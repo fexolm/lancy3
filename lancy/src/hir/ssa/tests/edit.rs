@@ -3,6 +3,33 @@ use crate::hir::ssa::{Binary, Function, Op, Terminator};
 use std::sync::Arc;
 
 #[test]
+fn replacing_a_call_changes_the_next_modules_reachable_functions() {
+    let mut leaf = Function::scalar(1);
+    let b = leaf.entry();
+    leaf.set_terminator(b, Terminator::Return(leaf.params(b)[0]));
+    let mut root = Function::scalar(1);
+    let b = root.entry();
+    let x = root.params(b)[0];
+    let site = root.add_call(Arc::new(leaf), &[x]);
+    let inst = root.append_inst(b, Op::Call(site));
+    root.set_terminator(b, Terminator::Return(root.result(inst).unwrap()));
+
+    {
+        let (before, _) = root.verified_module().unwrap();
+        assert_eq!(before.functions.len(), 2);
+        assert_eq!(before.call_graph.callees(before.call_graph.root()).len(), 1);
+    }
+    root.replace_op(inst, Op::Copy(x)).unwrap();
+    let (after, _) = root.verified_module().unwrap();
+    assert_eq!(after.functions.len(), 1);
+    assert!(after.call_graph.callees(after.call_graph.root()).is_empty());
+    assert_eq!(
+        crate::ScalarKernel::compile(&root).unwrap().call(&[17]),
+        Ok(17)
+    );
+}
+
+#[test]
 fn pruning_a_staging_block_retires_only_its_instructions() {
     let mut graph = Function::scalar(1);
     let entry = graph.entry();

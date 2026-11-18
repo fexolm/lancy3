@@ -2,6 +2,7 @@ mod relational;
 
 use relational::{Catalog, pricing_plan, query};
 use splice::Executable;
+use splice_cranelift::Cranelift;
 use splice_lancy::Lancy;
 use splice_llvm::Llvm;
 use splice_text::Text;
@@ -14,13 +15,14 @@ fn main() -> Result<(), String> {
     let plan = pricing_plan();
     match std::env::args().nth(1).as_deref() {
         None | Some("lancy") => run(query::build::<Lancy>(&plan)?),
+        Some("cranelift") => run(query::build::<Cranelift>(&plan)?),
         Some("llvm") => run(query::build::<Llvm>(&plan)?),
         Some("text") => {
             print!("{}", query::build::<Text>(&plan)?);
             Ok(())
         }
         Some(other) => Err(format!(
-            "unknown backend {other}; choose lancy, llvm or text"
+            "unknown backend {other}; choose lancy, cranelift, llvm or text"
         )),
     }
 }

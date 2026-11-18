@@ -2,6 +2,7 @@ use crate::relational::*;
 use splice::Codegen;
 use splice::Executable;
 use splice::hir::{Binary, BufferKind, Function, Instr};
+use splice_cranelift::Cranelift;
 use splice_lancy::Lancy;
 use splice_llvm::Llvm;
 
@@ -89,7 +90,16 @@ fn branching_join_tree_runs_against_changing_tables() {
     let llvm = Llvm::compile(&f).unwrap();
     let direct_lancy = query::build::<Lancy>(&plan).unwrap();
     let direct_llvm = query::build::<Llvm>(&plan).unwrap();
-    let kernels: [&dyn Executable; 4] = [&lancy, &llvm, &direct_lancy, &direct_llvm];
+    let cranelift = Cranelift::compile(&f).unwrap();
+    let direct_cranelift = query::build::<Cranelift>(&plan).unwrap();
+    let kernels: [&dyn Executable; 6] = [
+        &lancy,
+        &llvm,
+        &cranelift,
+        &direct_lancy,
+        &direct_llvm,
+        &direct_cranelift,
+    ];
     let tables: &[&[Row]] = &[
         &[(-7, 5), (1, 3), (9, 6), (1, 5)],
         &[(1, 9), (-7, 3), (9, 4)],

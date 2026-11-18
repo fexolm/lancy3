@@ -1,20 +1,19 @@
-//! The internal call ABI reserves RAX and RCX for instruction selection, RDX
-//! for the workspace and the four caller-saved registers R8..R11 for values.
-pub(super) const EAX: u8 = 0;
-pub(super) const ECX: u8 = 1;
-pub(super) const RDX: u8 = 2;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum Home {
-    Register(u8),
-    Slot(u32),
-}
-const _: () = assert!(std::mem::size_of::<Home>() <= 8);
-pub(super) const LINK_SLOTS: usize = 1;
-
+//! R11 points to a frame throughout allocated code. The host supplies the
+//! status pointer in root[0]. A child starts with its continuation and a
+//! pointer to the root, followed by incoming arguments and private spills.
+//! Siblings reuse the same space immediately above their caller.
+pub(super) const CHILD_ARGS: usize = 2;
 pub(super) struct Frame {
-    pub args: Vec<Home>,
+    pub spill_base: usize,
     pub slots: usize,
-    pub status_slot: usize,
-    pub save_base: usize,
+}
+
+impl Frame {
+    pub fn new(root: bool, arity: usize, spills: usize) -> Self {
+        let spill_base = if root { 1 } else { CHILD_ARGS + arity };
+        Self {
+            spill_base,
+            slots: spill_base + spills,
+        }
+    }
 }

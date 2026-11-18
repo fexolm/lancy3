@@ -10,9 +10,18 @@ use crate::hir::{
     transforms::{ControlFlowGraph, DomTree},
 };
 use crate::support::slotmap::{DenseMap, SlotMap};
+use crate::{
+    CompileError,
+    module::{FunctionIds, Module},
+};
 use std::{ops::Range, sync::Arc};
 
 crate::slot_key!(pub Block);
+
+pub(crate) struct VerifiedBody<'a> {
+    pub function: &'a Function,
+    pub cfg: ControlFlowGraph,
+}
 
 #[derive(Clone, Debug)]
 struct BlockData {
@@ -434,13 +443,18 @@ impl Function {
     /// Verify this body. Callee signatures participate in the check; code
     /// generation verifies every distinct callee body in the reachable graph.
     pub fn verify(&self) -> Result<(), IrError> {
+        self.verified_cfg().map(drop)
+    }
+
+    fn verified_cfg(&self) -> Result<ControlFlowGraph, IrError> {
         if self.params(self.entry()).len() != self.arity {
             return Err(IrError::EntryArity {
                 expected: self.arity,
                 actual: self.params(self.entry()).len(),
             });
         }
-        let dom = DomTree::compute(&ControlFlowGraph::compute(self)?);
+        let cfg = ControlFlowGraph::compute(self)?;
+        let dom = DomTree::compute(&cfg);
         let mut defs = DenseMap::filled(self.value_count(), None);
         for block in self.blocks() {
             for &param in self.params(block) {
@@ -577,31 +591,28 @@ impl Function {
                 }
             }
         }
-        Ok(())
+        Ok(cfg)
+    }
+}
+
+impl Function {
+    pub(crate) fn verified_module(
+        &self,
+    ) -> Result<(Module<VerifiedBody<'_>>, FunctionIds<Self>), CompileError> {
+        Module::discover(self, |function, callees| {
+            let cfg = function.verified_cfg()?;
+            for inst in function.insts.values() {
+                if let Op::Call(site) = inst.op {
+                    callees.push(function.calls[site].callee.as_ref());
+                }
+            }
+            Ok(VerifiedBody { function, cfg })
+        })
     }
 }
 
 #[cfg(test)]
 impl Function {
-    /// Validate this function and each distinct immutable callee once. Bodies
-    /// can form a shared call DAG of arbitrary depth.
-    fn verify_graph(&self) -> Result<(), IrError> {
-        let mut pending = vec![self];
-        let mut seen = std::collections::HashSet::new();
-        while let Some(body) = pending.pop() {
-            if !seen.insert(std::ptr::from_ref(body)) {
-                continue;
-            }
-            body.verify()?;
-            for inst in body.insts.values() {
-                if let Op::Call(call) = inst.op {
-                    pending.push(body.calls[call].callee.as_ref());
-                }
-            }
-        }
-        Ok(())
-    }
-
     pub fn interpret(&self, args: &[i32]) -> Result<i32, String> {
         if self.param_types().iter().any(|&ty| ty != Type::I32) || self.return_type != Type::I32 {
             return Err("expected an i32-only signature".into());
@@ -618,7 +629,7 @@ impl Function {
         if args.len() != self.arity() {
             return Err("wrong argument count".into());
         }
-        self.verify_graph().map_err(|error| error.to_string())?;
+        self.verified_module().map_err(|error| error.to_string())?;
         // SAFETY: the caller supplies every pointer reachable during execution.
         unsafe { interpret::run(self, args) }
     }

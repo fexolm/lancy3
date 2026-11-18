@@ -3,7 +3,12 @@ name = "lancy"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.94"
-description = "A CPU JIT with SSA HIR, linear-scan register allocation and x86-64 code generation"
+description = "A CPU JIT with SSA HIR, target-generic register allocation and x86-64 code generation"
 
 [dependencies]
+iced-x86 = { version = "1.21", default-features = false, features = ["std", "code_asm"] }
+regalloc2 = "0.15.3"
 thiserror = "2"
+
+[dev-dependencies]
+regalloc2 = { version = "0.15.3", features = ["checker"] }

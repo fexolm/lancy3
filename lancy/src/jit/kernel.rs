@@ -4,6 +4,9 @@ use crate::hir::{Function, Type};
 use crate::{CallError, CompileError};
 use std::mem::MaybeUninit;
 
+#[cfg(test)]
+mod tests;
+
 type Entry = unsafe extern "C" fn(*const u64, *mut u64) -> u64;
 
 /// Owns the executable memory backing a compiled function and its callees.
@@ -18,7 +21,8 @@ pub struct ScalarKernel {
 impl ScalarKernel {
     /// Verify the reachable functions, generate x64 code and install it for execution.
     pub fn compile(function: &Function) -> Result<Self, CompileError> {
-        let (bytes, words) = crate::lir::emit(function)?;
+        let (source, ids) = function.verified_module()?;
+        let (bytes, words) = crate::lir::emit(source, &ids)?;
         let memory = Executable::new(&bytes)?;
         // SAFETY: the emitter implements Entry for both supported x64 ABIs.
         let entry =

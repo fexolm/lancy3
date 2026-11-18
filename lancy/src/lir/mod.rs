@@ -1,9 +1,9 @@
-mod block;
-mod instruction;
-mod ssa;
+mod function;
+mod inst;
+mod regalloc;
 mod x64;
 
-use block::{BlockId, EdgeId};
-use instruction::{CallSiteId, FunctionId};
+use function::Function;
+use inst::TargetInst;
 
 pub(crate) use x64::emit;

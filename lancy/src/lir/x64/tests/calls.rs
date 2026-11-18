@@ -1,7 +1,39 @@
 use crate::ScalarKernel;
 use crate::hir::{Binary, Function, Op as H, Scale, Terminator, Type};
-use crate::lir::x64::graph::Graph;
+use crate::lir::x64::compile::compile;
 use std::sync::Arc;
+
+#[test]
+fn a_small_callee_leaves_registers_available_to_its_caller() {
+    let mut identity = Function::scalar(1);
+    let b = identity.entry();
+    identity.set_terminator(b, Terminator::Return(identity.params(b)[0]));
+
+    let mut f = Function::scalar(4);
+    let b = f.entry();
+    let args = f.params(b).to_vec();
+    let site = f.add_call(Arc::new(identity), &args[..1]);
+    let mut result = f.append(b, H::Call(site)).unwrap();
+    for arg in args {
+        result = f.append(b, H::Bin(Binary::Add, result, arg)).unwrap();
+    }
+    f.set_terminator(b, Terminator::Return(result));
+    let (source, ids) = f.verified_module().unwrap();
+    let entry = source.call_graph.root();
+    let edges = source.call_graph.callees(entry).as_ptr();
+    let module = compile(source, &ids).unwrap();
+    assert_eq!(module.call_graph.callees(entry).as_ptr(), edges);
+    assert_eq!(
+        module.functions[module.call_graph.root()]
+            .allocation
+            .num_spillslots,
+        0
+    );
+    assert_eq!(
+        ScalarKernel::compile(&f).unwrap().call(&[1, 2, 3, 4]),
+        Ok(11)
+    );
+}
 
 #[test]
 fn checked_nested_access_preserves_prior_stores_and_forwards_addresses() {
@@ -82,7 +114,8 @@ fn shared_calls_preserve_live_registers_and_spilled_arguments() {
         v = f.append(b, H::Bin(Binary::Add, v, arg)).unwrap();
     }
     f.set_terminator(b, Terminator::Return(v));
-    assert_eq!(Graph::lower(&f).unwrap().functions.len(), 2);
+    let (source, ids) = f.verified_module().unwrap();
+    assert_eq!(compile(source, &ids).unwrap().functions.len(), 2);
     let k = ScalarKernel::compile(&f).unwrap();
     for input in [[1, 2, 3, 4, 5, 6], [-1, -2, 5, i32::MIN, i32::MAX, 0]] {
         assert_eq!(k.call(&input).unwrap(), f.interpret(&input).unwrap());

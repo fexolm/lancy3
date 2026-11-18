@@ -1,0 +1,13 @@
+[package]
+name = "splice-cranelift"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.94"
+description = "Cranelift JIT code generator for Splice kernels"
+
+[dependencies]
+splice = { path = "../splice" }
+cranelift-codegen = "0.132"
+cranelift-frontend = "0.132"
+cranelift-module = "0.132"
+cranelift-jit = "0.132"

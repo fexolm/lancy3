@@ -9,6 +9,8 @@ description = "A staged Rust kernel language with a portable code generation int
 splice-macros = { path = "../splice-macros" }
 
 [dev-dependencies]
+criterion = { version = "0.8", features = ["html_reports"] }
+splice-cranelift = { path = "../splice-cranelift" }
 splice-lancy = { path = "../splice-lancy" }
 splice-llvm = { path = "../splice-llvm" }
 splice-text = { path = "../splice-text" }

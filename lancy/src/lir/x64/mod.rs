@@ -1,8 +1,8 @@
+mod compile;
 mod emit;
 mod frame;
-mod graph;
-mod machine;
-mod regalloc;
+mod inst;
+mod lower;
 #[cfg(test)]
 mod tests;
 

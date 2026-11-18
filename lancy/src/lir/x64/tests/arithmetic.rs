@@ -1,7 +1,10 @@
 use crate::hir::{Binary, Function, Op as H, Terminator};
 use crate::{
     CallError, ScalarKernel,
-    lir::{instruction::Op, x64::graph::Graph},
+    lir::x64::{
+        compile::compile,
+        inst::{Alu, Inst},
+    },
 };
 
 #[test]
@@ -52,14 +55,66 @@ fn explicit_instructions_survive_lowering_and_allocation() {
     let four = f.append(b, H::Bin(Binary::Add, two, two)).unwrap();
     f.append(b, H::Bin(Binary::Mul, four, two));
     f.set_terminator(b, Terminator::Return(four));
-    let graph = Graph::lower(&f).unwrap();
+    let (source, ids) = f.verified_module().unwrap();
+    let module = compile(source, &ids).unwrap();
     assert!(matches!(
-        &graph.functions[graph.root].ops[..],
+        module.functions[module.call_graph.root()].body.insts(),
         [
-            Op::Imm(_, 2),
-            Op::Alu(_, Binary::Add, ..),
-            Op::Alu(_, Binary::Mul, ..)
+            Inst::Imm(_, 2),
+            Inst::Alu(Alu::Add, ..),
+            Inst::Alu(Alu::Mul, ..),
+            Inst::Ret(_)
         ]
     ));
     assert_eq!(ScalarKernel::compile(&f).unwrap().call(&[]), Ok(4));
+}
+
+#[test]
+fn aliased_fixed_operands_keep_the_live_input() {
+    for op in [Binary::Shl, Binary::Shr, Binary::Div, Binary::Rem] {
+        let mut f = Function::scalar(1);
+        let b = f.entry();
+        let x = f.params(b)[0];
+        let y = f.append(b, H::Bin(op, x, x)).unwrap();
+        let result = f.append(b, H::Bin(Binary::Xor, y, x)).unwrap();
+        f.set_terminator(b, Terminator::Return(result));
+        let k = ScalarKernel::compile(&f).unwrap();
+        for x in [i32::MIN, -33, -1, 0, 1, 31, 32, i32::MAX] {
+            let value = match op {
+                Binary::Shl => Some(x.wrapping_shl(x as u32)),
+                Binary::Shr => Some(x.wrapping_shr(x as u32)),
+                Binary::Div => x.checked_div(x),
+                Binary::Rem => x.checked_rem(x),
+                _ => unreachable!(),
+            };
+            assert_eq!(
+                k.call(&[x]),
+                value.map(|y| y ^ x).ok_or(CallError::DivisionByZero)
+            );
+        }
+    }
+}
+
+#[test]
+fn disjoint_pressure_peaks_reuse_workspace() {
+    fn compile(phases: usize) -> ScalarKernel {
+        let mut f = Function::scalar(1);
+        let b = f.entry();
+        let mut sum = f.params(b)[0];
+        for _ in 0..phases {
+            let values: Vec<_> = (1..=32)
+                .map(|i| f.append(b, H::Const(i)).unwrap())
+                .collect();
+            for v in values {
+                sum = f.append(b, H::Bin(Binary::Add, sum, v)).unwrap();
+            }
+        }
+        f.set_terminator(b, Terminator::Return(sum));
+        ScalarKernel::compile(&f).unwrap()
+    }
+    let single = compile(1);
+    let many = compile(8);
+    assert_eq!(single.call(&[19]), Ok(19 + 528));
+    assert_eq!(many.call(&[19]), Ok(19 + 8 * 528));
+    assert!(many.workspace_words() < 2 * single.workspace_words());
 }
