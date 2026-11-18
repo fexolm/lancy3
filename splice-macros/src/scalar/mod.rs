@@ -257,7 +257,7 @@ pub(super) fn expand(root: Path, func: ItemFn, api: super::KernelApi) -> Result<
         let callback = quote!(::std::boxed::Box::new(move |#builder| Self::__stage_body #fish (#(#host_names,)* #builder)));
         (
             quote! {
-                #vis fn build #compile_generics (#(#host_decls),*) -> <#backend as #root::Codegen>::Output #where_ {
+                #vis fn build #compile_generics (#(#host_decls),*) -> #root::Result<<#backend as #root::Codegen>::Output> #where_ {
                     <#backend as #root::Codegen>::build(#arity, #kinds, #callback)
                 }
                 #vis fn ir #generic (#(#host_decls),*) -> ::core::result::Result<#hir::Function,String> #where_ {

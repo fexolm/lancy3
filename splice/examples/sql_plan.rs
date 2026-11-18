@@ -16,7 +16,7 @@ fn main() -> Result<(), String> {
         None | Some("lancy") => run(query::build::<Lancy>(&plan)?),
         Some("llvm") => run(query::build::<Llvm>(&plan)?),
         Some("text") => {
-            print!("{}", query::build::<Text>(&plan));
+            print!("{}", query::build::<Text>(&plan)?);
             Ok(())
         }
         Some(other) => Err(format!(

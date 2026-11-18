@@ -77,9 +77,9 @@ pub struct LlvmKernel {
 }
 
 impl Codegen for Llvm {
-    type Output = Result<LlvmKernel, String>;
+    type Output = LlvmKernel;
 
-    fn compile(function: &Function) -> Self::Output {
+    fn compile(function: &Function) -> splice::Result<Self::Output> {
         Self::version()?;
         let (owner, entry) = jit::Jit::compile(|ctx, m| lower::populate(ctx, m, function))?;
         Ok(LlvmKernel {
@@ -94,7 +94,7 @@ impl Codegen for Llvm {
         arity: usize,
         buffers: &[BufferKind],
         body: splice::frontend::Body<'_>,
-    ) -> Self::Output {
+    ) -> splice::Result<Self::Output> {
         Self::version()?;
         let (owner, entry) =
             jit::Jit::compile(move |ctx, m| lower::populate_direct(ctx, m, arity, buffers, body))?;

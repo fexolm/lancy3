@@ -11,10 +11,11 @@
 //!     if double { value.wrapping_mul(2) } else { value.wrapping_add(5) }
 //! }
 //!
-//! let text: String = adjust::build::<Text>(true);
+//! let text: String = adjust::build::<Text>(true)?;
 //! assert!(text.starts_with("fn adjust(value: i32)"));
 //! assert!(text.contains("value * "));
 //! assert!(!text.contains(" + "));
+//! # Ok::<(), String>(())
 //! ```
 #![forbid(unsafe_code)]
 
@@ -30,19 +31,10 @@ pub struct Text;
 impl Codegen for Text {
     type Output = String;
 
-    fn compile(root: &Function) -> String {
+    fn compile(root: &Function) -> splice::Result<String> {
         let mut output = String::new();
-        render(root, &mut output).expect("formatting into a String is infallible");
-        output
-    }
-
-    /// Returns a listing on success, or a diagnostic comment on a staging error.
-    /// To handle staging errors separately, use `Text::compile(&kernel::ir(...)?)`.
-    fn build(arity: usize, kinds: &[BufferKind], body: splice::frontend::Body<'_>) -> String {
-        match splice::frontend::materialize(arity, kinds, body) {
-            Ok(function) => Self::compile(&function),
-            Err(error) => format!("// Splice specialization failed: {error}\n"),
-        }
+        render(root, &mut output).map_err(|error| error.to_string())?;
+        Ok(output)
     }
 }
 

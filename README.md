@@ -22,7 +22,7 @@ fn main() -> Result<(), String> {
     let plan = Price::Wholesale(3);
     let fast_build = total::build::<Lancy>(&plan)?;
     let llvm = total::build::<Llvm>(&plan)?;
-    let listing: String = total::build::<Text>(&plan);
+    let listing: String = total::build::<Text>(&plan)?;
     print!("{listing}");
     assert_eq!(fast_build.call(&[10, 4], &mut [])?, 28);
     assert_eq!(llvm.call(&[10, 4], &mut [])?, 28);
@@ -34,7 +34,7 @@ fn main() -> Result<(), String> {
 
 `build::<Text>` возвращает текст функции после специализации. В примере сигнатура содержит только `price` и `qty`, а скидка 3 появляется в теле перед умножением. В листинге сохраняются имена параметров, операции со срезами и вызовы. Если один помощник вызван с разными планами, его тела получают разные номера. Переходы между метками показывают оставшиеся runtime-ветвления и циклы. Листинг отражает семантику Splice до оптимизаций машинного бэкенда.
 
-Сигнатура фабрики — `build::<T>(...) -> T::Output`. Для `Text` это `String`, для JIT-бэкендов — `Result` с исполняемым кернелом. При ошибке специализации текстовый бэкенд возвращает строку с диагностикой. Чтобы обработать ошибку отдельно, можно вызвать `let ir = total::ir(&plan)?;`. Методы `Lancy::compile(&ir)?`, `Llvm::compile(&ir)?` и `Text::compile(&ir)` принимают один и тот же переносимый IR.
+Сигнатура фабрики — `build::<T>(...) -> splice::Result<T::Output>`. У `Text` тип результата успешной сборки — `String`, у Lancy и LLVM — исполняемый кернел. Ошибки специализации и кодогенерации возвращаются через `Err(String)`. Для сравнения бэкендов на одном переносимом IR можно вызвать `let ir = total::ir(&plan)?;`, а затем `Lancy::compile(&ir)?`, `Llvm::compile(&ir)?` или `Text::compile(&ir)?`.
 
 | Крейт | Ответственность |
 | --- | --- |

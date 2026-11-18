@@ -10,17 +10,17 @@ use splice::{BufferArg, Codegen, Executable, Function};
 pub struct Lancy;
 
 impl Codegen for Lancy {
-    type Output = Result<LancyKernel, String>;
+    type Output = LancyKernel;
 
     fn build(
         arity: usize,
         kinds: &[splice::BufferKind],
         body: splice::frontend::Body<'_>,
-    ) -> Self::Output {
+    ) -> splice::Result<Self::Output> {
         direct::compile(arity, kinds, body, true).map(LancyKernel)
     }
 
-    fn compile(function: &Function) -> Self::Output {
+    fn compile(function: &Function) -> splice::Result<Self::Output> {
         ScalarKernel::compile_hir(&lower(function)?).map(LancyKernel)
     }
 }
@@ -29,17 +29,17 @@ impl Codegen for Lancy {
 pub struct LancyBaseline;
 
 impl Codegen for LancyBaseline {
-    type Output = Result<LancyKernel, String>;
+    type Output = LancyKernel;
 
     fn build(
         arity: usize,
         kinds: &[splice::BufferKind],
         body: splice::frontend::Body<'_>,
-    ) -> Self::Output {
+    ) -> splice::Result<Self::Output> {
         direct::compile(arity, kinds, body, false).map(LancyKernel)
     }
 
-    fn compile(function: &Function) -> Self::Output {
+    fn compile(function: &Function) -> splice::Result<Self::Output> {
         ScalarKernel::baseline_hir(&lower(function)?).map(LancyKernel)
     }
 }

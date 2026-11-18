@@ -5,13 +5,10 @@ use splice::{BufferArg, Codegen, Executable, Function, kernel};
 struct Inspect(Function);
 
 impl Codegen for Inspect {
-    type Output = Result<Self, String>;
+    type Output = Self;
 
     fn compile(f: &Function) -> Result<Self, String> {
         Ok(Self(f.clone()))
-    }
-    fn build(arity: usize, kinds: &[BufferKind], body: splice::frontend::Body<'_>) -> Self::Output {
-        Ok(Self(splice::frontend::materialize(arity, kinds, body)?))
     }
 }
 
@@ -148,7 +145,7 @@ mod directly_staged {
         constants: Vec<i32>,
     }
     impl Codegen for Trace {
-        type Output = Result<Self, String>;
+        type Output = Self;
         fn compile(_: &Function) -> Result<Self, String> {
             panic!("direct build materialized portable IR")
         }
