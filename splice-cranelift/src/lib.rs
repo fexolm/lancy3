@@ -9,9 +9,10 @@
 compile_error!("splice-cranelift currently supports x86-64 Windows and Linux");
 
 mod lower;
+mod module;
 
 use cranelift_jit::{JITBuilder, JITModule};
-use cranelift_module::default_libcall_names;
+use cranelift_module::{Module, default_libcall_names};
 use splice::{BufferArg, BufferKind, Codegen, Executable, Function, Result};
 use std::sync::Mutex;
 
@@ -68,10 +69,14 @@ impl Codegen for Cranelift {
         .map_err(|e| e.to_string())?;
         let mut memory = CodeMemory(Some(JITModule::new(builder)));
         let module = memory.0.as_mut().unwrap();
-        let id = lower::compile(module, function)?;
+        let kernel = module::KernelModule::lower(module, function)?;
+        let id = kernel.entry;
+        kernel.emit(&mut module.make_context(), |id, ctx| {
+            module.define_function(id, ctx).map_err(|e| e.to_string())
+        })?;
         module.finalize_definitions().map_err(|e| e.to_string())?;
         let address = module.get_finalized_function(id);
-        // SAFETY: lower declares the entry with the host C calling convention,
+        // SAFETY: KernelModule declares the entry with the host C calling convention,
         // two pointer parameters and an i64 return. The kernel owns its module.
         let entry = unsafe { std::mem::transmute::<*const u8, Entry>(address) };
         Ok(CraneliftKernel {

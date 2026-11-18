@@ -73,9 +73,7 @@ impl Jit {
         let target = host_machine()?;
         let context = Context::create();
         let module = build_module(&context, &target, populate)?;
-        module
-            .run_passes("default<O3>", &target, PassBuilderOptions::create())
-            .map_err(|error| error.to_string())?;
+        optimize(&module, &target)?;
         let object = target
             .write_to_memory_buffer(&module, FileType::Object)
             .map_err(|error| error.to_string())?;
@@ -117,6 +115,13 @@ impl Jit {
             Ok((jit, entry))
         }
     }
+}
+
+/// Both lowering paths finish defining all private callees before the module inliner runs.
+pub(crate) fn optimize(module: &Module<'_>, target: &TargetMachine) -> Result<(), String> {
+    module
+        .run_passes("default<O3>", target, PassBuilderOptions::create())
+        .map_err(|error| error.to_string())
 }
 
 unsafe fn check(error: LLVMErrorRef) -> Result<(), String> {

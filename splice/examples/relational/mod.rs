@@ -7,7 +7,7 @@ mod pricing;
 pub use kernels::query;
 pub use pricing::pricing_plan;
 
-#[derive(Clone)]
+#[derive(Clone, splice::ComptimeKey)]
 pub enum Expr {
     Key,
     Value,
@@ -17,20 +17,20 @@ pub enum Expr {
     Min(Box<Expr>, Box<Expr>),
 }
 
-#[derive(Clone)]
+#[derive(Clone, splice::ComptimeKey)]
 pub enum Predicate {
     AtLeast(Expr, Expr),
     Equal(Expr, Expr),
     And(Box<Predicate>, Box<Predicate>),
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, splice::ComptimeKey)]
 pub enum Combine {
     Add,
     Multiply,
 }
 
-#[derive(Clone)]
+#[derive(Clone, splice::ComptimeKey)]
 pub enum Plan {
     Scan(usize),
     Filter(Box<Plan>, Predicate),

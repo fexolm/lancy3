@@ -10,7 +10,7 @@ use lancy::hir::{self, Block, Function, Op, Value};
 use lancy::support::slotmap::DenseMap;
 use splice::{
     BufferKind,
-    frontend::{Body, KernelBuilder},
+    frontend::{Body, KernelBuilder, Specialization},
     hir::{Binary, Buffer, Label, Reg},
 };
 use std::{collections::HashMap, sync::Arc};
@@ -75,6 +75,7 @@ impl<'a> Builder<'a> {
         debug_assert_eq!(state, entry);
         Ok(Self {
             graph,
+            callees: HashMap::new(),
             arity,
             kinds,
             blocks,
@@ -119,6 +120,7 @@ struct Destination {
 
 struct Builder<'a> {
     graph: Function,
+    callees: HashMap<Specialization, Arc<Function>>,
     arity: usize,
     kinds: &'a [BufferKind],
     blocks: DenseMap<Block, State>,
@@ -207,6 +209,39 @@ impl Builder<'_> {
             values.extend([ptr, len]);
         }
         Op::Call(self.graph.add_call(callee, &values))
+    }
+    fn staged_call(
+        &mut self,
+        arity: usize,
+        kinds: &[BufferKind],
+        args: &[Reg],
+        buffers: &[Buffer],
+        key: Option<Specialization>,
+        body: Body<'_>,
+    ) -> splice::Result<Reg> {
+        if args.len() != arity {
+            return Err(format!(
+                "expected {arity} scalar arguments, got {}",
+                args.len()
+            ));
+        }
+        splice::hir::check_forwarding(self.kinds, kinds, buffers)?;
+        let callee = if let Some(hit) = key.as_ref().and_then(|k| self.callees.get(k)) {
+            hit.clone()
+        } else {
+            let mut child = Builder::new(arity, kinds)?;
+            std::mem::swap(&mut child.callees, &mut self.callees);
+            let staged = body(&mut child);
+            std::mem::swap(&mut child.callees, &mut self.callees);
+            staged?;
+            let callee = Arc::new(child.seal()?);
+            if let Some(key) = key {
+                self.callees.insert(key, callee.clone());
+            }
+            callee
+        };
+        let op = self.call_op(callee, args, buffers);
+        Ok(self.result(op))
     }
     fn target(&mut self, label: Label) -> Block {
         let Some(dest) = self.labels.get_mut(label.0 as usize) else {
@@ -321,15 +356,16 @@ impl KernelBuilder for Builder<'_> {
         buffers: &[Buffer],
         body: Body<'_>,
     ) -> Result<Reg, String> {
-        if args.len() != arity {
-            return Err(format!(
-                "expected {arity} scalar arguments, got {}",
-                args.len()
-            ));
-        }
-        splice::hir::check_forwarding(self.kinds, kinds, buffers)?;
-        let callee = Arc::new(build(arity, kinds, body)?);
-        let op = self.call_op(callee, args, buffers);
-        Ok(self.result(op))
+        self.staged_call(arity, kinds, args, buffers, None, body)
+    }
+    fn call_specialized(
+        &mut self,
+        key: Specialization,
+        args: &[Reg],
+        buffers: &[Buffer],
+        body: Body<'_>,
+    ) -> splice::Result<Reg> {
+        let (arity, kinds) = key.signature();
+        self.staged_call(arity, kinds, args, buffers, Some(key), body)
     }
 }

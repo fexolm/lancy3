@@ -1,9 +1,10 @@
 //! Builders receive staged operations directly from a kernel. A code generator
 //! may select its native IR or materialize the portable Splice function.
-mod builder;
-pub use builder::FunctionBuilder;
+pub use crate::hir::FunctionBuilder;
 #[doc(hidden)]
 pub mod scalar;
+mod specialization;
+pub use specialization::{ComptimeKey, KeyArgument, MaybeKey, Specialization};
 
 use crate::hir::{Binary, Buffer, BufferKind, Function, Label, Reg};
 
@@ -45,6 +46,37 @@ pub trait KernelBuilder {
         buffers: &[Buffer],
         body: Body<'_>,
     ) -> Result<Reg, String>;
+
+    /// Backends that retain callee definitions can reuse a successful specialization.
+    /// Custom streaming builders may continue to stage every call independently.
+    #[doc(hidden)]
+    fn call_specialized(
+        &mut self,
+        key: Specialization,
+        args: &[Reg],
+        buffers: &[Buffer],
+        body: Body<'_>,
+    ) -> Result<Reg, String> {
+        let (arity, kinds) = key.signature();
+        self.call_kernel(arity, kinds, args, buffers, body)
+    }
+}
+
+/// Compound operations used by staged kernel bodies.
+impl dyn KernelBuilder + '_ {
+    /// Snapshot a register before a later operation can overwrite it.
+    pub fn copy(&mut self, value: Reg) -> Reg {
+        let dst = self.local();
+        self.assign(dst, value);
+        dst
+    }
+
+    /// Continue in a fresh block when the condition holds.
+    pub fn branch_if_false(&mut self, cond: Reg, otherwise: Label) {
+        let next = self.label();
+        self.branch(cond, next, otherwise);
+        self.mark(next);
+    }
 }
 
 /// Explicitly materialize a verified portable IR for inspection or reuse.

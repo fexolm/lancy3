@@ -1,87 +1,15 @@
 use crate::{BOUNDS, DIV_ZERO, Descriptor, OVERFLOW};
 use cranelift_codegen::ir::{
-    AbiParam, FuncRef, InstBuilder, MemFlags, TrapCode, UserFuncName, Value,
+    FuncRef, InstBuilder, MemFlags, TrapCode, Value,
     condcodes::IntCC,
     types::{I32, I64},
 };
-use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
-use cranelift_jit::JITModule;
-use cranelift_module::{FuncId, Module};
+use cranelift_frontend::FunctionBuilder;
 use splice::Function;
 use splice::hir::{Binary, Instr, Reg};
-use std::collections::{HashMap, hash_map::Entry};
+use std::collections::HashMap;
 use std::mem::{offset_of, size_of};
 use std::sync::Arc;
-
-// make_signature selects the host C ABI (Windows fastcall or System V).
-// Only the public entry takes arrays. Nested calls pass scalars and slice
-// (pointer, length) pairs by value, including arguments passed on the stack.
-fn declare(module: &mut JITModule, f: &Function, entry: bool) -> splice::Result<FuncId> {
-    let mut sig = module.make_signature();
-    if entry {
-        sig.params.extend([AbiParam::new(I64); 2]);
-    } else {
-        // Cranelift indexes entry block parameters with u16.
-        if f.arity() + 2 * f.buffer_kinds().len() > usize::from(u16::MAX) + 1 {
-            return Err("too many parameters for a Cranelift kernel call".into());
-        }
-        sig.params.resize(f.arity(), AbiParam::new(I32));
-        for _ in f.buffer_kinds() {
-            sig.params.extend([AbiParam::new(I64), AbiParam::new(I32)]);
-        }
-    }
-    sig.returns.push(AbiParam::new(I64));
-    module
-        .declare_anonymous_function(&sig)
-        .map_err(|e| e.to_string())
-}
-
-pub(super) fn compile(module: &mut JITModule, root: &Function) -> splice::Result<FuncId> {
-    let root_id = declare(module, root, true)?;
-    let mut pending = vec![(root, root_id)];
-    let mut ids = HashMap::new();
-    let mut ctx = module.make_context();
-    let mut builder_ctx = FunctionBuilderContext::new();
-    while let Some((f, id)) = pending.pop() {
-        ctx.func.name = UserFuncName::user(0, id.as_u32());
-        ctx.func.signature = module
-            .declarations()
-            .get_function_decl(id)
-            .signature
-            .clone();
-        let mut imports = HashMap::new();
-        for inst in f.instructions() {
-            if let Instr::Call { function, .. } = inst {
-                let key = Arc::as_ptr(function);
-                let callee = match ids.entry(key) {
-                    Entry::Occupied(slot) => *slot.get(),
-                    Entry::Vacant(slot) => {
-                        let callee = declare(module, function, false)?;
-                        pending.push((function, callee));
-                        *slot.insert(callee)
-                    }
-                };
-                imports.entry(key).or_insert_with(|| {
-                    let reference = module.declare_func_in_func(callee, &mut ctx.func);
-                    // JIT code pages can be allocated more than 2 GiB apart.
-                    ctx.func.dfg.ext_funcs[reference].colocated = false;
-                    reference
-                });
-            }
-        }
-        emit(
-            FunctionBuilder::new(&mut ctx.func, &mut builder_ctx),
-            f,
-            id == root_id,
-            &imports,
-        );
-        module
-            .define_function(id, &mut ctx)
-            .map_err(|e| e.to_string())?;
-        module.clear_context(&mut ctx);
-    }
-    Ok(root_id)
-}
 
 fn parameters(b: &mut FunctionBuilder, f: &Function, is_entry: bool) -> Vec<Value> {
     let entry = b.create_block();
@@ -116,7 +44,7 @@ fn parameters(b: &mut FunctionBuilder, f: &Function, is_entry: bool) -> Vec<Valu
     params
 }
 
-fn emit(
+pub(super) fn emit(
     mut b: FunctionBuilder,
     f: &Function,
     is_entry: bool,

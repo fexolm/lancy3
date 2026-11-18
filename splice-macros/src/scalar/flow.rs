@@ -1,9 +1,8 @@
 //! Staging of mutable locals requires control dependence as well as data
 //! dependence. A literal-initialized counter must move into the IR if either
 //! its update or the number of loop iterations depends on a runtime input.
-use super::lower::Binding;
+use super::{bind_pattern, lower::Binding};
 use std::collections::{HashMap, HashSet};
-use syn::visit::Visit;
 use syn::{Block, Expr, Stmt};
 
 type Names = HashMap<String, (bool, Option<usize>)>;
@@ -32,13 +31,6 @@ pub(super) fn analyze(block: &Block, bindings: &HashMap<String, Binding>) -> Flo
     }
 }
 
-struct Introduce<'a>(&'a mut Names, bool, Option<usize>);
-impl<'a> Visit<'a> for Introduce<'_> {
-    fn visit_pat_ident(&mut self, p: &'a syn::PatIdent) {
-        self.0.insert(p.ident.to_string(), (self.1, self.2));
-        syn::visit::visit_pat_ident(self, p);
-    }
-}
 impl Flow {
     fn block(&mut self, block: &Block, outer: &Names, control: bool) -> bool {
         let mut names = outer.clone();
@@ -52,7 +44,7 @@ impl Flow {
                         .is_some_and(|v| self.expr(&v.expr, &names, control));
                     let id = key(l);
                     let reg = runtime || self.locals.contains(&id);
-                    Introduce(&mut names, reg, Some(id)).visit_pat(&l.pat);
+                    bind_pattern(&mut names, &l.pat, (reg, Some(id)));
                     dynamic |= reg;
                 }
                 Stmt::Expr(e, _) => dynamic |= self.expr(e, &names, control),
@@ -88,21 +80,7 @@ impl Flow {
                 use syn::BinOp::*;
                 let short_circuit = matches!(a.op, And(_) | Or(_));
                 let r = self.expr(&a.right, names, control || (short_circuit && l));
-                if (control || r || l)
-                    && matches!(
-                        a.op,
-                        AddAssign(_)
-                            | SubAssign(_)
-                            | MulAssign(_)
-                            | DivAssign(_)
-                            | RemAssign(_)
-                            | BitAndAssign(_)
-                            | BitOrAssign(_)
-                            | BitXorAssign(_)
-                            | ShlAssign(_)
-                            | ShrAssign(_)
-                    )
-                {
+                if (control || r || l) && super::compound_op(&a.op).is_some() {
                     self.mark_lhs(&a.left, names);
                 }
                 l || r
@@ -122,7 +100,7 @@ impl Flow {
                 let mut result = c;
                 for arm in &m.arms {
                     let mut local = names.clone();
-                    Introduce(&mut local, c, None).visit_pat(&arm.pat);
+                    bind_pattern(&mut local, &arm.pat, (c, None));
                     let guard = arm
                         .guard
                         .as_ref()
@@ -143,22 +121,12 @@ impl Flow {
                 // iterator still yields Rust pattern bindings when its body emits IR.
                 let induction =
                     c || (matches!(&*f.expr, Expr::Range(_)) && self.loops.contains(&key(&f.body)));
-                Introduce(&mut locals, induction, None).visit_pat(&f.pat);
+                bind_pattern(&mut locals, &f.pat, (induction, None));
                 self.scan_loop(&f.body, &locals, control, c)
             }
-            Expr::Call(c) => {
-                let mut reg = false;
-                for arg in &c.args {
-                    reg |= self.expr(arg, names, control);
-                }
-                reg
-            }
+            Expr::Call(c) => self.operands(&c.args, names, control),
             Expr::MethodCall(m) => {
-                let mut dynamic = self.expr(&m.receiver, names, control);
-                for arg in &m.args {
-                    dynamic |= self.expr(arg, names, control);
-                }
-                dynamic
+                self.expr(&m.receiver, names, control) | self.operands(&m.args, names, control)
             }
             Expr::Return(r) => {
                 if let Some(value) = &r.expr {
@@ -173,14 +141,11 @@ impl Flow {
             Expr::Unary(u) => self.expr(&u.expr, names, control),
             Expr::Paren(p) => self.expr(&p.expr, names, control),
             Expr::Group(g) => self.expr(&g.expr, names, control),
-            Expr::Range(r) => {
-                let mut runtime = false;
-                for bound in r.start.iter().chain(&r.end) {
-                    // Visit both expressions: each one can mutate a binding.
-                    runtime |= self.expr(bound, names, control);
-                }
-                runtime
-            }
+            Expr::Range(r) => self.operands(
+                r.start.iter().chain(&r.end).map(Box::as_ref),
+                names,
+                control,
+            ),
             Expr::Cast(c) => self.expr(&c.expr, names, control),
             Expr::Field(f) => self.expr(&f.base, names, control),
             Expr::Reference(r) => self.expr(&r.expr, names, control),
@@ -189,6 +154,17 @@ impl Flow {
             }
             _ => false,
         }
+    }
+    fn operands<'a>(
+        &mut self,
+        exprs: impl IntoIterator<Item = &'a Expr>,
+        names: &Names,
+        control: bool,
+    ) -> bool {
+        // Each operand can promote a binding, even after an earlier dynamic one.
+        exprs
+            .into_iter()
+            .fold(false, |runtime, e| self.expr(e, names, control) | runtime)
     }
     fn scan_loop(&mut self, body: &Block, names: &Names, control: bool, cond: bool) -> bool {
         let id = key(body);

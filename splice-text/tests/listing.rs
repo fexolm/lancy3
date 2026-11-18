@@ -2,6 +2,7 @@ use splice::{Codegen, hir::FunctionBuilder, kernel};
 use splice_text::Text;
 use std::sync::Arc;
 
+#[derive(splice::ComptimeKey)]
 enum Step {
     Scale(i32),
     Offset(i32),
@@ -45,8 +46,8 @@ fn only_the_chosen_comptime_arm_is_printed() -> splice::Result<()> {
 }
 
 #[test]
-fn unrolled_calls_have_distinct_names_and_runtime_loop_is_visible() -> splice::Result<()> {
-    let steps = [Step::Scale(3), Step::Offset(7)];
+fn unrolled_calls_reuse_equal_steps_and_keep_the_runtime_loop() -> splice::Result<()> {
+    let steps = [Step::Scale(3), Step::Offset(7), Step::Scale(3)];
     let listing: String = adjust::build::<Text>(&steps)?;
     assert_eq!(listing, Text::compile(&adjust::ir(&steps)?)?);
     assert!(listing.starts_with("fn adjust(data: &mut [i32]) -> i32"));
@@ -63,6 +64,7 @@ fn unrolled_calls_have_distinct_names_and_runtime_loop_is_visible() -> splice::R
         assert!(body.split_once('}').unwrap().0.contains(op));
     }
     assert_eq!(listing.matches("fn ").count(), 3);
+    assert_eq!(listing.matches(" = apply.1(").count(), 2);
     Ok(())
 }
 

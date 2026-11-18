@@ -1,61 +1,24 @@
 //! Runtime slices carry an immutable buffer identity through specialization.
 //! Only lengths, element accesses, and scalar computations become instructions.
 use super::{Lower, Scalar, Stage, Value, err};
-use crate::scalar::private;
 use proc_macro2::TokenStream;
-use quote::quote;
 use syn::{BinOp, Expr, ExprCast, ExprIndex, ExprMethodCall, ExprReference, Result, UnOp};
 
 impl Lower<'_> {
-    pub(super) fn index_comparison(
-        &self,
-        expr: &syn::ExprBinary,
-        lhs: Value,
-        rhs: Value,
-    ) -> Result<Value> {
-        let order = match expr.op {
-            BinOp::Eq(_) => "Eq",
-            BinOp::Ne(_) => "Ne",
-            BinOp::Lt(_) => "Lt",
-            BinOp::Le(_) => "Le",
-            BinOp::Gt(_) => "Gt",
-            BinOp::Ge(_) => "Ge",
-            _ => return err(expr, "cast the runtime index to i32 before arithmetic"),
-        };
-        let mut lhs = self.reg(lhs, Scalar::Index, &expr.left)?;
-        let mut rhs = self.reg(rhs, Scalar::Index, &expr.right)?;
-        if !matches!(expr.op, BinOp::Eq(_) | BinOp::Ne(_)) {
-            // Each supported runtime usize is a sign-extended i32 cast to usize.
-            // Its unsigned ordering is preserved by the low 32 bits.
-            let b = self.builder;
-            lhs = self.bin("Xor", lhs, quote!(#b.constant(i32::MIN)));
-            rhs = self.bin("Xor", rhs, quote!(#b.constant(i32::MIN)));
-        }
-        Ok(Value::new(
-            Stage::Reg(Scalar::Bool),
-            self.bin(order, lhs, rhs),
-        ))
-    }
-
     pub(super) fn method(&self, m: &ExprMethodCall) -> Result<Value> {
-        let original = Expr::MethodCall(m.clone());
-        if let Ok(code) = self.host_raw(&original) {
-            return Ok(Value::new(Stage::Host, code));
-        }
         let receiver = self.expr(&m.receiver)?;
-        let b = self.builder;
+
         if (m.method == "len" || m.method == "is_empty")
             && m.args.is_empty()
             && matches!(receiver.stage, Stage::Buffer(_))
         {
-            let buffer = receiver.code;
-            let length = quote!({let buffer=#buffer; #b.buffer_len(buffer)});
+            let length = emit!({let buffer=#receiver; __splice_builder.buffer_len(buffer)});
             return Ok(if m.method == "len" {
                 Value::new(Stage::Reg(Scalar::Index), length)
             } else {
                 Value::new(
                     Stage::Reg(Scalar::Bool),
-                    self.bin("Eq", length, quote!(#b.constant(0))),
+                    self.bin("Eq", length, emit!(__splice_builder.constant(0))),
                 )
             });
         }
@@ -72,7 +35,7 @@ impl Lower<'_> {
         {
             let rhs = &m.args[0];
             let left = self.reg(receiver, Scalar::Int, &m.receiver)?;
-            let right = self.reg(self.expr(rhs)?, Scalar::Int, rhs)?;
+            let right = self.operand(rhs, Scalar::Int)?;
             return Ok(Value::new(
                 Stage::Reg(Scalar::Int),
                 self.bin(op, left, right),
@@ -85,16 +48,8 @@ impl Lower<'_> {
     }
 
     pub(super) fn cast(&self, cast: &ExprCast) -> Result<Value> {
-        let original = Expr::Cast(cast.clone());
-        if let Ok(code) = self.host_raw(&original) {
-            return Ok(Value::new(Stage::Host, code));
-        }
         let value = self.expr(&cast.expr)?;
-        let kind = if crate::scalar_type(&cast.ty, "i32") {
-            Scalar::Int
-        } else if crate::scalar_type(&cast.ty, "usize") {
-            Scalar::Index
-        } else {
+        let Some(kind @ (Scalar::Int | Scalar::Index)) = Scalar::from_type(&cast.ty) else {
             return err(
                 &cast.ty,
                 "runtime casts support i32 and usize slice indices",
@@ -103,8 +58,7 @@ impl Lower<'_> {
         let code = match value.stage {
             Stage::Reg(Scalar::Index | Scalar::Int) => value.code,
             Stage::Reg(Scalar::Bool) => {
-                let b = self.builder;
-                self.bin("And", value.code, quote!(#b.constant(1)))
+                self.bin("And", value.code, emit!(__splice_builder.constant(1)))
             }
             _ => return err(cast, "expected an integer or boolean to cast"),
         };
@@ -112,10 +66,6 @@ impl Lower<'_> {
     }
 
     pub(super) fn reference(&self, reference: &ExprReference) -> Result<Value> {
-        let original = Expr::Reference(reference.clone());
-        if let Ok(code) = self.host_raw(&original) {
-            return Ok(Value::new(Stage::Host, code));
-        }
         // Explicit reborrows (&*input and &mut *output) keep the same descriptor.
         let target = match &*reference.expr {
             Expr::Unary(x) if matches!(x.op, UnOp::Deref(_)) => &*x.expr,
@@ -143,9 +93,7 @@ impl Lower<'_> {
         // Every host index above i32::MAX is out of bounds for a runtime
         // slice. Keep the fault on the executed path, even for a literal.
         let offset = if matches!(value.stage, Stage::Host | Stage::Literal(Scalar::Int)) {
-            let code = value.code;
-            let b = self.builder;
-            quote!({let i: usize = #code; #b.constant(i32::try_from(i).unwrap_or(-1))})
+            emit!({let i: usize = #value; __splice_builder.constant(i32::try_from(i).unwrap_or(-1))})
         } else {
             self.reg(value, Scalar::Index, &index.index)?
         };
@@ -153,15 +101,13 @@ impl Lower<'_> {
     }
 
     pub(super) fn index(&self, index: &ExprIndex) -> Result<Value> {
-        if let Ok(code) = self.host_raw(&Expr::Index(index.clone())) {
-            return Ok(Value::new(Stage::Host, code));
-        }
         let (_, slice, offset) = self.index_operands(index)?;
-        let b = self.builder;
+
         Ok(Value::new(
             Stage::Reg(Scalar::Int),
-            quote!({
-                let (buffer, index)=(#slice, #offset); #b.load(buffer,index)
+            emit!({
+                let (buffer, __splice_index) = (#slice, #offset);
+                __splice_builder.load(buffer, __splice_index)
             }),
         ))
     }
@@ -176,18 +122,23 @@ impl Lower<'_> {
         if !writable {
             return err(index, "writing a kernel slice requires &mut [i32]");
         }
-        let value = self.reg(self.expr(rhs)?, Scalar::Int, rhs)?;
-        let b = self.builder;
-        let value_reg = private("__splice_store_value");
+        let value = self.operand(rhs, Scalar::Int)?;
+
         let combine = op.map(|(op, _)| {
-            let combined = self.bin(op, quote!(#b.load(buffer,index)), quote!(#value_reg));
-            quote!(let #value_reg=#combined;)
+            let combined = self.bin(
+                op,
+                emit!(__splice_builder.load(buffer, __splice_index)),
+                emit!(__splice_value),
+            );
+            emit!(let __splice_value=#combined;)
         });
         // Rust evaluates the RHS before the place for assignment and primitive
         // compound assignment. The index expression may itself mutate memory.
-        Ok(Value::unit(quote!({
-            let #value_reg=#value; let (buffer,index)=(#slice,#offset);
-            #combine #b.store(buffer,index,#value_reg);
+        Ok(Value::unit(emit!({
+            let __splice_value = #value;
+            let (buffer, __splice_index) = (#slice, #offset);
+            #combine
+            __splice_builder.store(buffer, __splice_index, __splice_value);
         })))
     }
 }

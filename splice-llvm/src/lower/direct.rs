@@ -12,15 +12,19 @@ use inkwell::{
 };
 use splice::{
     BufferKind,
-    frontend::{Body as StagedBody, KernelBuilder},
+    frontend::{Body as StagedBody, KernelBuilder, Specialization},
     hir::{Binary, Buffer, Label, Reg, check_forwarding},
 };
-use std::cell::Cell;
+use std::{
+    cell::{Cell, RefCell},
+    collections::HashMap,
+};
 
 struct Graph<'a, 'ctx> {
     ctx: &'ctx Context,
     module: &'a Module<'ctx>,
     count: Cell<usize>,
+    callees: RefCell<HashMap<Specialization, (FunctionValue<'ctx>, bool)>>,
 }
 
 impl<'ctx> Graph<'_, 'ctx> {
@@ -28,27 +32,33 @@ impl<'ctx> Graph<'_, 'ctx> {
         &self,
         arity: usize,
         kinds: &[BufferKind],
+        key: Option<Specialization>,
         stage: StagedBody<'_>,
     ) -> Result<(FunctionValue<'ctx>, bool), String> {
+        if let Some(hit) = key
+            .as_ref()
+            .and_then(|k| self.callees.borrow().get(k).copied())
+        {
+            return Ok(hit);
+        }
         let id = self.count.get();
         let function = declare(self.ctx, self.module, arity, kinds, id)?;
         self.count.set(id + 1);
-        let emitted = self.body(function, arity, kinds, stage);
-        if emitted.is_err() {
-            // A staged caller can handle a failed specialization and try a
-            // different child. Remove the incomplete body and its private
-            // subtree before LLVM verifies the enclosing module. Functions
-            // are declared parent first; calls only refer to later IDs.
-            for child in id..self.count.replace(id) {
-                if let Some(abandoned) = self.module.get_function(&format!("kernel{child}")) {
-                    // SAFETY: body() has dropped its builders. No caller can
-                    // reference this tree until function() returns success,
-                    // and deleting parents first removes all intra-tree uses.
-                    unsafe { abandoned.delete() };
+        match self.body(function, arity, kinds, stage) {
+            Ok(fallible) => {
+                if let Some(key) = key {
+                    self.callees.borrow_mut().insert(key, (function, fallible));
                 }
+                Ok((function, fallible))
+            }
+            Err(error) => {
+                // SAFETY: body() dropped its builders and an incomplete function
+                // never enters the cache or a caller. Its completed children
+                // remain valid definitions that a later call can reuse.
+                unsafe { function.delete() };
+                Err(error)
             }
         }
-        emitted.map(|fallible| (function, fallible))
     }
 
     fn body(
@@ -95,8 +105,9 @@ pub(crate) fn populate_direct<'ctx>(
         ctx,
         module,
         count: Cell::new(0),
+        callees: RefCell::default(),
     };
-    let (root, _) = graph.function(arity, kinds, stage)?;
+    let (root, _) = graph.function(arity, kinds, None, stage)?;
     emit_entry(ctx, module, &ctx.create_builder(), arity, kinds.len(), root)
         .map_err(|e| e.to_string())
 }
@@ -265,6 +276,30 @@ impl KernelBuilder for Direct<'_, '_> {
         buffers: &[Buffer],
         stage: StagedBody<'_>,
     ) -> Result<Reg, String> {
+        self.staged_call(arity, kinds, args, buffers, None, stage)
+    }
+    fn call_specialized(
+        &mut self,
+        key: Specialization,
+        args: &[Reg],
+        buffers: &[Buffer],
+        stage: StagedBody<'_>,
+    ) -> splice::Result<Reg> {
+        let (arity, kinds) = key.signature();
+        self.staged_call(arity, kinds, args, buffers, Some(key), stage)
+    }
+}
+
+impl Direct<'_, '_> {
+    fn staged_call(
+        &mut self,
+        arity: usize,
+        kinds: &[BufferKind],
+        args: &[Reg],
+        buffers: &[Buffer],
+        key: Option<Specialization>,
+        stage: StagedBody<'_>,
+    ) -> splice::Result<Reg> {
         if arity != args.len() {
             return Err("wrong scalar arity at LLVM call".into());
         }
@@ -275,7 +310,7 @@ impl KernelBuilder for Direct<'_, '_> {
             return Err("invalid argument register in LLVM call".into());
         }
         check_forwarding(self.kinds, kinds, buffers)?;
-        let (callee, fallible) = self.graph.function(arity, kinds, stage)?;
+        let (callee, fallible) = self.graph.function(arity, kinds, key, stage)?;
         let dst = self.result(args, |ir, d| {
             ir.call_function(d, callee, fallible, args, buffers)
         });

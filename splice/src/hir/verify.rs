@@ -1,142 +1,122 @@
 //! Resolve labels, check calls and register indices, and verify definite initialization.
 
-use super::{BufferKind, Function, Instr, Label, buffer};
+use super::{BufferKind, Function, Instr, Label};
 use std::collections::VecDeque;
 
-pub(crate) fn finish(
-    source: Option<&'static crate::frontend::KernelSource>,
-    arity: usize,
-    buffer_kinds: Vec<BufferKind>,
-    registers: usize,
-    labels: usize,
-    code: Vec<Instr>,
-) -> Result<Function, String> {
-    if registers > u32::MAX as usize {
-        return Err("too many scalar registers".into());
-    }
-    if buffer_kinds.len() > u32::MAX as usize {
-        return Err("too many buffer parameters".into());
-    }
-    let mut targets = vec![usize::MAX; labels];
-    for (i, op) in code.iter().enumerate() {
-        if let Instr::Label(l) = op {
-            let slot = targets.get_mut(l.0 as usize).ok_or("invalid label index")?;
-            if *slot != usize::MAX {
-                return Err(format!("duplicate label {l:?}"));
+impl Function {
+    pub(super) fn verify(mut self) -> Result<Self, String> {
+        if self.registers > u32::MAX as usize {
+            return Err("too many scalar registers".into());
+        }
+        if self.buffer_kinds.len() > u32::MAX as usize {
+            return Err("too many buffer parameters".into());
+        }
+        if self.code.is_empty() {
+            return Err("empty scalar function".into());
+        }
+        let mut targets = vec![None; self.labels];
+        let mut starts = Vec::new();
+        let mut new_block = true;
+        for (i, op) in self.code.iter().enumerate() {
+            if new_block || matches!(op, Instr::Label(_)) {
+                starts.push(i);
             }
-            *slot = i;
-        }
-        let mut bad = false;
-        op.read(|v| bad |= v.0 as usize >= registers);
-        if bad || op.written().is_some_and(|v| v.0 as usize >= registers) {
-            return Err(format!("invalid register at instruction {i}"));
-        }
-        match op {
-            Instr::BufferLen { buffer, .. }
-            | Instr::Load { buffer, .. }
-            | Instr::Store { buffer, .. } => {
-                let kind = buffer_kinds
-                    .get(buffer.index())
-                    .ok_or_else(|| format!("invalid buffer at instruction {i}"))?;
-                if matches!(op, Instr::Store { .. }) && *kind != BufferKind::Write {
-                    return Err(format!("store to read-only buffer at instruction {i}"));
+            new_block = matches!(op, Instr::Return(_) | Instr::Branch { .. } | Instr::Jump(_));
+            if let Instr::Label(l) = op {
+                let slot = targets.get_mut(l.0 as usize).ok_or("invalid label index")?;
+                if slot.replace(starts.len() - 1).is_some() {
+                    return Err(format!("duplicate label {l:?}"));
                 }
             }
-            Instr::Call {
-                function,
-                args,
-                buffers,
-                ..
-            } => {
-                if function.arity != args.len() {
-                    return Err(format!(
-                        "call at instruction {i} expects {} arguments, got {}",
-                        function.arity,
-                        args.len()
-                    ));
+            if op
+                .reads()
+                .chain(op.written())
+                .any(|r| r.0 as usize >= self.registers)
+            {
+                return Err(format!("invalid register at instruction {i}"));
+            }
+            match op {
+                Instr::BufferLen { buffer, .. }
+                | Instr::Load { buffer, .. }
+                | Instr::Store { buffer, .. } => {
+                    let kind = self
+                        .buffer_kinds
+                        .get(buffer.index())
+                        .ok_or_else(|| format!("invalid buffer at instruction {i}"))?;
+                    if matches!(op, Instr::Store { .. }) && *kind != BufferKind::Write {
+                        return Err(format!("store to read-only buffer at instruction {i}"));
+                    }
                 }
-                buffer::check_forwarding(&buffer_kinds, function.buffer_kinds(), buffers)
-                    .map_err(|e| format!("call at instruction {i}: {e}"))?;
+                Instr::Call {
+                    function,
+                    args,
+                    buffers,
+                    ..
+                } => {
+                    function
+                        .check_call(&self.buffer_kinds, args, buffers)
+                        .map_err(|e| format!("call at instruction {i}: {e}"))?;
+                }
+                _ => {}
             }
-            _ => {}
         }
+        starts.push(self.code.len());
+        check_initialization(&self, &starts, &targets)?;
+        self.needs_status = !self.buffer_kinds.is_empty() || self.code.iter().any(Instr::may_trap);
+        Ok(self)
     }
-    for op in &code {
-        let check = |l: Label| {
-            targets
-                .get(l.0 as usize)
-                .filter(|p| **p != usize::MAX)
-                .ok_or_else(|| format!("undefined label {l:?}"))
-        };
-        match op {
-            Instr::Jump(l) => {
-                check(*l)?;
-            }
-            Instr::Branch { yes, no, .. } => {
-                check(*yes)?;
-                check(*no)?;
-            }
-            _ => {}
-        }
-    }
-    let mut function = Function {
-        source,
-        arity,
-        buffer_kinds,
-        needs_status: false,
-        registers,
-        code,
-        targets,
-    };
-    function.refresh_status();
-    check_initialization(&function)?;
-    Ok(function)
 }
 
 /// Forward must-analysis. A register at a join must have been assigned on
 /// every reachable incoming edge, including edges from loop back to header.
-fn check_initialization(f: &Function) -> Result<(), String> {
-    if f.code.is_empty() {
-        return Err("empty scalar function".into());
+fn check_initialization(
+    f: &Function,
+    starts: &[usize],
+    targets: &[Option<usize>],
+) -> Result<(), String> {
+    let target = |l: Label| {
+        targets
+            .get(l.0 as usize)
+            .copied()
+            .flatten()
+            .ok_or_else(|| format!("undefined label {l:?}"))
+    };
+    // Resolve every edge, including jumps in unreachable blocks. Fallthrough
+    // past the last block is an error only if execution can reach it.
+    let mut edges = Vec::new();
+    for (block, &end) in starts.iter().skip(1).enumerate() {
+        edges.push(match f.code[end - 1] {
+            Instr::Return(_) => [None, None],
+            Instr::Branch { yes, no, .. } => [Some(target(yes)?), Some(target(no)?)],
+            Instr::Jump(l) => [Some(target(l)?), None],
+            _ => [Some(block + 1), None],
+        });
     }
-    let mut leaders = vec![0];
-    for (i, op) in f.code.iter().enumerate().skip(1) {
-        if matches!(op, Instr::Label(_))
-            || matches!(
-                f.code[i - 1],
-                Instr::Return(_) | Instr::Branch { .. } | Instr::Jump(_)
-            )
-        {
-            leaders.push(i);
-        }
-    }
-    let target_block = |l: Label| leaders.binary_search(&f.targets[l.0 as usize]).unwrap();
     let mut entry = vec![0u64; f.registers.div_ceil(64)];
     for r in 0..f.arity {
         entry[r / 64] |= 1 << (r % 64);
     }
-    let mut states = vec![None; leaders.len()];
+    let mut states = vec![None; edges.len()];
     states[0] = Some(entry);
     let mut queue = VecDeque::from([0]);
     while let Some(block) = queue.pop_front() {
         let mut bits = states[block].as_ref().unwrap().clone();
-        let end = leaders.get(block + 1).copied().unwrap_or(f.code.len());
-        for pc in leaders[block]..end {
+        for pc in starts[block]..starts[block + 1] {
             let op = &f.code[pc];
-            let mut missing = None;
-            op.read(|r| {
-                if bits[r.0 as usize / 64] & (1 << (r.0 % 64)) == 0 {
-                    missing = Some(r);
-                }
-            });
-            if let Some(r) = missing {
+            if let Some(r) = op
+                .reads()
+                .find(|r| bits[r.0 as usize / 64] & (1 << (r.0 % 64)) == 0)
+            {
                 return Err(format!("uninitialized {r:?} at instruction {pc}"));
             }
             if let Some(r) = op.written() {
                 bits[r.0 as usize / 64] |= 1 << (r.0 % 64);
             }
         }
-        let mut propagate = |next: usize| {
+        for next in edges[block].into_iter().flatten() {
+            if next == edges.len() {
+                return Err("reachable path falls off the end of the function".into());
+            }
             if let Some(existing) = &mut states[next] {
                 let mut changed = false;
                 for (a, b) in existing.iter_mut().zip(&bits) {
@@ -151,16 +131,6 @@ fn check_initialization(f: &Function) -> Result<(), String> {
                 states[next] = Some(bits.clone());
                 queue.push_back(next);
             }
-        };
-        match f.code[end - 1] {
-            Instr::Return(_) => {}
-            Instr::Branch { yes, no, .. } => {
-                propagate(target_block(yes));
-                propagate(target_block(no));
-            }
-            Instr::Jump(l) => propagate(target_block(l)),
-            _ if end < f.code.len() => propagate(block + 1),
-            _ => return Err("reachable path falls off the end of the function".into()),
         }
     }
     Ok(())

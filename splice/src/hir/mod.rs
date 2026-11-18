@@ -2,11 +2,12 @@
 //! A function owns a dense instruction stream. Parameters occupy the first
 //! registers. Mutable locals and temporary results share the same index space.
 
-pub(crate) mod buffer;
-pub(crate) mod verify;
+mod buffer;
+mod builder;
+mod verify;
 
-pub use crate::frontend::FunctionBuilder;
 pub use buffer::{Buffer, BufferArg, BufferKind, check_forwarding, validate_buffers};
+pub use builder::FunctionBuilder;
 
 use std::sync::Arc;
 
@@ -111,21 +112,21 @@ impl Instr {
         }
     }
 
-    fn read(&self, mut read: impl FnMut(Reg)) {
-        match self {
-            Self::Copy(_, r) | Self::Return(r) | Self::Branch { cond: r, .. } => read(*r),
-            Self::Bin(_, _, a, b) => {
-                read(*a);
-                read(*b);
-            }
-            Self::Load { index, .. } => read(*index),
-            Self::Store { index, value, .. } => {
-                read(*index);
-                read(*value);
-            }
-            Self::Call { args, .. } => args.iter().copied().for_each(read),
-            _ => {}
-        }
+    fn reads(&self) -> impl Iterator<Item = Reg> + '_ {
+        use std::slice::from_ref;
+        let (first, rest): (_, &[Reg]) = match self {
+            Self::Copy(_, r)
+            | Self::Return(r)
+            | Self::Branch { cond: r, .. }
+            | Self::Load { index: r, .. } => (None, from_ref(r)),
+            Self::Bin(_, _, a, b)
+            | Self::Store {
+                index: a, value: b, ..
+            } => (Some(*a), from_ref(b)),
+            Self::Call { args, .. } => (None, args),
+            _ => (None, &[]),
+        };
+        first.into_iter().chain(rest.iter().copied())
     }
 
     fn written(&self) -> Option<Reg> {
@@ -149,10 +150,26 @@ pub struct Function {
     needs_status: bool,
     registers: usize,
     code: Vec<Instr>,
-    targets: Vec<usize>,
+    labels: usize,
 }
 
 impl Function {
+    fn check_call(
+        &self,
+        caller: &[BufferKind],
+        args: &[Reg],
+        buffers: &[Buffer],
+    ) -> crate::Result<()> {
+        if args.len() != self.arity {
+            return Err(format!(
+                "expected {} scalar arguments, got {}",
+                self.arity,
+                args.len()
+            ));
+        }
+        check_forwarding(caller, &self.buffer_kinds, buffers)
+    }
+
     pub fn source(&self) -> Option<&'static crate::frontend::KernelSource> {
         self.source
     }
@@ -162,7 +179,7 @@ impl Function {
     }
 
     pub fn label_count(&self) -> usize {
-        self.targets.len()
+        self.labels
     }
 
     pub fn arity(&self) -> usize {
@@ -178,9 +195,6 @@ impl Function {
         self.needs_status
     }
 
-    fn refresh_status(&mut self) {
-        self.needs_status = !self.buffer_kinds.is_empty() || self.code.iter().any(Instr::may_trap);
-    }
     pub fn instructions(&self) -> &[Instr] {
         &self.code
     }

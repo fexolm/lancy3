@@ -111,6 +111,24 @@ fn verification_rejects_a_branch_with_an_uninitialized_result() {
     assert!(b.finish().unwrap_err().contains("uninitialized"));
 }
 
+#[test]
+fn verification_resolves_jumps_even_in_unreachable_code() {
+    let body = || {
+        let mut b = FunctionBuilder::new(1);
+        b.ret(b.arg(0));
+        b
+    };
+    let mut dead_tail = body();
+    let unused = dead_tail.label();
+    dead_tail.mark(unused);
+    assert!(dead_tail.finish().is_ok());
+
+    let mut dangling = body();
+    let missing = dangling.label();
+    dangling.jump(missing);
+    assert!(dangling.finish().unwrap_err().contains("undefined label"));
+}
+
 mod directly_staged {
     use super::*;
     use splice::frontend::{Body, KernelBuilder};
@@ -349,4 +367,66 @@ fn by_value_array_patterns_bind_comptime_operands() {
     );
     let code = weighted::build::<splice_lancy::Lancy>(terms).unwrap();
     assert_eq!(code.call(&[7], &mut []), Ok(weighted(terms, 7)));
+}
+
+#[test]
+fn nested_loop_exits_and_generated_names_preserve_rust_bindings() -> splice::Result<()> {
+    use splice_lancy::Lancy;
+    use splice_llvm::Llvm;
+
+    #[allow(non_upper_case_globals)]
+    const builder: i32 = 5;
+
+    #[kernel]
+    #[expect(
+        clippy::needless_range_loop,
+        reason = "exercise the kernel's indexed range loop"
+    )]
+    fn nested(
+        #[comptime] steps: &[i32],
+        mut __splice_result: i32,
+        __splice_builder: &mut [i32],
+    ) -> i32 {
+        for &loop_end in steps {
+            for loop_next in 0..__splice_builder.len() {
+                let value = match __splice_builder[loop_next] {
+                    0 => continue,
+                    1 if __splice_result < 0 => return __splice_result,
+                    _ => loop_end + __splice_result,
+                };
+                __splice_builder[loop_next] = value;
+                __splice_result += value;
+                if value > builder {
+                    break;
+                }
+            }
+            if __splice_result < 0 {
+                break;
+            }
+        }
+        __splice_result
+    }
+
+    let steps = [2, -3, 4];
+    let ir = nested::ir(&steps)?;
+    let kernels: [&dyn Executable; 4] = [
+        &nested::build::<Lancy>(&steps)?,
+        &Lancy::compile(&ir)?,
+        &nested::build::<Llvm>(&steps)?,
+        &Llvm::compile(&ir)?,
+    ];
+    for seed in [-5, -1, 0, 3] {
+        let input = [0, 4, 1, 0, 2];
+        let mut expected = input;
+        let result = nested(&steps, seed, &mut expected);
+        for kernel in kernels {
+            let mut actual = input;
+            assert_eq!(
+                kernel.call(&[seed], &mut [BufferArg::Write(&mut actual)])?,
+                result
+            );
+            assert_eq!(actual, expected);
+        }
+    }
+    Ok(())
 }

@@ -7,8 +7,9 @@ extern crate self as splice;
 pub mod frontend;
 pub mod hir;
 
+pub use frontend::ComptimeKey;
 pub use hir::{BufferArg, BufferKind, Function, validate_buffers};
-pub use splice_macros::kernel;
+pub use splice_macros::{ComptimeKey, kernel};
 
 /// Result of a Splice operation, with the staging or backend error message.
 pub type Result<T> = std::result::Result<T, String>;

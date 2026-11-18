@@ -149,6 +149,67 @@ mod tests {
     use super::*;
     use splice::kernel;
 
+    #[test]
+    fn both_lowering_paths_offer_the_entire_kernel_to_o3() {
+        use splice::{frontend::KernelBuilder, hir::Binary};
+        fn staged(b: &mut dyn KernelBuilder) -> splice::Result<()> {
+            let value = b.call_kernel(
+                1,
+                &[],
+                &[b.arg(0)],
+                &[],
+                Box::new(|child| {
+                    let value = child.call_kernel(
+                        1,
+                        &[],
+                        &[child.arg(0)],
+                        &[],
+                        Box::new(|leaf| {
+                            let one = leaf.constant(1);
+                            let value = leaf.binary(Binary::Add, leaf.arg(0), one);
+                            leaf.ret(value);
+                            Ok(())
+                        }),
+                    )?;
+                    child.ret(value);
+                    Ok(())
+                }),
+            )?;
+            b.ret(value);
+            Ok(())
+        }
+        let ir = splice::frontend::materialize(1, &[], Box::new(staged)).unwrap();
+        let target = jit::host_machine().unwrap();
+        let ctx = Context::create();
+        for direct in [false, true] {
+            let m = build_module(&ctx, &target, |ctx, m| {
+                if direct {
+                    lower::populate_direct(ctx, m, 1, &[], Box::new(staged))
+                } else {
+                    lower::populate(ctx, m, &ir)
+                }
+            })
+            .unwrap();
+            for id in 0..3 {
+                let helper = m.get_function(&format!("kernel{id}")).unwrap();
+                assert_eq!(helper.get_linkage(), inkwell::module::Linkage::Internal);
+                assert!(helper.get_first_basic_block().is_some());
+            }
+            jit::optimize(&m, &target).unwrap();
+            let definitions: Vec<_> = m
+                .get_functions()
+                .filter(|f| f.get_first_basic_block().is_some())
+                .collect();
+            assert_eq!(definitions, [m.get_function("splice_entry").unwrap()]);
+        }
+        for native in [
+            Llvm::build(1, &[], Box::new(staged)).unwrap(),
+            Llvm::compile(&ir).unwrap(),
+        ] {
+            assert_eq!(native.call(&[i32::MAX], &mut []), Ok(i32::MIN));
+        }
+    }
+
     #[kernel]
     fn update(#[comptime] amount: i32, data: &mut [i32]) -> i32 {
         data[0] += amount;

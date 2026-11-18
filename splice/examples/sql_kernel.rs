@@ -1,6 +1,7 @@
 use splice::{Executable, kernel};
 use splice_lancy::Lancy;
 
+#[derive(splice::ComptimeKey)]
 enum SqlExpr {
     Price,
     Quantity,
