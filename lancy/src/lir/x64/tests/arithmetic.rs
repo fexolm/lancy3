@@ -3,7 +3,7 @@ use crate::{
     CallError, ScalarKernel,
     lir::x64::{
         compile::compile,
-        inst::{Alu, Inst},
+        inst::{Alu, Inst, Rhs},
     },
 };
 
@@ -48,7 +48,7 @@ fn arithmetic_and_spills_match_the_reference() {
 }
 
 #[test]
-fn explicit_instructions_survive_lowering_and_allocation() {
+fn selection_uses_an_immediate_and_drops_an_unused_multiply() {
     let mut f = Function::scalar(0);
     let b = f.entry();
     let two = f.append(b, H::Const(2)).unwrap();
@@ -61,8 +61,7 @@ fn explicit_instructions_survive_lowering_and_allocation() {
         module.functions[module.call_graph.root()].body.insts(),
         [
             Inst::Imm(_, 2),
-            Inst::Alu(Alu::Add, ..),
-            Inst::Alu(Alu::Mul, ..),
+            Inst::Alu(Alu::Add, _, _, Rhs::Imm(2)),
             Inst::Ret(_)
         ]
     ));
@@ -100,10 +99,14 @@ fn disjoint_pressure_peaks_reuse_workspace() {
     fn compile(phases: usize) -> ScalarKernel {
         let mut f = Function::scalar(1);
         let b = f.entry();
-        let mut sum = f.params(b)[0];
+        let x = f.params(b)[0];
+        let mut sum = x;
         for _ in 0..phases {
             let values: Vec<_> = (1..=32)
-                .map(|i| f.append(b, H::Const(i)).unwrap())
+                .map(|i| {
+                    let offset = f.append(b, H::Const(i)).unwrap();
+                    f.append(b, H::Bin(Binary::Add, x, offset)).unwrap()
+                })
                 .collect();
             for v in values {
                 sum = f.append(b, H::Bin(Binary::Add, sum, v)).unwrap();
@@ -114,7 +117,8 @@ fn disjoint_pressure_peaks_reuse_workspace() {
     }
     let single = compile(1);
     let many = compile(8);
-    assert_eq!(single.call(&[19]), Ok(19 + 528));
-    assert_eq!(many.call(&[19]), Ok(19 + 8 * 528));
+    assert_eq!(single.call(&[19]), Ok(19 + 32 * 19 + 528));
+    assert_eq!(many.call(&[19]), Ok(19 + 8 * (32 * 19 + 528)));
+    assert!(single.workspace_words() >= 32);
     assert!(many.workspace_words() < 2 * single.workspace_words());
 }

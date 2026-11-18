@@ -116,7 +116,7 @@ fn shared_calls_preserve_live_registers_and_spilled_arguments() {
     f.set_terminator(b, Terminator::Return(v));
     let (source, ids) = f.verified_module().unwrap();
     assert_eq!(compile(source, &ids).unwrap().functions.len(), 2);
-    let k = ScalarKernel::compile(&f).unwrap();
+    let k = ScalarKernel::compile_with_inlining(&f, crate::Inlining::Never).unwrap();
     for input in [[1, 2, 3, 4, 5, 6], [-1, -2, 5, i32::MIN, i32::MAX, 0]] {
         assert_eq!(k.call(&input).unwrap(), f.interpret(&input).unwrap());
     }

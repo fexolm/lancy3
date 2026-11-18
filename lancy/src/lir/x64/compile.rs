@@ -1,7 +1,7 @@
 use super::{
     frame::Frame,
     inst::{Inst, NONVOLATILE},
-    lower,
+    isel,
 };
 use crate::{
     CompileError, hir,
@@ -28,7 +28,7 @@ pub(super) fn compile(
     let arity = source.functions[entry].function.arity();
     let mut ctx = Ctx::default();
     let module = source.try_map_functions::<CompiledFunction>(|id, src, calls, compiled| {
-        let body = lower::lower(src.function, &src.cfg, id == entry, |callee| {
+        let body = isel::select(src.function, &src.cfg, id == entry, |callee| {
             let id = ids[&std::ptr::from_ref(callee)];
             (id, compiled[id].written)
         })?;

@@ -3,6 +3,7 @@
 
 #[cfg(test)]
 mod interpret;
+mod simplify;
 
 use super::{Op, Terminator, Type, Value};
 use crate::hir::{
@@ -168,6 +169,17 @@ impl Function {
     pub fn result(&self, i: Inst) -> Option<Value> {
         let result = self.insts[i].result;
         (result != Value::INVALID).then_some(result)
+    }
+    pub(crate) fn visit_operands(&self, i: Inst, mut visit: impl FnMut(Value)) {
+        let mut op = *self.op(i);
+        if let Op::Call(site) = op {
+            self.call(site).1.iter().copied().for_each(visit);
+        } else {
+            op.map_operands(|v| {
+                visit(v);
+                v
+            });
+        }
     }
     pub fn terminator(&self, b: Block) -> &Terminator {
         self.blocks[b]

@@ -1,6 +1,6 @@
 //! Selected x64 instructions. R11 addresses the current workspace frame.
 //! R10 is the allocator's move scratch and is available inside a pseudo-op.
-use crate::hir::{Scale, Type};
+use crate::hir::{Binary, Scale, Type};
 use crate::{lir::TargetInst, module::FunctionId};
 use regalloc2::{MachineEnv, Operand, PReg, PRegSet, RegClass, VReg};
 
@@ -62,6 +62,60 @@ pub(super) enum Cond {
     Ge,
 }
 
+impl Cond {
+    pub fn from_binary(op: Binary) -> Option<Self> {
+        Some(match op {
+            Binary::Eq => Self::Eq,
+            Binary::Ne => Self::Ne,
+            Binary::Lt => Self::Lt,
+            Binary::Le => Self::Le,
+            Binary::Gt => Self::Gt,
+            Binary::Ge => Self::Ge,
+            _ => return None,
+        })
+    }
+    pub fn inverse(self) -> Self {
+        match self {
+            Self::Eq => Self::Ne,
+            Self::Ne => Self::Eq,
+            Self::Lt => Self::Ge,
+            Self::Ge => Self::Lt,
+            Self::Gt => Self::Le,
+            Self::Le => Self::Gt,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(super) enum Rhs {
+    Reg(VReg),
+    Imm(i32),
+}
+
+impl Rhs {
+    fn operands(self, out: &mut Vec<Operand>) {
+        if let Self::Reg(r) = self {
+            out.push(Operand::any_use(r));
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(super) struct Address {
+    pub base: VReg,
+    pub index: Option<(VReg, Scale)>,
+    pub disp: i32,
+}
+
+impl Address {
+    fn operands(self, out: &mut Vec<Operand>) {
+        out.push(Operand::reg_use(self.base));
+        if let Some((index, _)) = self.index {
+            out.push(Operand::reg_use(index));
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 pub(super) enum Inst {
     Argv(VReg),
@@ -72,14 +126,15 @@ pub(super) enum Inst {
     },
     Imm(VReg, i32),
     Copy(VReg, VReg),
-    Alu(Alu, VReg, VReg, VReg),
+    Alu(Alu, VReg, VReg, Rhs),
     Shift {
         left: bool,
         dst: VReg,
         value: VReg,
-        count: VReg,
+        count: Rhs,
     },
-    Compare(Cond, VReg, VReg, VReg),
+    Compare(Cond, VReg, VReg, Rhs),
+    BrCmp(Cond, VReg, Rhs),
     Cdq {
         lo: VReg,
         hi: VReg,
@@ -93,9 +148,9 @@ pub(super) enum Inst {
     },
     CheckBounds(VReg, VReg),
     Movsxd(VReg, VReg),
-    Lea(VReg, VReg, VReg, Scale),
-    Load(Type, VReg, VReg),
-    Store(Type, VReg, VReg),
+    Lea(VReg, Address),
+    Load(Type, VReg, Address),
+    Store(Type, Address, VReg),
     StoreArg(usize, VReg),
     Call {
         target: FunctionId,
@@ -133,16 +188,28 @@ impl TargetInst for Inst {
             Self::Imm(d, _) => out.push(O::reg_def(d)),
             Self::Copy(d, a) => out.extend([O::reg_use(a), O::reg_reuse_def(d, 0)]),
             Self::Alu(_, d, a, b) => {
-                out.extend([O::reg_use(a), O::any_use(b), O::reg_reuse_def(d, 0)])
+                out.push(O::reg_use(a));
+                b.operands(out);
+                out.push(O::reg_reuse_def(d, 0));
             }
             Self::Shift {
                 dst, value, count, ..
-            } => out.extend([
-                O::reg_use(value),
-                O::reg_fixed_use(count, CX),
-                O::reg_reuse_def(dst, 0),
-            ]),
-            Self::Compare(_, d, a, b) => out.extend([O::reg_use(a), O::any_use(b), O::reg_def(d)]),
+            } => {
+                out.push(O::reg_use(value));
+                if let Rhs::Reg(r) = count {
+                    out.push(O::reg_fixed_use(r, CX));
+                }
+                out.push(O::reg_reuse_def(dst, 0));
+            }
+            Self::Compare(_, d, a, b) => {
+                out.push(O::reg_use(a));
+                b.operands(out);
+                out.push(O::reg_def(d));
+            }
+            Self::BrCmp(_, a, b) => {
+                out.push(O::reg_use(a));
+                b.operands(out);
+            }
             Self::Cdq { lo, hi } => {
                 out.extend([O::reg_fixed_use(lo, AX), O::reg_fixed_def(hi, DX)])
             }
@@ -159,11 +226,15 @@ impl TargetInst for Inst {
                 O::reg_fixed_def(dst, if remainder { DX } else { AX }),
             ]),
             Self::CheckBounds(i, n) => out.extend([O::reg_use(i), O::any_use(n)]),
-            Self::Movsxd(d, a) | Self::Load(_, d, a) => out.extend([O::reg_use(a), O::reg_def(d)]),
-            Self::Lea(d, base, i, _) => {
-                out.extend([O::reg_use(base), O::reg_use(i), O::reg_def(d)])
+            Self::Movsxd(d, a) => out.extend([O::reg_use(a), O::reg_def(d)]),
+            Self::Lea(d, addr) | Self::Load(_, d, addr) => {
+                addr.operands(out);
+                out.push(O::reg_def(d));
             }
-            Self::Store(_, a, v) => out.extend([O::reg_use(a), O::reg_use(v)]),
+            Self::Store(_, addr, value) => {
+                addr.operands(out);
+                out.push(O::reg_use(value));
+            }
             Self::StoreArg(_, v) | Self::Branch(v) => out.push(O::reg_use(v)),
             Self::Call { dst, .. } => out.push(O::reg_fixed_def(dst, AX)),
             Self::Ret(v) => out.push(O::reg_fixed_use(v, AX)),
@@ -186,7 +257,7 @@ impl TargetInst for Inst {
         }
     }
     fn is_branch(&self) -> bool {
-        matches!(self, Self::Jump | Self::Branch(_))
+        matches!(self, Self::Jump | Self::Branch(_) | Self::BrCmp(..))
     }
     fn is_ret(&self) -> bool {
         matches!(self, Self::Ret(_))

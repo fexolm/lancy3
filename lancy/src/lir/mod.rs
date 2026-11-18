@@ -1,5 +1,6 @@
 mod function;
 mod inst;
+mod isel;
 mod regalloc;
 mod x64;
 

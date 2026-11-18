@@ -59,21 +59,23 @@ fn nested_normal_and_trapping_returns_restore_host_registers() {
         caller.set_terminator(b, Terminator::Return(result));
         f = caller;
     }
-    let kernel = ScalarKernel::compile(&f).unwrap();
-    let probe = Executable::new(&abi_probe(kernel.entry).unwrap()).unwrap();
-    // SAFETY: abi_probe emits the same two-argument C ABI, forwards the
-    // arguments unchanged and retains stack alignment at the nested call.
-    let check =
-        unsafe { std::mem::transmute::<*mut std::ffi::c_void, Entry>(probe.address.as_ptr()) };
-    for (divisor, expected_status) in [(3, 0), (0, 2)] {
-        let mut args = [7u64; 24];
-        args[1] = divisor;
-        let mut status = 0i32;
-        let mut workspace = vec![0u64; kernel.words];
-        workspace[0] = std::ptr::from_mut(&mut status) as u64;
-        // SAFETY: both executable owners and all three data buffers live
-        // across this call. The verified kernel only accepts integer inputs.
-        assert_eq!(unsafe { check(args.as_ptr(), workspace.as_mut_ptr()) }, 0);
-        assert_eq!(status, expected_status);
+    for policy in [crate::Inlining::Always, crate::Inlining::Never] {
+        let kernel = ScalarKernel::compile_with_inlining(&f, policy).unwrap();
+        let probe = Executable::new(&abi_probe(kernel.entry).unwrap()).unwrap();
+        // SAFETY: abi_probe emits the same two-argument C ABI, forwards the
+        // arguments unchanged and retains stack alignment at the nested call.
+        let check =
+            unsafe { std::mem::transmute::<*mut std::ffi::c_void, Entry>(probe.address.as_ptr()) };
+        for (divisor, expected_status) in [(3, 0), (0, 2)] {
+            let mut args = [7u64; 24];
+            args[1] = divisor;
+            let mut status = 0i32;
+            let mut workspace = vec![0u64; kernel.words];
+            workspace[0] = std::ptr::from_mut(&mut status) as u64;
+            // SAFETY: both executable owners and all three data buffers live
+            // across this call. The verified kernel only accepts integer inputs.
+            assert_eq!(unsafe { check(args.as_ptr(), workspace.as_mut_ptr()) }, 0);
+            assert_eq!(status, expected_status);
+        }
     }
 }

@@ -1,5 +1,6 @@
 mod cfg;
 mod domtree;
+mod inline;
 #[cfg(test)]
 mod tests;
 

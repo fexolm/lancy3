@@ -15,4 +15,4 @@ mod module;
 pub mod support;
 
 pub use error::{CallError, CompileError};
-pub use jit::ScalarKernel;
+pub use jit::{Inlining, ScalarKernel};

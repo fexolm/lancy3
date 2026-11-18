@@ -9,6 +9,16 @@ mod tests;
 
 type Entry = unsafe extern "C" fn(*const u64, *mut u64) -> u64;
 
+/// Controls expansion of runtime calls in HIR.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Inlining {
+    /// Expand the entire acyclic graph when the resulting function is representable.
+    #[default]
+    Always,
+    /// Keep the internal call ABI while optimizing each body independently.
+    Never,
+}
+
 /// Owns the executable memory backing a compiled function and its callees.
 pub struct ScalarKernel {
     memory: Executable,
@@ -21,8 +31,36 @@ pub struct ScalarKernel {
 impl ScalarKernel {
     /// Verify the reachable functions, generate x64 code and install it for execution.
     pub fn compile(function: &Function) -> Result<Self, CompileError> {
+        Self::compile_with_inlining(function, Inlining::Always)
+    }
+
+    /// Select the HIR inlining policy for this compilation.
+    pub fn compile_with_inlining(
+        function: &Function,
+        inlining: Inlining,
+    ) -> Result<Self, CompileError> {
         let (source, ids) = function.verified_module()?;
-        let (bytes, words) = crate::lir::emit(source, &ids)?;
+        let emit = |optimized: Function| {
+            let (module, ids) = optimized.verified_module()?;
+            crate::lir::emit(module, &ids)
+        };
+        let outlined = || emit(source.simplify_bodies(&ids)?);
+        let (bytes, words) = if inlining == Inlining::Always && source.functions.len() > 1 {
+            let expanded = source.inline_all(&ids).and_then(|mut body| {
+                body.simplify()?;
+                emit(body)
+            });
+            match expanded {
+                // Selection can introduce extra virtual registers and branches
+                // after the HIR expansion has passed its size check.
+                Err(CompileError::FunctionTooLarge | CompileError::BranchOutOfRange { .. }) => {
+                    outlined()
+                }
+                other => other,
+            }
+        } else {
+            outlined()
+        }?;
         let memory = Executable::new(&bytes)?;
         // SAFETY: the emitter implements Entry for both supported x64 ABIs.
         let entry =

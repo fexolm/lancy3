@@ -7,6 +7,7 @@ use std::ops::Range;
 pub struct DomTree {
     // Each interval covers the block and all its descendants in preorder.
     intervals: DenseMap<Block, Range<usize>>,
+    preorder: Vec<Block>,
 }
 
 impl DomTree {
@@ -18,20 +19,27 @@ impl DomTree {
             children[parent[block]].push(block);
         }
         let mut intervals = DenseMap::filled(cfg.block_capacity(), 0..0);
-        let mut serial = 0;
+        let mut preorder = Vec::with_capacity(order.len());
         let mut stack = vec![(order[0], false)];
         while let Some((block, leave)) = stack.pop() {
             let interval = &mut intervals[block];
             if leave {
-                interval.end = serial;
+                interval.end = preorder.len();
             } else {
-                interval.start = serial;
-                serial += 1;
+                interval.start = preorder.len();
+                preorder.push(block);
                 stack.push((block, true));
                 stack.extend(children[block].iter().map(|&child| (child, false)));
             }
         }
-        Self { intervals }
+        Self {
+            intervals,
+            preorder,
+        }
+    }
+
+    pub(crate) fn preorder(&self) -> &[Block] {
+        &self.preorder
     }
 
     /// Whether every path from the entry to `block` passes through `dominator`.

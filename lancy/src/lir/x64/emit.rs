@@ -2,7 +2,7 @@
 use super::{
     compile::{CompiledFunction, compile},
     frame::{CHILD_ARGS, Frame},
-    inst::{Alu, Cond, Inst, NONVOLATILE},
+    inst::{Address, Alu, Cond, Inst, NONVOLATILE, Rhs},
 };
 use crate::{
     CompileError,
@@ -148,15 +148,21 @@ impl Emitter<'_> {
                                     self.a.jmp(labels[target])?;
                                 }
                             }
-                            Inst::Branch(_) => {
+                            inst @ (Inst::Branch(_) | Inst::BrCmp(..)) => {
                                 let succ = body.block_succs(b);
                                 let (yes, no) = (succ[0].index(), succ[1].index());
-                                let cond = R32[gpr(allocs[0])];
-                                self.a.test(cond, cond)?;
-                                if yes == i + 1 {
-                                    self.a.jz(labels[no])?;
+                                let condition = if let Inst::BrCmp(cc, _, rhs) = inst {
+                                    cmp(self.a, &self.machine.frame, allocs, rhs)?;
+                                    cc
                                 } else {
-                                    self.a.jnz(labels[yes])?;
+                                    let r = R32[gpr(allocs[0])];
+                                    self.a.test(r, r)?;
+                                    Cond::Ne
+                                };
+                                if yes == i + 1 {
+                                    jcc(self.a, condition.inverse(), labels[no])?;
+                                } else {
+                                    jcc(self.a, condition, labels[yes])?;
                                     if no != i + 1 {
                                         self.a.jmp(labels[no])?;
                                     }
@@ -217,7 +223,16 @@ impl Emitter<'_> {
                 argv: None, index, ..
             } => a.mov(q(0), slot(CHILD_ARGS + index)),
             Inst::Imm(_, n) => a.mov(r(0), n),
-            Inst::Alu(op, ..) => match op {
+            Inst::Alu(op, _, _, Rhs::Imm(n)) => match op {
+                Alu::Add => a.add(r(0), n),
+                Alu::Sub => a.sub(r(0), n),
+                Alu::And => a.and(r(0), n),
+                Alu::Or => a.or(r(0), n),
+                Alu::Xor => a.xor(r(0), n),
+                Alu::Mul => a.imul_3(r(0), r(0), n),
+                Alu::Min | Alu::Max => unreachable!("cmov requires a register or memory"),
+            },
+            Inst::Alu(op, _, _, Rhs::Reg(_)) => match op {
                 Alu::Add => rm32!(add, r(2), 1),
                 Alu::Sub => rm32!(sub, r(2), 1),
                 Alu::And => rm32!(and, r(2), 1),
@@ -233,16 +248,16 @@ impl Emitter<'_> {
                     }
                 }
             },
-            Inst::Shift { left, .. } => {
-                if left {
-                    a.shl(r(2), cl)
-                } else {
-                    a.sar(r(2), cl)
-                }
-            }
-            Inst::Compare(cc, ..) => {
-                rm32!(cmp, r(0), 1)?;
-                let byte = R8[reg(2)];
+            Inst::Shift { left, count, .. } => match (left, count) {
+                (true, Rhs::Reg(_)) => a.shl(r(0), cl),
+                (false, Rhs::Reg(_)) => a.sar(r(0), cl),
+                (true, Rhs::Imm(n)) => a.shl(r(0), n & 31),
+                (false, Rhs::Imm(n)) => a.sar(r(0), n & 31),
+            },
+            Inst::Compare(cc, _, _, rhs) => {
+                cmp(a, frame, allocs, rhs)?;
+                let dst = allocs.len() - 1;
+                let byte = R8[reg(dst)];
                 match cc {
                     Cond::Eq => a.sete(byte),
                     Cond::Ne => a.setne(byte),
@@ -251,8 +266,8 @@ impl Emitter<'_> {
                     Cond::Gt => a.setg(byte),
                     Cond::Ge => a.setge(byte),
                 }?;
-                a.movzx(r(2), byte)?;
-                a.neg(r(2))
+                a.movzx(r(dst), byte)?;
+                a.neg(r(dst))
             }
             Inst::Cdq { .. } => a.cdq(),
             Inst::IDiv { .. } => {
@@ -274,11 +289,19 @@ impl Emitter<'_> {
                 a.jae(fail)
             }
             Inst::Movsxd(..) => a.movsxd(q(1), r(0)),
-            Inst::Lea(_, _, _, scale) => a.lea(q(2), ptr(q(1) * (1i32 << scale as u8) + q(0))),
-            Inst::Load(Type::I32, ..) => a.mov(r(1), dword_ptr(q(0))),
-            Inst::Load(Type::Ptr, ..) => a.mov(q(1), qword_ptr(q(0))),
-            Inst::Store(Type::I32, ..) => a.mov(dword_ptr(q(0)), r(1)),
-            Inst::Store(Type::Ptr, ..) => a.mov(qword_ptr(q(0)), q(1)),
+            Inst::Lea(_, addr) => a.lea(q(allocs.len() - 1), memory(addr, allocs)),
+            Inst::Load(Type::I32, _, addr) => {
+                a.mov(r(allocs.len() - 1), dword_ptr(memory(addr, allocs)))
+            }
+            Inst::Load(Type::Ptr, _, addr) => {
+                a.mov(q(allocs.len() - 1), qword_ptr(memory(addr, allocs)))
+            }
+            Inst::Store(Type::I32, addr, _) => {
+                a.mov(dword_ptr(memory(addr, allocs)), r(allocs.len() - 1))
+            }
+            Inst::Store(Type::Ptr, addr, _) => {
+                a.mov(qword_ptr(memory(addr, allocs)), q(allocs.len() - 1))
+            }
             Inst::StoreArg(i, _) => a.mov(slot(frame.slots + CHILD_ARGS + i), q(0)),
             Inst::Call { target, .. } => {
                 if self.root {
@@ -298,7 +321,42 @@ impl Emitter<'_> {
             }
             Inst::Ret(_) if self.root => a.jmp(self.epilogue),
             Inst::Ret(_) => a.jmp(slot(0)),
-            Inst::Jump | Inst::Branch(_) => unreachable!("emitted with block successors"),
+            Inst::Jump | Inst::Branch(_) | Inst::BrCmp(..) => {
+                unreachable!("emitted with block successors")
+            }
         }
+    }
+}
+
+fn memory(addr: Address, allocs: &[Allocation]) -> AsmMemoryOperand {
+    let base = R64[gpr(allocs[0])];
+    match addr.index {
+        Some((_, scale)) => ptr(base + R64[gpr(allocs[1])] * (1i32 << scale as u8) + addr.disp),
+        None => ptr(base + addr.disp),
+    }
+}
+
+fn cmp(a: &mut CodeAssembler, frame: &Frame, allocs: &[Allocation], rhs: Rhs) -> AsmResult {
+    let lhs = R32[gpr(allocs[0])];
+    match rhs {
+        Rhs::Imm(n) => a.cmp(lhs, n),
+        Rhs::Reg(_) => match allocs[1].as_reg() {
+            Some(p) => a.cmp(lhs, R32[p.hw_enc()]),
+            None => a.cmp(
+                lhs,
+                dword_ptr(r11 + disp(frame.spill_base + allocs[1].as_stack().unwrap().index())),
+            ),
+        },
+    }
+}
+
+fn jcc(a: &mut CodeAssembler, cc: Cond, label: CodeLabel) -> AsmResult {
+    match cc {
+        Cond::Eq => a.je(label),
+        Cond::Ne => a.jne(label),
+        Cond::Lt => a.jl(label),
+        Cond::Le => a.jle(label),
+        Cond::Gt => a.jg(label),
+        Cond::Ge => a.jge(label),
     }
 }

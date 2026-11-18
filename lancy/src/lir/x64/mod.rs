@@ -2,7 +2,7 @@ mod compile;
 mod emit;
 mod frame;
 mod inst;
-mod lower;
+mod isel;
 #[cfg(test)]
 mod tests;
 

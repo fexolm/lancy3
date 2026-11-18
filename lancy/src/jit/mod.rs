@@ -1,4 +1,4 @@
 mod kernel;
 mod memory;
 
-pub use kernel::ScalarKernel;
+pub use kernel::{Inlining, ScalarKernel};

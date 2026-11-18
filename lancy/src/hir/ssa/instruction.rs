@@ -58,9 +58,8 @@ pub enum Binary {
     Max,
 }
 
-#[cfg(test)]
 impl Binary {
-    pub(super) fn checked_eval(self, a: i32, b: i32) -> Option<i32> {
+    pub(crate) fn checked_eval(self, a: i32, b: i32) -> Option<i32> {
         Some(match self {
             Self::Add => a.wrapping_add(b),
             Self::Sub => a.wrapping_sub(b),
@@ -85,11 +84,17 @@ impl Binary {
 }
 
 impl Op {
+    pub(crate) fn pure(self) -> bool {
+        matches!(
+            self,
+            Self::Const(_) | Self::Copy(_) | Self::PtrOffset(..) | Self::Bin(..)
+        ) && !matches!(self, Self::Bin(Binary::Div | Binary::Rem, ..))
+    }
     pub(super) fn produces_value(self) -> bool {
         !matches!(self, Self::Store(..) | Self::BoundsCheck(..))
     }
 
-    pub(super) fn map_operands(&mut self, mut map: impl FnMut(Value) -> Value) {
+    pub(crate) fn map_operands(&mut self, mut map: impl FnMut(Value) -> Value) {
         match self {
             Self::Copy(v) | Self::Load(_, v) => *v = map(*v),
             Self::Bin(_, a, b)
