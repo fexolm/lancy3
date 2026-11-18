@@ -1,0 +1,18 @@
+[package]
+name = "lancy-customers"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[[bin]]
+name = "customer-lab"
+path = "main.rs"
+
+[dependencies]
+lancy-jit = { path = ".." }
+
+[build-dependencies]
+cc = "1"
+
+[features]
+avx2 = []
