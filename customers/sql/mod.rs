@@ -1,4 +1,4 @@
-use lancy_jit::{AdaptiveKernel, NativeKernel, Tier, kernel};
+use lancy::{AdaptiveKernel, NativeKernel, Tier, kernel};
 
 const PAID: i32 = 2;
 const MINIMUM_EXCLUSIVE: i32 = 2;
@@ -141,7 +141,7 @@ impl Batch {
     }
 }
 
-fn program(nullable: bool) -> Result<lancy_jit::Program, String> {
+fn program(nullable: bool) -> Result<lancy::Program, String> {
     attributed_amount::build(nullable, PAID, MINIMUM_EXCLUSIVE)?
         .vectorize()?
         .ok_or_else(|| "SQL projection requires SIMD".into())

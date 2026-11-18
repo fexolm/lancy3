@@ -1,4 +1,4 @@
-use lancy_jit::kernel;
+use lancy::kernel;
 
 const PRIORITY: i32 = 1;
 const REGULATED: i32 = 2;
@@ -162,7 +162,7 @@ fn interpret(policy: &Policy, severity: i32, attempts: i32, flags: i32) -> i32 {
 pub fn run() -> Result<(), String> {
     let policy = deployed_policy();
     crate::build("rules/baseline + first event", || {
-        let baseline = lancy_jit::ScalarFn3::baseline(&route::build(&policy)?)?;
+        let baseline = lancy::ScalarFn3::baseline(&route::build(&policy)?)?;
         let result = baseline.call(6, 5, HOLD | DUPLICATE | PRIORITY);
         if result != 4 {
             return Err("first baseline event chose the wrong route".into());
@@ -170,10 +170,10 @@ pub fn run() -> Result<(), String> {
         Ok(baseline)
     })?;
     let scalar = crate::build("rules/scalar", || {
-        lancy_jit::ScalarFn3::compile(&route::build(&policy)?)
+        lancy::ScalarFn3::compile(&route::build(&policy)?)
     })?;
     let batch = crate::build("rules/SSE2", || {
-        lancy_jit::MappedKernel::compile(&route::build(&policy)?)
+        lancy::MappedKernel::compile(&route::build(&policy)?)
     })?;
     assert!(batch.is_vectorized());
 

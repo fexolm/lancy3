@@ -1,0 +1,41 @@
+[package]
+name = "lancy"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.94"
+description = "A low-latency CPU JIT with scalar control flow and adaptive SIMD projections"
+
+[dependencies]
+splice-macros = { path = "../splice-macros", optional = true }
+
+[features]
+default = ["kernel"]
+kernel = ["dep:splice-macros"]
+
+[[bench]]
+name = "query"
+harness = false
+
+[[example]]
+name = "retry_policy"
+required-features = ["kernel"]
+
+[[example]]
+name = "sql_kernel"
+required-features = ["kernel"]
+
+[[test]]
+name = "kernel"
+required-features = ["kernel"]
+
+[[test]]
+name = "scalar_language"
+required-features = ["kernel"]
+
+[[test]]
+name = "scalar_slices"
+required-features = ["kernel"]
+
+[[test]]
+name = "staging"
+required-features = ["kernel"]

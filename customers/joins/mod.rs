@@ -1,8 +1,9 @@
-#[path = "../../examples/relational/mod.rs"]
+#[path = "../../splice/examples/relational/mod.rs"]
 mod relational;
 
-use lancy_jit::ScalarKernel;
 use relational::{Catalog, pricing_plan, query};
+use splice::Codegen;
+use splice_lancy::{Lancy, LancyBaseline};
 use std::collections::HashMap;
 
 unsafe extern "C" {
@@ -98,13 +99,11 @@ fn cpp(catalog: &Catalog, workspace: &mut [i32]) -> i32 {
 
 pub fn run() -> Result<(), String> {
     let plan = pricing_plan();
-    let function = crate::build("joins: plan to HIR", || query::build(&plan))?;
+    let function = crate::build("joins: plan to HIR", || query::ir(&plan))?;
     let _baseline = crate::build("joins: HIR to baseline x64", || {
-        ScalarKernel::baseline(&function)
+        LancyBaseline::compile(&function)
     })?;
-    let code = crate::build("joins: HIR to optimized x64", || {
-        ScalarKernel::compile(&function)
-    })?;
+    let code = crate::build("joins: HIR to optimized x64", || Lancy::compile(&function))?;
     for (sales, products) in [(513, 257), (65_537, 4096)] {
         let tables = tables(sales, products);
         let catalog = Catalog::new(&tables.each_ref().map(Vec::as_slice))?;
@@ -138,7 +137,7 @@ fn fixed_pricing_query_handles_duplicates_extremes_and_simd_tail() {
     ];
     let answer = expected(&tables);
     let catalog = Catalog::new(&tables.each_ref().map(Vec::as_slice)).unwrap();
-    let jit = ScalarKernel::compile(&query::build(&pricing_plan()).unwrap()).unwrap();
+    let jit = Lancy::compile(&query::ir(&pricing_plan()).unwrap()).unwrap();
     let mut work = [0; 512];
     assert_eq!(cpp(&catalog, &mut work), (answer.len() / 2) as i32);
     assert_eq!(&work[..answer.len()], answer);

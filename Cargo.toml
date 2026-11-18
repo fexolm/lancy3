@@ -1,25 +1,4 @@
-[package]
-name = "lancy-jit"
-version = "0.1.0"
-edition = "2024"
-rust-version = "1.94"
-description = "A staged CPU JIT for scalar functions and adaptive SIMD projections on x86-64"
-
 [workspace]
-members = ["lancy-macros", "customers"]
-default-members = [".", "lancy-macros"]
+members = ["lancy", "splice", "splice-macros", "splice-lancy", "splice-llvm", "customers"]
+default-members = ["lancy", "splice", "splice-macros", "splice-lancy", "splice-llvm"]
 resolver = "3"
-
-[dependencies]
-lancy-macros = { path = "lancy-macros" }
-
-[lib]
-name = "lancy_jit"
-
-[[bench]]
-name = "query"
-harness = false
-
-[[example]]
-name = "sql_plan"
-test = true

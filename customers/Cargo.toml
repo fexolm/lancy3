@@ -9,7 +9,9 @@ name = "customer-lab"
 path = "main.rs"
 
 [dependencies]
-lancy-jit = { path = ".." }
+lancy = { path = "../lancy" }
+splice = { path = "../splice" }
+splice-lancy = { path = "../splice-lancy" }
 
 [build-dependencies]
 cc = "1"

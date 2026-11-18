@@ -1,4 +1,4 @@
-use lancy_jit::{NativeKernel, kernel};
+use lancy::{NativeKernel, kernel};
 
 #[derive(Clone, Copy)]
 struct Patch {

@@ -1,0 +1,128 @@
+use splice::hir::{Binary, Buffer, BufferKind, FunctionBuilder};
+use splice::{BufferArg, Codegen, Executable};
+use splice_llvm::Llvm;
+use std::sync::Arc;
+
+#[test]
+fn all_binary_ops_match_splice_at_signed_boundaries() {
+    use Binary::*;
+    let ops = [
+        Add, Sub, Mul, And, Or, Xor, Eq, Ne, Lt, Le, Gt, Ge, Shl, Shr, Min, Max, Div, Rem,
+    ];
+    let mut b = FunctionBuilder::new(3);
+    let (kind, left, right) = (b.arg(0), b.arg(1), b.arg(2));
+    for (i, &op) in ops.iter().enumerate() {
+        let id = b.constant(i as i32);
+        let chosen = b.binary(Eq, kind, id);
+        let (yes, next) = (b.label(), b.label());
+        b.branch(chosen, yes, next);
+        b.mark(yes);
+        let result = b.binary(op, left, right);
+        b.ret(result);
+        b.mark(next);
+    }
+    b.ret(kind);
+    let code = Llvm::compile(&b.finish().unwrap()).unwrap();
+    let cases = [i32::MIN, -35, -1, 0, 1, 31, 32, i32::MAX];
+    for (i, &op) in ops.iter().enumerate() {
+        for &a in &cases {
+            for &b in &cases {
+                let expected = op.checked_eval(a, b);
+                assert_eq!(
+                    code.call(&[i as i32, a, b], &mut []).ok(),
+                    expected,
+                    "{a} {op:?} {b}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn checked_calls_remap_buffers_and_stop_after_the_first_fault() {
+    let mut child = FunctionBuilder::with_buffers(2, vec![BufferKind::Write, BufferKind::Read]);
+    let zero = child.constant(0);
+    let one = child.constant(1);
+    let mark = child.constant(42);
+    child.store(Buffer(0), zero, mark);
+    let value = child.load(Buffer(1), child.arg(0));
+    let quotient = child.binary(Binary::Div, value, child.arg(1));
+    child.store(Buffer(0), one, quotient);
+    let length = child.buffer_len(Buffer(1));
+    child.ret(length);
+
+    let mut parent = FunctionBuilder::with_buffers(2, vec![BufferKind::Read, BufferKind::Write]);
+    let length = parent
+        .call_with_buffers(
+            child.finish().unwrap(),
+            &[parent.arg(0), parent.arg(1)],
+            &[Buffer(1), Buffer(0)],
+        )
+        .unwrap();
+    let two = parent.constant(2);
+    parent.store(Buffer(1), two, length);
+    parent.ret(length);
+    let code = Llvm::compile(&parent.finish().unwrap()).unwrap();
+
+    for (index, divisor, expected) in [
+        (-1, 1, None),
+        (2, 1, None),
+        (0, 0, None),
+        (1, -1, None),
+        (0, -2, Some(-4)),
+    ] {
+        let mut output = [0; 3];
+        let mut buffers = [
+            BufferArg::Read(&[8, i32::MIN]),
+            BufferArg::Write(&mut output),
+        ];
+        let result = code.call(&[index, divisor], &mut buffers);
+        match expected {
+            Some(value) => {
+                assert_eq!(result.unwrap(), 2);
+                assert_eq!(output, [42, value, 2]);
+            }
+            None => {
+                assert!(result.is_err());
+                assert_eq!(output, [42, 0, 0]);
+            }
+        }
+    }
+}
+
+#[test]
+fn shared_callees_loops_and_unreachable_tails_form_valid_llvm_blocks() {
+    let mut step = FunctionBuilder::new(1);
+    let one = step.constant(1);
+    let next = step.binary(Binary::Add, step.arg(0), one);
+    step.ret(next);
+    let step = Arc::new(step.finish().unwrap());
+
+    let mut b = FunctionBuilder::new(1);
+    let i = b.constant(0);
+    let (head, body, done, orphan) = (b.label(), b.label(), b.label(), b.label());
+    b.mark(head);
+    let more = b.binary(Binary::Lt, i, b.arg(0));
+    b.branch(more, body, done);
+    b.mark(body);
+    let a = b.call_shared(Arc::clone(&step), &[i]);
+    let z = b.call_shared(step, &[a]);
+    b.assign(i, z);
+    b.jump(head);
+    b.mark(done);
+    b.ret(i);
+    // A verified function may have unreachable operations after a terminator,
+    // adjacent labels and a dead tail without an explicit return.
+    b.constant(33);
+    b.mark(orphan);
+    let tail = b.label();
+    b.mark(tail);
+    b.constant(11);
+    let f = b.finish().unwrap();
+    let ir = splice_llvm::to_llvm_ir(&f).unwrap();
+    assert_eq!(ir.matches("define internal fastcc i32 @kernel").count(), 2);
+    let code = Llvm::compile(&f).unwrap();
+    for (limit, result) in [(-2, 0), (0, 0), (1, 2), (17, 18), (72, 72)] {
+        assert_eq!(code.call(&[limit], &mut []).unwrap(), result);
+    }
+}

@@ -1,4 +1,4 @@
-use lancy_jit::{NativeKernel, kernel};
+use lancy::{NativeKernel, kernel};
 
 const RECORD_SIZE: usize = 8;
 const CHUNK: usize = 1024;
@@ -65,7 +65,7 @@ fn decode_ir(kernel: &NativeKernel, bytes: &[u8], out: &mut [i32], scratch: &mut
             .iter_mut()
             .zip(samples.iter_mut())
             .zip(zeros.iter_mut());
-        for (((header, sample), zero), record) in fields.zip(wire.chunks_exact(RECORD_SIZE)) {
+        for (((header, sample), zero), record) in fields.zip(wire.as_chunks::<RECORD_SIZE>().0) {
             *header = i32::from(u16::from_le_bytes([record[0], record[1]]));
             *sample = i32::from(i16::from_le_bytes([record[2], record[3]]));
             *zero = i32::from(i16::from_le_bytes([record[4], record[5]]));
