@@ -1,4 +1,5 @@
-use super::{Executable, os_error};
+use super::executable::{Executable, os_error};
+use crate::CompileError;
 use std::ffi::c_void;
 use std::ptr::{self, NonNull};
 
@@ -11,14 +12,14 @@ unsafe extern "system" {
     fn FlushInstructionCache(process: *mut c_void, address: *const c_void, size: usize) -> i32;
 }
 
-pub(super) fn allocate(len: usize) -> Result<NonNull<c_void>, String> {
+pub(super) fn allocate(len: usize) -> Result<NonNull<c_void>, CompileError> {
     const MEM_COMMIT_RESERVE: u32 = 0x1000 | 0x2000;
     const PAGE_READWRITE: u32 = 0x04;
     let p = unsafe { VirtualAlloc(ptr::null_mut(), len, MEM_COMMIT_RESERVE, PAGE_READWRITE) };
     NonNull::new(p).ok_or_else(|| os_error("VirtualAlloc"))
 }
 
-pub(super) fn seal(mem: &Executable) -> Result<(), String> {
+pub(super) fn seal(mem: &Executable) -> Result<(), CompileError> {
     const PAGE_EXECUTE_READ: u32 = 0x20;
     let address = mem.address.as_ptr();
     let mut old = 0;

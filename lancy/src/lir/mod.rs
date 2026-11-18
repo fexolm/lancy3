@@ -1,5 +1,9 @@
-//! Lower HIR to SSA LIR, then allocate and emit code for the target.
+mod block;
+mod instruction;
 mod ssa;
 mod x64;
 
-pub(crate) use x64::{buffer_header_words, emit};
+use block::{BlockId, EdgeId};
+use instruction::{CallSiteId, FunctionId};
+
+pub(crate) use x64::emit;

@@ -1,15 +1,22 @@
-use lancy::ScalarKernel;
-use lancy::hir::{Binary, Block, Function, Op, Terminator};
+use lancy::hir::{Binary, Block, Function, IrError, Op, Terminator};
+use lancy::{CallError, CompileError, ScalarKernel};
 use std::sync::Arc;
 
 #[test]
 fn verify_rejects_bad_edges_dominance_call_signatures_and_unterminated_blocks() {
-    let mut f = Function::new(1, vec![]);
+    let mut f = Function::scalar(1);
     let missing = f.add_edge(Block(99), &[]);
     f.set_terminator(f.entry(), Terminator::Jump(missing));
-    assert!(f.verify().unwrap_err().contains("unknown target"));
+    assert_eq!(
+        f.verify(),
+        Err(IrError::UnknownTarget {
+            from: f.entry(),
+            edge: missing,
+            target: Block(99)
+        })
+    );
 
-    let mut f = Function::new(1, vec![]);
+    let mut f = Function::scalar(1);
     let entry = f.entry();
     let cond = f.params(entry)[0];
     let arm = f.create_block();
@@ -21,24 +28,78 @@ fn verify_rejects_bad_edges_dominance_call_signatures_and_unterminated_blocks() 
     let merge = f.add_edge(join, &[]);
     f.set_terminator(arm, Terminator::Jump(merge));
     f.set_terminator(join, Terminator::Return(only_in_arm));
-    assert!(f.verify().unwrap_err().contains("dominate"));
+    assert_eq!(
+        f.verify(),
+        Err(IrError::DoesNotDominate {
+            value: only_in_arm,
+            definition: arm,
+            block: join
+        })
+    );
 
-    let mut identity = Function::new(1, vec![]);
+    let mut identity = Function::scalar(1);
     let entry = identity.entry();
     identity.set_terminator(entry, Terminator::Return(identity.params(entry)[0]));
-    let mut f = Function::new(0, vec![]);
-    let call = f.add_call(Arc::new(identity), &[], &[]);
+    let mut f = Function::scalar(0);
+    let call = f.add_call(Arc::new(identity), &[]);
     let output = f.append(f.entry(), Op::Call(call)).unwrap();
     f.set_terminator(f.entry(), Terminator::Return(output));
-    assert!(f.verify().is_err());
+    assert_eq!(
+        f.verify(),
+        Err(IrError::CallArity {
+            call,
+            expected: 1,
+            actual: 0
+        })
+    );
 
-    let f = Function::new(0, vec![]);
-    assert!(f.verify().unwrap_err().contains("unterminated"));
+    let f = Function::scalar(0);
+    let Err(CompileError::InvalidIr(error)) = ScalarKernel::compile(&f) else {
+        panic!("expected an SSA error for an empty function");
+    };
+    assert_eq!(error, IrError::UnterminatedBlock { block: f.entry() });
+}
+
+#[test]
+fn compile_preserves_the_verifier_error_from_a_callee() {
+    use std::error::Error;
+
+    let child = Arc::new(Function::scalar(0));
+    let mut parent = Function::scalar(0);
+    let site = parent.add_call(child.clone(), &[]);
+    let returned = parent.append(parent.entry(), Op::Call(site)).unwrap();
+    parent.set_terminator(parent.entry(), Terminator::Return(returned));
+    parent.verify().unwrap();
+
+    let Err(err) = ScalarKernel::compile(&parent) else {
+        panic!("compiled an unterminated callee");
+    };
+    assert!(matches!(
+        err.source().and_then(|source| source.downcast_ref::<IrError>()),
+        Some(IrError::UnterminatedBlock { block }) if *block == child.entry()
+    ));
+}
+
+#[test]
+fn a_compiled_division_reports_each_arithmetic_trap() {
+    let mut f = Function::scalar(2);
+    let entry = f.entry();
+    let [lhs, rhs] = f.params(entry).try_into().unwrap();
+    let result = f.append(entry, Op::Bin(Binary::Div, lhs, rhs)).unwrap();
+    f.set_terminator(entry, Terminator::Return(result));
+
+    let kernel = ScalarKernel::compile(&f).unwrap();
+    assert_eq!(kernel.call(&[7, 0]), Err(CallError::DivisionByZero));
+    assert_eq!(
+        kernel.call(&[i32::MIN, -1]),
+        Err(CallError::DivisionOverflow)
+    );
+    assert_eq!(kernel.call(&[15, 3]), Ok(5));
 }
 
 #[test]
 fn calls_and_joins_preserve_noncanonical_branch_masks() {
-    let mut child = Function::new(2, vec![]);
+    let mut child = Function::scalar(2);
     let entry = child.entry();
     let (mask, x) = (child.params(entry)[0], child.params(entry)[1]);
     let increment = child.create_block();
@@ -60,10 +121,10 @@ fn calls_and_joins_preserve_noncanonical_branch_masks() {
     child.set_terminator(increment, Terminator::Return(next));
     child.set_terminator(identity, Terminator::Return(mask));
 
-    let mut f = Function::new(2, vec![]);
+    let mut f = Function::scalar(2);
     let entry = f.entry();
     let (mask, x) = (f.params(entry)[0], f.params(entry)[1]);
-    let call = f.add_call(Arc::new(child), &[mask, x], &[]);
+    let call = f.add_call(Arc::new(child), &[mask, x]);
     let result = f.append(entry, Op::Call(call)).unwrap();
     let zero = f.append(entry, Op::Const(0)).unwrap();
     let cond = f.append(entry, Op::Bin(Binary::Lt, result, zero)).unwrap();
@@ -89,12 +150,18 @@ fn calls_and_joins_preserve_noncanonical_branch_masks() {
 
         assert_eq!(kernel.call(&[mask, x]).unwrap(), expected);
     }
-    assert!(kernel.call(&[1]).is_err());
+    assert_eq!(
+        kernel.call(&[1]),
+        Err(CallError::Arity {
+            expected: 2,
+            actual: 1
+        })
+    );
 }
 
 #[test]
 fn loop_carried_parameters_handle_zero_trip_inputs() {
-    let mut f = Function::new(1, vec![]);
+    let mut f = Function::scalar(1);
     let entry = f.entry();
     let arg = f.params(entry)[0];
     let head = f.create_block();
@@ -137,7 +204,7 @@ fn jit_agrees_with_rust_on_forward_edges_and_shared_returns() {
         seed >> 8
     };
     for _ in 0..64 {
-        let mut f = Function::new(3, vec![]);
+        let mut f = Function::scalar(3);
         let entry = f.entry();
         let (flags, initial, fallback) =
             (f.params(entry)[0], f.params(entry)[1], f.params(entry)[2]);

@@ -1,51 +1,30 @@
-use super::*;
+use crate::hir::IrError;
+use crate::hir::ssa::{Binary, Function, Op, Terminator};
+use std::sync::Arc;
 
 #[test]
 fn pruning_a_staging_block_retires_only_its_instructions() {
-    let mut graph = Function::new(1, vec![]);
+    let mut graph = Function::scalar(1);
     let entry = graph.entry();
     let arg = graph.params(entry)[0];
     graph.set_terminator(entry, Terminator::Return(arg));
     let dead = graph.create_block();
     let operation = graph.append_inst(dead, Op::Bin(Binary::Div, arg, arg));
     assert_eq!(graph.prune_unreachable(), Ok(1));
-    assert!(graph.replace_op(operation, Op::Const(7)).is_err());
+    assert_eq!(
+        graph.replace_op(operation, Op::Const(7)),
+        Err(IrError::RetiredInstruction { inst: operation })
+    );
     assert_eq!(graph.interpret(&[91]), Ok(91));
-}
-
-fn jump(f: &mut Function, from: Block, to: Block, args: &[Value]) {
-    let edge = f.add_edge(to, args);
-    f.set_terminator(from, Terminator::Jump(edge));
-}
-
-#[test]
-fn rejects_sibling_uses_and_bad_edge_arity() {
-    let mut f = Function::new(1, vec![]);
-    let first = f.entry();
-    let cond = f.params(first)[0];
-    let then = f.create_block();
-    let other = f.create_block();
-    let join = f.create_block();
-    let result = f.append_param(join);
-    let yes = f.add_edge(then, &[]);
-    let no = f.add_edge(other, &[]);
-    f.set_terminator(first, Terminator::Branch { cond, yes, no });
-    let then_value = f.append(then, Op::Const(3)).unwrap();
-    jump(&mut f, then, join, &[then_value]);
-    jump(&mut f, other, join, &[then_value]);
-    f.set_terminator(join, Terminator::Return(result));
-    assert!(f.verify().unwrap_err().contains("dominate"));
-    jump(&mut f, other, join, &[]);
-    assert!(f.verify().unwrap_err().contains("arity"));
-    jump(&mut f, other, join, &[cond]);
-    f.verify().unwrap();
-    assert!(f.merge_blocks(then, join).is_err());
-    f.verify().unwrap();
+    let new_block = graph.create_block();
+    let new_inst = graph.append_inst(new_block, Op::Const(3));
+    assert_ne!(new_block, dead);
+    assert_ne!(new_inst, operation);
 }
 
 #[test]
 fn batch_replacement_keeps_ids_and_rolls_back_failed_edits() {
-    let mut f = Function::new(0, vec![]);
+    let mut f = Function::scalar(0);
     let block = f.entry();
     let one = f.append_inst(block, Op::Const(1));
     let value = f.result(one).unwrap();
@@ -69,12 +48,12 @@ fn batch_replacement_keeps_ids_and_rolls_back_failed_edits() {
 
 #[test]
 fn merging_rewrites_dominated_call_and_loop_arguments() {
-    let mut helper = Function::new(1, vec![]);
+    let mut helper = Function::scalar(1);
     helper.set_terminator(
         helper.entry(),
         Terminator::Return(helper.params(helper.entry())[0]),
     );
-    let mut f = Function::new(2, vec![]);
+    let mut f = Function::scalar(2);
     let entry = f.entry();
     let (a, b) = (f.params(entry)[0], f.params(entry)[1]);
     let head = f.create_block();
@@ -83,9 +62,9 @@ fn merging_rewrites_dominated_call_and_loop_arguments() {
     let latch = f.create_block();
     let exit = f.create_block();
     let done = f.append_param(exit);
-    jump(&mut f, entry, head, &[b, a]);
-    jump(&mut f, head, latch, &[]);
-    let call = f.add_call(Arc::new(helper), &[y], &[]);
+    f.jump(entry, head, &[b, a]);
+    f.jump(head, latch, &[]);
+    let call = f.add_call(Arc::new(helper), &[y]);
     let call_inst = f.append_inst(latch, Op::Call(call));
     let called = f.result(call_inst).unwrap();
     let yes = f.add_edge(latch, &[]);
@@ -111,13 +90,13 @@ fn merging_rewrites_dominated_call_and_loop_arguments() {
 
 #[test]
 fn merging_splices_nonempty_instruction_lists_without_reindexing() {
-    let mut f = Function::new(0, vec![]);
+    let mut f = Function::scalar(0);
     let entry = f.entry();
     let succ = f.create_block();
     let def = f.append_inst(entry, Op::Const(8));
     let val = f.result(def).unwrap();
     let param = f.append_param(succ);
-    jump(&mut f, entry, succ, &[val]);
+    f.jump(entry, succ, &[val]);
     let add = f.append_inst(succ, Op::Bin(Binary::Add, param, val));
     f.set_terminator(succ, Terminator::Return(f.result(add).unwrap()));
     f.merge_blocks(entry, succ).unwrap();
@@ -125,20 +104,4 @@ fn merging_splices_nonempty_instruction_lists_without_reindexing() {
     assert_eq!(f.instructions(entry).collect::<Vec<_>>(), vec![def, add]);
     assert_eq!(*f.op(add), Op::Bin(Binary::Add, val, val));
     f.verify().unwrap();
-}
-
-#[test]
-fn validates_call_permissions_and_rejects_entry_backedges() {
-    let mut callee = Function::new(1, vec![BufferKind::Write]);
-    let arg = callee.params(callee.entry())[0];
-    callee.set_terminator(callee.entry(), Terminator::Return(arg));
-    let mut f = Function::new(1, vec![BufferKind::Read]);
-    let entry = f.entry();
-    let arg = f.params(entry)[0];
-    let call = f.add_call(Arc::new(callee), &[arg], &[Buffer(0)]);
-    let res = f.append(entry, Op::Call(call)).unwrap();
-    f.set_terminator(entry, Terminator::Return(res));
-    assert!(f.verify().unwrap_err().contains("read-only"));
-    jump(&mut f, entry, entry, &[arg]);
-    assert!(f.verify().unwrap_err().contains("entry"));
 }

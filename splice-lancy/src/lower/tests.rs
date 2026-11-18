@@ -136,14 +136,15 @@ fn checked_nested_call_preserves_writes_before_failure() {
         }),
     )
     .unwrap();
-    let f = lancy::ScalarKernel::compile(&graph).unwrap();
+    use splice::Executable;
+    let f = crate::LancyKernel::new(&graph, 1, &[BufferKind::Read, BufferKind::Write]).unwrap();
     let mut out = [0];
     let error = f
-        .call_with_buffers(
+        .call(
             &[27],
             &mut [
-                lancy::BufferArg::Read(&[]),
-                lancy::BufferArg::Write(&mut out),
+                splice::BufferArg::Read(&[]),
+                splice::BufferArg::Write(&mut out),
             ],
         )
         .unwrap_err();

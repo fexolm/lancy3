@@ -4,3 +4,6 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.94"
 description = "A CPU JIT with SSA HIR, linear-scan register allocation and x86-64 code generation"
+
+[dependencies]
+thiserror = "2"

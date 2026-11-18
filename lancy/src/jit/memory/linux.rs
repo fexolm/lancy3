@@ -1,4 +1,5 @@
-use super::{Executable, os_error};
+use super::executable::{Executable, os_error};
+use crate::CompileError;
 use std::ffi::c_void;
 use std::ptr::{self, NonNull};
 
@@ -15,7 +16,7 @@ unsafe extern "C" {
     fn munmap(address: *mut c_void, size: usize) -> i32;
 }
 
-pub(super) fn allocate(len: usize) -> Result<NonNull<c_void>, String> {
+pub(super) fn allocate(len: usize) -> Result<NonNull<c_void>, CompileError> {
     const MAP_PRIVATE_ANONYMOUS: i32 = 0x02 | 0x20;
     const PROT_READ_WRITE: i32 = 1 | 2;
     let p = unsafe {
@@ -33,11 +34,14 @@ pub(super) fn allocate(len: usize) -> Result<NonNull<c_void>, String> {
     }
     NonNull::new(p).ok_or_else(|| {
         unsafe { munmap(p, len) };
-        "mmap returned a null base".into()
+        CompileError::ExecutableMemory {
+            operation: "mmap",
+            source: std::io::Error::other("mapping has a null base address"),
+        }
     })
 }
 
-pub(super) fn seal(mem: &Executable) -> Result<(), String> {
+pub(super) fn seal(mem: &Executable) -> Result<(), CompileError> {
     const PROT_READ_EXEC: i32 = 1 | 4;
     // x86-64 has coherent instruction/data caches. The kernel publishes
     // this newly created mapping only after mprotect succeeds.

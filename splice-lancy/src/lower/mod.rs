@@ -7,6 +7,7 @@ pub use portable::lower;
 mod tests;
 
 use lancy::hir::{self, Block, Function, Op, Value};
+use lancy::support::slotmap::DenseMap;
 use splice::{
     BufferKind,
     frontend::{Body, KernelBuilder},
@@ -54,29 +55,29 @@ impl<'a> Builder<'a> {
         if count == u32::MAX {
             return Err("too many kernel parameters".into());
         }
-        let graph = Function::new(
-            arity,
-            kinds
-                .iter()
-                .map(|kind| match kind {
-                    BufferKind::Read => hir::BufferKind::Read,
-                    BufferKind::Write => hir::BufferKind::Write,
-                })
-                .collect(),
-        );
+        let mut params = vec![hir::Type::I32; arity];
+        for _ in kinds {
+            params.extend([hir::Type::Ptr, hir::Type::I32]);
+        }
+        let graph = Function::new(&params, hir::Type::I32);
         let entry = graph.entry();
         let mut first = State::default();
         first.defs.extend(
             graph
                 .params(entry)
                 .iter()
+                .take(arity)
                 .enumerate()
                 .map(|(i, &v)| (Reg(i as u32), v)),
         );
+        let mut blocks = DenseMap::new();
+        let state = blocks.insert(first);
+        debug_assert_eq!(state, entry);
         Ok(Self {
             graph,
+            arity,
             kinds,
-            blocks: vec![first],
+            blocks,
             current: Some(entry),
             count,
             demands: Vec::new(),
@@ -118,8 +119,9 @@ struct Destination {
 
 struct Builder<'a> {
     graph: Function,
+    arity: usize,
     kinds: &'a [BufferKind],
-    blocks: Vec<State>,
+    blocks: DenseMap<Block, State>,
     current: Option<Block>,
     count: u32,
     demands: Vec<(Block, Reg)>,
@@ -135,23 +137,37 @@ impl Builder<'_> {
                 .get_or_insert_with(|| format!("invalid register {r:?}"));
         }
     }
-    fn buffer(&mut self, b: Buffer, write: bool) -> hir::Buffer {
-        match self.kinds.get(b.index()) {
+    fn slice(&mut self, buffer: Buffer, write: bool) -> (Value, Value) {
+        match self.kinds.get(buffer.index()) {
             None => {
                 self.error
-                    .get_or_insert_with(|| format!("unknown buffer {}", b.0));
+                    .get_or_insert_with(|| format!("unknown buffer {}", buffer.0));
+                return (Value::INVALID, Value::INVALID);
             }
             Some(BufferKind::Read) if write => {
                 self.error
-                    .get_or_insert_with(|| format!("buffer {} is read-only", b.0));
+                    .get_or_insert_with(|| format!("buffer {} is read-only", buffer.0));
             }
             _ => {}
         }
-        hir::Buffer(b.0)
+        let first = self.arity + 2 * buffer.index();
+        let params = self.graph.params(self.graph.entry());
+        (params[first], params[first + 1])
+    }
+
+    fn address(&mut self, buffer: Buffer, index: Value, write: bool) -> Value {
+        let (base, len) = self.slice(buffer, write);
+        let Some(block) = self.current else {
+            return Value::INVALID;
+        };
+        self.graph.append(block, Op::BoundsCheck(index, len));
+        self.graph
+            .append(block, Op::PtrOffset(base, index, hir::Scale::Four))
+            .unwrap()
     }
     fn parameter(&mut self, block: Block, r: Reg) -> Value {
         let v = self.graph.append_param(block);
-        let state = &mut self.blocks[block.index()];
+        let state = &mut self.blocks[block];
         state.incoming.push(r);
         state.defs.insert(r, v);
         self.demands.push((block, r));
@@ -160,15 +176,15 @@ impl Builder<'_> {
     fn read(&mut self, r: Reg) -> Value {
         self.valid(r);
         let Some(b) = self.current else {
-            return Value(u32::MAX);
+            return Value::INVALID;
         };
-        if let Some(&v) = self.blocks[b.index()].defs.get(&r) {
+        if let Some(&v) = self.blocks[b].defs.get(&r) {
             return v;
         }
         if b == self.graph.entry() {
             self.error
                 .get_or_insert_with(|| format!("uninitialized {r:?} at function entry"));
-            return Value(u32::MAX);
+            return Value::INVALID;
         }
         self.parameter(b, r)
     }
@@ -181,13 +197,16 @@ impl Builder<'_> {
     fn define(&mut self, r: Reg, op: Op) {
         if let Some(b) = self.current {
             let v = self.graph.append(b, op).expect("operation defines a value");
-            self.blocks[b.index()].defs.insert(r, v);
+            self.blocks[b].defs.insert(r, v);
         }
     }
     fn call_op(&mut self, callee: Arc<Function>, args: &[Reg], buffers: &[Buffer]) -> Op {
-        let args: Vec<_> = args.iter().map(|&r| self.read(r)).collect();
-        let buffers: Vec<_> = buffers.iter().map(|b| hir::Buffer(b.0)).collect();
-        Op::Call(self.graph.add_call(callee, &args, &buffers))
+        let mut values: Vec<_> = args.iter().map(|&r| self.read(r)).collect();
+        for &buffer in buffers {
+            let (ptr, len) = self.slice(buffer, false);
+            values.extend([ptr, len]);
+        }
+        Op::Call(self.graph.add_call(callee, &values))
     }
     fn target(&mut self, label: Label) -> Block {
         let Some(dest) = self.labels.get_mut(label.0 as usize) else {
@@ -196,21 +215,23 @@ impl Builder<'_> {
             return self.graph.entry();
         };
         *dest.block.get_or_insert_with(|| {
-            self.blocks.push(State::default());
-            self.graph.create_block()
+            let block = self.graph.create_block();
+            let state = self.blocks.insert(State::default());
+            debug_assert_eq!(state, block);
+            block
         })
     }
     fn end(&mut self, exit: Exit) {
         self.immediate = None;
         if let Some(b) = self.current.take() {
-            self.blocks[b.index()].exit = Some(exit);
+            self.blocks[b].exit = Some(exit);
         }
     }
 }
 
 impl KernelBuilder for Builder<'_> {
     fn arg(&self, index: usize) -> Reg {
-        Reg(if index < self.graph.arity() {
+        Reg(if index < self.arity {
             index as u32
         } else {
             u32::MAX
@@ -230,20 +251,20 @@ impl KernelBuilder for Builder<'_> {
         r
     }
     fn buffer_len(&mut self, buffer: Buffer) -> Reg {
-        let b = self.buffer(buffer, false);
-        self.result(Op::BufferLen(b))
+        let (_, len) = self.slice(buffer, false);
+        self.result(Op::Copy(len))
     }
     fn load(&mut self, buffer: Buffer, index: Reg) -> Reg {
         let index = self.read(index);
-        let b = self.buffer(buffer, false);
-        self.result(Op::Load(b, index))
+        let addr = self.address(buffer, index, false);
+        self.result(Op::Load(hir::Type::I32, addr))
     }
     fn store(&mut self, buffer: Buffer, index: Reg, value: Reg) {
         let (index, value) = (self.read(index), self.read(value));
-        let buffer = self.buffer(buffer, true);
+        let addr = self.address(buffer, index, true);
         self.immediate = None;
         if let Some(b) = self.current {
-            self.graph.append(b, Op::Store(buffer, index, value));
+            self.graph.append(b, Op::Store(addr, value));
         }
     }
     fn immediate_condition(&self, reg: Reg) -> Option<bool> {
@@ -258,7 +279,7 @@ impl KernelBuilder for Builder<'_> {
         let v = self.read(src);
         self.immediate = None;
         if let Some(b) = self.current {
-            self.blocks[b.index()].defs.insert(dst, v);
+            self.blocks[b].defs.insert(dst, v);
         }
     }
     fn label(&mut self) -> Label {

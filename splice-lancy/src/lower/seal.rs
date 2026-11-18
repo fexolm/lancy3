@@ -1,19 +1,25 @@
 use super::{Builder, Exit};
 use lancy::hir::{Block, Function, Terminator, Value};
+use lancy::support::slotmap::DenseMap;
 use splice::hir::Reg;
 
 impl Builder<'_> {
     /// All predecessors are known now. Walk backwards through single-entry
     /// blocks, path-compressing live-through names. A merge gets a parameter
     /// immediately to break cycles, and its incoming operands join the worklist.
-    fn reaching(&mut self, start: Block, r: Reg, preds: &[Vec<Block>]) -> Result<Value, String> {
+    fn reaching(
+        &mut self,
+        start: Block,
+        r: Reg,
+        preds: &DenseMap<Block, Vec<Block>>,
+    ) -> Result<Value, String> {
         let mut path = Vec::new();
         let mut b = start;
         let value = loop {
-            if let Some(&v) = self.blocks[b.index()].defs.get(&r) {
+            if let Some(&v) = self.blocks[b].defs.get(&r) {
                 break v;
             }
-            match preds[b.index()].as_slice() {
+            match preds[b].as_slice() {
                 [] => return Err(format!("uninitialized {r:?} on path to {start:?}")),
                 &[parent] => {
                     path.push(b);
@@ -23,7 +29,7 @@ impl Builder<'_> {
             }
         };
         for b in path {
-            self.blocks[b.index()].defs.insert(r, value);
+            self.blocks[b].defs.insert(r, value);
         }
         Ok(value)
     }
@@ -36,36 +42,36 @@ impl Builder<'_> {
             return Err("undefined kernel label".into());
         }
         let mut pending = vec![self.graph.entry()];
-        let mut live = vec![false; self.blocks.len()];
-        let mut preds = vec![Vec::new(); self.blocks.len()];
+        let mut live = DenseMap::filled(self.blocks.len(), false);
+        let mut preds = DenseMap::from_fn(self.blocks.len(), |_| Vec::new());
         while let Some(b) = pending.pop() {
-            if std::mem::replace(&mut live[b.index()], true) {
+            if std::mem::replace(&mut live[b], true) {
                 continue;
             }
-            let term = self.blocks[b.index()]
+            let term = self.blocks[b]
                 .exit
                 .ok_or("reachable kernel path falls off the end")?;
             for next in term.successors() {
-                if preds[next.index()].last() != Some(&b) {
-                    preds[next.index()].push(b);
+                if preds[next].last() != Some(&b) {
+                    preds[next].push(b);
                 }
                 pending.push(next);
             }
         }
         while let Some((block, r)) = self.demands.pop() {
-            if live[block.index()] {
-                for &pred in &preds[block.index()] {
+            if live[block] {
+                for &pred in &preds[block] {
                     self.reaching(pred, r, &preds)?;
                 }
             }
         }
-        for (i, &reachable) in live.iter().enumerate() {
+        for (block, &reachable) in live.iter() {
             if !reachable {
                 continue;
             }
-            let state = &self.blocks[i];
+            let state = &self.blocks[block];
             let mut edge = |target: Block| {
-                let args: Vec<_> = self.blocks[target.index()]
+                let args: Vec<_> = self.blocks[target]
                     .incoming
                     .iter()
                     .map(|r| state.defs[r])
@@ -81,12 +87,12 @@ impl Builder<'_> {
                 },
                 Exit::Return(v) => Terminator::Return(v),
             };
-            self.graph.set_terminator(Block(i as u32), term);
+            self.graph.set_terminator(block, term);
         }
-        if live.contains(&false) {
-            self.graph.prune_unreachable()?;
+        if live.as_slice().contains(&false) {
+            self.graph.prune_unreachable().map_err(|e| e.to_string())?;
         }
-        self.graph.verify()?;
+        self.graph.verify().map_err(|e| e.to_string())?;
         Ok(self.graph)
     }
 }

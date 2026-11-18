@@ -47,11 +47,13 @@ fn lower_body(
                 b.define(*dst, op);
             }
             Instr::BufferLen { dst, buffer } => {
-                b.define(*dst, Op::BufferLen(hir::Buffer(buffer.0)))
+                let (_, len) = b.slice(*buffer, false);
+                b.define(*dst, Op::Copy(len));
             }
             Instr::Load { dst, buffer, index } => {
                 let index = b.read(*index);
-                b.define(*dst, Op::Load(hir::Buffer(buffer.0), index));
+                let addr = b.address(*buffer, index, false);
+                b.define(*dst, Op::Load(hir::Type::I32, addr));
             }
             Instr::Call {
                 dst,
@@ -59,6 +61,7 @@ fn lower_body(
                 args,
                 buffers,
             } => {
+                splice::hir::check_forwarding(b.kinds, function.buffer_kinds(), buffers)?;
                 let op = b.call_op(callees[&Arc::as_ptr(function)].clone(), args, buffers);
                 b.define(*dst, op);
             }
