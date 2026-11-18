@@ -1,14 +1,12 @@
-//! Rust attribute frontend for scalar kernels and explicit batch projections.
+//! Rust attribute frontend for Splice kernels.
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as Tokens;
 use syn::{Error, ItemFn, Path, Result, Type, parse_macro_input, parse_quote};
 
-mod batch;
 mod scalar;
 
 /// Define a Splice kernel. `name::ir(...)` stages the comptime parameters and
-/// `name::build::<Backend>(...)` also compiles the result. A batch kernel
-/// takes one input column per row parameter and one final output column.
+/// `name::build::<Backend>(...)` also compiles the result.
 #[proc_macro_attribute]
 pub fn kernel(options: TokenStream, item: TokenStream) -> TokenStream {
     let function = parse_macro_input!(item as ItemFn);
@@ -30,7 +28,6 @@ pub fn lancy_kernel(options: TokenStream, item: TokenStream) -> TokenStream {
 enum KernelApi {
     Lancy,
     Splice,
-    Batch,
 }
 
 fn dispatch(options: Tokens, function: ItemFn, lancy: bool) -> Result<Tokens> {
@@ -42,21 +39,14 @@ fn dispatch(options: Tokens, function: ItemFn, lancy: bool) -> Result<Tokens> {
     } else {
         parse_quote!(::splice)
     };
-    let mut batch = false;
-    for path in paths {
-        if path.is_ident("batch") {
-            batch = true;
-        } else {
-            root = path;
-        }
+    if paths.len() > 1 {
+        return Err(Error::new_spanned(paths, "expected at most one crate path"));
     }
-    if lancy && batch {
-        return batch::expand(root, function);
+    if let Some(path) = paths.into_iter().next() {
+        root = path;
     }
     let api = if lancy {
         KernelApi::Lancy
-    } else if batch {
-        KernelApi::Batch
     } else {
         KernelApi::Splice
     };

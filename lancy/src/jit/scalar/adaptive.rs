@@ -1,6 +1,6 @@
 //! Tiered scalar compilation. Entry guards run before any kernel instruction.
 use super::ScalarFn;
-use crate::hir::{Function, Instr, Reg};
+use crate::input::{Function, Instr, Reg};
 use crate::jit::{Tier, worker};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::{AtomicBool, Ordering};

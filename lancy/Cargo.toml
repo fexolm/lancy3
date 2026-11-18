@@ -3,7 +3,7 @@ name = "lancy"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.94"
-description = "A low-latency CPU JIT with scalar control flow and adaptive SIMD projections"
+description = "A low-latency CPU JIT with editable SSA and adaptive specialization"
 
 [dependencies]
 splice-macros = { path = "../splice-macros", optional = true }
@@ -12,20 +12,12 @@ splice-macros = { path = "../splice-macros", optional = true }
 default = ["kernel"]
 kernel = ["dep:splice-macros"]
 
-[[bench]]
-name = "query"
-harness = false
-
 [[example]]
 name = "retry_policy"
 required-features = ["kernel"]
 
 [[example]]
 name = "sql_kernel"
-required-features = ["kernel"]
-
-[[test]]
-name = "kernel"
 required-features = ["kernel"]
 
 [[test]]

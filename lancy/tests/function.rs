@@ -1,5 +1,5 @@
 use lancy::function::Binary;
-use lancy::{FunctionBuilder, MappedKernel, ScalarKernel};
+use lancy::{FunctionBuilder, ScalarKernel};
 
 #[test]
 fn scalar_entry_guard_deoptimizes_before_executing_a_mutable_loop() {
@@ -64,7 +64,7 @@ fn reject_bad_edges_uninitialized_join_wrong_call_and_fallthrough() {
 }
 
 #[test]
-fn mapping_callee_with_multiple_returns_preserves_noncanonical_masks_and_joins() {
+fn calling_callee_with_multiple_returns_preserves_noncanonical_masks_and_joins() {
     let mut child = FunctionBuilder::new(2);
     let (yes, no) = (child.label(), child.label());
     child.branch(child.arg(0), yes, no);
@@ -89,8 +89,6 @@ fn mapping_callee_with_multiple_returns_preserves_noncanonical_masks_and_joins()
     f.mark(join);
     f.ret(out);
     let ir = f.finish().unwrap();
-    let map = MappedKernel::compile(&ir).unwrap();
-    assert!(map.is_vectorized());
     let mask = [1, -2, 0, -1, 0x01010101, 1, 2];
     let v = [i32::MIN, i32::MAX, 10, -20, 99, 0, 3];
     let expected: Vec<_> = mask
@@ -98,10 +96,6 @@ fn mapping_callee_with_multiple_returns_preserves_noncanonical_masks_and_joins()
         .zip(v)
         .map(|(&m, v)| ir.interpret(&[m, v]).unwrap())
         .collect();
-    let mut dst = [0; 7];
-    map.run(&[&mask, &v], &mut dst).unwrap();
-    assert_eq!(&dst, expected.as_slice());
-    assert!(map.run(&[&mask], &mut dst).is_err());
     let compiled = ScalarKernel::compile(&ir).unwrap();
     let mut caller = compiled.caller();
     for i in 0..v.len() {
@@ -111,7 +105,7 @@ fn mapping_callee_with_multiple_returns_preserves_noncanonical_masks_and_joins()
 }
 
 #[test]
-fn loops_map_with_the_scalar_backend() {
+fn scalar_loop_handles_zero_trip_inputs() {
     let mut f = FunctionBuilder::new(1);
     let n = f.arg(0);
     let total = f.constant(0);
@@ -129,11 +123,11 @@ fn loops_map_with_the_scalar_backend() {
     f.jump(head);
     f.mark(exit);
     f.ret(total);
-    let map = MappedKernel::compile(&f.finish().unwrap()).unwrap();
-    assert!(!map.is_vectorized());
-    let mut dst = [99; 5];
-    map.run(&[&[0, 4, 1, 10, -1]], &mut dst).unwrap();
-    assert_eq!(dst, [0, 10, 1, 55, 0]);
+    let kernel = ScalarKernel::compile(&f.finish().unwrap()).unwrap();
+    assert_eq!(
+        [0, 4, 1, 10, -1].map(|n| kernel.call(&[n]).unwrap()),
+        [0, 10, 1, 55, 0]
+    );
 }
 
 #[test]

@@ -1,7 +1,7 @@
 #![cfg_attr(feature = "kernel", doc = include_str!("../README.md"))]
 #![cfg_attr(
     not(feature = "kernel"),
-    doc = "Low-latency CPU JIT with scalar control flow and adaptive SIMD projections."
+    doc = "Low-latency CPU JIT with scalar control flow and adaptive specialization."
 )]
 #![deny(unsafe_op_in_unsafe_fn)]
 
@@ -17,30 +17,24 @@ extern crate self as lancy;
 #[cfg(feature = "kernel")]
 pub mod frontend;
 pub mod hir;
+/// Register-based input accepted by the original Lancy builder and macro.
+pub mod input;
 pub mod jit;
 mod lir;
 
-pub use hir::{
-    Assumption, Buffer, BufferArg, BufferKind, BuildError, BuildValue, Builder, Function,
-    FunctionBuilder, Op, Program, Value,
-};
+pub use input::{Buffer, BufferArg, BufferKind, Function, FunctionBuilder};
 pub use jit::{
-    AdaptiveBufferKernel, AdaptiveKernel, AdaptiveScalar, KernelStats, MappedKernel, NativeKernel,
-    ScalarCaller, ScalarFn, ScalarFn3, ScalarKernel, Tier,
+    AdaptiveBufferKernel, AdaptiveScalar, ScalarCaller, ScalarFn, ScalarFn3, ScalarKernel, Tier,
 };
 #[cfg(feature = "kernel")]
 pub use splice_macros::lancy_kernel as kernel;
 
-// Keep the original public paths available to clients and older macro expansions.
-#[doc(hidden)]
-#[cfg(feature = "kernel")]
-pub use frontend::batch as kernel_support;
-pub use hir::projection as ir;
+/// Compatibility path for the original instruction builder.
 pub mod function {
     #[doc(hidden)]
     #[cfg(feature = "kernel")]
     pub use crate::frontend::scalar::{
         ExpansionGuard, Host, RunArg, ScalarConstant, enter_expansion,
     };
-    pub use crate::hir::function::*;
+    pub use crate::input::*;
 }

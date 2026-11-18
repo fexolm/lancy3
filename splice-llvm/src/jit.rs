@@ -13,11 +13,11 @@ use inkwell::llvm_sys::orc2::{
     },
 };
 use inkwell::memory_buffer::MemoryBuffer;
+use inkwell::module::Module;
 use inkwell::passes::PassBuilderOptions;
 use inkwell::targets::{
     CodeModel, FileType, InitializationConfig, RelocMode, Target, TargetMachine,
 };
-use splice::Function;
 use std::ffi::CStr;
 use std::mem::ManuallyDrop;
 use std::ptr::null_mut;
@@ -67,10 +67,12 @@ impl Drop for Jit {
 }
 
 impl Jit {
-    pub fn compile(function: &Function) -> Result<(Self, Entry), String> {
+    pub fn compile(
+        populate: impl for<'ctx> FnOnce(&'ctx Context, &Module<'ctx>) -> Result<(), String>,
+    ) -> Result<(Self, Entry), String> {
         let target = host_machine()?;
         let context = Context::create();
-        let module = build_module(&context, function, &target)?;
+        let module = build_module(&context, &target, populate)?;
         module
             .run_passes("default<O3>", &target, PassBuilderOptions::create())
             .map_err(|error| error.to_string())?;

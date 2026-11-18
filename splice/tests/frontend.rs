@@ -5,16 +5,13 @@ use splice::{BufferArg, Codegen, Executable, Function, kernel};
 struct Inspect(Function);
 
 impl Codegen for Inspect {
-    type Kernel = Self;
+    type Output = Result<Self, String>;
 
     fn compile(f: &Function) -> Result<Self, String> {
         Ok(Self(f.clone()))
     }
-}
-
-impl Executable for Inspect {
-    fn call(&self, _: &[i32], _: &mut [BufferArg<'_>]) -> Result<i32, String> {
-        Err("inspection only".into())
+    fn build(arity: usize, kinds: &[BufferKind], body: splice::frontend::Body<'_>) -> Self::Output {
+        Ok(Self(splice::frontend::materialize(arity, kinds, body)?))
     }
 }
 
@@ -45,9 +42,12 @@ fn adjusted(#[comptime] positive: bool, row: i32) -> i32 {
     }
 }
 
-#[kernel(batch)]
-fn column(#[comptime] positive: bool, row: i32) -> i32 {
-    adjusted(positive, row)
+#[kernel]
+fn column(#[comptime] positive: bool, rows: &[i32], out: &mut [i32]) -> i32 {
+    for i in 0..out.len() as i32 {
+        out[i as usize] = adjusted(positive, rows[i as usize]);
+    }
+    out.len() as i32
 }
 
 #[test]
@@ -80,7 +80,7 @@ fn generic_functions_and_nested_calls_stage_before_codegen() {
 }
 
 #[test]
-fn batch_compiles_the_complete_column_loop() {
+fn slice_kernel_compiles_the_complete_loop() {
     let batch = column::build::<Inspect>(true).unwrap().0;
     assert_eq!(batch.arity(), 0);
     assert_eq!(batch.buffer_kinds(), [BufferKind::Read, BufferKind::Write]);
@@ -112,4 +112,244 @@ fn verification_rejects_a_branch_with_an_uninitialized_result() {
     b.mark(done);
     b.ret(result);
     assert!(b.finish().unwrap_err().contains("uninitialized"));
+}
+
+mod directly_staged {
+    use super::*;
+    use splice::frontend::{Body, KernelBuilder};
+    use splice::hir::{Buffer, Label, Reg};
+    use std::cell::Cell;
+
+    struct Config<'a>(&'a Cell<usize>);
+    impl Config<'_> {
+        fn bias(self) -> i32 {
+            self.0.set(self.0.get() + 1);
+            17
+        }
+    }
+
+    #[kernel]
+    fn leaf(#[comptime] config: Config<'_>, x: i32) -> i32 {
+        x.wrapping_add(config.bias())
+    }
+    #[kernel]
+    fn conditional(#[comptime] enabled: bool, #[comptime] config: Config<'_>, x: i32) -> i32 {
+        if enabled { leaf(config, x) } else { x }
+    }
+
+    /// A backend that accepts emitted operations only. Each nested body must
+    /// get its own argument and label namespace, and is staged synchronously.
+    #[derive(Default)]
+    struct Trace {
+        args: usize,
+        next_reg: u32,
+        next_label: u32,
+        bodies: usize,
+        constants: Vec<i32>,
+    }
+    impl Codegen for Trace {
+        type Output = Result<Self, String>;
+        fn compile(_: &Function) -> Result<Self, String> {
+            panic!("direct build materialized portable IR")
+        }
+        fn build(arity: usize, kinds: &[BufferKind], body: Body<'_>) -> Result<Self, String> {
+            assert!(kinds.is_empty());
+            let mut builder = Self {
+                args: arity,
+                next_reg: arity as u32,
+                bodies: 1,
+                ..Self::default()
+            };
+            body(&mut builder)?;
+            Ok(builder)
+        }
+    }
+    impl KernelBuilder for Trace {
+        fn arg(&self, index: usize) -> Reg {
+            assert!(index < self.args);
+            Reg(index as u32)
+        }
+        fn local(&mut self) -> Reg {
+            let r = Reg(self.next_reg);
+            self.next_reg += 1;
+            r
+        }
+        fn constant(&mut self, n: i32) -> Reg {
+            self.constants.push(n);
+            self.local()
+        }
+        fn buffer_len(&mut self, _: Buffer) -> Reg {
+            unreachable!()
+        }
+        fn load(&mut self, _: Buffer, _: Reg) -> Reg {
+            unreachable!()
+        }
+        fn store(&mut self, _: Buffer, _: Reg, _: Reg) {
+            unreachable!()
+        }
+        fn immediate_condition(&self, _: Reg) -> Option<bool> {
+            None
+        }
+        fn binary(&mut self, _: Binary, _: Reg, _: Reg) -> Reg {
+            self.local()
+        }
+        fn assign(&mut self, _: Reg, _: Reg) {}
+        fn label(&mut self) -> Label {
+            let l = Label(self.next_label);
+            self.next_label += 1;
+            l
+        }
+        fn mark(&mut self, _: Label) {}
+        fn jump(&mut self, _: Label) {}
+        fn branch(&mut self, _: Reg, _: Label, _: Label) {
+            unreachable!("comptime condition must be staged")
+        }
+        fn ret(&mut self, _: Reg) {}
+        fn call_kernel(
+            &mut self,
+            arity: usize,
+            kinds: &[BufferKind],
+            args: &[Reg],
+            buffers: &[Buffer],
+            body: Body<'_>,
+        ) -> Result<Reg, String> {
+            assert_eq!(args.len(), arity);
+            assert_eq!(buffers.len(), kinds.len());
+            let child = Self::build(arity, kinds, body)?;
+            self.bodies += child.bodies;
+            self.constants.extend(child.constants);
+            Ok(self.local())
+        }
+    }
+    #[test]
+    fn nested_calls_stage_once_into_the_chosen_backend_with_borrowed_host_data() {
+        let count = Cell::new(0);
+        let skipped = conditional::build::<Trace>(false, Config(&count)).unwrap();
+        assert_eq!((count.get(), skipped.bodies), (0, 1));
+        let built = conditional::build::<Trace>(true, Config(&count)).unwrap();
+        assert_eq!((count.get(), built.bodies), (1, 2));
+        assert_eq!(built.constants, [17]);
+    }
+}
+
+#[derive(Clone, Copy)]
+enum Arithmetic {
+    Affine(i32, i32),
+    Negate,
+}
+#[derive(Clone, Copy)]
+enum Step {
+    Eval(Arithmetic),
+    SkipNegative,
+    BreakPositive,
+    ContinueOrStop,
+    Stop,
+    Finish,
+    Unreachable,
+}
+fn unreachable_step() -> i32 {
+    panic!("host code after a terminating step was staged")
+}
+
+#[kernel]
+fn walk(#[comptime] steps: &[Step], mut value: i32) -> i32 {
+    for step in steps {
+        match step {
+            Step::Eval(Arithmetic::Affine(scale, bias)) if *scale != 0 => {
+                value = value.wrapping_mul(*scale).wrapping_add(*bias);
+            }
+            Step::Eval(Arithmetic::Affine(..)) => {}
+            Step::Eval(Arithmetic::Negate) => {
+                value = 0 - value;
+            }
+            Step::SkipNegative => {
+                if value < 0 {
+                    continue;
+                }
+            }
+            Step::BreakPositive => {
+                if value > 0 {
+                    break;
+                }
+            }
+            Step::ContinueOrStop => {
+                if value < 0 {
+                    continue;
+                }
+                break;
+            }
+            Step::Stop => break,
+            Step::Finish => return value.wrapping_add(19),
+            Step::Unreachable => {
+                value += unreachable_step();
+            }
+        }
+        value += 2;
+    }
+    value.wrapping_mul(3)
+}
+
+#[test]
+fn unrolled_host_plans_preserve_runtime_exits_and_prune_after_known_stops() {
+    use Step::*;
+    for plan in [
+        &[][..],
+        &[
+            Eval(Arithmetic::Affine(3, 7)),
+            Eval(Arithmetic::Affine(0, 99)),
+            Eval(Arithmetic::Affine(-1, 3)),
+        ],
+        &[
+            SkipNegative,
+            Eval(Arithmetic::Affine(-2, 1)),
+            ContinueOrStop,
+            Eval(Arithmetic::Affine(1, 9)),
+        ],
+        &[Eval(Arithmetic::Negate), BreakPositive, Finish, Unreachable],
+        &[Stop, Unreachable],
+        &[Finish, Unreachable],
+    ] {
+        let portable = walk::ir(plan).unwrap();
+        let lancy = walk::build::<splice_lancy::Lancy>(plan).unwrap();
+        let llvm = walk::build::<splice_llvm::Llvm>(plan).unwrap();
+        for x in [-23, 0, 7] {
+            let expected = walk(plan, x);
+            assert_eq!(lancy.call(&[x], &mut []), Ok(expected));
+            assert_eq!(llvm.call(&[x], &mut []), Ok(expected));
+        }
+        // Iterator progress and enum dispatch finish at specialization time.
+        let mut labels = std::collections::HashSet::new();
+        for op in portable.instructions() {
+            match op {
+                Instr::Label(l) => {
+                    labels.insert(*l);
+                }
+                Instr::Jump(l) => assert!(!labels.contains(l)),
+                Instr::Branch { yes, no, .. } => {
+                    assert!(!labels.contains(yes) && !labels.contains(no))
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
+#[kernel]
+fn weighted(#[comptime] terms: [(i32, i32); 3], mut x: i32) -> i32 {
+    for (scale, bias) in terms {
+        x = x.wrapping_mul(scale).wrapping_add(bias);
+    }
+    x
+}
+#[test]
+fn by_value_array_patterns_bind_comptime_operands() {
+    let terms = [(2, 1), (-1, 0), (3, 4)];
+    let ir = weighted::ir(terms).unwrap();
+    assert_eq!(
+        ir.label_count(),
+        1,
+        "only the kernel return label is needed"
+    );
+    let code = weighted::build::<splice_lancy::Lancy>(terms).unwrap();
+    assert_eq!(code.call(&[7], &mut []), Ok(weighted(terms, 7)));
 }

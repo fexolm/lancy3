@@ -105,17 +105,20 @@ pub(super) fn expand(root: Path, func: ItemFn, api: super::KernelApi) -> Result<
         })
         .collect();
     let fish = (!args.is_empty()).then(|| quote!(::<#(#args),*>));
-    let hir = quote!(#root::hir);
+    let hir = if api == super::KernelApi::Lancy {
+        quote!(#root::input)
+    } else {
+        quote!(#root::hir)
+    };
     let factory = if api == super::KernelApi::Lancy {
         quote!(#hir::FunctionBuilder)
     } else {
-        quote!(#root::frontend::FunctionBuilder)
+        quote!(dyn #root::frontend::KernelBuilder)
     };
     let support = quote!(#root::frontend::scalar);
     let builder = private("__lancy_builder");
     let exit = private("__lancy_return_label");
     let result = private("__lancy_result");
-    let callee = private("__lancy_callee");
     let guard = private("__lancy_guard");
     let mut bindings = HashMap::new();
     let mut formals = Vec::new();
@@ -204,23 +207,6 @@ pub(super) fn expand(root: Path, func: ItemFn, api: super::KernelApi) -> Result<
         formals.push(formal);
     }
     let arity = reg_names.len();
-    let (new_builder, call) = if buffer_names.is_empty() {
-        (
-            quote!(#factory::new(#arity)),
-            quote!(Ok(#builder.call(#callee, &[#(#reg_names),*]))),
-        )
-    } else {
-        (
-            quote!(#factory::with_buffers(#arity, vec![#(#buffer_kinds),*])),
-            quote!(#builder.call_with_buffers(#callee, &[#(#reg_names),*], &[#(#buffer_names),*])),
-        )
-    };
-    if api == super::KernelApi::Batch && !buffer_names.is_empty() {
-        return Err(Error::new_spanned(
-            &sig.inputs,
-            "batch row parameters must be scalar i32 values",
-        ));
-    }
     let flow = flow::analyze(&block, &bindings);
     let lower = Lower {
         root: &root,
@@ -233,6 +219,7 @@ pub(super) fn expand(root: Path, func: ItemFn, api: super::KernelApi) -> Result<
         result: &result,
         fish: quote!(#fish),
         loop_labels: None,
+        unrolled_exits: None,
         region_depth: 0,
     };
     let body = lower.block(&block)?;
@@ -242,8 +229,22 @@ pub(super) fn expand(root: Path, func: ItemFn, api: super::KernelApi) -> Result<
         let reg = lower.reg(body, Scalar::Int, &block)?;
         quote!({let value = #reg; #builder.assign(#result,value); #builder.jump(#exit);})
     };
-    let (stage, api_methods) = if api == super::KernelApi::Lancy {
-        (quote!(build), quote!())
+    let kinds = quote!(&[#(#buffer_kinds),*]);
+    let params = quote!(&[#(#reg_names),*]);
+    let buffers = quote!(&[#(#buffer_names),*]);
+    let (api_methods, call) = if api == super::KernelApi::Lancy {
+        (
+            quote! {
+                #vis fn build #generic (#(#host_decls),*) -> ::core::result::Result<#hir::Function,String> #where_ {
+                    let mut #builder = #factory::with_buffers(#arity, vec![#(#buffer_kinds),*]);
+                    Self::__stage_body #fish (#(#host_names,)* &mut #builder)?;
+                    #builder.finish()
+                }
+            },
+            quote! {
+                #builder.call_with_buffers(Self::build #fish (#(#host_names),*)?, #params, #buffers)
+            },
+        )
     } else {
         // Rust requires lifetime parameters before the backend type; the backend
         // is still the first argument at the usual lifetime-elided turbofish.
@@ -253,28 +254,28 @@ pub(super) fn expand(root: Path, func: ItemFn, api: super::KernelApi) -> Result<
         compile_generics
             .params
             .insert(lifetimes, syn::parse_quote!(#backend: #root::Codegen));
-        let stage = if api == super::KernelApi::Batch {
-            quote!(__splice_row)
-        } else {
-            quote!(ir)
-        };
-        let batch_ir = (api == super::KernelApi::Batch).then(|| quote! {
-            #vis fn ir #generic (#(#host_decls),*) -> ::core::result::Result<#hir::Function,String> #where_ {
-                Self::__splice_row #fish (#(#host_names),*)?.into_batch()
-            }
-        });
+        let callback = quote!(::std::boxed::Box::new(move |#builder| Self::__stage_body #fish (#(#host_names,)* #builder)));
         (
-            stage,
             quote! {
-                #batch_ir
-                #vis fn build #compile_generics (#(#host_decls),*) -> ::core::result::Result<
-                    <#backend as #root::Codegen>::Kernel, String
-                > #where_ {
-                    #backend::compile(&Self::ir #fish (#(#host_names),*)?)
+                #vis fn build #compile_generics (#(#host_decls),*) -> <#backend as #root::Codegen>::Output #where_ {
+                    <#backend as #root::Codegen>::build(#arity, #kinds, #callback)
+                }
+                #vis fn ir #generic (#(#host_decls),*) -> ::core::result::Result<#hir::Function,String> #where_ {
+                    #root::frontend::materialize(#arity, #kinds, #callback)
                 }
             },
+            quote!(#builder.call_kernel(#arity, #kinds, #params, #buffers, #callback)),
         )
     };
+    let source = (api == super::KernelApi::Splice).then(|| {
+        quote! {
+            #builder.set_source(&#root::frontend::KernelSource {
+                name: stringify!(#name),
+                scalars: &[#(stringify!(#reg_names)),*],
+                buffers: &[#(stringify!(#buffer_names)),*],
+            });
+        }
+    });
     Ok(quote! {
         #native
         #(#[#gates])*
@@ -284,19 +285,18 @@ pub(super) fn expand(root: Path, func: ItemFn, api: super::KernelApi) -> Result<
         #(#[#gates])*
         impl #name {
             #api_methods
-            #vis fn #stage #generic (#(#host_decls),*) -> ::core::result::Result<#hir::Function,String> #where_ {
-                let mut #builder = #new_builder;
+            fn __stage_body #generic (#(#host_decls,)* #builder: &mut #factory) -> ::core::result::Result<(),String> #where_ {
+                #source
                 #(#bind_args)*
-                let output = Self::__lancy_inline #fish (#(#names,)* &mut #builder)?;
+                let output = Self::__lancy_inline #fish (#(#names,)* #builder)?;
                 #builder.ret(output);
-                #builder.finish()
+                Ok(())
             }
             #[doc(hidden)]
             #[allow(clippy::too_many_arguments)]
             #vis fn __lancy_call #generic (#(#call_decls,)* #builder: &mut #factory)
                 -> ::core::result::Result<#hir::Reg,String> #where_ {
                 #(#unpack)*
-                let #callee = Self::#stage #fish (#(#host_names),*)?;
                 #call
             }
             #[allow(unreachable_code, clippy::too_many_arguments)]

@@ -69,6 +69,9 @@ fn compare(plan: &Plan, tables: &[&[Row]], f: &Function, kernels: &[&dyn Executa
         .collect();
     let mut scratch = vec![0x7fff; expected.len() * 8 + 512];
     for &code in kernels {
+        for (word, &want) in scratch.iter_mut().zip(&expected) {
+            *word = !want;
+        }
         assert_eq!(cat.run(code, &mut scratch).unwrap(), expected);
     }
     scratch.fill(-3);
@@ -101,6 +104,17 @@ fn branching_join_tree_runs_against_changing_tables() {
     let baseline = LancyBaseline::compile(&f).unwrap();
     let optimized = Lancy::compile(&f).unwrap();
     let llvm = Llvm::compile(&f).unwrap();
+    let direct_baseline = query::build::<LancyBaseline>(&plan).unwrap();
+    let direct_lancy = query::build::<Lancy>(&plan).unwrap();
+    let direct_llvm = query::build::<Llvm>(&plan).unwrap();
+    let kernels: [&dyn Executable; 6] = [
+        &baseline,
+        &optimized,
+        &llvm,
+        &direct_baseline,
+        &direct_lancy,
+        &direct_llvm,
+    ];
     let tables: &[&[Row]] = &[
         &[(-7, 5), (1, 3), (9, 6), (1, 5)],
         &[(1, 9), (-7, 3), (9, 4)],
@@ -108,11 +122,11 @@ fn branching_join_tree_runs_against_changing_tables() {
         &[(1, 3), (9, 8)],
         &[(9, 4), (1, 3), (1, 8)],
     ];
-    compare(&plan, tables, &f, &[&baseline, &optimized, &llvm]);
+    compare(&plan, tables, &f, &kernels);
     for empty in 0..tables.len() {
         let mut changed = tables.to_vec();
         changed[empty] = &[];
-        compare(&plan, &changed, &f, &[&baseline, &optimized, &llvm]);
+        compare(&plan, &changed, &f, &kernels);
     }
 }
 
@@ -182,7 +196,8 @@ fn different_plan_shapes_match_a_nested_loop_oracle() {
     for _ in 0..24 {
         let plan = tree(&mut seed, 4);
         let f = query::ir(&plan).unwrap();
-        let baseline = LancyBaseline::compile(&f).unwrap();
+        let baseline = query::build::<LancyBaseline>(&plan).unwrap();
+        let direct = query::build::<Lancy>(&plan).unwrap();
         let optimized = Lancy::compile(&f).unwrap();
         let llvm = Llvm::compile(&f).unwrap();
         compare(
@@ -193,7 +208,7 @@ fn different_plan_shapes_match_a_nested_loop_oracle() {
                 &[(-1, 1), (0, -1), (7, 3)],
             ],
             &f,
-            &[&baseline, &optimized, &llvm],
+            &[&baseline, &direct, &optimized, &llvm],
         );
     }
 }

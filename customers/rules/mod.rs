@@ -159,6 +159,25 @@ fn interpret(policy: &Policy, severity: i32, attempts: i32, flags: i32) -> i32 {
     }
 }
 
+#[kernel]
+fn route_events(
+    #[comptime] policy: &Policy,
+    severity: &[i32],
+    attempts: &[i32],
+    flags: &[i32],
+    out: &mut [i32],
+) -> i32 {
+    for i in 0..out.len() as i32 {
+        out[i as usize] = route(
+            policy,
+            severity[i as usize],
+            attempts[i as usize],
+            flags[i as usize],
+        );
+    }
+    out.len() as i32
+}
+
 pub fn run() -> Result<(), String> {
     let policy = deployed_policy();
     crate::build("rules/baseline + first event", || {
@@ -172,10 +191,9 @@ pub fn run() -> Result<(), String> {
     let scalar = crate::build("rules/scalar", || {
         lancy::ScalarFn3::compile(&route::build(&policy)?)
     })?;
-    let batch = crate::build("rules/SSE2", || {
-        lancy::MappedKernel::compile(&route::build(&policy)?)
+    let events_kernel = crate::build("rules/event loop", || {
+        lancy::ScalarKernel::compile(&route_events::build(&policy)?)
     })?;
-    assert!(batch.is_vectorized());
 
     for skewed in [false, true] {
         let n = 65_539;
@@ -210,7 +228,20 @@ pub fn run() -> Result<(), String> {
             n,
             &expected,
             |out| events.cpp_batch(out),
-            |out| batch.run(&columns, out).unwrap(),
+            |out| {
+                use lancy::BufferArg::{Read, Write};
+                events_kernel
+                    .call_with_buffers(
+                        &[],
+                        &mut [
+                            Read(columns[0]),
+                            Read(columns[1]),
+                            Read(columns[2]),
+                            Write(out),
+                        ],
+                    )
+                    .unwrap();
+            },
         )?;
     }
     Ok(())

@@ -4,6 +4,7 @@ use std::sync::Arc;
 /// Append typed scalar operations and control-flow edges, then verify the
 /// function for all code generators at `finish`.
 pub struct FunctionBuilder {
+    source: Option<&'static super::KernelSource>,
     arity: usize,
     buffer_kinds: Vec<BufferKind>,
     registers: usize,
@@ -17,6 +18,7 @@ impl FunctionBuilder {
     }
     pub fn with_buffers(arity: usize, kinds: Vec<BufferKind>) -> Self {
         Self {
+            source: None,
             arity,
             buffer_kinds: kinds,
             registers: arity,
@@ -131,11 +133,70 @@ impl FunctionBuilder {
     }
     pub fn finish(self) -> Result<Function, String> {
         verify::finish(
+            self.source,
             self.arity,
             self.buffer_kinds,
             self.registers,
             self.labels,
             self.code,
         )
+    }
+}
+
+impl super::KernelBuilder for FunctionBuilder {
+    fn set_source(&mut self, source: &'static super::KernelSource) {
+        self.source = Some(source);
+    }
+    fn arg(&self, index: usize) -> Reg {
+        self.arg(index)
+    }
+    fn local(&mut self) -> Reg {
+        self.local()
+    }
+    fn constant(&mut self, value: i32) -> Reg {
+        self.constant(value)
+    }
+    fn buffer_len(&mut self, buffer: Buffer) -> Reg {
+        self.buffer_len(buffer)
+    }
+    fn load(&mut self, buffer: Buffer, index: Reg) -> Reg {
+        self.load(buffer, index)
+    }
+    fn store(&mut self, buffer: Buffer, index: Reg, value: Reg) {
+        self.store(buffer, index, value)
+    }
+    fn immediate_condition(&self, reg: Reg) -> Option<bool> {
+        self.immediate_condition(reg)
+    }
+    fn binary(&mut self, op: Binary, a: Reg, b: Reg) -> Reg {
+        self.binary(op, a, b)
+    }
+    fn assign(&mut self, dst: Reg, src: Reg) {
+        self.assign(dst, src)
+    }
+    fn label(&mut self) -> Label {
+        self.label()
+    }
+    fn mark(&mut self, l: Label) {
+        self.mark(l)
+    }
+    fn jump(&mut self, l: Label) {
+        self.jump(l)
+    }
+    fn branch(&mut self, cond: Reg, yes: Label, no: Label) {
+        self.branch(cond, yes, no)
+    }
+    fn ret(&mut self, v: Reg) {
+        self.ret(v)
+    }
+    fn call_kernel(
+        &mut self,
+        arity: usize,
+        kinds: &[BufferKind],
+        args: &[Reg],
+        buffers: &[Buffer],
+        body: super::Body<'_>,
+    ) -> Result<Reg, String> {
+        self.call_with_buffers(super::materialize(arity, kinds, body)?, args, buffers)
     }
 }

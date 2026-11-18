@@ -58,6 +58,9 @@ pub(super) struct Lower<'a> {
     pub(super) exit: &'a Ident,
     pub(super) fish: TokenStream,
     pub(super) loop_labels: Option<(Ident, Ident)>,
+    // During host unrolling, track whether any staged path can reach another
+    // iteration or the code following the loop (including a runtime branch).
+    pub(super) unrolled_exits: Option<(Ident, Ident)>,
     pub(super) region_depth: usize,
     pub(super) flow: &'a super::flow::Flow,
 }
@@ -143,6 +146,15 @@ impl Lower<'_> {
     fn delimit(&self, code: TokenStream) -> TokenStream {
         let label = self.region();
         quote!(#[allow(unused_labels)] #label: { #code; })
+    }
+    fn end_region(&self) -> TokenStream {
+        if self.region_depth == 0 {
+            let (b, exit, result) = (self.builder, self.exit, self.result);
+            quote!(#b.mark(#exit); return Ok(#result);)
+        } else {
+            let region = self.region();
+            quote!(break #region;)
+        }
     }
     fn host_raw(&self, e: &Expr) -> Result<TokenStream> {
         let mut check = HostCheck {
@@ -408,12 +420,7 @@ impl Lower<'_> {
                 let (exit, result) = (self.exit, self.result);
                 // A host-known return transfers control in the generator too.
                 // The common exit remains the target of earlier runtime returns.
-                let finish = if self.region_depth == 0 {
-                    quote!(#b.mark(#exit); return Ok(#result);)
-                } else {
-                    let region = self.region();
-                    quote!(break #region;)
-                };
+                let finish = self.end_region();
                 Ok(Value::new(
                     Stage::Never,
                     quote!({let value=#ret; #b.assign(#result,value); #b.jump(#exit); #finish}),

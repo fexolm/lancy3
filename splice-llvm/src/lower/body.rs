@@ -37,6 +37,43 @@ pub(super) struct Body<'a, 'ctx> {
 }
 
 impl<'a, 'ctx> Body<'a, 'ctx> {
+    pub(super) fn start(
+        ctx: &'ctx Context,
+        builder: &'a Builder<'ctx>,
+        function: FunctionValue<'ctx>,
+        arity: usize,
+        register_count: usize,
+        buffer_count: usize,
+    ) -> Built<Self> {
+        builder.position_at_end(ctx.append_basic_block(function, "entry"));
+        // Only the entry allocates register slots. LLVM promotes these to SSA,
+        // including phi nodes for mutable locals across joins and backedges.
+        let registers = (0..register_count)
+            .map(|_| builder.build_alloca(ctx.i32_type(), ""))
+            .collect::<Built<Vec<_>>>()?;
+        let mut params = function.get_param_iter();
+        let status = params.next().unwrap().into_pointer_value();
+        for &ptr in &registers[..arity] {
+            builder.build_store(ptr, params.next().unwrap().into_int_value())?;
+        }
+        let slices = (0..buffer_count)
+            .map(|_| Slice {
+                data: params.next().unwrap().into_pointer_value(),
+                len: params.next().unwrap().into_int_value(),
+            })
+            .collect();
+        Ok(Self {
+            ctx,
+            builder,
+            function,
+            status,
+            registers,
+            slices,
+            labels: Vec::new(),
+            exits: [None; 4],
+        })
+    }
+
     pub(super) fn emit(
         ctx: &'ctx Context,
         builder: &'a Builder<'ctx>,
@@ -45,42 +82,21 @@ impl<'a, 'ctx> Body<'a, 'ctx> {
         ids: &HashMap<*const Function, usize>,
         declarations: &[FunctionValue<'ctx>],
     ) -> Built<()> {
-        builder.position_at_end(ctx.append_basic_block(function, "entry"));
-        // Only the entry allocates register slots. LLVM promotes these to SSA,
-        // including phi nodes for mutable locals across joins and backedges.
-        let registers = (0..f.register_count())
-            .map(|_| builder.build_alloca(ctx.i32_type(), ""))
-            .collect::<Built<Vec<_>>>()?;
-        let mut params = function.get_param_iter();
-        let status = params.next().unwrap().into_pointer_value();
-        for &ptr in &registers[..f.arity()] {
-            builder.build_store(ptr, params.next().unwrap().into_int_value())?;
-        }
-        let slices = f
-            .buffer_kinds()
-            .iter()
-            .map(|_| Slice {
-                data: params.next().unwrap().into_pointer_value(),
-                len: params.next().unwrap().into_int_value(),
-            })
-            .collect();
-        // A builder may allocate label IDs without ever marking or using them.
-        let mut labels = vec![None; f.label_count()];
-        for op in f.instructions() {
-            if let Instr::Label(l) = op {
-                labels[l.0 as usize] = Some(ctx.append_basic_block(function, ""));
-            }
-        }
-        let mut body = Self {
+        let mut body = Self::start(
             ctx,
             builder,
             function,
-            status,
-            registers,
-            slices,
-            labels,
-            exits: [None; 4],
-        };
+            f.arity(),
+            f.register_count(),
+            f.buffer_kinds().len(),
+        )?;
+        // A builder may allocate label IDs without marking or using them.
+        body.labels.resize(f.label_count(), None);
+        for op in f.instructions() {
+            if let Instr::Label(l) = op {
+                body.labels[l.0 as usize] = Some(ctx.append_basic_block(function, ""));
+            }
+        }
         let mut open = true;
         for inst in f.instructions() {
             if let Instr::Label(l) = inst {
@@ -107,6 +123,46 @@ impl<'a, 'ctx> Body<'a, 'ctx> {
 
     fn block(&self, label: Label) -> BasicBlock<'ctx> {
         self.labels[label.0 as usize].expect("verified jump target")
+    }
+
+    pub(super) fn new_local(&mut self, allocas: &Builder<'ctx>) -> Built<Reg> {
+        // A second builder can insert slots in the entry even while emitting
+        // code for a loop or a guarded continuation in a different block.
+        let entry = self.function.get_first_basic_block().unwrap();
+        if let Some(first) = entry.get_first_instruction() {
+            allocas.position_before(&first);
+        } else {
+            allocas.position_at_end(entry);
+        }
+        let id = Reg(self.registers.len() as u32);
+        self.registers
+            .push(allocas.build_alloca(self.ctx.i32_type(), "")?);
+        Ok(id)
+    }
+
+    pub(super) fn register_count(&self) -> usize {
+        self.registers.len()
+    }
+    pub(super) fn label_count(&self) -> usize {
+        self.labels.len()
+    }
+    pub(super) fn new_label(&mut self) -> Label {
+        let label = Label(self.labels.len() as u32);
+        self.labels.push(None);
+        label
+    }
+    pub(super) fn prepare_label(&mut self, label: Label) {
+        self.labels[label.0 as usize]
+            .get_or_insert_with(|| self.ctx.append_basic_block(self.function, ""));
+    }
+    pub(super) fn begin_block(&self, label: Label) {
+        self.builder.position_at_end(self.block(label));
+    }
+    pub(super) fn unreachable(&self) -> Built<()> {
+        self.builder.build_unreachable().map(|_| ())
+    }
+    pub(super) fn needs_status(&self) -> bool {
+        self.exits.iter().any(Option::is_some)
     }
 
     fn int(&self, n: i32) -> IntValue<'ctx> {
@@ -224,81 +280,118 @@ impl<'a, 'ctx> Body<'a, 'ctx> {
         }
     }
 
+    pub(super) fn constant(&self, dst: Reg, n: i32) -> Built<()> {
+        self.store(dst, self.int(n))
+    }
+    pub(super) fn assign(&self, dst: Reg, src: Reg) -> Built<()> {
+        self.store(dst, self.load(src)?)
+    }
+    pub(super) fn arithmetic(&mut self, dst: Reg, op: Binary, a: Reg, b: Reg) -> Built<()> {
+        let result = self.binary(op, self.load(a)?, self.load(b)?)?;
+        self.store(dst, result)
+    }
+    pub(super) fn length(&self, dst: Reg, buffer: Buffer) -> Built<()> {
+        let len = self.slices[buffer.index()].len;
+        self.store(
+            dst,
+            self.builder
+                .build_int_truncate(len, self.ctx.i32_type(), "")?,
+        )
+    }
+    pub(super) fn read_element(&mut self, dst: Reg, buffer: Buffer, index: Reg) -> Built<()> {
+        let ptr = self.element(buffer, index)?;
+        self.store(
+            dst,
+            self.builder
+                .build_load(self.ctx.i32_type(), ptr, "")?
+                .into_int_value(),
+        )
+    }
+    pub(super) fn write_element(&mut self, buffer: Buffer, index: Reg, value: Reg) -> Built<()> {
+        let ptr = self.element(buffer, index)?;
+        self.builder.build_store(ptr, self.load(value)?)?;
+        Ok(())
+    }
+    pub(super) fn jump(&self, label: Label) -> Built<()> {
+        self.builder.build_unconditional_branch(self.block(label))?;
+        Ok(())
+    }
+    pub(super) fn branch(&self, cond: Reg, yes: Label, no: Label) -> Built<()> {
+        let take =
+            self.builder
+                .build_int_compare(IntPredicate::NE, self.load(cond)?, self.int(0), "")?;
+        self.builder
+            .build_conditional_branch(take, self.block(yes), self.block(no))?;
+        Ok(())
+    }
+    pub(super) fn ret(&self, value: Reg) -> Built<()> {
+        self.builder.build_return(Some(&self.load(value)?))?;
+        Ok(())
+    }
+    pub(super) fn call_function(
+        &mut self,
+        dst: Reg,
+        callee: FunctionValue<'ctx>,
+        needs_status: bool,
+        args: &[Reg],
+        buffers: &[Buffer],
+    ) -> Built<()> {
+        let ir = self.builder;
+        let mut actuals =
+            Vec::<BasicMetadataValueEnum>::with_capacity(callee.count_params() as usize);
+        actuals.push(self.status.into());
+        for &r in args {
+            actuals.push(self.load(r)?.into());
+        }
+        for buffer in buffers {
+            let slice = self.slices[buffer.index()];
+            actuals.push(slice.data.into());
+            actuals.push(slice.len.into());
+        }
+        let result = call(ir, callee, &actuals)?;
+        if needs_status {
+            let status = ir
+                .build_load(self.ctx.i32_type(), self.status, "")?
+                .into_int_value();
+            let failed = ir.build_int_compare(IntPredicate::NE, status, self.int(0), "")?;
+            self.exit_if(failed, Failure::Propagate)?;
+        }
+        self.store(dst, result)
+    }
+
     fn instruction(
         &mut self,
         inst: &Instr,
         ids: &HashMap<*const Function, usize>,
         declarations: &[FunctionValue<'ctx>],
     ) -> Built<()> {
-        let ir = self.builder;
-        match inst {
-            Instr::Const(dst, n) => self.store(*dst, self.int(*n))?,
-            Instr::Copy(dst, src) => self.store(*dst, self.load(*src)?)?,
-            Instr::Bin(dst, op, a, b) => {
-                let result = self.binary(*op, self.load(*a)?, self.load(*b)?)?;
-                self.store(*dst, result)?;
-            }
-            Instr::BufferLen { dst, buffer } => {
-                let len = self.slices[buffer.0 as usize].len;
-                self.store(*dst, ir.build_int_truncate(len, self.ctx.i32_type(), "")?)?;
-            }
-            Instr::Load { dst, buffer, index } => {
-                let ptr = self.element(*buffer, *index)?;
-                self.store(
-                    *dst,
-                    ir.build_load(self.ctx.i32_type(), ptr, "")?
-                        .into_int_value(),
-                )?;
-            }
+        match *inst {
+            Instr::Const(d, n) => self.constant(d, n),
+            Instr::Copy(d, v) => self.assign(d, v),
+            Instr::Bin(d, op, a, b) => self.arithmetic(d, op, a, b),
+            Instr::BufferLen { dst, buffer } => self.length(dst, buffer),
+            Instr::Load { dst, buffer, index } => self.read_element(dst, buffer, index),
             Instr::Store {
                 buffer,
                 index,
                 value,
-            } => {
-                let ptr = self.element(*buffer, *index)?;
-                ir.build_store(ptr, self.load(*value)?)?;
-            }
-            Instr::Jump(label) => {
-                ir.build_unconditional_branch(self.block(*label))?;
-            }
-            Instr::Branch { cond, yes, no } => {
-                let take =
-                    ir.build_int_compare(IntPredicate::NE, self.load(*cond)?, self.int(0), "")?;
-                ir.build_conditional_branch(take, self.block(*yes), self.block(*no))?;
-            }
-            Instr::Return(reg) => {
-                ir.build_return(Some(&self.load(*reg)?))?;
-            }
+            } => self.write_element(buffer, index, value),
+            Instr::Jump(l) => self.jump(l),
+            Instr::Branch { cond, yes, no } => self.branch(cond, yes, no),
+            Instr::Return(v) => self.ret(v),
             Instr::Call {
                 dst,
-                function,
+                ref function,
+                ref args,
+                ref buffers,
+            } => self.call_function(
+                dst,
+                declarations[ids[&Arc::as_ptr(function)]],
+                function.needs_status(),
                 args,
                 buffers,
-            } => {
-                let callee = declarations[ids[&Arc::as_ptr(function)]];
-                let mut actuals =
-                    Vec::<BasicMetadataValueEnum>::with_capacity(callee.count_params() as usize);
-                actuals.push(self.status.into());
-                for &r in args {
-                    actuals.push(self.load(r)?.into());
-                }
-                for buffer in buffers {
-                    let slice = self.slices[buffer.0 as usize];
-                    actuals.push(slice.data.into());
-                    actuals.push(slice.len.into());
-                }
-                let result = call(ir, callee, &actuals)?;
-                if function.needs_status() {
-                    let status = ir
-                        .build_load(self.ctx.i32_type(), self.status, "")?
-                        .into_int_value();
-                    let failed = ir.build_int_compare(IntPredicate::NE, status, self.int(0), "")?;
-                    self.exit_if(failed, Failure::Propagate)?;
-                }
-                self.store(*dst, result)?;
-            }
+            ),
             Instr::Label(_) => unreachable!("handled at block boundary"),
         }
-        Ok(())
     }
 }

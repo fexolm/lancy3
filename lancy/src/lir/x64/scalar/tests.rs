@@ -1,6 +1,6 @@
-use super::frame::frame;
 use super::*;
-use crate::hir::{Buffer, BufferArg, BufferKind, FunctionBuilder};
+use crate::hir::ssa::from_input;
+use crate::input::{Buffer, BufferArg, BufferKind, FunctionBuilder};
 use crate::jit::{Executable, ScalarKernel};
 use std::sync::Arc;
 
@@ -29,7 +29,7 @@ fn bit_test_branches_to_return_through_shared_join() {
             b.ret(output);
             let f = b.finish().unwrap();
 
-            let (bytes, _) = emit(&f).unwrap();
+            let (bytes, _) = emit_ssa(&from_input(&f).unwrap()).unwrap();
             let branch = bytes
                 .windows(2)
                 .position(|b| b == [0x0f, if comparison == Binary::Eq { 0x84 } else { 0x85 }])
@@ -70,14 +70,10 @@ fn direct_three_abi_preserves_arguments_and_workspace_bounds() {
         }
         b.ret(result);
         let f = b.finish().unwrap();
+        let (code, words) = emit_ssa3(&from_input(&f).unwrap()).unwrap();
         if pressure {
-            assert!(
-                frame(&f, true).homes[..3]
-                    .iter()
-                    .all(|h| matches!(h, Home::Slot(_)))
-            );
+            assert!(words > 0, "register pressure requires spills");
         }
-        let (code, words) = emit3(&f).unwrap();
         let executable = Executable::new(&code).unwrap();
         // SAFETY: emit3 fixes the ABI, the mapping outlives all calls,
         // and words is the maximum workspace in i32 slots.
@@ -184,7 +180,13 @@ fn nested_shared_calls_return_to_the_correct_site_and_preserve_caller_values() {
     let result = b.binary(Binary::Xor, z, b.arg(1));
     b.ret(result);
     let function = b.finish().unwrap();
-    assert_eq!(Graph::discover(&function).functions.len(), 3);
+    assert_eq!(
+        Graph::lower(&from_input(&function).unwrap())
+            .unwrap()
+            .functions
+            .len(),
+        3
+    );
     let compiled = ScalarKernel::compile(&function).unwrap();
     for a in [-3, 0, 11, i32::MIN, i32::MAX] {
         for c in [3, -5, i32::MAX] {
@@ -349,9 +351,14 @@ fn spilled_index_and_value_address_a_late_buffer() {
     }
     f.ret(result);
     let f = f.finish().unwrap();
-    let layout = frame(&f, true);
-    assert!(matches!(layout.homes[4], Home::Slot(_)));
-    assert!(matches!(layout.homes[5], Home::Slot(_)));
+    let machine = Graph::lower(&from_input(&f).unwrap()).unwrap();
+    assert!(
+        machine.functions[0]
+            .frame
+            .args
+            .iter()
+            .any(|h| matches!(h, Home::Slot(_)))
+    );
     let kernel = ScalarKernel::baseline(&f).unwrap();
     let mut output = [-1; 3];
     let mut buffers: Vec<_> = (0..64).map(|_| BufferArg::Read(&[])).collect();
@@ -377,10 +384,14 @@ fn checked_division_preserves_spills_and_propagates_child_faults() {
         let total = child.binary(Binary::Add, quotient, sum);
         child.ret(total);
         let child = child.finish().unwrap();
-        let layout = frame(&child, false);
-        for reg in [4, 5, quotient.0 as usize] {
-            assert!(matches!(layout.homes[reg], Home::Slot(_)));
-        }
+        let machine = Graph::lower(&from_input(&child).unwrap()).unwrap();
+        assert!(
+            machine.functions[0]
+                .frame
+                .args
+                .iter()
+                .any(|h| matches!(h, Home::Slot(_)))
+        );
         let mut root = FunctionBuilder::new(6);
         let args: Vec<_> = (0..6).map(|i| root.arg(i)).collect();
         let total = root.call(child, &args);
@@ -437,4 +448,72 @@ fn discarded_division_by_constants_still_reports_faults() {
             }
         }
     }
+}
+
+#[test]
+fn conditional_backedge_rotates_block_arguments_in_parallel() {
+    use crate::hir::ssa::{Function, Op, Terminator};
+    let mut f = Function::new(3, vec![]);
+    let entry = f.entry();
+    let args = f.params(entry).to_vec();
+    let header = f.create_block();
+    let result = f.create_block();
+    let first = f.append_param(header);
+    let second = f.append_param(header);
+    let count = f.append_param(header);
+    let x = f.append_param(result);
+    let y = f.append_param(result);
+    let start = f.add_edge(header, &args);
+    f.set_terminator(entry, Terminator::Jump(start));
+    let one = f.append(header, Op::Const(1)).unwrap();
+    let next = f.append(header, Op::Bin(Binary::Sub, count, one)).unwrap();
+    let again = f.add_edge(header, &[second, first, next]);
+    let done = f.add_edge(result, &[first, second]);
+    f.set_terminator(
+        header,
+        Terminator::Branch {
+            cond: count,
+            yes: again,
+            no: done,
+        },
+    );
+    let diff = f.append(result, Op::Bin(Binary::Sub, x, y)).unwrap();
+    f.set_terminator(result, Terminator::Return(diff));
+
+    let (code, words) = emit_ssa3(&f).unwrap();
+    let owner = Executable::new(&code).unwrap();
+    // emit_ssa3 verified the entry signature and register allocation above.
+    let native = unsafe {
+        std::mem::transmute::<
+            *mut std::ffi::c_void,
+            unsafe extern "C" fn(i32, i32, i32, *mut i32) -> i32,
+        >(owner.address.as_ptr())
+    };
+    let mut workspace = vec![0i32; words];
+    for n in 0..20 {
+        let value = unsafe { native(-3, 8, n, workspace.as_mut_ptr()) };
+        assert_eq!(value, if n % 2 == 0 { -11 } else { 11 });
+    }
+}
+
+#[test]
+fn successive_temporaries_share_the_same_machine_register() {
+    let mut b = FunctionBuilder::new(1);
+    let mut value = b.arg(0);
+    for n in 2..66 {
+        let constant = b.constant(n);
+        value = b.binary(Binary::Mul, value, constant);
+    }
+    b.ret(value);
+    let f = from_input(&b.finish().unwrap()).unwrap();
+    let graph = Graph::lower(&f).unwrap();
+    assert_eq!(graph.workspace, 0);
+    let body = &graph.functions[0];
+    let result = body.frame.args[0];
+    assert!(matches!(result, Home::Register(_)));
+    assert!(
+        body.ops
+            .iter()
+            .all(|op| matches!(op,Op::Alu(d,_,src,_) if *d==result && *src==result))
+    );
 }

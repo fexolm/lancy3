@@ -139,8 +139,11 @@ impl Flow {
             Expr::ForLoop(f) => {
                 let c = self.expr(&f.expr, names, control);
                 let mut locals = names.clone();
-                Introduce(&mut locals, c || self.loops.contains(&key(&f.body)), None)
-                    .visit_pat(&f.pat);
+                // Runtime ranges have a symbolic induction variable. A host
+                // iterator still yields Rust pattern bindings when its body emits IR.
+                let induction =
+                    c || (matches!(&*f.expr, Expr::Range(_)) && self.loops.contains(&key(&f.body)));
+                Introduce(&mut locals, induction, None).visit_pat(&f.pat);
                 self.scan_loop(&f.body, &locals, control, c)
             }
             Expr::Call(c) => {

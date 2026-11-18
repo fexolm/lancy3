@@ -5,8 +5,11 @@ mod buffers;
 mod profile;
 
 use super::Executable;
-use crate::hir::{BufferArg, BufferKind, Function};
-use crate::lir::{emit_scalar, emit_scalar3};
+use crate::input::{BufferArg, BufferKind, Function};
+use crate::{
+    hir,
+    lir::{emit_ssa, emit_ssa3},
+};
 pub use adaptive::AdaptiveScalar;
 pub use adaptive_buffer::AdaptiveBufferKernel;
 use buffers::{Descriptor, descriptors, prepare_header};
@@ -37,12 +40,22 @@ pub struct ScalarKernel {
 
 impl ScalarKernel {
     pub fn compile(function: &Function) -> Result<Self, String> {
-        Self::baseline(&function.simplified()?)
+        Self::compile_hir(&hir::from_input(&function.simplified()?)?)
     }
 
     /// Emit the verified instruction stream directly for low startup latency.
     pub fn baseline(function: &Function) -> Result<Self, String> {
-        let (bytes, words) = emit_scalar(function)?;
+        Self::baseline_hir(&hir::from_input(function)?)
+    }
+
+    /// Compile an editable Lancy SSA graph using the common optimization passes.
+    pub fn compile_hir(function: &hir::Function) -> Result<Self, String> {
+        Self::baseline_hir(&hir::optimize(function)?)
+    }
+
+    /// Allocate and emit machine code directly from verified Lancy SSA.
+    pub fn baseline_hir(function: &hir::Function) -> Result<Self, String> {
+        let (bytes, words) = emit_ssa(function)?;
         let memory = Executable::new(&bytes)?;
         // SAFETY: the verified scalar backend emits only functions with this ABI.
         // The owner remains live for every invocation.
@@ -197,10 +210,14 @@ enum TypedCode {
 
 impl<const N: usize> ScalarFn<N> {
     pub fn compile(f: &Function) -> Result<Self, String> {
-        Self::baseline(&f.simplified()?)
+        Self::install(&hir::optimize(&hir::from_input(&f.simplified()?)?)?)
     }
 
     pub fn baseline(f: &Function) -> Result<Self, String> {
+        Self::install(&hir::from_input(f)?)
+    }
+
+    fn install(f: &hir::Function) -> Result<Self, String> {
         if !f.buffer_kinds().is_empty() {
             return Err(
                 "ScalarFn expects only scalar arguments; use ScalarKernel for slices".into(),
@@ -213,7 +230,7 @@ impl<const N: usize> ScalarFn<N> {
             ));
         }
         let code = if N == 3 && !f.needs_status() {
-            let (bytes, words) = emit_scalar3(f)?;
+            let (bytes, words) = emit_ssa3(f)?;
             let memory = Executable::new(&bytes)?;
             // SAFETY: emit_scalar3 uses the native ABI with three i32 parameters and scratch.
             let entry = unsafe {
@@ -225,7 +242,7 @@ impl<const N: usize> ScalarFn<N> {
                 words,
             }
         } else {
-            TypedCode::Generic(ScalarKernel::baseline(f)?)
+            TypedCode::Generic(ScalarKernel::baseline_hir(f)?)
         };
         Ok(Self(code))
     }

@@ -1,4 +1,4 @@
-use lancy::hir::{Binary, Function, Instr};
+use lancy::input::{Binary, Function, Instr};
 use lancy::jit::ScalarFn;
 use lancy::kernel;
 
@@ -268,10 +268,6 @@ fn a_known_i32_is_a_plain_constant_argument_of_a_runtime_call() {
     for x in [-7, 0, 5] {
         assert_eq!(jit.invoke([x]), apply_affine(4, x));
     }
-    let mapped = lancy::MappedKernel::compile(&f).unwrap();
-    let mut out = [0; 3];
-    mapped.run(&[&[-7, 0, 5]], &mut out).unwrap();
-    assert_eq!(out, [6, 13, 18]);
 }
 
 #[kernel]

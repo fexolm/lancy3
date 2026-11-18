@@ -1,4 +1,4 @@
-use lancy::{NativeKernel, kernel};
+use lancy::{BufferArg, ScalarKernel, kernel};
 
 const RECORD_SIZE: usize = 8;
 const CHUNK: usize = 1024;
@@ -22,6 +22,25 @@ fn project(#[comptime] schema: &Schema, header: i32, sample: i32, zero_point: i3
     } else {
         MISSING
     }
+}
+
+#[kernel]
+fn decode_fields(
+    #[comptime] schema: &Schema,
+    headers: &[i32],
+    samples: &[i32],
+    zeros: &[i32],
+    out: &mut [i32],
+) -> i32 {
+    for i in 0..out.len() as i32 {
+        out[i as usize] = project(
+            schema,
+            headers[i as usize],
+            samples[i as usize],
+            zeros[i as usize],
+        );
+    }
+    out.len() as i32
 }
 
 unsafe extern "C" {
@@ -50,7 +69,7 @@ impl Scratch {
     }
 }
 
-fn decode_ir(kernel: &NativeKernel, bytes: &[u8], out: &mut [i32], scratch: &mut Scratch) -> bool {
+fn decode_ir(kernel: &ScalarKernel, bytes: &[u8], out: &mut [i32], scratch: &mut Scratch) -> bool {
     if !bytes.len().is_multiple_of(RECORD_SIZE) || bytes.len() / RECORD_SIZE != out.len() {
         return false;
     }
@@ -70,10 +89,17 @@ fn decode_ir(kernel: &NativeKernel, bytes: &[u8], out: &mut [i32], scratch: &mut
             *sample = i32::from(i16::from_le_bytes([record[2], record[3]]));
             *zero = i32::from(i16::from_le_bytes([record[4], record[5]]));
         }
-        let written = kernel
-            .run(&[headers, samples, zeros], dst)
+        kernel
+            .call_with_buffers(
+                &[],
+                &mut [
+                    BufferArg::Read(headers),
+                    BufferArg::Read(samples),
+                    BufferArg::Read(zeros),
+                    BufferArg::Write(dst),
+                ],
+            )
             .expect("wire projection");
-        assert_eq!(written, n, "unguarded wire projection must complete");
     }
     true
 }
@@ -113,7 +139,7 @@ fn fixture(rows: usize) -> (Vec<u8>, Vec<i32>) {
     (wire, expected)
 }
 
-fn verify_parts(kernel: &NativeKernel, scratch: &mut Scratch) {
+fn verify_parts(kernel: &ScalarKernel, scratch: &mut Scratch) {
     for count in [0, 1, 2, 3, 4, 5, 7, 8, 9, CHUNK - 1, CHUNK, CHUNK + 1] {
         let (wire, expected) = fixture(count);
         let mut output = vec![0; count];
@@ -134,11 +160,8 @@ fn verify_parts(kernel: &NativeKernel, scratch: &mut Scratch) {
 }
 
 pub fn run() -> Result<(), String> {
-    let code = crate::build("decoder / schema to SIMD", || {
-        let program = project::build(&SCHEMA)?
-            .vectorize()?
-            .ok_or("decoder projection requires SIMD")?;
-        NativeKernel::specialize(&program, &[])
+    let code = crate::build("decoder / schema", || {
+        ScalarKernel::compile(&decode_fields::build(&SCHEMA)?)
     })?;
     let mut scratch = Scratch::new();
     verify_parts(&code, &mut scratch);

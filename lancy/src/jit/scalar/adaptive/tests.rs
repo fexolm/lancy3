@@ -1,6 +1,6 @@
 use super::super::profile::SAMPLE_CALLS;
 use super::*;
-use crate::hir::{Binary, FunctionBuilder};
+use crate::input::{Binary, FunctionBuilder};
 
 fn multiply() -> Function {
     let mut b = FunctionBuilder::new(2);

@@ -1,4 +1,4 @@
-use lancy::{AdaptiveKernel, NativeKernel, Tier, kernel};
+use lancy::{AdaptiveBufferKernel, BufferArg, ScalarKernel, kernel};
 
 const PAID: i32 = 2;
 const MINIMUM_EXCLUSIVE: i32 = 2;
@@ -141,14 +141,47 @@ impl Batch {
     }
 }
 
-fn program(nullable: bool) -> Result<lancy::Program, String> {
-    attributed_amount::build(nullable, PAID, MINIMUM_EXCLUSIVE)?
-        .vectorize()?
-        .ok_or_else(|| "SQL projection requires SIMD".into())
+#[kernel]
+fn project(
+    #[comptime] nullable: bool,
+    status: &[i32],
+    qty: &[i32],
+    amount: &[i32],
+    valid: &[i32],
+    out: &mut [i32],
+) -> i32 {
+    for i in 0..out.len() as i32 {
+        let validity = if nullable { valid[i as usize] } else { -1 };
+        out[i as usize] = attributed_amount(
+            nullable,
+            PAID,
+            MINIMUM_EXCLUSIVE,
+            status[i as usize],
+            qty[i as usize],
+            amount[i as usize],
+            validity,
+        );
+    }
+    out.len() as i32
 }
 
-fn compile(nullable: bool) -> Result<NativeKernel, String> {
-    NativeKernel::specialize(&program(nullable)?, &[])
+fn compile(nullable: bool) -> Result<ScalarKernel, String> {
+    ScalarKernel::compile(&project::build(nullable)?)
+}
+
+fn run_query(code: &ScalarKernel, columns: [&[i32]; 4], out: &mut [i32]) -> Result<usize, String> {
+    use BufferArg::{Read, Write};
+    code.call_with_buffers(
+        &[],
+        &mut [
+            Read(columns[0]),
+            Read(columns[1]),
+            Read(columns[2]),
+            Read(columns[3]),
+            Write(out),
+        ],
+    )
+    .map(|n| n as usize)
 }
 
 fn check_edges() -> Result<(), String> {
@@ -168,7 +201,7 @@ fn check_edges() -> Result<(), String> {
             batch.cpp(&mut cpp, false);
             let mut ir = vec![2; n];
             let mut scratch = vec![0; n];
-            let count = code.run(&batch.columns(&mut scratch), &mut ir)?;
+            let count = run_query(&code, batch.columns(&mut scratch), &mut ir)?;
             if count != n || cpp != expected || ir != expected {
                 return Err(format!(
                     "SQL: incorrect {n}-row tail or NULL handling (nullable={nullable})"
@@ -179,7 +212,7 @@ fn check_edges() -> Result<(), String> {
     Ok(())
 }
 
-fn mixed(n: usize, nullable: bool, code: &NativeKernel) -> Result<(), String> {
+fn mixed(n: usize, nullable: bool, code: &ScalarKernel) -> Result<(), String> {
     let batch = Batch::make(n, nullable);
     let expected = batch.oracle();
     let mut scratch = vec![0; if nullable { n } else { 0 }];
@@ -198,7 +231,7 @@ fn mixed(n: usize, nullable: bool, code: &NativeKernel) -> Result<(), String> {
         |out| batch.cpp(out, false),
         |out| {
             let columns = batch.columns(&mut scratch);
-            assert_eq!(code.run(&columns, out).unwrap(), n);
+            assert_eq!(run_query(code, columns, out).unwrap(), n);
         },
     )
 }
@@ -207,43 +240,42 @@ fn clustered() -> Result<(), String> {
     let n = 65_539;
     let mut batch = Batch::make(n, false);
     batch.status.fill(0);
-    let kernel = AdaptiveKernel::compile(program(false)?)?;
+    let kernel = AdaptiveBufferKernel::compile(project::build(false)?)?;
     let mut out = vec![i32::MAX; n];
-    kernel.run(&batch.columns(&mut []), &mut out)?;
+    run_query(kernel.current(), batch.columns(&mut []), &mut out)?;
     kernel.wait_for_optimization()?;
-    if kernel.stats().tier != Tier::Specialized || out != batch.oracle() {
-        return Err(
-            "SQL: clustered status failed to specialize or gave wrong initial result".into(),
-        );
+    if out != batch.oracle() {
+        return Err("SQL: incorrect result for clustered input".into());
     }
     crate::compare(
         "sql/clustered-rejected/adaptive",
         n,
         &batch.oracle(),
         |out| batch.cpp(out, true),
-        |out| kernel.run(&batch.columns(&mut []), out).unwrap(),
+        |out| {
+            run_query(kernel.current(), batch.columns(&mut []), out).unwrap();
+        },
     )?;
 
-    // The first violated speculation occurs inside an SSE group. Subsequent
-    // rows include both true and false predicates; an all-zero result is wrong.
+    // Reuse the installed code after the input distribution changes.
     batch.status[1003..].fill(PAID);
     batch.quantity[1003] = 3;
     batch.amount[1003] = i32::MIN;
-    kernel.run(&batch.columns(&mut []), &mut out)?;
+    run_query(kernel.current(), batch.columns(&mut []), &mut out)?;
     kernel.wait_for_optimization()?;
     let expected = batch.oracle();
     let mut cpp = vec![0; n];
     batch.cpp(&mut cpp, true);
-    if kernel.stats().deoptimizations != 1 || out != expected || cpp != expected {
-        return Err("SQL: changing status failed to resume at the correct output row".into());
+    if out != expected || cpp != expected {
+        return Err("SQL: wrong output after the input distribution changed".into());
     }
     Ok(())
 }
 
 pub fn run() -> Result<(), String> {
     check_edges()?;
-    let nullable = crate::build("sql/nullable HIR + SIMD", || compile(true))?;
-    let all_valid = crate::build("sql/all-valid HIR + SIMD", || compile(false))?;
+    let nullable = crate::build("sql/nullable HIR", || compile(true))?;
+    let all_valid = crate::build("sql/all-valid HIR", || compile(false))?;
     mixed(31, true, &nullable)?;
     mixed(65_539, true, &nullable)?;
     mixed(65_539, false, &all_valid)?;

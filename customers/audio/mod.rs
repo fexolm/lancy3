@@ -1,4 +1,4 @@
-use lancy::{NativeKernel, kernel};
+use lancy::{BufferArg, ScalarKernel, kernel};
 
 #[derive(Clone, Copy)]
 struct Patch {
@@ -59,15 +59,27 @@ fn voice_step(#[comptime] patch: Patch, sample: i32, previous: i32) -> i32 {
     if limited > high { high } else { limited }
 }
 
-fn compile_patch(patch: Patch) -> Result<NativeKernel, String> {
-    let program = voice_step::build(patch)?
-        .vectorize()?
-        .ok_or("audio voice step requires SIMD")?;
-    NativeKernel::specialize(&program, &[])
+#[kernel]
+fn render(#[comptime] patch: Patch, input: &[i32], output: &mut [i32], state: &mut [i32]) -> i32 {
+    let mut base = 0;
+    while base < input.len() as i32 {
+        for voice in 0..state.len() as i32 {
+            let i = (base + voice) as usize;
+            let next = voice_step(patch, input[i], state[voice as usize]);
+            output[i] = next;
+            state[voice as usize] = next;
+        }
+        base += state.len() as i32;
+    }
+    base
+}
+
+fn compile_patch(patch: Patch) -> Result<ScalarKernel, String> {
+    ScalarKernel::compile(&render::build(patch)?)
 }
 
 fn process(
-    code: &NativeKernel,
+    code: &ScalarKernel,
     input: &[i32],
     output: &mut [i32],
     state: &mut [i32],
@@ -82,19 +94,14 @@ fn process(
     if voices == 0 {
         return Err("a nonempty audio buffer needs at least one voice".into());
     }
-    let mut previous: &[i32] = state;
-    for (frame, destination) in input
-        .chunks_exact(voices)
-        .zip(output.chunks_exact_mut(voices))
-    {
-        if code.run(&[frame, previous], destination)? != voices {
-            return Err("unguarded audio kernel stopped mid-frame".into());
-        }
-        // The output of this frame is directly borrowed as the next frame's
-        // feedback. Only one copy of the last frame is needed per callback.
-        previous = destination;
-    }
-    state.copy_from_slice(&output[output.len() - voices..]);
+    code.call_with_buffers(
+        &[],
+        &mut [
+            BufferArg::Read(input),
+            BufferArg::Write(output),
+            BufferArg::Write(state),
+        ],
+    )?;
     Ok(())
 }
 
@@ -133,7 +140,7 @@ fn initial_state(voices: usize) -> Vec<i32> {
         .collect()
 }
 
-fn verify(code: &NativeKernel) -> Result<(), String> {
+fn verify(code: &ScalarKernel) -> Result<(), String> {
     let quiet = Patch {
         gain: 1,
         rise: 256,

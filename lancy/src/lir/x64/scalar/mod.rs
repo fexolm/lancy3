@@ -1,55 +1,85 @@
-//! Scalar x86-64 functions with control flow and a host-owned call workspace.
-//! The C entry point accepts (arguments, workspace) and returns one i32.
-//! Static callees share one native body per Function. A native jump enters
-//! that body with its own frame; the return continuation lives in the frame.
-//! No generated instruction adjusts RSP or touches a nonvolatile register.
-
+//! x86-64 machine emission and the internal, workspace-based call convention.
 mod checked;
 mod encode;
 mod frame;
+mod machine;
 mod memory;
+mod regalloc;
 #[cfg(test)]
 mod tests;
 
-use crate::hir::{Binary, Function, Instr, Label, Reg};
-use crate::lir::scalar::Layout;
+use crate::hir::{
+    Binary,
+    ssa::{Function, Op as HirOp},
+};
+use crate::lir::ssa::{Condition, Exit, Op, SsaBody};
 use checked::Failures;
-use encode::{Code, EAX, ECX, ENDBR64, RDX, comparison};
+use encode::{Code, EAX, ECX, ENDBR64, comparison};
 pub(crate) use frame::buffer_header_words;
-use frame::{Frame, Graph, Home, LINK_SLOTS};
+use frame::{Home, LINK_SLOTS};
+use machine::Machine;
 use std::collections::HashMap;
+use std::sync::Arc;
 
-#[derive(Default)]
-struct Labels {
-    bound: HashMap<u32, usize>,
-    fixups: Vec<(usize, u32)>,
+struct Graph {
+    functions: Vec<Machine>,
+    workspace: usize,
 }
-
-impl Labels {
-    fn jump(&mut self, code: &mut Code, cc: Option<u8>, to: Label) {
-        let pos = match cc {
-            Some(cc) => code.rel32(&[0x0f, 0x80 | cc]),
-            None => code.rel32(&[0xe9]),
-        };
-        self.fixups.push((pos, to.0));
-    }
-
-    fn branch(
-        &mut self,
-        code: &mut Code,
-        cc: u8,
-        yes: Label,
-        no: Label,
-        fallthrough: Option<Label>,
-    ) {
-        if Some(yes) == fallthrough {
-            self.jump(code, Some(cc ^ 1), no);
-        } else {
-            self.jump(code, Some(cc), yes);
-            if Some(no) != fallthrough {
-                self.jump(code, None, no);
+impl Graph {
+    fn lower(root: &Function) -> Result<Self, String> {
+        let mut ids = HashMap::from([(std::ptr::from_ref(root), 0)]);
+        let mut source = vec![root];
+        let mut functions = Vec::new();
+        while let Some(&f) = source.get(functions.len()) {
+            f.verify()?;
+            for b in f.blocks() {
+                for inst in f.instructions(b) {
+                    if let HirOp::Call(c) = f.op(inst) {
+                        let (target, _, _) = f.call(*c);
+                        ids.entry(Arc::as_ptr(target)).or_insert_with(|| {
+                            let n = source.len();
+                            source.push(target);
+                            n
+                        });
+                    }
+                }
+            }
+            let body = SsaBody::lower(f, &ids);
+            let allocation = regalloc::allocate(f, &body, functions.is_empty());
+            functions.push(Machine::new(body, allocation));
+        }
+        // The internal ABI reuses the child workspace between sibling calls.
+        let mut states = vec![0u8; functions.len()];
+        let mut peaks = vec![0usize; functions.len()];
+        let mut tasks = vec![(0, false)];
+        while let Some((id, done)) = tasks.pop() {
+            let f = &functions[id];
+            if done {
+                let child = f.calls.iter().map(|c| peaks[c.target]).max().unwrap_or(0);
+                peaks[id] = f
+                    .frame
+                    .slots
+                    .checked_add(child)
+                    .ok_or("scalar frame overflow")?;
+                states[id] = 2;
+            } else {
+                match states[id] {
+                    2 => continue,
+                    1 => return Err("recursive runtime calls require a dynamic stack".into()),
+                    _ => {}
+                }
+                states[id] = 1;
+                tasks.push((id, true));
+                tasks.extend(f.calls.iter().map(|c| (c.target, false)));
             }
         }
+        if peaks[0] > i32::MAX as usize / 4 || root.arity() > i32::MAX as usize / 4 {
+            return Err("scalar workspace exceeds x64 displacement range".into());
+        }
+        Ok(Self {
+            functions,
+            workspace: peaks[0],
+        })
     }
 }
 
@@ -58,40 +88,6 @@ enum EntryArgs {
     Slice,
     Three,
 }
-
-// Lower (x & mask) ==/!= 0 directly to TEST and Jcc. A fixed HIR literal
-// between the AND and comparison is rematerialized and emits no instruction.
-fn mask_branch(
-    f: &Function,
-    frame: &Frame,
-    mut i: usize,
-    masked: Reg,
-) -> Option<(usize, u8, Label, Label)> {
-    while let Some(Instr::Const(dst, _)) = f.code.get(i) {
-        if !matches!(frame.homes[dst.0 as usize], Home::Dead | Home::Immediate(_)) {
-            return None;
-        }
-        i += 1;
-    }
-    let Instr::Bin(cmp, op @ (Binary::Eq | Binary::Ne), a, b) = f.code.get(i)? else {
-        return None;
-    };
-    let zero = if *a == masked {
-        *b
-    } else if *b == masked {
-        *a
-    } else {
-        return None;
-    };
-    if frame.homes[zero.0 as usize] != Home::Immediate(0) || frame.reads[cmp.0 as usize] != 1 {
-        return None;
-    }
-    let Instr::Branch { cond, yes, no } = f.code.get(i + 1)? else {
-        return None;
-    };
-    (*cond == *cmp).then_some((i + 2, if *op == Binary::Eq { 4 } else { 5 }, *yes, *no))
-}
-
 fn load_three_args(code: &mut Code, homes: &[Home]) {
     // Move the scratch pointer before assigning r8..r11 to virtual registers.
     // The preserved source registers below cannot be overwritten by store().
@@ -114,190 +110,168 @@ fn load_three_args(code: &mut Code, homes: &[Home]) {
     }
 }
 
-fn body(code: &mut Code, graph: &Graph<'_>, id: usize, arguments: EntryArgs) -> Result<(), String> {
-    let f = graph.functions[id];
-    let frame = &graph.frames[id];
-    let home = |r: Reg| frame.homes[r.0 as usize];
-    if id == 0 && arguments == EntryArgs::Three {
-        load_three_args(code, &frame.homes);
+/// Scheduling uses verified block IDs, while each branch fixup names a machine
+/// block (including any critical-edge bridges introduced during allocation).
+fn emit_function(code: &mut Code, graph: &Graph, id: usize, abi: EntryArgs) -> Result<(), String> {
+    let f = &graph.functions[id];
+    let frame = &f.frame;
+    if id == 0 && abi == EntryArgs::Three {
+        load_three_args(code, &frame.args);
     } else {
-        for arg in 0..f.arity {
-            let dest = frame.homes[arg];
-            if id != 0 {
-                code.assign(dest, Home::Slot(LINK_SLOTS + arg));
-            } else if dest != Home::Dead {
-                let reg = match dest {
-                    Home::Register(r) => r,
-                    _ => EAX,
-                };
-                code.memory_op(&[0x8b], reg, ECX, arg);
-                code.store(dest, reg);
-            }
-        }
-    }
-    let mut labels = Labels::default();
-    let mut failures = Failures::default();
-    let layout = Layout::new(f);
-    let fallthrough = |i| layout.fallthrough(f.code.get(i));
-    let mut returned = false;
-    let mut i = 0;
-    while let Some(instr) = f.code.get(i) {
-        let path = layout.returns[i];
-        i += 1;
-        if let Instr::Label(label) = instr {
-            if let Some((_, next)) = layout.deferred[label.0 as usize] {
-                i = f.targets[next.0 as usize];
+        for (i, &dest) in frame.args.iter().enumerate() {
+            if dest == Home::Dead {
                 continue;
             }
-            returned &= !layout.branch_entries[label.0 as usize];
-            labels.bound.insert(label.0, code.bytes.len());
+            if id == 0 {
+                let reg = if let Home::Register(r) = dest { r } else { EAX };
+                code.memory_op(&[0x8b], reg, ECX, i);
+                code.store(dest, reg);
+            } else {
+                code.assign(dest, Home::Slot((LINK_SLOTS + i) as u32));
+            }
+        }
+    }
+    let returns = f.returns();
+    let mut order = Vec::new();
+    let mut seen = vec![false; f.blocks.len()];
+    let mut queue = vec![0];
+    while let Some(b) = queue.pop() {
+        if std::mem::replace(&mut seen[b], true) {
             continue;
         }
-        if returned {
+        order.push(b);
+        if returns[b].is_some() {
             continue;
         }
-        if let Some(value) = path {
-            code.return_value(value, frame, id == 0);
-            returned = true;
+        match f.blocks[b].exit {
+            Exit::Jump(n) if returns[n].is_none() => queue.push(n),
+            Exit::Branch(_, yes, no) => {
+                // Prefer a computing arm as fallthrough over an early return.
+                if returns[yes].is_some() {
+                    queue.extend([yes, no]);
+                } else {
+                    queue.extend([no, yes]);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut offsets = vec![0; f.blocks.len()];
+    let mut branches = Vec::new();
+    let mut failures = Failures::default();
+    for (index, &b) in order.iter().enumerate() {
+        offsets[b] = code.bytes.len();
+        if let Some(v) = returns[b] {
+            code.return_value(v, id == 0);
             continue;
         }
-        match instr {
-            Instr::Const(dst, n) => code.assign(home(*dst), Home::Immediate(*n)),
-            Instr::Copy(dst, src) => code.assign(home(*dst), home(*src)),
-            Instr::BufferLen { dst, buffer } => {
-                code.buffer_len(frame.buffer_slot(buffer.index()), home(*dst));
-            }
-            Instr::Load { dst, buffer, index } => {
-                failures.bounds.push(code.load_element(
-                    frame.buffer_slot(buffer.index()),
-                    home(*index),
-                    home(*dst),
-                ));
-            }
-            Instr::Store {
-                buffer,
-                index,
-                value,
-            } => {
-                failures.bounds.push(code.store_element(
-                    frame.buffer_slot(buffer.index()),
-                    home(*index),
-                    home(*value),
-                ));
-            }
-            Instr::Bin(dst, op @ (Binary::Div | Binary::Rem), lhs, rhs) => {
-                code.divide(*op, home(*dst), home(*lhs), home(*rhs), &mut failures)?;
-            }
-            Instr::Bin(dst, op, lhs, rhs) => {
-                if *op == Binary::And
-                    && frame.reads[dst.0 as usize] == 1
-                    && let (source, Home::Immediate(mask)) | (Home::Immediate(mask), source) =
-                        (home(*lhs), home(*rhs))
-                    && let Some((next, cc, yes, no)) = mask_branch(f, frame, i, *dst)
-                {
-                    code.test_mask(source, mask);
-                    i = next;
-                    labels.branch(code, cc, yes, no, fallthrough(i));
-                    continue;
+        let block = &f.blocks[b];
+        for &op in &f.ops[block.ops.clone()] {
+            match op {
+                Op::Imm(..) => unreachable!("literal materialization occurs at the use"),
+                Op::Move(dst, src) => code.assign(dst, src),
+                Op::Alu(dst, kind @ (Binary::Div | Binary::Rem), a, b) => {
+                    code.divide(kind, dst, a, b, &mut failures)?
                 }
-                // When the sole consumer is the next branch, consume the
-                // processor flags directly instead of creating a boolean mask.
-                if let Some(cc) = comparison(*op)
-                    && let Some(Instr::Branch { cond, yes, no }) = f.code.get(i)
-                    && cond.0 == dst.0
-                    && frame.reads[dst.0 as usize] == 1
-                {
-                    code.cmp(home(*lhs), home(*rhs));
-                    i += 1;
-                    labels.branch(code, cc, *yes, *no, fallthrough(i));
-                    continue;
+                Op::Alu(dst, kind, a, b) => code.binary(kind, dst, a, b),
+                Op::Len(dst, b) => code.buffer_len(frame.buffer_slot(b.index()), dst),
+                Op::Load(dst, b, i) => {
+                    failures
+                        .bounds
+                        .push(code.load_element(frame.buffer_slot(b.index()), i, dst))
                 }
-                code.binary(*op, home(*dst), home(*lhs), home(*rhs));
-            }
-            Instr::Label(_) | Instr::Return(_) => unreachable!(),
-            Instr::Jump(to) => {
-                if !matches!(f.code.get(i), Some(Instr::Label(l)) if l.0 == to.0) {
-                    labels.jump(code, None, *to);
+                Op::Store(b, i, v) => {
+                    failures
+                        .bounds
+                        .push(code.store_element(frame.buffer_slot(b.index()), i, v))
                 }
-            }
-            Instr::Branch { cond, yes, no } => {
-                match home(*cond) {
-                    Home::Immediate(n) => labels.jump(code, None, if n != 0 { *yes } else { *no }),
-                    Home::Register(r) => {
-                        code.register_op(&[0x85], r, r);
-                        labels.branch(code, 5, *yes, *no, fallthrough(i));
+                Op::Call(dst, index) => {
+                    let site = &f.calls[index as usize];
+                    let child = &graph.functions[site.target].frame;
+                    // A child with status has a header (status pointer followed by buffers).
+                    if child.has_status {
+                        code.pass_header(frame, child, &site.buffers);
                     }
-                    Home::Slot(s) => {
-                        code.memory_op(&[0x83], 7, RDX, s); // cmp dword [rdx+off],0
-                        code.bytes.push(0);
-                        labels.branch(code, 5, *yes, *no, fallthrough(i));
+                    code.call(
+                        frame,
+                        site.target,
+                        child,
+                        dst,
+                        &site.args,
+                        f.saves[index as usize],
+                    )?;
+                }
+            }
+        }
+        let next = order.get(index + 1).copied();
+        match block.exit {
+            Exit::Return(v) => code.return_value(v, id == 0),
+            Exit::Jump(n) => {
+                if let Some(v) = returns[n] {
+                    code.return_value(v, id == 0);
+                } else if Some(n) != next {
+                    branches.push((code.rel32(&[0xe9]), n));
+                }
+            }
+            Exit::Branch(c, yes, no) => {
+                let cc = match c {
+                    Condition::Nonzero(v) => {
+                        code.cmp(v, Home::Immediate(0));
+                        5
                     }
-                    Home::Dead => unreachable!(),
+                    Condition::Compare(op, a, b) => {
+                        code.cmp(a, b);
+                        comparison(op).unwrap()
+                    }
+                    Condition::Mask {
+                        source,
+                        mask,
+                        nonzero,
+                    } => {
+                        code.test_mask(source, mask);
+                        if nonzero { 5 } else { 4 }
+                    }
+                };
+                if next == Some(yes) {
+                    branches.push((code.rel32(&[0x0f, 0x80 | (cc ^ 1)]), no));
+                } else {
+                    branches.push((code.rel32(&[0x0f, 0x80 | cc]), yes));
+                    if next != Some(no) {
+                        branches.push((code.rel32(&[0xe9]), no));
+                    }
                 }
-            }
-            Instr::Call {
-                dst,
-                function,
-                args,
-                buffers,
-            } => {
-                let child = graph.ids[&std::sync::Arc::as_ptr(function)];
-                if function.needs_status() {
-                    code.pass_header(frame, &graph.frames[child], buffers);
-                }
-                code.call(frame, child, &graph.frames[child], home(*dst), args)?;
             }
         }
     }
-    for (label, exit) in layout.deferred.into_iter().enumerate() {
-        if let Some((value, _)) = exit {
-            labels.bound.insert(label as u32, code.bytes.len());
-            code.return_value(value, frame, id == 0);
-        }
+    for (offset, b) in branches {
+        code.patch(offset, offsets[b])?;
     }
-    for (offset, label) in labels.fixups {
-        let target = labels
-            .bound
-            .get(&label)
-            .ok_or("undefined scalar branch target")?;
-        code.patch(offset, *target)?;
-    }
-    code.failure_exits(frame, failures)?;
-    Ok(())
+    code.failure_exits(frame, failures)
 }
-
-pub(crate) fn emit(function: &Function) -> Result<(Vec<u8>, usize), String> {
+pub(crate) fn emit_ssa(function: &Function) -> Result<(Vec<u8>, usize), String> {
     emit_with_abi(function, EntryArgs::Slice)
 }
-
-/// extern "C" fn(i32, i32, i32, *mut i32) -> i32. Only the external
-/// prologue changes; the emitted control flow and callee ABI are identical.
-pub(crate) fn emit3(function: &Function) -> Result<(Vec<u8>, usize), String> {
-    if function.arity != 3 || function.needs_status() {
-        return Err(
-            "the typed x64 entry point expects three scalar arguments and no error-status frame"
-                .into(),
-        );
+pub(crate) fn emit_ssa3(function: &Function) -> Result<(Vec<u8>, usize), String> {
+    if function.arity() != 3 || function.needs_status() {
+        return Err("typed x64 entry expects 3 scalar arguments and no error-status frame".into());
     }
     emit_with_abi(function, EntryArgs::Three)
 }
-
-fn emit_with_abi(function: &Function, arguments: EntryArgs) -> Result<(Vec<u8>, usize), String> {
-    let graph = Graph::discover(function);
-    let workspace = graph.workspace()?;
+fn emit_with_abi(f: &Function, abi: EntryArgs) -> Result<(Vec<u8>, usize), String> {
+    let graph = Graph::lower(f)?;
     let mut code = Code::default();
     code.put(&ENDBR64);
     #[cfg(not(windows))]
-    if arguments == EntryArgs::Slice {
-        code.put(&[0x48, 0x89, 0xf9, 0x48, 0x89, 0xf2]); // RCX=args, RDX=scratch
+    if abi == EntryArgs::Slice {
+        code.put(&[0x48, 0x89, 0xf9, 0x48, 0x89, 0xf2]);
     }
     let mut entries = Vec::with_capacity(graph.functions.len());
     for id in 0..graph.functions.len() {
         entries.push(code.bytes.len());
-        body(&mut code, &graph, id, arguments)?;
+        emit_function(&mut code, &graph, id, abi)?;
     }
     for (offset, id) in std::mem::take(&mut code.calls) {
         code.patch(offset, entries[id])?;
     }
-    Ok((code.bytes, workspace))
+    Ok((code.bytes, graph.workspace))
 }

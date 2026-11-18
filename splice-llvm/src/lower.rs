@@ -1,5 +1,7 @@
 //! Lower a verified Splice call graph using Inkwell's typed builder.
 mod body;
+mod direct;
+pub(crate) use direct::populate_direct;
 
 use body::Body;
 use inkwell::AddressSpace;
@@ -39,10 +41,18 @@ pub(crate) fn populate<'ctx>(
 
     let mut declarations = Vec::with_capacity(functions.len());
     for (id, f) in functions.iter().enumerate() {
-        declarations.push(declare(ctx, module, f, id)?);
+        declarations.push(declare(ctx, module, f.arity(), f.buffer_kinds(), id)?);
     }
     let builder = ctx.create_builder();
-    emit_entry(ctx, module, &builder, root, declarations[0]).map_err(|e| e.to_string())?;
+    emit_entry(
+        ctx,
+        module,
+        &builder,
+        root.arity(),
+        root.buffer_kinds().len(),
+        declarations[0],
+    )
+    .map_err(|e| e.to_string())?;
     for (id, f) in functions.into_iter().enumerate() {
         Body::emit(ctx, &builder, f, declarations[id], &ids, &declarations)
             .map_err(|e| e.to_string())?;
@@ -53,16 +63,22 @@ pub(crate) fn populate<'ctx>(
 fn declare<'ctx>(
     ctx: &'ctx Context,
     module: &Module<'ctx>,
-    f: &Function,
+    arity: usize,
+    buffers: &[BufferKind],
     id: usize,
 ) -> Result<FunctionValue<'ctx>, String> {
-    let n = 1 + f.arity() + 2 * f.buffer_kinds().len();
+    let n = buffers
+        .len()
+        .checked_mul(2)
+        .and_then(|n| n.checked_add(arity))
+        .and_then(|n| n.checked_add(1))
+        .ok_or("LLVM kernel signature too large")?;
     u32::try_from(n).map_err(|_| "kernel signature exceeds LLVM's parameter count")?;
     let mut params = Vec::with_capacity(n);
     let pointer = ctx.ptr_type(AddressSpace::default());
     params.push(pointer.into()); // status
-    params.resize(1 + f.arity(), ctx.i32_type().into());
-    for _ in f.buffer_kinds() {
+    params.resize(1 + arity, ctx.i32_type().into());
+    for _ in buffers {
         params.push(pointer.into());
         params.push(ctx.i64_type().into());
     }
@@ -80,8 +96,8 @@ fn declare<'ctx>(
         .find(|&id| id != 0)
         .map(|id| ctx.create_enum_attribute(id, 0));
     callee.add_attribute(AttributeLoc::Param(0), noalias);
-    for (i, kind) in f.buffer_kinds().iter().enumerate() {
-        let slot = AttributeLoc::Param((1 + f.arity() + i * 2) as u32);
+    for (i, kind) in buffers.iter().enumerate() {
+        let slot = AttributeLoc::Param((1 + arity + i * 2) as u32);
         callee.add_attribute(
             slot,
             match kind {
@@ -102,7 +118,8 @@ fn emit_entry<'ctx>(
     ctx: &'ctx Context,
     module: &Module<'ctx>,
     b: &Builder<'ctx>,
-    f: &Function,
+    arity: usize,
+    buffer_count: usize,
     root: FunctionValue<'ctx>,
 ) -> Result<(), BuilderError> {
     let ptr = ctx.ptr_type(AddressSpace::default());
@@ -116,14 +133,14 @@ fn emit_entry<'ctx>(
     let descriptors = params.next().unwrap().into_pointer_value();
     let status = params.next().unwrap();
     let mut args = vec![status.into()];
-    for i in 0..f.arity() {
+    for i in 0..arity {
         let index = i64_ty.const_int(i as u64, false);
         // SAFETY: Executable::call verifies the length of the scalar array.
         let address = unsafe { b.build_in_bounds_gep(i32_ty, scalars, &[index], "")? };
         args.push(b.build_load(i32_ty, address, "")?.into());
     }
     let desc = ctx.struct_type(&[ptr.into(), i64_ty.into()], false);
-    for i in 0..f.buffer_kinds().len() {
+    for i in 0..buffer_count {
         let index = i64_ty.const_int(i as u64, false);
         // SAFETY: Executable::call validates one (data, length) descriptor per slice.
         let slot = unsafe { b.build_in_bounds_gep(desc, descriptors, &[index], "")? };

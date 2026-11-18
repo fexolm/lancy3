@@ -33,13 +33,13 @@ impl Llvm {
 
 fn build_module<'ctx>(
     context: &'ctx Context,
-    function: &Function,
     target: &TargetMachine,
+    populate: impl FnOnce(&'ctx Context, &Module<'ctx>) -> Result<(), String>,
 ) -> Result<Module<'ctx>, String> {
     let module = context.create_module("splice");
     module.set_triple(&target.get_triple());
     module.set_data_layout(&target.get_target_data().get_data_layout());
-    lower::populate(context, &module, function)?;
+    populate(context, &module)?;
     module.verify().map_err(|error| error.to_string())?;
     Ok(module)
 }
@@ -48,9 +48,11 @@ fn build_module<'ctx>(
 pub fn to_llvm_ir(function: &Function) -> Result<String, String> {
     Llvm::version()?;
     let context = Context::create();
-    Ok(build_module(&context, function, &jit::host_machine()?)?
-        .print_to_string()
-        .to_string())
+    Ok(build_module(&context, &jit::host_machine()?, |ctx, m| {
+        lower::populate(ctx, m, function)
+    })?
+    .print_to_string()
+    .to_string())
 }
 
 #[repr(C)]
@@ -75,16 +77,32 @@ pub struct LlvmKernel {
 }
 
 impl Codegen for Llvm {
-    type Kernel = LlvmKernel;
+    type Output = Result<LlvmKernel, String>;
 
-    fn compile(function: &Function) -> Result<Self::Kernel, String> {
+    fn compile(function: &Function) -> Self::Output {
         Self::version()?;
-        let (owner, entry) = jit::Jit::compile(function)?;
+        let (owner, entry) = jit::Jit::compile(|ctx, m| lower::populate(ctx, m, function))?;
         Ok(LlvmKernel {
             _owner: owner,
             entry,
             arity: function.arity(),
             buffers: function.buffer_kinds().into(),
+        })
+    }
+
+    fn build(
+        arity: usize,
+        buffers: &[BufferKind],
+        body: splice::frontend::Body<'_>,
+    ) -> Self::Output {
+        Self::version()?;
+        let (owner, entry) =
+            jit::Jit::compile(move |ctx, m| lower::populate_direct(ctx, m, arity, buffers, body))?;
+        Ok(LlvmKernel {
+            _owner: owner,
+            entry,
+            arity,
+            buffers: buffers.into(),
         })
     }
 }

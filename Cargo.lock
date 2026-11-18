@@ -156,6 +156,7 @@ dependencies = [
  "splice-lancy",
  "splice-llvm",
  "splice-macros",
+ "splice-text",
 ]
 
 [[package]]
@@ -183,6 +184,13 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.119",
+]
+
+[[package]]
+name = "splice-text"
+version = "0.1.0"
+dependencies = [
+ "splice",
 ]
 
 [[package]]

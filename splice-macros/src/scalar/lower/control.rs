@@ -135,17 +135,22 @@ impl Lower<'_> {
             return err(e, "break/continue outside a kernel loop");
         };
         let target = if again { next } else { end };
+        let record = self.unrolled_exits.as_ref().map(|(n, e)| {
+            let reached = if again { n } else { e };
+            quote!(#reached = true;)
+        });
         let b = self.builder;
         let region = self.region();
         Ok(Value::new(
             Stage::Never,
-            quote!({#b.jump(#target); break #region;}),
+            quote!({#record #b.jump(#target); break #region;}),
         ))
     }
     pub(super) fn loop_expr(&self, cond: Option<&Expr>, body: &Block) -> Result<Value> {
         let b = self.builder;
         let (header, end) = (private("__lancy_loop_head"), private("__lancy_loop_end"));
         let mut scope = self.nested_region();
+        scope.unrolled_exits = None;
         scope.loop_labels = Some((header.clone(), end.clone()));
         let test = if let Some(e) = cond {
             let reg = scope.reg(scope.expr(e)?, Scalar::Bool, e)?;
@@ -168,7 +173,7 @@ impl Lower<'_> {
     }
     pub(super) fn for_expr(&self, f: &syn::ExprForLoop) -> Result<Value> {
         let Expr::Range(range) = &*f.expr else {
-            return err(&f.expr, "kernel for loops require start..end");
+            return self.unroll(f);
         };
         let (Some(start), Some(stop)) = (&range.start, &range.end) else {
             return err(range, "expected start..end");
@@ -208,6 +213,7 @@ impl Lower<'_> {
         let one = private("__lancy_one");
         let next = private("__lancy_next");
         let mut scope = self.nested_region();
+        scope.unrolled_exits = None;
         scope.loop_labels = Some((step.clone(), end.clone()));
         let id = &pat.ident;
         scope
@@ -226,6 +232,47 @@ impl Lower<'_> {
             #contents #b.mark(#step);
             let #one=#b.constant(1);let #next=#b.binary(#root::hir::Binary::Add,#id,#one);
             #b.assign(#id,#next);#b.jump(#head);#b.mark(#end);
+        })))
+    }
+    fn unroll(&self, f: &syn::ExprForLoop) -> Result<Value> {
+        // The Rust iterator is evaluated once. The pattern (including references
+        // and destructuring) exists only while staging this iteration.
+        let iterable = self.host_raw(&f.expr)?;
+        let pat = &f.pat;
+        let b = self.builder;
+        let mut bindings = self.clone();
+        PatternNames(&mut bindings.bindings).visit_pat(pat);
+        if !contains_transfer(&f.body) {
+            // A straight-line plan needs no iteration labels or induction
+            // variable. Only the operations in its selected steps reach IR.
+            let body = bindings.block(&f.body)?.code;
+            return Ok(Value::unit(quote!({for #pat in #iterable { #body; }})));
+        }
+        let next = private("__splice_iteration_end");
+        let end = private("__splice_unroll_end");
+        let continued = private("__splice_reaches_next");
+        let stopped = private("__splice_reaches_end");
+        let mut scope = bindings.nested_region();
+        scope.loop_labels = Some((next.clone(), end.clone()));
+        scope.unrolled_exits = Some((continued.clone(), stopped.clone()));
+        let body = scope.block(&f.body)?;
+        let fallthrough = (body.stage != Stage::Never).then(|| quote!(#continued = true;));
+        let body = body.code;
+        let iteration = scope.delimit(quote!(#body; #fallthrough));
+        let leave = self.end_region();
+        Ok(Value::unit(quote!({
+            let #end = #b.label();
+            let mut #stopped = false;
+            let mut #continued = true;
+            for #pat in #iterable {
+                let #next = #b.label();
+                #continued = false;
+                #iteration
+                #b.mark(#next);
+                if !#continued { break; }
+            }
+            #b.mark(#end);
+            if !#continued && !#stopped { #leave }
         })))
     }
     pub(super) fn match_expr(&self, m: &syn::ExprMatch) -> Result<Value> {
@@ -372,6 +419,25 @@ impl Lower<'_> {
             ),
         }
     }
+}
+
+fn contains_transfer(body: &Block) -> bool {
+    struct Transfers(bool);
+    impl<'ast> Visit<'ast> for Transfers {
+        fn visit_expr(&mut self, expr: &'ast Expr) {
+            if matches!(
+                expr,
+                Expr::Break(_) | Expr::Continue(_) | Expr::Return(_) | Expr::Loop(_)
+            ) {
+                self.0 = true;
+            } else if !self.0 {
+                syn::visit::visit_expr(self, expr);
+            }
+        }
+    }
+    let mut visitor = Transfers(false);
+    visitor.visit_block(body);
+    visitor.0
 }
 
 fn contains_break(body: &Block) -> bool {

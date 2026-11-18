@@ -1,5 +1,5 @@
-use lancy::hir::{Buffer, BufferArg, BufferKind, Instr};
-use lancy::{MappedKernel, ScalarFn, ScalarKernel, kernel};
+use lancy::input::{Buffer, BufferArg, BufferKind, Instr};
+use lancy::{ScalarFn, ScalarKernel, kernel};
 
 #[kernel]
 fn append_score(out: &mut [i32], #[comptime] factor: i32, values: &[i32], row: i32) -> i32 {
@@ -69,7 +69,6 @@ fn slice_calls_remap_arguments_and_keep_row_updates() {
 fn entry_points_check_buffer_signatures_before_executing() {
     let f = score_column::build(3).unwrap();
     assert!(ScalarFn::<0>::baseline(&f).is_err());
-    assert!(MappedKernel::compile(&f).is_err());
     let kernel = ScalarKernel::compile(&f).unwrap();
     let mut caller = kernel.caller();
     assert!(kernel.call(&[]).is_err());
@@ -158,14 +157,6 @@ fn division_errors_follow_runtime_control_flow() {
     let typed = ScalarFn::<3>::compile(&f).unwrap();
     assert!(typed.try_invoke([2, 9, 0]).is_err());
     assert_eq!(typed.try_invoke([1, -17, 5]).unwrap(), -2);
-    let mapped = MappedKernel::compile(&f).unwrap();
-    let mut out = [41; 3];
-    assert!(
-        mapped
-            .run(&[&[0, 1, 0], &[9, 9, 9], &[2, 0, 3]], &mut out)
-            .is_err()
-    );
-    assert_eq!(out, [4, 41, 41]);
     for jit in [ScalarKernel::baseline(&f), ScalarKernel::compile(&f)] {
         let jit = jit.unwrap();
         for mode in 0..4 {

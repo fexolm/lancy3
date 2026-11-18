@@ -11,6 +11,7 @@ splice-macros = { path = "../splice-macros" }
 [dev-dependencies]
 splice-lancy = { path = "../splice-lancy" }
 splice-llvm = { path = "../splice-llvm" }
+splice-text = { path = "../splice-text" }
 lancy = { path = "../lancy" }
 
 [[bench]]

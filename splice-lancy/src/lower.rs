@@ -1,11 +1,14 @@
-use lancy::hir as native;
+use lancy::input as native;
 use splice::hir::{Binary, Buffer, BufferKind, Function, Instr, Label, Reg};
 use std::collections::HashMap;
 use std::sync::Arc;
 
-/// Translate a verified Splice program, retaining register numbers, control
-/// flow and shared callees. Lancy verifies its own instruction stream on import.
-pub fn lower(root: &Function) -> Result<native::Function, String> {
+/// Resolve mutable Splice registers and control flow into a Lancy SSA graph.
+pub fn lower(root: &Function) -> Result<lancy::hir::Function, String> {
+    lancy::hir::from_input(&import(root)?)
+}
+
+fn import(root: &Function) -> Result<native::Function, String> {
     let mut compiled = HashMap::new();
     let mut pending = vec![(root, false)];
     while let Some((function, ready)) = pending.pop() {
@@ -107,7 +110,7 @@ fn buffer(b: Buffer) -> native::Buffer {
     native::Buffer(b.0)
 }
 
-fn binary(op: Binary) -> native::Binary {
+pub(super) fn binary(op: Binary) -> native::Binary {
     use native::Binary as N;
     match op {
         Binary::Add => N::Add,

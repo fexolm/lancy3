@@ -1,5 +1,4 @@
-//! A bounded process-wide compiler queue shared by scalar and batch kernels.
-use super::batch::BatchJob;
+//! A bounded process-wide compiler queue for background kernel specialization.
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, SyncSender, TrySendError};
 use std::sync::{Mutex, OnceLock};
@@ -7,10 +6,7 @@ use std::thread;
 
 const QUEUE_CAPACITY: usize = 128;
 
-enum Job {
-    Batch(BatchJob),
-    Scalar(Box<dyn FnOnce() + Send>),
-}
+type Job = Box<dyn FnOnce() + Send>;
 
 /// Submit one scalar compilation, retaining the right to retry a full queue.
 /// Construct the job inside `attempt` so pending calls do not allocate or clone its owner.
@@ -56,20 +52,11 @@ impl ScalarSubmission {
     }
 }
 
-/// Preserve the batch's guard list when the caller needs to retry.
-pub(super) fn submit_batch(job: BatchJob, blocking: bool) -> Result<Option<BatchJob>, String> {
-    match submit(Job::Batch(job), blocking)? {
-        Some(Job::Batch(job)) => Ok(Some(job)),
-        Some(Job::Scalar(_)) => unreachable!("queue returned a different job"),
-        None => Ok(None),
-    }
-}
-
 pub(super) fn submit_scalar(
     job: impl FnOnce() + Send + 'static,
     blocking: bool,
 ) -> Result<bool, String> {
-    Ok(submit(Job::Scalar(Box::new(job)), blocking)?.is_none())
+    Ok(submit(Box::new(job), blocking)?.is_none())
 }
 
 fn submit(job: Job, blocking: bool) -> Result<Option<Job>, String> {
@@ -96,10 +83,7 @@ fn compiler_queue() -> Result<&'static SyncSender<Job>, String> {
                 .name("lancy-jit-compiler".into())
                 .spawn(move || {
                     for job in rx {
-                        match job {
-                            Job::Batch(job) => job.run(),
-                            Job::Scalar(run) => run(),
-                        }
+                        job();
                     }
                 })
                 .map_err(|e| format!("could not start background compiler: {e}"))?;

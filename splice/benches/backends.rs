@@ -1,21 +1,35 @@
-//! Compile the same staged function with both JITs and time whole invocations.
+//! Measure direct builds from staged Rust, compilation from one portable IR,
+//! and execution of the native kernel produced by each route.
 #[path = "../examples/relational/mod.rs"]
 mod relational;
 
 use relational::{Catalog, pricing_plan, query};
 use splice::{BufferArg, Codegen, Executable, Function, kernel};
-use splice_lancy::Lancy;
-use splice_llvm::Llvm;
+use splice_lancy::{Lancy, LancyKernel};
+use splice_llvm::{Llvm, LlvmKernel};
 use std::hint::black_box;
 use std::time::{Duration, Instant};
 
-#[kernel(batch)]
+#[kernel]
 fn line_total(#[comptime] minimum: i32, price: i32, quantity: i32) -> i32 {
     if quantity >= minimum {
         price.wrapping_mul(quantity)
     } else {
         0
     }
+}
+
+#[kernel]
+fn line_totals(
+    #[comptime] minimum: i32,
+    prices: &[i32],
+    quantities: &[i32],
+    out: &mut [i32],
+) -> i32 {
+    for i in 0..out.len() as i32 {
+        out[i as usize] = line_total(minimum, prices[i as usize], quantities[i as usize]);
+    }
+    out.len() as i32
 }
 
 fn timed<T>(make: impl FnOnce() -> Result<T, String>) -> Result<(T, Duration), String> {
@@ -32,6 +46,8 @@ fn median_us(mut samples: Vec<Duration>) -> f64 {
 fn compare(
     name: &str,
     stage: impl Fn() -> Result<Function, String>,
+    build_lancy: impl Fn() -> Result<LancyKernel, String>,
+    build_llvm: impl Fn() -> Result<LlvmKernel, String>,
     run: impl Fn(&dyn Executable, &mut [i32]) -> Result<usize, String>,
     expected: &[i32],
     words: usize,
@@ -41,12 +57,23 @@ fn compare(
     let ir = stage()?;
     let lancy = Lancy::compile(&ir)?;
     let llvm = Llvm::compile(&ir)?;
-    let mut arenas = [vec![-1; words], vec![-1; words]];
-    let kernels: [&dyn Executable; 2] = [&lancy, &llvm];
+    let direct_lancy = build_lancy()?;
+    let direct_llvm = build_llvm()?;
+    let kernels: [&dyn Executable; 4] = [&lancy, &llvm, &direct_lancy, &direct_llvm];
+    let names = [
+        "Lancy from IR",
+        "LLVM from IR",
+        "Lancy direct",
+        "LLVM direct",
+    ];
+    let mut arenas: [_; 4] = std::array::from_fn(|_| vec![-1; words]);
     let verify = |i: usize, arena: &mut [i32]| -> Result<(), String> {
+        for (word, &want) in arena.iter_mut().zip(expected) {
+            *word = !want;
+        }
         let used = run(kernels[i], arena)?;
         if arena.get(..used) != Some(expected) {
-            return Err(format!("{name}: incorrect backend {i} output"));
+            return Err(format!("{name}: incorrect {} output", names[i]));
         }
         Ok(())
     };
@@ -54,18 +81,22 @@ fn compare(
         verify(i, arena)?;
     }
     let mut staging = Vec::new();
-    let mut compiling = [Vec::new(), Vec::new()];
-    let mut executing = [Vec::new(), Vec::new()];
+    let mut compiling: [_; 4] = std::array::from_fn(|_| Vec::new());
+    let mut executing: [_; 4] = std::array::from_fn(|_| Vec::new());
     for sample in 0..SAMPLES {
         staging.push(timed(&stage)?.1);
-        // Alternate order, reuse inputs and scratch, and exclude destruction of
-        // the executable from the compilation timer. Each compilation is fresh.
-        for i in [sample % 2, 1 - sample % 2] {
-            compiling[i].push(if i == 0 {
-                timed(|| Lancy::compile(black_box(&ir)))?.1
-            } else {
-                timed(|| Llvm::compile(black_box(&ir)))?.1
-            });
+        // Rotate routes. Each build is fresh and timed through installation.
+        // Destruction happens after the elapsed time has been captured.
+        for step in 0..kernels.len() {
+            let i = (sample + step) % kernels.len();
+            let elapsed = match i {
+                0 => timed(|| Lancy::compile(black_box(&ir)))?.1,
+                1 => timed(|| Llvm::compile(black_box(&ir)))?.1,
+                2 => timed(&build_lancy)?.1,
+                3 => timed(&build_llvm)?.1,
+                _ => unreachable!(),
+            };
+            compiling[i].push(elapsed);
             let (_, elapsed) = timed(|| {
                 for _ in 0..CALLS {
                     black_box(run(kernels[i], black_box(&mut arenas[i]))?);
@@ -78,10 +109,10 @@ fn compare(
     for (i, arena) in arenas.iter_mut().enumerate() {
         verify(i, arena)?;
     }
-    println!("{name} | stage {:.2} us", median_us(staging));
-    for ((backend, build), execute) in ["Lancy", "LLVM"].into_iter().zip(compiling).zip(executing) {
+    println!("{name} | stage portable IR {:.2} us", median_us(staging));
+    for ((backend, build), execute) in names.into_iter().zip(compiling).zip(executing) {
         println!(
-            "  {backend:5} | compile {:>10.2} us | execute {:>9.2} us",
+            "  {backend:13} | build {:>10.2} us | execute {:>9.2} us",
             median_us(build),
             median_us(execute)
         );
@@ -96,6 +127,9 @@ fn main() -> Result<(), String> {
         std::env::consts::ARCH,
         std::env::consts::OS
     );
+    println!(
+        "Direct build includes staging and codegen. From-IR build starts with the shared, verified IR."
+    );
     let price: Vec<i32> = (0..65_536).map(|i| i % 997).collect();
     let qty: Vec<i32> = (0..65_536).map(|i| i % 13).collect();
     let expected: Vec<_> = price
@@ -105,7 +139,9 @@ fn main() -> Result<(), String> {
         .collect();
     compare(
         "line totals (65536 rows)",
-        || line_total::ir(2),
+        || line_totals::ir(2),
+        || line_totals::build::<Lancy>(2),
+        || line_totals::build::<Llvm>(2),
         |kernel, dst| {
             kernel
                 .call(
@@ -135,6 +171,8 @@ fn main() -> Result<(), String> {
     compare(
         "pricing (5 tables, 4 joins, 8192 sales)",
         || query::ir(&plan),
+        || query::build::<Lancy>(&plan),
+        || query::build::<Llvm>(&plan),
         |kernel, arena| catalog.run(kernel, arena).map(<[i32]>::len),
         &expected[..rows * 2],
         expected.len(),

@@ -1,0 +1,9 @@
+[package]
+name = "splice-text"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.94"
+description = "Print specialized Splice kernels as readable code"
+
+[dependencies]
+splice = { path = "../splice" }

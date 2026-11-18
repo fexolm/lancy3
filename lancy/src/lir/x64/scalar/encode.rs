@@ -1,8 +1,7 @@
 //! Encoding of scalar integer instructions and the internal call convention.
 
 use super::frame::{Frame, Home, LINK_SLOTS};
-use crate::hir::{Binary, Reg};
-use crate::lir::scalar::ReturnValue;
+use crate::hir::Binary;
 
 pub(super) const EAX: u8 = 0;
 pub(super) const ECX: u8 = 1;
@@ -68,7 +67,7 @@ impl Code {
         match source {
             Home::Register(other) if other != reg => self.register_op(&[0x8b], reg, other),
             Home::Register(_) => {}
-            Home::Slot(slot) => self.memory_op(&[0x8b], reg, RDX, slot),
+            Home::Slot(slot) => self.memory_op(&[0x8b], reg, RDX, slot as usize),
             Home::Immediate(value) => {
                 self.rex(0, reg);
                 self.bytes.push(0xb8 + (reg & 7));
@@ -81,7 +80,7 @@ impl Code {
     pub(super) fn store(&mut self, dest: Home, reg: u8) {
         match dest {
             Home::Register(other) => self.load(other, Home::Register(reg)),
-            Home::Slot(slot) => self.memory_op(&[0x89], reg, RDX, slot),
+            Home::Slot(slot) => self.memory_op(&[0x89], reg, RDX, slot as usize),
             Home::Dead | Home::Immediate(_) => {}
         }
     }
@@ -94,7 +93,7 @@ impl Code {
             (Home::Register(reg), _) => self.load(reg, source),
             (_, Home::Register(reg)) => self.store(dest, reg),
             (Home::Slot(slot), Home::Immediate(value)) => {
-                self.memory_op(&[0xc7], 0, RDX, slot);
+                self.memory_op(&[0xc7], 0, RDX, slot as usize);
                 self.put(&value.to_le_bytes());
             }
             _ => {
@@ -118,7 +117,7 @@ impl Code {
         match rhs {
             Home::Immediate(n) => self.alu_immediate(immediate_extension, reg, n),
             Home::Register(r) => self.register_op(&[opcode], reg, r),
-            Home::Slot(s) => self.memory_op(&[opcode], reg, RDX, s),
+            Home::Slot(s) => self.memory_op(&[opcode], reg, RDX, s as usize),
             Home::Dead => unreachable!(),
         }
     }
@@ -140,7 +139,7 @@ impl Code {
         let opcode = if byte.is_some() { 0xf6 } else { 0xf7 };
         match source {
             Home::Register(r) => self.register_op(&[opcode], 0, r),
-            Home::Slot(slot) => self.memory_op(&[opcode], 0, RDX, slot),
+            Home::Slot(slot) => self.memory_op(&[opcode], 0, RDX, slot as usize),
             _ => {
                 self.load(EAX, source);
                 self.register_op(&[opcode], 0, EAX);
@@ -180,7 +179,7 @@ impl Code {
                 self.alu(0x3b, 7, acc, rhs); // cmp acc,rhs
                 match rhs {
                     Home::Register(r) => self.register_op(&[0x0f, opcode], acc, r),
-                    Home::Slot(s) => self.memory_op(&[0x0f, opcode], acc, RDX, s),
+                    Home::Slot(s) => self.memory_op(&[0x0f, opcode], acc, RDX, s as usize),
                     Home::Immediate(_) => {
                         self.load(ECX, rhs); // MOV preserves the comparison flags.
                         self.register_op(&[0x0f, opcode], acc, ECX);
@@ -199,7 +198,7 @@ impl Code {
                     }
                 }
                 Home::Register(r) => self.register_op(&[0x0f, 0xaf], acc, r),
-                Home::Slot(s) => self.memory_op(&[0x0f, 0xaf], acc, RDX, s),
+                Home::Slot(s) => self.memory_op(&[0x0f, 0xaf], acc, RDX, s as usize),
                 Home::Dead => unreachable!(),
             },
             Binary::Shl | Binary::Shr => {
@@ -217,14 +216,8 @@ impl Code {
         self.store(dst, acc);
     }
 
-    pub(super) fn return_value(&mut self, value: ReturnValue, frame: &Frame, root: bool) {
-        self.load(
-            EAX,
-            match value {
-                ReturnValue::Reg(reg) => frame.homes[reg.0 as usize],
-                ReturnValue::Constant(n) => Home::Immediate(n),
-            },
-        );
+    pub(super) fn return_value(&mut self, value: Home, root: bool) {
+        self.load(EAX, value);
         self.put(if root { &[0xc3] } else { &[0xff, 0x22] });
     }
 
@@ -241,18 +234,20 @@ impl Code {
         child_id: usize,
         child: &Frame,
         dst: Home,
-        args: &[Reg],
+        args: &[Home],
+        saves: u8,
     ) -> Result<(), String> {
         for (i, arg) in args.iter().enumerate() {
-            if child.homes[i] != Home::Dead {
-                self.assign(
-                    Home::Slot(caller.slots + LINK_SLOTS + i),
-                    caller.homes[arg.0 as usize],
-                );
+            if child.args[i] != Home::Dead {
+                self.assign(Home::Slot((caller.slots + LINK_SLOTS + i) as u32), *arg);
             }
         }
-        for &(reg, slot) in &caller.saves {
-            self.store(Home::Slot(slot), reg);
+        for i in 0..4u8 {
+            if saves & (1 << i) == 0 {
+                continue;
+            }
+            let (reg, slot) = (8 + i, caller.save_base + i as usize);
+            self.store(Home::Slot(slot as u32), reg);
         }
         self.frame_adjust(caller.slots, false);
         let next = self.rel32(&[0x48, 0x8d, 0x05]); // lea rax,[rip+continuation]
@@ -262,8 +257,12 @@ impl Code {
         self.patch(next, self.bytes.len())?;
         self.put(&ENDBR64); // indirect jump target of the callee return
         self.frame_adjust(caller.slots, true);
-        for &(reg, slot) in &caller.saves {
-            self.load(reg, Home::Slot(slot));
+        for i in 0..4u8 {
+            if saves & (1 << i) == 0 {
+                continue;
+            }
+            let (reg, slot) = (8 + i, caller.save_base + i as usize);
+            self.load(reg, Home::Slot(slot as u32));
         }
         self.store(dst, EAX);
         Ok(())

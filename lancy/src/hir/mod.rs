@@ -1,10 +1,8 @@
-//! High-level intermediate representations for scalar control flow and column projections.
+//! Canonical Lancy SSA. Successor arguments supply basic block parameters.
+mod passes;
+pub mod ssa;
+pub use passes::optimize;
 
-pub mod function;
-pub mod projection;
-pub(crate) mod vectorize;
-
-pub use function::{
-    Binary, Buffer, BufferArg, BufferKind, Function, FunctionBuilder, Instr, Label, Reg,
-};
-pub use projection::{Assumption, BuildError, BuildValue, Builder, Op, Program, Value};
+pub(crate) use crate::input::check_forwarding;
+pub use crate::input::{Binary, Buffer, BufferArg, BufferKind};
+pub use ssa::*;

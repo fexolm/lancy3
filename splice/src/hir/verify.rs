@@ -4,6 +4,7 @@ use super::{BufferKind, Function, Instr, Label, buffer};
 use std::collections::VecDeque;
 
 pub(crate) fn finish(
+    source: Option<&'static crate::frontend::KernelSource>,
     arity: usize,
     buffer_kinds: Vec<BufferKind>,
     registers: usize,
@@ -79,13 +80,13 @@ pub(crate) fn finish(
         }
     }
     let mut function = Function {
+        source,
         arity,
         buffer_kinds,
         needs_status: false,
         registers,
         code,
         targets,
-        batch_row: None,
     };
     function.refresh_status();
     check_initialization(&function)?;

@@ -1,24 +1,31 @@
 mod relational;
 
 use relational::{Catalog, pricing_plan, query};
-use splice::Codegen;
+use splice::Executable;
 use splice_lancy::Lancy;
 use splice_llvm::Llvm;
+use splice_text::Text;
 
 #[cfg(test)]
 #[path = "relational/tests.rs"]
 mod tests;
 
 fn main() -> Result<(), String> {
+    let plan = pricing_plan();
     match std::env::args().nth(1).as_deref() {
-        None | Some("lancy") => run::<Lancy>(),
-        Some("llvm") => run::<Llvm>(),
-        Some(other) => Err(format!("unknown backend {other}; choose lancy or llvm")),
+        None | Some("lancy") => run(query::build::<Lancy>(&plan)?),
+        Some("llvm") => run(query::build::<Llvm>(&plan)?),
+        Some("text") => {
+            print!("{}", query::build::<Text>(&plan));
+            Ok(())
+        }
+        Some(other) => Err(format!(
+            "unknown backend {other}; choose lancy, llvm or text"
+        )),
     }
 }
 
-fn run<B: Codegen>() -> Result<(), String> {
-    let code = query::build::<B>(&pricing_plan())?;
+fn run(code: impl Executable) -> Result<(), String> {
     let catalog = Catalog::new(&[
         &[(7, 3), (8, 1), (7, 4)],
         &[(7, 10), (8, 2)],

@@ -2,12 +2,11 @@
 //! A function owns a dense instruction stream. Parameters occupy the first
 //! registers. Mutable locals and temporary results share the same index space.
 
-mod batch;
 pub(crate) mod buffer;
 pub(crate) mod verify;
 
 pub use crate::frontend::FunctionBuilder;
-pub use buffer::{Buffer, BufferArg, BufferKind, validate_buffers};
+pub use buffer::{Buffer, BufferArg, BufferKind, check_forwarding, validate_buffers};
 
 use std::sync::Arc;
 
@@ -144,16 +143,20 @@ impl Instr {
 
 #[derive(Debug, Clone)]
 pub struct Function {
+    source: Option<&'static crate::frontend::KernelSource>,
     arity: usize,
     buffer_kinds: Vec<BufferKind>,
     needs_status: bool,
     registers: usize,
     code: Vec<Instr>,
     targets: Vec<usize>,
-    batch_row: Option<Arc<Function>>,
 }
 
 impl Function {
+    pub fn source(&self) -> Option<&'static crate::frontend::KernelSource> {
+        self.source
+    }
+
     pub fn register_count(&self) -> usize {
         self.registers
     }
@@ -164,11 +167,6 @@ impl Function {
 
     pub fn arity(&self) -> usize {
         self.arity
-    }
-    /// The verified scalar row of a loop built by `into_batch`. Backends can
-    /// vectorize its independent rows while preserving the loop's input bounds.
-    pub fn batch_row(&self) -> Option<&Function> {
-        self.batch_row.as_deref()
     }
     pub fn buffer_kinds(&self) -> &[BufferKind] {
         &self.buffer_kinds

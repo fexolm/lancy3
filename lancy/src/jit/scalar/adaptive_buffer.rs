@@ -1,15 +1,21 @@
 //! Tier whole invocations of scalar functions that access caller-owned slices.
 use super::ScalarKernel;
-use crate::hir::{BufferArg, Function};
+use crate::hir;
+use crate::input::{BufferArg, Function};
 use crate::jit::{Tier, worker};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::{Arc, OnceLock};
 
 struct Inner {
-    function: Function,
+    function: Source,
     baseline: ScalarKernel,
     optimized: OnceLock<Result<ScalarKernel, String>>,
     submission: worker::ScalarSubmission,
+}
+
+enum Source {
+    Input(Function),
+    Ssa(hir::Function),
 }
 
 /// A baseline slice kernel with a background-compiled generic replacement.
@@ -20,6 +26,17 @@ pub struct AdaptiveBufferKernel(Arc<Inner>);
 impl AdaptiveBufferKernel {
     pub fn compile(function: Function) -> Result<Self, String> {
         let baseline = ScalarKernel::baseline(&function)?;
+        Ok(Self::install(Source::Input(function), baseline))
+    }
+
+    /// Install a baseline from canonical SSA and optimize that same graph on
+    /// the background compiler. Each invocation selects its tier on entry.
+    pub fn compile_hir(function: hir::Function) -> Result<Self, String> {
+        let baseline = ScalarKernel::baseline_hir(&function)?;
+        Ok(Self::install(Source::Ssa(function), baseline))
+    }
+
+    fn install(function: Source, baseline: ScalarKernel) -> Self {
         let kernel = Self(Arc::new(Inner {
             function,
             baseline,
@@ -27,7 +44,7 @@ impl AdaptiveBufferKernel {
             submission: worker::ScalarSubmission::default(),
         }));
         kernel.schedule(false);
-        Ok(kernel)
+        kernel
     }
 
     /// Borrow the best installed version. A caller created from this reference
@@ -79,8 +96,9 @@ impl AdaptiveBufferKernel {
             worker::submit_scalar(
                 move || {
                     if let Some(inner) = pending.upgrade() {
-                        let result = catch_unwind(AssertUnwindSafe(|| {
-                            ScalarKernel::compile(&inner.function)
+                        let result = catch_unwind(AssertUnwindSafe(|| match &inner.function {
+                            Source::Input(f) => ScalarKernel::compile(f),
+                            Source::Ssa(f) => ScalarKernel::compile_hir(f),
                         }))
                         .unwrap_or_else(|_| {
                             Err("buffer kernel background compiler panicked".into())
@@ -97,7 +115,7 @@ impl AdaptiveBufferKernel {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::hir::{Binary, Buffer, BufferKind, FunctionBuilder};
+    use crate::input::{Binary, Buffer, BufferKind, FunctionBuilder};
 
     fn increment_then_load() -> Function {
         let mut b = FunctionBuilder::with_buffers(1, vec![BufferKind::Write]);
@@ -145,7 +163,8 @@ mod tests {
             true,
         )
         .unwrap();
-        let kernel = AdaptiveBufferKernel::compile(increment_then_load()).unwrap();
+        let graph = hir::from_input(&increment_then_load()).unwrap();
+        let kernel = AdaptiveBufferKernel::compile_hir(graph).unwrap();
         assert!(matches!(kernel.tier(), Tier::Baseline | Tier::Compiling));
         let baseline = kernel.current();
         let mut caller = baseline.caller();

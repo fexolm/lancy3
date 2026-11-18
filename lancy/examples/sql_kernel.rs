@@ -1,4 +1,4 @@
-use lancy::{AdaptiveKernel, ScalarFn, kernel};
+use lancy::{ScalarFn, kernel};
 
 enum SqlExpr {
     Price,
@@ -55,18 +55,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             assert_eq!(single.invoke(args), expected[i]);
             assert_eq!(project(&expr, args[0], args[1]), expected[i]);
         }
-        let program = function
-            .vectorize()?
-            .ok_or("expected an independent SQL projection")?;
-        println!(
-            "{sql}  SIMD IR = {:?}",
-            lancy::hir::projection::optimize(&program, &[]).ops()
-        );
-        let jit = AdaptiveKernel::compile(program)?;
-        let mut out = [0; 3];
-        jit.run(&[&prices, &quantities], &mut out)?;
-        assert_eq!(out, expected);
-        println!("  => {out:?}");
+        println!("{sql} => {expected:?}");
     }
     Ok(())
 }

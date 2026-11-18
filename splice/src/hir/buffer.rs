@@ -75,7 +75,7 @@ pub fn validate_buffers(kinds: &[BufferKind], args: &[BufferArg<'_>]) -> Result<
 
 /// Check the borrow contract at a static call site. Multiple immutable
 /// views may name the same buffer. A mutable view needs exclusive access.
-pub(crate) fn check_forwarding(
+pub fn check_forwarding(
     caller: &[BufferKind],
     callee: &[BufferKind],
     actual: &[Buffer],

@@ -1,5 +1,6 @@
 //! Staging support used by the scalar kernel attribute during HIR construction.
-use crate::hir::{FunctionBuilder, Reg};
+use super::KernelBuilder;
+use crate::hir::Reg;
 use std::{cell::Cell, marker::PhantomData, rc::Rc};
 
 #[doc(hidden)]
@@ -26,15 +27,15 @@ impl<T: ScalarConstant + Copy> ScalarConstant for &T {
 #[doc(hidden)]
 #[diagnostic::on_unimplemented(message = "a scalar kernel parameter requires an i32 value")]
 pub trait RunArg {
-    fn reg(self, builder: &mut FunctionBuilder) -> Reg;
+    fn reg(self, builder: &mut dyn KernelBuilder) -> Reg;
 }
 impl RunArg for Reg {
-    fn reg(self, _: &mut FunctionBuilder) -> Reg {
+    fn reg(self, _: &mut dyn KernelBuilder) -> Reg {
         self
     }
 }
 impl RunArg for Host<i32> {
-    fn reg(self, b: &mut FunctionBuilder) -> Reg {
+    fn reg(self, b: &mut dyn KernelBuilder) -> Reg {
         b.constant(self.0)
     }
 }

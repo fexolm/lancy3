@@ -1,5 +1,5 @@
 //! Compile portable Splice kernels with the Lancy x64 JIT.
-mod batch;
+mod direct;
 mod lower;
 
 use lancy::ScalarKernel;
@@ -10,16 +10,18 @@ use splice::{BufferArg, Codegen, Executable, Function};
 pub struct Lancy;
 
 impl Codegen for Lancy {
-    type Kernel = LancyKernel;
+    type Output = Result<LancyKernel, String>;
 
-    fn compile(function: &Function) -> Result<LancyKernel, String> {
-        if let Some(row) = function.batch_row()
-            && let Some(projection) = lower(row)?.vectorize()?
-        {
-            let kernel = batch::Batch::compile(&projection, function.buffer_kinds())?;
-            return Ok(LancyKernel(Code::Batch(kernel)));
-        }
-        ScalarKernel::compile(&lower(function)?).map(LancyKernel::from)
+    fn build(
+        arity: usize,
+        kinds: &[splice::BufferKind],
+        body: splice::frontend::Body<'_>,
+    ) -> Self::Output {
+        direct::compile(arity, kinds, body, true).map(LancyKernel)
+    }
+
+    fn compile(function: &Function) -> Self::Output {
+        ScalarKernel::compile_hir(&lower(function)?).map(LancyKernel)
     }
 }
 
@@ -27,39 +29,26 @@ impl Codegen for Lancy {
 pub struct LancyBaseline;
 
 impl Codegen for LancyBaseline {
-    type Kernel = LancyKernel;
+    type Output = Result<LancyKernel, String>;
 
-    fn compile(function: &Function) -> Result<LancyKernel, String> {
-        ScalarKernel::baseline(&lower(function)?).map(LancyKernel::from)
+    fn build(
+        arity: usize,
+        kinds: &[splice::BufferKind],
+        body: splice::frontend::Body<'_>,
+    ) -> Self::Output {
+        direct::compile(arity, kinds, body, false).map(LancyKernel)
+    }
+
+    fn compile(function: &Function) -> Self::Output {
+        ScalarKernel::baseline_hir(&lower(function)?).map(LancyKernel)
     }
 }
 
-pub struct LancyKernel(Code);
-
-enum Code {
-    Scalar(ScalarKernel),
-    Batch(batch::Batch),
-}
-
-impl LancyKernel {
-    /// Whether the independent batch rows were compiled into a SIMD loop.
-    pub fn is_vectorized(&self) -> bool {
-        matches!(self.0, Code::Batch(_))
-    }
-}
-
-impl From<ScalarKernel> for LancyKernel {
-    fn from(code: ScalarKernel) -> Self {
-        Self(Code::Scalar(code))
-    }
-}
+pub struct LancyKernel(ScalarKernel);
 
 impl Executable for LancyKernel {
     fn call(&self, args: &[i32], buffers: &mut [BufferArg<'_>]) -> Result<i32, String> {
-        match &self.0 {
-            Code::Scalar(code) => call_native(code, args, buffers),
-            Code::Batch(batch) => batch.call(args, buffers),
-        }
+        call_native(&self.0, args, buffers)
     }
 }
 

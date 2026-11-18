@@ -1,5 +1,5 @@
 //! Staging support used by the scalar kernel attribute during HIR construction.
-use crate::hir::{FunctionBuilder, Reg};
+use crate::input::{FunctionBuilder, Reg};
 use std::{cell::Cell, marker::PhantomData, rc::Rc};
 
 #[doc(hidden)]

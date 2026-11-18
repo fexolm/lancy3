@@ -1,5 +1,5 @@
-use crate::hir::function::validate_buffers;
-use crate::hir::{BufferArg, BufferKind};
+use crate::input::validate_buffers;
+use crate::input::{BufferArg, BufferKind};
 use std::mem::MaybeUninit;
 
 /// Read by the x64 emitter. Pointers live for one synchronous invocation.

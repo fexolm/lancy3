@@ -1,6 +1,5 @@
-//! The Splice language frontend. Staging a kernel constructs a verified function
-//! from its `#[comptime]` arguments; a code generator compiles that function.
-//! The same function may be compiled more than once with different generators.
+//! The Splice frontend stages a kernel directly into its chosen backend.
+//! A portable function can also be materialized for inspection and reuse.
 #![forbid(unsafe_code)]
 
 extern crate self as splice;
@@ -11,10 +10,15 @@ pub mod hir;
 pub use hir::{BufferArg, BufferKind, Function, validate_buffers};
 pub use splice_macros::kernel;
 
-/// Compile staged Splice IR into an owned, callable kernel.
+/// Generate a backend-specific output from a specialized kernel.
 pub trait Codegen {
-    type Kernel: Executable;
-    fn compile(function: &Function) -> Result<Self::Kernel, String>;
+    /// The complete return type of `kernel::build::<Self>()`, including
+    /// any error handling chosen by this backend.
+    type Output;
+    fn compile(function: &Function) -> Self::Output;
+    /// Consume the specialized operation stream. Backends that work on a
+    /// verified portable function can use [`frontend::materialize`].
+    fn build(arity: usize, kinds: &[BufferKind], body: frontend::Body<'_>) -> Self::Output;
 }
 
 /// The portable calling convention. Scalars and slices have separate
