@@ -3,31 +3,4 @@ name = "lancy"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.94"
-description = "A low-latency CPU JIT with editable SSA and adaptive specialization"
-
-[dependencies]
-splice-macros = { path = "../splice-macros", optional = true }
-
-[features]
-default = ["kernel"]
-kernel = ["dep:splice-macros"]
-
-[[example]]
-name = "retry_policy"
-required-features = ["kernel"]
-
-[[example]]
-name = "sql_kernel"
-required-features = ["kernel"]
-
-[[test]]
-name = "scalar_language"
-required-features = ["kernel"]
-
-[[test]]
-name = "scalar_slices"
-required-features = ["kernel"]
-
-[[test]]
-name = "staging"
-required-features = ["kernel"]
+description = "A CPU JIT with SSA HIR, linear-scan register allocation and x86-64 code generation"

@@ -55,7 +55,7 @@ fn configuration(meta: &Meta) -> Result<Option<TokenStream>> {
     Ok((!gates.is_empty()).then(|| quote!(cfg_attr(#condition, #(#gates),*))))
 }
 
-pub(super) fn expand(root: Path, func: ItemFn, api: super::KernelApi) -> Result<TokenStream> {
+pub(super) fn expand(root: Path, func: ItemFn) -> Result<TokenStream> {
     let mut native = func.clone();
     for arg in &mut native.sig.inputs {
         if let FnArg::Typed(arg) = arg {
@@ -105,21 +105,13 @@ pub(super) fn expand(root: Path, func: ItemFn, api: super::KernelApi) -> Result<
         })
         .collect();
     let fish = (!args.is_empty()).then(|| quote!(::<#(#args),*>));
-    let hir = if api == super::KernelApi::Lancy {
-        quote!(#root::input)
-    } else {
-        quote!(#root::hir)
-    };
-    let factory = if api == super::KernelApi::Lancy {
-        quote!(#hir::FunctionBuilder)
-    } else {
-        quote!(dyn #root::frontend::KernelBuilder)
-    };
+    let hir = quote!(#root::hir);
+    let factory = quote!(dyn #root::frontend::KernelBuilder);
     let support = quote!(#root::frontend::scalar);
-    let builder = private("__lancy_builder");
-    let exit = private("__lancy_return_label");
-    let result = private("__lancy_result");
-    let guard = private("__lancy_guard");
+    let builder = private("__splice_builder");
+    let exit = private("__splice_return_label");
+    let result = private("__splice_result");
+    let guard = private("__splice_guard");
     let mut bindings = HashMap::new();
     let mut formals = Vec::new();
     let mut host_decls = Vec::new();
@@ -194,7 +186,7 @@ pub(super) fn expand(root: Path, func: ItemFn, api: super::KernelApi) -> Result<
             let index = reg_names.len();
             reg_names.push(id);
             if pat.mutability.is_some() {
-                let target = private("__lancy_mutable_argument");
+                let target = private("__splice_mutable_argument");
                 copy_mutable.push(quote!(let #id = {let #target=#builder.local();#builder.assign(#target,#id);#target};));
             }
             bind_args.push(quote!(let #id = #builder.arg(#index);));
@@ -232,50 +224,15 @@ pub(super) fn expand(root: Path, func: ItemFn, api: super::KernelApi) -> Result<
     let kinds = quote!(&[#(#buffer_kinds),*]);
     let params = quote!(&[#(#reg_names),*]);
     let buffers = quote!(&[#(#buffer_names),*]);
-    let (api_methods, call) = if api == super::KernelApi::Lancy {
-        (
-            quote! {
-                #vis fn build #generic (#(#host_decls),*) -> ::core::result::Result<#hir::Function,String> #where_ {
-                    let mut #builder = #factory::with_buffers(#arity, vec![#(#buffer_kinds),*]);
-                    Self::__stage_body #fish (#(#host_names,)* &mut #builder)?;
-                    #builder.finish()
-                }
-            },
-            quote! {
-                #builder.call_with_buffers(Self::build #fish (#(#host_names),*)?, #params, #buffers)
-            },
-        )
-    } else {
-        // Rust requires lifetime parameters before the backend type; the backend
-        // is still the first argument at the usual lifetime-elided turbofish.
-        let mut compile_generics = generic.clone();
-        let backend = private("__SpliceCodegen");
-        let lifetimes = generic.lifetimes().count();
-        compile_generics
-            .params
-            .insert(lifetimes, syn::parse_quote!(#backend: #root::Codegen));
-        let callback = quote!(::std::boxed::Box::new(move |#builder| Self::__stage_body #fish (#(#host_names,)* #builder)));
-        (
-            quote! {
-                #vis fn build #compile_generics (#(#host_decls),*) -> #root::Result<<#backend as #root::Codegen>::Output> #where_ {
-                    <#backend as #root::Codegen>::build(#arity, #kinds, #callback)
-                }
-                #vis fn ir #generic (#(#host_decls),*) -> ::core::result::Result<#hir::Function,String> #where_ {
-                    #root::frontend::materialize(#arity, #kinds, #callback)
-                }
-            },
-            quote!(#builder.call_kernel(#arity, #kinds, #params, #buffers, #callback)),
-        )
-    };
-    let source = (api == super::KernelApi::Splice).then(|| {
-        quote! {
-            #builder.set_source(&#root::frontend::KernelSource {
-                name: stringify!(#name),
-                scalars: &[#(stringify!(#reg_names)),*],
-                buffers: &[#(stringify!(#buffer_names)),*],
-            });
-        }
-    });
+    // Rust requires lifetime parameters before the backend type; the backend
+    // is still the first argument at the usual lifetime-elided turbofish.
+    let mut compile_generics = generic.clone();
+    let backend = private("__SpliceCodegen");
+    let lifetimes = generic.lifetimes().count();
+    compile_generics
+        .params
+        .insert(lifetimes, syn::parse_quote!(#backend: #root::Codegen));
+    let callback = quote!(::std::boxed::Box::new(move |#builder| Self::__stage_body #fish (#(#host_names,)* #builder)));
     Ok(quote! {
         #native
         #(#[#gates])*
@@ -284,23 +241,32 @@ pub(super) fn expand(root: Path, func: ItemFn, api: super::KernelApi) -> Result<
         #vis enum #name {}
         #(#[#gates])*
         impl #name {
-            #api_methods
+            #vis fn build #compile_generics (#(#host_decls),*) -> #root::Result<<#backend as #root::Codegen>::Output> #where_ {
+                <#backend as #root::Codegen>::build(#arity, #kinds, #callback)
+            }
+            #vis fn ir #generic (#(#host_decls),*) -> #root::Result<#hir::Function> #where_ {
+                #root::frontend::materialize(#arity, #kinds, #callback)
+            }
             fn __stage_body #generic (#(#host_decls,)* #builder: &mut #factory) -> ::core::result::Result<(),String> #where_ {
-                #source
+                #builder.set_source(&#root::frontend::KernelSource {
+                    name: stringify!(#name),
+                    scalars: &[#(stringify!(#reg_names)),*],
+                    buffers: &[#(stringify!(#buffer_names)),*],
+                });
                 #(#bind_args)*
-                let output = Self::__lancy_inline #fish (#(#names,)* #builder)?;
+                let output = Self::__splice_inline #fish (#(#names,)* #builder)?;
                 #builder.ret(output);
                 Ok(())
             }
             #[doc(hidden)]
             #[allow(clippy::too_many_arguments)]
-            #vis fn __lancy_call #generic (#(#call_decls,)* #builder: &mut #factory)
+            #vis fn __splice_call #generic (#(#call_decls,)* #builder: &mut #factory)
                 -> ::core::result::Result<#hir::Reg,String> #where_ {
                 #(#unpack)*
-                #call
+                #builder.call_kernel(#arity, #kinds, #params, #buffers, #callback)
             }
             #[allow(unreachable_code, clippy::too_many_arguments)]
-            fn __lancy_inline #generic (#(#inline_decls,)* #builder:&mut #factory)
+            fn __splice_inline #generic (#(#inline_decls,)* #builder:&mut #factory)
                 -> ::core::result::Result<#hir::Reg,String> #where_ {
                 let #guard = #support::enter_expansion()?;
                 #(#copy_mutable)*
@@ -336,7 +302,7 @@ mod tests {
                 if depth == 0 { 1 } else { walk(column[0], column) }
             }
         };
-        let error = expand(parse_quote!(::splice), f, crate::KernelApi::Splice).unwrap_err();
+        let error = expand(parse_quote!(::splice), f).unwrap_err();
         assert!(error.to_string().contains("expected a comptime value"));
     }
 
@@ -345,7 +311,7 @@ mod tests {
         let f = parse_quote! {
             fn edit(column: &[i32]) -> i32 { column[0] = 1; 0 }
         };
-        let error = expand(parse_quote!(::splice), f, crate::KernelApi::Splice).unwrap_err();
+        let error = expand(parse_quote!(::splice), f).unwrap_err();
         assert!(error.to_string().contains("requires &mut [i32]"));
     }
 
@@ -356,11 +322,9 @@ mod tests {
             #[cfg_attr(all(), inline, cfg(target_arch = "x86_64"))]
             fn sum(x: i32, y: i32) -> i32 { x + y }
         };
-        let items = syn::parse2::<syn::File>(
-            expand(parse_quote!(::splice), f, crate::KernelApi::Splice).unwrap(),
-        )
-        .unwrap()
-        .items;
+        let items = syn::parse2::<syn::File>(expand(parse_quote!(::splice), f).unwrap())
+            .unwrap()
+            .items;
         assert_eq!(items.len(), 3);
         for item in items {
             let attrs = match item {

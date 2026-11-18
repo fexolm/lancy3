@@ -178,7 +178,7 @@ impl Lower<'_> {
         }
         let value = self.reg(self.expr(rhs)?, Scalar::Int, rhs)?;
         let b = self.builder;
-        let value_reg = private("__lancy_store_value");
+        let value_reg = private("__splice_store_value");
         let combine = op.map(|(op, _)| {
             let combined = self.bin(op, quote!(#b.load(buffer,index)), quote!(#value_reg));
             quote!(let #value_reg=#combined;)

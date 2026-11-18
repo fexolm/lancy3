@@ -1,4 +1,5 @@
-use lancy::{BufferArg, ScalarKernel, kernel};
+use splice::{BufferArg, Executable, kernel};
+use splice_lancy::Lancy;
 
 #[derive(Clone, Copy)]
 struct Patch {
@@ -74,12 +75,12 @@ fn render(#[comptime] patch: Patch, input: &[i32], output: &mut [i32], state: &m
     base
 }
 
-fn compile_patch(patch: Patch) -> Result<ScalarKernel, String> {
-    ScalarKernel::compile(&render::build(patch)?)
+fn compile_patch(patch: Patch) -> Result<impl Executable, String> {
+    render::build::<Lancy>(patch)
 }
 
 fn process(
-    code: &ScalarKernel,
+    code: &impl Executable,
     input: &[i32],
     output: &mut [i32],
     state: &mut [i32],
@@ -94,7 +95,7 @@ fn process(
     if voices == 0 {
         return Err("a nonempty audio buffer needs at least one voice".into());
     }
-    code.call_with_buffers(
+    code.call(
         &[],
         &mut [
             BufferArg::Read(input),
@@ -140,7 +141,7 @@ fn initial_state(voices: usize) -> Vec<i32> {
         .collect()
 }
 
-fn verify(code: &ScalarKernel) -> Result<(), String> {
+fn verify(code: &impl Executable) -> Result<(), String> {
     let quiet = Patch {
         gain: 1,
         rise: 256,

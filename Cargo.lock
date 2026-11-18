@@ -58,16 +58,12 @@ dependencies = [
 [[package]]
 name = "lancy"
 version = "0.1.0"
-dependencies = [
- "splice-macros",
-]
 
 [[package]]
 name = "lancy-customers"
 version = "0.1.0"
 dependencies = [
  "cc",
- "lancy",
  "splice",
  "splice-lancy",
 ]
@@ -152,7 +148,6 @@ checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
 name = "splice"
 version = "0.1.0"
 dependencies = [
- "lancy",
  "splice-lancy",
  "splice-llvm",
  "splice-macros",

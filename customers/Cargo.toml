@@ -9,7 +9,6 @@ name = "customer-lab"
 path = "main.rs"
 
 [dependencies]
-lancy = { path = "../lancy" }
 splice = { path = "../splice" }
 splice-lancy = { path = "../splice-lancy" }
 

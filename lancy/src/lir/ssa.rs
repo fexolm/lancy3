@@ -1,9 +1,6 @@
 //! Instruction-selected LIR. The same opcodes are first parameterized by SSA
 //! values and later by machine homes. Calls and edge arguments are out of line.
-use crate::hir::{
-    Binary, Buffer,
-    ssa::{self, Function, Value},
-};
+use crate::hir::{self, Binary, Buffer, Function, Value};
 use std::collections::HashMap;
 use std::ops::Range;
 use std::sync::Arc;
@@ -58,34 +55,11 @@ impl<R: Copy> Op<R> {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
-pub(super) enum Condition<R> {
-    Nonzero(R),
-    Compare(Binary, R, R),
-    Mask { source: R, mask: i32, nonzero: bool },
-}
-impl<R: Copy> Condition<R> {
-    pub(super) fn map<S>(self, mut f: impl FnMut(R) -> S) -> Condition<S> {
-        match self {
-            Self::Nonzero(r) => Condition::Nonzero(f(r)),
-            Self::Compare(op, a, b) => Condition::Compare(op, f(a), f(b)),
-            Self::Mask {
-                source,
-                mask,
-                nonzero,
-            } => Condition::Mask {
-                source: f(source),
-                mask,
-                nonzero,
-            },
-        }
-    }
-}
 #[derive(Clone, Copy)]
 pub(super) enum Exit<R> {
     Return(R),
     Jump(usize),
-    Branch(Condition<R>, usize, usize),
+    Branch(R, usize, usize),
 }
 impl<R: Copy> Exit<R> {
     pub(super) fn successors(self) -> impl Iterator<Item = usize> {
@@ -121,52 +95,19 @@ pub(super) struct SsaBody<'a> {
 }
 
 impl<'a> SsaBody<'a> {
-    /// Select operations into a compact block layout. Fold unique flag-producing
-    /// comparisons into branches before computing liveness, so their actual
-    /// operands live up to the branch and no boolean register is necessary.
+    /// Copy verified HIR operands and terminators into dense LIR blocks.
     pub fn lower(f: &'a Function, callees: &HashMap<*const Function, usize>) -> Self {
-        let mut defs = vec![None; f.value_count()];
-        let mut uses = vec![0; f.value_count()];
         let mut mapping = vec![0; f.block_capacity()];
-        for (n, b) in f.blocks().enumerate() {
-            mapping[b.index()] = n;
-            for i in f.instructions(b) {
-                let op = *f.op(i);
-                if let Some(d) = f.result(i) {
-                    defs[d.index()] = Some(op);
-                }
-                let mut used = |v: Value| uses[v.index()] += 1;
-                match op {
-                    ssa::Op::Copy(v) | ssa::Op::Load(_, v) => used(v),
-                    ssa::Op::Bin(_, a, b) | ssa::Op::Store(_, a, b) => {
-                        used(a);
-                        used(b);
-                    }
-                    ssa::Op::Call(site) => f.call(site).1.iter().copied().for_each(used),
-                    _ => {}
-                }
-            }
-            let term = *f.terminator(b);
-            match term {
-                ssa::Terminator::Branch { cond, .. } | ssa::Terminator::Return(cond) => {
-                    uses[cond.index()] += 1
-                }
-                _ => {}
-            }
-            for e in term.edges() {
-                for v in f.edge(e).1 {
-                    uses[v.index()] += 1;
-                }
-            }
+        for (index, block) in f.blocks().enumerate() {
+            mapping[block.index()] = index;
         }
-        let mut omitted = vec![false; uses.len()];
         let mut body = Self {
             blocks: Vec::new(),
             ops: Vec::new(),
             params: Vec::new(),
             edges: Vec::new(),
             calls: Vec::new(),
-            values: uses.len(),
+            values: f.value_count(),
         };
         for b in f.blocks() {
             body.params.push(f.params(b));
@@ -180,31 +121,24 @@ impl<'a> SsaBody<'a> {
                 id
             };
             let exit = match *f.terminator(b) {
-                ssa::Terminator::Return(v) => Exit::Return(v),
-                ssa::Terminator::Jump(e) => Exit::Jump(edge(e)),
-                ssa::Terminator::Branch { cond, yes, no } => Exit::Branch(
-                    condition(cond, &defs, &uses, &mut omitted),
-                    edge(yes),
-                    edge(no),
-                ),
+                hir::Terminator::Return(v) => Exit::Return(v),
+                hir::Terminator::Jump(e) => Exit::Jump(edge(e)),
+                hir::Terminator::Branch { cond, yes, no } => {
+                    Exit::Branch(cond, edge(yes), edge(no))
+                }
             };
-            body.blocks.push(Block { ops: 0..0, exit });
-        }
-        for (id, b) in f.blocks().enumerate() {
+
             let start = body.ops.len();
             for i in f.instructions(b) {
                 let dst = f.result(i);
-                if dst.is_some_and(|v| omitted[v.index()]) {
-                    continue;
-                }
                 body.ops.push(match *f.op(i) {
-                    ssa::Op::Const(n) => Op::Imm(dst.unwrap(), n),
-                    ssa::Op::Copy(v) => Op::Move(dst.unwrap(), v),
-                    ssa::Op::Bin(op, a, b) => Op::Alu(dst.unwrap(), op, a, b),
-                    ssa::Op::BufferLen(b) => Op::Len(dst.unwrap(), b),
-                    ssa::Op::Load(b, v) => Op::Load(dst.unwrap(), b, v),
-                    ssa::Op::Store(b, i, v) => Op::Store(b, i, v),
-                    ssa::Op::Call(c) => {
+                    hir::Op::Const(n) => Op::Imm(dst.unwrap(), n),
+                    hir::Op::Copy(v) => Op::Move(dst.unwrap(), v),
+                    hir::Op::Bin(op, a, b) => Op::Alu(dst.unwrap(), op, a, b),
+                    hir::Op::BufferLen(b) => Op::Len(dst.unwrap(), b),
+                    hir::Op::Load(b, v) => Op::Load(dst.unwrap(), b, v),
+                    hir::Op::Store(b, i, v) => Op::Store(b, i, v),
+                    hir::Op::Call(c) => {
                         let (child, args, buffers) = f.call(c);
                         // The number of sites is bounded by the verified u32 HIR instruction IDs.
                         let site = body.calls.len() as u32;
@@ -217,45 +151,11 @@ impl<'a> SsaBody<'a> {
                     }
                 });
             }
-            body.blocks[id].ops = start..body.ops.len();
+            body.blocks.push(Block {
+                ops: start..body.ops.len(),
+                exit,
+            });
         }
         body
     }
-}
-
-fn condition(
-    v: Value,
-    defs: &[Option<ssa::Op>],
-    uses: &[usize],
-    omitted: &mut [bool],
-) -> Condition<Value> {
-    use Binary::{And, Eq, Ge, Gt, Le, Lt, Ne};
-    use ssa::Op::{Bin, Const};
-    if uses[v.index()] != 1 {
-        return Condition::Nonzero(v);
-    }
-    let Some(Bin(cmp @ (Eq | Ne | Lt | Le | Gt | Ge), a, b)) = defs[v.index()] else {
-        return Condition::Nonzero(v);
-    };
-    omitted[v.index()] = true;
-    if matches!(cmp, Eq | Ne) {
-        for (test, zero) in [(a, b), (b, a)] {
-            if uses[test.index()] != 1 || defs[zero.index()] != Some(Const(0)) {
-                continue;
-            }
-            if let Some(Bin(And, x, y)) = defs[test.index()] {
-                for (source, literal) in [(x, y), (y, x)] {
-                    if let Some(Const(mask)) = defs[literal.index()] {
-                        omitted[test.index()] = true;
-                        return Condition::Mask {
-                            source,
-                            mask,
-                            nonzero: cmp == Ne,
-                        };
-                    }
-                }
-            }
-        }
-    }
-    Condition::Compare(cmp, a, b)
 }

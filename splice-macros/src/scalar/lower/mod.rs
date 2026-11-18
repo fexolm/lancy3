@@ -134,7 +134,7 @@ impl Lower<'_> {
     // or continue can skip the rest of that arm without skipping its siblings.
     fn region(&self) -> syn::Lifetime {
         syn::Lifetime::new(
-            &format!("'__lancy_arm_{}", self.region_depth),
+            &format!("'__splice_arm_{}", self.region_depth),
             proc_macro2::Span::mixed_site(),
         )
     }
@@ -258,7 +258,7 @@ impl Lower<'_> {
                 // A later operand can assign this variable. Snapshot its value
                 // at the Rust evaluation point before constructing the RHS.
                 let b = self.builder;
-                let snapshot = super::private("__lancy_snapshot");
+                let snapshot = super::private("__splice_snapshot");
                 Value::new(
                     Stage::Reg(*t),
                     quote!({let #snapshot=#b.local(); #b.assign(#snapshot,#p);#snapshot}),
@@ -499,7 +499,7 @@ impl Lower<'_> {
         } else {
             rhs
         };
-        let assigned = super::private("__lancy_assigned_value");
+        let assigned = super::private("__splice_assigned_value");
         Ok(Value::unit(
             quote!({let #assigned=#code; #b.assign(#left,#assigned);}),
         ))
@@ -642,7 +642,7 @@ impl Lower<'_> {
             let fish = &self.fish;
             return Ok(Value::new(
                 Stage::Reg(Scalar::Int),
-                quote!(Self::__lancy_inline #fish (#(#args,)* #b)?),
+                quote!(Self::__splice_inline #fish (#(#args,)* #b)?),
             ));
         }
         let mut target = p.path.clone();
@@ -666,7 +666,7 @@ impl Lower<'_> {
             .collect::<Result<Vec<_>>>()?;
         Ok(Value::new(
             Stage::Reg(Scalar::Int),
-            quote!(#target::__lancy_call #fish (#(#args,)* #b)?),
+            quote!(#target::__splice_call #fish (#(#args,)* #b)?),
         ))
     }
 }

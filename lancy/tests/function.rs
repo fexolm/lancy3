@@ -1,182 +1,199 @@
-use lancy::function::Binary;
-use lancy::{FunctionBuilder, ScalarKernel};
+use lancy::ScalarKernel;
+use lancy::hir::{Binary, Block, Function, Op, Terminator};
+use std::sync::Arc;
 
 #[test]
-fn scalar_entry_guard_deoptimizes_before_executing_a_mutable_loop() {
-    use lancy::{AdaptiveScalar, Tier};
-    let mut b = FunctionBuilder::new(2);
-    let (head, body, done) = (b.label(), b.label(), b.label());
-    let x = b.arg(0);
-    let remaining = b.arg(1);
-    let one = b.constant(1);
-    b.mark(head);
-    b.branch(remaining, body, done);
-    b.mark(body);
-    let next = b.binary(Binary::Add, x, one);
-    b.assign(x, next);
-    let step = b.binary(Binary::Sub, remaining, one);
-    b.assign(remaining, step);
-    b.jump(head);
-    b.mark(done);
-    b.ret(x);
-    let f = b.finish().unwrap();
-    assert!(AdaptiveScalar::<2>::with_assumptions(f.clone(), &[(2, 0)]).is_err());
-    assert!(AdaptiveScalar::<2>::with_assumptions(f.clone(), &[(0, 3), (0, 4)]).is_err());
-    let kernel = AdaptiveScalar::<2>::with_assumptions(f, &[(0, 3), (0, 3)]).unwrap();
-    assert_eq!(kernel.invoke([3, 8]), 11);
-    kernel.wait_for_optimization().unwrap();
-    assert_eq!(kernel.tier(), Tier::Specialized);
-    assert_eq!(kernel.invoke([3, 8]), 11);
-    std::thread::scope(|scope| {
-        for input in [-7, 9, 3, i32::MAX] {
-            let k = kernel.clone();
-            scope.spawn(move || assert_eq!(k.invoke([input, 1]), input.wrapping_add(1)));
-        }
-    });
-    assert_eq!(kernel.tier(), Tier::Generic);
-    assert_eq!(kernel.invoke([5, 6]), 11);
+fn verify_rejects_bad_edges_dominance_call_signatures_and_unterminated_blocks() {
+    let mut f = Function::new(1, vec![]);
+    let missing = f.add_edge(Block(99), &[]);
+    f.set_terminator(f.entry(), Terminator::Jump(missing));
+    assert!(f.verify().unwrap_err().contains("unknown target"));
+
+    let mut f = Function::new(1, vec![]);
+    let entry = f.entry();
+    let cond = f.params(entry)[0];
+    let arm = f.create_block();
+    let join = f.create_block();
+    let yes = f.add_edge(arm, &[]);
+    let no = f.add_edge(join, &[]);
+    f.set_terminator(entry, Terminator::Branch { cond, yes, no });
+    let only_in_arm = f.append(arm, Op::Const(1)).unwrap();
+    let merge = f.add_edge(join, &[]);
+    f.set_terminator(arm, Terminator::Jump(merge));
+    f.set_terminator(join, Terminator::Return(only_in_arm));
+    assert!(f.verify().unwrap_err().contains("dominate"));
+
+    let mut identity = Function::new(1, vec![]);
+    let entry = identity.entry();
+    identity.set_terminator(entry, Terminator::Return(identity.params(entry)[0]));
+    let mut f = Function::new(0, vec![]);
+    let call = f.add_call(Arc::new(identity), &[], &[]);
+    let output = f.append(f.entry(), Op::Call(call)).unwrap();
+    f.set_terminator(f.entry(), Terminator::Return(output));
+    assert!(f.verify().is_err());
+
+    let f = Function::new(0, vec![]);
+    assert!(f.verify().unwrap_err().contains("unterminated"));
 }
 
 #[test]
-fn reject_bad_edges_uninitialized_join_wrong_call_and_fallthrough() {
-    let mut f = FunctionBuilder::new(1);
-    let unknown = f.label();
-    f.jump(unknown);
-    assert!(f.finish().unwrap_err().contains("undefined label"));
-    let mut f = FunctionBuilder::new(1);
-    let (yes, join) = (f.label(), f.label());
-    let local = f.local();
-    f.branch(f.arg(0), yes, join);
-    f.mark(yes);
-    f.assign(local, f.arg(0));
-    f.mark(join);
-    f.ret(local);
-    assert!(f.finish().unwrap_err().contains("uninitialized"));
-    let mut identity = FunctionBuilder::new(1);
-    identity.ret(identity.arg(0));
-    let mut f = FunctionBuilder::new(0);
-    let value = f.call(identity.finish().unwrap(), &[]);
-    f.ret(value);
-    assert!(f.finish().unwrap_err().contains("expects 1 arguments"));
-    let mut f = FunctionBuilder::new(0);
-    f.constant(2);
-    assert!(f.finish().unwrap_err().contains("falls off"));
-}
-
-#[test]
-fn calling_callee_with_multiple_returns_preserves_noncanonical_masks_and_joins() {
-    let mut child = FunctionBuilder::new(2);
-    let (yes, no) = (child.label(), child.label());
-    child.branch(child.arg(0), yes, no);
-    child.mark(yes);
-    let one = child.constant(1);
-    let plus = child.binary(Binary::Add, child.arg(1), one);
-    child.ret(plus);
-    child.mark(no);
-    child.ret(child.arg(0));
-    let mut f = FunctionBuilder::new(2);
-    let res = f.call(child.finish().unwrap(), &[f.arg(0), f.arg(1)]);
-    let (pos, neg, join) = (f.label(), f.label(), f.label());
-    let out = f.local();
-    let zero = f.constant(0);
-    let mask = f.binary(Binary::Lt, res, zero);
-    f.branch(mask, neg, pos);
-    f.mark(neg);
-    f.assign(out, f.arg(1));
-    f.jump(join);
-    f.mark(pos);
-    f.assign(out, res);
-    f.mark(join);
-    f.ret(out);
-    let ir = f.finish().unwrap();
-    let mask = [1, -2, 0, -1, 0x01010101, 1, 2];
-    let v = [i32::MIN, i32::MAX, 10, -20, 99, 0, 3];
-    let expected: Vec<_> = mask
-        .iter()
-        .zip(v)
-        .map(|(&m, v)| ir.interpret(&[m, v]).unwrap())
-        .collect();
-    let compiled = ScalarKernel::compile(&ir).unwrap();
-    let mut caller = compiled.caller();
-    for i in 0..v.len() {
-        assert_eq!(caller.call(&[mask[i], v[i]]).unwrap(), expected[i]);
-    }
-    assert!(caller.call(&[1]).is_err());
-}
-
-#[test]
-fn scalar_loop_handles_zero_trip_inputs() {
-    let mut f = FunctionBuilder::new(1);
-    let n = f.arg(0);
-    let total = f.constant(0);
-    let one = f.constant(1);
-    let zero = f.constant(0);
-    let (head, body, exit) = (f.label(), f.label(), f.label());
-    f.mark(head);
-    let positive = f.binary(Binary::Gt, n, zero);
-    f.branch(positive, body, exit);
-    f.mark(body);
-    let sum = f.binary(Binary::Add, total, n);
-    f.assign(total, sum);
-    let decreased = f.binary(Binary::Sub, n, one);
-    f.assign(n, decreased);
-    f.jump(head);
-    f.mark(exit);
-    f.ret(total);
-    let kernel = ScalarKernel::compile(&f.finish().unwrap()).unwrap();
-    assert_eq!(
-        [0, 4, 1, 10, -1].map(|n| kernel.call(&[n]).unwrap()),
-        [0, 10, 1, 55, 0]
+fn calls_and_joins_preserve_noncanonical_branch_masks() {
+    let mut child = Function::new(2, vec![]);
+    let entry = child.entry();
+    let (mask, x) = (child.params(entry)[0], child.params(entry)[1]);
+    let increment = child.create_block();
+    let identity = child.create_block();
+    let yes = child.add_edge(increment, &[]);
+    let no = child.add_edge(identity, &[]);
+    child.set_terminator(
+        entry,
+        Terminator::Branch {
+            cond: mask,
+            yes,
+            no,
+        },
     );
+    let one = child.append(increment, Op::Const(1)).unwrap();
+    let next = child
+        .append(increment, Op::Bin(Binary::Add, x, one))
+        .unwrap();
+    child.set_terminator(increment, Terminator::Return(next));
+    child.set_terminator(identity, Terminator::Return(mask));
+
+    let mut f = Function::new(2, vec![]);
+    let entry = f.entry();
+    let (mask, x) = (f.params(entry)[0], f.params(entry)[1]);
+    let call = f.add_call(Arc::new(child), &[mask, x], &[]);
+    let result = f.append(entry, Op::Call(call)).unwrap();
+    let zero = f.append(entry, Op::Const(0)).unwrap();
+    let cond = f.append(entry, Op::Bin(Binary::Lt, result, zero)).unwrap();
+    let join = f.create_block();
+    let output = f.append_param(join);
+    let yes = f.add_edge(join, &[x]);
+    let no = f.add_edge(join, &[result]);
+    f.set_terminator(entry, Terminator::Branch { cond, yes, no });
+    f.set_terminator(join, Terminator::Return(output));
+
+    let kernel = ScalarKernel::compile(&f).unwrap();
+    for (mask, x) in [
+        (1, i32::MIN),
+        (-2, i32::MAX),
+        (0, 10),
+        (-1, -20),
+        (0x01010101, 99),
+        (1, 0),
+        (2, 3),
+    ] {
+        let result = if mask != 0 { x.wrapping_add(1) } else { 0 };
+        let expected = if result < 0 { x } else { result };
+
+        assert_eq!(kernel.call(&[mask, x]).unwrap(), expected);
+    }
+    assert!(kernel.call(&[1]).is_err());
 }
 
 #[test]
-fn scalar_backends_agree_on_forward_edges_and_shared_returns() {
-    use lancy::ScalarFn;
+fn loop_carried_parameters_handle_zero_trip_inputs() {
+    let mut f = Function::new(1, vec![]);
+    let entry = f.entry();
+    let arg = f.params(entry)[0];
+    let head = f.create_block();
+    let body = f.create_block();
+    let exit = f.create_block();
+    let n = f.append_param(head);
+    let total = f.append_param(head);
+    let zero = f.append(entry, Op::Const(0)).unwrap();
+    let one = f.append(entry, Op::Const(1)).unwrap();
+    let start = f.add_edge(head, &[arg, zero]);
+    f.set_terminator(entry, Terminator::Jump(start));
+
+    let cond = f.append(head, Op::Bin(Binary::Gt, n, zero)).unwrap();
+    let yes = f.add_edge(body, &[]);
+    let no = f.add_edge(exit, &[]);
+    f.set_terminator(head, Terminator::Branch { cond, yes, no });
+    let sum = f.append(body, Op::Bin(Binary::Add, total, n)).unwrap();
+    let decreased = f.append(body, Op::Bin(Binary::Sub, n, one)).unwrap();
+    let back = f.add_edge(head, &[decreased, sum]);
+    f.set_terminator(body, Terminator::Jump(back));
+    f.set_terminator(exit, Terminator::Return(total));
+
+    let kernel = ScalarKernel::compile(&f).unwrap();
+    for (n, sum) in [(0, 0), (4, 10), (1, 1), (10, 55), (-1, 0)] {
+        assert_eq!(kernel.call(&[n]).unwrap(), sum);
+    }
+}
+
+#[test]
+fn jit_agrees_with_rust_on_forward_edges_and_shared_returns() {
+    #[derive(Clone, Copy)]
+    enum Update {
+        Constant(i32),
+        AddBit,
+        UseFallback,
+    }
     let mut seed = 734_851u32;
     let mut next = || {
         seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
         seed >> 8
     };
     for _ in 0..64 {
-        let mut b = FunctionBuilder::new(3);
-        let labels: Vec<_> = (0..9).map(|_| b.label()).collect();
-        let value = b.local();
-        b.assign(value, b.arg(1));
-        for (i, &label) in labels.iter().enumerate() {
-            b.mark(label);
-            let tail = &labels[i + 1..];
-            if tail.is_empty() {
-                b.ret(value);
+        let mut f = Function::new(3, vec![]);
+        let entry = f.entry();
+        let (flags, initial, fallback) =
+            (f.params(entry)[0], f.params(entry)[1], f.params(entry)[2]);
+        let blocks: Vec<_> = (0..9)
+            .map(|_| {
+                let block = f.create_block();
+                let value = f.append_param(block);
+                (block, value)
+            })
+            .collect();
+        let start = f.add_edge(blocks[0].0, &[initial]);
+        f.set_terminator(entry, Terminator::Jump(start));
+        let mut plan = Vec::new();
+        for (i, &(block, value)) in blocks.iter().enumerate() {
+            let successors = &blocks[i + 1..];
+            if successors.is_empty() {
+                f.set_terminator(block, Terminator::Return(value));
                 break;
             }
-            let other = tail[next() as usize % tail.len()];
-            match next() % 5 {
-                0 => {
-                    let constant = b.constant(next() as i32);
-                    b.assign(value, constant);
-                    b.jump(other);
-                }
-                1 => b.ret(value),
-                2 => {
-                    b.assign(value, b.arg(2));
-                    b.jump(other);
-                }
-                _ => {
-                    let bit = b.constant(1 << (next() & 7));
-                    let cond = b.binary(Binary::And, b.arg(0), bit);
-                    b.branch(cond, tail[0], other);
+            let other = i + 1 + (next() as usize % successors.len());
+            let bit_value = 1 << (next() & 7);
+            let bit = f.append(block, Op::Const(bit_value)).unwrap();
+            let cond = f.append(block, Op::Bin(Binary::And, flags, bit)).unwrap();
+            let update = match next() % 3 {
+                0 => Update::Constant(next() as i32),
+                1 => Update::AddBit,
+                _ => Update::UseFallback,
+            };
+            plan.push((bit_value, other, update));
+            let result = match update {
+                Update::Constant(n) => f.append(block, Op::Const(n)).unwrap(),
+                Update::AddBit => f.append(block, Op::Bin(Binary::Add, value, bit)).unwrap(),
+                Update::UseFallback => fallback,
+            };
+            let yes = f.add_edge(successors[0].0, &[result]);
+            let no = f.add_edge(blocks[other].0, &[value]);
+            f.set_terminator(block, Terminator::Branch { cond, yes, no });
+        }
+        let kernel = ScalarKernel::compile(&f).unwrap();
+        for mask in [0, 1, 7, 0x55, 0xaa, -1] {
+            let args = [mask, -207, 42];
+            let mut value: i32 = args[1];
+            let mut pc = 0;
+            while let Some(&(bit, other, update)) = plan.get(pc) {
+                if mask & bit != 0 {
+                    value = match update {
+                        Update::Constant(n) => n,
+                        Update::AddBit => value.wrapping_add(bit),
+                        Update::UseFallback => args[2],
+                    };
+                    pc += 1;
+                } else {
+                    pc = other;
                 }
             }
-        }
-        let f = b.finish().unwrap();
-        let baseline = ScalarKernel::baseline(&f).unwrap();
-        let typed = ScalarFn::<3>::compile(&f).unwrap();
-        for flags in [0, 1, 7, 0x55, 0xaa, -1] {
-            let args = [flags, -207, 42];
-            let expected = f.interpret(&args).unwrap();
-            assert_eq!(baseline.call(&args).unwrap(), expected);
-            assert_eq!(typed.invoke(args), expected);
+            assert_eq!(kernel.call(&args).unwrap(), value);
         }
     }
 }

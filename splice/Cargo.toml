@@ -12,7 +12,6 @@ splice-macros = { path = "../splice-macros" }
 splice-lancy = { path = "../splice-lancy" }
 splice-llvm = { path = "../splice-llvm" }
 splice-text = { path = "../splice-text" }
-lancy = { path = "../lancy" }
 
 [[bench]]
 name = "backends"

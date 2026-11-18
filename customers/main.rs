@@ -142,7 +142,7 @@ fn main() -> Result<(), String> {
         cfg!(debug_assertions)
     );
     println!(
-        "case | workload | units/call | C++ ns/unit | IR ns/unit | IR/C++ | C++ us/call p50/p95 | IR us/call p50/p95"
+        "case | workload | units/call | C++ ns/unit | Lancy ns/unit | Lancy/C++ | C++ us/call p50/p95 | Lancy us/call p50/p95"
     );
     type Workload = fn() -> Result<(), String>;
     let workloads: [(&str, Workload); 5] = [

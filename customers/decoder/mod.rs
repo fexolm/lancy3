@@ -1,4 +1,5 @@
-use lancy::{BufferArg, ScalarKernel, kernel};
+use splice::{BufferArg, Executable, kernel};
+use splice_lancy::Lancy;
 
 const RECORD_SIZE: usize = 8;
 const CHUNK: usize = 1024;
@@ -69,7 +70,12 @@ impl Scratch {
     }
 }
 
-fn decode_ir(kernel: &ScalarKernel, bytes: &[u8], out: &mut [i32], scratch: &mut Scratch) -> bool {
+fn decode_ir(
+    kernel: &impl Executable,
+    bytes: &[u8],
+    out: &mut [i32],
+    scratch: &mut Scratch,
+) -> bool {
     if !bytes.len().is_multiple_of(RECORD_SIZE) || bytes.len() / RECORD_SIZE != out.len() {
         return false;
     }
@@ -90,7 +96,7 @@ fn decode_ir(kernel: &ScalarKernel, bytes: &[u8], out: &mut [i32], scratch: &mut
             *zero = i32::from(i16::from_le_bytes([record[4], record[5]]));
         }
         kernel
-            .call_with_buffers(
+            .call(
                 &[],
                 &mut [
                     BufferArg::Read(headers),
@@ -139,7 +145,7 @@ fn fixture(rows: usize) -> (Vec<u8>, Vec<i32>) {
     (wire, expected)
 }
 
-fn verify_parts(kernel: &ScalarKernel, scratch: &mut Scratch) {
+fn verify_parts(kernel: &impl Executable, scratch: &mut Scratch) {
     for count in [0, 1, 2, 3, 4, 5, 7, 8, 9, CHUNK - 1, CHUNK, CHUNK + 1] {
         let (wire, expected) = fixture(count);
         let mut output = vec![0; count];
@@ -161,7 +167,7 @@ fn verify_parts(kernel: &ScalarKernel, scratch: &mut Scratch) {
 
 pub fn run() -> Result<(), String> {
     let code = crate::build("decoder / schema", || {
-        ScalarKernel::compile(&decode_fields::build(&SCHEMA)?)
+        decode_fields::build::<Lancy>(&SCHEMA)
     })?;
     let mut scratch = Scratch::new();
     verify_parts(&code, &mut scratch);
@@ -177,4 +183,10 @@ pub fn run() -> Result<(), String> {
         )?;
     }
     Ok(())
+}
+
+#[test]
+fn wire_decoder_matches_cpp_and_validates_chunk_boundaries() {
+    let kernel = decode_fields::build::<Lancy>(&SCHEMA).unwrap();
+    verify_parts(&kernel, &mut Scratch::new());
 }

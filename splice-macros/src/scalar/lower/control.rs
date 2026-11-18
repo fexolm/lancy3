@@ -103,12 +103,12 @@ impl Lower<'_> {
         let b = self.builder;
         let test = self.reg(cond, Scalar::Bool, &at)?;
         let stage = Self::runtime_join(stage, &at)?;
-        let dst = private("__lancy_choice");
-        let end = private("__lancy_join");
-        let cond = private("__lancy_cond");
-        let yes_label = private("__lancy_yes");
-        let no_label = private("__lancy_no");
-        let known = private("__lancy_known_condition");
+        let dst = private("__splice_choice");
+        let end = private("__splice_join");
+        let cond = private("__splice_cond");
+        let yes_label = private("__splice_yes");
+        let no_label = private("__splice_no");
+        let known = private("__splice_known_condition");
         let inner = self.nested_region();
         let yes_code = inner.delimit(self.write_arm(yes, stage, &dst, &end, &at)?);
         let no_code = inner.delimit(self.write_arm(no, stage, &dst, &end, &at)?);
@@ -148,7 +148,7 @@ impl Lower<'_> {
     }
     pub(super) fn loop_expr(&self, cond: Option<&Expr>, body: &Block) -> Result<Value> {
         let b = self.builder;
-        let (header, end) = (private("__lancy_loop_head"), private("__lancy_loop_end"));
+        let (header, end) = (private("__splice_loop_head"), private("__splice_loop_end"));
         let mut scope = self.nested_region();
         scope.unrolled_exits = None;
         scope.loop_labels = Some((header.clone(), end.clone()));
@@ -205,13 +205,13 @@ impl Lower<'_> {
         };
         let initial = self.reg(self.expr(start)?, kind, start)?;
         let bound = self.reg(stop_value, kind, stop)?;
-        let (step, end) = (private("__lancy_loop_step"), private("__lancy_loop_end"));
-        let start_reg = private("__lancy_start");
-        let limit = private("__lancy_limit");
-        let head = private("__lancy_for_head");
-        let entry = private("__lancy_for_body");
-        let one = private("__lancy_one");
-        let next = private("__lancy_next");
+        let (step, end) = (private("__splice_loop_step"), private("__splice_loop_end"));
+        let start_reg = private("__splice_start");
+        let limit = private("__splice_limit");
+        let head = private("__splice_for_head");
+        let entry = private("__splice_for_body");
+        let one = private("__splice_one");
+        let next = private("__splice_next");
         let mut scope = self.nested_region();
         scope.unrolled_exits = None;
         scope.loop_labels = Some((step.clone(), end.clone()));
@@ -331,9 +331,9 @@ impl Lower<'_> {
         }
         let stage = Self::runtime_join(stage, m)?;
         let (dst, end, subject) = (
-            private("__lancy_match_result"),
-            private("__lancy_match_end"),
-            private("__lancy_subject"),
+            private("__splice_match_result"),
+            private("__splice_match_end"),
+            private("__splice_subject"),
         );
         let b = self.builder;
         let mut body = TokenStream::new();
@@ -341,7 +341,7 @@ impl Lower<'_> {
             if !arm.attrs.is_empty() {
                 return err(arm, "attributes on runtime arms are unsupported");
             }
-            let after = private("__lancy_next_arm");
+            let after = private("__splice_next_arm");
             let write = self.write_arm(value, stage, &dst, &end, &arm.body)?;
             let pattern = if matches!(arm.pat, Pat::Wild(_)) {
                 quote!()

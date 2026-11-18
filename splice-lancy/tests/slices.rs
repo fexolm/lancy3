@@ -1,5 +1,5 @@
-use splice::{BufferArg, Executable, kernel};
-use splice_lancy::{Lancy, LancyBaseline};
+use splice::{BufferArg, Codegen, Executable, kernel};
+use splice_lancy::Lancy;
 
 #[kernel]
 fn project(#[comptime] gain: i32, values: &[i32], second: &[i32], out: &mut [i32]) -> i32 {
@@ -28,12 +28,12 @@ fn constant(out: &mut [i32]) -> i32 {
 }
 
 #[test]
-fn optimized_kernel_matches_the_portable_loop_for_partial_columns() {
-    let baseline = project::build::<LancyBaseline>(3).unwrap();
-    let optimized = project::build::<Lancy>(3).unwrap();
+fn partial_columns_have_the_same_store_order_through_both_splice_entry_points() {
+    let direct = project::build::<Lancy>(3).unwrap();
+    let imported = Lancy::compile(&project::ir(3).unwrap()).unwrap();
     let values: Vec<i32> = (-7..20).collect();
     for (n, short) in [(9, 9), (9, 5), (16, 0), (0, 4), (17, 27)] {
-        for code in [&optimized, &baseline] {
+        for code in [&direct, &imported] {
             let mut out = vec![71; n];
             // A writable input can be borrowed read-only by the kernel.
             let mut unused = vec![0; short];

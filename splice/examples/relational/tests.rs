@@ -1,9 +1,8 @@
 use crate::relational::*;
-use lancy::BufferArg;
 use splice::Codegen;
 use splice::Executable;
 use splice::hir::{Binary, BufferKind, Function, Instr};
-use splice_lancy::{Lancy, LancyBaseline};
+use splice_lancy::Lancy;
 use splice_llvm::Llvm;
 
 type Row = (i32, i32);
@@ -61,7 +60,7 @@ fn reference(plan: &Plan, tables: &[&[Row]]) -> Vec<Row> {
     }
 }
 
-fn compare(plan: &Plan, tables: &[&[Row]], f: &Function, kernels: &[&dyn Executable]) {
+fn compare(plan: &Plan, tables: &[&[Row]], kernels: &[&dyn Executable]) {
     let cat = Catalog::new(tables).unwrap();
     let expected: Vec<i32> = reference(plan, tables)
         .into_iter()
@@ -74,21 +73,6 @@ fn compare(plan: &Plan, tables: &[&[Row]], f: &Function, kernels: &[&dyn Executa
         }
         assert_eq!(cat.run(code, &mut scratch).unwrap(), expected);
     }
-    scratch.fill(-3);
-    let mut interp = [
-        BufferArg::Read(cat.offsets()),
-        BufferArg::Read(cat.data()),
-        BufferArg::Write(&mut scratch),
-    ];
-    assert_eq!(
-        splice_lancy::lower(f)
-            .unwrap()
-            .interpret_with_buffers(&[], &mut interp)
-            .unwrap() as usize
-            * 2,
-        expected.len()
-    );
-    assert_eq!(scratch[..expected.len()], expected);
     scratch.fill(-8);
     assert_eq!(
         query(plan, cat.offsets(), cat.data(), &mut scratch) as usize * 2,
@@ -101,20 +85,11 @@ fn compare(plan: &Plan, tables: &[&[Row]], f: &Function, kernels: &[&dyn Executa
 fn branching_join_tree_runs_against_changing_tables() {
     let plan = pricing_plan();
     let f = query::ir(&plan).unwrap();
-    let baseline = LancyBaseline::compile(&f).unwrap();
-    let optimized = Lancy::compile(&f).unwrap();
+    let lancy = Lancy::compile(&f).unwrap();
     let llvm = Llvm::compile(&f).unwrap();
-    let direct_baseline = query::build::<LancyBaseline>(&plan).unwrap();
     let direct_lancy = query::build::<Lancy>(&plan).unwrap();
     let direct_llvm = query::build::<Llvm>(&plan).unwrap();
-    let kernels: [&dyn Executable; 6] = [
-        &baseline,
-        &optimized,
-        &llvm,
-        &direct_baseline,
-        &direct_lancy,
-        &direct_llvm,
-    ];
+    let kernels: [&dyn Executable; 4] = [&lancy, &llvm, &direct_lancy, &direct_llvm];
     let tables: &[&[Row]] = &[
         &[(-7, 5), (1, 3), (9, 6), (1, 5)],
         &[(1, 9), (-7, 3), (9, 4)],
@@ -122,11 +97,11 @@ fn branching_join_tree_runs_against_changing_tables() {
         &[(1, 3), (9, 8)],
         &[(9, 4), (1, 3), (1, 8)],
     ];
-    compare(&plan, tables, &f, &kernels);
+    compare(&plan, tables, &kernels);
     for empty in 0..tables.len() {
         let mut changed = tables.to_vec();
         changed[empty] = &[];
-        compare(&plan, &changed, &f, &kernels);
+        compare(&plan, &changed, &kernels);
     }
 }
 
@@ -143,11 +118,10 @@ fn self_join_after_rekey_handles_collisions_and_overlapping_compaction() {
         Combine::Multiply,
     );
     let f = query::ir(&plan).unwrap();
-    let baseline = LancyBaseline::compile(&f).unwrap();
-    let optimized = Lancy::compile(&f).unwrap();
+    let lancy = Lancy::compile(&f).unwrap();
     let llvm = Llvm::compile(&f).unwrap();
     let duplicate = [(3, 3); 13];
-    compare(&plan, &[&duplicate], &f, &[&baseline, &optimized, &llvm]);
+    compare(&plan, &[&duplicate], &[&lancy, &llvm]);
     let mixed = [
         (1, 9),
         (9, 1),
@@ -157,7 +131,7 @@ fn self_join_after_rekey_handles_collisions_and_overlapping_compaction() {
         (i32::MIN, i32::MIN),
         (1, 9),
     ];
-    compare(&plan, &[&mixed], &f, &[&baseline, &optimized, &llvm]);
+    compare(&plan, &[&mixed], &[&lancy, &llvm]);
 }
 
 #[test]
@@ -196,9 +170,8 @@ fn different_plan_shapes_match_a_nested_loop_oracle() {
     for _ in 0..24 {
         let plan = tree(&mut seed, 4);
         let f = query::ir(&plan).unwrap();
-        let baseline = query::build::<LancyBaseline>(&plan).unwrap();
         let direct = query::build::<Lancy>(&plan).unwrap();
-        let optimized = Lancy::compile(&f).unwrap();
+        let from_ir = Lancy::compile(&f).unwrap();
         let llvm = Llvm::compile(&f).unwrap();
         compare(
             &plan,
@@ -207,8 +180,7 @@ fn different_plan_shapes_match_a_nested_loop_oracle() {
                 &[(7, 10), (-1, 9)],
                 &[(-1, 1), (0, -1), (7, 3)],
             ],
-            &f,
-            &[&baseline, &direct, &optimized, &llvm],
+            &[&direct, &from_ir, &llvm],
         );
     }
 }

@@ -1,4 +1,5 @@
-use lancy::kernel;
+use splice::{BufferArg, Executable, kernel};
+use splice_lancy::Lancy;
 
 const PRIORITY: i32 = 1;
 const REGULATED: i32 = 2;
@@ -180,20 +181,16 @@ fn route_events(
 
 pub fn run() -> Result<(), String> {
     let policy = deployed_policy();
-    crate::build("rules/baseline + first event", || {
-        let baseline = lancy::ScalarFn3::baseline(&route::build(&policy)?)?;
-        let result = baseline.call(6, 5, HOLD | DUPLICATE | PRIORITY);
+    crate::build("rules/policy to first route", || {
+        let code = route::build::<Lancy>(&policy)?;
+        let result = code.call(&[6, 5, HOLD | DUPLICATE | PRIORITY], &mut [])?;
         if result != 4 {
-            return Err("first baseline event chose the wrong route".into());
+            return Err("first event chose the wrong route".into());
         }
-        Ok(baseline)
+        Ok(code)
     })?;
-    let scalar = crate::build("rules/scalar", || {
-        lancy::ScalarFn3::compile(&route::build(&policy)?)
-    })?;
-    let events_kernel = crate::build("rules/event loop", || {
-        lancy::ScalarKernel::compile(&route_events::build(&policy)?)
-    })?;
+    let scalar = crate::build("rules/scalar", || route::build::<Lancy>(&policy))?;
+    let events_kernel = crate::build("rules/event loop", || route_events::build::<Lancy>(&policy))?;
 
     for skewed in [false, true] {
         let n = 65_539;
@@ -219,7 +216,9 @@ pub fn run() -> Result<(), String> {
             },
             |out| {
                 for (i, destination) in out.iter_mut().enumerate() {
-                    *destination = scalar.call(columns[0][i], columns[1][i], columns[2][i]);
+                    *destination = scalar
+                        .call(&[columns[0][i], columns[1][i], columns[2][i]], &mut [])
+                        .unwrap();
                 }
             },
         )?;
@@ -229,9 +228,9 @@ pub fn run() -> Result<(), String> {
             &expected,
             |out| events.cpp_batch(out),
             |out| {
-                use lancy::BufferArg::{Read, Write};
+                use BufferArg::{Read, Write};
                 events_kernel
-                    .call_with_buffers(
+                    .call(
                         &[],
                         &mut [
                             Read(columns[0]),
@@ -245,4 +244,41 @@ pub fn run() -> Result<(), String> {
         )?;
     }
     Ok(())
+}
+
+#[test]
+fn routing_plan_matches_scalar_and_batched_cpp() {
+    use BufferArg::{Read, Write};
+    let policy = deployed_policy();
+    let single = route::build::<Lancy>(&policy).unwrap();
+    let batch = route_events::build::<Lancy>(&policy).unwrap();
+    let events = Events::new(EDGE_CASES.len() + 127, false);
+    let [severity, attempts, flags] = events.columns();
+    let mut cpp = vec![0; severity.len()];
+    let mut packed = vec![-1; severity.len()];
+    events.cpp_batch(&mut cpp);
+    let count = batch
+        .call(
+            &[],
+            &mut [
+                Read(severity),
+                Read(attempts),
+                Read(flags),
+                Write(&mut packed),
+            ],
+        )
+        .unwrap();
+    assert_eq!(count as usize, packed.len());
+    assert_eq!(packed, cpp);
+    for i in 0..cpp.len() {
+        let args = [severity[i], attempts[i], flags[i]];
+        let expected = interpret(&policy, args[0], args[1], args[2]);
+        assert_eq!(cpp[i], expected);
+        assert_eq!(single.call(&args, &mut []).unwrap(), expected);
+        // SAFETY: All three arguments and the result are plain i32.
+        assert_eq!(
+            unsafe { rules_cpp_one(args[0], args[1], args[2]) },
+            expected
+        );
+    }
 }

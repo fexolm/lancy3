@@ -7,4 +7,4 @@ description = "Lancy native code generation for Splice kernels"
 
 [dependencies]
 splice = { path = "../splice" }
-lancy = { path = "../lancy", default-features = false }
+lancy = { path = "../lancy" }

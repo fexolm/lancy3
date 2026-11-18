@@ -1,4 +1,5 @@
-use lancy::{AdaptiveBufferKernel, BufferArg, ScalarKernel, kernel};
+use splice::{BufferArg, Executable, kernel};
+use splice_lancy::Lancy;
 
 const PAID: i32 = 2;
 const MINIMUM_EXCLUSIVE: i32 = 2;
@@ -165,13 +166,17 @@ fn project(
     out.len() as i32
 }
 
-fn compile(nullable: bool) -> Result<ScalarKernel, String> {
-    ScalarKernel::compile(&project::build(nullable)?)
+fn compile(nullable: bool) -> Result<impl Executable, String> {
+    project::build::<Lancy>(nullable)
 }
 
-fn run_query(code: &ScalarKernel, columns: [&[i32]; 4], out: &mut [i32]) -> Result<usize, String> {
+fn run_query(
+    code: &impl Executable,
+    columns: [&[i32]; 4],
+    out: &mut [i32],
+) -> Result<usize, String> {
     use BufferArg::{Read, Write};
-    code.call_with_buffers(
+    code.call(
         &[],
         &mut [
             Read(columns[0]),
@@ -212,7 +217,7 @@ fn check_edges() -> Result<(), String> {
     Ok(())
 }
 
-fn mixed(n: usize, nullable: bool, code: &ScalarKernel) -> Result<(), String> {
+fn mixed(n: usize, nullable: bool, code: &impl Executable) -> Result<(), String> {
     let batch = Batch::make(n, nullable);
     let expected = batch.oracle();
     let mut scratch = vec![0; if nullable { n } else { 0 }];
@@ -236,24 +241,22 @@ fn mixed(n: usize, nullable: bool, code: &ScalarKernel) -> Result<(), String> {
     )
 }
 
-fn clustered() -> Result<(), String> {
+fn clustered(code: &impl Executable) -> Result<(), String> {
     let n = 65_539;
     let mut batch = Batch::make(n, false);
     batch.status.fill(0);
-    let kernel = AdaptiveBufferKernel::compile(project::build(false)?)?;
     let mut out = vec![i32::MAX; n];
-    run_query(kernel.current(), batch.columns(&mut []), &mut out)?;
-    kernel.wait_for_optimization()?;
+    run_query(code, batch.columns(&mut []), &mut out)?;
     if out != batch.oracle() {
         return Err("SQL: incorrect result for clustered input".into());
     }
     crate::compare(
-        "sql/clustered-rejected/adaptive",
+        "sql/clustered-rejected",
         n,
         &batch.oracle(),
         |out| batch.cpp(out, true),
         |out| {
-            run_query(kernel.current(), batch.columns(&mut []), out).unwrap();
+            run_query(code, batch.columns(&mut []), out).unwrap();
         },
     )?;
 
@@ -261,8 +264,7 @@ fn clustered() -> Result<(), String> {
     batch.status[1003..].fill(PAID);
     batch.quantity[1003] = 3;
     batch.amount[1003] = i32::MIN;
-    run_query(kernel.current(), batch.columns(&mut []), &mut out)?;
-    kernel.wait_for_optimization()?;
+    run_query(code, batch.columns(&mut []), &mut out)?;
     let expected = batch.oracle();
     let mut cpp = vec![0; n];
     batch.cpp(&mut cpp, true);
@@ -274,12 +276,12 @@ fn clustered() -> Result<(), String> {
 
 pub fn run() -> Result<(), String> {
     check_edges()?;
-    let nullable = crate::build("sql/nullable HIR", || compile(true))?;
-    let all_valid = crate::build("sql/all-valid HIR", || compile(false))?;
+    let nullable = crate::build("sql/nullable projection", || compile(true))?;
+    let all_valid = crate::build("sql/all-valid projection", || compile(false))?;
     mixed(31, true, &nullable)?;
     mixed(65_539, true, &nullable)?;
     mixed(65_539, false, &all_valid)?;
-    clustered()
+    clustered(&all_valid)
 }
 
 #[cfg(test)]
