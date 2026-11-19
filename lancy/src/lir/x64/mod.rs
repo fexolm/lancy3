@@ -1,8 +1,7 @@
 mod compile;
 mod emit;
-mod features;
 mod frame;
-pub(crate) use features::Features;
+pub(crate) use splice_target::Features;
 mod inst;
 mod isel;
 #[cfg(test)]

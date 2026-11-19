@@ -3,9 +3,9 @@ use super::{Features, inst::class, inst::simd};
 use super::{
     compile::{CompiledFunction, compile},
     frame::{CHILD_ARGS, Frame},
-    inst::{Address, Alu, Cond, Inst, NONVOLATILE, Rhs},
+    inst::{Address, Alu, Cond, Inst, Rhs},
 };
-use crate::{CallError, numbers::Math};
+use crate::numbers::Math;
 use crate::{
     CompileError,
     hir::{Function, Type, ssa::VerifiedBody},
@@ -14,8 +14,9 @@ use crate::{
 };
 use iced_x86::{IcedError, code_asm::*};
 use regalloc2::RegClass;
-use regalloc2::{Allocation, Block, Edit, Function as _, InstOrEdit, PReg};
+use regalloc2::{Allocation, Block, Edit, Function as _, InstOrEdit};
 
+pub(super) type Constants = Vec<(CodeLabel, crate::numbers::Bits, usize)>;
 type AsmResult = Result<(), IcedError>;
 
 pub(super) const R64: [AsmRegister64; 16] = [
@@ -24,10 +25,10 @@ pub(super) const R64: [AsmRegister64; 16] = [
 pub(super) const R32: [AsmRegister32; 16] = [
     eax, ecx, edx, ebx, esp, ebp, esi, edi, r8d, r9d, r10d, r11d, r12d, r13d, r14d, r15d,
 ];
-const R16: [AsmRegister16; 16] = [
+pub(super) const R16: [AsmRegister16; 16] = [
     ax, cx, dx, bx, sp, bp, si, di, r8w, r9w, r10w, r11w, r12w, r13w, r14w, r15w,
 ];
-const R8: [AsmRegister8; 16] = [
+pub(super) const R8: [AsmRegister8; 16] = [
     al, cl, dl, bl, spl, bpl, sil, dil, r8b, r9b, r10b, r11b, r12b, r13b, r14b, r15b,
 ];
 
@@ -81,7 +82,6 @@ pub(crate) struct Code {
     #[cfg(test)]
     pub text_len: usize,
     pub words: usize,
-    pub descriptors: Box<[Math]>,
 }
 
 pub(crate) fn emit(
@@ -102,29 +102,24 @@ pub(super) fn emit_compiled(module: &Module<CompiledFunction>) -> Result<Code, C
     // The allocator models argv's incoming register. R11 is reserved.
     a.mov(r11, if cfg!(windows) { rdx } else { rsi })?;
     let root = &module.functions[entry];
-    let saved = root.written & NONVOLATILE;
-    let save_base = root.frame.slots - saved.len() as usize;
+    let saved = root.saved;
+    let words: usize = saved.into_iter().map(super::frame::save_words).sum();
     let saves = || {
         saved
             .into_iter()
-            .enumerate()
-            .map(|(i, r): (usize, PReg)| (slot(save_base + i), R64[r.hw_enc()]))
+            .scan(root.frame.slots - words, |off, reg| {
+                let at = slot(*off);
+                *off += super::frame::save_words(reg);
+                Some((at, reg))
+            })
     };
     for (mem, reg) in saves() {
-        a.mov(mem, reg)?;
+        if reg.class() == RegClass::Vector {
+            simd::store(&mut a, mem, reg.hw_enc(), 16)?;
+        } else {
+            a.mov(mem, R64[reg.hw_enc()])?;
+        }
     }
-    // A fixed allocation keeps descriptor addresses valid for the installed kernel.
-    let descriptors: Box<[_]> = module
-        .functions
-        .iter()
-        .rev()
-        .flat_map(|(_, f)| f.body.insts())
-        .filter_map(|op| match op {
-            Inst::Math(m, ..) => Some(*m),
-            _ => None,
-        })
-        .collect();
-    let mut descriptor_iter = descriptors.iter();
     let mut constants = Vec::new();
     // The root (last in postorder) follows the native entry prologue.
     for (id, machine) in module.functions.iter().rev() {
@@ -132,7 +127,6 @@ pub(super) fn emit_compiled(module: &Module<CompiledFunction>) -> Result<Code, C
         Emitter {
             a: &mut a,
             machine,
-            descriptors: &mut descriptor_iter,
             constants: &mut constants,
             root: id == entry,
             entries: &entries,
@@ -143,7 +137,11 @@ pub(super) fn emit_compiled(module: &Module<CompiledFunction>) -> Result<Code, C
     }
     bind(&mut a, epilogue)?;
     for (mem, reg) in saves() {
-        a.mov(reg, mem)?;
+        if reg.class() == RegClass::Vector {
+            simd::load(&mut a, reg.hw_enc(), mem, 16)?;
+        } else {
+            a.mov(R64[reg.hw_enc()], mem)?;
+        }
     }
     a.ret()?;
     #[cfg(test)]
@@ -161,19 +159,16 @@ pub(super) fn emit_compiled(module: &Module<CompiledFunction>) -> Result<Code, C
             target: bytes.len(),
         });
     }
-    debug_assert!(descriptor_iter.next().is_none());
     Ok(Code {
         #[cfg(test)]
         text_len: bytes.len() - pool_bytes,
         bytes,
         words: root.workspace,
-        descriptors,
     })
 }
 
-struct Emitter<'a, 'data> {
-    descriptors: &'a mut std::slice::Iter<'data, Math>,
-    constants: &'a mut Vec<(CodeLabel, crate::numbers::Bits, usize)>,
+struct Emitter<'a> {
+    constants: &'a mut Constants,
     a: &'a mut CodeAssembler,
     machine: &'a CompiledFunction,
     root: bool,
@@ -182,7 +177,7 @@ struct Emitter<'a, 'data> {
     failures: [Option<CodeLabel>; 3],
 }
 
-impl Emitter<'_, '_> {
+impl Emitter<'_> {
     fn function(&mut self) -> AsmResult {
         let body = &self.machine.body;
         let labels: Vec<_> = (0..body.num_blocks())
@@ -205,10 +200,17 @@ impl Emitter<'_, '_> {
                                     self.a.jmp(labels[target])?;
                                 }
                             }
-                            inst @ (Inst::Branch(_) | Inst::BrCmp(..)) => {
+                            inst @ (Inst::Branch(_) | Inst::BranchAny(_) | Inst::BrCmp(..)) => {
                                 let succ = body.block_succs(b);
                                 let (yes, no) = (succ[0].index(), succ[1].index());
-                                let condition = if let Inst::BrCmp(cc, _, rhs) = inst {
+                                let condition = if let Inst::BranchAny(_) = inst {
+                                    simd::test_any(
+                                        self.a,
+                                        super::Features::host(),
+                                        gpr(allocs[0]),
+                                    )?;
+                                    Cond::Ne
+                                } else if let Inst::BrCmp(cc, _, rhs) = inst {
                                     cmp(self.a, &self.machine.frame, allocs, rhs)?;
                                     cc
                                 } else {
@@ -249,49 +251,39 @@ impl Emitter<'_, '_> {
         Ok(())
     }
 
-    fn math(&mut self, allocs: &[Allocation]) -> AsmResult {
-        let spec = self
-            .descriptors
-            .next()
-            .expect("descriptor for emitted operation");
+    fn lanes(&mut self, spec: Math, allocs: &[Allocation]) -> AsmResult {
+        use super::inst::lanes::{self, FRAME, INPUT, OUTPUT, WORKSPACE};
         let a = &mut self.a;
-        // Both x64 ABIs enter with RSP % 16 == 8. Internal jumps preserve RSP.
-        // Reserve host shadow space, three 64-byte operands and the saved workspace pointer.
-        const FRAME: i32 = 32 + 3 * 64 + 8;
         a.sub(rsp, FRAME)?;
-        a.mov(qword_ptr(rsp + FRAME - 8), r11)?;
+        a.mov(qword_ptr(rsp + WORKSPACE), r11)?;
         for &i in spec.inputs() {
-            store(
-                a,
-                spec.operand_type(i),
-                ptr(rsp + 32 + 64 * i as i32),
-                gpr(allocs[i]),
-            )?;
+            store(a, spec.operand_type(i), ptr(rsp + INPUT[i]), gpr(allocs[i]))?;
         }
-        let (buf, desc) = if cfg!(windows) {
-            (rcx, rdx)
-        } else {
-            (rdi, rsi)
-        };
-        a.lea(buf, ptr(rsp + 32))?;
-        a.mov(desc, std::ptr::from_ref(spec) as u64)?;
-        a.mov(r10, eval_math as *const () as u64)?;
-        a.call(r10)?;
-        a.mov(r11, qword_ptr(rsp + FRAME - 8))?;
-        a.test(eax, eax)?;
-        let success = a.create_label();
-        a.jz(success)?;
+        let mut faults = [None; 3];
+        lanes::emit(a, spec, &mut faults)?;
+        load(
+            a,
+            spec.output,
+            gpr(*allocs.last().unwrap()),
+            ptr(rsp + OUTPUT),
+        )?;
+        a.mov(r11, qword_ptr(rsp + WORKSPACE))?;
         a.add(rsp, FRAME)?;
-        for i in 0..2 {
-            let label = *self.failures[i].get_or_insert_with(|| a.create_label());
-            a.cmp(eax, (i + 1) as i32)?;
-            a.je(label)?;
+        if faults.iter().any(Option::is_some) {
+            let done = a.create_label();
+            a.jmp(done)?;
+            for (i, local) in faults.into_iter().enumerate() {
+                if let Some(label) = local {
+                    bind(a, label)?;
+                    a.mov(r11, qword_ptr(rsp + WORKSPACE))?;
+                    a.add(rsp, FRAME)?;
+                    let fail = *self.failures[i].get_or_insert_with(|| a.create_label());
+                    a.jmp(fail)?;
+                }
+            }
+            bind(a, done)?;
         }
-        let overflow = *self.failures[2].get_or_insert_with(|| a.create_label());
-        a.jmp(overflow)?;
-        bind(a, success)?;
-        load(a, spec.output, gpr(*allocs.last().unwrap()), ptr(rsp + 32))?;
-        a.add(rsp, FRAME)
+        Ok(())
     }
 
     fn instruction(&mut self, inst: Inst, allocs: &[Allocation]) -> AsmResult {
@@ -329,13 +321,15 @@ impl Emitter<'_, '_> {
                 ..
             } => load(a, ty, reg(0), slot(CHILD_ARGS + index)),
             Inst::Native(native, ..) => {
-                let mut regs = [0; 4];
+                let mut regs = [0; 10];
                 for (dst, &loc) in regs.iter_mut().zip(allocs) {
                     *dst = gpr(loc);
                 }
-                native.emit(a, &regs[..allocs.len()])
+                let (operands, temps) =
+                    regs[..allocs.len()].split_at(allocs.len() - native.temporaries());
+                native.emit_allocated(a, operands, temps, Some(self.constants))
             }
-            Inst::Math(..) => self.math(allocs),
+            Inst::Lanes(spec, ..) => self.lanes(spec, allocs),
             Inst::Literal(l, bits, _) => match l.bytes() {
                 16 => {
                     let label = a.create_label();
@@ -358,14 +352,18 @@ impl Emitter<'_, '_> {
             Inst::Iota(l, _) => {
                 let label = a.create_label();
                 let width = Features::host().bytes;
-                let spec = Math {
-                    action: crate::numbers::Action::Iota,
-                    input: l.scalar(),
-                    output: Type::Vector(l),
-                };
-                let bits = spec
-                    .eval(&[[0; 64]; 3], width)
-                    .expect("lane numbering is total");
+                let mut bits = [0; 64];
+                for (index, lane) in bits[..width].chunks_exact_mut(l.bytes()).enumerate() {
+                    let value = match l {
+                        crate::hir::Lane::F16 | crate::hir::Lane::BF16 => u128::from(
+                            crate::numbers::half::Format::for_lane(l).encode(index as f64, 0.),
+                        ),
+                        crate::hir::Lane::F32 => u128::from((index as f32).to_bits()),
+                        crate::hir::Lane::F64 => u128::from((index as f64).to_bits()),
+                        _ => index as u128,
+                    };
+                    lane.copy_from_slice(&value.to_le_bytes()[..l.bytes()]);
+                }
                 self.constants.push((label, bits, width));
                 simd::load(a, reg(0), ptr(label), width)
             }
@@ -464,6 +462,11 @@ impl Emitter<'_, '_> {
                 bind(a, divide)?;
                 a.idiv(r(2))
             }
+            Inst::CheckMask(_) => {
+                let fail = *self.failures[0].get_or_insert_with(|| a.create_label());
+                simd::test_any(a, super::Features::host(), reg(0))?;
+                a.jne(fail)
+            }
             Inst::CheckBounds(..) => {
                 let fail = *self.failures[0].get_or_insert_with(|| a.create_label());
                 rm32!(cmp, r(0), 1)?;
@@ -472,18 +475,23 @@ impl Emitter<'_, '_> {
             Inst::Movsxd(..) => a.movsxd(q(1), r(0)),
             Inst::Lea(_, addr) => a.lea(q(allocs.len() - 1), memory(addr, allocs)),
             Inst::Masked {
-                ty, indices, dst, ..
+                ty,
+                indices,
+                dst,
+                temp,
+                ..
             } => {
                 let i = 1 + usize::from(indices.is_some());
-                simd::masked(
-                    a,
+                simd::MaskedMemory {
                     ty,
-                    reg(0),
-                    indices.map(|_| reg(1)),
-                    reg(i),
-                    reg(i + 1),
-                    dst.map(|_| reg(i + 2)),
-                )
+                    base: reg(0),
+                    index: indices.map(|_| reg(1)),
+                    mask: reg(i),
+                    value: reg(i + 1),
+                    dst: dst.map(|_| reg(i + 2)),
+                    temp: temp.map(|_| reg(allocs.len() - 1)),
+                }
+                .emit(a, super::Features::host())
             }
             Inst::Load(ty, _, addr) => load(a, ty, reg(allocs.len() - 1), memory(addr, allocs)),
             Inst::Store(ty, addr, _) => store(a, ty, memory(addr, allocs), reg(allocs.len() - 1)),
@@ -515,33 +523,10 @@ impl Emitter<'_, '_> {
                 a.jmp(self.epilogue)
             }
             Inst::Ret(_) => a.jmp(slot(0)),
-            Inst::Jump | Inst::Branch(_) | Inst::BrCmp(..) => {
+            Inst::Jump | Inst::Branch(_) | Inst::BranchAny(_) | Inst::BrCmp(..) => {
                 unreachable!("emitted with block successors")
             }
         }
-    }
-}
-
-unsafe extern "C" fn eval_math(buf: *mut u8, spec: *const Math) -> u32 {
-    // SAFETY: the live kernel owns the immutable descriptor emitted at this call site.
-    let spec = unsafe { *spec };
-    let width = Features::host().bytes;
-    let mut args = [[0; 64]; 3];
-    for &i in spec.inputs() {
-        let n = spec.operand_type(i).bytes(width);
-        // SAFETY: the emitted call initialized this prefix of the i-th 64-byte stack slot.
-        unsafe { std::ptr::copy_nonoverlapping(buf.add(i * 64), args[i].as_mut_ptr(), n) };
-    }
-    match spec.eval(&args, width) {
-        Ok(bits) => {
-            // SAFETY: the first slot has capacity for every result, including a ZMM.
-            unsafe { std::ptr::copy_nonoverlapping(bits.as_ptr(), buf, spec.output.bytes(width)) };
-            0
-        }
-        Err(CallError::OutOfBounds) => 1,
-        Err(CallError::DivisionByZero) => 2,
-        Err(CallError::DivisionOverflow) => 3,
-        Err(_) => unreachable!("numeric operation returned an invocation error"),
     }
 }
 

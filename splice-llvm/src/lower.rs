@@ -54,8 +54,16 @@ pub(crate) fn populate<'ctx>(
     )
     .map_err(|e| e.to_string())?;
     for (id, f) in functions.into_iter().enumerate() {
-        Body::emit(ctx, &builder, f, declarations[id], &ids, &declarations)
-            .map_err(|e| e.to_string())?;
+        Body::emit(
+            ctx,
+            &builder,
+            module,
+            f,
+            declarations[id],
+            &ids,
+            &declarations,
+        )
+        .map_err(|e| e.to_string())?;
     }
     Ok(())
 }
@@ -98,13 +106,7 @@ fn declare<'ctx>(
     callee.add_attribute(AttributeLoc::Param(0), noalias);
     for (i, kind) in buffers.iter().enumerate() {
         let slot = AttributeLoc::Param((1 + arity + i * 2) as u32);
-        callee.add_attribute(
-            slot,
-            match kind {
-                BufferKind::Read => readonly,
-                BufferKind::Write => noalias,
-            },
-        );
+        callee.add_attribute(slot, if kind.writable() { noalias } else { readonly });
         if let Some(a) = capture {
             callee.add_attribute(slot, a);
         }

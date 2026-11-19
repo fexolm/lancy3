@@ -1,5 +1,6 @@
 //! Selected x64 instructions. R11 addresses the current workspace frame.
 //! R10 is the allocator's move scratch and is available inside a pseudo-op.
+pub(super) mod lanes;
 pub(super) mod simd;
 use crate::hir::{Binary, Lane, Scale, Type};
 use crate::numbers::Math;
@@ -30,7 +31,7 @@ const VOLATILE: PRegSet = if cfg!(windows) {
 } else {
     gprs(&[0, 1, 2, 6, 7, 8, 9])
 };
-pub(super) const NONVOLATILE: PRegSet = if cfg!(windows) {
+const SAVED_GPRS: PRegSet = if cfg!(windows) {
     gprs(&[3, 5, 6, 7, 12, 13, 14, 15])
 } else {
     gprs(&[3, 5, 12, 13, 14, 15])
@@ -51,6 +52,22 @@ fn return_reg(v: VReg) -> PReg {
     PReg::new(0, v.class())
 }
 const SCRATCH: usize = if cfg!(windows) { 5 } else { 15 };
+const fn vectors(mut start: usize, end: usize) -> PRegSet {
+    let mut regs = PRegSet::empty();
+    while start < end {
+        regs.add(PReg::new(start, RegClass::Vector));
+        start += 1;
+    }
+    regs
+}
+const SAVED_SIMD: PRegSet = if cfg!(windows) {
+    vectors(6, 16)
+} else {
+    PRegSet::empty()
+};
+pub(super) fn nonvolatile() -> PRegSet {
+    SAVED_GPRS | SAVED_SIMD
+}
 const SIMD: PRegSet = {
     let mut set = PRegSet::empty();
     let mut i = 0;
@@ -63,7 +80,7 @@ const SIMD: PRegSet = {
 
 static ENV: MachineEnv = MachineEnv {
     preferred_regs_by_class: [VOLATILE, PRegSet::empty(), SIMD],
-    non_preferred_regs_by_class: [NONVOLATILE, PRegSet::empty(), PRegSet::empty()],
+    non_preferred_regs_by_class: [SAVED_GPRS, PRegSet::empty(), SAVED_SIMD],
     scratch_by_class: [
         Some(gpr(10)),
         None,
@@ -157,8 +174,8 @@ pub(super) enum Inst {
         ty: Type,
         index: usize,
     },
-    Native(Native, VReg, [Option<VReg>; 3]),
-    Math(Math, VReg, [Option<VReg>; 3]),
+    Native(Native, VReg, [Option<VReg>; 3], [Option<VReg>; 6]),
+    Lanes(Math, VReg, [Option<VReg>; 3]),
     Literal(Lane, u128, VReg),
     Iota(Lane, VReg),
     BitMove(Type, Type, VReg, VReg),
@@ -186,6 +203,8 @@ pub(super) enum Inst {
         divisor: VReg,
     },
     CheckBounds(VReg, VReg),
+    CheckMask(VReg),
+    BranchAny(VReg),
     Movsxd(VReg, VReg),
     Lea(VReg, Address),
     Load(Type, VReg, Address),
@@ -193,6 +212,7 @@ pub(super) enum Inst {
         ty: Type,
         base: VReg,
         indices: Option<VReg>,
+        temp: Option<VReg>,
         mask: VReg,
         value: VReg,
         dst: Option<VReg>,
@@ -230,15 +250,18 @@ impl TargetInst for Inst {
                 out.extend(argv.map(O::reg_use));
                 out.push(O::reg_def(dst));
             }
-            Self::Native(native, d, args) => {
+            Self::Native(native, d, args, temps) => {
                 out.extend(args.into_iter().flatten().map(O::reg_use));
-                out.push(if native.tied() {
+                out.push(if native.separate_output() {
+                    O::reg_def_at_start(d)
+                } else if native.tied() {
                     O::reg_reuse_def(d, 0)
                 } else {
                     O::reg_def(d)
                 });
+                out.extend(temps.into_iter().flatten().map(O::reg_temp));
             }
-            Self::Math(_, d, args) => {
+            Self::Lanes(_, d, args) => {
                 out.extend(args.into_iter().flatten().map(O::reg_use));
                 out.push(O::reg_fixed_def(d, return_reg(d)));
             }
@@ -296,6 +319,7 @@ impl TargetInst for Inst {
             Self::Masked {
                 base,
                 indices,
+                temp,
                 mask,
                 value,
                 dst,
@@ -305,12 +329,15 @@ impl TargetInst for Inst {
                 out.extend(indices.map(O::reg_use));
                 out.extend([O::reg_use(mask), O::reg_use(value)]);
                 out.extend(dst.map(O::reg_def));
+                out.extend(temp.map(O::reg_temp));
             }
             Self::Store(_, addr, value) => {
                 addr.operands(out);
                 out.push(O::reg_use(value));
             }
-            Self::StoreArg(_, _, v) | Self::Branch(v) => out.push(O::reg_use(v)),
+            Self::CheckMask(v) | Self::BranchAny(v) | Self::StoreArg(_, _, v) | Self::Branch(v) => {
+                out.push(O::reg_use(v))
+            }
             Self::Call { dst, .. } => out.push(O::reg_fixed_def(dst, return_reg(dst))),
             Self::Ret(v) => out.push(O::reg_fixed_use(v, return_reg(v))),
             Self::Jump => {}
@@ -319,8 +346,15 @@ impl TargetInst for Inst {
     fn clobbers(&self) -> PRegSet {
         match self {
             Self::Call { clobbers, .. } => *clobbers,
-            Self::Math(_, dst, _) => {
-                let mut set = VOLATILE | SIMD;
+            Self::Lanes(spec, dst, _) => {
+                // The inline expansions use only these scratch registers. A real
+                // math call may also overwrite the upper halves of Windows YMM/ZMM6..15.
+                let mut set = if lanes::calls_library(*spec) {
+                    let wide = super::Features::host().bytes > 16;
+                    VOLATILE | SIMD | if wide { SAVED_SIMD } else { PRegSet::empty() }
+                } else {
+                    gprs(&[0, 1, 2, 8, 9]) | vectors(0, 3)
+                };
                 set.remove(return_reg(*dst));
                 set
             }
@@ -329,7 +363,10 @@ impl TargetInst for Inst {
         }
     }
     fn is_branch(&self) -> bool {
-        matches!(self, Self::Jump | Self::Branch(_) | Self::BrCmp(..))
+        matches!(
+            self,
+            Self::Jump | Self::Branch(_) | Self::BranchAny(_) | Self::BrCmp(..)
+        )
     }
     fn is_ret(&self) -> bool {
         matches!(self, Self::Ret(_))

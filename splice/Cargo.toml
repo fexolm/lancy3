@@ -6,6 +6,7 @@ rust-version = "1.94"
 description = "A staged Rust kernel language with a portable code generation interface"
 
 [dependencies]
+splice-target = { path = "../splice-target" }
 splice-macros = { path = "../splice-macros" }
 
 [dev-dependencies]
@@ -21,4 +22,12 @@ harness = false
 
 [[example]]
 name = "sql_plan"
+test = true
+
+[[example]]
+name = "simd_matmul"
+test = true
+
+[[example]]
+name = "simd_hash_lookup"
 test = true

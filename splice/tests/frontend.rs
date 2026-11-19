@@ -12,6 +12,45 @@ impl Codegen for Inspect {
     }
 }
 
+#[test]
+fn oversized_signature_is_rejected_by_the_portable_builder() {
+    let result = Inspect::build(
+        usize::MAX,
+        &[],
+        Box::new(|b| {
+            b.ret(b.arg(0));
+            Ok(())
+        }),
+    );
+    assert!(matches!(result, Err(message) if message.contains("too many")));
+}
+
+mod pricing {
+    pub struct Lane;
+    impl Lane {
+        pub fn surcharge(zone: i32) -> i32 {
+            zone + 2
+        }
+    }
+}
+
+#[kernel]
+fn delivery(#[comptime] zone: i32, price: i32) -> i32 {
+    price + pricing::Lane::surcharge(zone)
+}
+
+#[test]
+fn host_associated_functions_can_belong_to_a_type_named_lane() {
+    assert_eq!(delivery(3, 8), 13);
+    assert!(
+        delivery::ir(3)
+            .unwrap()
+            .instructions()
+            .iter()
+            .any(|inst| matches!(inst, Instr::Const(_, 5)))
+    );
+}
+
 trait Factor {
     fn factor(&self) -> i32;
 }

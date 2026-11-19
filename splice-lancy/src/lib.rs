@@ -62,11 +62,7 @@ impl Executable for LancyKernel {
         let mut words = Vec::with_capacity(self.arity + 2 * buffers.len());
         words.extend(args.iter().map(|&v| v as u32 as u64));
         for slice in buffers {
-            let (ptr, len) = match slice {
-                BufferArg::Read(s) => (s.as_ptr(), s.len()),
-                BufferArg::Write(s) => (s.as_mut_ptr().cast_const(), s.len()),
-            };
-            words.extend([ptr as u64, len as u64]);
+            words.extend([slice.data() as u64, slice.len() as u64]);
         }
         // SAFETY: both Splice lowering paths guard every access using the length
         // paired with its original slice, and validate permissions on every store and call.

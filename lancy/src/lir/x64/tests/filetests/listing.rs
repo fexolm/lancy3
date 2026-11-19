@@ -74,12 +74,12 @@ pub(super) fn hir(module: &Module<VerifiedBody>, ids: &FunctionIds<Function>) ->
                             v(x)
                         )
                     }
+                    Op::Literal(l, n) => format!("Literal({n}) {:?} ", l.scalar()),
                     op @ (Op::Simd(_)
                     | Op::Unary(..)
                     | Op::Ternary(..)
                     | Op::Cast(..)
-                    | Op::Bitcast(..)
-                    | Op::Literal(..)) => {
+                    | Op::Bitcast(..)) => {
                         let prefix = if matches!(op, Op::Simd(_)) {
                             "simd."
                         } else {
@@ -167,7 +167,7 @@ fn opcode(inst: Inst) -> String {
         Inst::Argv(_) => "argv".into(),
         Inst::LoadArg { index, .. } => format!("arg {index}"),
         Inst::Native(n, ..) => format!("native.{:?}.{:?}", n.math.input, n.math.action),
-        Inst::Math(m, ..) => format!("math.{:?}.{:?}", m.input, m.action),
+        Inst::Lanes(m, ..) => format!("lanes.{:?}.{:?}", m.input, m.action),
         Inst::Literal(l, n, _) => format!("literal.{l:?} {n:#x}"),
         Inst::Iota(l, _) => format!("iota.{l:?}"),
         Inst::BitMove(from, to, ..) => format!("bitcast.{from:?}.{to:?}"),
@@ -180,6 +180,8 @@ fn opcode(inst: Inst) -> String {
         }
         Inst::Compare(cc, _, _, arg) => format!("cmp.{cc:?}{}", rhs(arg)),
         Inst::BrCmp(cc, _, arg) => format!("brcmp.{cc:?}{}", rhs(arg)),
+        Inst::CheckMask(_) => "bounds.mask".into(),
+        Inst::BranchAny(_) => "branch.any".into(),
         Inst::CheckBounds(..) => "bounds".into(),
         Inst::Cdq { .. } => "cdq".into(),
         Inst::IDiv { remainder, .. } => if remainder { "irem" } else { "idiv" }.into(),

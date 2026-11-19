@@ -1,14 +1,16 @@
 //! Binary16 and bfloat16 use the same sign/exponent/fraction layout with
 //! different exponent biases. Widening either format to binary64 is exact.
-use super::{Action, Binary, Lane, Ternary, Unary, float64};
+#[cfg(test)]
+use super::{Action, Binary, Ternary, Unary, reference::float64};
+use crate::hir::Lane;
 
-pub(super) struct Format {
+pub(crate) struct Format {
     fraction: u32,
     bias: i32,
 }
 
 impl Format {
-    pub fn for_lane(lane: Lane) -> Self {
+    pub const fn for_lane(lane: Lane) -> Self {
         match lane {
             Lane::F16 => Self {
                 fraction: 10,
@@ -24,6 +26,7 @@ impl Format {
     fn infinity(&self) -> u16 {
         0x7fff & !((1 << self.fraction) - 1)
     }
+    #[cfg(test)]
     pub fn decode(&self, raw: u16) -> f64 {
         let magnitude = raw & 0x7fff;
         let frac = magnitude & ((1 << self.fraction) - 1);
@@ -68,6 +71,7 @@ impl Format {
         sign | (base + rounded as u16)
     }
 
+    #[cfg(test)]
     pub fn eval(&self, action: Action, x: u16, y: u16, z: u16) -> u128 {
         let a = self.decode(x);
         let b = self.decode(y);

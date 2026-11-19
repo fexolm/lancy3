@@ -20,7 +20,7 @@
 #![forbid(unsafe_code)]
 
 use splice::hir::{Binary, Buffer, Instr, Reg};
-use splice::{BufferKind, Codegen, Function};
+use splice::{Codegen, Function};
 use std::collections::{HashMap, hash_map::Entry};
 use std::fmt::{self, Write};
 use std::sync::Arc;
@@ -95,15 +95,70 @@ fn render(root: &Function, out: &mut String) -> fmt::Result {
             if i != 0 || f.arity() != 0 {
                 out.push_str(", ");
             }
-            let ty = match kind {
-                BufferKind::Read => "&[i32]",
-                BufferKind::Write => "&mut [i32]",
-            };
-            write!(out, "{}: {ty}", buf(Buffer(i as u32)))?;
+            let access = if kind.writable() { "&mut " } else { "&" };
+            write!(
+                out,
+                "{}: {access}[{}]",
+                buf(Buffer(i as u32)),
+                kind.element().name()
+            )?;
         }
         writeln!(out, ") -> i32 {{")?;
         for instruction in f.instructions() {
             match instruction {
+                Instr::Simd { dst, inst, args } => {
+                    use splice::hir::SimdOp::*;
+                    write!(out, "    ")?;
+                    if let Some(d) = dst {
+                        write!(out, "{} = ", reg(*d))?;
+                    }
+                    let (op, buffer) = match inst.op {
+                        Load(b) => ("load", Some(b)),
+                        Store(b) => ("store", Some(b)),
+                        LoadSelect(b) => ("load_select", Some(b)),
+                        StoreSelect(b) => ("store_select", Some(b)),
+                        Gather(b) => ("gather", Some(b)),
+                        Scatter(b) => ("scatter", Some(b)),
+                        GatherSelect(b) => ("gather_select", Some(b)),
+                        ScatterSelect(b) => ("scatter_select", Some(b)),
+                        Splat(_) | SplatScalar => ("splat", None),
+                        Lanes => ("lanes", None),
+                        FirstN => ("first_n", None),
+                        Iota => ("iota", None),
+                        Add => ("add", None),
+                        Sub => ("sub", None),
+                        Mul => ("mul", None),
+                        Div => ("div", None),
+                        And => ("and", None),
+                        Or => ("or", None),
+                        Xor => ("xor", None),
+                        Not => ("not", None),
+                        Eq => ("eq", None),
+                        Ne => ("ne", None),
+                        Lt => ("lt", None),
+                        Le => ("le", None),
+                        Gt => ("gt", None),
+                        Ge => ("ge", None),
+                        MaskAnd => ("mask_and", None),
+                        MaskOr => ("mask_or", None),
+                        MaskXor => ("mask_xor", None),
+                        MaskNot => ("mask_not", None),
+                        Any => ("any", None),
+                        All => ("all", None),
+                        Select => ("select", None),
+                    };
+                    write!(out, "simd.{op}.{}", inst.element.name())?;
+                    if let Some(b) = buffer {
+                        write!(out, " {}", buf(b))?;
+                    }
+                    if let Splat(bits) = inst.op {
+                        write!(out, " {bits:#x}")?;
+                    }
+                    for &r in args {
+                        write!(out, " {}", reg(r))?;
+                    }
+                    writeln!(out)?;
+                }
                 Instr::Const(dst, n) => writeln!(out, "    {} = {n}", reg(*dst))?,
                 Instr::Copy(dst, src) => writeln!(out, "    {} = {}", reg(*dst), reg(*src))?,
                 Instr::Bin(dst, op, a, b) => {

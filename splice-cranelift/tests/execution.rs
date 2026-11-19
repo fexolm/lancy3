@@ -183,3 +183,85 @@ fn shared_callees_stack_arguments_and_backedges_outlive_the_ir() {
         }
     });
 }
+
+#[test]
+fn masked_f64_memory_keeps_global_lane_order_across_chunks() {
+    use splice::{
+        BufferKind,
+        hir::{Buffer, Simd, SimdOp},
+        simd::Element::{F64, I64},
+    };
+
+    let mut f = FunctionBuilder::with_buffers(
+        0,
+        vec![
+            BufferKind::new(F64, false),
+            BufferKind::new(I64, false),
+            BufferKind::new(F64, false),
+            BufferKind::new(F64, true),
+        ],
+    );
+    let offset = f.constant(0);
+    let mut simd = |element, op, args: &[_]| f.simd(Simd { element, op }, args).unwrap();
+    let data = simd(F64, SimdOp::Load(Buffer(0)), &[offset]).unwrap();
+    let indices = simd(I64, SimdOp::Load(Buffer(1)), &[offset]).unwrap();
+    let zero = simd(F64, SimdOp::Splat(0), &[]).unwrap();
+    let active = simd(F64, SimdOp::Gt, &[data, zero]).unwrap();
+    let gathered = simd(
+        F64,
+        SimdOp::GatherSelect(Buffer(2)),
+        &[indices, active, zero],
+    )
+    .unwrap();
+    let sum = simd(F64, SimdOp::Add, &[data, gathered]).unwrap();
+    let selected = simd(F64, SimdOp::Select, &[active, sum, zero]).unwrap();
+    simd(
+        F64,
+        SimdOp::ScatterSelect(Buffer(3)),
+        &[indices, active, selected],
+    );
+    let any = simd(F64, SimdOp::Any, &[active]).unwrap();
+    let all = simd(F64, SimdOp::All, &[active]).unwrap();
+    let result = f.binary(Binary::Add, any, all);
+    f.ret(result);
+    let code = Cranelift::compile(&f.finish().unwrap()).unwrap();
+
+    let mut data: Vec<_> = (0..F64.lanes()).map(|i| (i + 1) as f64).collect();
+    let mut indices = vec![1; data.len()];
+    data[1] = f64::NAN;
+    indices[1] = i64::MAX;
+    // Leave an entire middle 128-bit chunk inactive when the width permits.
+    // Its invalid indices must be skipped while later active chunks still run.
+    if data.len() > 4 {
+        data[2..4].fill(0.0);
+        indices[2..4].fill(i64::MIN);
+    }
+    let table = [0.0, 0.25, 0.5];
+    for last_index in [1, 2] {
+        let last = (0..data.len()).rfind(|&i| data[i] > 0.0).unwrap();
+        indices[last] = last_index;
+        let mut expected = [17.0, 29.0];
+        let mut actual = expected;
+        let mut expected_result = Ok(-1);
+        for (&x, &i) in data.iter().zip(&indices) {
+            if x > 0.0 {
+                let Some(slot) = expected.get_mut(i as usize) else {
+                    expected_result = Err("kernel slice index out of bounds".to_owned());
+                    break;
+                };
+                *slot = x + table[i as usize];
+            }
+        }
+        let result = code.call(
+            &[],
+            &mut [
+                data.as_slice().into(),
+                indices.as_slice().into(),
+                table.as_slice().into(),
+                actual.as_mut_slice().into(),
+            ],
+        );
+        assert_eq!(result, expected_result);
+        assert_eq!(actual, expected);
+    }
+}

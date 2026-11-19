@@ -126,3 +126,73 @@ fn shared_callees_loops_and_unreachable_tails_form_valid_llvm_blocks() {
         assert_eq!(code.call(&[limit], &mut []).unwrap(), result);
     }
 }
+
+#[test]
+fn masked_f64_gather_checks_active_indices_at_full_i64_width() {
+    use splice::{
+        frontend::{self, KernelBuilder},
+        hir::{Simd, SimdOp},
+        simd::Element,
+    };
+    let kinds = [
+        BufferKind::new(Element::I64, false),
+        BufferKind::new(Element::F64, false),
+        BufferKind::new(Element::F64, true),
+    ];
+    fn stage(b: &mut dyn KernelBuilder) -> splice::Result<()> {
+        let zero = b.constant(0);
+        let i64op = |op| Simd {
+            element: Element::I64,
+            op,
+        };
+        let f64op = |op| Simd {
+            element: Element::F64,
+            op,
+        };
+        let idx = b.simd(i64op(SimdOp::Load(Buffer(0))), &[zero])?.unwrap();
+        let positions = b.simd(f64op(SimdOp::Iota), &[])?.unwrap();
+        let one = b
+            .simd(f64op(SimdOp::Splat(1.0_f64.to_bits())), &[])?
+            .unwrap();
+        let first = b.simd(f64op(SimdOp::Lt), &[positions, one])?.unwrap();
+        let selected = b
+            .simd(
+                f64op(SimdOp::GatherSelect(Buffer(1))),
+                &[idx, first, positions],
+            )?
+            .unwrap();
+        b.simd(f64op(SimdOp::Store(Buffer(2))), &[zero, selected])?;
+        b.ret(zero);
+        Ok(())
+    }
+    let ir = frontend::materialize(0, &kinds, Box::new(stage)).unwrap();
+    let n = Element::F64.lanes();
+    for kernel in [
+        Llvm::build(0, &kinds, Box::new(stage)).unwrap(),
+        Llvm::compile(&ir).unwrap(),
+    ] {
+        let src = [-17.0];
+        let mut indices = vec![-1_i64; n];
+        for active in [0, 1_i64 << 32, -1] {
+            indices[0] = active;
+            let mut out = vec![777.0_f64; n];
+            let result = kernel.call(
+                &[],
+                &mut [
+                    BufferArg::from(indices.as_slice()),
+                    BufferArg::from(&src[..]),
+                    BufferArg::from(out.as_mut_slice()),
+                ],
+            );
+            if active == 0 {
+                assert_eq!(result, Ok(0));
+                let mut expected: Vec<_> = (0..n).map(|i| i as f64).collect();
+                expected[0] = src[0];
+                assert_eq!(out, expected);
+            } else {
+                assert!(result.unwrap_err().contains("bounds"));
+                assert_eq!(out, vec![777.0; n]);
+            }
+        }
+    }
+}

@@ -1,12 +1,13 @@
 //! Resolve labels, check calls and register indices, and verify definite initialization.
 
-use super::{BufferKind, Function, Instr, Label};
+use super::{Function, Instr, Label, ValueType};
+use crate::simd::Element;
 use std::collections::VecDeque;
 
 impl Function {
     pub(super) fn verify(mut self) -> Result<Self, String> {
-        if self.registers > u32::MAX as usize {
-            return Err("too many scalar registers".into());
+        if self.register_count() > u32::MAX as usize {
+            return Err("too many registers".into());
         }
         if self.buffer_kinds.len() > u32::MAX as usize {
             return Err("too many buffer parameters".into());
@@ -31,9 +32,30 @@ impl Function {
             if op
                 .reads()
                 .chain(op.written())
-                .any(|r| r.0 as usize >= self.registers)
+                .any(|r| r.0 as usize >= self.register_count())
             {
                 return Err(format!("invalid register at instruction {i}"));
+            }
+            match op {
+                Instr::Simd { dst, inst, args } => {
+                    let types: Vec<_> = args.iter().map(|&r| self.reg_type(r)).collect();
+                    inst.validate(&types, &self.buffer_kinds)?;
+                    if dst.map(|r| self.reg_type(r)) != inst.output() {
+                        return Err("invalid SIMD result type".into());
+                    }
+                }
+                Instr::Copy(d, s) if self.reg_type(*d) != self.reg_type(*s) => {
+                    return Err("register copy type mismatch".into());
+                }
+                Instr::Copy(..) => {}
+                _ if op
+                    .reads()
+                    .chain(op.written())
+                    .any(|r| self.reg_type(r) != ValueType::Scalar) =>
+                {
+                    return Err("expected a scalar register".into());
+                }
+                _ => {}
             }
             match op {
                 Instr::BufferLen { buffer, .. }
@@ -43,7 +65,10 @@ impl Function {
                         .buffer_kinds
                         .get(buffer.index())
                         .ok_or_else(|| format!("invalid buffer at instruction {i}"))?;
-                    if matches!(op, Instr::Store { .. }) && *kind != BufferKind::Write {
+                    if !matches!(op, Instr::BufferLen { .. }) && kind.element() != Element::I32 {
+                        return Err("scalar element access requires an i32 buffer".into());
+                    }
+                    if matches!(op, Instr::Store { .. }) && !kind.writable() {
                         return Err(format!("store to read-only buffer at instruction {i}"));
                     }
                 }
@@ -92,7 +117,7 @@ fn check_initialization(
             _ => [Some(block + 1), None],
         });
     }
-    let mut entry = vec![0u64; f.registers.div_ceil(64)];
+    let mut entry = vec![0u64; f.register_count().div_ceil(64)];
     for r in 0..f.arity {
         entry[r / 64] |= 1 << (r % 64);
     }

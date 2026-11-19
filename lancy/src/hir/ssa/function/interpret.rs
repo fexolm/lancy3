@@ -103,6 +103,12 @@ pub(super) unsafe fn run(
         f.next = graph.insts[inst].next;
         let result = match *graph.op(inst) {
             Op::Const(n) => word(n as u32 as u64),
+            Op::Literal(lane, bits) => {
+                let mut value = [0; 64];
+                let size = lane.bytes();
+                value[..size].copy_from_slice(&bits.to_le_bytes()[..size]);
+                value
+            }
             Op::Simd(Simd::LaneCount(l)) => word((width / l.bytes()) as u64),
             Op::Copy(v) => f.values[v],
             Op::BoundsCheck(index, len) => {

@@ -83,7 +83,15 @@ pub(super) fn select(
                     Op::Simd(Simd::LaneCount(lane)) => {
                         Inst::Imm(dst(), (cpu.bytes / lane.bytes()) as i32)
                     }
-                    Op::BoundsCheck(i, n) => Inst::CheckBounds(rules.input(i), rules.input(n)),
+                    Op::BoundsCheck(i, n) => {
+                        if rules.ctx.constant(n) == Some(1)
+                            && let Some(Op::Simd(Simd::AnyTrue(mask))) = rules.ctx.single_use(i)
+                        {
+                            Inst::CheckMask(rules.input(mask))
+                        } else {
+                            Inst::CheckBounds(rules.input(i), rules.input(n))
+                        }
+                    }
                     Op::PtrOffset(base, i, scale) => {
                         Inst::Lea(dst(), rules.offset(base, i, scale)?)
                     }
@@ -100,6 +108,17 @@ pub(super) fn select(
                         ty: f.value_type(value),
                         base: rules.input(address.base),
                         indices: address.indices.map(|v| rules.input(v)),
+                        temp: if cpu.bytes == 32
+                            && cpu.avx10 == 0
+                            && cpu.avx2
+                            && address.indices.is_some()
+                            && f.result(i).is_some()
+                            && matches!(f.value_type(value).lane().unwrap().bytes(), 4 | 8)
+                        {
+                            Some(rules.body.temp(RegClass::Vector)?)
+                        } else {
+                            None
+                        },
                         mask: rules.input(mask),
                         value: rules.input(value),
                         dst: f.result(i).map(reg),
@@ -128,8 +147,14 @@ pub(super) fn select(
                             Math::from_op(op, |v| f.value_type(v)).expect("numeric instruction");
                         let args = args.map(|v| v.map(|v| rules.input(v)));
                         match Native::select(math, cpu) {
-                            Some(native) => Inst::Native(native, dst(), args),
-                            None => Inst::Math(math, dst(), args),
+                            Some(native) => {
+                                let mut temps = [None; 6];
+                                for t in &mut temps[..native.temporaries()] {
+                                    *t = Some(rules.body.temp(RegClass::Vector)?);
+                                }
+                                Inst::Native(native, dst(), args, temps)
+                            }
+                            None => Inst::Lanes(math, dst(), args),
                         }
                     }
                 };
@@ -216,7 +241,9 @@ impl Rules<'_> {
             Terminator::Return(v) => Inst::Ret(self.input(v)),
             Terminator::Jump(_) => Inst::Jump,
             Terminator::Branch { cond, .. } => {
-                if let Some(Op::Bin(kind, a, b)) = self.ctx.single_use(cond)
+                if let Some(Op::Simd(Simd::AnyTrue(v))) = self.ctx.single_use(cond) {
+                    Inst::BranchAny(self.input(v))
+                } else if let Some(Op::Bin(kind, a, b)) = self.ctx.single_use(cond)
                     && self.f.value_type(a) == crate::hir::Type::I32
                     && let Some(cc) = Cond::from_binary(kind)
                 {

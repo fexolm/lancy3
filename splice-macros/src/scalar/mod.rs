@@ -8,7 +8,7 @@ macro_rules! emit {
 
 mod flow;
 mod lower;
-use lower::{Binding, Lower, Scalar};
+use lower::{Binding, BufferType, Elem, Lower, Scalar};
 use proc_macro2::{Ident, TokenStream};
 use std::collections::HashMap;
 use syn::visit::Visit;
@@ -114,11 +114,9 @@ pub(super) fn expand(root: Path, mut native: ItemFn) -> Result<TokenStream> {
                 let index = buffer_names.len() as u32;
                 inline_args.push(emit!(#hir::Buffer(#index)));
                 buffer_names.push(id);
-                buffer_kinds.push(if writable {
-                    emit!(#hir::BufferKind::Write)
-                } else {
-                    emit!(#hir::BufferKind::Read)
-                });
+                let elem = writable.elem.tokens(&root);
+                let write = writable.write;
+                buffer_kinds.push(emit!(#hir::BufferKind::new(#elem,#write)));
                 emit!(#id: #hir::Buffer)
             }
             Binding::Reg(_, mutable) => {
@@ -150,7 +148,7 @@ pub(super) fn expand(root: Path, mut native: ItemFn) -> Result<TokenStream> {
         region_depth: 0,
     };
     let code = lower.kernel_body(&native.block)?;
-    let kinds = emit!(&[#(#buffer_kinds),*]);
+    let kinds = emit!(const { &[#(#buffer_kinds),*] });
     // Rust requires lifetime parameters before the backend type; the backend
     // is still the first argument at the usual lifetime-elided turbofish.
     let mut compile_generics = generic.clone();
@@ -251,7 +249,7 @@ fn parameter(arg: &FnArg) -> Result<(&Ident, &Type, Binding)> {
             let writable = slice_type(&arg.ty).ok_or_else(|| {
                 Error::new_spanned(
                     &arg.ty,
-                    "runtime parameters must be i32, &[i32], or &mut [i32]",
+                    "runtime parameters must be i32 or a slice of u16, i32, i64, f32, or f64",
                 )
             })?;
             if mutable {
@@ -307,14 +305,17 @@ fn named(pat: &Pat) -> Result<&syn::PatIdent> {
     }
 }
 
-fn slice_type(ty: &syn::Type) -> Option<bool> {
+fn slice_type(ty: &syn::Type) -> Option<BufferType> {
     let syn::Type::Reference(reference) = ty else {
         return None;
     };
     let syn::Type::Slice(slice) = &*reference.elem else {
         return None;
     };
-    (Scalar::from_type(&slice.elem) == Some(Scalar::Int)).then_some(reference.mutability.is_some())
+    Some(BufferType {
+        elem: Elem::parse(&slice.elem)?,
+        write: reference.mutability.is_some(),
+    })
 }
 
 #[cfg(test)]

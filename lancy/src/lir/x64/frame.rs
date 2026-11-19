@@ -17,3 +17,12 @@ impl Frame {
         }
     }
 }
+
+// Win64 preserves the low 128 bits of XMM6..15. GPR saves occupy one word.
+pub(super) fn save_words(reg: regalloc2::PReg) -> usize {
+    if reg.class() == regalloc2::RegClass::Vector {
+        2
+    } else {
+        1
+    }
+}

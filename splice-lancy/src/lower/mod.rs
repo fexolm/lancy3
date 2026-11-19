@@ -1,7 +1,8 @@
-//! Stage directly into Lancy. Scalar operations receive SSA values immediately.
+//! Stage Splice's typed operations directly into Lancy SSA.
 //! Only mutable-name bindings and the operands of forward edges are deferred.
 mod portable;
 mod seal;
+mod simd;
 pub use portable::lower;
 #[cfg(test)]
 mod tests;
@@ -11,7 +12,8 @@ use lancy::support::slotmap::DenseMap;
 use splice::{
     BufferKind,
     frontend::{Body, KernelBuilder, Specialization},
-    hir::{Binary, Buffer, Label, Reg},
+    hir::{Binary, Buffer, Label, Reg, Simd, ValueType},
+    simd::Element,
 };
 use std::{collections::HashMap, sync::Arc};
 
@@ -80,7 +82,7 @@ impl<'a> Builder<'a> {
             kinds,
             blocks,
             current: Some(entry),
-            count,
+            types: vec![ValueType::Scalar; arity],
             demands: Vec::new(),
             labels: Vec::new(),
             immediate: None,
@@ -125,7 +127,7 @@ struct Builder<'a> {
     kinds: &'a [BufferKind],
     blocks: DenseMap<Block, State>,
     current: Option<Block>,
-    count: u32,
+    types: Vec<ValueType>,
     demands: Vec<(Block, Reg)>,
     labels: Vec<Destination>,
     immediate: Option<(Reg, bool)>,
@@ -134,10 +136,20 @@ struct Builder<'a> {
 
 impl Builder<'_> {
     fn valid(&mut self, r: Reg) {
-        if r.0 >= self.count {
+        if r.0 as usize >= self.types.len() {
             self.error
                 .get_or_insert_with(|| format!("invalid register {r:?}"));
         }
+    }
+    fn expect_type(&mut self, r: Reg, ty: ValueType) {
+        if self.types.get(r.0 as usize) != Some(&ty) {
+            self.error
+                .get_or_insert_with(|| format!("expected {ty:?} register, got {r:?}"));
+        }
+    }
+    fn scalar(&mut self, r: Reg) -> Value {
+        self.expect_type(r, ValueType::Scalar);
+        self.read(r)
     }
     fn slice(&mut self, buffer: Buffer, write: bool) -> (Value, Value) {
         match self.kinds.get(buffer.index()) {
@@ -146,7 +158,7 @@ impl Builder<'_> {
                     .get_or_insert_with(|| format!("unknown buffer {}", buffer.0));
                 return (Value::INVALID, Value::INVALID);
             }
-            Some(BufferKind::Read) if write => {
+            Some(kind) if write && !kind.writable() => {
                 self.error
                     .get_or_insert_with(|| format!("buffer {} is read-only", buffer.0));
             }
@@ -158,6 +170,14 @@ impl Builder<'_> {
     }
 
     fn address(&mut self, buffer: Buffer, index: Value, write: bool) -> Value {
+        if self
+            .kinds
+            .get(buffer.index())
+            .is_some_and(|k| k.element() != Element::I32)
+        {
+            self.error
+                .get_or_insert_with(|| "scalar memory access requires an i32 buffer".into());
+        }
         let (base, len) = self.slice(buffer, write);
         let Some(block) = self.current else {
             return Value::INVALID;
@@ -168,7 +188,12 @@ impl Builder<'_> {
             .unwrap()
     }
     fn parameter(&mut self, block: Block, r: Reg) -> Value {
-        let v = self.graph.append_param(block);
+        let ty = self
+            .types
+            .get(r.0 as usize)
+            .copied()
+            .unwrap_or(ValueType::Scalar);
+        let v = self.graph.append_typed_param(block, simd::native_type(ty));
         let state = &mut self.blocks[block];
         state.incoming.push(r);
         state.defs.insert(r, v);
@@ -203,7 +228,7 @@ impl Builder<'_> {
         }
     }
     fn call_op(&mut self, callee: Arc<Function>, args: &[Reg], buffers: &[Buffer]) -> Op {
-        let mut values: Vec<_> = args.iter().map(|&r| self.read(r)).collect();
+        let mut values: Vec<_> = args.iter().map(|&r| self.scalar(r)).collect();
         for &buffer in buffers {
             let (ptr, len) = self.slice(buffer, false);
             values.extend([ptr, len]);
@@ -265,6 +290,9 @@ impl Builder<'_> {
 }
 
 impl KernelBuilder for Builder<'_> {
+    fn reg_type(&self, r: Reg) -> Option<ValueType> {
+        self.types.get(r.0 as usize).copied()
+    }
     fn arg(&self, index: usize) -> Reg {
         Reg(if index < self.arity {
             index as u32
@@ -273,12 +301,18 @@ impl KernelBuilder for Builder<'_> {
         })
     }
     fn local(&mut self) -> Reg {
-        let r = Reg(self.count);
-        self.count = self
-            .count
-            .checked_add(1)
-            .expect("exhausted scalar register handles");
+        self.typed_local(ValueType::Scalar)
+    }
+    fn typed_local(&mut self, ty: ValueType) -> Reg {
+        let r = Reg(u32::try_from(self.types.len()).expect("exhausted register handles"));
+        self.types.push(ty);
         r
+    }
+    fn simd(&mut self, inst: Simd, args: &[Reg]) -> splice::Result<Option<Reg>> {
+        let value = self.emit_simd(inst, args)?;
+        let dst = inst.output().map(|ty| self.typed_local(ty));
+        self.bind_simd(dst, value);
+        Ok(dst)
     }
     fn constant(&mut self, n: i32) -> Reg {
         let r = self.result(Op::Const(n));
@@ -290,12 +324,12 @@ impl KernelBuilder for Builder<'_> {
         self.result(Op::Copy(len))
     }
     fn load(&mut self, buffer: Buffer, index: Reg) -> Reg {
-        let index = self.read(index);
+        let index = self.scalar(index);
         let addr = self.address(buffer, index, false);
         self.result(Op::Load(hir::Type::I32, addr))
     }
     fn store(&mut self, buffer: Buffer, index: Reg, value: Reg) {
-        let (index, value) = (self.read(index), self.read(value));
+        let (index, value) = (self.scalar(index), self.scalar(value));
         let addr = self.address(buffer, index, true);
         self.immediate = None;
         if let Some(b) = self.current {
@@ -306,11 +340,14 @@ impl KernelBuilder for Builder<'_> {
         self.immediate.filter(|(r, _)| *r == reg).map(|(_, v)| v)
     }
     fn binary(&mut self, op: Binary, a: Reg, b: Reg) -> Reg {
-        let (a, b) = (self.read(a), self.read(b));
+        let (a, b) = (self.scalar(a), self.scalar(b));
         self.result(Op::Bin(binary(op), a, b))
     }
     fn assign(&mut self, dst: Reg, src: Reg) {
         self.valid(dst);
+        if let Some(&ty) = self.types.get(dst.0 as usize) {
+            self.expect_type(src, ty);
+        }
         let v = self.read(src);
         self.immediate = None;
         if let Some(b) = self.current {
@@ -340,12 +377,12 @@ impl KernelBuilder for Builder<'_> {
         self.end(Exit::Jump(b));
     }
     fn branch(&mut self, cond: Reg, yes: Label, no: Label) {
-        let cond = self.read(cond);
+        let cond = self.scalar(cond);
         let (yes, no) = (self.target(yes), self.target(no));
         self.end(Exit::Branch(cond, yes, no));
     }
     fn ret(&mut self, value: Reg) {
-        let v = self.read(value);
+        let v = self.scalar(value);
         self.end(Exit::Return(v));
     }
     fn call_kernel(

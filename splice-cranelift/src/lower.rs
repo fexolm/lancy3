@@ -11,6 +11,8 @@ use std::collections::HashMap;
 use std::mem::{offset_of, size_of};
 use std::sync::Arc;
 
+mod simd;
+
 fn parameters(b: &mut FunctionBuilder, f: &Function, is_entry: bool) -> Vec<Value> {
     let entry = b.create_block();
     b.append_block_params_for_function_params(entry);
@@ -53,12 +55,10 @@ pub(super) fn emit(
     let params = parameters(&mut b, f, is_entry);
     let (scalars, pairs) = params.split_at(f.arity());
     let buffers = pairs.as_chunks::<2>().0;
-    let vars: Vec<_> = (0..f.register_count())
-        .map(|_| b.declare_var(I32))
-        .collect();
-    let var = |r: Reg| vars[r.0 as usize];
-    for (&var, &value) in vars.iter().zip(scalars) {
-        b.def_var(var, value);
+    let vars = simd::Registers::new(&mut b, f);
+    let var = |r: Reg| vars.get(r)[0];
+    for (index, &value) in scalars.iter().enumerate() {
+        b.def_var(var(Reg(index as u32)), value);
     }
     let labels: Vec<_> = (0..f.label_count()).map(|_| b.create_block()).collect();
     let mut open = true;
@@ -78,8 +78,17 @@ pub(super) fn emit(
                 b.def_var(var(dst), value);
             }
             Instr::Copy(dst, src) => {
-                let value = b.use_var(var(src));
-                b.def_var(var(dst), value);
+                for (&d, &s) in vars.get(dst).iter().zip(vars.get(src)) {
+                    let value = b.use_var(s);
+                    b.def_var(d, value);
+                }
+            }
+            Instr::Simd {
+                dst,
+                inst,
+                ref args,
+            } => {
+                simd::emit(&mut b, inst, &vars, dst, args, buffers);
             }
             Instr::Bin(dst, op, left, right) => {
                 let lhs = b.use_var(var(left));

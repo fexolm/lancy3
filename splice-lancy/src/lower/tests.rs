@@ -1,4 +1,5 @@
 use super::*;
+mod simd;
 
 #[test]
 fn portable_calls_share_one_lowered_body_and_preserve_argument_reassignment() {

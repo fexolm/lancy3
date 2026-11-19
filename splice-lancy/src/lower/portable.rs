@@ -36,12 +36,18 @@ fn lower_body(
     callees: &HashMap<*const Function, Arc<hir::Function>>,
 ) -> Result<hir::Function, String> {
     let mut b = Builder::new(function.arity(), function.buffer_kinds())?;
-    b.count = u32::try_from(function.register_count()).map_err(|_| "too many scalar registers")?;
+    b.types = (0..function.register_count())
+        .map(|i| function.reg_type(splice::hir::Reg(i as u32)))
+        .collect();
     b.labels
         .resize_with(function.label_count(), Destination::default);
     for inst in function.instructions() {
         match inst {
             Instr::Const(dst, n) => b.define(*dst, Op::Const(*n)),
+            Instr::Simd { dst, inst, args } => {
+                let v = b.emit_simd(*inst, args)?;
+                b.bind_simd(*dst, v);
+            }
             Instr::Bin(dst, op, lhs, rhs) => {
                 let op = Op::Bin(binary(*op), b.read(*lhs), b.read(*rhs));
                 b.define(*dst, op);

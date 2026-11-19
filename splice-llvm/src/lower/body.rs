@@ -1,11 +1,14 @@
+mod simd;
+
 use super::call;
-use inkwell::IntPredicate;
 use inkwell::basic_block::BasicBlock;
 use inkwell::builder::{Builder, BuilderError};
 use inkwell::context::Context;
+use inkwell::types::BasicTypeEnum;
 use inkwell::values::{BasicMetadataValueEnum, FunctionValue, IntValue, PointerValue};
+use inkwell::{IntPredicate, module::Module};
 use splice::Function;
-use splice::hir::{Binary, Buffer, Instr, Label, Reg};
+use splice::hir::{Binary, Buffer, Instr, Label, Reg, ValueType};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -28,9 +31,10 @@ enum Failure {
 pub(super) struct Body<'a, 'ctx> {
     ctx: &'ctx Context,
     builder: &'a Builder<'ctx>,
+    module: &'a Module<'ctx>,
     function: FunctionValue<'ctx>,
     status: PointerValue<'ctx>,
-    registers: Vec<PointerValue<'ctx>>,
+    registers: Vec<(ValueType, PointerValue<'ctx>)>,
     slices: Vec<Slice<'ctx>>,
     labels: Vec<Option<BasicBlock<'ctx>>>,
     exits: [Option<BasicBlock<'ctx>>; 4],
@@ -40,20 +44,22 @@ impl<'a, 'ctx> Body<'a, 'ctx> {
     pub(super) fn start(
         ctx: &'ctx Context,
         builder: &'a Builder<'ctx>,
+        module: &'a Module<'ctx>,
         function: FunctionValue<'ctx>,
         arity: usize,
-        register_count: usize,
+        types: impl IntoIterator<Item = ValueType>,
         buffer_count: usize,
     ) -> Built<Self> {
         builder.position_at_end(ctx.append_basic_block(function, "entry"));
         // Only the entry allocates register slots. LLVM promotes these to SSA,
         // including phi nodes for mutable locals across joins and backedges.
-        let registers = (0..register_count)
-            .map(|_| builder.build_alloca(ctx.i32_type(), ""))
+        let registers = types
+            .into_iter()
+            .map(|ty| Ok((ty, builder.build_alloca(simd::llvm_type(ctx, ty), "")?)))
             .collect::<Built<Vec<_>>>()?;
         let mut params = function.get_param_iter();
         let status = params.next().unwrap().into_pointer_value();
-        for &ptr in &registers[..arity] {
+        for &(_, ptr) in &registers[..arity] {
             builder.build_store(ptr, params.next().unwrap().into_int_value())?;
         }
         let slices = (0..buffer_count)
@@ -65,6 +71,7 @@ impl<'a, 'ctx> Body<'a, 'ctx> {
         Ok(Self {
             ctx,
             builder,
+            module,
             function,
             status,
             registers,
@@ -77,6 +84,7 @@ impl<'a, 'ctx> Body<'a, 'ctx> {
     pub(super) fn emit(
         ctx: &'ctx Context,
         builder: &'a Builder<'ctx>,
+        module: &'a Module<'ctx>,
         f: &Function,
         function: FunctionValue<'ctx>,
         ids: &HashMap<*const Function, usize>,
@@ -85,9 +93,10 @@ impl<'a, 'ctx> Body<'a, 'ctx> {
         let mut body = Self::start(
             ctx,
             builder,
+            module,
             function,
             f.arity(),
-            f.register_count(),
+            (0..f.register_count()).map(|i| f.reg_type(Reg(i as u32))),
             f.buffer_kinds().len(),
         )?;
         // A builder may allocate label IDs without marking or using them.
@@ -125,7 +134,7 @@ impl<'a, 'ctx> Body<'a, 'ctx> {
         self.labels[label.0 as usize].expect("verified jump target")
     }
 
-    pub(super) fn new_local(&mut self, allocas: &Builder<'ctx>) -> Built<Reg> {
+    pub(super) fn new_local(&mut self, allocas: &Builder<'ctx>, ty: ValueType) -> Built<Reg> {
         // A second builder can insert slots in the entry even while emitting
         // code for a loop or a guarded continuation in a different block.
         let entry = self.function.get_first_basic_block().unwrap();
@@ -136,8 +145,12 @@ impl<'a, 'ctx> Body<'a, 'ctx> {
         }
         let id = Reg(self.registers.len() as u32);
         self.registers
-            .push(allocas.build_alloca(self.ctx.i32_type(), "")?);
+            .push((ty, allocas.build_alloca(simd::llvm_type(self.ctx, ty), "")?));
         Ok(id)
+    }
+
+    pub(super) fn reg_type(&self, r: Reg) -> Option<ValueType> {
+        self.registers.get(r.0 as usize).map(|slot| slot.0)
     }
 
     pub(super) fn register_count(&self) -> usize {
@@ -172,13 +185,13 @@ impl<'a, 'ctx> Body<'a, 'ctx> {
     fn load(&self, reg: Reg) -> Built<IntValue<'ctx>> {
         Ok(self
             .builder
-            .build_load(self.ctx.i32_type(), self.registers[reg.0 as usize], "")?
+            .build_load(self.ctx.i32_type(), self.registers[reg.0 as usize].1, "")?
             .into_int_value())
     }
 
     fn store(&self, reg: Reg, value: IntValue<'ctx>) -> Built<()> {
         self.builder
-            .build_store(self.registers[reg.0 as usize], value)?;
+            .build_store(self.registers[reg.0 as usize].1, value)?;
         Ok(())
     }
 
@@ -208,7 +221,16 @@ impl<'a, 'ctx> Body<'a, 'ctx> {
         let index = self
             .builder
             .build_int_z_extend(self.load(index)?, self.ctx.i64_type(), "")?;
-        // Zero extension makes negative indices compare above every legal slice length.
+        self.checked_element(slice, self.ctx.i32_type().into(), index)
+    }
+
+    fn checked_element(
+        &mut self,
+        slice: Slice<'ctx>,
+        element: BasicTypeEnum<'ctx>,
+        index: IntValue<'ctx>,
+    ) -> Built<PointerValue<'ctx>> {
+        // The unsigned comparison also rejects negative signed indices, as every slice fits i32.
         let invalid = self
             .builder
             .build_int_compare(IntPredicate::UGE, index, slice.len, "")?;
@@ -216,7 +238,7 @@ impl<'a, 'ctx> Body<'a, 'ctx> {
         // SAFETY: Only the edge with index < slice.len reaches this instruction.
         unsafe {
             self.builder
-                .build_in_bounds_gep(self.ctx.i32_type(), slice.data, &[index], "")
+                .build_in_bounds_gep(element, slice.data, &[index], "")
         }
     }
 
@@ -284,7 +306,13 @@ impl<'a, 'ctx> Body<'a, 'ctx> {
         self.store(dst, self.int(n))
     }
     pub(super) fn assign(&self, dst: Reg, src: Reg) -> Built<()> {
-        self.store(dst, self.load(src)?)
+        let (ty, ptr) = self.registers[src.0 as usize];
+        let value = self
+            .builder
+            .build_load(simd::llvm_type(self.ctx, ty), ptr, "")?;
+        self.builder
+            .build_store(self.registers[dst.0 as usize].1, value)?;
+        Ok(())
     }
     pub(super) fn arithmetic(&mut self, dst: Reg, op: Binary, a: Reg, b: Reg) -> Built<()> {
         let result = self.binary(op, self.load(a)?, self.load(b)?)?;
@@ -366,6 +394,11 @@ impl<'a, 'ctx> Body<'a, 'ctx> {
         declarations: &[FunctionValue<'ctx>],
     ) -> Built<()> {
         match *inst {
+            Instr::Simd {
+                dst,
+                inst,
+                ref args,
+            } => self.simd(dst, inst, args),
             Instr::Const(d, n) => self.constant(d, n),
             Instr::Copy(d, v) => self.assign(d, v),
             Instr::Bin(d, op, a, b) => self.arithmetic(d, op, a, b),

@@ -197,7 +197,7 @@ fn selected(
         })?;
         listing::lir(&mut out, id, &f, None);
         if !root {
-            clobbers.insert(written_regs(&f, &regalloc::allocate(&f, &mut ctx)?));
+            clobbers.insert(written_regs(&f, &regalloc::allocate(&f, &mut ctx)?).0);
         }
     }
     Ok(out)

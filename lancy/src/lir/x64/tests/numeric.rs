@@ -249,6 +249,9 @@ fn instruction_encodings_require_their_exact_isa() {
         ssse3: false,
         sse42: false,
         vbmi2: false,
+        vbmi: false,
+        f16c: false,
+        bf16: false,
         fp16: false,
         fma: false,
         vpopcnt: false,
@@ -287,16 +290,53 @@ fn instruction_encodings_require_their_exact_isa() {
         binary(avx, Lane::F32, Binary::Add),
         Some(Code::VEX_Vaddps_ymm_ymm_ymmm256)
     );
-    assert_eq!(binary(avx, Lane::I32, Binary::Add), None);
+    assert!(binary(avx, Lane::I32, Binary::Add).is_some());
     assert_eq!(
         binary(avx2, Lane::I32, Binary::Add),
         Some(Code::VEX_Vpaddd_ymm_ymm_ymmm256)
     );
     assert!(binary(avx512, Lane::I32, Binary::Add).is_some());
-    assert!(binary(avx512, Lane::U8, Binary::Add).is_none());
+    assert!(binary(avx512, Lane::U8, Binary::Add).is_some());
     assert!(binary(Features { bw: true, ..avx512 }, Lane::U8, Binary::Add).is_some());
-    assert!(binary(avx512, Lane::U64, Binary::Mul).is_none());
+    let mul = encode(
+        avx512,
+        Action::Binary(Binary::Mul),
+        vector(Lane::U64),
+        vector(Lane::U64),
+        &[1, 2, 3],
+    )
+    .unwrap();
+    let ops = Decoder::new(64, &mul, DecoderOptions::NONE)
+        .iter()
+        .map(|i| i.mnemonic())
+        .collect::<Vec<_>>();
+    assert!(ops.contains(&iced_x86::Mnemonic::Vpmuludq));
+    assert!(!ops.contains(&iced_x86::Mnemonic::Vpmullq));
     assert!(binary(Features { dq: true, ..avx512 }, Lane::U64, Binary::Mul).is_some());
+    let reduce_mask = |cpu, action, lane| {
+        encode(cpu, action, vector(lane), Type::I32, &[1, 0]).map(|bytes| {
+            Decoder::new(64, &bytes, DecoderOptions::NONE)
+                .decode()
+                .mnemonic()
+        })
+    };
+    use iced_x86::Mnemonic::{Vptestmd, Vptestmq};
+    assert_eq!(
+        reduce_mask(avx512, Action::AnyTrue, Lane::I64),
+        Some(Vptestmd)
+    );
+    assert_eq!(
+        reduce_mask(avx512, Action::AllTrue, Lane::I32),
+        Some(Vptestmd)
+    );
+    assert_eq!(
+        reduce_mask(avx512, Action::AllTrue, Lane::I64),
+        Some(Vptestmq)
+    );
+    assert_eq!(
+        reduce_mask(Features { dq: true, ..avx512 }, Action::AllTrue, Lane::I64),
+        Some(Vptestmq)
+    );
     // Golden register-register forms independently assembled by LLVM 21 llvm-mc.
     for (width, src, dst, from, to, golden) in [
         (
@@ -341,17 +381,71 @@ fn instruction_encodings_require_their_exact_isa() {
             encode(cpu, Action::Cast, vector(from), vector(to), &[src, dst]).unwrap(),
             golden
         );
-        assert!(
-            encode(
-                Features { avx10: 1, ..cpu },
-                Action::Cast,
-                vector(from),
-                vector(to),
-                &[src, dst]
-            )
-            .is_none()
+        // Earlier targets may synthesize saturation, but cannot execute this
+        // AVX10.2-only instruction.
+        let older = encode(
+            Features { avx10: 1, ..cpu },
+            Action::Cast,
+            vector(from),
+            vector(to),
+            &[src, dst],
+        );
+        assert!(!older.is_some_and(|code| code.windows(golden.len()).any(|inst| inst == golden)));
+    }
+}
+
+#[test]
+fn avx512_splat_reads_integer_gprs_and_floating_point_xmm_sources() {
+    use super::packed_code::{body, profiles};
+    use crate::{
+        lir::x64::inst::simd::Native,
+        numbers::{Action, Math},
+    };
+    use iced_x86::{Decoder, DecoderOptions, Mnemonic, Register};
+
+    let [_, avx2, foundation, full] = profiles();
+    let encoding = |cpu, lane: Lane| {
+        let op = Native::select(
+            Math {
+                action: Action::Splat,
+                input: lane.scalar(),
+                output: Type::Vector(lane),
+            },
+            cpu,
+        )?;
+        let (bytes, text) = body(op, &[1, 3]);
+        Some(
+            Decoder::new(64, &bytes[..text], DecoderOptions::NONE)
+                .iter()
+                .map(|i| (i.mnemonic(), i.op0_register(), i.op1_register()))
+                .collect::<Vec<_>>(),
+        )
+    };
+    for (cpu, lane, opcode, source) in [
+        (full, Lane::I8, Mnemonic::Vpbroadcastb, Register::ECX),
+        (full, Lane::U16, Mnemonic::Vpbroadcastw, Register::ECX),
+        (foundation, Lane::I32, Mnemonic::Vpbroadcastd, Register::ECX),
+        (foundation, Lane::U64, Mnemonic::Vpbroadcastq, Register::RCX),
+        (
+            foundation,
+            Lane::F32,
+            Mnemonic::Vpbroadcastd,
+            Register::XMM1,
+        ),
+    ] {
+        assert_eq!(
+            encoding(cpu, lane).unwrap(),
+            [(opcode, Register::ZMM3, source)]
         );
     }
+    assert!(encoding(foundation, Lane::U16).is_none());
+    assert_eq!(
+        encoding(avx2, Lane::I32).unwrap(),
+        [
+            (Mnemonic::Movd, Register::XMM3, Register::ECX),
+            (Mnemonic::Vpbroadcastd, Register::YMM3, Register::XMM3),
+        ]
+    );
 }
 
 #[test]

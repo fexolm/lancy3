@@ -73,6 +73,31 @@ fn main p:ptr -> i32
   ret total
 @run -> 1 | ff ff ff ff | 01 00 00 00
 ---
+# The mask also supplies the signed indices and passthrough. Only lane zero
+# is inactive. All active lanes scatter to the same word; the last wins.
+fn main p:ptr inactive:i32 -> i32
+  zero = const 0
+  one = const 1
+  minus_one = const -1
+  base = offset p one 4
+  negative = simd.splat minus_one
+  indices = simd.insert negative zero inactive
+  gathered = simd.maskedload base indices indices indices
+  lanes = simd.iota i32
+  count = simd.lanes i32
+  last = sub count one
+  last_lane = simd.splat last
+  replacements = simd.eq lanes last_lane
+  simd.maskedstore base indices indices replacements
+  inactive_value = simd.extract gathered zero
+  first_value = simd.extract gathered one
+  result = add inactive_value first_value
+  ret result
+@isel check: maskedload.Vector(I32)
+@isel check: maskedstore.Vector(I32)
+@run 1 -> 120 | 77 00 00 00 | ff ff ff ff
+@run 2147483647 -> -2147483530 | 77 00 00 00 | ff ff ff ff
+---
 fn main x:i32 -> i32
   indices = simd.iota i32
   ones = simd.splat x

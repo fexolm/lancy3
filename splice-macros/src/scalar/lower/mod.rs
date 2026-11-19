@@ -1,6 +1,8 @@
 //! Lower expressions, calls and bindings while tracking their stage and scalar type.
 mod control;
 mod memory;
+pub(super) mod simd;
+pub(super) use simd::{BufferType, Elem};
 
 use proc_macro2::{Ident, TokenStream};
 use quote::ToTokens;
@@ -15,10 +17,24 @@ pub(super) enum Scalar {
     Bool,
     /// A usize used for indexing. Native slice lengths fit in i32.
     Index,
+    /// A usize known to fit a nonnegative i32 (slice length or SIMD lane count).
+    Length,
     Inferred,
+    Vector(Elem),
+    Mask(Elem),
 }
 impl Scalar {
+    fn base(self) -> Self {
+        if self == Self::Length {
+            Self::Index
+        } else {
+            self
+        }
+    }
     pub(super) fn from_type(ty: &syn::Type) -> Option<Self> {
+        if let Some(t) = simd::vector_type(ty) {
+            return Some(t);
+        }
         let name = match ty {
             syn::Type::Path(p) if p.qself.is_none() => p.path.get_ident()?,
             _ => return None,
@@ -38,7 +54,7 @@ enum Stage {
     Host,
     Literal(Scalar),
     Reg(Scalar),
-    Buffer(bool),
+    Buffer(BufferType),
     Unit,
     Never,
 }
@@ -59,7 +75,7 @@ impl Stage {
 pub(super) enum Binding {
     Host,
     Reg(Scalar, bool),
-    Buffer(bool),
+    Buffer(BufferType),
 }
 struct Value {
     stage: Stage,
@@ -197,12 +213,17 @@ impl Lower<'_> {
     }
     fn reg(&self, v: Value, want: Scalar, at: impl ToTokens) -> Result<TokenStream> {
         let root = self.root;
+        let want = want.base();
         let bits = match (v.stage, want) {
             (Stage::Reg(t), _)
-                if t == want
-                    || (t != Scalar::Index
-                        && want != Scalar::Index
-                        && (t == Scalar::Inferred || want == Scalar::Inferred)) =>
+                if t.base() == want
+                    || (!matches!(
+                        t.base(),
+                        Scalar::Index | Scalar::Vector(_) | Scalar::Mask(_)
+                    ) && !matches!(
+                        want,
+                        Scalar::Index | Scalar::Vector(_) | Scalar::Mask(_)
+                    ) && (t == Scalar::Inferred || want == Scalar::Inferred)) =>
             {
                 return Ok(v.code);
             }
@@ -230,9 +251,10 @@ impl Lower<'_> {
                     at,
                     match want {
                         Scalar::Int => "expected a runtime i32",
-                        Scalar::Index => "expected a usize slice index",
+                        Scalar::Index | Scalar::Length => "expected a usize slice index",
                         Scalar::Bool => "expected a runtime bool condition",
                         Scalar::Inferred => "expected a runtime scalar",
+                        Scalar::Vector(_) | Scalar::Mask(_) => "SIMD operand type mismatch",
                     },
                 );
             }
@@ -240,7 +262,37 @@ impl Lower<'_> {
         Ok(emit!({let __splice_word = #bits; __splice_builder.constant(__splice_word)}))
     }
     fn operand(&self, expr: &Expr, kind: Scalar) -> Result<TokenStream> {
-        self.reg(self.expr(expr)?, kind, expr)
+        let value = self.expr_with_hint(expr, Some(kind))?;
+        self.reg(value, kind, expr)
+    }
+
+    /// Either data operand can supply the type of an unqualified Lane constructor.
+    /// The generated operands still execute in source order.
+    fn paired_operands(
+        &self,
+        lhs: &Expr,
+        rhs: &Expr,
+        hint: Option<Scalar>,
+        fallback: Option<Scalar>,
+    ) -> Result<(Value, Value)> {
+        match self.expr_with_hint(lhs, hint) {
+            Ok(left) => {
+                let ty = if let Stage::Reg(t) = left.stage {
+                    Some(t)
+                } else {
+                    hint
+                };
+                Ok((left, self.expr_with_hint(rhs, ty)?))
+            }
+            Err(error) if simd::uses_lane(lhs) => {
+                let right = self.expr_with_hint(rhs, hint.or(fallback))?;
+                let Stage::Reg(t @ (Scalar::Vector(_) | Scalar::Mask(_))) = right.stage else {
+                    return Err(error);
+                };
+                Ok((self.expr_with_hint(lhs, Some(t))?, right))
+            }
+            Err(error) => Err(error),
+        }
     }
     fn bin(&self, op: &str, x: TokenStream, y: TokenStream) -> TokenStream {
         let root = self.root;
@@ -252,12 +304,16 @@ impl Lower<'_> {
         match (a, z) {
             (Never, other) | (other, Never) => Ok(other),
             (a, z) if a == z => Ok(a),
-            (Buffer(a), Buffer(b)) => Ok(Buffer(a && b)),
+            (Reg(a), Reg(b)) if a.base() == b.base() => Ok(Reg(a.base())),
+            (Buffer(a), Buffer(b)) if a.elem == b.elem => Ok(Buffer(BufferType {
+                write: a.write && b.write,
+                ..a
+            })),
             (Reg(t), Literal(u)) | (Literal(u), Reg(t)) if t == u => Ok(Reg(t)),
             (Reg(Scalar::Inferred), Reg(t) | Literal(t))
-            | (Reg(t) | Literal(t), Reg(Scalar::Inferred)) => Ok(Reg(t)),
+            | (Reg(t) | Literal(t), Reg(Scalar::Inferred)) => Ok(Reg(t.base())),
             (Host, Literal(_)) | (Literal(_), Host) => Ok(Host),
-            (Host, Reg(t)) | (Reg(t), Host) => Ok(Reg(t)),
+            (Host, Reg(t)) | (Reg(t), Host) => Ok(Reg(t.base())),
             _ => err(at, "branch arms have different result types"),
         }
     }
@@ -305,8 +361,15 @@ impl Lower<'_> {
         let mut scope = self.clone();
         let mut prefix = TokenStream::new();
         let mut tail = Value::unit(emit!({}));
+        // Rust imports apply to the whole block, including expressions before a return.
+        for s in &block.stmts {
+            if let Stmt::Item(syn::Item::Use(item)) = s {
+                prefix.extend(emit!(#[allow(unused_imports)] #item));
+            }
+        }
         for (i, s) in block.stmts.iter().enumerate() {
             match s {
+                Stmt::Item(syn::Item::Use(_)) => {}
                 Stmt::Local(local) => prefix.extend(scope.local(local)?),
                 Stmt::Expr(e, semi) => {
                     let v = scope.expr(e)?;
@@ -328,7 +391,12 @@ impl Lower<'_> {
         if init.diverge.is_some() || !local.attrs.is_empty() {
             return err(local, "expected a kernel let binding");
         }
-        let value = self.expr(&init.expr)?;
+        let hint = if let Pat::Type(t) = &local.pat {
+            Scalar::from_type(&t.ty)
+        } else {
+            None
+        };
+        let value = self.expr_with_hint(&init.expr, hint)?;
         let pat = &local.pat;
         if value.stage.is_host() && !self.flow.locals.contains(&super::flow::key(local)) {
             super::bind_pattern(&mut self.bindings, pat, Binding::Host);
@@ -362,25 +430,36 @@ impl Lower<'_> {
             };
             if let Some(ty) = ty
                 && scalar != Scalar::Inferred
-                && annotation != Some(scalar)
+                && annotation != Some(scalar.base())
             {
                 return err(ty, "type annotation differs from the runtime initializer");
             }
             let mut rhs = self.reg(value, scalar, &init.expr)?;
             if mutable {
-                rhs = emit!({let __splice_init = #rhs; __splice_builder.copy(__splice_init)});
+                rhs = emit!({let value=#rhs;__splice_builder.copy(value)});
             }
-            (Binding::Reg(scalar, mutable), rhs)
+            (
+                Binding::Reg(if mutable { scalar.base() } else { scalar }, mutable),
+                rhs,
+            )
         };
         self.bindings.insert(id.to_string(), binding);
         Ok(emit!(let #id = #rhs;))
     }
 
     fn expr(&self, e: &Expr) -> Result<Value> {
+        self.expr_with_hint(e, None)
+    }
+
+    fn expr_with_hint(&self, e: &Expr, hint: Option<Scalar>) -> Result<Value> {
+        if let Some(v) = self.simd_constructor(e, hint)? {
+            return Ok(v);
+        }
         if matches!(
             e,
             Expr::Index(_) | Expr::Cast(_) | Expr::MethodCall(_) | Expr::Reference(_)
-        ) && let Ok(code) = self.host_raw(e)
+        ) && !simd::uses_lane(e)
+            && let Ok(code) = self.host_raw(e)
         {
             return Ok(Value::new(Stage::Host, code));
         }
@@ -394,8 +473,8 @@ impl Lower<'_> {
                 e,
             )),
             Expr::Path(p) => Ok(self.path(p)),
-            Expr::Paren(x) => self.expr(&x.expr),
-            Expr::Group(x) => self.expr(&x.expr),
+            Expr::Paren(x) => self.expr_with_hint(&x.expr, hint),
+            Expr::Group(x) => self.expr_with_hint(&x.expr, hint),
             Expr::Block(x) if x.label.is_none() => self.block(&x.block),
             Expr::If(x) => self.if_expr(x),
             Expr::Match(x) => self.match_expr(x),
@@ -420,7 +499,7 @@ impl Lower<'_> {
                 let region = self.region();
                 Ok(Value::new(Stage::Never, emit!({#ret; break #region;})))
             }
-            Expr::Binary(x) => self.binary(x),
+            Expr::Binary(x) => self.binary(x, hint),
             Expr::Assign(x) => self.assignment(&x.left, &x.right, None),
             Expr::Unary(x) => {
                 let v = self.expr(&x.expr)?;
@@ -437,6 +516,9 @@ impl Lower<'_> {
                     }
                     _ => return err(x, "expected an operand"),
                 };
+                if matches!(t, Scalar::Vector(_) | Scalar::Mask(_)) {
+                    return self.simd_unary(t, op, v, x);
+                }
                 let code = match op {
                     UnOp::Neg(_) if t != Scalar::Bool => {
                         self.bin("Sub", emit!(__splice_builder.constant(0)), v.code)
@@ -444,12 +526,12 @@ impl Lower<'_> {
                     UnOp::Not(_) => self.bin("Xor", v.code, emit!(__splice_builder.constant(-1))),
                     _ => return err(x, "unsupported runtime unary operator"),
                 };
-                Ok(Value::new(Stage::Reg(t), code))
+                Ok(Value::new(Stage::Reg(t.base()), code))
             }
             Expr::Call(x) => self.call(x),
             Expr::Index(x) => self.index(x),
             Expr::Cast(x) => self.cast(x),
-            Expr::MethodCall(x) => self.method(x),
+            Expr::MethodCall(x) => self.method(x, hint),
             Expr::Reference(x) => self.reference(x),
             Expr::Macro(m) if m.mac.path.is_ident("comptime") => {
                 let expr = m.mac.parse_body::<Expr>()?;
@@ -485,7 +567,12 @@ impl Lower<'_> {
         let rhs = self.operand(right, t)?;
 
         let code = if let Some((op, _)) = op {
-            self.bin(op, emit!(#left), rhs)
+            if matches!(t, Scalar::Vector(_) | Scalar::Mask(_)) {
+                self.simd_operator(t, op, vec![emit!(#left), rhs], left)?
+                    .code
+            } else {
+                self.bin(op, emit!(#left), rhs)
+            }
         } else {
             rhs
         };
@@ -493,19 +580,23 @@ impl Lower<'_> {
             emit!({let __splice_assigned_value=#code; __splice_builder.assign(#left,__splice_assigned_value);}),
         ))
     }
-    fn binary(&self, x: &syn::ExprBinary) -> Result<Value> {
+    fn binary(&self, x: &syn::ExprBinary, hint: Option<Scalar>) -> Result<Value> {
         use BinOp::*;
         let op = &x.op;
         if let Some(operation) = super::compound_op(op) {
             return self.assignment(&x.left, &x.right, Some((operation, op)));
         }
-        let left = self.expr(&x.left)?;
-        let rhs_scope = if matches!(op, And(_) | Or(_)) && matches!(left.stage, Stage::Reg(_)) {
-            self.nested_region()
+        let (left, right) = if matches!(op, And(_) | Or(_)) {
+            let left = self.expr(&x.left)?;
+            let right = if matches!(left.stage, Stage::Reg(_)) {
+                self.nested_region().expr(&x.right)?
+            } else {
+                self.expr(&x.right)?
+            };
+            (left, right)
         } else {
-            self.clone()
+            self.paired_operands(&x.left, &x.right, hint, None)?
         };
-        let right = rhs_scope.expr(&x.right)?;
         let t = match (left.stage, right.stage) {
             (Stage::Reg(t), _) | (_, Stage::Reg(t)) => t,
             (Stage::Host | Stage::Literal(_), Stage::Literal(_) | Stage::Host) => {
@@ -513,7 +604,12 @@ impl Lower<'_> {
             }
             _ => return err(x, "expected scalar operands"),
         };
-        let index = [left.stage, right.stage].contains(&Stage::Reg(Scalar::Index));
+        if matches!(t, Scalar::Vector(_) | Scalar::Mask(_)) {
+            return self.simd_binary(t, op, left, right, x);
+        }
+        let index = [left.stage, right.stage]
+            .iter()
+            .any(|s| matches!(s, Stage::Reg(Scalar::Index | Scalar::Length)));
         if index && !matches!(op, Eq(_) | Ne(_) | Lt(_) | Le(_) | Gt(_) | Ge(_)) {
             return err(x, "cast the runtime index to i32 before arithmetic");
         }
@@ -616,7 +712,9 @@ impl Lower<'_> {
             let formal = recursive.then(|| self.formals[i]);
             args.push(match (formal, value.stage) {
                 (Some(Binding::Reg(t, _)), _) => self.reg(value, t, expr)?,
-                (Some(Binding::Buffer(write)), Stage::Buffer(actual)) if !write || actual => {
+                (Some(Binding::Buffer(write)), Stage::Buffer(actual))
+                    if write.elem == actual.elem && (!write.write || actual.write) =>
+                {
                     value.code
                 }
                 (Some(Binding::Buffer(_)), _) => {

@@ -1,3 +1,4 @@
+use crate::simd::Element;
 use std::collections::HashMap;
 
 /// A buffer parameter in a function's separate buffer argument list.
@@ -11,44 +12,118 @@ impl Buffer {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum BufferKind {
-    Read,
-    Write,
+pub struct BufferKind {
+    element: Element,
+    writable: bool,
 }
 
 impl BufferKind {
+    #[allow(non_upper_case_globals)]
+    pub const Read: Self = Self::new(Element::I32, false);
+    #[allow(non_upper_case_globals)]
+    pub const Write: Self = Self::new(Element::I32, true);
+    pub const fn new(element: Element, writable: bool) -> Self {
+        Self { element, writable }
+    }
+    pub const fn element(self) -> Element {
+        self.element
+    }
+    pub const fn writable(self) -> bool {
+        self.writable
+    }
     fn accepts(self, actual: Self) -> bool {
-        self == Self::Read || actual == Self::Write
+        self.element == actual.element && (!self.writable || actual.writable)
     }
 }
 
-/// A borrowed i32 slice. Writable slices also support loads.
+/// A borrowed typed slice. Writable slices also support loads.
 #[derive(Debug)]
 pub enum BufferArg<'a> {
     Read(&'a [i32]),
     Write(&'a mut [i32]),
+    ReadU16(&'a [u16]),
+    WriteU16(&'a mut [u16]),
+    ReadI64(&'a [i64]),
+    WriteI64(&'a mut [i64]),
+    ReadF32(&'a [f32]),
+    WriteF32(&'a mut [f32]),
+    ReadF64(&'a [f64]),
+    WriteF64(&'a mut [f64]),
 }
+
+macro_rules! buffer_from {
+    ($ty:ty,$read:ident,$write:ident) => {
+        impl<'a> From<&'a [$ty]> for BufferArg<'a> {
+            fn from(s: &'a [$ty]) -> Self {
+                Self::$read(s)
+            }
+        }
+        impl<'a> From<&'a mut [$ty]> for BufferArg<'a> {
+            fn from(s: &'a mut [$ty]) -> Self {
+                Self::$write(s)
+            }
+        }
+    };
+}
+buffer_from!(i32, Read, Write);
+buffer_from!(u16, ReadU16, WriteU16);
+buffer_from!(i64, ReadI64, WriteI64);
+buffer_from!(f32, ReadF32, WriteF32);
+buffer_from!(f64, ReadF64, WriteF64);
 
 impl BufferArg<'_> {
     pub fn kind(&self) -> BufferKind {
         match self {
-            Self::Read(_) => BufferKind::Read,
-            Self::Write(_) => BufferKind::Write,
+            Self::Read(_) => BufferKind::new(Element::I32, false),
+            Self::Write(_) => BufferKind::new(Element::I32, true),
+            Self::ReadU16(_) => BufferKind::new(Element::U16, false),
+            Self::WriteU16(_) => BufferKind::new(Element::U16, true),
+            Self::ReadI64(_) => BufferKind::new(Element::I64, false),
+            Self::WriteI64(_) => BufferKind::new(Element::I64, true),
+            Self::ReadF32(_) => BufferKind::new(Element::F32, false),
+            Self::WriteF32(_) => BufferKind::new(Element::F32, true),
+            Self::ReadF64(_) => BufferKind::new(Element::F64, false),
+            Self::WriteF64(_) => BufferKind::new(Element::F64, true),
         }
     }
-
     pub fn len(&self) -> usize {
-        self.as_slice().len()
+        match self {
+            Self::Read(s) => s.len(),
+            Self::Write(s) => s.len(),
+            Self::ReadU16(s) => s.len(),
+            Self::WriteU16(s) => s.len(),
+            Self::ReadI64(s) => s.len(),
+            Self::WriteI64(s) => s.len(),
+            Self::ReadF32(s) => s.len(),
+            Self::WriteF32(s) => s.len(),
+            Self::ReadF64(s) => s.len(),
+            Self::WriteF64(s) => s.len(),
+        }
     }
-
     pub fn is_empty(&self) -> bool {
-        self.as_slice().is_empty()
+        self.len() == 0
     }
-
+    /// Raw slice address for validated native backends. Only writable arguments permit writes.
+    pub fn data(&mut self) -> *mut u8 {
+        match self {
+            Self::Read(s) => s.as_ptr().cast_mut().cast(),
+            Self::Write(s) => s.as_mut_ptr().cast(),
+            Self::ReadU16(s) => s.as_ptr().cast_mut().cast(),
+            Self::WriteU16(s) => s.as_mut_ptr().cast(),
+            Self::ReadI64(s) => s.as_ptr().cast_mut().cast(),
+            Self::WriteI64(s) => s.as_mut_ptr().cast(),
+            Self::ReadF32(s) => s.as_ptr().cast_mut().cast(),
+            Self::WriteF32(s) => s.as_mut_ptr().cast(),
+            Self::ReadF64(s) => s.as_ptr().cast_mut().cast(),
+            Self::WriteF64(s) => s.as_mut_ptr().cast(),
+        }
+    }
+    /// Access an i32 buffer. Panics if this argument has a different element type.
     pub fn as_slice(&self) -> &[i32] {
         match self {
-            Self::Read(slice) => slice,
-            Self::Write(slice) => slice,
+            Self::Read(s) => s,
+            Self::Write(s) => s,
+            _ => panic!("expected an i32 buffer"),
         }
     }
 }
@@ -63,6 +138,12 @@ pub fn validate_buffers(kinds: &[BufferKind], args: &[BufferArg<'_>]) -> Result<
         ));
     }
     for (i, (&kind, arg)) in kinds.iter().zip(args).enumerate() {
+        if kind.element() != arg.kind().element() {
+            return Err(format!(
+                "buffer {i} expects {} elements",
+                kind.element().name()
+            ));
+        }
         if !kind.accepts(arg.kind()) {
             return Err(format!("buffer {i} requires a writable slice"));
         }
@@ -95,13 +176,16 @@ pub fn check_forwarding(
         let kind = caller
             .get(buffer.index())
             .ok_or_else(|| format!("unknown buffer {}", buffer.0))?;
+        if required.element() != kind.element() {
+            return Err(format!("buffer {} has wrong element type", buffer.0));
+        }
         if !required.accepts(*kind) {
             return Err(format!("buffer {} is read-only", buffer.0));
         }
         if actual.len() > 1
             && seen
                 .insert(buffer, required)
-                .is_some_and(|prior| prior == BufferKind::Write || required == BufferKind::Write)
+                .is_some_and(|prior| prior.writable() || required.writable())
         {
             return Err(format!(
                 "writable buffer {} aliases another call argument",

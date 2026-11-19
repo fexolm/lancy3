@@ -124,7 +124,10 @@ impl Flow {
                 bind_pattern(&mut locals, &f.pat, (induction, None));
                 self.scan_loop(&f.body, &locals, control, c)
             }
-            Expr::Call(c) => self.operands(&c.args, names, control),
+            Expr::Call(c) => {
+                self.operands(&c.args, names, control)
+                    | matches!(c.func.as_ref(), Expr::Path(p) if super::lower::simd::constructor_arity(&p.path).is_some())
+            }
             Expr::MethodCall(m) => {
                 self.expr(&m.receiver, names, control) | self.operands(&m.args, names, control)
             }

@@ -13,7 +13,8 @@ use inkwell::{
 use splice::{
     BufferKind,
     frontend::{Body as StagedBody, KernelBuilder, Specialization},
-    hir::{Binary, Buffer, Label, Reg, check_forwarding},
+    hir::{Binary, Buffer, Label, Reg, Simd, ValueType, check_forwarding},
+    simd::Element,
 };
 use std::{
     cell::{Cell, RefCell},
@@ -69,8 +70,16 @@ impl<'ctx> Graph<'_, 'ctx> {
         stage: StagedBody<'_>,
     ) -> Result<bool, String> {
         let builder = self.ctx.create_builder();
-        let native = Body::start(self.ctx, &builder, function, arity, arity, kinds.len())
-            .map_err(|e| e.to_string())?;
+        let native = Body::start(
+            self.ctx,
+            &builder,
+            self.module,
+            function,
+            arity,
+            std::iter::repeat_n(ValueType::Scalar, arity),
+            kinds.len(),
+        )
+        .map_err(|e| e.to_string())?;
         let mut direct = Direct {
             native,
             graph: self,
@@ -131,6 +140,23 @@ impl<'a, 'ctx> Direct<'a, 'ctx> {
         dst: Option<Reg>,
         generate: impl FnOnce(&mut Body<'a, 'ctx>) -> Result<(), BuilderError>,
     ) {
+        if reads.iter().copied().chain(dst).any(|r| {
+            self.native
+                .reg_type(r)
+                .is_some_and(|ty| ty != ValueType::Scalar)
+        }) {
+            self.error
+                .get_or_insert_with(|| "expected a scalar LLVM register".into());
+            return;
+        }
+        self.emit_typed(reads, dst, generate);
+    }
+    fn emit_typed(
+        &mut self,
+        reads: &[Reg],
+        dst: Option<Reg>,
+        generate: impl FnOnce(&mut Body<'a, 'ctx>) -> Result<(), BuilderError>,
+    ) {
         self.literal = None;
         if self.error.is_some() {
             return;
@@ -166,11 +192,22 @@ impl<'a, 'ctx> Direct<'a, 'ctx> {
                 self.error
                     .get_or_insert_with(|| "invalid LLVM buffer".into());
             }
-            Some(BufferKind::Read) if write => {
+            Some(kind) if write && !kind.writable() => {
                 self.error
                     .get_or_insert_with(|| "store to read-only LLVM buffer".into());
             }
             _ => {}
+        }
+    }
+    fn scalar_buffer(&mut self, b: Buffer, write: bool) {
+        self.buffer(b, write);
+        if self
+            .kinds
+            .get(b.index())
+            .is_some_and(|k| k.element() != Element::I32)
+        {
+            self.error
+                .get_or_insert_with(|| "scalar access requires an i32 buffer".into());
         }
     }
     fn target(&mut self, label: Label) {
@@ -183,6 +220,9 @@ impl<'a, 'ctx> Direct<'a, 'ctx> {
 }
 
 impl KernelBuilder for Direct<'_, '_> {
+    fn reg_type(&self, r: Reg) -> Option<ValueType> {
+        self.native.reg_type(r)
+    }
     fn arg(&self, index: usize) -> Reg {
         Reg(if index < self.arity {
             index as u32
@@ -191,8 +231,11 @@ impl KernelBuilder for Direct<'_, '_> {
         })
     }
     fn local(&mut self) -> Reg {
+        self.typed_local(ValueType::Scalar)
+    }
+    fn typed_local(&mut self, ty: ValueType) -> Reg {
         if self.error.is_none() && self.native.register_count() < u32::MAX as usize {
-            match self.native.new_local(&self.allocas) {
+            match self.native.new_local(&self.allocas, ty) {
                 Ok(r) => return r,
                 Err(e) => self.error = Some(e.to_string()),
             }
@@ -200,6 +243,16 @@ impl KernelBuilder for Direct<'_, '_> {
         self.error
             .get_or_insert_with(|| "exhausted LLVM registers".into());
         Reg(u32::MAX)
+    }
+    fn simd(&mut self, inst: Simd, args: &[Reg]) -> splice::Result<Option<Reg>> {
+        let types = args
+            .iter()
+            .map(|&r| self.native.reg_type(r).ok_or("invalid LLVM register"))
+            .collect::<Result<Vec<_>, _>>()?;
+        inst.validate(&types, self.kinds)?;
+        let dst = inst.output().map(|ty| self.typed_local(ty));
+        self.emit_typed(args, dst, |ir| ir.simd(dst, inst, args));
+        Ok(dst)
     }
     fn constant(&mut self, n: i32) -> Reg {
         let r = self.result(&[], |ir, d| ir.constant(d, n));
@@ -211,11 +264,11 @@ impl KernelBuilder for Direct<'_, '_> {
         self.result(&[], |ir, d| ir.length(d, b))
     }
     fn load(&mut self, b: Buffer, index: Reg) -> Reg {
-        self.buffer(b, false);
+        self.scalar_buffer(b, false);
         self.result(&[index], |ir, d| ir.read_element(d, b, index))
     }
     fn store(&mut self, b: Buffer, index: Reg, value: Reg) {
-        self.buffer(b, true);
+        self.scalar_buffer(b, true);
         self.emit(&[index, value], None, |ir| {
             ir.write_element(b, index, value)
         });
@@ -227,7 +280,12 @@ impl KernelBuilder for Direct<'_, '_> {
         self.result(&[a, b], |ir, d| ir.arithmetic(d, op, a, b))
     }
     fn assign(&mut self, d: Reg, s: Reg) {
-        self.emit(&[s], Some(d), |ir| ir.assign(d, s));
+        if self.native.reg_type(d) != self.native.reg_type(s) {
+            self.error
+                .get_or_insert_with(|| "incompatible LLVM register assignment".into());
+            return;
+        }
+        self.emit_typed(&[s], Some(d), |ir| ir.assign(d, s));
     }
     fn label(&mut self) -> Label {
         if self.native.label_count() >= u32::MAX as usize {

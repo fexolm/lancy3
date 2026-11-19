@@ -1,4 +1,4 @@
-use super::{Binary, Buffer, BufferKind, Function, Instr, Label, Reg};
+use super::{Binary, Buffer, BufferKind, Function, Instr, Label, Reg, Simd, ValueType};
 use crate::frontend::{Body, KernelBuilder, KernelSource, Specialization};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -22,7 +22,7 @@ impl FunctionBuilder {
                 needs_status: false,
                 arity,
                 buffer_kinds: kinds,
-                registers: arity,
+                locals: Vec::new(),
                 labels: 0,
                 code: Vec::new(),
             },
@@ -36,10 +36,33 @@ impl FunctionBuilder {
         })
     }
     pub fn local(&mut self) -> Reg {
-        let register =
-            Reg(u32::try_from(self.function.registers).expect("exhausted virtual registers"));
-        self.function.registers += 1;
-        register
+        self.typed_local(ValueType::Scalar)
+    }
+    pub fn typed_local(&mut self, ty: ValueType) -> Reg {
+        let index = self.function.register_count();
+        if index >= u32::MAX as usize {
+            return Reg(u32::MAX);
+        }
+        self.function.locals.push(ty);
+        Reg(index as u32)
+    }
+    pub fn simd(&mut self, inst: Simd, args: &[Reg]) -> crate::Result<Option<Reg>> {
+        let types = args
+            .iter()
+            .map(|&r| {
+                self.function
+                    .checked_reg_type(r)
+                    .ok_or("invalid SIMD register")
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        inst.validate(&types, &self.function.buffer_kinds)?;
+        let dst = inst.output().map(|ty| self.typed_local(ty));
+        self.function.code.push(Instr::Simd {
+            inst,
+            dst,
+            args: args.to_vec(),
+        });
+        Ok(dst)
     }
     fn emit_value(&mut self, instruction: impl FnOnce(Reg) -> Instr) -> Reg {
         let dst = self.local();
@@ -167,6 +190,9 @@ macro_rules! forward_mut {
 }
 
 impl KernelBuilder for FunctionBuilder {
+    fn reg_type(&self, r: Reg) -> Option<ValueType> {
+        self.function.checked_reg_type(r)
+    }
     fn set_source(&mut self, source: &'static KernelSource) {
         self.function.source = Some(source);
     }
@@ -175,6 +201,8 @@ impl KernelBuilder for FunctionBuilder {
     }
     forward_mut! {
         local() -> Reg;
+        typed_local(ty:ValueType) -> Reg;
+        simd(inst:Simd,args:&[Reg])->crate::Result<Option<Reg>>;
         constant(value: i32) -> Reg;
         buffer_len(buffer: Buffer) -> Reg;
         load(buffer: Buffer, index: Reg) -> Reg;

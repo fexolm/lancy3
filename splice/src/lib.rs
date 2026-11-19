@@ -6,6 +6,7 @@ extern crate self as splice;
 
 pub mod frontend;
 pub mod hir;
+pub mod simd;
 
 pub use frontend::ComptimeKey;
 pub use hir::{BufferArg, BufferKind, Function, validate_buffers};

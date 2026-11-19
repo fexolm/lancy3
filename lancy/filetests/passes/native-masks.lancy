@@ -1,0 +1,58 @@
+# Select uses the sign bit of each lane. Any accepts every nonzero bit pattern.
+fn main mask:i32 value:i32 -> i32
+  masks = simd.splat mask
+  yes = simd.splat value
+  no = simd.not masks
+  chosen = simd.select masks yes no
+  result = simd.any chosen
+  ret result
+@isel regex: FREE_RESULT=Def: v[0-9]+v reg
+@isel check: native.Vector(I32).Ternary(Select)
+@isel sameln: $FREE_RESULT
+@asm check: endbr64
+@asm not: call
+@asm check: ret
+@run -1 0 -> 0
+@run -1 1 -> -1
+@run 1 0 -> -1
+@run 0x80000000 0 -> 0
+---
+# Only the last lane is zero after adding -(width-1).
+fn main x:i32 -> i32
+  n = simd.lanes i32
+  b = sub x n
+  delta = simd.splat b
+  indices = simd.iota i32
+  shifted = simd.add indices delta
+  result = simd.all shifted
+  ret result
+@asm check: endbr64
+@asm not: call
+@asm check: ret
+@run 0 -> -1
+@run 1 -> 0
+---
+# Only the upper word of each i128 lane can be nonzero. Select tests its sign.
+fn main x:i32 -> i32
+  input = cast i128 x
+  shift = literal i128 40
+  high = shl input shift
+  masks = simd.splat high
+  zero = literal i128 0
+  one = literal i128 1
+  zeros = simd.splat zero
+  ones = simd.splat one
+  chosen = simd.select masks ones zeros
+  sign = simd.any chosen
+  any = simd.any masks
+  all = simd.all masks
+  first = const 0
+  mixed = simd.insert masks first zero
+  mixed_all = simd.all mixed
+  counts = add any all
+  signs = add sign mixed_all
+  result = add counts signs
+  ret result
+@run 0 -> 0
+@run 1 -> -2
+@run -1 -> -3

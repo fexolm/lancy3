@@ -1,10 +1,12 @@
-//! Scalar functions over i32 values, with explicit control flow and calls.
+//! Portable kernels over scalar, vector and mask registers, with explicit control flow and calls.
 //! A function owns a dense instruction stream. Parameters occupy the first
 //! registers. Mutable locals and temporary results share the same index space.
 
 mod buffer;
 mod builder;
+mod simd;
 mod verify;
+pub use simd::{Simd, SimdOp, ValueType};
 
 pub use buffer::{Buffer, BufferArg, BufferKind, check_forwarding, validate_buffers};
 pub use builder::FunctionBuilder;
@@ -68,6 +70,11 @@ impl Binary {
 
 #[derive(Clone, Debug)]
 pub enum Instr {
+    Simd {
+        dst: Option<Reg>,
+        inst: Simd,
+        args: Vec<Reg>,
+    },
     Const(Reg, i32),
     Copy(Reg, Reg),
     Bin(Reg, Binary, Reg, Reg),
@@ -123,7 +130,7 @@ impl Instr {
             | Self::Store {
                 index: a, value: b, ..
             } => (Some(*a), from_ref(b)),
-            Self::Call { args, .. } => (None, args),
+            Self::Call { args, .. } | Self::Simd { args, .. } => (None, args),
             _ => (None, &[]),
         };
         first.into_iter().chain(rest.iter().copied())
@@ -131,6 +138,7 @@ impl Instr {
 
     fn written(&self) -> Option<Reg> {
         match self {
+            Self::Simd { dst, .. } => *dst,
             Self::Const(dst, _)
             | Self::Copy(dst, _)
             | Self::Bin(dst, ..)
@@ -148,7 +156,7 @@ pub struct Function {
     arity: usize,
     buffer_kinds: Vec<BufferKind>,
     needs_status: bool,
-    registers: usize,
+    locals: Vec<ValueType>,
     code: Vec<Instr>,
     labels: usize,
 }
@@ -175,7 +183,20 @@ impl Function {
     }
 
     pub fn register_count(&self) -> usize {
-        self.registers
+        self.arity + self.locals.len()
+    }
+
+    pub fn reg_type(&self, r: Reg) -> ValueType {
+        self.checked_reg_type(r).expect("invalid register")
+    }
+
+    fn checked_reg_type(&self, r: Reg) -> Option<ValueType> {
+        let index = r.0 as usize;
+        if index < self.arity {
+            Some(ValueType::Scalar)
+        } else {
+            self.locals.get(index - self.arity).copied()
+        }
     }
 
     pub fn label_count(&self) -> usize {

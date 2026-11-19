@@ -29,7 +29,6 @@ pub struct ScalarKernel {
     arg_words: usize,
     result_words: usize,
     pointer_signature: bool,
-    _descriptors: Box<[crate::numbers::Math]>,
 }
 
 impl ScalarKernel {
@@ -76,7 +75,6 @@ impl ScalarKernel {
             scalar_signature: function.return_type() == Type::I32
                 && function.param_types().iter().all(|&ty| ty == Type::I32),
             words: code.words,
-            _descriptors: code.descriptors,
             arg_words: function
                 .param_types()
                 .iter()

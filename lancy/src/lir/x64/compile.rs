@@ -1,6 +1,6 @@
 use super::{
     frame::Frame,
-    inst::{Inst, NONVOLATILE},
+    inst::{Inst, nonvolatile},
     isel,
 };
 use crate::{
@@ -19,6 +19,7 @@ pub(super) struct CompiledFunction {
     pub workspace: usize,
     /// Includes implicit writes and transitive callees on a normal return.
     pub written: PRegSet,
+    pub saved: PRegSet,
 }
 
 pub(super) fn compile(
@@ -41,7 +42,11 @@ pub(super) fn compile(
             (id, compiled[id].written)
         })?;
         let allocation = regalloc::allocate(&body, &mut ctx)?;
-        let written = written_regs(&body, &allocation);
+        let (written, defined) = written_regs(&body, &allocation);
+        let mut saved = defined & nonvolatile();
+        for &callee in calls {
+            saved.union_from(compiled[callee].saved);
+        }
         let result = src.function.return_type();
         let mut frame = Frame::new(
             id == entry,
@@ -56,7 +61,10 @@ pub(super) fn compile(
         if id == entry {
             // Save the host's nonvolatile registers once, including those
             // written by descendants. Normal and trapping exits restore them.
-            frame.slots += (written & NONVOLATILE).len() as usize;
+            frame.slots += saved
+                .into_iter()
+                .map(super::frame::save_words)
+                .sum::<usize>();
         }
         let child_peak = calls
             .iter()
@@ -74,6 +82,7 @@ pub(super) fn compile(
             result,
             workspace,
             written,
+            saved,
         })
     })?;
     let slots = module.functions[entry].workspace.max(arity);
@@ -83,7 +92,8 @@ pub(super) fn compile(
     Ok(module)
 }
 
-pub(super) fn written_regs(f: &lir::Function<Inst>, allocation: &Output) -> PRegSet {
+pub(super) fn written_regs(f: &lir::Function<Inst>, allocation: &Output) -> (PRegSet, PRegSet) {
+    let mut defined = PRegSet::empty();
     let mut written = PRegSet::empty();
     for (i, op) in f.insts().iter().enumerate() {
         let i = regalloc2::Inst::new(i);
@@ -92,18 +102,19 @@ pub(super) fn written_regs(f: &lir::Function<Inst>, allocation: &Output) -> PReg
             if operand.kind() == OperandKind::Def
                 && let Some(r) = loc.as_reg()
             {
-                written.add(r);
+                defined.add(r);
             }
         }
     }
     for (_, Edit::Move { to, .. }) in &allocation.edits {
         if let Some(r) = to.as_reg() {
-            written.add(r);
+            defined.add(r);
         }
     }
     // Move resolution may also write R10, which is reserved throughout
     // the internal ABI and cannot hold a caller value across a call.
     let regs = &Inst::machine_env().preferred_regs_by_class;
-    written.intersect_from(regs[0] | regs[2] | NONVOLATILE);
-    written
+    written.union_from(defined);
+    written.intersect_from(regs[0] | regs[2] | nonvolatile());
+    (written, defined)
 }

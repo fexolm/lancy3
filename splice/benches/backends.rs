@@ -1,4 +1,8 @@
 //! JIT compilation and warm execution on the same inputs for all three backends.
+#[path = "../examples/workloads/matmul.rs"]
+mod matmul;
+#[path = "../examples/workloads/probe.rs"]
+mod probe;
 #[path = "../examples/relational/mod.rs"]
 mod relational;
 
@@ -43,7 +47,7 @@ struct Builders<'a> {
 
 struct Workload<'a, Run> {
     name: &'static str,
-    input_rows: usize,
+    elements: usize,
     workspace_words: usize,
     expected: &'a dyn Fn() -> &'a [i32],
     run: Run,
@@ -95,7 +99,7 @@ where
         build: impl Fn() -> splice::Result<K>,
     ) {
         let mut state = None;
-        group.bench_function(BenchmarkId::new(backend, self.input_rows), |b| {
+        group.bench_function(BenchmarkId::new(backend, self.elements), |b| {
             let (kernel, workspace) = state.get_or_insert_with(|| {
                 let kernel = build().expect("compile execution benchmark");
                 let mut workspace = vec![-1; self.workspace_words];
@@ -120,7 +124,7 @@ where
         compile.finish();
 
         let mut execute = c.benchmark_group(format!("{}/execute/{route}", self.name));
-        execute.throughput(Throughput::Elements(self.input_rows as u64));
+        execute.throughput(Throughput::Elements(self.elements as u64));
         self.bench_execute(&mut execute, "lancy", builds.lancy);
         self.bench_execute(&mut execute, "cranelift", builds.cranelift);
         self.bench_execute(&mut execute, "llvm", builds.llvm);
@@ -164,7 +168,7 @@ fn projection(c: &mut Criterion) {
         .collect();
     let workload = Workload {
         name: "projection",
-        input_rows: prices.len(),
+        elements: prices.len(),
         workspace_words: prices.len(),
         expected: &|| &expected,
         run: |kernel: &dyn Executable, dst: &mut [i32]| {
@@ -217,7 +221,7 @@ fn sql_plan(c: &mut Criterion) {
     });
     let workload = Workload {
         name: "sql_plan",
-        input_rows: SALES as usize,
+        elements: SALES as usize,
         workspace_words,
         expected: &|| &data.1,
         run: |kernel: &dyn Executable, arena: &mut [i32]| {
@@ -235,9 +239,77 @@ fn sql_plan(c: &mut Criterion) {
     );
 }
 
+fn simd_matmul(c: &mut Criterion) {
+    use matmul::matmul as multiply;
+    const M: usize = 96;
+    const K: usize = 128;
+    const N: usize = 128;
+    let a: Vec<_> = (0..M * K).map(|i| (i % 37) as i32 - 18).collect();
+    let b: Vec<_> = (0..K * N).map(|i| (i % 53) as i32 - 26).collect();
+    let expected = matmul::reference(M, K, N, &a, &b);
+    let workload = Workload {
+        name: "simd_matmul",
+        elements: M * K * N, // One element of throughput is one multiply-accumulate.
+        workspace_words: M * N,
+        expected: &|| &expected,
+        run: |kernel: &dyn Executable, dst: &mut [i32]| {
+            let written = kernel.call(
+                &[M as i32, K as i32, N as i32],
+                &mut [
+                    BufferArg::Read(&a),
+                    BufferArg::Read(&b),
+                    BufferArg::Write(dst),
+                ],
+            )?;
+            usize::try_from(written).map_err(|_| "invalid matrix dimensions".into())
+        },
+    };
+    workload.compare(
+        c,
+        multiply::ir,
+        Builders {
+            lancy: &multiply::build::<Lancy>,
+            cranelift: &multiply::build::<Cranelift>,
+            llvm: &multiply::build::<Llvm>,
+        },
+    );
+}
+
+fn simd_hash_lookup(c: &mut Criterion) {
+    use probe::lookup;
+    let (table, queries) = probe::fixture(16_384, 12_288, 32_768);
+    let expected = probe::reference(&table, &queries);
+    let workload = Workload {
+        name: "simd_hash_lookup",
+        elements: queries.len(),
+        workspace_words: queries.len(),
+        expected: &|| &expected,
+        run: |kernel: &dyn Executable, dst: &mut [i32]| {
+            let written = kernel.call(
+                &[],
+                &mut [
+                    BufferArg::Read(&table),
+                    BufferArg::Read(&queries),
+                    BufferArg::Write(dst),
+                ],
+            )?;
+            usize::try_from(written).map_err(|_| "invalid hash table".into())
+        },
+    };
+    workload.compare(
+        c,
+        lookup::ir,
+        Builders {
+            lancy: &lookup::build::<Lancy>,
+            cranelift: &lookup::build::<Cranelift>,
+            llvm: &lookup::build::<Llvm>,
+        },
+    );
+}
+
 criterion_group! {
     name = backends;
     config = Criterion::default().sample_size(30);
-    targets = projection, sql_plan
+    targets = projection, sql_plan, simd_matmul, simd_hash_lookup
 }
 criterion_main!(backends);

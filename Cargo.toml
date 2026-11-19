@@ -1,3 +1,3 @@
 [workspace]
-members = ["lancy", "splice", "splice-macros", "splice-lancy", "splice-llvm", "splice-cranelift", "splice-text"]
+members = ["lancy", "splice", "splice-macros", "splice-target", "splice-lancy", "splice-llvm", "splice-cranelift", "splice-text"]
 resolver = "3"

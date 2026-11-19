@@ -570,6 +570,7 @@ dependencies = [
  "filecheck",
  "iced-x86",
  "regalloc2",
+ "splice-target",
  "thiserror 2.0.21",
 ]
 
@@ -904,6 +905,7 @@ dependencies = [
  "splice-lancy",
  "splice-llvm",
  "splice-macros",
+ "splice-target",
  "splice-text",
 ]
 
@@ -944,6 +946,10 @@ dependencies = [
  "quote",
  "syn 2.0.119",
 ]
+
+[[package]]
+name = "splice-target"
+version = "0.1.0"
 
 [[package]]
 name = "splice-text"

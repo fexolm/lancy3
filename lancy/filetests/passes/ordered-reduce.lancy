@@ -1,0 +1,12 @@
+# Floating-point reduction starts at lane zero and adds lanes in increasing order.
+fn main values:vec.f32 -> f32
+  sum = simd.reduce add values
+  ret sum
+@opt check: simd.Reduce(Add)
+@asm regex: SCALAR_ADD=v?addss
+@asm regex: REASSOC=v?h?addps
+@asm check: endbr64
+@asm not: $REASSOC
+@asm check: $SCALAR_ADD
+@asm not: $REASSOC
+@asm check: ret

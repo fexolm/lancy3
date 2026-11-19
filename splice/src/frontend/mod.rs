@@ -6,7 +6,7 @@ pub mod scalar;
 mod specialization;
 pub use specialization::{ComptimeKey, KeyArgument, MaybeKey, Specialization};
 
-use crate::hir::{Binary, Buffer, BufferKind, Function, Label, Reg};
+use crate::hir::{Binary, Buffer, BufferKind, Function, Label, Reg, Simd, ValueType};
 
 /// A function body is staged once against the builder selected by its backend.
 /// Borrowed comptime parameters may live only for the duration of the build.
@@ -26,6 +26,17 @@ pub trait KernelBuilder {
     fn set_source(&mut self, _source: &'static KernelSource) {}
     fn arg(&self, index: usize) -> Reg;
     fn local(&mut self) -> Reg;
+    /// Scalar-only builders use the default type for every register.
+    fn reg_type(&self, _r: Reg) -> Option<ValueType> {
+        Some(ValueType::Scalar)
+    }
+    /// Builders with typed storage override this for vector and mask locals.
+    fn typed_local(&mut self, _ty: ValueType) -> Reg {
+        self.local()
+    }
+    fn simd(&mut self, _inst: Simd, _args: &[Reg]) -> crate::Result<Option<Reg>> {
+        Err("this builder does not support SIMD".into())
+    }
     fn constant(&mut self, value: i32) -> Reg;
     fn buffer_len(&mut self, buffer: Buffer) -> Reg;
     fn load(&mut self, buffer: Buffer, index: Reg) -> Reg;
@@ -66,7 +77,7 @@ pub trait KernelBuilder {
 impl dyn KernelBuilder + '_ {
     /// Snapshot a register before a later operation can overwrite it.
     pub fn copy(&mut self, value: Reg) -> Reg {
-        let dst = self.local();
+        let dst = self.typed_local(self.reg_type(value).unwrap_or(ValueType::Scalar));
         self.assign(dst, value);
         dst
     }

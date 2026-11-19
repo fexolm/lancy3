@@ -1,0 +1,6 @@
+[package]
+name = "splice-target"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.94"
+description = "Shared host SIMD capabilities for Splice and Lancy"

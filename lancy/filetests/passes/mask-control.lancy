@@ -1,0 +1,60 @@
+# Only the last lane can be nonzero. A single low bit is enough to trap.
+fn main x:i32 -> i32
+  zero = const 0
+  one = const 1
+  v = simd.splat zero
+  n = simd.lanes i32
+  last = sub n one
+  mask = simd.insert v last x
+  any = simd.any mask
+  bounds any one
+  ret zero
+@isel not: AnyTrue
+@isel check: bounds.mask
+@run 0 -> 0
+@run 1 -> !bounds
+@run 0x80000000 -> !bounds
+---
+# At length zero an empty mask still fails the ordinary unsigned check.
+fn main x:i32 -> i32
+  zero = const 0
+  v = simd.splat x
+  any = simd.any v
+  bounds any zero
+  ret zero
+@isel check: AnyTrue
+@isel nextln: bounds |
+@run 0 -> !bounds
+@run 1 -> !bounds
+---
+# Another consumer needs the all-ones scalar. The branch and the check share it.
+fn main x:i32 -> i32
+  v = simd.splat x
+  any = simd.any v
+  one = const 1
+  br any nonzero | empty
+block nonzero
+  ret any
+block empty
+  bounds any one
+  ret any
+@isel check: AnyTrue
+@isel check: branch |
+@isel check: bounds |
+@run 0 -> 0
+@run 1 -> -1
+---
+fn main x:i32 -> i32
+  v = simd.splat x
+  any = simd.any v
+  br any nonzero | empty
+block nonzero
+  yes = const 17
+  ret yes
+block empty
+  no = const 23
+  ret no
+@isel not: AnyTrue
+@isel check: branch.any
+@run 0 -> 23
+@run 1 -> 17

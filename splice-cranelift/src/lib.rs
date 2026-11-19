@@ -21,7 +21,7 @@ pub struct Cranelift;
 
 #[repr(C)]
 struct Descriptor {
-    data: *mut i32,
+    data: *mut u8,
     len: i32,
 }
 
@@ -102,10 +102,7 @@ impl Executable for CraneliftKernel {
             .iter_mut()
             .map(|buffer| Descriptor {
                 len: buffer.len() as i32,
-                data: match buffer {
-                    BufferArg::Read(s) => s.as_ptr().cast_mut(),
-                    BufferArg::Write(s) => s.as_mut_ptr(),
-                },
+                data: buffer.data(),
             })
             .collect();
         // SAFETY: The signature check covers both input arrays, and their

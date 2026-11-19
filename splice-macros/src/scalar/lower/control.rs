@@ -28,7 +28,10 @@ impl Lower<'_> {
         if v.stage == Stage::Never {
             let code = v.code;
             return match to {
-                Stage::Reg(_) => Ok(emit!({#code; __splice_builder.local()})),
+                Stage::Reg(t) => {
+                    let ty = t.value_type(self.root);
+                    Ok(emit!({#code; __splice_builder.typed_local(#ty)}))
+                }
                 Stage::Never | Stage::Unit => Ok(code),
                 _ => err(at, "an early kernel return must merge with a scalar result"),
             };
@@ -111,7 +114,7 @@ impl Lower<'_> {
         let inner = self.nested_region();
         let yes_code = inner.delimit(self.write_arm(yes, stage, &at)?);
         let no_code = inner.delimit(self.write_arm(no, stage, &at)?);
-        let (init, result) = result_slot(stage);
+        let (init, result) = result_slot(stage, self.root);
         Ok(Value::new(
             stage,
             emit!({
@@ -184,18 +187,17 @@ impl Lower<'_> {
             return err(pat, "expected an immutable loop variable");
         }
         let stop_value = self.expr(stop)?;
-        let kind = if stop_value.stage == Stage::Reg(Scalar::Index) {
-            // Lengths are checked at the native API boundary. A general usize
-            // produced with `as` may instead exceed the register width.
-            if !matches!(&**stop, Expr::MethodCall(m) if m.method == "len")
+        let kind = if matches!(stop_value.stage, Stage::Reg(Scalar::Index | Scalar::Length)) {
+            // This loop uses a signed i32 induction variable. Both endpoints must fit.
+            if stop_value.stage != Stage::Reg(Scalar::Length)
                 || !matches!(&**start, Expr::Lit(l) if matches!(&l.lit, Lit::Int(i) if i.base10_parse::<i32>().is_ok()))
             {
                 return err(
                     range,
-                    "use an i32 range or a literal start and a runtime slice.len() bound",
+                    "use an i32 range or a literal start with a slice.len() or Lane::lanes() bound",
                 );
             }
-            Scalar::Index
+            Scalar::Length
         } else {
             Scalar::Int
         };
@@ -330,7 +332,7 @@ impl Lower<'_> {
                 __splice_builder.mark(__splice_next_arm);
             }));
         }
-        let (init, result) = result_slot(stage);
+        let (init, result) = result_slot(stage, self.root);
         Ok(Value::new(
             stage,
             emit!({
@@ -403,10 +405,11 @@ impl Lower<'_> {
     }
 }
 
-fn result_slot(stage: Stage) -> (TokenStream, TokenStream) {
-    if matches!(stage, Stage::Reg(_)) {
+fn result_slot(stage: Stage, root: &syn::Path) -> (TokenStream, TokenStream) {
+    if let Stage::Reg(t) = stage {
+        let ty = t.value_type(root);
         (
-            emit!(let __splice_branch_result = __splice_builder.local();),
+            emit!(let __splice_branch_result = __splice_builder.typed_local(#ty);),
             emit!(__splice_branch_result),
         )
     } else {

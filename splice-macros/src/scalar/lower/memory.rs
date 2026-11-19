@@ -5,16 +5,29 @@ use proc_macro2::TokenStream;
 use syn::{BinOp, Expr, ExprCast, ExprIndex, ExprMethodCall, ExprReference, Result, UnOp};
 
 impl Lower<'_> {
-    pub(super) fn method(&self, m: &ExprMethodCall) -> Result<Value> {
-        let receiver = self.expr(&m.receiver)?;
+    pub(super) fn method(&self, m: &ExprMethodCall, hint: Option<Scalar>) -> Result<Value> {
+        let data_type = if matches!(
+            m.method.to_string().as_str(),
+            "store" | "store_select" | "scatter" | "scatter_select"
+        ) && let Some(dst) = m.args.first()
+            && let Stage::Buffer(buffer) = self.expr(dst)?.stage
+        {
+            Some(Scalar::Vector(buffer.elem))
+        } else {
+            None
+        };
+        let receiver = self.expr_with_hint(&m.receiver, data_type)?;
 
+        if let Stage::Reg(t @ (Scalar::Vector(_) | Scalar::Mask(_))) = receiver.stage {
+            return self.simd_method(t, receiver, m, hint);
+        }
         if (m.method == "len" || m.method == "is_empty")
             && m.args.is_empty()
             && matches!(receiver.stage, Stage::Buffer(_))
         {
             let length = emit!({let buffer=#receiver; __splice_builder.buffer_len(buffer)});
             return Ok(if m.method == "len" {
-                Value::new(Stage::Reg(Scalar::Index), length)
+                Value::new(Stage::Reg(Scalar::Length), length)
             } else {
                 Value::new(
                     Stage::Reg(Scalar::Bool),
@@ -56,7 +69,7 @@ impl Lower<'_> {
             );
         };
         let code = match value.stage {
-            Stage::Reg(Scalar::Index | Scalar::Int) => value.code,
+            Stage::Reg(Scalar::Index | Scalar::Length | Scalar::Int) => value.code,
             Stage::Reg(Scalar::Bool) => {
                 self.bin("And", value.code, emit!(__splice_builder.constant(1)))
             }
@@ -74,9 +87,13 @@ impl Lower<'_> {
         let value = self.expr(target)?;
         let writable = reference.mutability.is_some();
         match value.stage {
-            Stage::Buffer(actual) if !writable || actual => {
-                Ok(Value::new(Stage::Buffer(writable), value.code))
-            }
+            Stage::Buffer(actual) if !writable || actual.write => Ok(Value::new(
+                Stage::Buffer(super::BufferType {
+                    write: writable,
+                    ..actual
+                }),
+                value.code,
+            )),
             _ => err(reference, "only a runtime slice can be reborrowed here"),
         }
     }
@@ -89,6 +106,9 @@ impl Lower<'_> {
                 "index a runtime &[i32] or &mut [i32] parameter",
             );
         };
+        if writable.elem != super::Elem::I32 {
+            return err(index, "use Lane::load or Lane::store for typed SIMD slices");
+        }
         let value = self.expr(&index.index)?;
         // Every host index above i32::MAX is out of bounds for a runtime
         // slice. Keep the fault on the executed path, even for a literal.
@@ -97,7 +117,7 @@ impl Lower<'_> {
         } else {
             self.reg(value, Scalar::Index, &index.index)?
         };
-        Ok((writable, slice.code, offset))
+        Ok((writable.write, slice.code, offset))
     }
 
     pub(super) fn index(&self, index: &ExprIndex) -> Result<Value> {

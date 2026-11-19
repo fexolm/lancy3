@@ -1,0 +1,52 @@
+# Width comes from the host. ISel should consume each whole vector.
+fn main x:vec.f32 y:vec.f32 -> vec.f32
+  neg = simd.neg x
+  mag = simd.abs y
+  out = simd.copysign mag neg
+  ret out
+@isel check: native.Vector(F32).Unary(Neg)
+@isel check: native.Vector(F32).Unary(Abs)
+@isel check: native.Vector(F32).Binary(CopySign)
+---
+fn main x:vec.f64 y:vec.f64 -> vec.i64
+  a = simd.ordered x y
+  b = simd.unordered y x
+  mask = simd.or a b
+  ret mask
+@isel check: native.Vector(F64).Binary(Ordered)
+@isel check: native.Vector(F64).Binary(Unordered)
+---
+fn main x:vec.f32 -> vec.i32
+  finite = simd.isfinite x
+  sub = simd.issubnormal x
+  sign = simd.signbit x
+  non_subnormal = simd.xor finite sub
+  result = simd.and sign non_subnormal
+  ret result
+@isel check: native.Vector(F32).Unary(IsFinite)
+@isel check: native.Vector(F32).Unary(IsSubnormal)
+@isel check: native.Vector(F32).Unary(SignBit)
+---
+fn main x:vec.f32 -> vec.f32
+  i = simd.cast i32 x
+  y = simd.cast f32 i
+  ret y
+@isel check: native.Vector(F32).Cast
+@isel check: native.Vector(I32).Cast
+@asm regex: TO_INT=v?cvttps2dqs?
+@asm regex: TO_FLOAT=v?cvtdq2ps
+@asm check: $TO_INT
+@asm check: $TO_FLOAT
+---
+fn main x:vec.f32 -> vec.f32
+  low = simd.widenlo f64 x
+  high = simd.widenhi f64 x
+  swapped = simd.narrow f32 high low
+  ret swapped
+@isel check: native.Vector(F32).Widen(false)
+@isel check: native.Vector(F32).Widen(true)
+@isel check: native.Vector(F64).Narrow
+@asm regex: WIDEN=v?cvtps2pd
+@asm regex: NARROW=v?cvtpd2ps
+@asm check: $WIDEN
+@asm check: $NARROW
