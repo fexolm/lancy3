@@ -1,9 +1,11 @@
 //! Emit the allocated stream including regalloc2's ordered edge and spill moves.
+use super::{Features, inst::class, inst::simd};
 use super::{
     compile::{CompiledFunction, compile},
     frame::{CHILD_ARGS, Frame},
     inst::{Address, Alu, Cond, Inst, NONVOLATILE, Rhs},
 };
+use crate::{CallError, numbers::Math};
 use crate::{
     CompileError,
     hir::{Function, Type, ssa::VerifiedBody},
@@ -11,15 +13,19 @@ use crate::{
     support::slotmap::DenseMap,
 };
 use iced_x86::{IcedError, code_asm::*};
+use regalloc2::RegClass;
 use regalloc2::{Allocation, Block, Edit, Function as _, InstOrEdit, PReg};
 
 type AsmResult = Result<(), IcedError>;
 
-const R64: [AsmRegister64; 16] = [
+pub(super) const R64: [AsmRegister64; 16] = [
     rax, rcx, rdx, rbx, rsp, rbp, rsi, rdi, r8, r9, r10, r11, r12, r13, r14, r15,
 ];
-const R32: [AsmRegister32; 16] = [
+pub(super) const R32: [AsmRegister32; 16] = [
     eax, ecx, edx, ebx, esp, ebp, esi, edi, r8d, r9d, r10d, r11d, r12d, r13d, r14d, r15d,
+];
+const R16: [AsmRegister16; 16] = [
+    ax, cx, dx, bx, sp, bp, si, di, r8w, r9w, r10w, r11w, r12w, r13w, r14w, r15w,
 ];
 const R8: [AsmRegister8; 16] = [
     al, cl, dl, bl, spl, bpl, sil, dil, r8b, r9b, r10b, r11b, r12b, r13b, r14b, r15b,
@@ -46,6 +52,15 @@ impl Frame {
             return Ok(());
         }
         match (from.as_reg(), to.as_reg()) {
+            (Some(s), Some(d)) if s.class() == RegClass::Vector => {
+                simd::copy(a, d.hw_enc(), s.hw_enc(), Features::host().bytes)
+            }
+            (Some(s), None) if s.class() == RegClass::Vector => {
+                simd::store(a, self.spill(to), s.hw_enc(), Features::host().bytes)
+            }
+            (None, Some(d)) if d.class() == RegClass::Vector => {
+                simd::load(a, d.hw_enc(), self.spill(from), Features::host().bytes)
+            }
             (Some(s), Some(d)) => a.mov(R64[d.hw_enc()], R64[s.hw_enc()]),
             (Some(s), None) => a.mov(self.spill(to), R64[s.hw_enc()]),
             (None, Some(d)) => a.mov(R64[d.hw_enc()], self.spill(from)),
@@ -56,22 +71,28 @@ impl Frame {
 
 // iced attaches a label to the next instruction. Its zero-byte pseudo-op
 // lets a coalesced copy or a fallthrough block have an address of its own.
-fn bind(a: &mut CodeAssembler, mut label: CodeLabel) -> AsmResult {
+pub(super) fn bind(a: &mut CodeAssembler, mut label: CodeLabel) -> AsmResult {
     a.set_label(&mut label)?;
     a.zero_bytes()
+}
+
+pub(crate) struct Code {
+    pub bytes: Vec<u8>,
+    #[cfg(test)]
+    pub text_len: usize,
+    pub words: usize,
+    pub descriptors: Box<[Math]>,
 }
 
 pub(crate) fn emit(
     source: Module<VerifiedBody<'_>>,
     ids: &FunctionIds<Function>,
-) -> Result<(Vec<u8>, usize), CompileError> {
+) -> Result<Code, CompileError> {
     let module = compile(source, ids)?;
     emit_compiled(&module)
 }
 
-pub(super) fn emit_compiled(
-    module: &Module<CompiledFunction>,
-) -> Result<(Vec<u8>, usize), CompileError> {
+pub(super) fn emit_compiled(module: &Module<CompiledFunction>) -> Result<Code, CompileError> {
     let entry = module.call_graph.root();
     let mut a = CodeAssembler::new(64)?;
     let entries = DenseMap::from_fn(module.functions.len(), |_| a.create_label());
@@ -92,12 +113,27 @@ pub(super) fn emit_compiled(
     for (mem, reg) in saves() {
         a.mov(mem, reg)?;
     }
+    // A fixed allocation keeps descriptor addresses valid for the installed kernel.
+    let descriptors: Box<[_]> = module
+        .functions
+        .iter()
+        .rev()
+        .flat_map(|(_, f)| f.body.insts())
+        .filter_map(|op| match op {
+            Inst::Math(m, ..) => Some(*m),
+            _ => None,
+        })
+        .collect();
+    let mut descriptor_iter = descriptors.iter();
+    let mut constants = Vec::new();
     // The root (last in postorder) follows the native entry prologue.
     for (id, machine) in module.functions.iter().rev() {
         bind(&mut a, entries[id])?;
         Emitter {
             a: &mut a,
             machine,
+            descriptors: &mut descriptor_iter,
+            constants: &mut constants,
             root: id == entry,
             entries: &entries,
             epilogue,
@@ -110,6 +146,12 @@ pub(super) fn emit_compiled(
         a.mov(reg, mem)?;
     }
     a.ret()?;
+    #[cfg(test)]
+    let pool_bytes: usize = constants.iter().map(|(_, _, size)| size).sum();
+    for (label, bits, size) in constants {
+        bind(&mut a, label)?;
+        a.db(&bits[..size])?;
+    }
     let bytes = a.assemble(0)?;
     // Executable::new may install at any address. All label references must
     // fit RIP-relative addressing, including the LEA for each continuation.
@@ -119,10 +161,19 @@ pub(super) fn emit_compiled(
             target: bytes.len(),
         });
     }
-    Ok((bytes, root.workspace))
+    debug_assert!(descriptor_iter.next().is_none());
+    Ok(Code {
+        #[cfg(test)]
+        text_len: bytes.len() - pool_bytes,
+        bytes,
+        words: root.workspace,
+        descriptors,
+    })
 }
 
-struct Emitter<'a> {
+struct Emitter<'a, 'data> {
+    descriptors: &'a mut std::slice::Iter<'data, Math>,
+    constants: &'a mut Vec<(CodeLabel, crate::numbers::Bits, usize)>,
     a: &'a mut CodeAssembler,
     machine: &'a CompiledFunction,
     root: bool,
@@ -131,7 +182,7 @@ struct Emitter<'a> {
     failures: [Option<CodeLabel>; 3],
 }
 
-impl Emitter<'_> {
+impl Emitter<'_, '_> {
     fn function(&mut self) -> AsmResult {
         let body = &self.machine.body;
         let labels: Vec<_> = (0..body.num_blocks())
@@ -198,6 +249,51 @@ impl Emitter<'_> {
         Ok(())
     }
 
+    fn math(&mut self, allocs: &[Allocation]) -> AsmResult {
+        let spec = self
+            .descriptors
+            .next()
+            .expect("descriptor for emitted operation");
+        let a = &mut self.a;
+        // Both x64 ABIs enter with RSP % 16 == 8. Internal jumps preserve RSP.
+        // Reserve host shadow space, three 64-byte operands and the saved workspace pointer.
+        const FRAME: i32 = 32 + 3 * 64 + 8;
+        a.sub(rsp, FRAME)?;
+        a.mov(qword_ptr(rsp + FRAME - 8), r11)?;
+        for &i in spec.inputs() {
+            store(
+                a,
+                spec.operand_type(i),
+                ptr(rsp + 32 + 64 * i as i32),
+                gpr(allocs[i]),
+            )?;
+        }
+        let (buf, desc) = if cfg!(windows) {
+            (rcx, rdx)
+        } else {
+            (rdi, rsi)
+        };
+        a.lea(buf, ptr(rsp + 32))?;
+        a.mov(desc, std::ptr::from_ref(spec) as u64)?;
+        a.mov(r10, eval_math as *const () as u64)?;
+        a.call(r10)?;
+        a.mov(r11, qword_ptr(rsp + FRAME - 8))?;
+        a.test(eax, eax)?;
+        let success = a.create_label();
+        a.jz(success)?;
+        a.add(rsp, FRAME)?;
+        for i in 0..2 {
+            let label = *self.failures[i].get_or_insert_with(|| a.create_label());
+            a.cmp(eax, (i + 1) as i32)?;
+            a.je(label)?;
+        }
+        let overflow = *self.failures[2].get_or_insert_with(|| a.create_label());
+        a.jmp(overflow)?;
+        bind(a, success)?;
+        load(a, spec.output, gpr(*allocs.last().unwrap()), ptr(rsp + 32))?;
+        a.add(rsp, FRAME)
+    }
+
     fn instruction(&mut self, inst: Inst, allocs: &[Allocation]) -> AsmResult {
         let a = &mut *self.a;
         let frame = &self.machine.frame;
@@ -222,12 +318,91 @@ impl Emitter<'_> {
             Inst::Argv(_) | Inst::Copy(..) => Ok(()), // incoming fixed def / tied operands
             Inst::LoadArg {
                 argv: Some(_),
+                ty,
                 index,
                 ..
-            } => a.mov(q(1), qword_ptr(q(0) + disp(index))),
+            } => load(a, ty, reg(1), ptr(q(0) + disp(index))),
             Inst::LoadArg {
-                argv: None, index, ..
-            } => a.mov(q(0), slot(CHILD_ARGS + index)),
+                argv: None,
+                ty,
+                index,
+                ..
+            } => load(a, ty, reg(0), slot(CHILD_ARGS + index)),
+            Inst::Native(native, ..) => {
+                let mut regs = [0; 4];
+                for (dst, &loc) in regs.iter_mut().zip(allocs) {
+                    *dst = gpr(loc);
+                }
+                native.emit(a, &regs[..allocs.len()])
+            }
+            Inst::Math(..) => self.math(allocs),
+            Inst::Literal(l, bits, _) => match l.bytes() {
+                16 => {
+                    let label = a.create_label();
+                    let mut data = [0; 64];
+                    data[..16].copy_from_slice(&bits.to_le_bytes());
+                    self.constants.push((label, data, 16));
+                    simd::load(a, reg(0), ptr(label), 16)
+                }
+                8 if l.float() => {
+                    a.mov(r10, bits as u64)?;
+                    a.movq(simd::XMM[reg(0)], r10)
+                }
+                4 if l.float() => {
+                    a.mov(r10d, bits as u32)?;
+                    a.movd(simd::XMM[reg(0)], r10d)
+                }
+                8 => a.mov(q(0), bits as u64),
+                size => a.mov(r(0), (bits & (u128::MAX >> (128 - size * 8))) as u32),
+            },
+            Inst::Iota(l, _) => {
+                let label = a.create_label();
+                let width = Features::host().bytes;
+                let spec = Math {
+                    action: crate::numbers::Action::Iota,
+                    input: l.scalar(),
+                    output: Type::Vector(l),
+                };
+                let bits = spec
+                    .eval(&[[0; 64]; 3], width)
+                    .expect("lane numbering is total");
+                self.constants.push((label, bits, width));
+                simd::load(a, reg(0), ptr(label), width)
+            }
+            Inst::BitMove(from, to, ..) => match (class(to), from.bytes(Features::host().bytes)) {
+                (RegClass::Vector, 4) => a.movd(simd::XMM[reg(1)], r(0)),
+                (RegClass::Vector, 8) => a.movq(simd::XMM[reg(1)], q(0)),
+                (RegClass::Int, 4) => a.movd(r(1), simd::XMM[reg(0)]),
+                (RegClass::Int, 8) => a.movq(q(1), simd::XMM[reg(0)]),
+                _ => unreachable!(),
+            },
+            Inst::IntBinary(op, ty, ..) => {
+                use crate::hir::Binary;
+                let size = ty.lane().unwrap().bytes();
+                macro_rules! integer {
+                    ($mn:ident) => {
+                        if size == 8 {
+                            a.$mn(q(0), q(1))
+                        } else {
+                            a.$mn(r(0), r(1))
+                        }
+                    };
+                }
+                match op {
+                    Binary::Add => integer!(add),
+                    Binary::Sub => integer!(sub),
+                    Binary::Mul => integer!(imul_2),
+                    Binary::And => integer!(and),
+                    Binary::Or => integer!(or),
+                    Binary::Xor => integer!(xor),
+                    _ => unreachable!(),
+                }?;
+                match size {
+                    1 => a.movzx(r(0), R8[reg(0)]),
+                    2 => a.movzx(r(0), R16[reg(0)]),
+                    _ => Ok(()),
+                }
+            }
             Inst::Imm(_, n) => a.mov(r(0), n),
             Inst::Alu(op, _, _, Rhs::Imm(n)) => match op {
                 Alu::Add => a.add(r(0), n),
@@ -296,19 +471,23 @@ impl Emitter<'_> {
             }
             Inst::Movsxd(..) => a.movsxd(q(1), r(0)),
             Inst::Lea(_, addr) => a.lea(q(allocs.len() - 1), memory(addr, allocs)),
-            Inst::Load(Type::I32, _, addr) => {
-                a.mov(r(allocs.len() - 1), dword_ptr(memory(addr, allocs)))
+            Inst::Masked {
+                ty, indices, dst, ..
+            } => {
+                let i = 1 + usize::from(indices.is_some());
+                simd::masked(
+                    a,
+                    ty,
+                    reg(0),
+                    indices.map(|_| reg(1)),
+                    reg(i),
+                    reg(i + 1),
+                    dst.map(|_| reg(i + 2)),
+                )
             }
-            Inst::Load(Type::Ptr, _, addr) => {
-                a.mov(q(allocs.len() - 1), qword_ptr(memory(addr, allocs)))
-            }
-            Inst::Store(Type::I32, addr, _) => {
-                a.mov(dword_ptr(memory(addr, allocs)), r(allocs.len() - 1))
-            }
-            Inst::Store(Type::Ptr, addr, _) => {
-                a.mov(qword_ptr(memory(addr, allocs)), q(allocs.len() - 1))
-            }
-            Inst::StoreArg(i, _) => a.mov(slot(frame.slots + CHILD_ARGS + i), q(0)),
+            Inst::Load(ty, _, addr) => load(a, ty, reg(allocs.len() - 1), memory(addr, allocs)),
+            Inst::Store(ty, addr, _) => store(a, ty, memory(addr, allocs), reg(allocs.len() - 1)),
+            Inst::StoreArg(i, ty, _) => store(a, ty, slot(frame.slots + CHILD_ARGS + i), reg(0)),
             Inst::Call { target, .. } => {
                 if self.root {
                     a.mov(slot(frame.slots + 1), r11)?;
@@ -325,12 +504,71 @@ impl Emitter<'_> {
                 a.endbr64()?;
                 a.sub(r11, disp(frame.slots))
             }
-            Inst::Ret(_) if self.root => a.jmp(self.epilogue),
+            Inst::Ret(_) if self.root => {
+                let ty = self.machine.result;
+                match ty.bytes(Features::host().bytes) {
+                    16.. => store(a, ty, slot(1), 0)?,
+                    4 if ty == Type::F32 => a.movd(eax, simd::XMM[0])?,
+                    8 if ty == Type::F64 => a.movq(rax, simd::XMM[0])?,
+                    _ => {}
+                }
+                a.jmp(self.epilogue)
+            }
             Inst::Ret(_) => a.jmp(slot(0)),
             Inst::Jump | Inst::Branch(_) | Inst::BrCmp(..) => {
                 unreachable!("emitted with block successors")
             }
         }
+    }
+}
+
+unsafe extern "C" fn eval_math(buf: *mut u8, spec: *const Math) -> u32 {
+    // SAFETY: the live kernel owns the immutable descriptor emitted at this call site.
+    let spec = unsafe { *spec };
+    let width = Features::host().bytes;
+    let mut args = [[0; 64]; 3];
+    for &i in spec.inputs() {
+        let n = spec.operand_type(i).bytes(width);
+        // SAFETY: the emitted call initialized this prefix of the i-th 64-byte stack slot.
+        unsafe { std::ptr::copy_nonoverlapping(buf.add(i * 64), args[i].as_mut_ptr(), n) };
+    }
+    match spec.eval(&args, width) {
+        Ok(bits) => {
+            // SAFETY: the first slot has capacity for every result, including a ZMM.
+            unsafe { std::ptr::copy_nonoverlapping(bits.as_ptr(), buf, spec.output.bytes(width)) };
+            0
+        }
+        Err(CallError::OutOfBounds) => 1,
+        Err(CallError::DivisionByZero) => 2,
+        Err(CallError::DivisionOverflow) => 3,
+        Err(_) => unreachable!("numeric operation returned an invocation error"),
+    }
+}
+
+fn load(a: &mut CodeAssembler, ty: Type, d: usize, mem: AsmMemoryOperand) -> AsmResult {
+    let size = ty.bytes(Features::host().bytes);
+    if class(ty) == RegClass::Vector {
+        return simd::load(a, d, mem, size);
+    }
+    match size {
+        1 => a.movzx(R32[d], byte_ptr(mem)),
+        2 => a.movzx(R32[d], word_ptr(mem)),
+        4 => a.mov(R32[d], dword_ptr(mem)),
+        8 => a.mov(R64[d], qword_ptr(mem)),
+        _ => unreachable!(),
+    }
+}
+fn store(a: &mut CodeAssembler, ty: Type, mem: AsmMemoryOperand, s: usize) -> AsmResult {
+    let size = ty.bytes(Features::host().bytes);
+    if class(ty) == RegClass::Vector {
+        return simd::store(a, mem, s, size);
+    }
+    match size {
+        1 => a.mov(byte_ptr(mem), R8[s]),
+        2 => a.mov(word_ptr(mem), R16[s]),
+        4 => a.mov(dword_ptr(mem), R32[s]),
+        8 => a.mov(qword_ptr(mem), R64[s]),
+        _ => unreachable!(),
     }
 }
 

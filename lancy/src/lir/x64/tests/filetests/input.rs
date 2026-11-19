@@ -1,5 +1,7 @@
 //! Small, test-only spelling of Lancy SSA. Build the same Function as the frontend.
-use crate::hir::{Binary, Block, Edge, Function, Op, Scale, Terminator, Type, Value};
+use crate::hir::{
+    Binary, Block, Edge, Function, Lane, Op, Scale, Simd, Terminator, Ternary, Type, Unary, Value,
+};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -8,11 +10,177 @@ type Names<'a, T> = HashMap<&'a str, T>;
 type Result<T> = std::result::Result<T, String>;
 
 fn ty(s: &str) -> Result<Type> {
-    match s {
-        "i32" => Ok(Type::I32),
-        "ptr" => Ok(Type::Ptr),
-        _ => Err(format!("unknown type {s}")),
+    if s == "ptr" {
+        return Ok(Type::Ptr);
     }
+    let vector = s.strip_prefix("vec.");
+    let lane = match vector.unwrap_or(s) {
+        "i8" => Lane::I8,
+        "u8" => Lane::U8,
+        "i16" => Lane::I16,
+        "u16" => Lane::U16,
+        "i32" => Lane::I32,
+        "u32" => Lane::U32,
+        "i64" => Lane::I64,
+        "u64" => Lane::U64,
+        "i128" => Lane::I128,
+        "u128" => Lane::U128,
+        "isize" => Lane::Isize,
+        "usize" => Lane::Usize,
+        "f16" => Lane::F16,
+        "bf16" => Lane::BF16,
+        "f32" => Lane::F32,
+        "f64" => Lane::F64,
+        _ => return Err(format!("unknown type {s}")),
+    };
+    Ok(if vector.is_some() {
+        Type::Vector(lane)
+    } else {
+        lane.scalar()
+    })
+}
+
+fn binary(name: &str) -> Result<Binary> {
+    use Binary::*;
+    Ok(match name {
+        "add" => Add,
+        "sub" => Sub,
+        "mul" => Mul,
+        "div" => Div,
+        "rem" => Rem,
+        "and" => And,
+        "or" => Or,
+        "xor" => Xor,
+        "eq" => Eq,
+        "ne" => Ne,
+        "lt" => Lt,
+        "le" => Le,
+        "gt" => Gt,
+        "ge" => Ge,
+        "shl" => Shl,
+        "shr" => Shr,
+        "min" => Min,
+        "max" => Max,
+        "ordered" => Ordered,
+        "unordered" => Unordered,
+        "copysign" => CopySign,
+        "pow" => Pow,
+        "atan2" => Atan2,
+        "hypot" => Hypot,
+        "rotateleft" => RotateLeft,
+        "rotateright" => RotateRight,
+        "saturatingadd" => SaturatingAdd,
+        "saturatingsub" => SaturatingSub,
+        _ => return Err(format!("unknown instruction {name}")),
+    })
+}
+
+fn element(s: &str) -> Result<Lane> {
+    let t = ty(s)?;
+    t.lane()
+        .filter(|l| l.scalar() == t)
+        .ok_or_else(|| format!("expected scalar element, got {s}"))
+}
+
+fn unary(name: &str) -> Result<Unary> {
+    Ok(match name {
+        "isnan" => Unary::IsNan,
+        "isinfinite" => Unary::IsInfinite,
+        "isfinite" => Unary::IsFinite,
+        "isnormal" => Unary::IsNormal,
+        "issubnormal" => Unary::IsSubnormal,
+        "signbit" => Unary::SignBit,
+        "signum" => Unary::Signum,
+        "nextup" => Unary::NextUp,
+        "nextdown" => Unary::NextDown,
+        "neg" => Unary::Neg,
+        "abs" => Unary::Abs,
+        "not" => Unary::Not,
+        "popcnt" => Unary::Popcnt,
+        "leadingzeros" => Unary::LeadingZeros,
+        "trailingzeros" => Unary::TrailingZeros,
+        "sqrt" => Unary::Sqrt,
+        "floor" => Unary::Floor,
+        "ceil" => Unary::Ceil,
+        "trunc" => Unary::Trunc,
+        "round" => Unary::Round,
+        "nearest" => Unary::Nearest,
+        "fract" => Unary::Fract,
+        "recip" => Unary::Recip,
+        "exp" => Unary::Exp,
+        "exp2" => Unary::Exp2,
+        "ln" => Unary::Ln,
+        "log2" => Unary::Log2,
+        "log10" => Unary::Log10,
+        "sin" => Unary::Sin,
+        "cos" => Unary::Cos,
+        "tan" => Unary::Tan,
+        "asin" => Unary::Asin,
+        "acos" => Unary::Acos,
+        "atan" => Unary::Atan,
+        "sinh" => Unary::Sinh,
+        "cosh" => Unary::Cosh,
+        "tanh" => Unary::Tanh,
+        "asinh" => Unary::Asinh,
+        "acosh" => Unary::Acosh,
+        "atanh" => Unary::Atanh,
+        "expm1" => Unary::ExpM1,
+        "ln1p" => Unary::Ln1p,
+        "cbrt" => Unary::Cbrt,
+        _ => return Err(format!("unknown instruction {name}")),
+    })
+}
+
+fn simd(name: &str, args: &[&str], v: impl Fn(&str) -> Result<Value>) -> Result<Simd> {
+    Ok(match (name, args) {
+        ("lanes", [t]) => Simd::LaneCount(element(t)?),
+        ("iota", [t]) => Simd::Iota(element(t)?),
+        ("shuffle", [x, y, i]) => Simd::Shuffle(v(x)?, v(y)?, v(i)?),
+        ("any", [x]) => Simd::AnyTrue(v(x)?),
+        ("all", [x]) => Simd::AllTrue(v(x)?),
+        ("reduce", [op, x]) => Simd::Reduce(binary(op)?, v(x)?),
+        (part @ ("widenlo" | "widenhi"), [t, x]) => Simd::Widen {
+            to: element(t)?,
+            high: part == "widenhi",
+            value: v(x)?,
+        },
+        ("narrow", [t, x, y]) => Simd::Narrow(element(t)?, v(x)?, v(y)?),
+        ("splat", [x]) => Simd::Splat(v(x)?),
+        ("extract", [x, i]) => Simd::ExtractLane(v(x)?, v(i)?),
+        ("insert", [x, i, y]) => Simd::InsertLane(v(x)?, v(i)?, v(y)?),
+        (op @ ("maskedload" | "maskedstore"), [p, idx, mask, x]) => {
+            let address = crate::hir::VectorAddress {
+                base: v(p)?,
+                indices: if *idx == "-" { None } else { Some(v(idx)?) },
+            };
+            if op == "maskedload" {
+                Simd::MaskedLoad {
+                    address,
+                    mask: v(mask)?,
+                    passthrough: v(x)?,
+                }
+            } else {
+                Simd::MaskedStore {
+                    address,
+                    mask: v(mask)?,
+                    value: v(x)?,
+                }
+            }
+        }
+
+        ("compress", [x, m]) => Simd::Compress(v(x)?, v(m)?),
+        ("expand", [x, m]) => Simd::Expand(v(x)?, v(m)?),
+        ("load", [t, p]) => Simd::Load(element(t)?, v(p)?),
+        ("store", [p, x]) => Simd::Store(v(p)?, v(x)?),
+        ("cast", [t, x]) => Simd::Cast(element(t)?, v(x)?),
+        ("bitcast", [t, x]) => Simd::Bitcast(element(t)?, v(x)?),
+        ("fma", [x, y, z]) => Simd::Ternary(Ternary::MulAdd, v(x)?, v(y)?, v(z)?),
+        ("bitselect", [x, y, z]) => Simd::Ternary(Ternary::BitSelect, v(x)?, v(y)?, v(z)?),
+        ("select", [x, y, z]) => Simd::Ternary(Ternary::Select, v(x)?, v(y)?, v(z)?),
+        (name, [x]) => Simd::Unary(unary(name)?, v(x)?),
+        (name, [x, y]) => Simd::Bin(binary(name)?, v(x)?, v(y)?),
+        _ => return Err(format!("invalid SIMD instruction {name}")),
+    })
 }
 
 fn params<'a>(words: &[&'a str]) -> Result<Vec<(&'a str, Type)>> {
@@ -89,7 +257,19 @@ fn instruction<'a>(
         _ => (None, words),
     };
     let op = match words {
+        [name, args @ ..] if name.starts_with("simd.") => Op::Simd(simd(&name[5..], args, v)?),
         ["const", n] => Op::Const(super::integer(n)?),
+        ["literal", t, n] => {
+            let lane = element(t)?;
+            let bits = u128::from_str_radix(n.trim_start_matches("0x"), 16)
+                .map_err(|_| "expected literal bits in hex")?;
+            Op::Literal(lane, bits)
+        }
+        ["cast", t, x] => Op::Cast(ty(t)?, v(x)?),
+        ["bitcast", t, x] => Op::Bitcast(ty(t)?, v(x)?),
+        ["fma", x, y, z] => Op::Ternary(Ternary::MulAdd, v(x)?, v(y)?, v(z)?),
+        ["select", x, y, z] => Op::Ternary(Ternary::Select, v(x)?, v(y)?, v(z)?),
+        ["bitselect", x, y, z] => Op::Ternary(Ternary::BitSelect, v(x)?, v(y)?, v(z)?),
         ["copy", x] => Op::Copy(v(x)?),
         ["bounds", i, n] => Op::BoundsCheck(v(i)?, v(n)?),
         ["offset", p, i, stride] => Op::PtrOffset(
@@ -112,31 +292,8 @@ fn instruction<'a>(
             let args = args.iter().map(|arg| v(arg)).collect::<Result<Vec<_>>>()?;
             Op::Call(f.add_call(Arc::clone(callee), &args))
         }
-        [name, a, b] => {
-            use Binary::*;
-            let op = match *name {
-                "add" => Add,
-                "sub" => Sub,
-                "mul" => Mul,
-                "div" => Div,
-                "rem" => Rem,
-                "and" => And,
-                "or" => Or,
-                "xor" => Xor,
-                "eq" => Eq,
-                "ne" => Ne,
-                "lt" => Lt,
-                "le" => Le,
-                "gt" => Gt,
-                "ge" => Ge,
-                "shl" => Shl,
-                "shr" => Shr,
-                "min" => Min,
-                "max" => Max,
-                _ => return Err(format!("unknown instruction {name}")),
-            };
-            Op::Bin(op, v(a)?, v(b)?)
-        }
+        [name, x] => Op::Unary(unary(name)?, v(x)?),
+        [name, a, b] => Op::Bin(binary(name)?, v(a)?, v(b)?),
         _ => return Err(format!("invalid instruction: {}", words.join(" "))),
     };
     match (dst, f.append(block, op)) {

@@ -36,7 +36,11 @@ pub enum CompileError {
 pub enum CallError {
     #[error("expected {expected} arguments, got {actual}")]
     Arity { expected: usize, actual: usize },
-    #[error("use call_raw for a pointer signature")]
+    #[error("use call_words or call_words_raw for a multiword signature")]
+    WideSignature,
+    #[error("expected {expected} result words, got {actual}")]
+    ResultWords { expected: usize, actual: usize },
+    #[error("signature requires a typed invocation")]
     PointerSignature,
     #[error("kernel slice index out of bounds")]
     OutOfBounds,

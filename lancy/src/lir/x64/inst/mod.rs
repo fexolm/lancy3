@@ -1,8 +1,11 @@
 //! Selected x64 instructions. R11 addresses the current workspace frame.
 //! R10 is the allocator's move scratch and is available inside a pseudo-op.
-use crate::hir::{Binary, Scale, Type};
+pub(super) mod simd;
+use crate::hir::{Binary, Lane, Scale, Type};
+use crate::numbers::Math;
 use crate::{lir::TargetInst, module::FunctionId};
 use regalloc2::{MachineEnv, Operand, PReg, PRegSet, RegClass, VReg};
+use simd::Native;
 
 const fn gpr(enc: usize) -> PReg {
     PReg::new(enc, RegClass::Int)
@@ -33,10 +36,39 @@ pub(super) const NONVOLATILE: PRegSet = if cfg!(windows) {
     gprs(&[3, 5, 12, 13, 14, 15])
 };
 
+// XMM, YMM and ZMM are aliases. Scalars and packed values must share one class.
+pub(super) fn class(ty: Type) -> RegClass {
+    if matches!(
+        ty,
+        Type::Vector(_) | Type::F32 | Type::F64 | Type::U128 | Type::I128
+    ) {
+        RegClass::Vector
+    } else {
+        RegClass::Int
+    }
+}
+fn return_reg(v: VReg) -> PReg {
+    PReg::new(0, v.class())
+}
+const SCRATCH: usize = if cfg!(windows) { 5 } else { 15 };
+const SIMD: PRegSet = {
+    let mut set = PRegSet::empty();
+    let mut i = 0;
+    while i < SCRATCH {
+        set.add(PReg::new(i, RegClass::Vector));
+        i += 1;
+    }
+    set
+};
+
 static ENV: MachineEnv = MachineEnv {
-    preferred_regs_by_class: [VOLATILE, PRegSet::empty(), PRegSet::empty()],
+    preferred_regs_by_class: [VOLATILE, PRegSet::empty(), SIMD],
     non_preferred_regs_by_class: [NONVOLATILE, PRegSet::empty(), PRegSet::empty()],
-    scratch_by_class: [Some(gpr(10)), None, None],
+    scratch_by_class: [
+        Some(gpr(10)),
+        None,
+        Some(PReg::new(SCRATCH, RegClass::Vector)),
+    ],
     fixed_stack_slots: Vec::new(),
 };
 
@@ -122,8 +154,15 @@ pub(super) enum Inst {
     LoadArg {
         dst: VReg,
         argv: Option<VReg>,
+        ty: Type,
         index: usize,
     },
+    Native(Native, VReg, [Option<VReg>; 3]),
+    Math(Math, VReg, [Option<VReg>; 3]),
+    Literal(Lane, u128, VReg),
+    Iota(Lane, VReg),
+    BitMove(Type, Type, VReg, VReg),
+    IntBinary(Binary, Type, VReg, VReg, VReg),
     Imm(VReg, i32),
     Copy(VReg, VReg),
     Alu(Alu, VReg, VReg, Rhs),
@@ -150,12 +189,20 @@ pub(super) enum Inst {
     Movsxd(VReg, VReg),
     Lea(VReg, Address),
     Load(Type, VReg, Address),
+    Masked {
+        ty: Type,
+        base: VReg,
+        indices: Option<VReg>,
+        mask: VReg,
+        value: VReg,
+        dst: Option<VReg>,
+    },
     Store(Type, Address, VReg),
-    StoreArg(usize, VReg),
+    StoreArg(usize, Type, VReg),
     Call {
         target: FunctionId,
         dst: VReg,
-        clobbers: u16,
+        clobbers: PRegSet,
     },
     Jump,
     Branch(VReg),
@@ -164,10 +211,8 @@ pub(super) enum Inst {
 
 impl Inst {
     pub fn call(target: FunctionId, dst: VReg, mut written: PRegSet) -> Self {
-        written.remove(AX); // The return value is a fixed definition.
-        let clobbers = written
-            .into_iter()
-            .fold(0, |bits, r| bits | (1 << r.hw_enc()));
+        written.remove(return_reg(dst));
+        let clobbers = written;
         Self::Call {
             target,
             dst,
@@ -184,6 +229,23 @@ impl TargetInst for Inst {
             Self::LoadArg { dst, argv, .. } => {
                 out.extend(argv.map(O::reg_use));
                 out.push(O::reg_def(dst));
+            }
+            Self::Native(native, d, args) => {
+                out.extend(args.into_iter().flatten().map(O::reg_use));
+                out.push(if native.tied() {
+                    O::reg_reuse_def(d, 0)
+                } else {
+                    O::reg_def(d)
+                });
+            }
+            Self::Math(_, d, args) => {
+                out.extend(args.into_iter().flatten().map(O::reg_use));
+                out.push(O::reg_fixed_def(d, return_reg(d)));
+            }
+            Self::Literal(_, _, d) | Self::Iota(_, d) => out.push(O::reg_def(d)),
+            Self::BitMove(_, _, d, a) => out.extend([O::reg_use(a), O::reg_def(d)]),
+            Self::IntBinary(_, _, d, a, b) => {
+                out.extend([O::reg_use(a), O::reg_use(b), O::reg_reuse_def(d, 0)])
             }
             Self::Imm(d, _) => out.push(O::reg_def(d)),
             Self::Copy(d, a) => out.extend([O::reg_use(a), O::reg_reuse_def(d, 0)]),
@@ -231,25 +293,35 @@ impl TargetInst for Inst {
                 addr.operands(out);
                 out.push(O::reg_def(d));
             }
+            Self::Masked {
+                base,
+                indices,
+                mask,
+                value,
+                dst,
+                ..
+            } => {
+                out.push(O::reg_use(base));
+                out.extend(indices.map(O::reg_use));
+                out.extend([O::reg_use(mask), O::reg_use(value)]);
+                out.extend(dst.map(O::reg_def));
+            }
             Self::Store(_, addr, value) => {
                 addr.operands(out);
                 out.push(O::reg_use(value));
             }
-            Self::StoreArg(_, v) | Self::Branch(v) => out.push(O::reg_use(v)),
-            Self::Call { dst, .. } => out.push(O::reg_fixed_def(dst, AX)),
-            Self::Ret(v) => out.push(O::reg_fixed_use(v, AX)),
+            Self::StoreArg(_, _, v) | Self::Branch(v) => out.push(O::reg_use(v)),
+            Self::Call { dst, .. } => out.push(O::reg_fixed_def(dst, return_reg(dst))),
+            Self::Ret(v) => out.push(O::reg_fixed_use(v, return_reg(v))),
             Self::Jump => {}
         }
     }
     fn clobbers(&self) -> PRegSet {
         match self {
-            Self::Call { clobbers, .. } => {
-                let mut set = PRegSet::empty();
-                let mut bits = *clobbers;
-                while bits != 0 {
-                    set.add(gpr(bits.trailing_zeros() as usize));
-                    bits &= bits - 1;
-                }
+            Self::Call { clobbers, .. } => *clobbers,
+            Self::Math(_, dst, _) => {
+                let mut set = VOLATILE | SIMD;
+                set.remove(return_reg(*dst));
                 set
             }
             Self::IDiv { remainder, .. } => PRegSet::empty().with(if *remainder { AX } else { DX }),
@@ -266,7 +338,10 @@ impl TargetInst for Inst {
         &ENV
     }
     fn spillslot_size(class: RegClass) -> usize {
-        debug_assert_eq!(class, RegClass::Int);
-        1 // one 64-bit workspace word for either i32 or ptr
+        if class == RegClass::Vector {
+            super::Features::host().bytes / 8
+        } else {
+            1
+        }
     }
 }

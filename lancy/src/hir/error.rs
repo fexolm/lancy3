@@ -65,6 +65,8 @@ pub enum IrError {
         expected: Type,
         actual: Type,
     },
+    #[error("invalid numeric operation in {inst:?} for {ty:?}")]
+    InvalidNumeric { inst: Inst, ty: Type },
     #[error("unknown SSA call {call:?} in {inst:?}")]
     UnknownCall { inst: Inst, call: Call },
     #[error("wrong scalar arity at SSA call {call:?}: expected {expected}, got {actual}")]

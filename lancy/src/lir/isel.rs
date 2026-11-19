@@ -36,7 +36,7 @@ impl Context {
     pub fn single_use(&self, v: Value) -> Option<Op> {
         let def = &self.defs[v];
         let (b, op) = def.source?;
-        (b == self.current && def.uses == 1 && op.pure()).then_some(op)
+        (b == self.current && def.uses == 1 && op.pure(None)).then_some(op)
     }
 }
 
@@ -82,7 +82,9 @@ pub(super) fn select<I>(
         emit(&mut ctx, Root::Term(*f.terminator(b)))?;
         instructions.extend(f.instructions(b));
         for i in instructions.drain(..).rev() {
-            if f.result(i).is_some_and(|v| !ctx.defs[v].register) && f.op(i).pure() {
+            if f.result(i)
+                .is_some_and(|v| !ctx.defs[v].register && f.op(i).pure(Some(f.value_type(v))))
+            {
                 continue;
             }
             emit(&mut ctx, Root::Inst(i))?;

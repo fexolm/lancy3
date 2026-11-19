@@ -160,8 +160,8 @@ impl<'a> Case<'a> {
                 out
             })?;
             if self.checks.contains_key("asm") {
-                let (bytes, _) = emit_compiled(&module).map_err(|e| format!("asm: {e}"))?;
-                let asm = listing::asm(&bytes)?;
+                let code = emit_compiled(&module).map_err(|e| format!("asm: {e}"))?;
+                let asm = listing::asm(&code.bytes[..code.text_len])?;
                 self.check("asm", || asm)?;
             }
         }

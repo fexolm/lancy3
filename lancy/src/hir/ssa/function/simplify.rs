@@ -80,12 +80,17 @@ impl Function {
             instructions.extend(self.instructions(b));
             for i in instructions.drain(..).rev() {
                 let op = *self.op(i);
-                if op.pure() && !live[self.insts[i].result] {
+                if op.pure(self.result(i).map(|v| self.value_type(v)))
+                    && !live[self.insts[i].result]
+                {
                     continue;
+                }
+                if let Some(result) = self.result(i) {
+                    live[result] = true;
                 }
                 self.visit_operands(i, |v| live[v] = true);
             }
-            self.retain_instructions(b, |op, result| !op.pure() || live[result]);
+            self.retain_instructions(b, |_, result| result == Value::INVALID || live[result]);
         }
     }
 

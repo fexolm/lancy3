@@ -1,0 +1,481 @@
+use crate::{
+    CallError, Inlining, ScalarKernel,
+    hir::{Binary, Function, Lane, Op, Simd, Terminator, Ternary, Type, Unary},
+};
+use std::sync::Arc;
+
+fn kernel(
+    types: &[Type],
+    result: Type,
+    body: impl FnOnce(&[crate::hir::Value]) -> Op,
+) -> ScalarKernel {
+    let mut f = Function::new(types, result);
+    let b = f.entry();
+    let op = body(f.params(b));
+    let r = f.append(b, op).unwrap();
+    f.set_terminator(b, Terminator::Return(r));
+    ScalarKernel::compile(&f).unwrap()
+}
+
+#[test]
+fn each_integer_width_wraps_and_divides_with_its_signedness() {
+    use Lane::*;
+    for l in [
+        I8, U8, I16, U16, I32, U32, I64, U64, I128, U128, Isize, Usize,
+    ] {
+        for ty in [l.scalar(), Type::Vector(l)] {
+            let bytes = ty.bytes(ScalarKernel::vector_bytes());
+            let words = bytes.div_ceil(8);
+            for op in [Binary::Add, Binary::Div, Binary::Lt] {
+                let k = kernel(&[ty, ty], op.result_type(ty), |v| {
+                    if matches!(ty, Type::Vector(_)) {
+                        Op::Simd(Simd::Bin(op, v[0], v[1]))
+                    } else {
+                        Op::Bin(op, v[0], v[1])
+                    }
+                });
+                let mut a = vec![0xff; words * 8];
+                let mut b = vec![0; words * 8];
+                let mut expected = Vec::new();
+                for (lane, (x, y)) in a[..bytes]
+                    .chunks_mut(l.bytes())
+                    .zip(b[..bytes].chunks_mut(l.bytes()))
+                    .enumerate()
+                {
+                    let val = if lane % 2 == 0 { u128::MAX } else { 18 };
+                    x.copy_from_slice(&val.to_le_bytes()[..l.bytes()]);
+                    y[0] = 2;
+                    let mask = u128::MAX >> (128 - 8 * l.bytes());
+                    let n = match op {
+                        Binary::Add => val.wrapping_add(2),
+                        Binary::Div if l.signed() && val == u128::MAX => 0,
+                        Binary::Div => (val & mask) / 2,
+                        Binary::Lt if l.signed() && val == u128::MAX => u128::MAX,
+                        Binary::Lt => 0,
+                        _ => unreachable!(),
+                    };
+                    expected.extend_from_slice(
+                        &n.to_le_bytes()[..if ty == l.scalar() && op == Binary::Lt {
+                            4
+                        } else {
+                            l.bytes()
+                        }],
+                    );
+                }
+                let args: Vec<_> = a
+                    .into_iter()
+                    .chain(b)
+                    .collect::<Vec<_>>()
+                    .chunks_exact(8)
+                    .map(|x| u64::from_le_bytes(x.try_into().unwrap()))
+                    .collect();
+                let mut out = vec![0; expected.len().div_ceil(8)];
+                k.call_words(&args, &mut out).unwrap();
+                let actual: Vec<_> = out.into_iter().flat_map(u64::to_le_bytes).collect();
+                assert_eq!(&actual[..expected.len()], expected, "{ty:?} {op:?}");
+            }
+        }
+    }
+}
+
+#[test]
+fn fp_results_include_signed_zero_nan_and_fused_rounding() {
+    for ty in [
+        Type::F32,
+        Type::Vector(Lane::F32),
+        Type::F64,
+        Type::Vector(Lane::F64),
+    ] {
+        let bytes = ty.bytes(ScalarKernel::vector_bytes());
+        let lane = ty.lane().unwrap();
+        let from = |x: f64| {
+            if lane == Lane::F32 {
+                u64::from((x as f32).to_bits())
+            } else {
+                x.to_bits()
+            }
+        };
+        let run = |k: &ScalarKernel, inputs: &[u64]| {
+            let mut args = Vec::new();
+            for &n in inputs {
+                let mut a = vec![0; bytes.div_ceil(8) * 8];
+                for p in a[..bytes].chunks_mut(lane.bytes()) {
+                    p.copy_from_slice(&n.to_le_bytes()[..lane.bytes()]);
+                }
+                args.extend(
+                    a.chunks_exact(8)
+                        .map(|x| u64::from_le_bytes(x.try_into().unwrap())),
+                );
+            }
+            let mut out = vec![0; bytes.div_ceil(8)];
+            k.call_words(&args, &mut out).unwrap();
+            let bits: Vec<_> = out.into_iter().flat_map(u64::to_le_bytes).collect();
+            bits[..bytes]
+                .chunks_exact(lane.bytes())
+                .map(|x| crate::numbers::read(x) as u64)
+                .collect::<Vec<_>>()
+        };
+        let sqrt = kernel(&[ty], ty, |v| {
+            if matches!(ty, Type::Vector(_)) {
+                Op::Simd(Simd::Unary(Unary::Sqrt, v[0]))
+            } else {
+                Op::Unary(Unary::Sqrt, v[0])
+            }
+        });
+        assert!(run(&sqrt, &[from(-0.)]).iter().all(|&x| x == from(-0.)));
+        let div = kernel(&[ty, ty], ty, |v| {
+            if matches!(ty, Type::Vector(_)) {
+                Op::Simd(Simd::Bin(Binary::Div, v[0], v[1]))
+            } else {
+                Op::Bin(Binary::Div, v[0], v[1])
+            }
+        });
+        for x in run(&div, &[0, 0]) {
+            assert!(if lane == Lane::F32 {
+                f32::from_bits(x as u32).is_nan()
+            } else {
+                f64::from_bits(x).is_nan()
+            });
+        }
+        let fma = kernel(&[ty; 3], ty, |v| {
+            if matches!(ty, Type::Vector(_)) {
+                Op::Simd(Simd::Ternary(Ternary::MulAdd, v[0], v[1], v[2]))
+            } else {
+                Op::Ternary(Ternary::MulAdd, v[0], v[1], v[2])
+            }
+        });
+        let eps = if lane == Lane::F32 {
+            f32::EPSILON as f64
+        } else {
+            f64::EPSILON
+        };
+        assert!(
+            run(&fma, &[from(1. + eps), from(1. - eps), from(-1.)])
+                .iter()
+                .all(|&x| x == from(-eps * eps))
+        );
+    }
+}
+
+#[test]
+fn wide_spills_and_outlined_calls_preserve_every_lane() {
+    let v = Type::Vector(Lane::U64);
+    let w = ScalarKernel::vector_bytes() / 8;
+    let mut leaf = Function::new(&[v, Type::I32, v], v);
+    let b = leaf.entry();
+    let [x, idx, y] = leaf.params(b).try_into().unwrap();
+    let z = leaf
+        .append(b, Op::Simd(Simd::Bin(Binary::Add, x, y)))
+        .unwrap();
+    leaf.append(b, Op::Simd(Simd::ExtractLane(z, idx)));
+    leaf.set_terminator(b, Terminator::Return(z));
+    let mut types = vec![v; 22];
+    types.push(Type::I32);
+    let mut root = Function::new(&types, v);
+    let b = root.entry();
+    let args = root.params(b).to_vec();
+    let site = root.add_call(Arc::new(leaf), &[args[0], args[22], args[1]]);
+    let mut sum = root.append(b, Op::Call(site)).unwrap();
+    for &arg in &args[2..22] {
+        sum = root
+            .append(b, Op::Simd(Simd::Bin(Binary::Add, sum, arg)))
+            .unwrap();
+    }
+    root.set_terminator(b, Terminator::Return(sum));
+    for policy in [Inlining::Never, Inlining::Always] {
+        let k = ScalarKernel::compile_with_inlining(&root, policy).unwrap();
+        let mut input: Vec<_> = (0..22 * w).map(|i| 0x100000003 * (i + 1) as u64).collect();
+        input.push(0);
+        let mut out = vec![0; w];
+        k.call_words(&input, &mut out).unwrap();
+        for i in 0..w {
+            assert_eq!(out[i], (0..22).map(|j| input[j * w + i]).sum());
+        }
+        *input.last_mut().unwrap() = w as u64;
+        assert_eq!(k.call_words(&input, &mut out), Err(CallError::OutOfBounds));
+    }
+}
+
+#[test]
+fn unaligned_vector_store_precedes_trap() {
+    let mut f = Function::new(&[Type::Ptr, Type::I32], Type::I32);
+    let b = f.entry();
+    let [p, i] = f.params(b).try_into().unwrap();
+    let x = f.append(b, Op::Simd(Simd::Load(Lane::I32, p))).unwrap();
+    let y = f.append(b, Op::Simd(Simd::Bin(Binary::Add, x, x))).unwrap();
+    f.append(b, Op::Simd(Simd::Store(p, y)));
+    let n = f.append(b, Op::Simd(Simd::LaneCount(Lane::I32))).unwrap();
+    f.append(b, Op::BoundsCheck(i, n));
+    f.append(b, Op::Simd(Simd::Store(p, x)));
+    f.set_terminator(b, Terminator::Return(i));
+    let k = ScalarKernel::compile(&f).unwrap();
+    let w = ScalarKernel::vector_bytes();
+    let original: Vec<_> = (0..w + 2).map(|i| (201 + 19 * i) as u8).collect();
+    for (i, result) in [(0, Ok(0)), (w as u64 / 4, Err(CallError::OutOfBounds))] {
+        let mut buf = original.clone();
+        let mut expected = original.clone();
+        if result.is_err() {
+            for x in expected[1..1 + w].chunks_exact_mut(4) {
+                x.copy_from_slice(
+                    &i32::from_le_bytes((*x).try_into().unwrap())
+                        .wrapping_mul(2)
+                        .to_le_bytes(),
+                );
+            }
+        }
+        // SAFETY: p points one byte into this live, exclusively owned width+2 byte buffer.
+        assert_eq!(
+            unsafe { k.call_raw(&[buf[1..].as_mut_ptr() as u64, i]) },
+            result
+        );
+        assert_eq!(buf, expected);
+    }
+}
+
+#[test]
+fn instruction_encodings_require_their_exact_isa() {
+    use crate::{
+        lir::x64::{Features, inst::simd::Native},
+        numbers::{Action, Math},
+    };
+    use iced_x86::{Code, Decoder, DecoderOptions, code_asm::CodeAssembler};
+    let base = Features {
+        bytes: 16,
+        avx2: false,
+        avx10: 0,
+        bw: false,
+        dq: false,
+        sse41: false,
+        ssse3: false,
+        sse42: false,
+        vbmi2: false,
+        fp16: false,
+        fma: false,
+        vpopcnt: false,
+        bitalg: false,
+        cd: false,
+    };
+    let avx = Features { bytes: 32, ..base };
+    let avx2 = Features { avx2: true, ..avx };
+    let avx512 = Features { bytes: 64, ..avx2 };
+    let vector = Type::Vector;
+    let encode = |features, action, input, output, regs: &[usize]| {
+        let op = Native::select(
+            Math {
+                action,
+                input,
+                output,
+            },
+            features,
+        )?;
+        let mut a = CodeAssembler::new(64).unwrap();
+        op.emit(&mut a, regs).unwrap();
+        Some(a.assemble(0).unwrap())
+    };
+    let binary = |cpu, l, op| {
+        encode(cpu, Action::Binary(op), vector(l), vector(l), &[1, 2, 1]).map(|bytes| {
+            Decoder::new(64, &bytes, DecoderOptions::NONE)
+                .decode()
+                .code()
+        })
+    };
+    assert_eq!(
+        binary(base, Lane::I32, Binary::Add),
+        Some(Code::Paddd_xmm_xmmm128)
+    );
+    assert_eq!(
+        binary(avx, Lane::F32, Binary::Add),
+        Some(Code::VEX_Vaddps_ymm_ymm_ymmm256)
+    );
+    assert_eq!(binary(avx, Lane::I32, Binary::Add), None);
+    assert_eq!(
+        binary(avx2, Lane::I32, Binary::Add),
+        Some(Code::VEX_Vpaddd_ymm_ymm_ymmm256)
+    );
+    assert!(binary(avx512, Lane::I32, Binary::Add).is_some());
+    assert!(binary(avx512, Lane::U8, Binary::Add).is_none());
+    assert!(binary(Features { bw: true, ..avx512 }, Lane::U8, Binary::Add).is_some());
+    assert!(binary(avx512, Lane::U64, Binary::Mul).is_none());
+    assert!(binary(Features { dq: true, ..avx512 }, Lane::U64, Binary::Mul).is_some());
+    // Golden register-register forms independently assembled by LLVM 21 llvm-mc.
+    for (width, src, dst, from, to, golden) in [
+        (
+            32,
+            2,
+            1,
+            Lane::F32,
+            Lane::I32,
+            [0x62, 0xf5, 0x7c, 0x28, 0x6d, 0xca],
+        ),
+        (
+            64,
+            11,
+            13,
+            Lane::F32,
+            Lane::U32,
+            [0x62, 0x55, 0x7c, 0x48, 0x6c, 0xeb],
+        ),
+        (
+            64,
+            2,
+            1,
+            Lane::F64,
+            Lane::I64,
+            [0x62, 0xf5, 0xfd, 0x48, 0x6d, 0xca],
+        ),
+        (
+            32,
+            11,
+            13,
+            Lane::F64,
+            Lane::U64,
+            [0x62, 0x55, 0xfd, 0x28, 0x6c, 0xeb],
+        ),
+    ] {
+        let cpu = Features {
+            bytes: width,
+            avx10: 2,
+            ..avx512
+        };
+        assert_eq!(
+            encode(cpu, Action::Cast, vector(from), vector(to), &[src, dst]).unwrap(),
+            golden
+        );
+        assert!(
+            encode(
+                Features { avx10: 1, ..cpu },
+                Action::Cast,
+                vector(from),
+                vector(to),
+                &[src, dst]
+            )
+            .is_none()
+        );
+    }
+}
+
+#[test]
+fn signed_zero_and_unordered_fp_comparisons_make_per_lane_masks() {
+    let w = ScalarKernel::vector_bytes() / 4;
+    let ty = Type::Vector(Lane::F32);
+    let xs = [-0., f32::NAN, 4., -3.];
+    let ys = [0., 7., f32::NAN, -4.];
+    let pack = |tab: &[f32; 4]| {
+        (0..w / 2)
+            .map(|j| {
+                u64::from(tab[2 * j % 4].to_bits())
+                    | (u64::from(tab[(2 * j + 1) % 4].to_bits()) << 32)
+            })
+            .collect::<Vec<_>>()
+    };
+    let args = [pack(&xs), pack(&ys)].concat();
+    for op in [
+        Binary::Eq,
+        Binary::Ne,
+        Binary::Lt,
+        Binary::Le,
+        Binary::Gt,
+        Binary::Ge,
+    ] {
+        let k = kernel(&[ty, ty], Type::Vector(Lane::I32), |v| {
+            Op::Simd(Simd::Bin(op, v[0], v[1]))
+        });
+        let mut out = vec![0; w / 2];
+        k.call_words(&args, &mut out).unwrap();
+        for i in 0..w {
+            let (a, b) = (xs[i % 4], ys[i % 4]);
+            let expected = match op {
+                Binary::Eq => a == b,
+                Binary::Ne => a != b,
+                Binary::Lt => a < b,
+                Binary::Le => a <= b,
+                Binary::Gt => a > b,
+                _ => a >= b,
+            };
+            assert_eq!(
+                (out[i / 2] >> ((i % 2) * 32)) as u32,
+                if expected { u32::MAX } else { 0 }
+            );
+        }
+    }
+}
+
+#[test]
+fn typed_word_abi_rejects_short_buffers_before_execution() {
+    let ty = Type::Vector(Lane::U64);
+    let f = kernel(&[ty], ty, |v| Op::Copy(v[0]));
+    let n = ScalarKernel::vector_bytes() / 8;
+    let result = &mut vec![0xdead; n];
+    assert_eq!(
+        f.call_words(&[1], result),
+        Err(CallError::Arity {
+            expected: n,
+            actual: 1
+        })
+    );
+    assert_eq!(
+        f.call_words(&vec![0; n], &mut result[..1]),
+        Err(CallError::ResultWords {
+            expected: n,
+            actual: 1
+        })
+    );
+    assert_eq!(result, &vec![0xdead; n]);
+}
+
+#[test]
+fn saturating_float_cast_uses_every_lane() {
+    for ty in [Type::Vector(Lane::I32), Type::Vector(Lane::U32)] {
+        let k = kernel(&[Type::Vector(Lane::F32)], ty, |v| {
+            Op::Simd(Simd::Cast(ty.lane().unwrap(), v[0]))
+        });
+        let w = ScalarKernel::vector_bytes() / 8;
+        let cases = [
+            f32::NAN,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+            -3.75,
+            8.875,
+            2147483648.,
+            4294967296.,
+            -0.,
+        ];
+        for pair in cases.chunks_exact(2) {
+            let bits = u64::from(pair[0].to_bits()) | u64::from(pair[1].to_bits()) << 32;
+            let mut result = vec![0; w];
+            k.call_words(&vec![bits; w], &mut result).unwrap();
+            let convert = |x: f32| {
+                if ty == Type::Vector(Lane::I32) {
+                    x as i32 as u32
+                } else {
+                    x as u32
+                }
+            };
+            let expected = u64::from(convert(pair[0])) | u64::from(convert(pair[1])) << 32;
+            assert!(result.iter().all(|&x| x == expected));
+        }
+    }
+}
+
+#[test]
+fn mixed_scalar_mask_selects_full_width_values() {
+    for ty in [Type::I8, Type::I64, Type::I128, Type::F32, Type::F64] {
+        let k = kernel(&[Type::I32, ty, ty], ty, |v| {
+            Op::Ternary(Ternary::Select, v[0], v[1], v[2])
+        });
+        let size = ty.bytes(ScalarKernel::vector_bytes());
+        let words = size.div_ceil(8);
+        for cond in [0, 1, 0x80000000] {
+            let mut args = vec![cond];
+            args.extend(vec![0x1111; words]);
+            args.extend(vec![0x7777; words]);
+            let mut out = vec![0; words];
+            k.call_words(&args, &mut out).unwrap();
+            let mask = if size == 1 { 0xff } else { u64::MAX };
+            assert!(
+                out.iter()
+                    .all(|&x| x == (if cond != 0 { 0x1111 } else { 0x7777 }) & mask)
+            );
+        }
+    }
+}

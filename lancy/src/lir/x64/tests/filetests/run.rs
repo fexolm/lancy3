@@ -96,7 +96,7 @@ impl Run {
                 .collect();
             // SAFETY: Case::execute first interprets this same verified function,
             // input and initial bytes with checked offsets. Every executed access
-            // is an in-range i32 load/store derived from this one live allocation.
+            // is within this live allocation, including every active lane of a masked access.
             let result = unsafe { kernel.call_raw(&args) }.map(|v| v as i32);
             self.check_bytes("run", &bytes, expected)?;
             result

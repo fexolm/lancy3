@@ -26,6 +26,10 @@ pub struct ScalarKernel {
     arity: usize,
     scalar_signature: bool,
     words: usize,
+    arg_words: usize,
+    result_words: usize,
+    pointer_signature: bool,
+    _descriptors: Box<[crate::numbers::Math]>,
 }
 
 impl ScalarKernel {
@@ -45,7 +49,7 @@ impl ScalarKernel {
             crate::lir::emit(module, &ids)
         };
         let outlined = || emit(source.simplify_bodies(&ids)?);
-        let (bytes, words) = if inlining == Inlining::Always && source.functions.len() > 1 {
+        let code = if inlining == Inlining::Always && source.functions.len() > 1 {
             let expanded = source.inline_all(&ids).and_then(|mut body| {
                 body.simplify()?;
                 emit(body)
@@ -61,7 +65,7 @@ impl ScalarKernel {
         } else {
             outlined()
         }?;
-        let memory = Executable::new(&bytes)?;
+        let memory = Executable::new(&code.bytes)?;
         // SAFETY: the emitter implements Entry for both supported x64 ABIs.
         let entry =
             unsafe { std::mem::transmute::<*mut std::ffi::c_void, Entry>(memory.address.as_ptr()) };
@@ -71,9 +75,26 @@ impl ScalarKernel {
             arity: function.arity(),
             scalar_signature: function.return_type() == Type::I32
                 && function.param_types().iter().all(|&ty| ty == Type::I32),
-            words,
+            words: code.words,
+            _descriptors: code.descriptors,
+            arg_words: function
+                .param_types()
+                .iter()
+                .map(|ty| ty.bytes(Self::vector_bytes()).div_ceil(8))
+                .sum(),
+            result_words: function
+                .return_type()
+                .bytes(Self::vector_bytes())
+                .div_ceil(8),
+            pointer_signature: function.param_types().contains(&Type::Ptr)
+                || function.return_type() == Type::Ptr,
         })
     }
+    /// Size of one scalable vector for kernels compiled in this process.
+    pub fn vector_bytes() -> usize {
+        crate::lir::Features::host().bytes
+    }
+
     pub fn code_size(&self) -> usize {
         self.memory.len
     }
@@ -104,10 +125,53 @@ impl ScalarKernel {
     /// derived from it or loaded transitively. The caller must uphold lifetimes,
     /// initialization and Rust aliasing rules for the duration of the call.
     pub unsafe fn call_raw(&self, args: &[u64]) -> Result<u64, CallError> {
+        if self.result_words != 1 || self.arity != self.arg_words {
+            return Err(CallError::WideSignature);
+        }
         self.check_arity(args.len())?;
         let mut workspace = vec![MaybeUninit::<u64>::uninit(); self.words];
         // SAFETY: the caller supplies valid memory for every external access.
         unsafe { self.invoke(args.as_ptr(), &mut workspace) }
+    }
+
+    /// Invoke a numeric signature. Values occupy consecutive little-endian words,
+    /// each starting at a word boundary. Narrow scalars use the low bits.
+    pub fn call_words(&self, args: &[u64], result: &mut [u64]) -> Result<(), CallError> {
+        if self.pointer_signature {
+            return Err(CallError::PointerSignature);
+        }
+        // SAFETY: verification prevents constructing pointers from numeric values.
+        unsafe { self.call_words_raw(args, result) }
+    }
+
+    /// Invoke any signature with the same packed representation as `call_words`.
+    /// # Safety
+    /// Pointer values must satisfy the memory and lifetime contract of `call_raw`.
+    pub unsafe fn call_words_raw(&self, args: &[u64], result: &mut [u64]) -> Result<(), CallError> {
+        if args.len() != self.arg_words {
+            return Err(CallError::Arity {
+                expected: self.arg_words,
+                actual: args.len(),
+            });
+        }
+        if result.len() != self.result_words {
+            return Err(CallError::ResultWords {
+                expected: self.result_words,
+                actual: result.len(),
+            });
+        }
+        let mut workspace = vec![MaybeUninit::<u64>::uninit(); self.words];
+        // SAFETY: the sizes match the compiled ABI and the caller covers pointer validity.
+        let low = unsafe { self.invoke(args.as_ptr(), &mut workspace) }?;
+        if self.result_words == 1 {
+            result[0] = low;
+        } else {
+            for (dst, slot) in result.iter_mut().zip(&workspace[1..]) {
+                // SAFETY: a successful wide root return writes every result byte at root[1].
+                *dst = unsafe { slot.assume_init() };
+            }
+        }
+        Ok(())
     }
 
     fn check_arity(&self, count: usize) -> Result<(), CallError> {

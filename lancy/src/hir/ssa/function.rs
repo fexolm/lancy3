@@ -1,4 +1,4 @@
-//! Scalar SSA with block parameters. IDs are stable across instruction rewrites
+//! Typed SSA with block parameters. IDs are stable across instruction rewrites
 //! and block merges. Instruction order lives in the layout, independently of IDs.
 
 #[cfg(test)]
@@ -213,6 +213,16 @@ impl Function {
         let last = self.blocks[b].last;
         let result = if op.produces_value() {
             let ty = match op {
+                Op::Simd(op) => op
+                    .result_type(|v| self.types.get(v).copied().unwrap_or(Type::I32))
+                    .expect("value-producing SIMD operation"),
+                Op::Literal(lane, _) => lane.scalar(),
+                Op::Ternary(_, _, v, _) => self.types.get(v).copied().unwrap_or(Type::I32),
+                Op::Unary(op, v) => op.result_type(self.types.get(v).copied().unwrap_or(Type::I32)),
+                Op::Cast(ty, _) | Op::Bitcast(ty, _) => ty,
+                Op::Bin(op, v, _) => {
+                    op.result_type(self.types.get(v).copied().unwrap_or(Type::I32))
+                }
                 Op::PtrOffset(..) => Type::Ptr,
                 Op::Load(ty, _) => ty,
                 Op::Copy(v) => self.types.get(v).copied().unwrap_or(Type::I32),
@@ -512,11 +522,66 @@ impl Function {
                 };
                 let ty = match *self.op(inst) {
                     Op::Const(_) => Type::I32,
+                    Op::Simd(op) => {
+                        op.verify(inst, operand)?;
+                        let Some(ty) = op.result_type(|v| self.value_type(v)) else {
+                            continue;
+                        };
+                        ty
+                    }
+                    Op::Literal(lane, _) => lane.scalar(),
                     Op::Copy(v) => operand(v)?,
-                    Op::Bin(_, a, b) => {
-                        expect(a, Type::I32)?;
-                        expect(b, Type::I32)?;
-                        Type::I32
+                    Op::Bin(op, a, b) => {
+                        let ty = operand(a)?;
+                        expect(b, ty)?;
+                        if matches!(ty, Type::Vector(_)) || !op.supports(ty) {
+                            return Err(IrError::InvalidNumeric { inst, ty });
+                        }
+                        op.result_type(ty)
+                    }
+                    Op::Unary(op, v) => {
+                        let ty = operand(v)?;
+                        if matches!(ty, Type::Vector(_)) || !op.supports(ty) {
+                            return Err(IrError::InvalidNumeric { inst, ty });
+                        }
+                        op.result_type(ty)
+                    }
+                    Op::Ternary(op, a, b, c) => {
+                        let ty = operand(b)?;
+                        if matches!(ty, Type::Vector(_)) {
+                            return Err(IrError::InvalidNumeric { inst, ty });
+                        }
+                        expect(
+                            a,
+                            if op == super::Ternary::Select {
+                                ty.mask_type()
+                            } else {
+                                ty
+                            },
+                        )?;
+                        expect(c, ty)?;
+                        if ty
+                            .lane()
+                            .is_none_or(|l| op == super::Ternary::MulAdd && !l.float())
+                        {
+                            return Err(IrError::InvalidNumeric { inst, ty });
+                        }
+                        ty
+                    }
+                    Op::Cast(to, v) | Op::Bitcast(to, v) => {
+                        let ty = operand(v)?;
+                        let valid = match (ty, to) {
+                            (Type::Ptr, _) | (_, Type::Ptr) => false,
+                            (Type::Vector(_), _) | (_, Type::Vector(_)) => false,
+                            _ => {
+                                matches!(self.op(inst), Op::Cast(..))
+                                    || ty.bytes(16) == to.bytes(16)
+                            }
+                        };
+                        if !valid {
+                            return Err(IrError::InvalidNumeric { inst, ty });
+                        }
+                        to
                     }
                     Op::BoundsCheck(index, len) => {
                         expect(index, Type::I32)?;
@@ -529,12 +594,18 @@ impl Function {
                         Type::Ptr
                     }
                     Op::Load(ty, addr) => {
+                        if matches!(ty, Type::Vector(_)) {
+                            return Err(IrError::InvalidNumeric { inst, ty });
+                        }
                         expect(addr, Type::Ptr)?;
                         ty
                     }
                     Op::Store(addr, value) => {
                         expect(addr, Type::Ptr)?;
-                        operand(value)?;
+                        let ty = operand(value)?;
+                        if matches!(ty, Type::Vector(_)) {
+                            return Err(IrError::InvalidNumeric { inst, ty });
+                        }
                         continue;
                     }
                     Op::Call(id) => {

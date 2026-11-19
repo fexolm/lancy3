@@ -5,5 +5,6 @@ mod filetests;
 mod generated;
 mod integer_runtests;
 mod isel;
+mod numeric;
 mod pointers;
 mod traps;

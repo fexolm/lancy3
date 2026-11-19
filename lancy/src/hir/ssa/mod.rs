@@ -1,8 +1,10 @@
 mod function;
-mod instruction;
+pub mod inst;
 #[cfg(test)]
 mod tests;
 
 pub(crate) use function::VerifiedBody;
 pub use function::{Block, Call, Edge, Function, Inst};
-pub use instruction::{Binary, Op, Scale, Terminator, Type, Value};
+pub use inst::{
+    Binary, Lane, Op, Scale, Simd, Terminator, Ternary, Type, Unary, Value, VectorAddress,
+};

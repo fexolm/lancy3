@@ -1,0 +1,158 @@
+fn main x:i32 -> i32
+  a = cast f32 x
+  dead = div a a
+  vec = simd.splat a
+  unused = simd.mul vec vec
+  two = simd.add vec vec
+  n = simd.lanes f32
+  one = const 1
+  last = sub n one
+  high = simd.extract two last
+  answer = cast i32 high
+  ret answer
+
+@source check: Div
+@source check: Mul
+@opt not: Div
+@opt not: Mul
+@opt check: Add
+@isel check: native.Vector(F32).Binary(Add)
+@alloc regex: SIMD=[xyz]mm[0-9]+
+@alloc check: native.Vector(F32).Binary(Add) | $SIMD
+@asm regex: ADDPS=v?addps
+@asm check: $ADDPS
+@run 0 -> 0
+@run -11 -> -22
+---
+fn main x:i32 -> i32
+  a = simd.splat x
+  n = simd.lanes i32
+  dead = simd.extract a n
+  ret x
+@opt check: Extract
+@run 7 -> !bounds
+---
+fn main p:ptr -> i32
+  dead = simd.load f32 p
+  r = const 9
+  ret r
+@opt check: simd.load F32
+@isel check: load.Vector(F32)
+---
+fn main p:ptr -> i32
+  v = simd.splat p
+  z = const 0
+  ret z
+@reject invalid numeric operation
+---
+fn main p:ptr x:i32 -> i32
+  lanes = simd.iota i32
+  one = const 1
+  limit = simd.splat one
+  first = simd.lt lanes limit
+  vs = simd.splat x
+  simd.maskedstore p - first vs
+  loaded = simd.maskedload p - first lanes
+  zero = const 0
+  r = simd.extract loaded zero
+  ret r
+@opt check: simd.maskedstore
+@opt check: simd.maskedload
+@run 193 -> 193 | ad de fe ca | c1 00 00 00
+---
+fn main p:ptr -> i32
+  i = simd.iota i32
+  z = const 0
+  zero = simd.splat z
+  one = const 1
+  second = simd.splat one
+  mask = simd.eq i second
+  simd.maskedstore p zero mask i
+  result = simd.maskedload p zero mask zero
+  total = simd.reduce add result
+  ret total
+@run -> 1 | ff ff ff ff | 01 00 00 00
+---
+fn main x:i32 -> i32
+  indices = simd.iota i32
+  ones = simd.splat x
+  pred = simd.lt indices ones
+  comp = simd.compress indices pred
+  back = simd.expand comp pred
+  pick = simd.select pred ones back
+  shuffled = simd.shuffle pick back indices
+  total = simd.reduce add shuffled
+  ret total
+@run 3 -> 9
+---
+fn main -> i32
+  all = simd.iota u16
+  low = simd.widenlo u32 all
+  high = simd.widenhi u32 all
+  reconstructed = simd.narrow u16 low high
+  mismatch = simd.ne all reconstructed
+  bad = simd.any mismatch
+  ret bad
+@asm check: ret
+@run -> 0
+---
+fn main -> i32
+  a = literal f16 0x3e00
+  b = literal f16 0x4000
+  z = literal f16 0x0000
+  prod = fma a b z
+  r = cast i32 prod
+  ret r
+@run -> 3
+---
+fn main -> i32
+  sub = literal bf16 0x0001
+  ok = issubnormal sub
+  ret ok
+@run -> -1
+---
+fn main -> i32
+  z = literal f32 0x80000000
+  qnan = literal f32 0x7fc00001
+  a = unordered z qnan
+  b = signbit z
+  result = and a b
+  ret result
+@run -> -1
+---
+fn main a:vec.f64 b:vec.i32 -> vec.f64
+  x = simd.add a b
+  ret x
+@reject expected Vector(F64) operand
+---
+fn main x:i32 -> i32
+  bad = bitcast ptr x
+  ret x
+@reject invalid numeric operation
+---
+fn main x:i32 -> i32
+  a = simd.splat x
+  one = const 1
+  b = simd.iota i32
+  jump swap a b one
+block swap left:vec.i32 right:vec.i32 again:i32
+  zero = const 0
+  br again swap right left zero | exit left
+block exit picked:vec.i32
+  n = simd.lanes i32
+  last = sub n one
+  hi = simd.extract picked last
+  r = sub n hi
+  ret r
+@alloc check: spill_slots=
+@run -123 -> 1
+---
+fn main x:vec.f32 -> vec.f32
+  invalid = add x x
+  ret invalid
+@reject invalid numeric operation
+---
+fn main x:f64 -> f64
+  invalid = simd.add x x
+  ret invalid
+@reject invalid numeric operation

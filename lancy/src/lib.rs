@@ -6,12 +6,13 @@ compile_error!("lancy currently targets x86-64 Windows and Linux");
 
 mod call_graph;
 mod error;
-/// Scalar SSA with block parameters and stable instruction and block IDs.
+/// Typed SSA with block parameters and stable instruction and block IDs.
 pub mod hir;
 /// Installation and execution of compiled kernels.
 pub mod jit;
 mod lir;
 mod module;
+mod numbers;
 pub mod support;
 
 pub use error::{CallError, CompileError};
