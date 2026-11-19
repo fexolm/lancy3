@@ -121,10 +121,7 @@ impl<'ctx> Body<'_, 'ctx> {
                 ir.build_right_shift(bytes, self.int(2), false, "prefix")?
                     .into()
             }
-            Compress | Expand
-                if std::is_x86_feature_detected!("avx512f")
-                    && (e.lanes() == 16 || std::is_x86_feature_detected!("avx512vl")) =>
-            {
+            Compress | Expand if crate::jit::x86_compress(e.lanes()) => {
                 let data = arg(0)?;
                 let (name, fallback) = if inst.op == Compress {
                     (

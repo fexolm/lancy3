@@ -3,6 +3,7 @@ use splice::{
     simd::{Lane, Mask},
 };
 use splice_cranelift::Cranelift;
+#[cfg(target_arch = "x86_64")]
 use splice_lancy::Lancy;
 use splice_llvm::Llvm;
 use splice_text::Text;
@@ -85,6 +86,7 @@ macro_rules! compile_all {
     ($name:ident) => {{
         let ir: Function = $name::ir().unwrap();
         let mut v = Vec::new();
+        #[cfg(target_arch = "x86_64")]
         kernels(&mut v, $name::build::<Lancy>(), Lancy::compile(&ir));
         kernels(&mut v, $name::build::<Llvm>(), Llvm::compile(&ir));
         kernels(&mut v, $name::build::<Cranelift>(), Cranelift::compile(&ir));
@@ -1202,7 +1204,9 @@ fn specialization_sized_locals_have_independent_registers() {
         let want = if slot == 0 { 29 } else { 22 };
         assert_eq!(staged_locals(2, slot, 5), want);
         for result in [
+            #[cfg(target_arch = "x86_64")]
             Lancy::compile(&ir).unwrap().call(&[5], &mut []),
+            #[cfg(target_arch = "x86_64")]
             staged_locals::build::<Lancy>(2, slot)
                 .unwrap()
                 .call(&[5], &mut []),

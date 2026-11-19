@@ -164,9 +164,44 @@ AMD Ryzen 7 9800X3D, Windows x64, 16 полос `i32`. Первые четыре
 
 ## Сборка
 
-Нужны Rust 1.94+ и x86-64 Windows или Linux. Бэкенды Lancy и Cranelift собираются отдельно от LLVM. Для приложения с Cranelift достаточно зависимостей `splice` и `splice-cranelift`. Команда `cargo test -p splice-cranelift --release` собирает этот бэкенд и запускает его тесты. Пример с выбором бэкенда, общий стенд и полный комплект тестов используют все три компилятора.
+Нужен Rust 1.94+. На Windows и Linux x86-64 доступны Lancy, Cranelift и LLVM. На Linux AArch64 доступны Cranelift и LLVM. Собственный генератор Lancy рассчитан на x86-64. Бэкенды Lancy и Cranelift собираются отдельно от LLVM. Для приложения с Cranelift достаточно зависимостей `splice` и `splice-cranelift`.
 
 * **Windows x64 MSVC.** Для `splice-llvm` выбран LLVM 19.1. Сборка находит LLVM в стандартном каталоге или в компонентах C++ Clang для Visual Studio. Для другой папки установки задайте `LLVM_SYS_191_PREFIX` до сборки. В ней должны быть `lib/LLVM-C.lib` и `bin/LLVM-C.dll`. Cargo подготавливает DLL для `cargo run`, тестов и бенчмарков. Для самостоятельного запуска готового приложения положите соответствующую DLL рядом с исполняемым файлом или добавьте её каталог в `PATH`.
-* **Linux x86-64.** Выбран LLVM 21.1 с динамической линковкой. Нужны инструменты разработки, включая `llvm-config-21`, и разделяемая библиотека LLVM. Для отдельной установки укажите префикс через `LLVM_SYS_211_PREFIX`.
+* **Linux x86-64 и AArch64.** Выбран LLVM 21.1 с динамической линковкой. Нужны инструменты разработки, включая `llvm-config-21`, и разделяемая библиотека LLVM. Для отдельной установки укажите префикс через `LLVM_SYS_211_PREFIX`.
 
 Версии Inkwell и LLVM указаны в [манифесте бэкенда](splice-llvm/Cargo.toml). Операции над LLVM-инструкциями, типами, значениями и базовыми блоками используют [Inkwell Builder](https://docs.rs/inkwell/0.11.0/inkwell/builder/struct.Builder.html).
+
+### Выбор SIMD-профиля
+
+Задайте `SPLICE_SIMD` до запуска процесса. `auto` выбирает профиль по возможностям CPU и ОС. Явный профиль позволяет проверить более раннюю ISA на новом процессоре. Если CPU или ОС не поддерживают указанный профиль, JIT возвращает ошибку сборки. Обычная Rust-функция использует ту же ширину, что и JIT, и сообщает об ошибочном профиле паникой при запросе полос.
+
+| Платформа | `SPLICE_SIMD` | Логическая ширина |
+| --- | --- | --- |
+| x86-64 | `sse`, `avx2`, `avx512` | 16, 32, 64 байта соответственно |
+| x86-64 | `avx10` | По CPUID и состоянию XSAVE. Для LLVM нужны хотя бы 32 байта, LLVM использует набор AVX10.1. |
+| Linux AArch64 | `neon` | 16 байт |
+| Linux AArch64 | `sve`, `sve2` | 16, 32 или 64 байта, в пределах SVE VL потока при первом использовании SIMD |
+
+На AArch64 `auto` предпочитает SVE2, затем SVE и NEON. LLVM выбирает инструкции SVE/SVE2 для фиксированных векторов, когда позволяет их ширина. Для 128-битных векторов LLVM может выбрать NEON. Если другой поток уменьшил SVE VL ниже ширины ядра, LLVM JIT возвращает ошибку до вызова машинного кода. Cranelift использует 128-битные части общего логического вектора и поддерживаемые им инструкции хоста. В профиле `sse` Cranelift может использовать доступные SSSE3 и SSE4.
+
+В PowerShell задайте профиль перед вызовом Cargo, например `$env:SPLICE_SIMD = 'avx2'`.
+
+```sh
+# На x86-64 с AVX2
+SPLICE_SIMD=avx2 cargo run -p splice-target --example simd_profile
+SPLICE_SIMD=avx2 cargo test -p splice --release --test simd
+
+# На Linux AArch64
+SPLICE_SIMD=neon cargo test --workspace --exclude lancy --exclude splice-lancy --release
+
+# На Linux AArch64 с SVE2
+SPLICE_SIMD=sve2 cargo test -p splice-llvm --release
+SPLICE_SIMD=sve2 cargo test -p splice --release --test simd
+
+# На Linux AArch64 с QEMU user-mode
+SPLICE_SIMD=sve2 \
+CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUNNER='qemu-aarch64 -cpu max,sve-default-vector-length=64' \
+cargo test -p splice-llvm --release --target aarch64-unknown-linux-gnu
+```
+
+GitHub Actions проверяет NEON на нативном ARM64-раннере и запускает SVE/SVE2 под QEMU с длинами 32, 48 и 64 байта. На x86-64 CI выполняет SSE и остальные профили, которые ОС видит на процессоре раннера. Тест SVE2 проверяет наличие `eor3` в листинге LLVM и сравнивает результат обоих путей компиляции с обычным поэлементным вычислением. [Workflow](.github/workflows/simd.yml)

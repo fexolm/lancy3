@@ -1,11 +1,15 @@
-//! Native vector width and x86 instruction sets enabled by the CPU and the OS.
+//! SIMD profiles and native vector widths shared by the frontend and JITs.
+mod profile;
+
+pub use profile::{Profile, Simd, simd};
+
 #[cfg(target_arch = "x86_64")]
 use std::{
     arch::x86_64::{__cpuid, __cpuid_count, _xgetbv},
     sync::OnceLock,
 };
 
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, Default)]
 pub struct Features {
     pub bytes: usize,
     pub avx2: bool,
@@ -48,6 +52,38 @@ fn width_for_features(avx: bool, avx512: bool, avx10: u32) -> usize {
 impl Features {
     #[cfg(target_arch = "x86_64")]
     pub fn host() -> Self {
+        static SELECTED: OnceLock<Features> = OnceLock::new();
+        *SELECTED.get_or_init(Self::selected)
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    fn selected() -> Self {
+        let selected = simd().expect("invalid SIMD configuration");
+        match selected.profile {
+            Profile::Sse => Self {
+                bytes: 16,
+                ..Self::default()
+            },
+            Profile::Avx2 => {
+                let cpu = Self::detected();
+                Self {
+                    bytes: 32,
+                    avx2: true,
+                    ssse3: cpu.ssse3,
+                    sse41: cpu.sse41,
+                    sse42: cpu.sse42,
+                    f16c: cpu.f16c,
+                    fma: cpu.fma,
+                    ..Self::default()
+                }
+            }
+            Profile::Avx512 => Self::x86_features(0),
+            _ => Self::detected(),
+        }
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    fn detected() -> Self {
         static HOST: OnceLock<Features> = OnceLock::new();
         *HOST.get_or_init(|| {
             let max = __cpuid(0).eax;
@@ -65,44 +101,42 @@ impl Features {
             } else {
                 0
             };
-            let converged = avx10 & 0xff >= 1;
-            Self {
-                bytes: width_for_features(
-                    is_x86_feature_detected!("avx"),
-                    is_x86_feature_detected!("avx512f"),
-                    avx10,
-                ),
-                avx10: avx10 as u8,
-                avx2: is_x86_feature_detected!("avx2") || converged,
-                bw: is_x86_feature_detected!("avx512bw") || converged,
-                dq: is_x86_feature_detected!("avx512dq") || converged,
-                fp16: is_x86_feature_detected!("avx512fp16") || converged,
-                ssse3: is_x86_feature_detected!("ssse3"),
-                sse42: is_x86_feature_detected!("sse4.2"),
-                vbmi: is_x86_feature_detected!("avx512vbmi") || converged,
-                f16c: is_x86_feature_detected!("f16c"),
-                bf16: is_x86_feature_detected!("avx512bf16") || converged,
-                vbmi2: is_x86_feature_detected!("avx512vbmi2") || converged,
-                sse41: is_x86_feature_detected!("sse4.1"),
-                vpopcnt: is_x86_feature_detected!("avx512vpopcntdq") || converged,
-                bitalg: is_x86_feature_detected!("avx512bitalg") || converged,
-                cd: is_x86_feature_detected!("avx512cd") || converged,
-                fma: is_x86_feature_detected!("fma"),
-            }
+            Self::x86_features(avx10)
         })
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    fn x86_features(avx10: u32) -> Self {
+        let converged = avx10 & 0xff >= 1;
+        Self {
+            bytes: width_for_features(
+                is_x86_feature_detected!("avx"),
+                is_x86_feature_detected!("avx512f"),
+                avx10,
+            ),
+            avx10: avx10 as u8,
+            avx2: is_x86_feature_detected!("avx2") || converged,
+            bw: is_x86_feature_detected!("avx512bw") || converged,
+            dq: is_x86_feature_detected!("avx512dq") || converged,
+            fp16: is_x86_feature_detected!("avx512fp16") || converged,
+            ssse3: is_x86_feature_detected!("ssse3"),
+            sse42: is_x86_feature_detected!("sse4.2"),
+            vbmi: is_x86_feature_detected!("avx512vbmi") || converged,
+            f16c: is_x86_feature_detected!("f16c"),
+            bf16: is_x86_feature_detected!("avx512bf16") || converged,
+            vbmi2: is_x86_feature_detected!("avx512vbmi2") || converged,
+            sse41: is_x86_feature_detected!("sse4.1"),
+            vpopcnt: is_x86_feature_detected!("avx512vpopcntdq") || converged,
+            bitalg: is_x86_feature_detected!("avx512bitalg") || converged,
+            cd: is_x86_feature_detected!("avx512cd") || converged,
+            fma: is_x86_feature_detected!("fma"),
+        }
     }
 }
 
 /// The portable frontend and the ordinary Rust implementation can also run on non-x64 hosts.
 pub fn vector_bytes() -> usize {
-    #[cfg(target_arch = "x86_64")]
-    {
-        Features::host().bytes
-    }
-    #[cfg(not(target_arch = "x86_64"))]
-    {
-        16
-    }
+    simd().expect("invalid SIMD configuration").bytes
 }
 
 #[cfg(test)]

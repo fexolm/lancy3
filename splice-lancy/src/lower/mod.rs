@@ -46,6 +46,7 @@ pub(crate) fn build(
     kinds: &[BufferKind],
     body: Body<'_>,
 ) -> Result<Function, String> {
+    splice_target::simd()?;
     let mut builder = Builder::new(arity, kinds)?;
     body(&mut builder)?;
     builder.seal()

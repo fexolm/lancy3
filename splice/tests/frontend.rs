@@ -364,10 +364,12 @@ fn unrolled_host_plans_preserve_runtime_exits_and_prune_after_known_stops() {
         &[Finish, Unreachable],
     ] {
         let portable = walk::ir(plan).unwrap();
+        #[cfg(target_arch = "x86_64")]
         let lancy = walk::build::<splice_lancy::Lancy>(plan).unwrap();
         let llvm = walk::build::<splice_llvm::Llvm>(plan).unwrap();
         for x in [-23, 0, 7] {
             let expected = walk(plan, x);
+            #[cfg(target_arch = "x86_64")]
             assert_eq!(lancy.call(&[x], &mut []), Ok(expected));
             assert_eq!(llvm.call(&[x], &mut []), Ok(expected));
         }
@@ -404,12 +406,20 @@ fn by_value_array_patterns_bind_comptime_operands() {
         1,
         "only the kernel return label is needed"
     );
-    let code = weighted::build::<splice_lancy::Lancy>(terms).unwrap();
+    let code = weighted::build::<splice_llvm::Llvm>(terms).unwrap();
     assert_eq!(code.call(&[7], &mut []), Ok(weighted(terms, 7)));
+    #[cfg(target_arch = "x86_64")]
+    assert_eq!(
+        weighted::build::<splice_lancy::Lancy>(terms)
+            .unwrap()
+            .call(&[7], &mut []),
+        Ok(weighted(terms, 7))
+    );
 }
 
 #[test]
 fn nested_loop_exits_and_generated_names_preserve_rust_bindings() -> splice::Result<()> {
+    #[cfg(target_arch = "x86_64")]
     use splice_lancy::Lancy;
     use splice_llvm::Llvm;
 
@@ -448,8 +458,10 @@ fn nested_loop_exits_and_generated_names_preserve_rust_bindings() -> splice::Res
 
     let steps = [2, -3, 4];
     let ir = nested::ir(&steps)?;
-    let kernels: [&dyn Executable; 4] = [
+    let kernels: &[&dyn Executable] = &[
+        #[cfg(target_arch = "x86_64")]
         &nested::build::<Lancy>(&steps)?,
+        #[cfg(target_arch = "x86_64")]
         &Lancy::compile(&ir)?,
         &nested::build::<Llvm>(&steps)?,
         &Llvm::compile(&ir)?,

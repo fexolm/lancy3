@@ -12,9 +12,11 @@ splice-macros = { path = "../splice-macros" }
 [dev-dependencies]
 criterion = { version = "0.8", features = ["html_reports"] }
 splice-cranelift = { path = "../splice-cranelift" }
-splice-lancy = { path = "../splice-lancy" }
 splice-llvm = { path = "../splice-llvm" }
 splice-text = { path = "../splice-text" }
+
+[target.'cfg(target_arch = "x86_64")'.dev-dependencies]
+splice-lancy = { path = "../splice-lancy" }
 
 [[bench]]
 name = "backends"

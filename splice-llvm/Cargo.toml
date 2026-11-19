@@ -7,14 +7,21 @@ description = "LLVM ORC JIT code generator for Splice kernels"
 
 [dependencies]
 splice = { path = "../splice" }
+splice-target = { path = "../splice-target" }
 
 [target.'cfg(windows)'.dependencies]
 inkwell = { version = "0.11", default-features = false, features = ["target-x86", "llvm19-1-no-llvm-linking"] }
 # The Windows build supplies the inline llvm-c/Target.h wrappers with the import library.
 llvm-sys = { version = "191", features = ["disable-alltargets-init", "no-llvm-linking"] }
 
-[target.'cfg(target_os = "linux")'.dependencies]
+[target.'cfg(all(target_os = "linux", target_arch = "x86_64"))'.dependencies]
 inkwell = { version = "0.11", default-features = false, features = ["target-x86", "llvm21-1-force-dynamic"] }
+
+[target.'cfg(all(target_os = "linux", target_arch = "aarch64"))'.dependencies]
+inkwell = { version = "0.11", default-features = false, features = ["target-aarch64", "llvm21-1-force-dynamic"] }
+
+[target.'cfg(all(target_os = "linux", target_arch = "aarch64"))'.dev-dependencies]
+libc = "0.2"
 
 [build-dependencies]
 cc = "1"

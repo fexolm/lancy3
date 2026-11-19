@@ -2,11 +2,17 @@
 //! The frontend emits instructions directly into an Inkwell module.
 #![deny(unsafe_op_in_unsafe_fn)]
 
-#[cfg(not(all(target_arch = "x86_64", any(windows, target_os = "linux"))))]
-compile_error!("splice-llvm currently supports x86-64 Windows and Linux");
+#[cfg(not(any(
+    all(target_arch = "x86_64", any(windows, target_os = "linux")),
+    all(target_arch = "aarch64", target_os = "linux")
+)))]
+compile_error!("splice-llvm supports x86-64 Windows and Linux, and AArch64 Linux");
 
 mod jit;
 mod lower;
+
+#[cfg(all(test, target_arch = "aarch64"))]
+mod aarch64_tests;
 
 use inkwell::{context::Context, module::Module, targets::TargetMachine};
 use splice::{BufferArg, BufferKind, Codegen, Executable, Function};
@@ -40,6 +46,24 @@ fn build_module<'ctx>(
     module.set_triple(&target.get_triple());
     module.set_data_layout(&target.get_target_data().get_data_layout());
     populate(context, &module)?;
+    #[cfg(target_arch = "aarch64")]
+    {
+        use inkwell::attributes::{Attribute, AttributeLoc};
+        use splice_target::Profile;
+        let simd = splice_target::simd()?;
+        if matches!(simd.profile, Profile::Sve | Profile::Sve2) {
+            // LLVM encodes the minimum vscale in the high 32 bits and the
+            // maximum in the low 32. SVE has at most 16 architectural quads.
+            let range = ((simd.bytes as u64 / 16) << 32) | 16;
+            let attr = context
+                .create_enum_attribute(Attribute::get_named_enum_kind_id("vscale_range"), range);
+            for function in module.get_functions() {
+                if !function.as_global_value().is_declaration() {
+                    function.add_attribute(AttributeLoc::Function, attr);
+                }
+            }
+        }
+    }
     module.verify().map_err(|error| error.to_string())?;
     Ok(module)
 }
@@ -109,6 +133,8 @@ impl Codegen for Llvm {
 
 impl Executable for LlvmKernel {
     fn call(&self, args: &[i32], buffers: &mut [BufferArg<'_>]) -> Result<i32, String> {
+        #[cfg(target_arch = "aarch64")]
+        splice_target::simd()?.check_execution()?;
         if self.arity != args.len() {
             return Err(format!(
                 "expected {} scalar arguments, got {}",
@@ -125,8 +151,9 @@ impl Executable for LlvmKernel {
             })
             .collect();
         let mut status = 0;
-        // Signature and permissions were checked above. All descriptor pointers
-        // refer to live borrows, and the generated code checks every index.
+        // SAFETY: the target emits the host C ABI (Windows x64, SysV x64 or
+        // AAPCS64). ORC owns the code for this borrow. Descriptors refer to
+        // live slices, permissions were checked, and the kernel checks indices.
         let result = unsafe { (self.entry)(args.as_ptr(), descriptors.as_ptr(), &mut status) };
         match status {
             0 => Ok(result),

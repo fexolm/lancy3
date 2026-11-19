@@ -353,11 +353,11 @@ fn swizzle_words(
 // Our control bytes are either in 0..16 or have their high bit set.
 // PSHUFB implements these cases directly; CLIF swizzle also handles 16..127.
 fn shuffle_bytes(b: &mut FunctionBuilder, bytes: Value, selector: Value) -> Value {
+    #[cfg(target_arch = "x86_64")]
     if std::is_x86_feature_detected!("ssse3") {
-        b.ins().x86_pshufb(bytes, selector)
-    } else {
-        b.ins().swizzle(bytes, selector)
+        return b.ins().x86_pshufb(bytes, selector);
     }
+    b.ins().swizzle(bytes, selector)
 }
 
 // One pshufb control vector per four-bit comparison mask. The immutable

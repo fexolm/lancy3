@@ -4,3 +4,6 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.94"
 description = "Shared host SIMD capabilities for Splice and Lancy"
+
+[target.'cfg(all(target_arch = "aarch64", target_os = "linux"))'.dependencies]
+libc = "0.2"

@@ -1,5 +1,6 @@
 use splice::{Codegen, ComptimeKey, Executable, kernel};
 use splice_cranelift::Cranelift;
+#[cfg(target_arch = "x86_64")]
 use splice_lancy::Lancy;
 use splice_llvm::Llvm;
 use splice_text::Text;
@@ -68,6 +69,7 @@ fn repeated_values_skip_staging_across_parents_and_keep_all_calls() {
     // emits the same bias but is a different set of specialization arguments.
     let modes = [Mode::Add(&a), Mode::Add(&b), Mode::Sub(&a), Mode::Add(&[5])];
     let expected = chain(&modes, 12);
+    #[cfg(target_arch = "x86_64")]
     check_direct::<Lancy>(&modes, expected);
     check_direct::<Llvm>(&modes, expected);
     check_direct::<Cranelift>(&modes, expected);
@@ -82,11 +84,13 @@ fn repeated_values_skip_staging_across_parents_and_keep_all_calls() {
     assert_eq!(listing.matches("fn increment.").count(), 1);
     assert_eq!(listing.matches(" = increment.").count(), 5);
     assert_eq!(chain::build::<Text>(&modes).unwrap(), listing);
-    for code in [
-        Box::new(Lancy::compile(&ir).unwrap()) as Box<dyn Executable>,
+    let kernels: Vec<Box<dyn Executable>> = vec![
+        #[cfg(target_arch = "x86_64")]
+        Box::new(Lancy::compile(&ir).unwrap()),
         Box::new(Llvm::compile(&ir).unwrap()),
         Box::new(Cranelift::compile(&ir).unwrap()),
-    ] {
+    ];
+    for code in kernels {
         assert_eq!(code.call(&[12], &mut []), Ok(expected));
     }
 }
@@ -126,6 +130,7 @@ fn type_and_const_arguments_distinguish_monomorphizations() {
     assert_eq!(listing.matches("fn affine.").count(), 3);
     assert_eq!(listing.matches(" = affine.").count(), 4);
     let expected = instances(3);
+    #[cfg(target_arch = "x86_64")]
     assert_eq!(
         instances::build::<Lancy>().unwrap().call(&[3], &mut []),
         Ok(expected)
@@ -179,10 +184,17 @@ fn retry(root: &mut dyn splice::frontend::KernelBuilder) -> splice::Result<()> {
 }
 #[test]
 fn a_failed_body_can_be_retried_and_its_completed_children_reused() {
+    #[cfg(target_arch = "x86_64")]
     let lancy = Lancy::build(0, &[], Box::new(retry)).unwrap();
     let llvm = Llvm::build(0, &[], Box::new(retry)).unwrap();
     let cranelift = Cranelift::build(0, &[], Box::new(retry)).unwrap();
-    for code in [&lancy as &dyn Executable, &llvm, &cranelift] {
+    let kernels: &[&dyn Executable] = &[
+        #[cfg(target_arch = "x86_64")]
+        &lancy,
+        &llvm,
+        &cranelift,
+    ];
+    for code in kernels {
         assert_eq!(code.call(&[], &mut []), Ok(17));
     }
 }
@@ -205,7 +217,9 @@ fn shared_fallible_body_observes_each_calls_buffers_and_arguments() -> splice::R
     let ir = two_buffers::ir()?;
     assert_eq!(Text::compile(&ir)?.matches("fn store_ratio.").count(), 1);
     let kernels: Vec<Box<dyn Executable>> = vec![
+        #[cfg(target_arch = "x86_64")]
         Box::new(two_buffers::build::<Lancy>()?),
+        #[cfg(target_arch = "x86_64")]
         Box::new(Lancy::compile(&ir)?),
         Box::new(two_buffers::build::<Llvm>()?),
         Box::new(Llvm::compile(&ir)?),

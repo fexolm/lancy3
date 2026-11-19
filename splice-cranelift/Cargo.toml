@@ -7,7 +7,9 @@ description = "Cranelift JIT code generator for Splice kernels"
 
 [dependencies]
 splice = { path = "../splice" }
+splice-target = { path = "../splice-target" }
 cranelift-codegen = "0.132"
 cranelift-frontend = "0.132"
 cranelift-module = "0.132"
 cranelift-jit = "0.132"
+cranelift-native = "0.132"

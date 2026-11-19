@@ -3,6 +3,7 @@ mod relational;
 use relational::{Catalog, pricing_plan, query};
 use splice::Executable;
 use splice_cranelift::Cranelift;
+#[cfg(target_arch = "x86_64")]
 use splice_lancy::Lancy;
 use splice_llvm::Llvm;
 use splice_text::Text;
@@ -14,7 +15,12 @@ mod tests;
 fn main() -> Result<(), String> {
     let plan = pricing_plan();
     match std::env::args().nth(1).as_deref() {
+        #[cfg(target_arch = "x86_64")]
         None | Some("lancy") => run(query::build::<Lancy>(&plan)?),
+        #[cfg(not(target_arch = "x86_64"))]
+        None => run(query::build::<Llvm>(&plan)?),
+        #[cfg(not(target_arch = "x86_64"))]
+        Some("lancy") => Err("Lancy requires x86-64".into()),
         Some("cranelift") => run(query::build::<Cranelift>(&plan)?),
         Some("llvm") => run(query::build::<Llvm>(&plan)?),
         Some("text") => {

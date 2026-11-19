@@ -1,0 +1,91 @@
+name: SIMD backends
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  x86:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust and LLVM
+        run: |
+          rustup toolchain install 1.94.1 --profile minimal --component clippy,rustfmt
+          curl --fail --silent --show-error https://apt.llvm.org/llvm-snapshot.gpg.key |
+            sudo gpg --dearmor -o /usr/share/keyrings/apt-llvm.gpg
+          echo 'deb [signed-by=/usr/share/keyrings/apt-llvm.gpg] https://apt.llvm.org/noble/ llvm-toolchain-noble-21 main' |
+            sudo tee /etc/apt/sources.list.d/apt-llvm.list
+          sudo apt-get update
+          sudo apt-get install -y g++ libffi-dev llvm-21-dev
+      - name: Check and test the workspace
+        env:
+          LLVM_SYS_211_PREFIX: /usr/lib/llvm-21
+        run: |
+          cargo +1.94.1 fmt --all -- --check
+          cargo +1.94.1 clippy --workspace --all-targets --locked -- -D warnings
+          cargo +1.94.1 test --workspace --release --locked
+      - name: Exercise native x86 SIMD profiles
+        env:
+          LLVM_SYS_211_PREFIX: /usr/lib/llvm-21
+        run: |
+          test_profile() {
+            export SPLICE_SIMD="$1"
+            cargo +1.94.1 test --release --locked -p lancy
+            cargo +1.94.1 test --release --locked -p splice --test simd
+            cargo +1.94.1 test --release --locked -p splice-llvm
+          }
+          cargo +1.94.1 build --release --locked -p splice-target --example simd_profile
+          test_profile sse
+          for profile in avx2 avx512 avx10; do
+            if SPLICE_SIMD="$profile" target/release/examples/simd_profile; then
+              test_profile "$profile"
+            else
+              echo "::notice::Skipping native $profile execution on this runner"
+            fi
+          done
+
+  arm64:
+    runs-on: ubuntu-24.04-arm
+    env:
+      LLVM_SYS_211_PREFIX: /usr/lib/llvm-21
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust, LLVM and QEMU
+        run: |
+          rustup toolchain install 1.94.1 --profile minimal --component clippy
+          curl --fail --silent --show-error https://apt.llvm.org/llvm-snapshot.gpg.key |
+            sudo gpg --dearmor -o /usr/share/keyrings/apt-llvm.gpg
+          echo 'deb [signed-by=/usr/share/keyrings/apt-llvm.gpg] https://apt.llvm.org/noble/ llvm-toolchain-noble-21 main' |
+            sudo tee /etc/apt/sources.list.d/apt-llvm.list
+          sudo apt-get update
+          sudo apt-get install -y g++ libffi-dev llvm-21-dev qemu-user
+      - name: Test native NEON
+        env:
+          SPLICE_SIMD: neon
+        run: |
+          cargo +1.94.1 clippy --workspace --exclude lancy --exclude splice-lancy --all-targets --locked -- -D warnings
+          cargo +1.94.1 test --workspace --exclude lancy --exclude splice-lancy --release --locked --target aarch64-unknown-linux-gnu
+      - name: Exercise native SVE hardware when available
+        run: |
+          cargo +1.94.1 build --release --locked --target aarch64-unknown-linux-gnu -p splice-target --example simd_profile
+          for profile in sve sve2; do
+            if SPLICE_SIMD="$profile" target/aarch64-unknown-linux-gnu/release/examples/simd_profile; then
+              SPLICE_SIMD="$profile" cargo +1.94.1 test --release --locked --target aarch64-unknown-linux-gnu -p splice-llvm -p splice --tests
+            fi
+          done
+      - name: Test SVE and SVE2 in QEMU
+        run: |
+          for row in 'sve 32 32' 'sve2 64 64' 'sve2 48 32'; do
+            read -r SPLICE_SIMD vl width <<< "$row"
+            export SPLICE_SIMD
+            export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUNNER="qemu-aarch64 -cpu max,sve-default-vector-length=$vl"
+            selected=$(cargo +1.94.1 run --quiet --release --locked --target aarch64-unknown-linux-gnu -p splice-target --example simd_profile)
+            echo "$selected"
+            [[ "$selected" == *", $width bytes" ]]
+            cargo +1.94.1 test --release --locked --target aarch64-unknown-linux-gnu -p splice-llvm -p splice-cranelift -p splice --tests
+          done

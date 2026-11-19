@@ -6,6 +6,7 @@ use std::{collections::HashMap, sync::Arc};
 /// Lower a verified portable function and its callees using the same SSA
 /// construction as direct Splice staging. Preserve shared callee identities.
 pub fn lower(root: &Function) -> Result<hir::Function, String> {
+    splice_target::simd()?;
     let mut callees = HashMap::new();
     let mut pending = vec![(root, false)];
     while let Some((f, visited)) = pending.pop() {

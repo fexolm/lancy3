@@ -7,6 +7,8 @@ use thiserror::Error;
 pub enum CompileError {
     #[error("invalid SSA: {0}")]
     InvalidIr(#[from] IrError),
+    #[error("{0}")]
+    SimdProfile(String),
     #[error("recursive runtime calls require a dynamic stack")]
     RecursiveCall,
     #[error("scalar frame size overflow")]

@@ -917,7 +917,9 @@ dependencies = [
  "cranelift-frontend",
  "cranelift-jit",
  "cranelift-module",
+ "cranelift-native",
  "splice",
+ "splice-target",
 ]
 
 [[package]]
@@ -926,6 +928,7 @@ version = "0.1.0"
 dependencies = [
  "lancy",
  "splice",
+ "splice-target",
 ]
 
 [[package]]
@@ -934,8 +937,10 @@ version = "0.1.0"
 dependencies = [
  "cc",
  "inkwell",
+ "libc",
  "llvm-sys 191.1.1",
  "splice",
+ "splice-target",
 ]
 
 [[package]]
@@ -950,6 +955,9 @@ dependencies = [
 [[package]]
 name = "splice-target"
 version = "0.1.0"
+dependencies = [
+ "libc",
+]
 
 [[package]]
 name = "splice-text"

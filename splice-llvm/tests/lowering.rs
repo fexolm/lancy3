@@ -215,9 +215,20 @@ fn i32_gather_keeps_dword_indices_and_native_compaction() {
             .any(|line| line.contains("getelementptr i32, ptr")
                 && line.contains(&format!("<{width} x i32>")))
     );
-    if std::is_x86_feature_detected!("avx512f")
-        && (width == 16 || std::is_x86_feature_detected!("avx512vl"))
-    {
+    #[cfg(target_arch = "x86_64")]
+    let native = match splice_target::simd().unwrap().profile {
+        splice_target::Profile::Auto => {
+            is_x86_feature_detected!("avx512f")
+                && (width == 16 || is_x86_feature_detected!("avx512vl"))
+        }
+        splice_target::Profile::Avx512 | splice_target::Profile::Avx10 => true,
+        _ => false,
+    };
+    #[cfg(not(target_arch = "x86_64"))]
+    let native = false;
+    if native {
         assert!(ir.contains("@llvm.x86.avx512.mask.compress"));
+    } else {
+        assert!(ir.contains("@llvm.experimental.vector.compress"));
     }
 }

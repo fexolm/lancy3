@@ -1,12 +1,11 @@
 //! Compile verified Splice kernels to native code with Cranelift.
 #![deny(unsafe_op_in_unsafe_fn)]
 
-#[cfg(not(all(
-    target_arch = "x86_64",
-    target_pointer_width = "64",
-    any(windows, target_os = "linux")
+#[cfg(not(any(
+    all(target_arch = "x86_64", any(windows, target_os = "linux")),
+    all(target_arch = "aarch64", target_os = "linux")
 )))]
-compile_error!("splice-cranelift currently supports x86-64 Windows and Linux");
+compile_error!("splice-cranelift supports x86-64 Windows and Linux, and AArch64 Linux");
 
 mod lower;
 mod module;
@@ -18,6 +17,56 @@ use std::sync::Mutex;
 
 /// Compile a specialized kernel or a portable Splice function with Cranelift.
 pub struct Cranelift;
+
+fn builder() -> Result<JITBuilder> {
+    use cranelift_codegen::settings::{self, Configurable};
+    use splice_target::Profile;
+
+    let simd = splice_target::simd()?;
+    let mut flags = settings::builder();
+    for (name, value) in [
+        ("opt_level", "speed"),
+        ("enable_probestack", "true"),
+        ("probestack_strategy", "inline"),
+        // Definitions may be farther apart than a direct AArch64 call.
+        ("use_colocated_libcalls", "false"),
+        ("is_pic", "false"),
+    ] {
+        flags.set(name, value).map_err(|e| e.to_string())?;
+    }
+    let auto = simd.profile == Profile::Auto;
+    let isa = cranelift_native::builder_with_options(auto)?;
+    #[cfg(target_arch = "x86_64")]
+    let isa = {
+        let mut isa = isa;
+        let profile = simd.profile;
+        // Cranelift has no AVX10 setting. Enable only instructions that it
+        // models and the OS reports under their legacy feature names.
+        for (enabled, flag) in [
+            (is_x86_feature_detected!("ssse3"), "has_ssse3"),
+            (is_x86_feature_detected!("sse4.1"), "has_sse41"),
+            (is_x86_feature_detected!("sse4.2"), "has_sse42"),
+            (
+                profile != Profile::Sse && is_x86_feature_detected!("avx"),
+                "has_avx",
+            ),
+            (
+                profile != Profile::Sse && is_x86_feature_detected!("avx2"),
+                "has_avx2",
+            ),
+            (profile == Profile::Avx512, "has_avx512f"),
+        ] {
+            if !auto && enabled {
+                isa.enable(flag).map_err(|e| e.to_string())?;
+            }
+        }
+        isa
+    };
+    let isa = isa
+        .finish(settings::Flags::new(flags))
+        .map_err(|e| e.to_string())?;
+    Ok(JITBuilder::with_isa(isa, default_libcall_names()))
+}
 
 #[repr(C)]
 struct Descriptor {
@@ -58,16 +107,7 @@ impl Codegen for Cranelift {
     type Output = CraneliftKernel;
 
     fn compile(function: &Function) -> Result<CraneliftKernel> {
-        let builder = JITBuilder::with_flags(
-            &[
-                ("opt_level", "speed"),
-                ("enable_probestack", "true"),
-                ("probestack_strategy", "inline"),
-            ],
-            default_libcall_names(),
-        )
-        .map_err(|e| e.to_string())?;
-        let mut memory = CodeMemory(Some(JITModule::new(builder)));
+        let mut memory = CodeMemory(Some(JITModule::new(builder()?)));
         let module = memory.0.as_mut().unwrap();
         let kernel = module::KernelModule::lower(module, function)?;
         let id = kernel.entry;

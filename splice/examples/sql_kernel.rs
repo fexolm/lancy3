@@ -1,5 +1,8 @@
 use splice::{Executable, kernel};
-use splice_lancy::Lancy;
+#[cfg(target_arch = "x86_64")]
+use splice_lancy::Lancy as Backend;
+#[cfg(not(target_arch = "x86_64"))]
+use splice_llvm::Llvm as Backend;
 
 #[derive(splice::ComptimeKey)]
 enum SqlExpr {
@@ -48,7 +51,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ),
     ];
     for (sql, expr, expected) in expressions {
-        let single = project::build::<Lancy>(&expr)?;
+        let single = project::build::<Backend>(&expr)?;
         let prices = [10, 20, 30];
         let quantities = [2, 3, 4];
         for i in 0..expected.len() {

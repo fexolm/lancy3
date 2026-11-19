@@ -42,6 +42,7 @@ impl ScalarKernel {
         function: &Function,
         inlining: Inlining,
     ) -> Result<Self, CompileError> {
+        splice_target::simd().map_err(CompileError::SimdProfile)?;
         let (source, ids) = function.verified_module()?;
         let emit = |optimized: Function| {
             let (module, ids) = optimized.verified_module()?;
