@@ -1,0 +1,102 @@
+# Adapted from Wasmtime v45.0.3, runtests/sdiv.clif
+# SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+
+# %sdiv_i32
+fn main v0:i32 v1:i32 -> i32
+  v2 = div v0 v1
+  ret v2
+@run 0 100 -> 0
+@run 2 1 -> 2
+@run 16 2 -> 8
+@run 123456 789 -> 156
+@run -2 1 -> -2
+@run -16 2 -> -8
+@run -123456 789 -> -156
+@run -2 -1 -> 2
+@run -16 -2 -> 8
+@run -123456 -789 -> 156
+
+---
+
+# %sdiv_pow2_i32
+fn main v0:i32 -> i32
+  v1 = const 8
+  v2 = div v0 v1
+  ret v2
+@run 0 -> 0
+@run 8 -> 1
+@run 9 -> 1
+@run 16 -> 2
+@run 17 -> 2
+@run -8 -> -1
+@run -9 -> -1
+@run -16 -> -2
+@run -17 -> -2
+
+---
+
+# %sdiv_neg_pow2_i32
+fn main v0:i32 -> i32
+  v1 = const -4
+  v2 = div v0 v1
+  ret v2
+@run 0 -> 0
+@run 8 -> -2
+@run 9 -> -2
+@run 16 -> -4
+@run 17 -> -4
+@run -8 -> 2
+@run -9 -> 2
+@run -16 -> 4
+@run -17 -> 4
+
+---
+
+# %sdiv_by_const_1337_i32
+fn main v0:i32 -> i32
+  v1 = const 1337
+  v2 = div v0 v1
+  ret v2
+@run 0 -> 0
+@run 1337 -> 1
+@run 1338 -> 1
+@run 56154 -> 42
+@run 56155 -> 42
+@run 57490 -> 42
+@run 57491 -> 43
+@run -1337 -> -1
+@run -1338 -> -1
+@run -56154 -> -42
+@run -56155 -> -42
+@run -57490 -> -42
+@run -57491 -> -43
+
+---
+
+# %sdiv_by_const_neg_1337_i32
+fn main v0:i32 -> i32
+  v1 = const -1337
+  v2 = div v0 v1
+  ret v2
+@run 0 -> 0
+@run 1337 -> -1
+@run 1338 -> -1
+@run 56154 -> -42
+@run 56155 -> -42
+@run 57490 -> -42
+@run 57491 -> -43
+@run -1337 -> 1
+@run -1338 -> 1
+@run -56154 -> 42
+@run -56155 -> 42
+@run -57490 -> 42
+@run -57491 -> 43
+
+---
+
+# %sdiv_by_const_neg_i32min_i32
+fn main v0:i32 -> i32
+  v1 = const -2147483648
+  v2 = div v0 v1
+  ret v2
+@run -2147483648 -> 1

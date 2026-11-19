@@ -11,4 +11,6 @@ regalloc2 = "0.15.3"
 thiserror = "2"
 
 [dev-dependencies]
+filecheck = "0.5"
+iced-x86 = { version = "1.21", default-features = false, features = ["decoder", "intel"] }
 regalloc2 = { version = "0.15.3", features = ["checker"] }

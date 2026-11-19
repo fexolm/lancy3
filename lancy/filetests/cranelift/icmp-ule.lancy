@@ -1,0 +1,34 @@
+# Adapted from Wasmtime v45.0.3, runtests/icmp-ule.clif
+# SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+
+# %icmp_ule_i32
+fn main v0:i32 v1:i32 -> i32
+  t0 = const -2147483648
+  t1 = xor v0 t0
+  t2 = xor v1 t0
+  t3 = le t1 t2
+  t4 = const 1
+  v2 = and t3 t4
+  ret v2
+@run 0 0 -> 1
+@run 1 0 -> 0
+@run -1 -1 -> 1
+@run 0 1 -> 1
+@run -5 -1 -> 1
+@run 1 -1 -> 1
+
+---
+
+# %icmp_ule_i32_imm
+fn main v0:i32 -> i32
+  t0 = const 10
+  t1 = const -2147483648
+  t2 = xor v0 t1
+  t3 = xor t0 t1
+  t4 = le t2 t3
+  t5 = const 1
+  v2 = and t4 t5
+  ret v2
+@run 10 -> 1
+@run 0 -> 1
+@run -1 -> 0

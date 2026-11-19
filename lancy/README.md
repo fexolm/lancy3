@@ -56,3 +56,5 @@ cargo test -p lancy --release
 cargo test -p splice-lancy --release
 cargo run -p splice --release --example retry_policy
 ```
+
+Для проверки отдельных проходов добавьте текстовый SSA-сценарий в `lancy/filetests`. Каждый файл автоматически становится отдельным Cargo-тестом. Ожидаемые преобразования HIR, LIR, назначения регистров, машинные инструкции и примеры выполнения задаются рядом с исходным IR. [Формат и команды запуска](filetests/README.md)

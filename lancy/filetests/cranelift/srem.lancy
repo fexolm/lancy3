@@ -1,0 +1,38 @@
+# Adapted from Wasmtime v45.0.3, runtests/srem.clif
+# SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+
+# %srem_i32
+fn main v0:i32 v1:i32 -> i32
+  v2 = rem v0 v1
+  ret v2
+@run 0 1 -> 0
+@run 2 2 -> 0
+@run 1 -1 -> 0
+@run 3 2 -> 1
+@run 19 7 -> 5
+@run 3 -2 -> 1
+@run -19 7 -> -5
+@run 0 13 -> 0
+@run 1048576 8192 -> 0
+@run -1024 255 -> -4
+@run 0xC0FFEEEE 8 -> -2
+@run 0xC0FFEEEE -8 -> -2
+@run 0x80000000 -2 -> 0
+
+---
+
+# %srem_imm_i32
+fn main v0:i32 -> i32
+  t0 = const 3
+  v1 = rem v0 t0
+  ret v1
+@run 0 -> 0
+@run 1 -> 1
+@run 2 -> 2
+@run 3 -> 0
+@run 4 -> 1
+@run 19 -> 1
+@run -19 -> -1
+@run -42 -> 0
+@run 1057 -> 1
+@run 0xC0FFEEEE -> -2

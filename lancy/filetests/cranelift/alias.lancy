@@ -1,0 +1,28 @@
+# Adapted from Wasmtime v45.0.3, runtests/alias.clif
+# SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+
+# %alias
+fn main v0:i32 -> i32
+  v1 = copy v0
+  ret v1
+@run 0 -> 0
+@run -1 -> -1
+
+---
+
+# %double_alias
+fn main v0:i32 -> i32
+  v1 = copy v0
+  v2 = copy v1
+  ret v2
+@run 0 -> 0
+@run -1 -> -1
+
+---
+
+# %alias_inst
+fn main -> i32
+  v0 = const 10
+  v1 = copy v0
+  ret v1
+@run -> 10

@@ -64,7 +64,7 @@ pub(super) fn compile(
     Ok(module)
 }
 
-fn written_regs(f: &lir::Function<Inst>, allocation: &Output) -> PRegSet {
+pub(super) fn written_regs(f: &lir::Function<Inst>, allocation: &Output) -> PRegSet {
     let mut written = PRegSet::empty();
     for (i, op) in f.insts().iter().enumerate() {
         let i = regalloc2::Inst::new(i);

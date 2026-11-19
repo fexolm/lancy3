@@ -1,5 +1,9 @@
 mod arithmetic;
 mod calls;
 mod control_flow;
+mod filetests;
+mod generated;
+mod integer_runtests;
 mod isel;
 mod pointers;
+mod traps;

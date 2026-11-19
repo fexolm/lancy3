@@ -1,0 +1,17 @@
+# Adapted from Wasmtime v45.0.3, runtests/div-checks.clif
+# SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+
+# %i32
+fn main v0:i32 v1:i32 -> i32
+  v2 = rem v0 v1
+  ret v2
+@run 0x80000000 0xffffffff -> !overflow
+
+---
+
+# %i32_const
+fn main v0:i32 -> i32
+  v1 = const -1
+  v2 = rem v0 v1
+  ret v2
+@run 0x80000000 -> !overflow

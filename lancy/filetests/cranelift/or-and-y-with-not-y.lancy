@@ -1,0 +1,29 @@
+# Adapted from Wasmtime v45.0.3, runtests/or-and-y-with-not-y.clif
+# SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+
+# %or_and_y_with_not_y
+fn main v0:i32 v1:i32 -> i32
+  v2 = and v0 v1
+  t0 = const -1
+  v3 = xor v1 t0
+  v4 = or v2 v3
+  ret v4
+@run -1 0x0a -> -1
+@run -1 -80 -> -1
+@run -86 0x0a -> -1
+@run -86 -80 -> -17
+@run 0x00 0x0a -> -11
+@run 0x00 -80 -> 0x4f
+
+---
+
+# %or_and_constant_with_not_constant
+fn main v0:i32 -> i32
+  v1 = const -4
+  v2 = and v0 v1
+  v3 = const 3
+  v4 = or v2 v3
+  ret v4
+@run -1 -> -1
+@run -86 -> -85
+@run 0x00 -> 0x03

@@ -1,0 +1,21 @@
+fn write out:ptr x:i32 divisor:i32 -> i32
+  store out x
+  dead = div x divisor
+  one = const 1
+  next = offset out one 4
+  store next divisor
+  ret x
+
+fn main out:ptr x:i32 divisor:i32 -> i32
+  result = call write out x divisor
+  ret result
+@policy never
+@opt check: store
+@opt nextln: Div
+@opt check: store
+@isel check: store.I32
+@isel check: idiv
+@isel check: store.I32
+@run 7 0 -> !zero | aa aa aa aa bb bb bb bb | 07 00 00 00 bb bb bb bb
+@run -2147483648 -1 -> !overflow | aa aa aa aa bb bb bb bb | 00 00 00 80 bb bb bb bb
+@run 7 2 -> 7 | aa aa aa aa bb bb bb bb | 07 00 00 00 02 00 00 00

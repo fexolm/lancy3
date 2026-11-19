@@ -1,0 +1,26 @@
+# Adapted from Wasmtime v45.0.3, runtests/shift-right-left.clif
+# SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+
+# %unsigned_shift_right_shift_left_i32
+fn main v0:i32 -> i32
+  v1 = const 5
+  t0 = shr v0 v1
+  t1 = const 134217727
+  v2 = and t0 t1
+  v3 = shl v2 v1
+  ret v3
+@run -1 -> 0xffffffe0
+@run 0 -> 0
+@run 0xaaaaaaaa -> 0xaaaaaaa0
+
+---
+
+# %signed_shift_right_shift_left_i32
+fn main v0:i32 -> i32
+  v1 = const 5
+  v2 = shr v0 v1
+  v3 = shl v2 v1
+  ret v3
+@run -1 -> 0xffffffe0
+@run 0 -> 0
+@run 0xaaaaaaaa -> 0xaaaaaaa0

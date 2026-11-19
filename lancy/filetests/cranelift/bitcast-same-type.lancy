@@ -1,0 +1,10 @@
+# Adapted from Wasmtime v45.0.3, runtests/bitcast-same-type.clif
+# SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+
+# %bitcast_i32
+fn main v0:i32 -> i32
+  v1 = copy v0
+  ret v1
+@run 0 -> 0
+@run 42 -> 42
+@run -1 -> -1

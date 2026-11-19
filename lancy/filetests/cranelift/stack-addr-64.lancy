@@ -1,0 +1,44 @@
+# Adapted from Wasmtime v45.0.3, runtests/stack-addr-64.clif (%stack_addr_iadd).
+# SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+# Access the same scratch word via two equivalent address expressions.
+fn main base:ptr x:i32 -> i32
+  eight = const 8
+  two = const 2
+  a = offset base eight 1
+  b = offset base two 4
+  store a x
+  first = load i32 b
+  twenty = const 20
+  y = add x twenty
+  store b y
+  second = load i32 a
+  ok1 = eq first x
+  ok2 = eq second y
+  both = and ok1 ok2
+  ret both
+@run 0 -> -1 | 00 00 00 00 00 00 00 00 00 00 00 00 | 00 00 00 00 00 00 00 00 14 00 00 00
+@run 1 -> -1 | 00 00 00 00 00 00 00 00 00 00 00 00 | 00 00 00 00 00 00 00 00 15 00 00 00
+@run -1 -> -1 | 00 00 00 00 00 00 00 00 00 00 00 00 | 00 00 00 00 00 00 00 00 13 00 00 00
+
+---
+
+# %stack_addr_64, with three separate i32 words and two padding gaps.
+fn main p:ptr x:i32 -> i32
+  store p x
+  first = load i32 p
+  eight = const 8
+  second_ptr = offset p eight 1
+  store second_ptr x
+  second = load i32 second_ptr
+  third_ptr = offset second_ptr eight 1
+  store third_ptr x
+  third = load i32 third_ptr
+  a = eq x first
+  b = eq x second
+  c = eq x third
+  ab = and a b
+  abc = and ab c
+  ret abc
+@run 0 -> -1 | aa aa aa aa 11 22 33 44 aa aa aa aa 55 66 77 88 aa aa aa aa | 00 00 00 00 11 22 33 44 00 00 00 00 55 66 77 88 00 00 00 00
+@run 1 -> -1 | aa aa aa aa 11 22 33 44 aa aa aa aa 55 66 77 88 aa aa aa aa | 01 00 00 00 11 22 33 44 01 00 00 00 55 66 77 88 01 00 00 00
+@run -1 -> -1 | aa aa aa aa 11 22 33 44 aa aa aa aa 55 66 77 88 aa aa aa aa | ff ff ff ff 11 22 33 44 ff ff ff ff 55 66 77 88 ff ff ff ff

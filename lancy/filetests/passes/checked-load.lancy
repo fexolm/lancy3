@@ -1,0 +1,22 @@
+fn main base:ptr i:i32 len:i32 -> i32
+  bounds i len
+  bounds i len
+  addr = offset base i 4
+  value = load i32 addr
+  ret value
+
+@source check: bounds
+@source nextln: bounds
+@opt check: bounds
+@opt not: bounds
+@opt check: offset
+@isel check: bounds
+@isel nextln: movsxd
+@isel nextln: load.I32 scale=4 disp=0
+@isel not: lea
+@asm check: cmp
+@asm check: jae
+@asm check: movsxd
+@asm check: *4]
+@run 1 2 -> -2 | 03 00 00 00 fe ff ff ff | 03 00 00 00 fe ff ff ff
+@run -1 2 -> !bounds | 03 00 00 00 fe ff ff ff | 03 00 00 00 fe ff ff ff

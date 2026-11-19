@@ -1,0 +1,722 @@
+# Adapted from Wasmtime v45.0.3, runtests/arithmetic.clif
+# SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+
+# %add_i32
+fn main v0:i32 v1:i32 -> i32
+  v2 = add v0 v1
+  ret v2
+@run 0 0 -> 0
+@run 0 1 -> 1
+@run -1 0 -> -1
+@run -1 1 -> 0
+@run 0x7FFFFFFF 0x7FFFFFFF -> -2
+@run 0x7FFFFFFF 0x80000000 -> -1
+@run 0x01234567 0xFEDCBA98 -> -1
+@run 0xA00A00A0 0x0BB0BB0B -> 0xABBABBAB
+@run 0xC0FFEEEE 0x1DCB1111 -> 0xDECAFFFF
+
+---
+
+# %sub_i32
+fn main v0:i32 v1:i32 -> i32
+  v2 = sub v0 v1
+  ret v2
+@run 0 0 -> 0
+@run 0 1 -> -1
+@run 1 0 -> 1
+@run -1 0 -> -1
+@run -1 1 -> -2
+@run 0x80000000 0x7FFFFFFF -> 1
+@run 0xFFFFFFFF 0xFEDCBA98 -> 0x01234567
+@run 0xABBABBAB 0x0BB0BB0B -> 0xA00A00A0
+@run 0xC0FFEEEE 0xDECAFFFF -> 0xE234EEEF
+
+---
+
+# %mul_i32
+fn main v0:i32 v1:i32 -> i32
+  v2 = mul v0 v1
+  ret v2
+@run 0 0 -> 0
+@run 0 1 -> 0
+@run 1 -1 -> -1
+@run 2 2 -> 4
+@run 0x7FFFFFFF 0x7FFFFFFF -> 1
+@run 0x80000000 0x7FFFFFFF -> 0x80000000
+@run 0x01234567 0xFEDCBA98 -> 0x23E20B28
+@run 0xC0FFEEEE 0xDECAFFFF -> 0x19BA1112
+
+---
+
+# %madd_i32
+fn main v0:i32 v1:i32 v2:i32 -> i32
+  v3 = mul v1 v2
+  v4 = add v0 v3
+  ret v4
+@run 0 1 0 -> 0
+@run 1 0 0 -> 1
+@run 0 -1 1 -> -1
+@run 2 2 2 -> 6
+@run 0 0x7FFFFFFF 0x7FFFFFFF -> 1
+@run -1 0x7FFFFFFF 0x7FFFFFFF -> 0
+@run 0x80000000 1 0x7FFFFFFF -> -1
+@run 0x80000000 0x01234567 0x7FFFFFFF -> 0xFEDCBA99
+@run 0x01234567 0x80000000 0xFEDCBA98 -> 0x1234567
+@run 0xC0FFEEEE 0xDECAFFFF 0x0DEBAC1E -> 0x32DE42D0
+
+---
+
+# %msub_i32
+fn main v0:i32 v1:i32 v2:i32 -> i32
+  v3 = mul v1 v2
+  v4 = sub v0 v3
+  ret v4
+@run 0 0 0 -> 0
+@run 1 1 1 -> 0
+@run 1 1 0 -> 1
+@run 0 1 1 -> -1
+@run 1 1 -1 -> 2
+@run -2 1 -1 -> -1
+@run 2 2 2 -> -2
+@run 0 0x7FFFFFFF 0x7FFFFFFF -> -1
+@run 0x0FFFFF 1 0x7FFFFFFF -> 0x80100000
+@run 0x7FFFFFFF 1 0x80000000 -> -1
+@run 0x80000000 0x01234567 0x7FFFFFFF -> 0x01234567
+@run 0xFEDCBA98 0x80000000 0x01234567 -> 0x7EDCBA98
+@run 0xC0FFEEEE 0xDECAFFFF 0x0DEBAC1E -> 0x4F219B0C
+
+---
+
+# %sdiv_i32
+fn main v0:i32 v1:i32 -> i32
+  v2 = div v0 v1
+  ret v2
+@run 0 1 -> 0
+@run 2 2 -> 1
+@run 1 -1 -> -1
+@run 3 2 -> 1
+@run 19 7 -> 2
+@run 3 -2 -> -1
+@run -19 7 -> -2
+@run 0xC0FFEEEE 8 -> 0xF81FFDDE
+@run 0xC0FFEEEE -8 -> 0x7E00222
+@run 0x80000000 -2 -> 0x40000000
+
+---
+
+# %sdiv_i32_const
+fn main v0:i32 -> i32
+  v1 = const -2
+  v2 = div v0 v1
+  ret v2
+@run 0 -> 0
+@run -1 -> 0
+@run 0xFFFFFFFE -> 1
+
+---
+
+# %imul_small_constant
+fn main -> i32
+  v0 = const 7
+  v1 = const 572662306
+  v2 = mul v0 v1
+  ret v2
+@run -> -286331154
+
+---
+
+# %imul_big_constant
+fn main -> i32
+  v0 = const 286331153
+  v1 = const 572662306
+  v2 = mul v0 v1
+  ret v2
+@run -> 248153666
+
+---
+
+# %mul_one_shl
+fn main v0:i32 v1:i32 -> i32
+  v2 = const 1
+  v3 = shl v2 v1
+  v4 = mul v0 v3
+  ret v4
+@run 2 3 -> 16
+@run 4 5 -> 128
+@run 8 6 -> 512
+
+---
+
+# %fold_add_sub3
+fn main v0:i32 v1:i32 -> i32
+  v2 = sub v0 v1
+  v3 = add v2 v1
+  ret v3
+@run 0xdead0000 0x0000beef -> 0xdead0000
+
+---
+
+# %simplify_sub_sub_self
+fn main v0:i32 v1:i32 -> i32
+  v2 = sub v0 v1
+  v3 = sub v2 v0
+  ret v3
+@run 42 5 -> -5
+
+---
+
+# %eq_mul_odd
+fn main v0:i32 -> i32
+  v1 = const 7
+  v2 = const 42
+  v3 = mul v0 v1
+  t0 = eq v3 v2
+  t1 = const 1
+  v4 = and t0 t1
+  ret v4
+@run 6 -> 1
+@run 7 -> 0
+
+---
+
+# %ne_mul_odd
+fn main v0:i32 -> i32
+  v1 = const 7
+  v2 = const 42
+  v3 = mul v0 v1
+  t0 = ne v3 v2
+  t1 = const 1
+  v4 = and t0 t1
+  ret v4
+@run 6 -> 0
+@run 7 -> 1
+
+---
+
+# %fold_iadd_iadd_ineg_i32_rt
+fn main v0:i32 v1:i32 -> i32
+  v2 = add v0 v1
+  t0 = const 0
+  v3 = sub t0 v1
+  v4 = add v2 v3
+  ret v4
+@run 42 5 -> 42
+@run -7 9 -> -7
+@run 0x7fffffff 0x80000000 -> 0x7fffffff
+
+---
+
+# %test_isub_bor_band_to_bxor_rt
+fn main v0:i32 v1:i32 -> i32
+  v2 = or v0 v1
+  v3 = and v0 v1
+  v4 = sub v2 v3
+  ret v4
+@run 4 5 -> 1
+@run 7 7 -> 0
+@run -1 1 -> -2
+
+---
+
+# %fold_isub_iadd_band_to_bor_i32_rt
+fn main v0:i32 v1:i32 -> i32
+  v2 = add v0 v1
+  v3 = and v0 v1
+  v4 = sub v2 v3
+  ret v4
+@run 4 5 -> 5
+@run 7 7 -> 7
+@run -1 1 -> -1
+
+---
+
+# %fold_isub_bor_bxor_to_band_i32_rt
+fn main v0:i32 v1:i32 -> i32
+  v2 = or v0 v1
+  v3 = xor v0 v1
+  v4 = sub v2 v3
+  ret v4
+@run 4 5 -> 4
+@run 7 7 -> 7
+@run -1 1 -> 1
+
+---
+
+# %fold_iadd_bnot_x_to_allones_i32_rt
+fn main v0:i32 -> i32
+  t0 = const -1
+  v1 = xor v0 t0
+  v2 = add v1 v0
+  ret v2
+@run 0 -> -1
+@run 1 -> -1
+@run 0x12345678 -> -1
+
+---
+
+# %test_isub_iadd_iadd_cancel_rt
+fn main v0:i32 v1:i32 v2:i32 -> i32
+  v3 = add v0 v1
+  v4 = add v0 v2
+  v5 = sub v3 v4
+  ret v5
+@run 0 0 0 -> 0
+@run 5 7 3 -> 4
+@run 10 1 9 -> -8
+
+---
+
+# %test_isub_isub_isub_cancel_rt
+fn main v0:i32 v1:i32 v2:i32 -> i32
+  v3 = sub v0 v2
+  v4 = sub v1 v2
+  v5 = sub v3 v4
+  ret v5
+@run 0 0 0 -> 0
+@run 7 3 1 -> 4
+@run 3 7 1 -> -4
+
+---
+
+# %test_isub_isub_isub_swap_cancel_rt
+fn main v0:i32 v1:i32 v2:i32 -> i32
+  v3 = sub v0 v1
+  v4 = sub v0 v2
+  v5 = sub v3 v4
+  ret v5
+@run 0 0 0 -> 0
+@run 7 3 1 -> -2
+@run 7 1 3 -> 2
+
+---
+
+# %test_iadd_umin_umax
+fn main v0:i32 v1:i32 -> i32
+  t0 = const -2147483648
+  t1 = xor v0 t0
+  t2 = xor v1 t0
+  t3 = min t1 t2
+  v2 = xor t3 t0
+  t4 = const -2147483648
+  t5 = xor v0 t4
+  t6 = xor v1 t4
+  t7 = max t5 t6
+  v3 = xor t7 t4
+  v4 = add v2 v3
+  ret v4
+@run 1 2 -> 3
+@run 2 1 -> 3
+@run 7 7 -> 14
+@run -1 1 -> 0
+
+---
+
+# %test_iadd_smin_smax
+fn main v0:i32 v1:i32 -> i32
+  v2 = min v0 v1
+  v3 = max v0 v1
+  v4 = add v2 v3
+  ret v4
+@run 1 2 -> 3
+@run 2 1 -> 3
+@run 7 7 -> 14
+@run -1 1 -> 0
+
+---
+
+# %test_isub_iadd_iadd_common_rhs_rt
+fn main v0:i32 v1:i32 v2:i32 -> i32
+  v3 = add v0 v2
+  v4 = add v1 v2
+  v5 = sub v3 v4
+  ret v5
+@run 0 0 0 -> 0
+@run 7 3 1 -> 4
+@run 3 7 1 -> -4
+
+---
+
+# %test_iadd_isub_iadd_cancel_rt
+fn main v0:i32 v1:i32 v2:i32 -> i32
+  v3 = sub v0 v1
+  v4 = add v1 v2
+  v5 = add v3 v4
+  ret v5
+@run 0 0 0 -> 0
+@run 7 3 1 -> 8
+@run 7 1 3 -> 10
+
+---
+
+# %test_isub_iadd_to_ineg_rt
+fn main v0:i32 v1:i32 -> i32
+  v2 = add v0 v1
+  v3 = sub v0 v2
+  ret v3
+@run 0 0 -> 0
+@run 7 3 -> -3
+@run 7 -3 -> 3
+
+---
+
+# %test_iadd_iadd_isub_cancel_rt
+fn main v0:i32 v1:i32 v2:i32 -> i32
+  v3 = sub v2 v0
+  v4 = add v1 v3
+  v5 = add v0 v4
+  ret v5
+@run 0 0 0 -> 0
+@run 7 3 1 -> 4
+@run 7 1 3 -> 4
+@run -4 6 2 -> 8
+@run 0x1234 0x34 0x10 -> 0x44
+
+---
+
+# %simplify_icmp_eq_iadd_commute
+fn main v0:i32 v1:i32 -> i32
+  v2 = add v0 v1
+  v3 = add v1 v0
+  t0 = eq v2 v3
+  t1 = const 1
+  v4 = and t0 t1
+  ret v4
+@run 0 0 -> 1
+@run 1 2 -> 1
+@run -1 1 -> 1
+
+---
+
+# %simplify_icmp_ne_isub_x
+fn main v0:i32 v1:i32 -> i32
+  v2 = sub v0 v1
+  t0 = ne v2 v0
+  t1 = const 1
+  v3 = and t0 t1
+  ret v3
+@run 0 0 -> 0
+@run 1 0 -> 0
+@run 1 1 -> 1
+
+---
+
+# %test_eq_isub_same
+fn main v0:i32 v1:i32 -> i32
+  v2 = sub v0 v1
+  t0 = eq v2 v0
+  t1 = const 1
+  v3 = and t0 t1
+  ret v3
+@run 0 0 -> 1
+@run 1 0 -> 1
+
+---
+
+# %test_eq_iadd_same_rhs
+fn main v0:i32 v1:i32 -> i32
+  v2 = add v0 v1
+  t0 = eq v2 v1
+  t1 = const 1
+  v3 = and t0 t1
+  ret v3
+@run 0 0 -> 1
+@run 0 7 -> 1
+@run 1 0 -> 0
+
+---
+
+# %test_eq_ineg_ineg
+fn main v0:i32 v1:i32 -> i32
+  t0 = const 0
+  v2 = sub t0 v0
+  t1 = const 0
+  v3 = sub t1 v1
+  t2 = eq v2 v3
+  t3 = const 1
+  v4 = and t2 t3
+  ret v4
+@run 0 0 -> 1
+@run 1 1 -> 1
+@run 1 2 -> 0
+
+---
+
+# %test_ineg_imul_ineg_lhs
+fn main v0:i32 v1:i32 -> i32
+  t0 = const 0
+  v2 = sub t0 v1
+  v3 = mul v2 v0
+  t1 = const 0
+  v4 = sub t1 v3
+  ret v4
+@run 0 0 -> 0
+@run 1 2 -> 2
+@run -3 4 -> -12
+@run 7 -5 -> -35
+@run 0x1234 0x10 -> 0x12340
+
+---
+
+# %test_ineg_imul_ineg_rhs
+fn main v0:i32 v1:i32 -> i32
+  t0 = const 0
+  v2 = sub t0 v1
+  v3 = mul v0 v2
+  t1 = const 0
+  v4 = sub t1 v3
+  ret v4
+@run 0 0 -> 0
+@run 1 2 -> 2
+
+---
+
+# %test_sge_smax_x
+fn main v0:i32 v1:i32 -> i32
+  v2 = max v0 v1
+  t0 = ge v2 v0
+  t1 = const 1
+  v3 = and t0 t1
+  ret v3
+@run 0 0 -> 1
+@run 1 2 -> 1
+
+---
+
+# %test_ule_x_umax
+fn main v0:i32 v1:i32 -> i32
+  t0 = const -2147483648
+  t1 = xor v0 t0
+  t2 = xor v1 t0
+  t3 = max t1 t2
+  v2 = xor t3 t0
+  t4 = const -2147483648
+  t5 = xor v0 t4
+  t6 = xor v2 t4
+  t7 = le t5 t6
+  t8 = const 1
+  v3 = and t7 t8
+  ret v3
+@run 0 0 -> 1
+@run 1 2 -> 1
+
+---
+
+# %test_sge_x_smin
+fn main v0:i32 v1:i32 -> i32
+  v2 = min v0 v1
+  t0 = ge v0 v2
+  t1 = const 1
+  v3 = and t0 t1
+  ret v3
+@run 0 0 -> 1
+@run 1 2 -> 1
+
+---
+
+# %test_ule_umin_x
+fn main v0:i32 v1:i32 -> i32
+  t0 = const -2147483648
+  t1 = xor v0 t0
+  t2 = xor v1 t0
+  t3 = min t1 t2
+  v2 = xor t3 t0
+  t4 = const -2147483648
+  t5 = xor v2 t4
+  t6 = xor v0 t4
+  t7 = le t5 t6
+  t8 = const 1
+  v3 = and t7 t8
+  ret v3
+@run 0 0 -> 1
+@run 1 2 -> 1
+@run 2 1 -> 1
+
+---
+
+# %test_umin_same
+fn main v0:i32 -> i32
+  t0 = const -2147483648
+  t1 = xor v0 t0
+  t2 = xor v0 t0
+  t3 = min t1 t2
+  v1 = xor t3 t0
+  ret v1
+@run 0 -> 0
+@run 1 -> 1
+
+---
+
+# %test_smin_same
+fn main v0:i32 -> i32
+  v1 = min v0 v0
+  ret v1
+@run 0 -> 0
+@run 1 -> 1
+
+---
+
+# %test_umax_same
+fn main v0:i32 -> i32
+  t0 = const -2147483648
+  t1 = xor v0 t0
+  t2 = xor v0 t0
+  t3 = max t1 t2
+  v1 = xor t3 t0
+  ret v1
+@run 0 -> 0
+@run 1 -> 1
+
+---
+
+# %test_smax_same
+fn main v0:i32 -> i32
+  v1 = max v0 v0
+  ret v1
+@run 0 -> 0
+@run 1 -> 1
+
+---
+
+# %test_smax_nested_absorb
+fn main v0:i32 v1:i32 -> i32
+  v2 = max v0 v1
+  v3 = max v2 v0
+  ret v3
+@run 0 0 -> 0
+@run 1 2 -> 2
+@run 2 1 -> 2
+
+---
+
+# %test_umax_nested_absorb
+fn main v0:i32 v1:i32 -> i32
+  t0 = const -2147483648
+  t1 = xor v0 t0
+  t2 = xor v1 t0
+  t3 = max t1 t2
+  v2 = xor t3 t0
+  t4 = const -2147483648
+  t5 = xor v2 t4
+  t6 = xor v0 t4
+  t7 = max t5 t6
+  v3 = xor t7 t4
+  ret v3
+@run 0 0 -> 0
+@run 1 2 -> 2
+
+---
+
+# %test_smin_nested_absorb
+fn main v0:i32 v1:i32 -> i32
+  v2 = min v0 v1
+  v3 = min v2 v0
+  ret v3
+@run 0 0 -> 0
+@run 1 2 -> 1
+@run 2 1 -> 1
+
+---
+
+# %test_umin_nested_absorb
+fn main v0:i32 v1:i32 -> i32
+  t0 = const -2147483648
+  t1 = xor v0 t0
+  t2 = xor v1 t0
+  t3 = min t1 t2
+  v2 = xor t3 t0
+  t4 = const -2147483648
+  t5 = xor v2 t4
+  t6 = xor v0 t4
+  t7 = min t5 t6
+  v3 = xor t7 t4
+  ret v3
+@run 0 0 -> 0
+@run 1 2 -> 1
+@run 2 1 -> 1
+
+---
+
+# %test_smin_smax_absorb
+fn main v0:i32 v1:i32 -> i32
+  v2 = max v0 v1
+  v3 = min v2 v1
+  ret v3
+@run 0 0 -> 0
+@run 1 2 -> 2
+
+---
+
+# %test_umax_umin_absorb
+fn main v0:i32 v1:i32 -> i32
+  t0 = const -2147483648
+  t1 = xor v0 t0
+  t2 = xor v1 t0
+  t3 = min t1 t2
+  v2 = xor t3 t0
+  t4 = const -2147483648
+  t5 = xor v2 t4
+  t6 = xor v1 t4
+  t7 = max t5 t6
+  v3 = xor t7 t4
+  ret v3
+@run 0 0 -> 0
+@run 1 2 -> 2
+
+---
+
+# %test_sgt_x_smax
+fn main v0:i32 v1:i32 -> i32
+  v2 = max v0 v1
+  t0 = gt v0 v2
+  t1 = const 1
+  v3 = and t0 t1
+  ret v3
+@run 0 0 -> 0
+@run 1 2 -> 0
+
+---
+
+# %test_ugt_x_umax
+fn main v0:i32 v1:i32 -> i32
+  t0 = const -2147483648
+  t1 = xor v0 t0
+  t2 = xor v1 t0
+  t3 = max t1 t2
+  v2 = xor t3 t0
+  t4 = const -2147483648
+  t5 = xor v0 t4
+  t6 = xor v2 t4
+  t7 = gt t5 t6
+  t8 = const 1
+  v3 = and t7 t8
+  ret v3
+@run 0 0 -> 0
+@run 1 2 -> 0
+
+---
+
+# %fold_bnot_iadd_const_i32_rt
+fn main v0:i32 -> i32
+  v1 = const 5
+  v2 = add v0 v1
+  t0 = const -1
+  v3 = xor v2 t0
+  ret v3
+@run 0 -> -6
+@run 7 -> -13
+@run -5 -> -1
+@run 0x7fffffff -> 0x7ffffffb
+
+---
+
+# %fold_bnot_iadd_neg_const_i64_rt (low 32 bits)
+fn main v0:i32 -> i32
+  v1 = const -7
+  v2 = add v0 v1
+  t0 = const -1
+  v3 = xor v2 t0
+  ret v3
+@run 0 -> 6
+@run 7 -> -1
+@run -1 -> 7
+@run 0 -> 6

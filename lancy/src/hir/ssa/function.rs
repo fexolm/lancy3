@@ -643,6 +643,26 @@ impl Function {
         }
         self.verified_module().map_err(|error| error.to_string())?;
         // SAFETY: the caller supplies every pointer reachable during execution.
-        unsafe { interpret::run(self, args) }
+        unsafe { interpret::run(self, args, None) }
+    }
+
+    /// Execute a filetest with one buffer. Its pointer is represented by a
+    /// byte offset so an invalid fixture is rejected before entering the JIT.
+    pub(crate) fn interpret_buffer(&self, args: &[i32], buffer: &mut [u8]) -> Result<i32, String> {
+        let Some((Type::Ptr, scalars)) = self.param_types().split_first() else {
+            return Err("expected leading buffer argument".into());
+        };
+        if self.return_type != Type::I32
+            || scalars.len() != args.len()
+            || scalars.iter().any(|&t| t != Type::I32)
+        {
+            return Err("expected (ptr, i32...) -> i32 matching the run arguments".into());
+        }
+        self.verified_module().map_err(|e| e.to_string())?;
+        let words: Vec<_> = std::iter::once(0)
+            .chain(args.iter().map(|&x| u64::from(x as u32)))
+            .collect();
+        // SAFETY: buffer mode services every load/store through checked slice accesses.
+        unsafe { interpret::run(self, &words, Some(buffer)) }.map(|v| v as i32)
     }
 }

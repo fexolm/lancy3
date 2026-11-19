@@ -1,0 +1,54 @@
+# Adapted from Wasmtime v45.0.3, runtests/stack.clif (%offset_unaligned).
+# SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+# The caller owns the scratch bytes. Check the neighbouring bytes as well.
+fn main base:ptr x:i32 -> i32
+  one = const 1
+  dst = offset base one 1
+  store dst x
+  result = load i32 dst
+  ret result
+@isel check: lea scale=0 disp=1
+@isel check: store.I32
+@isel nextln: load.I32
+@run 0 -> 0 | aa bb cc dd ee ff | aa 00 00 00 00 ff
+@run 1 -> 1 | aa bb cc dd ee ff | aa 01 00 00 00 ff
+@run -1 -> -1 | aa bb cc dd ee ff | aa ff ff ff ff ff
+
+---
+
+# %stack_simple
+fn main p:ptr x:i32 -> i32
+  store p x
+  result = load i32 p
+  ret result
+@run 0 -> 0 | aa aa aa aa | 00 00 00 00
+@run 1 -> 1 | aa aa aa aa | 01 00 00 00
+@run -1 -> -1 | aa aa aa aa | ff ff ff ff
+
+---
+
+# %stack_offset
+fn main p:ptr x:i32 -> i32
+  eight = const 8
+  at = offset p eight 1
+  store at x
+  result = load i32 at
+  ret result
+@run 0 -> 0 | 01 23 45 67 89 ab cd ef aa aa aa aa | 01 23 45 67 89 ab cd ef 00 00 00 00
+@run 1 -> 1 | 01 23 45 67 89 ab cd ef aa aa aa aa | 01 23 45 67 89 ab cd ef 01 00 00 00
+@run -1 -> -1 | 01 23 45 67 89 ab cd ef aa aa aa aa | 01 23 45 67 89 ab cd ef ff ff ff ff
+
+---
+
+# %multi_slot_stack
+fn main p:ptr x:i32 y:i32 -> i32
+  one = const 1
+  q = offset p one 4
+  store p x
+  store q y
+  a = load i32 p
+  b = load i32 q
+  total = add a b
+  ret total
+@run 0 1 -> 1 | aa aa aa aa bb bb bb bb | 00 00 00 00 01 00 00 00
+@run 1 2 -> 3 | aa aa aa aa bb bb bb bb | 01 00 00 00 02 00 00 00

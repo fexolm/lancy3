@@ -1,0 +1,40 @@
+# Adapted from Wasmtime v45.0.3, runtests/const.clif
+# SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+
+# %i32_iconst_0
+fn main -> i32
+  v1 = const 0
+  ret v1
+@run -> 0
+
+---
+
+# %i32_iconst_1
+fn main -> i32
+  v1 = const 1
+  ret v1
+@run -> 1
+
+---
+
+# %i32_iconst_neg_one
+fn main -> i32
+  v1 = const -1
+  ret v1
+@run -> -1
+
+---
+
+# %i32_iconst_false
+fn main -> i32
+  v1 = const 0
+  ret v1
+@run -> 0
+
+---
+
+# %i32_iconst_true
+fn main -> i32
+  v1 = const 1
+  ret v1
+@run -> 1

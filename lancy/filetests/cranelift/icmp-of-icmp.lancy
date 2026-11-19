@@ -1,0 +1,64 @@
+# Adapted from Wasmtime v45.0.3, runtests/icmp-of-icmp.clif
+# SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+
+# %eq_eq_zero
+fn main v0:i32 -> i32
+  v1 = const 5
+  t0 = eq v0 v1
+  t1 = const 1
+  v2 = and t0 t1
+  v3 = const 0
+  t2 = eq v2 v3
+  t3 = const 1
+  v4 = and t2 t3
+  ret v4
+@run 5 -> 0
+@run 3 -> 1
+
+---
+
+# %ne_eq_one
+fn main v0:i32 -> i32
+  v1 = const 5
+  t0 = eq v0 v1
+  t1 = const 1
+  v2 = and t0 t1
+  v3 = const 1
+  t2 = ne v2 v3
+  t3 = const 1
+  v4 = and t2 t3
+  ret v4
+@run 5 -> 0
+@run 3 -> 1
+
+---
+
+# %ne_eq_zero
+fn main v0:i32 -> i32
+  v1 = const 5
+  t0 = eq v0 v1
+  t1 = const 1
+  v2 = and t0 t1
+  v3 = const 0
+  t2 = ne v2 v3
+  t3 = const 1
+  v4 = and t2 t3
+  ret v4
+@run 5 -> 1
+@run 3 -> 0
+
+---
+
+# %eq_eq_one
+fn main v0:i32 -> i32
+  v1 = const 5
+  t0 = eq v0 v1
+  t1 = const 1
+  v2 = and t0 t1
+  v3 = const 1
+  t2 = eq v2 v3
+  t3 = const 1
+  v4 = and t2 t3
+  ret v4
+@run 5 -> 1
+@run 3 -> 0

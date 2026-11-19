@@ -1,0 +1,72 @@
+# Adapted from Wasmtime v45.0.3, runtests/long-jump.clif
+# SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+
+# %a
+fn main v0:i32 -> i32
+  jump block1 v0
+block block1 v1:i32
+  ret v0
+@run 0 -> 0
+
+---
+
+# Lancy has no block-padding setting. Make the skipped block exceed rel8.
+fn main skip:i32 x:i32 -> i32
+  one = const 1
+  br skip exit x | work
+block work
+  a0 = add x one
+  a1 = add a0 one
+  a2 = add a1 one
+  a3 = add a2 one
+  a4 = add a3 one
+  a5 = add a4 one
+  a6 = add a5 one
+  a7 = add a6 one
+  a8 = add a7 one
+  a9 = add a8 one
+  a10 = add a9 one
+  a11 = add a10 one
+  a12 = add a11 one
+  a13 = add a12 one
+  a14 = add a13 one
+  a15 = add a14 one
+  a16 = add a15 one
+  a17 = add a16 one
+  a18 = add a17 one
+  a19 = add a18 one
+  a20 = add a19 one
+  a21 = add a20 one
+  a22 = add a21 one
+  a23 = add a22 one
+  a24 = add a23 one
+  a25 = add a24 one
+  a26 = add a25 one
+  a27 = add a26 one
+  a28 = add a27 one
+  a29 = add a28 one
+  a30 = add a29 one
+  a31 = add a30 one
+  a32 = add a31 one
+  a33 = add a32 one
+  a34 = add a33 one
+  a35 = add a34 one
+  a36 = add a35 one
+  a37 = add a36 one
+  a38 = add a37 one
+  a39 = add a38 one
+  a40 = add a39 one
+  a41 = add a40 one
+  a42 = add a41 one
+  a43 = add a42 one
+  a44 = add a43 one
+  a45 = add a44 one
+  a46 = add a45 one
+  a47 = add a46 one
+  jump exit a47
+block exit result:i32
+  ret result
+@asm check: e9
+@asm sameln: jmp
+@run 1 7 -> 7
+@run 0 7 -> 55

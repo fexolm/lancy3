@@ -1,0 +1,18 @@
+# Adapted from Wasmtime v45.0.3, runtests/issue5839.clif
+# SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+
+# %a
+fn main v0:i32 v1:i32 -> i32
+  t0 = le v0 v1
+  t1 = const 1
+  v2 = and t0 t1
+  v3 = copy v2
+  v4 = const 0
+  v5 = const 1
+  t2 = eq v3 v4
+  t3 = const 1
+  v6 = and t2 t3
+  br v6 select_v7 v5 | select_v7 v3
+block select_v7 v7:i32
+  ret v7
+@run 20 -11 -> 1

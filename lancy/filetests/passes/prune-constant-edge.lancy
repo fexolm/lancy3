@@ -1,0 +1,33 @@
+fn main x:i32 -> i32
+  zero = const 0
+  br zero dead | live
+block dead
+  trap = div x zero
+  ret trap
+block live
+  ret x
+@source check: Div
+@opt not: Div
+@opt not: br
+@opt check: jump
+@asm not: idiv
+@run 17 -> 17
+
+---
+
+fn main x:i32 -> i32
+  jump join
+block join y:i32
+  ret y
+@reject wrong arity
+
+---
+
+fn main x:i32 -> i32
+  br x left | right
+block left
+  y = const 4
+  ret y
+block right
+  ret y
+@reject does not dominate

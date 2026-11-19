@@ -66,6 +66,12 @@ pub(crate) fn emit(
     ids: &FunctionIds<Function>,
 ) -> Result<(Vec<u8>, usize), CompileError> {
     let module = compile(source, ids)?;
+    emit_compiled(&module)
+}
+
+pub(super) fn emit_compiled(
+    module: &Module<CompiledFunction>,
+) -> Result<(Vec<u8>, usize), CompileError> {
     let entry = module.call_graph.root();
     let mut a = CodeAssembler::new(64)?;
     let entries = DenseMap::from_fn(module.functions.len(), |_| a.create_label());

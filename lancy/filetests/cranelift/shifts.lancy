@@ -1,0 +1,57 @@
+# Adapted from Wasmtime v45.0.3, runtests/shifts.clif
+# SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+
+# %ishl_i32_i32
+fn main v0:i32 v1:i32 -> i32
+  v2 = shl v0 v1
+  ret v2
+@run 0x00000000 0 -> 0x00000000
+@run 0x00000000 1 -> 0x00000000
+@run 0x0000000f 0 -> 0x0000000f
+@run 0x0000000f 4 -> 0x000000f0
+@run 0x00000004 32 -> 0x00000004
+@run 0x00000004 33 -> 0x00000008
+@run 0x00000004 34 -> 0x00000010
+
+---
+
+# %sshr_i32_i32
+fn main v0:i32 v1:i32 -> i32
+  v2 = shr v0 v1
+  ret v2
+@run 0x80000000 0 -> 0x80000000
+@run 0x80000000 1 -> 0xC0000000
+@run 0xf0000000 0 -> 0xf0000000
+@run 0xf0000000 4 -> 0xff000000
+@run 0x40000000 32 -> 0x40000000
+@run 0x40000000 33 -> 0x20000000
+@run 0x40000000 34 -> 0x10000000
+
+---
+
+# %ishl_i32_const
+fn main v0:i32 -> i32
+  t0 = const 33
+  v1 = shl v0 t0
+  ret v1
+@run 0x00000004 -> 0x00000008
+
+---
+
+# %ushr_i32_const
+fn main v0:i32 -> i32
+  t0 = const 33
+  t1 = shr v0 t0
+  t2 = const 2147483647
+  v1 = and t1 t2
+  ret v1
+@run 0x40000000 -> 0x20000000
+
+---
+
+# %sshr_i32_const
+fn main v0:i32 -> i32
+  t0 = const 33
+  v1 = shr v0 t0
+  ret v1
+@run 0x40000000 -> 0x20000000

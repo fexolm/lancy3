@@ -48,7 +48,21 @@ impl<'a> Frame<'a> {
     }
 }
 
-pub(super) unsafe fn run(function: &Function, args: &[u64]) -> Result<u64, String> {
+fn buffer_word(bytes: &mut [u8], addr: u64, ty: Type) -> Result<&mut [u8; 4], String> {
+    if ty != Type::I32 {
+        return Err("filetest buffer holds i32 data only".into());
+    }
+    bytes
+        .get_mut(addr as usize..)
+        .and_then(|tail| tail.first_chunk_mut())
+        .ok_or_else(|| format!("filetest access outside buffer at offset {addr}"))
+}
+
+pub(super) unsafe fn run(
+    function: &Function,
+    args: &[u64],
+    mut buffer: Option<&mut [u8]>,
+) -> Result<u64, String> {
     let mut frames = vec![Frame::new(function, args.iter().copied(), None)];
     loop {
         let f = frames.last_mut().unwrap();
@@ -96,21 +110,30 @@ pub(super) unsafe fn run(function: &Function, args: &[u64]) -> Result<u64, Strin
                 .wrapping_add((f.read(index) as i32 as i64 as u64) << scale as u8),
             Op::Load(ty, addr) => {
                 let addr = f.read(addr);
-                // SAFETY: covered by interpret_raw's caller contract.
-                unsafe {
-                    match ty {
-                        Type::I32 => (addr as *const u32).read_unaligned() as u64,
-                        Type::Ptr => (addr as *const u64).read_unaligned(),
+                if let Some(bytes) = buffer.as_deref_mut() {
+                    u32::from_ne_bytes(*buffer_word(bytes, addr, ty)?) as u64
+                } else {
+                    // SAFETY: covered by interpret_raw's caller contract.
+                    unsafe {
+                        match ty {
+                            Type::I32 => (addr as *const u32).read_unaligned() as u64,
+                            Type::Ptr => (addr as *const u64).read_unaligned(),
+                        }
                     }
                 }
             }
             Op::Store(addr, value) => {
                 let addr = f.read(addr);
-                // SAFETY: covered by interpret_raw's caller contract.
-                unsafe {
-                    match graph.value_type(value) {
-                        Type::I32 => (addr as *mut u32).write_unaligned(f.read(value) as u32),
-                        Type::Ptr => (addr as *mut u64).write_unaligned(f.read(value)),
+                if let Some(bytes) = buffer.as_deref_mut() {
+                    *buffer_word(bytes, addr, graph.value_type(value))? =
+                        (f.read(value) as u32).to_ne_bytes();
+                } else {
+                    // SAFETY: covered by interpret_raw's caller contract.
+                    unsafe {
+                        match graph.value_type(value) {
+                            Type::I32 => (addr as *mut u32).write_unaligned(f.read(value) as u32),
+                            Type::Ptr => (addr as *mut u64).write_unaligned(f.read(value)),
+                        }
                     }
                 }
                 continue;

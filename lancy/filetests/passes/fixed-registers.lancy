@@ -1,0 +1,22 @@
+fn main x:i32 y:i32 -> i32
+  rest = rem x y
+  result = shl rest y
+  ret result
+
+@opt check: Rem
+@opt nextln: Shl
+@isel check: cdq
+@isel nextln: irem
+@isel nextln: shl
+@alloc check: cdq | rax rdx
+@alloc check: irem | rax rdx
+@alloc sameln: rdx
+@alloc check: shl |
+@alloc sameln: rcx
+@asm check: cdq
+@asm check: idiv
+@asm check: shl
+@asm sameln: ,cl
+@run -17 3 -> -16
+@run 101 0 -> !zero
+@run -2147483648 -1 -> !overflow

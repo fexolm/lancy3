@@ -1,0 +1,59 @@
+# Adapted from Wasmtime v45.0.3, runtests/br.clif
+# SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+
+# %jump
+fn main -> i32
+  jump block2
+block block2
+  v1 = const 1
+  ret v1
+@run -> 1
+
+---
+
+# %brif_false__i32_overflow
+fn main v0:i32 -> i32
+  v1 = const -1
+  v2 = add v0 v1
+  br v2 block1 | block2
+block block1
+  v3 = const 1
+  ret v3
+block block2
+  v4 = const 0
+  ret v4
+@run 0 -> 1
+@run 1 -> 0
+@run 2 -> 1
+@run 98 -> 1
+@run 97 -> 1
+
+---
+
+# %brif_false__i32
+fn main v0:i32 -> i32
+  br v0 block2 | block1
+block block1
+  v1 = const 1
+  ret v1
+block block2
+  v2 = const 0
+  ret v2
+@run 0 -> 1
+@run 1 -> 0
+@run -1 -> 0
+
+---
+
+# %brif_true__i32
+fn main v0:i32 -> i32
+  br v0 block1 | block2
+block block1
+  v1 = const 1
+  ret v1
+block block2
+  v2 = const 0
+  ret v2
+@run 0 -> 0
+@run 1 -> 1
+@run -1 -> 1

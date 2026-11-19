@@ -1,0 +1,286 @@
+# Adapted from Wasmtime v45.0.3, runtests/fold-bitops.clif
+# SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+
+# %simplify_bor_xxy
+fn main v0:i32 v1:i32 -> i32
+  v2 = or v0 v1
+  v3 = or v0 v2
+  ret v3
+@run 1 2 -> 3
+@run 54 9 -> 63
+
+---
+
+# %simplify_bor_yxy
+fn main v0:i32 v1:i32 -> i32
+  v3 = or v0 v1
+  v4 = or v1 v3
+  ret v4
+@run 1 2 -> 3
+@run 54 9 -> 63
+
+---
+
+# %simplify_bor_xyx
+fn main v0:i32 v1:i32 -> i32
+  v2 = or v0 v1
+  v3 = or v2 v0
+  ret v3
+@run 1 2 -> 3
+@run 54 9 -> 63
+
+---
+
+# %simplify_bor_xyy
+fn main v0:i32 v1:i32 -> i32
+  v2 = or v0 v1
+  v3 = or v2 v1
+  ret v3
+@run 1 2 -> 3
+@run 54 9 -> 63
+
+---
+
+# %test_isub_band_band_bnot_rt
+fn main v0:i32 v1:i32 -> i32
+  t0 = const -1
+  v2 = xor v1 t0
+  v3 = and v0 v2
+  v4 = and v0 v1
+  v5 = sub v3 v4
+  ret v5
+@run 0 0 -> 0
+@run 1 0 -> 1
+@run 1 1 -> -1
+
+---
+
+# %test_bor_band_bnot_to_bxor
+fn main v0:i32 v1:i32 -> i32
+  t0 = const -1
+  v2 = xor v1 t0
+  v3 = and v0 v2
+  t1 = const -1
+  v4 = xor v0 t1
+  v5 = and v4 v1
+  v6 = or v3 v5
+  ret v6
+@run 0 0 -> 0
+@run 1 0 -> 1
+@run 0 1 -> 1
+
+---
+
+# %test_bor_band_bnot_bxor_absorb
+fn main v0:i32 v1:i32 -> i32
+  t0 = const -1
+  v2 = xor v1 t0
+  v3 = and v0 v2
+  v4 = xor v0 v1
+  v5 = or v3 v4
+  ret v5
+@run 0 0 -> 0
+@run 1 0 -> 1
+@run 0 1 -> 1
+
+---
+
+# %test_bxor_band_bnot_to_bnot_band
+fn main v0:i32 v1:i32 -> i32
+  t0 = const -1
+  v2 = xor v1 t0
+  v3 = and v0 v2
+  t1 = const -1
+  v4 = xor v0 t1
+  v5 = xor v3 v4
+  ret v5
+@run 0 0 -> 0xffffffff
+@run 1 0 -> 0xffffffff
+@run 1 1 -> 0xfffffffe
+
+---
+
+# %test_bxor_band_bnot_x
+fn main v0:i32 v1:i32 -> i32
+  t0 = const -1
+  v2 = xor v0 t0
+  v3 = and v2 v1
+  v4 = xor v3 v0
+  ret v4
+@run 0 0 -> 0
+@run 1 0 -> 1
+@run 0 1 -> 1
+
+---
+
+# %test_band_bor_bnot_bxor
+fn main v0:i32 v1:i32 -> i32
+  v2 = or v0 v1
+  v3 = xor v0 v1
+  t0 = const -1
+  v4 = xor v3 t0
+  v5 = and v2 v4
+  ret v5
+@run 0 0 -> 0
+@run 1 0 -> 0
+@run 0 1 -> 0
+@run 1 1 -> 1
+
+---
+
+# %test_bor_bnot_bxor
+fn main v0:i32 v1:i32 -> i32
+  v2 = xor v0 v1
+  t0 = const -1
+  v3 = xor v2 t0
+  v4 = or v0 v3
+  ret v4
+@run 0 0 -> 0xffffffff
+@run 1 0 -> 0xffffffff
+
+---
+
+# %test_bor_bxor_bnot_x
+fn main v0:i32 v1:i32 -> i32
+  t0 = const -1
+  v2 = xor v0 t0
+  v3 = xor v2 v1
+  v4 = or v0 v3
+  ret v4
+@run 0 0 -> 0xffffffff
+@run 1 0 -> 0xffffffff
+@run 0 1 -> 0xfffffffe
+
+---
+
+# %test_band_bnot_bxor
+fn main v0:i32 v1:i32 -> i32
+  v2 = xor v0 v1
+  t0 = const -1
+  v3 = xor v2 t0
+  v4 = and v0 v3
+  ret v4
+@run 0 0 -> 0
+@run 1 0 -> 0
+@run 0 1 -> 0
+
+---
+
+# %test_band_bxor_bnot_x
+fn main v0:i32 v1:i32 -> i32
+  t0 = const -1
+  v2 = xor v0 t0
+  v3 = xor v2 v1
+  v4 = and v0 v3
+  ret v4
+@run 0 0 -> 0
+@run 1 0 -> 0
+@run 0 1 -> 0
+
+---
+
+# %test_bor_bor_bxor_same
+fn main v0:i32 v1:i32 -> i32
+  v2 = or v0 v1
+  v3 = xor v0 v1
+  v4 = or v2 v3
+  ret v4
+@run 0 0 -> 0
+@run 1 0 -> 1
+@run 0 1 -> 1
+
+---
+
+# %test_band_bxor_bxor_bnot
+fn main v0:i32 v1:i32 v2:i32 -> i32
+  v3 = xor v0 v1
+  v4 = xor v1 v2
+  v5 = xor v4 v0
+  v6 = and v3 v5
+  ret v6
+@run 0 0 0 -> 0
+@run 1 0 0 -> 1
+@run 1 0 1 -> 0
+
+---
+
+# %test_bxor_band_bnot_general
+fn main v0:i32 v1:i32 v2:i32 -> i32
+  t0 = const -1
+  v3 = xor v0 t0
+  v4 = and v3 v1
+  v5 = xor v4 v2
+  ret v5
+@run 0 0 0 -> 0
+@run 1 0 0 -> 0
+@run 0 1 0 -> 1
+
+---
+
+# %test_isub_bnot_bnot
+fn main v0:i32 v1:i32 -> i32
+  t0 = const -1
+  v2 = xor v0 t0
+  t1 = const -1
+  v3 = xor v1 t1
+  v4 = sub v2 v3
+  ret v4
+@run 0 0 -> 0
+@run 1 0 -> -1
+@run 0 1 -> 1
+
+---
+
+# %test_bor_band_bnot_bor_to_bnot
+fn main v0:i32 v1:i32 -> i32
+  t0 = const -1
+  v2 = xor v0 t0
+  v3 = and v2 v1
+  v4 = or v0 v1
+  t1 = const -1
+  v5 = xor v4 t1
+  v6 = or v3 v5
+  ret v6
+@run 0 0 -> 0xffffffff
+@run 1 0 -> 0xfffffffe
+
+---
+
+# %test_band_bor_bnot_band_to_bnot
+fn main v0:i32 v1:i32 -> i32
+  t0 = const -1
+  v2 = xor v0 t0
+  v3 = or v2 v1
+  v4 = and v0 v1
+  t1 = const -1
+  v5 = xor v4 t1
+  v6 = and v3 v5
+  ret v6
+@run 0 0 -> 0xffffffff
+@run 1 0 -> 0xfffffffe
+
+---
+
+# %test_bor_band_bnot_bor_to_bnot_bxor
+fn main v0:i32 v1:i32 -> i32
+  v2 = and v0 v1
+  v3 = or v0 v1
+  t0 = const -1
+  v4 = xor v3 t0
+  v5 = or v2 v4
+  ret v5
+@run 0 0 -> 0xffffffff
+@run 1 0 -> 0xfffffffe
+
+---
+
+# %test_bxor_bor_bnot_bxor
+fn main v0:i32 v1:i32 -> i32
+  t0 = const -1
+  v2 = xor v0 t0
+  v3 = or v2 v1
+  v4 = xor v0 v1
+  v5 = xor v3 v4
+  ret v5
+@run 0 0 -> 0xffffffff
+@run 1 0 -> 0xffffffff
