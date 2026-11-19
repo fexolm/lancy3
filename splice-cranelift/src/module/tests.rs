@@ -205,3 +205,22 @@ fn masked_contiguous_access_selects_packed_and_ordered_paths() {
         assert_eq!(actual, expected);
     }
 }
+
+#[test]
+fn a_full_gather_has_one_bounds_branch_for_all_lanes() {
+    use splice::{kernel, simd::Lane};
+    #[kernel]
+    fn first_block(data: &[i32]) -> i32 {
+        Lane::<i32>::gather(data, Lane::<i32>::iota()).last()
+    }
+    let mut jit = JITModule::new(JITBuilder::new(default_libcall_names()).unwrap());
+    let module = KernelModule::lower(&mut jit, &first_block::ir().unwrap()).unwrap();
+    let entry = &module.bodies[&module.entry];
+    let branches = entry
+        .layout
+        .blocks()
+        .flat_map(|block| entry.layout.block_insts(block))
+        .filter(|&inst| entry.dfg.insts[inst].opcode() == Opcode::Brif)
+        .count();
+    assert_eq!(branches, 1);
+}

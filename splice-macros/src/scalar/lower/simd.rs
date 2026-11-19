@@ -99,7 +99,7 @@ pub(crate) fn constructor_arity(p: &Path) -> Option<usize> {
     match member.to_string().as_str() {
         "lanes" | "iota" => Some(0),
         "splat" | "first_n" => Some(1),
-        "load" | "gather" => Some(2),
+        "alignment_prefix" | "load" | "gather" => Some(2),
         "load_select" | "gather_select" => Some(4),
         _ => None,
     }
@@ -116,7 +116,7 @@ pub(super) fn uses_lane(e: &Expr) -> bool {
     f.0
 }
 impl Scalar {
-    pub(super) fn value_type(self, root: &Path) -> TokenStream {
+    pub(in crate::scalar) fn value_type(self, root: &Path) -> TokenStream {
         match self {
             Self::Vector(e) => {
                 let e = e.tokens(root);
@@ -190,7 +190,7 @@ impl Lower<'_> {
         }
         let buffer = if matches!(
             name.as_str(),
-            "load" | "gather" | "load_select" | "gather_select"
+            "alignment_prefix" | "load" | "gather" | "load_select" | "gather_select"
         ) {
             let v = self.expr(&c.args[0])?;
             let Stage::Buffer(b) = v.stage else {
@@ -270,6 +270,23 @@ impl Lower<'_> {
                 }
                 pre.extend(emit!(let buffer=#buf;));
                 match name.as_str() {
+                    "alignment_prefix" if elem == Elem::I32 => {
+                        let index = self.expr(&c.args[1])?;
+                        // Alignment depends only on low address bits, including for
+                        // host offsets above the range representable by a JIT index.
+                        let offset = if index.stage.is_host() {
+                            emit!({let index:usize=#index; __splice_builder.constant(index as i32)})
+                        } else {
+                            self.reg(index, Scalar::Index, &c.args[1])?
+                        };
+                        self.vector_op(
+                            elem,
+                            emit!(AlignmentPrefix(buffer)),
+                            vec![offset],
+                            Some(Scalar::Length),
+                        )
+                    }
+                    "alignment_prefix" => return err(c, "alignment_prefix expects i32 lanes"),
                     "load" | "load_select" => {
                         let mut a = vec![self.offset(self.expr(&c.args[1])?, &c.args[1])?];
                         let op = if n == 4 {
@@ -335,6 +352,15 @@ impl Lower<'_> {
         r: Value,
         at: &syn::ExprBinary,
     ) -> Result<Value> {
+        if t == Scalar::Vector(Elem::I32) && matches!(op, syn::BinOp::Shr(_)) {
+            let shift = self.host(r, &at.right)?;
+            return Ok(self.vector_op(
+                Elem::I32,
+                emit!(Shr({let shift:u32=#shift;shift & 31})),
+                vec![self.reg(l, t, at)?],
+                Some(t),
+            ));
+        }
         let name = match op {
             syn::BinOp::Add(_) => "Add",
             syn::BinOp::Sub(_) => "Sub",
@@ -384,6 +410,61 @@ impl Lower<'_> {
         let recv = emit!(__splice_receiver);
         let mut pre = emit!(let __splice_receiver=#receiver;);
         let mut value = match (method.as_str(), args.len(), is_mask) {
+            (
+                "interleave_low" | "interleave_high" | "deinterleave_even" | "deinterleave_odd",
+                1,
+                false,
+            ) if e == Elem::I32 => {
+                let order = format_ident!(
+                    "{}",
+                    match method.as_str() {
+                        "interleave_low" => "InterleaveLow",
+                        "interleave_high" => "InterleaveHigh",
+                        "deinterleave_even" => "DeinterleaveEven",
+                        _ => "DeinterleaveOdd",
+                    }
+                );
+                let root = self.root;
+                self.vector_op(
+                    e,
+                    emit!(Shuffle(#root::simd::Shuffle::#order)),
+                    vec![recv, op(0, v)?],
+                    Some(v),
+                )
+            }
+            ("compress", 1, false) if e == Elem::I32 => {
+                self.vector_op(e, emit!(Compress), vec![recv, op(0, mask)?], Some(v))
+            }
+            ("expand", 2, false) if e == Elem::I32 => self.vector_op(
+                e,
+                emit!(Expand),
+                vec![recv, op(0, mask)?, op(1, v)?],
+                Some(v),
+            ),
+            ("swizzle", 1, false) if e == Elem::I32 => {
+                self.vector_op(e, emit!(Swizzle), vec![recv, op(0, v)?], Some(v))
+            }
+            ("prefix_sum", 0, false) if e == Elem::I32 => {
+                self.vector_op(e, emit!(PrefixSum), vec![recv], Some(v))
+            }
+            ("count", 0, true) if e == Elem::I32 => {
+                self.vector_op(e, emit!(Count), vec![recv], Some(Scalar::Int))
+            }
+            ("extract_wrapping", 1, false) if e == Elem::I32 => self.vector_op(
+                e,
+                emit!(ExtractWrapping),
+                vec![recv, op(0, Scalar::Int)?],
+                Some(Scalar::Int),
+            ),
+            ("replace_wrapping", 2, false) if e == Elem::I32 => self.vector_op(
+                e,
+                emit!(ReplaceWrapping),
+                vec![recv, op(0, Scalar::Int)?, op(1, Scalar::Int)?],
+                Some(v),
+            ),
+            ("last", 0, false) if e == Elem::I32 => {
+                self.vector_op(e, emit!(Last), vec![recv], Some(Scalar::Int))
+            }
             ("any" | "all", 0, true) => {
                 let f = if method == "any" {
                     emit!(Any)
@@ -435,7 +516,8 @@ impl Lower<'_> {
                     Some(v),
                 )
             }
-            ("store" | "scatter", 2, false) | ("store_select" | "scatter_select", 3, false) => {
+            ("store" | "scatter", 2, false)
+            | ("store_select" | "scatter_select" | "compress_store", 3, false) => {
                 let buf = self.expr(&args[0])?;
                 let Stage::Buffer(b) = buf.stage else {
                     return err(m, "expected a mutable runtime slice");
@@ -454,9 +536,16 @@ impl Lower<'_> {
                         vec![self.offset(self.expr(&args[1])?, &args[1])?, recv],
                         None,
                     ),
-                    "store_select" => self.vector_op(
+                    "compress_store" if e != Elem::I32 => {
+                        return err(m, "compress_store requires i32 lanes");
+                    }
+                    "store_select" | "compress_store" => self.vector_op(
                         e,
-                        emit!(StoreSelect(buffer)),
+                        if method == "compress_store" {
+                            emit!(CompressStore(buffer))
+                        } else {
+                            emit!(StoreSelect(buffer))
+                        },
                         vec![
                             self.offset(self.expr(&args[1])?, &args[1])?,
                             op(2, mask)?,

@@ -196,3 +196,28 @@ fn masked_f64_gather_checks_active_indices_at_full_i64_width() {
         }
     }
 }
+
+#[test]
+fn i32_gather_keeps_dword_indices_and_native_compaction() {
+    use splice::{kernel, simd::Lane};
+    #[kernel]
+    fn compact(src: &[i32], ids: &[i32], out: &mut [i32]) -> i32 {
+        let positions = Lane::<i32>::load(ids, 0);
+        let words = Lane::<i32>::gather(src, positions);
+        let keep = words.simd_ge(Lane::splat(0));
+        words.compress(keep).store(out, 0);
+        keep.count()
+    }
+    let ir = splice_llvm::to_llvm_ir(&compact::ir().unwrap()).unwrap();
+    let width = Lane::<i32>::lanes();
+    assert!(
+        ir.lines()
+            .any(|line| line.contains("getelementptr i32, ptr")
+                && line.contains(&format!("<{width} x i32>")))
+    );
+    if std::is_x86_feature_detected!("avx512f")
+        && (width == 16 || std::is_x86_feature_detected!("avx512vl"))
+    {
+        assert!(ir.contains("@llvm.x86.avx512.mask.compress"));
+    }
+}

@@ -50,6 +50,7 @@ struct Workload<'a, Run> {
     elements: usize,
     workspace_words: usize,
     expected: &'a dyn Fn() -> &'a [i32],
+    equal: fn(&[i32], &[i32]) -> bool,
     run: Run,
 }
 
@@ -86,7 +87,7 @@ where
             self.name
         );
         assert!(
-            workspace[..used] == *expected,
+            (self.equal)(&workspace[..used], expected),
             "{} / {backend}: incorrect output",
             self.name
         );
@@ -171,6 +172,7 @@ fn projection(c: &mut Criterion) {
         elements: prices.len(),
         workspace_words: prices.len(),
         expected: &|| &expected,
+        equal: <[i32]>::eq,
         run: |kernel: &dyn Executable, dst: &mut [i32]| {
             let count = kernel.call(
                 &[],
@@ -197,8 +199,7 @@ fn projection(c: &mut Criterion) {
 fn sql_plan(c: &mut Criterion) {
     const SALES: i32 = 28 * 1024 * 1024;
     const PRODUCTS: i32 = SALES / 16;
-    // Each product matches at most once in every dimension. Allow two sales
-    // buffers, a dimension and its hash table (bucket heads and chain links).
+    // Keep the workspace identical across scalar and SIMD benchmark runs.
     let workspace_words =
         (4 * SALES + 3 * PRODUCTS) as usize + (PRODUCTS as usize).next_power_of_two();
     let plan = pricing_plan();
@@ -212,11 +213,19 @@ fn sql_plan(c: &mut Criterion) {
             Catalog::new(&[&sales, &prices, &flags, &promos, &adjustments])
                 .expect("build pricing catalog")
         };
-        let mut expected = vec![0; workspace_words];
-        let count = query(&plan, catalog.offsets(), catalog.data(), &mut expected);
-        let rows = usize::try_from(count).expect("reference query ran out of workspace");
-        assert_eq!(rows, SALES as usize * 3 / 8);
-        expected.truncate(rows * 2);
+        // Each odd product has one flag and one promotion. Derive the expected
+        // rows directly from the fixture, independently of the query operators.
+        let mut expected = Vec::with_capacity(SALES as usize * 3 / 4);
+        for sale in 0..SALES {
+            let product = sale % PRODUCTS;
+            let quantity = sale % 8;
+            if quantity >= 2 && product % 2 == 1 {
+                let revenue = quantity.wrapping_mul(product + 1);
+                let discount = (1 + product % 5) * (2 * (product % 16)).min(20);
+                expected.extend([product, revenue.wrapping_add(discount).wrapping_add(1)]);
+            }
+        }
+        assert_eq!(expected.len(), SALES as usize * 3 / 4);
         (catalog, expected.into_boxed_slice())
     });
     let workload = Workload {
@@ -224,6 +233,26 @@ fn sql_plan(c: &mut Criterion) {
         elements: SALES as usize,
         workspace_words,
         expected: &|| &data.1,
+        equal: |actual, expected| {
+            // Every sale for a given product has the same quantity. Compare
+            // its value and occurrence count independently of emission order.
+            let mut products = vec![(0, 0u32); PRODUCTS as usize];
+            for &[key, value] in expected.as_chunks::<2>().0 {
+                let entry = &mut products[key as usize];
+                entry.0 = value;
+                entry.1 += 1;
+            }
+            actual.as_chunks::<2>().0.iter().all(|&[key, value]| {
+                let Some(entry) = products.get_mut(key as usize) else {
+                    return false;
+                };
+                if entry.0 != value || entry.1 == 0 {
+                    return false;
+                }
+                entry.1 -= 1;
+                true
+            })
+        },
         run: |kernel: &dyn Executable, arena: &mut [i32]| {
             data.0.run(kernel, arena).map(<[i32]>::len)
         },
@@ -252,6 +281,7 @@ fn simd_matmul(c: &mut Criterion) {
         elements: M * K * N, // One element of throughput is one multiply-accumulate.
         workspace_words: M * N,
         expected: &|| &expected,
+        equal: <[i32]>::eq,
         run: |kernel: &dyn Executable, dst: &mut [i32]| {
             let written = kernel.call(
                 &[M as i32, K as i32, N as i32],
@@ -284,6 +314,7 @@ fn simd_hash_lookup(c: &mut Criterion) {
         elements: queries.len(),
         workspace_words: queries.len(),
         expected: &|| &expected,
+        equal: <[i32]>::eq,
         run: |kernel: &dyn Executable, dst: &mut [i32]| {
             let written = kernel.call(
                 &[],

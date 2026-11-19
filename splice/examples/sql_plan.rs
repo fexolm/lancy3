@@ -37,7 +37,9 @@ fn run(code: impl Executable) -> Result<(), String> {
     ])?;
     let mut workspace = vec![0; 256];
     let rows = catalog.run(&code, &mut workspace)?;
-    assert_eq!(rows, [7, 61, 7, 91, 7, 71, 7, 101]);
+    let mut result = rows.as_chunks::<2>().0.to_vec();
+    result.sort_unstable();
+    assert_eq!(result, [[7, 61], [7, 71], [7, 91], [7, 101]]);
     for [product, value] in rows.as_chunks::<2>().0 {
         println!("product_id={product} adjusted_value={value}");
     }

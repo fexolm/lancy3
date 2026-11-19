@@ -41,16 +41,16 @@ impl Lower<'_> {
             _ => Ok(v.code),
         }
     }
-    pub(super) fn if_expr(&self, i: &syn::ExprIf) -> Result<Value> {
+    pub(super) fn if_expr(&self, i: &syn::ExprIf, hint: Option<Scalar>) -> Result<Value> {
         let cond = self.expr(&i.cond)?;
         let scope = if matches!(cond.stage, Stage::Reg(_)) {
             self.nested_region()
         } else {
             self.clone()
         };
-        let yes = scope.block(&i.then_branch)?;
+        let yes = scope.block_with_hint(&i.then_branch, hint)?;
         let no = if let Some((_, no)) = &i.else_branch {
-            scope.expr(no)?
+            scope.expr_with_hint(no, hint)?
         } else {
             Value::unit(emit!({}))
         };
@@ -266,7 +266,7 @@ impl Lower<'_> {
             if !__splice_reaches_next && !__splice_reaches_end { break #region; }
         })))
     }
-    pub(super) fn match_expr(&self, m: &syn::ExprMatch) -> Result<Value> {
+    pub(super) fn match_expr(&self, m: &syn::ExprMatch, hint: Option<Scalar>) -> Result<Value> {
         let test = self.expr(&m.expr)?;
         let host = test.stage.is_host();
         let scope = if host {
@@ -278,7 +278,7 @@ impl Lower<'_> {
         for arm in &m.arms {
             let pattern_scope = host.then(|| self.with_pattern(&arm.pat));
             let scope = pattern_scope.as_ref().unwrap_or(&scope);
-            let value = scope.expr(&arm.body)?;
+            let value = scope.expr_with_hint(&arm.body, hint)?;
             let guard = match &arm.guard {
                 Some((_, g)) if host => {
                     let test = scope.host_raw(g)?;

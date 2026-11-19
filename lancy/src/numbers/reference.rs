@@ -12,7 +12,11 @@ pub(crate) fn read(bytes: &[u8]) -> u128 {
 
 impl Math {
     pub fn eval(self, args: &[Bits; 3], width: usize) -> Result<Bits, CallError> {
-        let lane = self.input.lane().unwrap();
+        let lane = match self.input {
+            // Pointer-to-word bitcasts preserve the address bits without an element type.
+            Type::Ptr if matches!(self.action, Action::Bitcast) => return Ok(args[0]),
+            ty => ty.lane().expect("numeric operand"),
+        };
         let size = lane.bytes();
         let mut out = [0; 64];
         let [a, b, c] = args;

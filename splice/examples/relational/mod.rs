@@ -3,6 +3,7 @@
 use splice::{BufferArg, Executable};
 
 mod kernels;
+mod pipeline;
 mod pricing;
 pub use kernels::query;
 pub use pricing::pricing_plan;
@@ -38,6 +39,7 @@ pub enum Plan {
     Join(Box<Plan>, Box<Plan>, Combine),
 }
 
+/// Each table stores a contiguous key column followed by its value column.
 /// Offsets are measured in i32 words. The same compiled plan can run against
 /// catalogs with different table sizes. Only the table IDs are staged.
 pub struct Catalog {
@@ -64,15 +66,14 @@ impl Catalog {
                 .and_then(|n| data.len().checked_add(n))
                 .and_then(|n| i32::try_from(n).ok())
                 .ok_or("catalog exceeds i32 address range")?;
-            for &(key, value) in *table {
-                data.extend([key, value]);
-            }
+            data.extend(table.iter().map(|&(key, _)| key));
+            data.extend(table.iter().map(|&(_, value)| value));
             offsets.push(words);
         }
         Ok(Self { offsets, data })
     }
 
-    /// On success returns the packed result in the caller's workspace.
+    /// Returns the packed result in the caller's workspace. Joins may reorder rows.
     pub fn run<'a>(
         &self,
         code: &(impl Executable + ?Sized),

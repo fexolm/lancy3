@@ -1,12 +1,18 @@
 use crate::relational::*;
 use splice::Codegen;
 use splice::Executable;
-use splice::hir::{Binary, BufferKind, Function, Instr};
+use splice::hir::{BufferKind, Function, Instr, SimdOp};
+use splice::simd::Lane;
 use splice_cranelift::Cranelift;
 use splice_lancy::Lancy;
 use splice_llvm::Llvm;
 
 type Row = (i32, i32);
+
+// key ^ (key >> 16) has zeroes in the low 16 bits for these small salts.
+fn colliding_key(salt: i32) -> i32 {
+    (salt << 16) | salt
+}
 
 fn eval(expr: &Expr, (key, value): Row) -> i32 {
     let arg = |e| eval(e, (key, value));
@@ -61,45 +67,105 @@ fn reference(plan: &Plan, tables: &[&[Row]]) -> Vec<Row> {
     }
 }
 
+fn contains_join(plan: &Plan) -> bool {
+    match plan {
+        Plan::Join(..) => true,
+        Plan::Filter(child, _) | Plan::Project(child, ..) => contains_join(child),
+        Plan::Scan(_) => false,
+    }
+}
+
+fn assert_rows(plan: &Plan, words: &[i32], expected: &[Row]) {
+    assert_eq!(words.len(), expected.len() * 2);
+    let mut rows: Vec<Row> = words.chunks_exact(2).map(|v| (v[0], v[1])).collect();
+    if contains_join(plan) {
+        let mut expected = expected.to_vec();
+        expected.sort_unstable();
+        rows.sort_unstable();
+        assert_eq!(rows, expected);
+    } else {
+        assert_eq!(rows, expected);
+    }
+}
+
 fn compare(plan: &Plan, tables: &[&[Row]], kernels: &[&dyn Executable]) {
     let cat = Catalog::new(tables).unwrap();
-    let expected: Vec<i32> = reference(plan, tables)
-        .into_iter()
-        .flat_map(|(k, v)| [k, v])
-        .collect();
-    let mut scratch = vec![0x7fff; expected.len() * 8 + 512];
+    let expected = reference(plan, tables);
+    let input_rows = tables.iter().map(|t| t.len()).sum::<usize>();
+    let mut scratch = vec![0x7fff; (expected.len() + input_rows) * 8 + 512];
     for &code in kernels {
-        for (word, &want) in scratch.iter_mut().zip(&expected) {
-            *word = !want;
-        }
-        assert_eq!(cat.run(code, &mut scratch).unwrap(), expected);
+        scratch.fill(i32::MIN + 37);
+        assert_rows(plan, cat.run(code, &mut scratch).unwrap(), &expected);
     }
     scratch.fill(-8);
     assert_eq!(
-        query(plan, cat.offsets(), cat.data(), &mut scratch) as usize * 2,
+        query(plan, cat.offsets(), cat.data(), &mut scratch) as usize,
         expected.len()
     );
-    assert_eq!(scratch[..expected.len()], expected);
+    assert_rows(plan, &scratch[..2 * expected.len()], &expected);
 }
 
-#[test]
-fn branching_join_tree_runs_against_changing_tables() {
-    let plan = pricing_plan();
-    let f = query::ir(&plan).unwrap();
+fn check_workspace_boundary(plan: &Plan, tables: &[&[Row]], kernels: &[&dyn Executable]) {
+    let catalog = Catalog::new(tables).unwrap();
+    let want = reference(plan, tables);
+    let sentinel = -1_234_567;
+    let mut enough = 8 * (tables.iter().map(|t| t.len()).sum::<usize>() + 2 * want.len()) + 256;
+    let mut storage = vec![sentinel; enough + 2];
+    let run = |words: &mut [i32]| query(plan, catalog.offsets(), catalog.data(), words);
+    assert_eq!(run(&mut storage[1..=enough]) as usize, want.len());
+    let mut short = 0;
+    while enough - short > 1 {
+        let middle = short + (enough - short) / 2;
+        if run(&mut storage[1..=middle]) < 0 {
+            short = middle;
+        } else {
+            enough = middle;
+        }
+    }
+    // Reuse the same address so partial writes have the same alignment.
+    storage.fill(sentinel);
+    assert_eq!(run(&mut storage[1..=short]), -1);
+    let failed = storage.clone();
+    assert_eq!(failed[0], sentinel);
+    assert!(failed[short + 1..].iter().all(|&v| v == sentinel));
+    for &kernel in kernels {
+        storage.fill(sentinel);
+        assert_eq!(
+            catalog.run(kernel, &mut storage[1..=short]).unwrap_err(),
+            "query workspace is too small"
+        );
+        assert_eq!(storage, failed);
+        assert_rows(
+            plan,
+            catalog.run(kernel, &mut storage[1..=enough]).unwrap(),
+            &want,
+        );
+        assert_eq!(storage[0], sentinel);
+        assert!(storage[enough + 1..].iter().all(|&v| v == sentinel));
+    }
+}
+
+fn with_kernels(plan: &Plan, test: impl FnOnce(&[&dyn Executable])) {
+    let f = query::ir(plan).unwrap();
     let lancy = Lancy::compile(&f).unwrap();
     let llvm = Llvm::compile(&f).unwrap();
-    let direct_lancy = query::build::<Lancy>(&plan).unwrap();
-    let direct_llvm = query::build::<Llvm>(&plan).unwrap();
+    let direct_lancy = query::build::<Lancy>(plan).unwrap();
+    let direct_llvm = query::build::<Llvm>(plan).unwrap();
     let cranelift = Cranelift::compile(&f).unwrap();
-    let direct_cranelift = query::build::<Cranelift>(&plan).unwrap();
-    let kernels: [&dyn Executable; 6] = [
+    let direct_cranelift = query::build::<Cranelift>(plan).unwrap();
+    test(&[
         &lancy,
         &llvm,
         &cranelift,
         &direct_lancy,
         &direct_llvm,
         &direct_cranelift,
-    ];
+    ]);
+}
+
+#[test]
+fn branching_join_tree_runs_against_changing_tables() {
+    let plan = pricing_plan();
     let tables: &[&[Row]] = &[
         &[(-7, 5), (1, 3), (9, 6), (1, 5)],
         &[(1, 9), (-7, 3), (9, 4)],
@@ -107,16 +173,370 @@ fn branching_join_tree_runs_against_changing_tables() {
         &[(1, 3), (9, 8)],
         &[(9, 4), (1, 3), (1, 8)],
     ];
-    compare(&plan, tables, &kernels);
-    for empty in 0..tables.len() {
-        let mut changed = tables.to_vec();
-        changed[empty] = &[];
-        compare(&plan, &changed, &kernels);
-    }
+    with_kernels(&plan, |kernels| {
+        compare(&plan, tables, kernels);
+        for empty in 0..tables.len() {
+            let mut changed = tables.to_vec();
+            changed[empty] = &[];
+            compare(&plan, &changed, kernels);
+        }
+    });
 }
 
 #[test]
-fn self_join_after_rekey_handles_collisions_and_overlapping_compaction() {
+fn filter_compacts_batches_and_project_reads_both_original_columns() {
+    let width = Lane::<i32>::lanes();
+    let plan = Plan::Project(
+        Box::new(Plan::Filter(
+            Box::new(Plan::Scan(0)),
+            Predicate::AtLeast(Expr::Value, Expr::Literal(0)),
+        )),
+        Expr::Value,
+        Expr::Add(
+            Box::new(Expr::Key),
+            Box::new(Expr::Mul(
+                Box::new(Expr::Value),
+                Box::new(Expr::Literal(i32::MAX)),
+            )),
+        ),
+    );
+    let table: Vec<_> = (0..3 * width + 1)
+        .map(|i| {
+            // The first packet is empty, the second keeps its endpoints,
+            // the third is full and the last contains just one valid row.
+            let keep = i >= 2 * width || i == width || i == 2 * width - 1;
+            (
+                i32::MIN + i as i32,
+                if keep { i32::MAX - i as i32 } else { -1 },
+            )
+        })
+        .collect();
+    with_kernels(&plan, |kernels| {
+        for n in [0, width - 1, width, width + 1, 2 * width, table.len()] {
+            compare(&plan, &[&table[..n]], kernels);
+        }
+    });
+}
+
+#[test]
+fn short_scan_filter_project_batches_fit_shifted_workspaces() {
+    let width = Lane::<i32>::lanes();
+    let plan = Plan::Project(
+        Box::new(Plan::Filter(
+            Box::new(Plan::Scan(1)),
+            Predicate::AtLeast(Expr::Value, Expr::Literal(0)),
+        )),
+        Expr::Value,
+        Expr::Add(Box::new(Expr::Key), Box::new(Expr::Value)),
+    );
+    let table: Vec<_> = (0..2 * width + 3)
+        .map(|i| (7 - i as i32, if i % 3 == 0 { -1 } else { i as i32 }))
+        .collect();
+    let sentinel = 0x1234_5678;
+    with_kernels(&plan, |kernels| {
+        for rows in [1, width - 1, width + 1, table.len()] {
+            // Table one follows a different table in the catalog. The input
+            // and output addresses need not have the same vector alignment.
+            let tables: &[&[Row]] = &[&[(42, 13)], &table[..rows]];
+            let catalog = Catalog::new(tables).unwrap();
+            let want: Vec<_> = reference(&plan, tables)
+                .into_iter()
+                .flat_map(|(k, v)| [k, v])
+                .collect();
+            let words = 2 * rows;
+            let mut storage = vec![sentinel; width + words + 1];
+            for start in 1..=width {
+                for &kernel in kernels {
+                    storage.fill(sentinel);
+                    assert_eq!(
+                        catalog
+                            .run(kernel, &mut storage[start..start + words])
+                            .unwrap(),
+                        want
+                    );
+                    assert!(
+                        storage[..start]
+                            .iter()
+                            .chain(&storage[start + words..])
+                            .all(|&v| v == sentinel)
+                    );
+                }
+            }
+        }
+    });
+}
+
+#[test]
+fn fused_scan_filter_project_needs_only_two_words_for_one_survivor() {
+    let width = Lane::<i32>::lanes();
+    let plan = Plan::Project(
+        Box::new(Plan::Filter(
+            Box::new(Plan::Scan(0)),
+            Predicate::Equal(Expr::Value, Expr::Literal(7)),
+        )),
+        Expr::Value,
+        Expr::Add(Box::new(Expr::Value), Box::new(Expr::Key)),
+    );
+    let n = 128 * width + 3;
+    with_kernels(&plan, |kernels| {
+        for survivor in [width + 1, n - 1] {
+            let mut rows: Vec<_> = (0..n).map(|i| (i as i32, -1)).collect();
+            rows[survivor].1 = 7;
+            let catalog = Catalog::new(&[&rows]).unwrap();
+            let expected = [7, survivor as i32 + 7];
+            let mut guarded = [-9; 4];
+            assert_eq!(
+                query(&plan, catalog.offsets(), catalog.data(), &mut guarded[1..3]),
+                1
+            );
+            assert_eq!(guarded, [-9, expected[0], expected[1], -9]);
+            for &kernel in kernels {
+                guarded.fill(-9);
+                assert_eq!(catalog.run(kernel, &mut guarded[1..3]).unwrap(), expected);
+                assert_eq!((guarded[0], guarded[3]), (-9, -9));
+            }
+        }
+    });
+}
+
+#[test]
+fn fused_join_streams_all_hits_and_stays_successful_as_workspace_grows() {
+    let rows = 4099;
+    let right: Vec<Row> = (0..7).map(|k| (k, 5 * k - 13)).collect();
+    let left: Vec<Row> = (0..rows)
+        .map(|i| {
+            let k = i % 7;
+            (i - (5 * k - 13), k)
+        })
+        .collect();
+    let join = Plan::Join(
+        Box::new(Plan::Project(
+            Box::new(Plan::Scan(0)),
+            Expr::Value,
+            Expr::Key,
+        )),
+        Box::new(Plan::Scan(1)),
+        Combine::Add,
+    );
+    let plan = Plan::Project(
+        Box::new(Plan::Filter(
+            Box::new(join),
+            Predicate::AtLeast(Expr::Value, Expr::Literal(rows - 6)),
+        )),
+        Expr::Value,
+        Expr::Key,
+    );
+    let tables: &[&[Row]] = &[&left, &right];
+    let expected = reference(&plan, tables);
+    assert_eq!(expected.len(), 6);
+    let catalog = Catalog::new(tables).unwrap();
+    // The index and six surviving rows fit well inside this bound. Every
+    // probe hits, so materializing either the left input or the join cannot fit.
+    let mut storage = [-971; 98];
+    let mut fits = false;
+    with_kernels(&plan, |kernels| {
+        for capacity in 0..=96 {
+            storage.fill(-971);
+            let n = query(
+                &plan,
+                catalog.offsets(),
+                catalog.data(),
+                &mut storage[1..1 + capacity],
+            );
+            if n < 0 {
+                assert_eq!(n, -1);
+                assert!(!fits, "adding workspace caused failure at {capacity} words");
+            } else {
+                fits = true;
+                assert_rows(&plan, &storage[1..1 + 2 * n as usize], &expected);
+            }
+            for &kernel in kernels {
+                storage.fill(-971);
+                let result = catalog.run(kernel, &mut storage[1..1 + capacity]);
+                if fits {
+                    assert_rows(&plan, result.unwrap(), &expected);
+                } else {
+                    assert_eq!(result.unwrap_err(), "query workspace is too small");
+                }
+                assert_eq!(storage[0], -971);
+                assert!(storage[1 + capacity..].iter().all(|&x| x == -971));
+            }
+        }
+        assert!(fits);
+    });
+}
+
+#[test]
+fn batched_probe_returns_every_build_side_match() {
+    let width = Lane::<i32>::lanes();
+    let plan = Plan::Join(
+        Box::new(Plan::Scan(0)),
+        Box::new(Plan::Scan(1)),
+        Combine::Add,
+    );
+    let a = colliding_key(1);
+    let b = colliding_key(2);
+    let keys = [0, a, 1, b, -1, a, i32::MIN, colliding_key(3)];
+    let left: Vec<_> = (0..2 * width + 1)
+        .map(|i| (keys[i % keys.len()], i32::MAX - i as i32))
+        .collect();
+    // Distinct payloads expose any lost or duplicated match.
+    let right = [
+        (a, 10),
+        (0, 20),
+        (b, 30),
+        (a, 40),
+        (0, 50),
+        (a, 60),
+        (i32::MIN, 70),
+        (b, 80),
+        (-1, 90),
+    ];
+    let tables: &[&[Row]] = &[&left, &right];
+    with_kernels(&plan, |kernels| compare(&plan, tables, kernels));
+}
+
+#[test]
+fn probe_verifies_keys_in_singleton_and_colliding_buckets() {
+    let plan = Plan::Join(
+        Box::new(Plan::Scan(0)),
+        Box::new(Plan::Scan(1)),
+        Combine::Multiply,
+    );
+    let a = colliding_key(1);
+    let b = colliding_key(2);
+    let c = colliding_key(3);
+    let keys = [0, a, b, c, colliding_key(4), 65536, i32::MIN, 3, 7];
+    let left: Vec<_> = (0..2 * Lane::<i32>::lanes() + 3)
+        .map(|i| (keys[i % keys.len()], 17 + i as i32))
+        .collect();
+    // 65536 hashes to slot one. The other salts start from occupied slot zero.
+    let unique = [0, 65536, 2, 3, 4, 5, 6, 7];
+    // The fourth salt is absent even when the first three are present.
+    let collisions = [0, a, b, c, 65536, 2, 3, 4];
+    with_kernels(&plan, |kernels| {
+        for build in [unique, collisions] {
+            let right: Vec<_> = build
+                .into_iter()
+                .enumerate()
+                .map(|(i, k)| (k, 200 + i as i32))
+                .collect();
+            compare(&plan, &[&left, &right], kernels);
+        }
+    });
+}
+
+#[test]
+fn colliding_keys_with_duplicate_values_and_a_late_neighbor_both_match() {
+    let width = Lane::<i32>::lanes();
+    let plan = Plan::Join(
+        Box::new(Plan::Scan(0)),
+        Box::new(Plan::Scan(1)),
+        Combine::Add,
+    );
+    // All sixteen keys start probing from slot zero.
+    let left: Vec<_> = (0..3 * width)
+        .map(|i| {
+            let key = match i % width {
+                0 => colliding_key(12),
+                1 => colliding_key(2),
+                2 => colliding_key(15),
+                _ => colliding_key(16),
+            };
+            (key, i as i32 * 1000)
+        })
+        .collect();
+    let mut right: Vec<_> = (0..16).map(|i| (colliding_key(i), i + 1)).collect();
+    with_kernels(&plan, |kernels| {
+        compare(&plan, &[&left, &right], kernels);
+        right[14].0 = colliding_key(12);
+        compare(&plan, &[&left, &right], kernels);
+    });
+}
+
+#[test]
+fn refilled_probe_lanes_preserve_late_hits_and_drain_the_tail() {
+    let width = Lane::<i32>::lanes();
+    let chain = 4 * width + 5;
+    let mut right: Vec<_> = (0..chain)
+        .map(|i| (colliding_key(i as i32), 100 + i as i32))
+        .collect();
+    let late = right[chain - 1].0;
+    let neighbor = right[chain - 3].0;
+    let fast = chain as i32 + 2;
+    right.extend([(fast, 23), (fast + 1, 37)]);
+    // The first two probes collide with many distinct keys. Later probes
+    // hit or miss just beyond the cluster while those old lanes stay live.
+    let rows = 5 * width + 3;
+    let left: Vec<_> = (0..rows)
+        .map(|i| {
+            let k = match i {
+                0 => late,
+                1 => neighbor,
+                i if i == rows - 1 => late,
+                _ => [fast, fast + 1, colliding_key(1) ^ fast, fast + 2][i % 4],
+            };
+            (k, i as i32 * 1000)
+        })
+        .collect();
+    let plan = Plan::Join(
+        Box::new(Plan::Scan(0)),
+        Box::new(Plan::Scan(1)),
+        Combine::Add,
+    );
+    with_kernels(&plan, |kernels| {
+        for n in [width - 1, width, width + 1, rows] {
+            compare(&plan, &[&left[..n], &right], kernels);
+        }
+        // A displaced key now has two values; the final incoming probe for
+        // that same key stays active after input has been exhausted.
+        right[chain - 2].0 = late;
+        // At EOF one lane retries, one hits, and one lands on an empty slot.
+        compare(
+            &plan,
+            &[&[(late, 11), (fast, 23), (fast + 2, 45)], &right],
+            kernels,
+        );
+        let tables: &[&[Row]] = &[&left, &right];
+        compare(&plan, tables, kernels);
+
+        check_workspace_boundary(&plan, tables, kernels);
+    });
+}
+
+#[test]
+fn duplicate_values_span_several_batches_of_many_to_many_matches() {
+    let width = Lane::<i32>::lanes();
+    let count = 6 * width + 3;
+    let other = colliding_key(1);
+    // Interleave two colliding keys with unrelated rows and give each
+    // right value a distinct payload.
+    let right: Vec<_> = (0..count)
+        .map(|i| {
+            let key = if i % 13 == 4 {
+                2
+            } else if i % 11 == 7 {
+                other
+            } else {
+                0
+            };
+            (key, i as i32 + 1)
+        })
+        .collect();
+    let probe = [0, colliding_key(2), 2, 0, other, 17];
+    let left: Vec<_> = (0..width + 3)
+        .map(|i| (probe[i % probe.len()], 1000 * (i as i32 + 1)))
+        .collect();
+    let plan = Plan::Join(
+        Box::new(Plan::Scan(0)),
+        Box::new(Plan::Scan(1)),
+        Combine::Add,
+    );
+    with_kernels(&plan, |kernels| compare(&plan, &[&left, &right], kernels));
+}
+
+#[test]
+fn self_join_after_rekey_handles_collisions_and_duplicate_rows() {
     // Both sides scan the same table. Re-key the right before joining.
     let plan = Plan::Join(
         Box::new(Plan::Scan(0)),
@@ -205,39 +625,94 @@ fn balanced_tree_with_32_scans_runs_through_one_entry_point() {
             Plan::Join(Box::new(left.clone()), Box::new(left), Combine::Add)
         }
     }
-    let ir = query::ir(&subtree(5)).unwrap();
+    let plan = subtree(5);
+    let ir = query::ir(&plan).unwrap();
     let lancy = Lancy::compile(&ir).unwrap();
     let llvm = Llvm::compile(&ir).unwrap();
     let cat = Catalog::new(&[&[(12, 2), (7, 3)]]).unwrap();
     for code in [&lancy as &dyn Executable, &llvm] {
-        assert_eq!(cat.run(code, &mut [0; 256]).unwrap(), [12, 64, 7, 96]);
+        assert_rows(
+            &plan,
+            cat.run(code, &mut [0; 1024]).unwrap(),
+            &[(12, 64), (7, 96)],
+        );
     }
 }
 
-fn contains_op(f: &Function, op: Binary) -> bool {
-    f.instructions().iter().any(|inst| match inst {
-        Instr::Bin(_, b, ..) => *b == op,
-        Instr::Call { function, .. } => contains_op(function, op),
-        _ => false,
-    })
+fn simd_ops(f: &Function) -> Vec<SimdOp> {
+    let mut ops = Vec::new();
+    for instruction in f.instructions() {
+        match instruction {
+            Instr::Simd { inst, .. } => ops.push(inst.op),
+            Instr::Call { function, .. } => ops.extend(simd_ops(function)),
+            _ => {}
+        }
+    }
+    ops
 }
 
 #[test]
 fn plan_shape_selects_the_reachable_operator_kernels_at_build_time() {
     let scan = query::ir(&Plan::Scan(0)).unwrap();
-    let joined = query::ir(&pricing_plan()).unwrap();
-    for f in [&scan, &joined] {
+    let filter = query::ir(&Plan::Filter(
+        Box::new(Plan::Scan(0)),
+        Predicate::And(
+            Box::new(Predicate::AtLeast(Expr::Value, Expr::Literal(2))),
+            Box::new(Predicate::Equal(Expr::Key, Expr::Literal(7))),
+        ),
+    ))
+    .unwrap();
+    let project = query::ir(&Plan::Project(
+        Box::new(Plan::Scan(0)),
+        Expr::Add(Box::new(Expr::Key), Box::new(Expr::Value)),
+        Expr::Mul(Box::new(Expr::Key), Box::new(Expr::Value)),
+    ))
+    .unwrap();
+    let join = query::ir(&Plan::Join(
+        Box::new(Plan::Scan(0)),
+        Box::new(Plan::Scan(1)),
+        Combine::Add,
+    ))
+    .unwrap();
+    for f in [&scan, &filter, &project, &join] {
         assert_eq!(f.arity(), 0);
         assert_eq!(
             f.buffer_kinds(),
             [BufferKind::Read, BufferKind::Read, BufferKind::Write]
         );
     }
-    // XOR comes from hash partitioning, Min only from the staged projection.
-    for op in [Binary::Xor, Binary::Min] {
-        assert!(!contains_op(&scan, op));
-        assert!(contains_op(&joined, op));
+    let scan_ops = simd_ops(&scan);
+    assert!(
+        scan_ops
+            .iter()
+            .any(|op| matches!(op, SimdOp::AlignmentPrefix(_)))
+    );
+    assert!(
+        scan_ops
+            .iter()
+            .any(|op| matches!(op, SimdOp::Load(_) | SimdOp::LoadSelect(_)))
+    );
+    assert!(
+        scan_ops
+            .iter()
+            .any(|op| matches!(op, SimdOp::Store(_) | SimdOp::StoreSelect(_)))
+    );
+    let filter_ops = simd_ops(&filter);
+    for op in [SimdOp::Ge, SimdOp::Eq, SimdOp::MaskAnd] {
+        assert!(filter_ops.contains(&op), "missing filter operation {op:?}");
     }
+    let project_ops = simd_ops(&project);
+    assert!(project_ops.contains(&SimdOp::Add) && project_ops.contains(&SimdOp::Mul));
+    let join_ops = simd_ops(&join);
+    assert!(join_ops.iter().any(|op| matches!(op, SimdOp::Gather(_))));
+    assert!(join_ops.contains(&SimdOp::Eq));
+    assert!(join_ops.contains(&SimdOp::Compress));
+    let full_plan_ops = simd_ops(&query::ir(&pricing_plan()).unwrap());
+    assert!(full_plan_ops.contains(&SimdOp::Compress));
+    assert!(!full_plan_ops.iter().any(|op| matches!(
+        op,
+        SimdOp::GatherSelect(_) | SimdOp::Scatter(_) | SimdOp::ScatterSelect(_)
+    )));
     // The executable outlives the temporary plan passed to build().
     let code = Lancy::compile(&scan).unwrap();
     assert_eq!(
@@ -251,24 +726,16 @@ fn plan_shape_selects_the_reachable_operator_kernels_at_build_time() {
 
 #[test]
 fn workspace_exhaustion_has_an_explicit_result_and_caller_can_retry() {
-    let f = query::ir(&Plan::Join(
+    let plan = Plan::Join(
         Box::new(Plan::Scan(0)),
         Box::new(Plan::Scan(1)),
         Combine::Add,
-    ))
-    .unwrap();
-    let code = Lancy::compile(&f).unwrap();
-    let cat = Catalog::new(&[&[(0, 7)], &[(0, 5)]]).unwrap();
-    // Cover scan, hash-table allocation, and emission of the matched row.
-    for n in 0..8 {
-        let mut mem = [0x1234; 9];
-        assert_eq!(
-            cat.run(&code, &mut mem[..n]).unwrap_err(),
-            "query workspace is too small"
-        );
-        assert!(mem[n..].iter().all(|&x| x == 0x1234));
-    }
-    assert_eq!(cat.run(&code, &mut [0; 8]).unwrap(), [0, 12]);
+    );
+    let tables: &[&[Row]] = &[&[(0, 7)], &[(0, 5)]];
+    with_kernels(&plan, |kernels| {
+        check_workspace_boundary(&plan, tables, kernels)
+    });
+    let cat = Catalog::new(tables).unwrap();
     for id in [2, usize::MAX] {
         let unknown_table = Lancy::compile(&query::ir(&Plan::Scan(id)).unwrap()).unwrap();
         assert!(

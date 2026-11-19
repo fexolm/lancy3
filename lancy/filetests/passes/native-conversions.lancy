@@ -28,3 +28,16 @@ fn main x:vec.bf16 y:vec.bf16 z:vec.bf16 -> vec.bf16
 @asm check: endbr64
 @asm not: call
 @asm check: ret
+---
+# Exposing the low address bits permits alignment arithmetic on a slice.
+fn main base:ptr i:i32 -> i32
+  next = offset base i 4
+  a = bitcast u64 base
+  b = bitcast u64 next
+  diff = sub b a
+  result = cast i32 diff
+  ret result
+@asm check: endbr64
+@asm not: call
+@asm check: ret
+@run 3 -> 12 | 00 | 00

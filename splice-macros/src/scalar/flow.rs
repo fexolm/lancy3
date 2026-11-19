@@ -63,6 +63,7 @@ impl Flow {
     }
     fn expr(&mut self, e: &Expr, names: &Names, control: bool) -> bool {
         match e {
+            Expr::Macro(m) if m.mac.path.is_ident("vec") => true,
             Expr::Path(p) => p
                 .path
                 .get_ident()

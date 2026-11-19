@@ -198,7 +198,7 @@ impl<T: LaneElement> Lane<T> {
     fn at(&self, i: usize) -> T {
         self.0.as_ref()[i]
     }
-    fn from_fn(f: impl Fn(usize) -> T) -> Self {
+    fn from_fn(mut f: impl FnMut(usize) -> T) -> Self {
         let mut data = T::fill(T::default());
         for (i, v) in data.as_mut()[..Self::lanes()].iter_mut().enumerate() {
             *v = f(i);
@@ -285,6 +285,127 @@ impl<T: LaneElement> Lane<T> {
         mask.select(self + rhs, fallback)
     }
 }
+/// Fixed-width-independent permutations of two vectors concatenated end to end.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Shuffle {
+    InterleaveLow,
+    InterleaveHigh,
+    DeinterleaveEven,
+    DeinterleaveOdd,
+}
+impl Shuffle {
+    pub fn index(self, i: usize, lanes: usize) -> usize {
+        match self {
+            Self::InterleaveLow => i / 2 + (i % 2) * lanes,
+            Self::InterleaveHigh => lanes / 2 + i / 2 + (i % 2) * lanes,
+            Self::DeinterleaveEven => 2 * i,
+            Self::DeinterleaveOdd => 2 * i + 1,
+        }
+    }
+}
+impl Mask<i32> {
+    /// Number of active lanes.
+    pub fn count(self) -> i32 {
+        self.0.count_ones() as i32
+    }
+}
+
+impl std::ops::Shr<u32> for Lane<i32> {
+    type Output = Self;
+    fn shr(self, count: u32) -> Self {
+        Self::from_fn(|i| self.at(i).wrapping_shr(count))
+    }
+}
+
+impl Lane<i32> {
+    /// Number of words before the next vector-aligned address. Does not access memory.
+    pub fn alignment_prefix(src: &[i32], offset: usize) -> usize {
+        let addr = src.as_ptr().wrapping_add(offset).addr();
+        (addr.wrapping_neg() & (vector_bytes() - 1)) / size_of::<i32>()
+    }
+    /// Pack selected lanes, preserving order and zeroing the remaining lanes.
+    pub fn compress(self, mask: Mask<i32>) -> Self {
+        let mut bits = mask.0;
+        Self::from_fn(|_| {
+            if bits == 0 {
+                return 0;
+            }
+            let i = bits.trailing_zeros() as usize;
+            bits &= bits - 1;
+            self.at(i)
+        })
+    }
+    /// Fill selected positions from consecutive low lanes; keep the other
+    /// positions from `fallback`.
+    pub fn expand(self, mask: Mask<i32>, fallback: Self) -> Self {
+        let mut src = 0;
+        Self::from_fn(|i| {
+            if mask.active(i) {
+                let word = self.at(src);
+                src += 1;
+                word
+            } else {
+                fallback.at(i)
+            }
+        })
+    }
+    /// Look up each lane by its index; out-of-range indices produce zero.
+    pub fn swizzle(self, indices: Self) -> Self {
+        Self::from_fn(|i| {
+            let idx = indices.at(i) as usize;
+            if idx < Self::lanes() { self.at(idx) } else { 0 }
+        })
+    }
+    /// Write enabled lanes contiguously, in lane order. An empty mask touches no memory.
+    pub fn compress_store(self, dst: &mut [i32], mut offset: usize, mask: Mask<i32>) {
+        for i in 0..Self::lanes() {
+            if mask.active(i) {
+                dst[offset] = self.at(i);
+                offset += 1;
+            }
+        }
+    }
+    fn shuffle(self, other: Self, order: Shuffle) -> Self {
+        let n = Self::lanes();
+        Self::from_fn(|i| {
+            let j = order.index(i, n);
+            if j < n { self.at(j) } else { other.at(j - n) }
+        })
+    }
+    pub fn interleave_low(self, rhs: Self) -> Self {
+        self.shuffle(rhs, Shuffle::InterleaveLow)
+    }
+    pub fn interleave_high(self, rhs: Self) -> Self {
+        self.shuffle(rhs, Shuffle::InterleaveHigh)
+    }
+    pub fn deinterleave_even(self, rhs: Self) -> Self {
+        self.shuffle(rhs, Shuffle::DeinterleaveEven)
+    }
+    pub fn deinterleave_odd(self, rhs: Self) -> Self {
+        self.shuffle(rhs, Shuffle::DeinterleaveOdd)
+    }
+    /// Wrapping sum of lanes zero through i in output lane i.
+    pub fn prefix_sum(self) -> Self {
+        let mut sum = 0i32;
+        Self::from_fn(|i| {
+            sum = sum.wrapping_add(self.at(i));
+            sum
+        })
+    }
+    /// Read a lane, wrapping the index modulo the active lane count.
+    pub fn extract_wrapping(self, index: i32) -> i32 {
+        self.at(index as usize & (Self::lanes() - 1))
+    }
+    /// Replace a lane, wrapping the index modulo the active lane count.
+    pub fn replace_wrapping(self, index: i32, value: i32) -> Self {
+        let index = index as usize & (Self::lanes() - 1);
+        Self::from_fn(|i| if i == index { value } else { self.at(i) })
+    }
+    pub fn last(self) -> i32 {
+        self.at(Self::lanes() - 1)
+    }
+}
+
 macro_rules! compare {
     ($name:ident, $op:tt) => {
         impl<T: LaneElement> Lane<T> {

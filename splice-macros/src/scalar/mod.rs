@@ -72,9 +72,15 @@ pub(super) fn expand(root: Path, mut native: ItemFn) -> Result<TokenStream> {
             "expected an ordinary kernel function",
         ));
     }
-    if !matches!(&sig.output, ReturnType::Type(_, t) if Scalar::from_type(t) == Some(Scalar::Int)) {
-        return Err(Error::new_spanned(&sig.output, "scalar kernels return i32"));
-    }
+    let ReturnType::Type(_, ty) = &sig.output else {
+        return Err(Error::new_spanned(
+            &sig.output,
+            "expected a kernel return type",
+        ));
+    };
+    let result_type = Scalar::from_type(ty)
+        .filter(|t| matches!(t, Scalar::Int | Scalar::Vector(_) | Scalar::Mask(_)))
+        .ok_or_else(|| Error::new_spanned(ty, "expected i32, Lane<T> or Mask<T>"))?;
     let name = &sig.ident;
     let generic = &sig.generics;
     let where_ = &generic.where_clause;
@@ -95,6 +101,7 @@ pub(super) fn expand(root: Path, mut native: ItemFn) -> Result<TokenStream> {
     let mut formals = Vec::new();
     let mut host_types = Vec::new();
     let mut host_names = Vec::new();
+    let mut helper_args = Vec::new();
     let mut inline_args = Vec::new();
     let mut reg_names = Vec::new();
     let mut buffer_names = Vec::new();
@@ -103,6 +110,11 @@ pub(super) fn expand(root: Path, mut native: ItemFn) -> Result<TokenStream> {
     let mut copy_mutable = Vec::new();
     for arg in &sig.inputs {
         let (id, ty, formal) = parameter(arg)?;
+        helper_args.push(if matches!(formal, Binding::Host) {
+            emit!(#support::Host(#id))
+        } else {
+            emit!(#id)
+        });
         let decl = match formal {
             Binding::Host => {
                 host_names.push(id);
@@ -119,6 +131,7 @@ pub(super) fn expand(root: Path, mut native: ItemFn) -> Result<TokenStream> {
                 buffer_kinds.push(emit!(#hir::BufferKind::new(#elem,#write)));
                 emit!(#id: #hir::Buffer)
             }
+            Binding::Locals(..) => unreachable!("local register collections are not parameters"),
             Binding::Reg(_, mutable) => {
                 let index = reg_names.len();
                 inline_args.push(emit!(__splice_builder.arg(#index)));
@@ -140,6 +153,7 @@ pub(super) fn expand(root: Path, mut native: ItemFn) -> Result<TokenStream> {
     let lower = Lower {
         root: &root,
         name,
+        result_type,
         formals: &formals,
         bindings,
         flow: &flow,
@@ -172,13 +186,12 @@ pub(super) fn expand(root: Path, mut native: ItemFn) -> Result<TokenStream> {
         #((&#frontend::KeyArgument::<#type_args>::for_type()).add_type(&mut __splice_key);)*
         #((&#frontend::KeyArgument::for_value(&#value_args)).add_value(&#value_args, &mut __splice_key);)*
     };
-    let generated = emit! {
-        #(#[#gates])*
-        #[doc(hidden)]
-        #[allow(non_camel_case_types)]
-        #vis enum #name {}
-        #(#[#gates])*
-        impl #name {
+    let typed_helper = result_type != Scalar::Int
+        || formals
+            .iter()
+            .any(|f| matches!(f, Binding::Reg(Scalar::Vector(_) | Scalar::Mask(_), _)));
+    let result_value_type = result_type.value_type(&root);
+    let standalone = emit! {
             #vis fn build #compile_generics (#host_decls) -> #root::Result<<#backend as #root::Codegen>::Output> #where_ {
                 <#backend as #root::Codegen>::build(#arity, #kinds, #callback)
             }
@@ -207,13 +220,38 @@ pub(super) fn expand(root: Path, mut native: ItemFn) -> Result<TokenStream> {
                     None => __splice_builder.call_kernel(#arity, #kinds, &[#(#reg_names),*], &[#(#buffer_names),*], __splice_body),
                 }
             }
+
+    };
+    // The public kernel ABI transports i32 scalars and slices. SIMD helpers
+    // expand into their caller so vectors and masks stay in typed registers.
+    let entry_points = if typed_helper {
+        emit! {
+            #[doc(hidden)]
+            #[allow(clippy::too_many_arguments)]
+            #vis fn __splice_call #generic (#(#call_decls,)* __splice_builder:&mut #factory)->#root::Result<#hir::Reg> #where_{
+                Self::__splice_inline #fish (#(#helper_args,)* __splice_builder)
+            }
+        }
+    } else {
+        standalone
+    };
+    let generated = emit! {
+        #(#[#gates])*
+        #[doc(hidden)]
+        #[allow(non_camel_case_types)]
+        #vis enum #name {}
+        #(#[#gates])*
+        impl #name {
+            #[doc(hidden)]
+            #vis const __SPLICE_RETURN: #hir::ValueType = #result_value_type;
+            #entry_points
             #[allow(unreachable_code, clippy::too_many_arguments)]
             fn __splice_inline #generic (#(#call_decls,)* __splice_builder:&mut #factory)
                 -> #root::Result<#hir::Reg> #where_ {
                 let __splice_guard = #support::enter_expansion()?;
                 #unpack
                 #(#copy_mutable)*
-                let __splice_result = __splice_builder.local();
+                let __splice_result = __splice_builder.typed_local(#result_value_type);
                 let __splice_return_label = __splice_builder.label();
                 #code
                 __splice_builder.mark(__splice_return_label);
@@ -244,7 +282,13 @@ fn parameter(arg: &FnArg) -> Result<(&Ident, &Type, Binding)> {
             }
             Binding::Host
         }
-        [] if Scalar::from_type(&arg.ty) == Some(Scalar::Int) => Binding::Reg(Scalar::Int, mutable),
+        [] if matches!(
+            Scalar::from_type(&arg.ty),
+            Some(Scalar::Int | Scalar::Vector(_) | Scalar::Mask(_))
+        ) =>
+        {
+            Binding::Reg(Scalar::from_type(&arg.ty).unwrap(), mutable)
+        }
         [] => {
             let writable = slice_type(&arg.ty).ok_or_else(|| {
                 Error::new_spanned(

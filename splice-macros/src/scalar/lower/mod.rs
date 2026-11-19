@@ -74,6 +74,7 @@ impl Stage {
 #[derive(Clone, Copy)]
 pub(super) enum Binding {
     Host,
+    Locals(Scalar, bool),
     Reg(Scalar, bool),
     Buffer(BufferType),
 }
@@ -108,6 +109,7 @@ pub(super) enum LoopKind {
 pub(super) struct Lower<'a> {
     pub(super) root: &'a Path,
     pub(super) name: &'a Ident,
+    pub(super) result_type: Scalar,
     pub(super) formals: &'a [Binding],
     pub(super) bindings: HashMap<String, Binding>,
     pub(super) fish: TokenStream,
@@ -134,7 +136,7 @@ impl<'ast> Visit<'ast> for HostCheck<'_> {
         if let Some(id) = p.path.get_ident()
             && matches!(
                 self.names.get(&id.to_string()),
-                Some(Binding::Reg(..) | Binding::Buffer(_))
+                Some(Binding::Reg(..) | Binding::Buffer(_) | Binding::Locals(..))
             )
         {
             self.error = Some(Error::new_spanned(
@@ -339,7 +341,7 @@ impl Lower<'_> {
         }
     }
     pub(super) fn kernel_body(&self, block: &Block) -> Result<TokenStream> {
-        let body = self.block(block)?;
+        let body = self.block_with_hint(block, Some(self.result_type))?;
         let code = if body.stage == Stage::Never {
             body.code
         } else {
@@ -349,7 +351,7 @@ impl Lower<'_> {
     }
 
     fn return_value(&self, value: Value, at: impl ToTokens) -> Result<TokenStream> {
-        let value = self.reg(value, Scalar::Int, at)?;
+        let value = self.reg(value, self.result_type, at)?;
         Ok(emit!({
             let __splice_value = #value;
             __splice_builder.assign(__splice_result, __splice_value);
@@ -358,6 +360,9 @@ impl Lower<'_> {
     }
 
     fn block(&self, block: &Block) -> Result<Value> {
+        self.block_with_hint(block, None)
+    }
+    fn block_with_hint(&self, block: &Block, hint: Option<Scalar>) -> Result<Value> {
         let mut scope = self.clone();
         let mut prefix = TokenStream::new();
         let mut tail = Value::unit(emit!({}));
@@ -372,8 +377,9 @@ impl Lower<'_> {
                 Stmt::Item(syn::Item::Use(_)) => {}
                 Stmt::Local(local) => prefix.extend(scope.local(local)?),
                 Stmt::Expr(e, semi) => {
-                    let v = scope.expr(e)?;
-                    if v.stage == Stage::Never || (i + 1 == block.stmts.len() && semi.is_none()) {
+                    let last = i + 1 == block.stmts.len() && semi.is_none();
+                    let v = scope.expr_with_hint(e, if last { hint } else { None })?;
+                    if v.stage == Stage::Never || last {
                         tail = v;
                         break;
                     }
@@ -390,6 +396,30 @@ impl Lower<'_> {
         };
         if init.diverge.is_some() || !local.attrs.is_empty() {
             return err(local, "expected a kernel let binding");
+        }
+        // A specialization-sized collection of independent runtime locals. Only
+        // the builder owns this Vec. Every element becomes a scalar or SIMD register.
+        if let Expr::Macro(m) = &*init.expr
+            && m.mac.path.is_ident("vec")
+        {
+            let tokens = &m.mac.tokens;
+            let repeat: syn::ExprRepeat = syn::parse2(emit!([#tokens]))?;
+            let name = super::named(&local.pat)?;
+            let id = &name.ident;
+            let len = self.host_raw(&repeat.len)?;
+            let initial = self.expr(&repeat.expr)?;
+            let (Stage::Reg(t) | Stage::Literal(t)) = initial.stage else {
+                return err(&repeat.expr, "expected a typed runtime local initializer");
+            };
+            let initial = self.reg(initial, t, &repeat.expr)?;
+            self.bindings.insert(
+                id.to_string(),
+                Binding::Locals(t, name.mutability.is_some()),
+            );
+            return Ok(emit!(let #id = {
+                let initial = #initial;
+                (0..#len).map(|_| __splice_builder.copy(initial)).collect::<::std::vec::Vec<_>>()
+            };));
         }
         let hint = if let Pat::Type(t) = &local.pat {
             Scalar::from_type(&t.ty)
@@ -472,12 +502,15 @@ impl Lower<'_> {
                 },
                 e,
             )),
+            Expr::Path(p) if matches!(self.binding(p), Some(Binding::Locals(..))) => {
+                err(p, "index kernel locals with a comptime index")
+            }
             Expr::Path(p) => Ok(self.path(p)),
             Expr::Paren(x) => self.expr_with_hint(&x.expr, hint),
             Expr::Group(x) => self.expr_with_hint(&x.expr, hint),
-            Expr::Block(x) if x.label.is_none() => self.block(&x.block),
-            Expr::If(x) => self.if_expr(x),
-            Expr::Match(x) => self.match_expr(x),
+            Expr::Block(x) if x.label.is_none() => self.block_with_hint(&x.block, hint),
+            Expr::If(x) => self.if_expr(x, hint),
+            Expr::Match(x) => self.match_expr(x, hint),
             Expr::While(x) if x.label.is_none() => {
                 self.staged_loop(e, &x.body, || self.loop_expr(Some(&x.cond), &x.body))
             }
@@ -491,9 +524,10 @@ impl Lower<'_> {
             Expr::Break(x) if x.label.is_none() && x.expr.is_none() => self.loop_jump(e, false),
             Expr::Return(x) => {
                 let Some(arg) = &x.expr else {
-                    return err(e, "a kernel must return an i32");
+                    return err(e, "a kernel return requires a value");
                 };
-                let ret = self.return_value(self.expr(arg)?, arg)?;
+                let ret =
+                    self.return_value(self.expr_with_hint(arg, Some(self.result_type))?, arg)?;
                 // A host-known return transfers control in the generator too.
                 // The common exit remains the target of earlier runtime returns.
                 let region = self.region();
@@ -528,8 +562,17 @@ impl Lower<'_> {
                 };
                 Ok(Value::new(Stage::Reg(t.base()), code))
             }
-            Expr::Call(x) => self.call(x),
-            Expr::Index(x) => self.index(x),
+            Expr::Call(x) => self.call(x, hint),
+            Expr::Index(x) => {
+                if let Some((place, t, _)) = self.local_element(x)? {
+                    Ok(Value::new(
+                        Stage::Reg(t),
+                        emit!(__splice_builder.copy(#place)),
+                    ))
+                } else {
+                    self.index(x)
+                }
+            }
             Expr::Cast(x) => self.cast(x),
             Expr::MethodCall(x) => self.method(x, hint),
             Expr::Reference(x) => self.reference(x),
@@ -544,8 +587,37 @@ impl Lower<'_> {
             ),
         }
     }
+    fn local_element(&self, idx: &syn::ExprIndex) -> Result<Option<(TokenStream, Scalar, bool)>> {
+        let Expr::Path(path) = &*idx.expr else {
+            return Ok(None);
+        };
+        let Some(Binding::Locals(t, mutable)) = self.binding(path) else {
+            return Ok(None);
+        };
+        let index = self.host_raw(&idx.index)?;
+        Ok(Some((
+            emit!(*#path.get(#index).ok_or("kernel local index out of bounds")?),
+            t,
+            mutable,
+        )))
+    }
     fn assignment(&self, left: &Expr, right: &Expr, op: Option<(&str, &BinOp)>) -> Result<Value> {
         if let Expr::Index(index) = left {
+            if let Some((place, t, mutable)) = self.local_element(index)? {
+                if !mutable {
+                    return err(left, "assignment requires mutable kernel locals");
+                }
+                let rhs = self.operand(right, t)?;
+                let value = match op {
+                    Some((op, _)) if matches!(t, Scalar::Vector(_) | Scalar::Mask(_)) => {
+                        self.simd_operator(t, op, vec![emit!(dst), rhs], left)?.code
+                    }
+                    Some((op, _)) => self.bin(op, emit!(dst), rhs),
+                    None => rhs,
+                };
+                return Ok(Value::unit(emit!({let dst = #place; let value = #value;
+                    __splice_builder.assign(dst, value); })));
+            }
             return self.store(index, right, op);
         }
         let Expr::Path(p) = left else {
@@ -675,7 +747,7 @@ impl Lower<'_> {
             operands.0 #op operands.1
         })
     }
-    fn call(&self, c: &syn::ExprCall) -> Result<Value> {
+    fn call(&self, c: &syn::ExprCall, hint: Option<Scalar>) -> Result<Value> {
         let Expr::Path(p) = &*c.func else {
             return err(&c.func, "expected a kernel function path");
         };
@@ -690,6 +762,13 @@ impl Lower<'_> {
             return Ok(Value::new(Stage::Host, emit!(#p(#(#values),*))));
         }
         let recursive = p.path.is_ident(self.name);
+        let output = if recursive {
+            self.result_type
+        } else {
+            hint.filter(|t| matches!(t, Scalar::Vector(_) | Scalar::Mask(_)))
+                .unwrap_or(Scalar::Int)
+        };
+        let mut check = TokenStream::new();
         let target = if recursive {
             if !self.formals.iter().any(|p| matches!(p, Binding::Host)) {
                 return err(
@@ -705,6 +784,8 @@ impl Lower<'_> {
         } else {
             let mut path = p.path.clone();
             let fish = std::mem::take(&mut path.segments.last_mut().unwrap().arguments);
+            let expected = output.value_type(root);
+            check = emit!(const {assert!(matches!(#path::__SPLICE_RETURN,#expected),"annotate the kernel helper result with its Lane<T> or Mask<T> type")};);
             emit!(#path::__splice_call #fish)
         };
         let mut args = Vec::new();
@@ -727,7 +808,13 @@ impl Lower<'_> {
                         "expected a comptime value; found a runtime expression",
                     );
                 }
-                (None, Stage::Reg(Scalar::Int | Scalar::Inferred) | Stage::Buffer(_)) => value.code,
+                (
+                    None,
+                    Stage::Reg(
+                        Scalar::Int | Scalar::Inferred | Scalar::Vector(_) | Scalar::Mask(_),
+                    )
+                    | Stage::Buffer(_),
+                ) => value.code,
                 _ => {
                     return err(
                         expr,
@@ -737,8 +824,8 @@ impl Lower<'_> {
             });
         }
         Ok(Value::new(
-            Stage::Reg(Scalar::Int),
-            emit!(#target(#(#args,)* __splice_builder)?),
+            Stage::Reg(output),
+            emit!({#check #target(#(#args,)* __splice_builder)?}),
         ))
     }
 }

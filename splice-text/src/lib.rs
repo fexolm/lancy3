@@ -125,6 +125,26 @@ fn render(root: &Function, out: &mut String) -> fmt::Result {
                         Lanes => ("lanes", None),
                         FirstN => ("first_n", None),
                         Iota => ("iota", None),
+                        Shuffle(order) => (
+                            match order {
+                                splice::simd::Shuffle::InterleaveLow => "interleave_low",
+                                splice::simd::Shuffle::InterleaveHigh => "interleave_high",
+                                splice::simd::Shuffle::DeinterleaveEven => "deinterleave_even",
+                                splice::simd::Shuffle::DeinterleaveOdd => "deinterleave_odd",
+                            },
+                            None,
+                        ),
+                        Compress => ("compress", None),
+                        Expand => ("expand", None),
+                        Swizzle => ("swizzle", None),
+                        AlignmentPrefix(b) => ("alignment_prefix", Some(b)),
+                        PrefixSum => ("prefix_sum", None),
+                        Shr(_) => ("shr", None),
+                        Count => ("count", None),
+                        CompressStore(b) => ("compress_store", Some(b)),
+                        ExtractWrapping => ("extract_wrapping", None),
+                        ReplaceWrapping => ("replace_wrapping", None),
+                        Last => ("last", None),
                         Add => ("add", None),
                         Sub => ("sub", None),
                         Mul => ("mul", None),
@@ -150,6 +170,9 @@ fn render(root: &Function, out: &mut String) -> fmt::Result {
                     write!(out, "simd.{op}.{}", inst.element.name())?;
                     if let Some(b) = buffer {
                         write!(out, " {}", buf(b))?;
+                    }
+                    if let Shr(shift) = inst.op {
+                        write!(out, " {shift}")?;
                     }
                     if let Splat(bits) = inst.op {
                         write!(out, " {bits:#x}")?;

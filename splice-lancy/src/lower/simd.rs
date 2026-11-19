@@ -105,6 +105,104 @@ impl Builder<'_> {
                 };
                 return Ok(result);
             }
+            Shuffle(order) => {
+                use splice::simd::Shuffle as S;
+                let ids = self.vec_op(V::Iota(Lane::I32));
+                let one = self.splat_bits(Lane::I32, 1);
+                let indices = match order {
+                    S::DeinterleaveEven | S::DeinterleaveOdd => {
+                        let even = self.vec_op(V::Bin(Binary::Add, ids, ids));
+                        if order == S::DeinterleaveEven {
+                            even
+                        } else {
+                            self.vec_op(V::Bin(Binary::Add, even, one))
+                        }
+                    }
+                    S::InterleaveLow | S::InterleaveHigh => {
+                        let pair = self.vec_op(V::Bin(Binary::Shr, ids, one));
+                        let odd = self.vec_op(V::Bin(Binary::And, ids, one));
+                        let width = self.splat_bits(Lane::I32, e.lanes() as u64);
+                        let base = self.vec_op(V::Bin(Binary::Mul, odd, width));
+                        let idx = self.vec_op(V::Bin(Binary::Add, pair, base));
+                        if order == S::InterleaveLow {
+                            idx
+                        } else {
+                            let half = self.splat_bits(Lane::I32, e.lanes() as u64 / 2);
+                            self.vec_op(V::Bin(Binary::Add, idx, half))
+                        }
+                    }
+                };
+                V::Shuffle(vs[0], vs[1], indices)
+            }
+            Shr(n) => {
+                let shift = self.splat_bits(Lane::I32, (n & 31).into());
+                V::Bin(Binary::Shr, vs[0], shift)
+            }
+            Count => return Ok(Some(self.mask_count(vs[0]))),
+            Compress => V::Compress(vs[0], vs[1]),
+            Expand => {
+                let expanded = self.vec_op(V::Expand(vs[0], vs[1]));
+                V::Ternary(Ternary::Select, vs[1], expanded, vs[2])
+            }
+            Swizzle => {
+                let zero = self.splat_bits(Lane::I32, 0);
+                V::Shuffle(vs[0], zero, vs[1])
+            }
+            AlignmentPrefix(b) => {
+                let (base, _) = self.slice(b, false);
+                let ptr = self.val(Op::PtrOffset(base, vs[0], Scale::Four));
+                let addr = self.val(Op::Bitcast(Type::U64, ptr));
+                let low = self.val(Op::Cast(Type::I32, addr));
+                let neg = self.val(Op::Unary(Unary::Neg, low));
+                let mask = self.val(Op::Const((splice::simd::vector_bytes() - 1) as i32));
+                let bytes = self.val(Op::Bin(Binary::And, neg, mask));
+                let two = self.val(Op::Const(2));
+                return Ok(Some(self.val(Op::Bin(Binary::Shr, bytes, two))));
+            }
+            CompressStore(b) => {
+                let (base, len) = self.slice(b, true);
+                let data = self.vec_op(V::Compress(vs[2], vs[1]));
+                let count = self.mask_count(vs[1]);
+                let selected = self.first_lanes(e, count);
+                return Ok(self.masked_contiguous(
+                    e,
+                    base,
+                    len,
+                    vs[0],
+                    selected,
+                    Access {
+                        write: true,
+                        value: data,
+                    },
+                ));
+            }
+            ExtractWrapping | ReplaceWrapping => {
+                let mask = self.val(Op::Const(e.lanes() as i32 - 1));
+                let i = self.val(Op::Bin(Binary::And, vs[1], mask));
+                if inst.op == ExtractWrapping {
+                    V::ExtractLane(vs[0], i)
+                } else {
+                    V::InsertLane(vs[0], i, vs[2])
+                }
+            }
+            Last => {
+                let last = self.val(Op::Const(e.lanes() as i32 - 1));
+                V::ExtractLane(vs[0], last)
+            }
+            PrefixSum => {
+                let indices = self.vec_op(V::Iota(Lane::I32));
+                let mut sums = vs[0];
+                let mut shift = 1;
+                while shift < e.lanes() {
+                    let offset = self.splat_bits(Lane::I32, shift as u64);
+                    let previous = self.vec_op(V::Bin(Binary::Sub, indices, offset));
+                    // Negative indices select zero in a two-table Lancy shuffle.
+                    let low = self.vec_op(V::Shuffle(sums, sums, previous));
+                    sums = self.vec_op(V::Bin(Binary::Add, sums, low));
+                    shift *= 2;
+                }
+                return Ok(Some(sums));
+            }
             Any => V::AnyTrue(vs[0]),
             All => V::AllTrue(vs[0]),
             Not | MaskNot => V::Unary(Unary::Not, vs[0]),
@@ -163,6 +261,11 @@ impl Builder<'_> {
             self.val(Op::Cast(ty, x))
         };
         self.vec_op(V::Splat(x))
+    }
+    fn mask_count(&mut self, mask: Value) -> Value {
+        // Splice predicates are all-ones or zero in each Lancy lane.
+        let flags = self.vec_op(V::Unary(Unary::Neg, mask));
+        self.vec_op(V::Reduce(Binary::Add, flags))
     }
     fn first_lanes(&mut self, e: Element, count: Value) -> Value {
         let iota = self.vec_op(V::Iota(lane(e.index())));

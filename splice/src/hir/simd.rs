@@ -15,6 +15,18 @@ pub enum SimdOp {
     Splat(u64),
     SplatScalar,
     Iota,
+    Shuffle(crate::simd::Shuffle),
+    PrefixSum,
+    AlignmentPrefix(Buffer),
+    Compress,
+    Expand,
+    Swizzle,
+    Count,
+    Shr(u32),
+    CompressStore(Buffer),
+    Last,
+    ExtractWrapping,
+    ReplaceWrapping,
     Load(Buffer),
     Store(Buffer),
     LoadSelect(Buffer),
@@ -56,11 +68,15 @@ impl Simd {
     pub fn output(self) -> Option<ValueType> {
         use SimdOp::*;
         Some(match self.op {
-            Lanes | Any | All => ValueType::Scalar,
+            Lanes | AlignmentPrefix(_) | Any | All | Last | ExtractWrapping | Count => {
+                ValueType::Scalar
+            }
             FirstN | Eq | Ne | Lt | Le | Gt | Ge | MaskAnd | MaskOr | MaskXor | MaskNot => {
                 ValueType::Mask(self.element)
             }
-            Store(_) | StoreSelect(_) | Scatter(_) | ScatterSelect(_) => return None,
+            CompressStore(_) | Store(_) | StoreSelect(_) | Scatter(_) | ScatterSelect(_) => {
+                return None;
+            }
             _ => ValueType::Vector(self.element),
         })
     }
@@ -72,6 +88,27 @@ impl Simd {
         let s = ValueType::Scalar;
         let expected: &[ValueType] = match self.op {
             Lanes | Splat(_) | Iota => &[],
+            Shuffle(_) if self.element == Element::I32 => &[v, v],
+            Shuffle(_) => return Err("paired shuffle requires i32 lanes".into()),
+            AlignmentPrefix(_) if self.element == Element::I32 => &[s],
+            Compress if self.element == Element::I32 => &[v, m],
+            ExtractWrapping if self.element == Element::I32 => &[v, s],
+            ReplaceWrapping if self.element == Element::I32 => &[v, s, s],
+            ExtractWrapping | ReplaceWrapping => return Err("expected i32 lanes".into()),
+            Swizzle if self.element == Element::I32 => &[v, v],
+            Expand if self.element == Element::I32 => &[v, m, v],
+            Compress | Expand | Swizzle | AlignmentPrefix(_) => {
+                return Err("expected i32 lanes".into());
+            }
+            Count if self.element == Element::I32 => &[m],
+            CompressStore(_) if self.element == Element::I32 => &[s, m, v],
+            Count | CompressStore(_) => {
+                return Err("mask count and compact store require i32 lanes".into());
+            }
+            Shr(_) | PrefixSum | Last if self.element == Element::I32 => &[v],
+            Shr(_) | PrefixSum | Last => {
+                return Err("shift, prefix_sum and last require i32 lanes".into());
+            }
             SplatScalar if self.element == Element::I32 => &[s],
             SplatScalar => return Err("runtime splat expects an i32 element".into()),
             Div if self.element.is_float() => &[v, v],
@@ -103,8 +140,12 @@ impl Simd {
             ));
         }
         let (buffer, write) = match self.op {
-            Load(b) | LoadSelect(b) | Gather(b) | GatherSelect(b) => (b, false),
-            Store(b) | StoreSelect(b) | Scatter(b) | ScatterSelect(b) => (b, true),
+            AlignmentPrefix(b) | Load(b) | LoadSelect(b) | Gather(b) | GatherSelect(b) => {
+                (b, false)
+            }
+            CompressStore(b) | Store(b) | StoreSelect(b) | Scatter(b) | ScatterSelect(b) => {
+                (b, true)
+            }
             _ => return Ok(()),
         };
         let kind = buffers.get(buffer.index()).ok_or("invalid SIMD buffer")?;

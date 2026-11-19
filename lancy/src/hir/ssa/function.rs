@@ -571,6 +571,8 @@ impl Function {
                     Op::Cast(to, v) | Op::Bitcast(to, v) => {
                         let ty = operand(v)?;
                         let valid = match (ty, to) {
+                            // Expose the address bits for alignment arithmetic.
+                            (Type::Ptr, Type::U64) => matches!(self.op(inst), Op::Bitcast(..)),
                             (Type::Ptr, _) | (_, Type::Ptr) => false,
                             (Type::Vector(_), _) | (_, Type::Vector(_)) => false,
                             _ => {
