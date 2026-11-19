@@ -5,7 +5,11 @@ edition = "2024"
 rust-version = "1.94"
 description = "A CPU JIT with SSA HIR, target-generic register allocation and x86-64 code generation"
 
+[features]
+aarch64-encoder = ["dep:lancy-aarch64"]
+
 [dependencies]
+lancy-aarch64 = { path = "../lancy-aarch64", optional = true }
 splice-target = { path = "../splice-target" }
 iced-x86 = { version = "1.21", default-features = false, features = ["std", "code_asm"] }
 regalloc2 = "0.15.3"

@@ -15,5 +15,8 @@ mod module;
 mod numbers;
 pub mod support;
 
+#[cfg(feature = "aarch64-encoder")]
+pub use lancy_aarch64 as aarch64;
+
 pub use error::{CallError, CompileError};
 pub use jit::{Inlining, ScalarKernel};

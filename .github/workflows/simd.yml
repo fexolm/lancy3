@@ -27,8 +27,8 @@ jobs:
           LLVM_SYS_211_PREFIX: /usr/lib/llvm-21
         run: |
           cargo +1.94.1 fmt --all -- --check
-          cargo +1.94.1 clippy --workspace --all-targets --locked -- -D warnings
-          cargo +1.94.1 test --workspace --release --locked
+          cargo +1.94.1 clippy --workspace --all-targets --locked --features lancy/aarch64-encoder -- -D warnings
+          cargo +1.94.1 test --workspace --release --locked --features lancy/aarch64-encoder
       - name: Exercise native x86 SIMD profiles
         env:
           LLVM_SYS_211_PREFIX: /usr/lib/llvm-21
