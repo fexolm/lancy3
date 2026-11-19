@@ -5,7 +5,7 @@
 //! once it knows the destination or patch it after assigning block addresses.
 //!
 //! ```
-//! use lancy_aarch64::{Code, Encoder, Operand, Register};
+//! use lancy::aarch64::{Code, Encoder, Operand, Register};
 //!
 //! let mut buffer = [0; 4];
 //! let mut encoder = Encoder::new(0x1000, &mut buffer)?;
@@ -14,15 +14,18 @@
 //!     &[Operand::reg(Register::X0), Operand::reg(Register::X1), Operand::imm(7)],
 //! )?;
 //! assert_eq!(encoder.bytes(), &[0x20, 0x1c, 0x00, 0x91]);
-//! # Ok::<(), lancy_aarch64::Error>(())
+//! # Ok::<(), lancy::aarch64::Error>(())
 //! ```
-#![no_std]
-#![forbid(unsafe_code)]
+#[cfg(target_arch = "aarch64")]
+mod backend;
+mod instruction;
+mod operand;
 
-pub use decoderant_a64::{
-    Arrangement, Code, ConditionCode, EncodeError, ExtendKind, Feature, FeatureSet, Instruction,
-    MemoryMode, Operand, PredQual, Register, ShiftKind,
-};
+#[cfg(target_arch = "aarch64")]
+pub(crate) use backend::{SITE_POINTER, Site, emit};
+
+pub use instruction::{Code, EncodeError, Feature, FeatureSet, Instruction};
+pub use operand::{Arrangement, ConditionCode, Operand, PredQual, Register, ShiftKind};
 
 const WORD_BYTES: usize = 4;
 
@@ -43,7 +46,7 @@ pub enum Error {
 /// A stream of little-endian AArch64 instructions in caller-owned storage.
 ///
 /// The code generator is responsible for selecting instructions available on
-/// its target. See `Code::op_code().is_available(&features)`.
+/// its target. See [`Code::is_available`].
 pub struct Encoder<'a> {
     start_pc: u64,
     buffer: &'a mut [u8],
@@ -95,7 +98,7 @@ impl<'a> Encoder<'a> {
     /// Encode a previously validated instruction at the current PC.
     /// A PC-relative operand retains its absolute target.
     pub fn push_instruction(&mut self, instruction: &Instruction) -> Result<usize, Error> {
-        self.append(|pc| Ok(decoderant_a64::encode(instruction, pc)?.to_le_bytes()))
+        self.append(|pc| Ok(instruction.encode_at(pc)?.to_le_bytes()))
     }
 
     fn append(
@@ -144,9 +147,5 @@ fn word(
     operands: &[Operand],
     pc: u64,
 ) -> Result<[u8; WORD_BYTES], EncodeError> {
-    // The checked constructor already encodes the instruction. Its word is
-    // ready to write without a mnemonic search or a second encoding pass.
-    Ok(Instruction::with_suffix(code, suffix, operands, pc)?
-        .decoded_word()
-        .to_le_bytes())
+    Ok(code.encode(suffix, operands, pc)?.to_le_bytes())
 }

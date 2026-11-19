@@ -1,7 +1,7 @@
 //! Numeric operation signatures and reference semantics for the HIR interpreter.
 pub(crate) mod half;
 use crate::hir::{Binary, Ternary, Type, Unary};
-#[cfg(test)]
+#[cfg(any(test, target_arch = "aarch64"))]
 mod reference;
 #[cfg(test)]
 pub(crate) use reference::read;
@@ -133,6 +133,7 @@ impl Math {
         ))
     }
 
+    #[cfg(target_arch = "x86_64")]
     pub fn inputs(self) -> &'static [usize] {
         match self.action {
             Action::Iota => &[],
@@ -152,6 +153,7 @@ impl Math {
             Action::Shuffle | Action::Ternary(_) | Action::Insert => &[0, 1, 2],
         }
     }
+    #[cfg(target_arch = "x86_64")]
     pub fn operand_type(self, i: usize) -> Type {
         match (self.action, i) {
             (Action::Extract | Action::Insert, 1) => Type::I32,

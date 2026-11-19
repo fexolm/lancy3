@@ -17,12 +17,15 @@ pub enum CompileError {
     WorkspaceTooLarge { slots: usize },
     #[error("function exceeds the register allocator's index range")]
     FunctionTooLarge,
-    #[error("x64 code offsets {offset} and {target} exceed the supported rel32 span")]
+    #[error("branch between code offsets {offset} and {target} exceeds the supported span")]
     BranchOutOfRange { offset: usize, target: usize },
     #[error("register allocation failed: {0}")]
     RegisterAllocation(#[from] regalloc2::RegAllocError),
     #[error("x64 assembly failed: {0}")]
+    #[cfg(target_arch = "x86_64")]
     Assembly(#[from] iced_x86::IcedError),
+    #[error("AArch64 assembly failed: {0}")]
+    Aarch64Assembly(#[from] crate::aarch64::Error),
     #[error("cannot install empty machine code")]
     EmptyCode,
     #[error("{operation} failed while installing machine code: {source}")]
@@ -36,6 +39,8 @@ pub enum CompileError {
 /// Failure to invoke a kernel, or a trap raised during its execution.
 #[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
 pub enum CallError {
+    #[error("the calling thread's SVE vector length is smaller than the compiled kernel requires")]
+    VectorLength,
     #[error("expected {expected} arguments, got {actual}")]
     Arity { expected: usize, actual: usize },
     #[error("use call_words or call_words_raw for a multiword signature")]

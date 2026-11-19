@@ -1,0 +1,37 @@
+fn main x:i32 -> i32
+  lanes = simd.lanes u8
+  byte_lanes = cast u8 lanes
+  a = simd.iota u8
+  b = simd.splat byte_lanes
+  diff = simd.sub a b
+  factor = cast u8 x
+  factors = simd.splat factor
+  product = simd.mul diff factors
+  one = const 1
+  last = sub lanes one
+  value = simd.extract product last
+  result = cast i32 value
+  ret result
+@aarch64 neon has 0xffe0fc00 0x4e209c00
+@aarch64 sve has 0xffffe000 0x04100000
+@aarch64 sve lacks 0xff20fc00 0x04206000
+@aarch64 sve2 has 0xff20fc00 0x04206000
+@run 3 -> 253
+@run 255 -> 1
+---
+fn main x:i32 -> i32
+  hi = literal u128 0xffffffffffffffff
+  lo = cast u128 x
+  a = simd.splat hi
+  b = simd.splat lo
+  sum = simd.add a b
+  zero = const 0
+  lane = simd.extract sum zero
+  sixty_four = literal u128 0x40
+  carry = shr lane sixty_four
+  result = cast i32 carry
+  ret result
+@aarch64 all lacks 0xff20fc00 0x04200000
+@aarch64 all lacks 0xbfe0fc00 0x0ee08400
+@run 1 -> 1
+@run 0 -> 0

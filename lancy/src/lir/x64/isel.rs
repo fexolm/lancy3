@@ -3,13 +3,13 @@ use super::{
     inst::simd::Native,
     inst::{Address, Alu, Cond, Inst, Rhs, class},
 };
+use crate::CompileError;
 use crate::hir::{Binary, Function, Op, Scale, Terminator, Value, transforms::ControlFlowGraph};
 use crate::hir::{Simd, Type};
-use crate::lir::isel::{self, Context, Root};
+use crate::lir::isel::{self, Context, Edges, Root};
 use crate::numbers::Math;
-use crate::{CompileError, support::slotmap::DenseMap};
 use crate::{lir, module::FunctionId};
-use regalloc2::{Block, PRegSet, RegClass, VReg};
+use regalloc2::{PRegSet, RegClass, VReg};
 
 fn reg(f: &Function, v: Value) -> VReg {
     VReg::new(v.index(), class(f.value_type(v)))
@@ -23,17 +23,8 @@ pub(super) fn select(
 ) -> Result<lir::Function<Inst>, CompileError> {
     let reg = |v| reg(f, v);
     let cpu = Features::host();
-    let mut mapping = DenseMap::filled(f.block_capacity(), Block::invalid());
-    let mut count = 0;
-    let split = |source, target| {
-        matches!(f.terminator(source), Terminator::Branch { .. })
-            && cfg.predecessors(target).len() > 1
-    };
-    for &b in cfg.reverse_postorder() {
-        mapping[b] = Block::new(count);
-        count += 1 + cfg.successors(b).filter(|&target| split(b, target)).count();
-    }
-    let mut body = lir::Function::new(count, f.value_count())?;
+    let edges = Edges::new(f, cfg);
+    let mut body = edges.function()?;
     let mut blocks = isel::select(f, cfg, |ctx, root, out| {
         let mut rules = Rules {
             ctx,
@@ -45,7 +36,15 @@ pub(super) fn select(
             Root::Term(term) => rules.branch(term),
             Root::Inst(i) => {
                 let dst = || reg(f.result(i).expect("value-producing instruction"));
-                let op = match *f.op(i) {
+                let op = *f.op(i);
+                if let Op::Bin(kind, a, b) = op
+                    && f.value_type(a) == Type::I32
+                    && let Some(inst) = rules.i32_binary(kind, dst(), a, b)?
+                {
+                    rules.out.push(inst);
+                    return Ok(());
+                }
+                let op = match op {
                     Op::Const(n) => Inst::Imm(dst(), n),
                     Op::Literal(l, n) => Inst::Literal(l, n, dst()),
                     Op::Simd(Simd::Iota(l)) => Inst::Iota(l, dst()),
@@ -55,11 +54,6 @@ pub(super) fn select(
                     Op::Bitcast(to, v) => Inst::BitMove(f.value_type(v), to, dst(), rules.input(v)),
                     Op::Simd(Simd::Bitcast(_, v)) => Inst::Copy(dst(), rules.input(v)),
                     Op::Copy(v) => Inst::Copy(dst(), rules.input(v)),
-                    Op::Bin(kind, a, b)
-                        if f.value_type(a) == crate::hir::Type::I32 && kind.scalar_alu() =>
-                    {
-                        rules.binary(kind, dst(), a, b)?
-                    }
                     Op::Bin(
                         kind @ (Binary::Add
                         | Binary::Sub
@@ -188,30 +182,7 @@ pub(super) fn select(
         for op in blocks[b].drain(..) {
             body.push(op);
         }
-        let term = *f.terminator(b);
-        // Each critical edge gets its own block, including two arms going
-        // to the same join with different arguments. Keep it near its source
-        // so that forward edges stay forward in the allocator's loop estimate.
-        let mut bridge = mapping[b].index() + 1;
-        for e in term.edges() {
-            let (target, args) = f.edge(e);
-            if split(b, target) {
-                body.edge(Block::new(bridge), []);
-                bridge += 1;
-            } else {
-                body.edge(mapping[target], args.iter().copied().map(reg));
-            }
-        }
-        let params = if entry { &[] } else { f.params(b) };
-        body.end_block(params.iter().copied().map(reg))?;
-        for e in term.edges() {
-            let (target, args) = f.edge(e);
-            if split(b, target) {
-                body.push(Inst::Jump);
-                body.edge(mapping[target], args.iter().copied().map(reg));
-                body.end_block([])?;
-            }
-        }
+        edges.finish(&mut body, b, reg, || Inst::Jump)?;
     }
     Ok(body)
 }
@@ -290,15 +261,15 @@ impl Rules<'_> {
         })
     }
 
-    fn binary(
+    fn i32_binary(
         &mut self,
         kind: Binary,
         dst: VReg,
         mut a: Value,
         mut b: Value,
-    ) -> Result<Inst, CompileError> {
+    ) -> Result<Option<Inst>, CompileError> {
         if let Some(cc) = Cond::from_binary(kind) {
-            return Ok(Inst::Compare(cc, dst, self.input(a), self.rhs(b)));
+            return Ok(Some(Inst::Compare(cc, dst, self.input(a), self.rhs(b))));
         }
         if matches!(
             kind,
@@ -308,9 +279,9 @@ impl Rules<'_> {
         {
             std::mem::swap(&mut a, &mut b);
         }
-        let a = self.input(a);
-        Ok(match kind {
+        Ok(Some(match kind {
             Binary::Div | Binary::Rem => {
+                let a = self.input(a);
                 let hi = self.body.temp(RegClass::Int)?;
                 self.out.push(Inst::Cdq { lo: a, hi });
                 Inst::IDiv {
@@ -324,18 +295,18 @@ impl Rules<'_> {
             Binary::Shl | Binary::Shr => Inst::Shift {
                 left: kind == Binary::Shl,
                 dst,
-                value: a,
+                value: self.input(a),
                 count: self.rhs(b),
             },
-            Binary::Add => Inst::Alu(Alu::Add, dst, a, self.rhs(b)),
-            Binary::Sub => Inst::Alu(Alu::Sub, dst, a, self.rhs(b)),
-            Binary::Mul => Inst::Alu(Alu::Mul, dst, a, self.rhs(b)),
-            Binary::And => Inst::Alu(Alu::And, dst, a, self.rhs(b)),
-            Binary::Or => Inst::Alu(Alu::Or, dst, a, self.rhs(b)),
-            Binary::Xor => Inst::Alu(Alu::Xor, dst, a, self.rhs(b)),
-            Binary::Min => Inst::Alu(Alu::Min, dst, a, Rhs::Reg(self.input(b))),
-            Binary::Max => Inst::Alu(Alu::Max, dst, a, Rhs::Reg(self.input(b))),
-            _ => unreachable!("comparisons handled above"),
-        })
+            Binary::Add => Inst::Alu(Alu::Add, dst, self.input(a), self.rhs(b)),
+            Binary::Sub => Inst::Alu(Alu::Sub, dst, self.input(a), self.rhs(b)),
+            Binary::Mul => Inst::Alu(Alu::Mul, dst, self.input(a), self.rhs(b)),
+            Binary::And => Inst::Alu(Alu::And, dst, self.input(a), self.rhs(b)),
+            Binary::Or => Inst::Alu(Alu::Or, dst, self.input(a), self.rhs(b)),
+            Binary::Xor => Inst::Alu(Alu::Xor, dst, self.input(a), self.rhs(b)),
+            Binary::Min => Inst::Alu(Alu::Min, dst, self.input(a), Rhs::Reg(self.input(b))),
+            Binary::Max => Inst::Alu(Alu::Max, dst, self.input(a), Rhs::Reg(self.input(b))),
+            _ => return Ok(None),
+        }))
     }
 }

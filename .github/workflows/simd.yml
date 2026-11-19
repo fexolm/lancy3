@@ -1,4 +1,4 @@
-name: SIMD backends
+name: Tests
 
 on:
   push:
@@ -27,8 +27,8 @@ jobs:
           LLVM_SYS_211_PREFIX: /usr/lib/llvm-21
         run: |
           cargo +1.94.1 fmt --all -- --check
-          cargo +1.94.1 clippy --workspace --all-targets --locked --features lancy/aarch64-encoder -- -D warnings
-          cargo +1.94.1 test --workspace --release --locked --features lancy/aarch64-encoder
+          cargo +1.94.1 clippy --workspace --all-targets --locked -- -D warnings
+          cargo +1.94.1 test --workspace --release --locked
       - name: Exercise native x86 SIMD profiles
         env:
           LLVM_SYS_211_PREFIX: /usr/lib/llvm-21
@@ -64,28 +64,28 @@ jobs:
             sudo tee /etc/apt/sources.list.d/apt-llvm.list
           sudo apt-get update
           sudo apt-get install -y g++ libffi-dev llvm-21-dev qemu-user
-      - name: Test native NEON
+      - name: Check and test the workspace with NEON
         env:
           SPLICE_SIMD: neon
         run: |
-          cargo +1.94.1 clippy --workspace --exclude lancy --exclude splice-lancy --all-targets --locked -- -D warnings
-          cargo +1.94.1 test --workspace --exclude lancy --exclude splice-lancy --release --locked --target aarch64-unknown-linux-gnu
+          cargo +1.94.1 clippy --workspace --all-targets --locked -- -D warnings
+          cargo +1.94.1 test --workspace --release --locked --target aarch64-unknown-linux-gnu
       - name: Exercise native SVE hardware when available
         run: |
           cargo +1.94.1 build --release --locked --target aarch64-unknown-linux-gnu -p splice-target --example simd_profile
           for profile in sve sve2; do
             if SPLICE_SIMD="$profile" target/aarch64-unknown-linux-gnu/release/examples/simd_profile; then
-              SPLICE_SIMD="$profile" cargo +1.94.1 test --release --locked --target aarch64-unknown-linux-gnu -p splice-llvm -p splice --tests
+              SPLICE_SIMD="$profile" cargo +1.94.1 test --release --locked --target aarch64-unknown-linux-gnu -p lancy -p splice-target -p splice-lancy -p splice-llvm -p splice --tests
             fi
           done
       - name: Test SVE and SVE2 in QEMU
         run: |
-          for row in 'sve 32 32' 'sve2 64 64' 'sve2 48 32'; do
-            read -r SPLICE_SIMD vl width <<< "$row"
+          for row in 'sve a64fx 32 32' 'sve2 max 64 64' 'sve2 max 48 32'; do
+            read -r SPLICE_SIMD cpu vl width <<< "$row"
             export SPLICE_SIMD
-            export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUNNER="qemu-aarch64 -cpu max,sve-default-vector-length=$vl"
+            export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUNNER="qemu-aarch64 -cpu $cpu,sve-default-vector-length=$vl"
             selected=$(cargo +1.94.1 run --quiet --release --locked --target aarch64-unknown-linux-gnu -p splice-target --example simd_profile)
             echo "$selected"
             [[ "$selected" == *", $width bytes" ]]
-            cargo +1.94.1 test --release --locked --target aarch64-unknown-linux-gnu -p splice-llvm -p splice-cranelift -p splice --tests
+            cargo +1.94.1 test --release --locked --target aarch64-unknown-linux-gnu -p lancy -p splice-target -p splice-lancy -p splice-llvm -p splice-cranelift -p splice --tests
           done

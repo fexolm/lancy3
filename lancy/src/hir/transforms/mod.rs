@@ -1,6 +1,6 @@
 mod cfg;
 mod domtree;
-mod inline;
+pub(crate) mod passes;
 #[cfg(test)]
 mod tests;
 

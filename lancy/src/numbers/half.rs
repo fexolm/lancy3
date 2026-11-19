@@ -1,6 +1,6 @@
 //! Binary16 and bfloat16 use the same sign/exponent/fraction layout with
 //! different exponent biases. Widening either format to binary64 is exact.
-#[cfg(test)]
+#[cfg(any(test, target_arch = "aarch64"))]
 use super::{Action, Binary, Ternary, Unary, reference::float64};
 use crate::hir::Lane;
 
@@ -26,7 +26,7 @@ impl Format {
     fn infinity(&self) -> u16 {
         0x7fff & !((1 << self.fraction) - 1)
     }
-    #[cfg(test)]
+    #[cfg(any(test, target_arch = "aarch64"))]
     pub fn decode(&self, raw: u16) -> f64 {
         let magnitude = raw & 0x7fff;
         let frac = magnitude & ((1 << self.fraction) - 1);
@@ -71,7 +71,7 @@ impl Format {
         sign | (base + rounded as u16)
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, target_arch = "aarch64"))]
     pub fn eval(&self, action: Action, x: u16, y: u16, z: u16) -> u128 {
         let a = self.decode(x);
         let b = self.decode(y);

@@ -3,18 +3,12 @@ mod matrix;
 use matrix::{matmul, reference};
 use splice::{BufferArg, Executable};
 use splice_cranelift::Cranelift;
-#[cfg(target_arch = "x86_64")]
 use splice_lancy::Lancy;
 use splice_llvm::Llvm;
 
 fn main() -> splice::Result<()> {
     let kernel: Box<dyn Executable> = match std::env::args().nth(1).as_deref() {
-        #[cfg(target_arch = "x86_64")]
         None | Some("lancy") => Box::new(matmul::build::<Lancy>()?),
-        #[cfg(not(target_arch = "x86_64"))]
-        None => Box::new(matmul::build::<Llvm>()?),
-        #[cfg(not(target_arch = "x86_64"))]
-        Some("lancy") => return Err("Lancy requires x86-64".into()),
         Some("cranelift") => Box::new(matmul::build::<Cranelift>()?),
         Some("llvm") => Box::new(matmul::build::<Llvm>()?),
         Some(other) => {
@@ -51,9 +45,7 @@ mod tests {
     fn kernels() -> Vec<(&'static str, Box<dyn Executable>)> {
         let ir = matmul::ir().unwrap();
         vec![
-            #[cfg(target_arch = "x86_64")]
             ("Lancy/direct", Box::new(matmul::build::<Lancy>().unwrap())),
-            #[cfg(target_arch = "x86_64")]
             ("Lancy/ir", Box::new(Lancy::compile(&ir).unwrap())),
             (
                 "Cranelift/direct",

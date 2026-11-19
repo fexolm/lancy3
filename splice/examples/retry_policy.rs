@@ -1,8 +1,5 @@
 use splice::{Executable, kernel};
-#[cfg(target_arch = "x86_64")]
-use splice_lancy::Lancy as Backend;
-#[cfg(not(target_arch = "x86_64"))]
-use splice_llvm::Llvm as Backend;
+use splice_lancy::Lancy;
 
 #[derive(splice::ComptimeKey)]
 struct RetryPolicy {
@@ -66,7 +63,7 @@ fn main() -> Result<(), String> {
         max_ms: 2_000,
         max_attempts: 8,
     };
-    let decide = retry_delay::build::<Backend>(&policy)?;
+    let decide = retry_delay::build::<Lancy>(&policy)?;
 
     // A single native scalar call handles one failed delivery.
     for (status, attempt, retry_after_ms, expected) in [

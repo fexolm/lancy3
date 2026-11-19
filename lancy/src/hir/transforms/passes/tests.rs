@@ -1,3 +1,4 @@
+use super::{inline_all, simplify};
 use crate::hir::{Binary, Function, Op, Terminator};
 use crate::{CallError, Inlining, ScalarKernel};
 use std::sync::Arc;
@@ -17,19 +18,23 @@ fn an_unrepresentable_expansion_keeps_the_shared_graph_executable() {
         let yes = f.add_edge(twice, &[]);
         let no = f.add_edge(skip, &[]);
         f.set_terminator(b, Terminator::Branch { cond: x, yes, no });
-        let site = f.add_call(child, &[x]);
+        let one = f.append(b, Op::Const(1)).unwrap();
+        let previous = f.append(twice, Op::Bin(Binary::Sub, x, one)).unwrap();
+        let site = f.add_call(child, &[previous]);
         let a = f.append(twice, Op::Call(site)).unwrap();
         let c = f.append(twice, Op::Call(site)).unwrap();
         let sum = f.append(twice, Op::Bin(Binary::Add, a, c)).unwrap();
         f.set_terminator(twice, Terminator::Return(sum));
-        f.set_terminator(skip, Terminator::Return(x));
+        f.set_terminator(skip, Terminator::Return(one));
     }
     let (m, ids) = f.verified_module().unwrap();
     assert!(matches!(
-        m.inline_all(&ids),
+        inline_all(&m, &ids),
         Err(crate::CompileError::FunctionTooLarge)
     ));
-    assert_eq!(ScalarKernel::compile(&f).unwrap().call(&[0]), Ok(0));
+    let code = ScalarKernel::compile(&f).unwrap();
+    assert_eq!(code.call(&[0]), Ok(1));
+    assert_eq!(code.call(&[1]), Ok(2));
 }
 
 #[test]
@@ -72,7 +77,7 @@ fn repeated_calls_clone_loops_and_each_early_return_into_its_own_continuation() 
     root.set_terminator(b, Terminator::Return(answer));
 
     let (source, ids) = root.verified_module().unwrap();
-    let expanded = source.inline_all(&ids).unwrap();
+    let expanded = inline_all(&source, &ids).unwrap();
     assert_eq!(expanded.verified_module().unwrap().0.functions.len(), 1);
     for policy in [Inlining::Always, Inlining::Never] {
         let code = ScalarKernel::compile_with_inlining(&root, policy).unwrap();
@@ -102,7 +107,7 @@ fn non_returning_callee_removes_only_the_unreachable_continuation() {
     let no = root.add_edge(no, &[]);
     root.set_terminator(b, Terminator::Branch { cond: x, yes, no });
     let (source, ids) = root.verified_module().unwrap();
-    let expanded = source.inline_all(&ids).unwrap();
+    let expanded = inline_all(&source, &ids).unwrap();
     expanded.verify().unwrap();
     assert_eq!(
         expanded
@@ -133,7 +138,7 @@ fn remove_dominated_checks_but_keep_sibling_checks_and_unused_trapping_math() {
     let zero = f.append(end, Op::Const(0)).unwrap();
     f.append(end, Op::Bin(Binary::Div, n, zero));
     f.set_terminator(end, Terminator::Return(zero));
-    f.simplify().unwrap();
+    simplify(&mut f).unwrap();
     f.verify().unwrap();
     assert_eq!(f.instructions(a).count(), 1);
     assert_eq!(

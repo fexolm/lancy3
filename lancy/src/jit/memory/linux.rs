@@ -43,12 +43,41 @@ pub(super) fn allocate(len: usize) -> Result<NonNull<c_void>, CompileError> {
 
 pub(super) fn seal(mem: &Executable) -> Result<(), CompileError> {
     const PROT_READ_EXEC: i32 = 1 | 4;
-    // x86-64 has coherent instruction/data caches. The kernel publishes
-    // this newly created mapping only after mprotect succeeds.
+    #[cfg(target_arch = "aarch64")]
+    synchronize(mem);
+    // Publish the mapping only after mprotect succeeds.
     if unsafe { mprotect(mem.address.as_ptr(), mem.len, PROT_READ_EXEC) } != 0 {
         return Err(os_error("mprotect"));
     }
     Ok(())
+}
+
+#[cfg(target_arch = "aarch64")]
+fn synchronize(mem: &Executable) {
+    use std::arch::asm;
+    let start = mem.address.as_ptr() as usize;
+    let end = start + mem.len;
+    let ctr: usize;
+    // SAFETY: Linux permits reading CTR_EL0 at EL0. Only lines overlapping
+    // the live mapping are maintained. No mappings are written by this code.
+    unsafe {
+        asm!("mrs {ctr}, ctr_el0", ctr = out(reg) ctr, options(nostack, preserves_flags));
+        if ctr & (1 << 28) == 0 {
+            let line = 4 << ((ctr >> 16) & 15);
+            for address in (start & !(line - 1)..end).step_by(line) {
+                asm!("dc cvau, {p}", p = in(reg) address, options(nostack, preserves_flags));
+            }
+        }
+        asm!("dsb ish", options(nostack, preserves_flags));
+        if ctr & (1 << 29) == 0 {
+            let line = 4 << (ctr & 15);
+            for address in (start & !(line - 1)..end).step_by(line) {
+                asm!("ic ivau, {p}", p = in(reg) address, options(nostack, preserves_flags));
+            }
+            asm!("dsb ish", options(nostack, preserves_flags));
+        }
+        asm!("isb", options(nostack, preserves_flags));
+    }
 }
 
 pub(super) fn release(mem: &Executable) {

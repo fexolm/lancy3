@@ -1,0 +1,27 @@
+# BL encodes an outlined call between these two functions.
+fn plus_one x:i32 -> i32
+  one = const 1
+  sum = add x one
+  ret sum
+
+fn main x:i32 -> i32
+  sum = call plus_one x
+  ret sum
+
+@aarch64 all lacks 0xfc000000 0x94000000
+@run 41 -> 42
+
+---
+
+@policy never
+fn plus_one x:i32 -> i32
+  one = const 1
+  sum = add x one
+  ret sum
+
+fn main x:i32 -> i32
+  sum = call plus_one x
+  ret sum
+
+@aarch64 all has 0xfc000000 0x94000000
+@run 41 -> 42

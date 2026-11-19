@@ -5,7 +5,7 @@ use crate::hir::{
 use std::collections::HashMap;
 use std::sync::Arc;
 
-pub(super) type Lines<'a> = Vec<(usize, &'a str)>;
+pub(crate) type Lines<'a> = Vec<(usize, &'a str)>;
 type Names<'a, T> = HashMap<&'a str, T>;
 type Result<T> = std::result::Result<T, String>;
 
@@ -349,7 +349,7 @@ fn body<'a>(
     Ok(f)
 }
 
-pub(super) fn parse(mut lines: &[(usize, &str)]) -> Result<Arc<Function>> {
+pub(crate) fn parse(mut lines: &[(usize, &str)]) -> Result<Arc<Function>> {
     let mut functions = Names::new();
     while let Some((&(line, header), rest)) = lines.split_first() {
         let words: Vec<_> = header.split_whitespace().collect();

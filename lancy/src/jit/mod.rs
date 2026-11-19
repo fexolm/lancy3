@@ -1,6 +1,7 @@
 mod kernel;
 mod memory;
-#[cfg(test)]
+#[cfg(all(test, target_arch = "x86_64"))]
 pub(crate) mod packed_test;
 
-pub use kernel::{Inlining, ScalarKernel};
+pub use crate::hir::transforms::passes::Inlining;
+pub use kernel::ScalarKernel;

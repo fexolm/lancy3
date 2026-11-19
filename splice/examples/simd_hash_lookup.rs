@@ -4,7 +4,6 @@ mod probe;
 use probe::{fixture, lookup, reference};
 use splice::Executable;
 use splice_cranelift::Cranelift;
-#[cfg(target_arch = "x86_64")]
 use splice_lancy::Lancy;
 use splice_llvm::Llvm;
 
@@ -12,12 +11,7 @@ fn main() -> Result<(), String> {
     let kernel: Box<dyn Executable> = match std::env::args().nth(1).as_deref() {
         Some("llvm") => Box::new(lookup::build::<Llvm>()?),
         Some("cranelift") => Box::new(lookup::build::<Cranelift>()?),
-        #[cfg(target_arch = "x86_64")]
         None | Some("lancy") => Box::new(lookup::build::<Lancy>()?),
-        #[cfg(not(target_arch = "x86_64"))]
-        None => Box::new(lookup::build::<Llvm>()?),
-        #[cfg(not(target_arch = "x86_64"))]
-        Some("lancy") => return Err("Lancy requires x86-64".into()),
         Some(name) => return Err(format!("unknown backend {name}")),
     };
     let (table, queries) = fixture(16, 12, 9);
@@ -82,10 +76,8 @@ mod tests {
     #[test]
     fn independent_probes_stop_on_matches_empty_slots_and_full_laps() {
         let ir = lookup::ir().unwrap();
-        let kernels: Vec<Box<dyn Executable>> = vec![
-            #[cfg(target_arch = "x86_64")]
+        let kernels: [Box<dyn Executable>; 6] = [
             Box::new(lookup::build::<Lancy>().unwrap()),
-            #[cfg(target_arch = "x86_64")]
             Box::new(Lancy::compile(&ir).unwrap()),
             Box::new(lookup::build::<Cranelift>().unwrap()),
             Box::new(Cranelift::compile(&ir).unwrap()),

@@ -1,4 +1,4 @@
-//! Executable reference used only by compiler tests.
+//! Portable numeric semantics used by the SSA reference and AArch64 libcalls.
 use super::{Action, Bits, Math, half::Format};
 use crate::{
     CallError,

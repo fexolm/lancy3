@@ -1,7 +1,7 @@
 //! Expand the verified call DAG in callee-first order. A template is built once
 //! per distinct function, including when many call sites share its body.
-use super::ControlFlowGraph;
 use crate::CompileError;
+use crate::hir::transforms::ControlFlowGraph;
 use crate::hir::{Block, Edge, Function, Op, Terminator, Value, ssa::VerifiedBody};
 use crate::module::{FunctionId, FunctionIds, Module};
 use crate::support::slotmap::DenseMap;
@@ -12,52 +12,53 @@ struct Template {
     returns: usize,
 }
 
-impl Module<VerifiedBody<'_>> {
-    pub(crate) fn inline_all(&self, ids: &FunctionIds<Function>) -> Result<Function, CompileError> {
-        self.check_expansion()?;
-        let mut uses = DenseMap::filled(self.functions.len(), 0usize);
-        for id in self.functions.keys() {
-            for &child in self.call_graph.callees(id) {
-                uses[child] += 1;
-            }
+pub(crate) fn inline_all(
+    module: &Module<VerifiedBody<'_>>,
+    ids: &FunctionIds<Function>,
+) -> Result<Function, CompileError> {
+    check_expansion(module)?;
+    let mut uses = DenseMap::filled(module.functions.len(), 0usize);
+    for id in module.functions.keys() {
+        for &child in module.call_graph.callees(id) {
+            uses[child] += 1;
         }
-        let mut templates: DenseMap<FunctionId, Option<Template>> = DenseMap::new();
-        for (id, source) in self.functions.iter() {
-            let src = source.function;
-            let mut body = Function::new(src.param_types(), src.return_type());
-            let entry = body.entry();
-            let args = body.params(entry).to_vec();
-            let mut copy = Copier::new(src, &source.cfg, &mut body, entry, &args);
-            copy.copy_blocks(
-                &mut body,
-                &source.cfg,
-                Exit::Root,
-                |out, at, callee, args| {
-                    let id = ids[&std::ptr::from_ref(callee)];
-                    let template = templates[id].as_ref().unwrap();
-                    let result = template.expand(out, at, args);
-                    uses[id] -= 1;
-                    if uses[id] == 0 {
-                        templates[id] = None;
-                    }
-                    result
-                },
-            );
-            // A callee can loop forever. Its call continuation, and even other
-            // caller blocks dominated by the call, then become unreachable.
-            body.prune_unreachable()?;
-            if id == self.call_graph.root() {
-                return Ok(body);
-            }
-            let cfg = ControlFlowGraph::compute(&body)?;
-            let returns = body
-                .blocks()
-                .filter(|&b| matches!(body.terminator(b), Terminator::Return(_)))
-                .count();
-            templates.insert(Some(Template { body, cfg, returns }));
-        }
-        unreachable!("a verified module contains its root")
     }
+    let mut templates: DenseMap<FunctionId, Option<Template>> = DenseMap::new();
+    for (id, source) in module.functions.iter() {
+        let src = source.function;
+        let mut body = Function::new(src.param_types(), src.return_type());
+        let entry = body.entry();
+        let args = body.params(entry).to_vec();
+        let mut copy = Copier::new(src, &source.cfg, &mut body, entry, &args);
+        copy.copy_blocks(
+            &mut body,
+            &source.cfg,
+            Exit::Root,
+            |out, at, callee, args| {
+                let id = ids[&std::ptr::from_ref(callee)];
+                let template = templates[id].as_ref().unwrap();
+                let result = template.expand(out, at, args);
+                uses[id] -= 1;
+                if uses[id] == 0 {
+                    templates[id] = None;
+                }
+                result
+            },
+        );
+        // A callee can loop forever. Its call continuation, and even other
+        // caller blocks dominated by the call, then become unreachable.
+        body.prune_unreachable()?;
+        if id == module.call_graph.root() {
+            return Ok(body);
+        }
+        let cfg = ControlFlowGraph::compute(&body)?;
+        let returns = body
+            .blocks()
+            .filter(|&b| matches!(body.terminator(b), Terminator::Return(_)))
+            .count();
+        templates.insert(Some(Template { body, cfg, returns }));
+    }
+    unreachable!("a verified module contains its root")
 }
 
 /// Account for the emitted entities at every call site before copying a shared
@@ -72,48 +73,46 @@ struct Size {
     returns: u64,
 }
 
-impl Module<VerifiedBody<'_>> {
-    fn check_expansion(&self) -> Result<(), CompileError> {
-        let mut sizes: DenseMap<FunctionId, Size> = DenseMap::new();
-        for (id, src) in self.functions.iter() {
-            let f = src.function;
-            let mut size = Size::default();
-            for &b in src.cfg.reverse_postorder() {
-                size.blocks += 1;
-                size.values += f.params(b).len() as u64;
-                for i in f.instructions(b) {
-                    if !matches!(f.op(i), Op::Call(_)) {
-                        size.insts += 1;
-                        size.values += u64::from(f.result(i).is_some());
-                    }
-                }
-                let term = *f.terminator(b);
-                size.returns += u64::from(matches!(term, Terminator::Return(_)));
-                for e in term.edges() {
-                    size.edges += 1;
-                    size.args += f.edge(e).1.len() as u64;
+fn check_expansion(module: &Module<VerifiedBody<'_>>) -> Result<(), CompileError> {
+    let mut sizes: DenseMap<FunctionId, Size> = DenseMap::new();
+    for (id, src) in module.functions.iter() {
+        let f = src.function;
+        let mut size = Size::default();
+        for &b in src.cfg.reverse_postorder() {
+            size.blocks += 1;
+            size.values += f.params(b).len() as u64;
+            for i in f.instructions(b) {
+                if !matches!(f.op(i), Op::Call(_)) {
+                    size.insts += 1;
+                    size.values += u64::from(f.result(i).is_some());
                 }
             }
-            for &child in self.call_graph.callees(id) {
-                let c = &sizes[child];
-                let join = u64::from(c.returns != 1);
-                size.insts += c.insts;
-                size.blocks += c.blocks - 1 + join;
-                size.values += c.values - self.functions[child].function.arity() as u64 + join;
-                size.edges += c.edges + join * c.returns;
-                size.args += c.args + join * c.returns;
+            let term = *f.terminator(b);
+            size.returns += u64::from(matches!(term, Terminator::Return(_)));
+            for e in term.edges() {
+                size.edges += 1;
+                size.args += f.edge(e).1.len() as u64;
             }
-            if size.insts + size.blocks > i32::MAX as u64
-                || size.values > regalloc2::VReg::MAX as u64
-                || size.edges > u32::MAX as u64
-                || size.args > u32::MAX as u64
-            {
-                return Err(CompileError::FunctionTooLarge);
-            }
-            sizes.insert(size);
         }
-        Ok(())
+        for &child in module.call_graph.callees(id) {
+            let c = &sizes[child];
+            let join = u64::from(c.returns != 1);
+            size.insts += c.insts;
+            size.blocks += c.blocks - 1 + join;
+            size.values += c.values - module.functions[child].function.arity() as u64 + join;
+            size.edges += c.edges + join * c.returns;
+            size.args += c.args + join * c.returns;
+        }
+        if size.insts + size.blocks > i32::MAX as u64
+            || size.values > regalloc2::VReg::MAX as u64
+            || size.edges > u32::MAX as u64
+            || size.args > u32::MAX as u64
+        {
+            return Err(CompileError::FunctionTooLarge);
+        }
+        sizes.insert(size);
     }
+    Ok(())
 }
 
 enum Exit {

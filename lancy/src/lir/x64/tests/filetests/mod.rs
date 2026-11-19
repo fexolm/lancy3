@@ -1,9 +1,9 @@
 //! File-driven tests for the actual Lancy passes. See lancy/filetests/README.md.
-mod input;
 mod listing;
-mod run;
 
-use crate::hir::{Function, ssa::VerifiedBody};
+use crate::filetests::{Result, Run, input};
+
+use crate::hir::{Function, ssa::VerifiedBody, transforms::passes};
 use crate::lir::{
     regalloc,
     x64::{
@@ -15,11 +15,9 @@ use crate::lir::{
 use crate::module::{FunctionIds, Module};
 use crate::{CompileError, Inlining, ScalarKernel};
 use filecheck::{CheckerBuilder, NO_VARIABLES};
-use run::Run;
 use std::{collections::BTreeMap, sync::Arc};
 
 const STAGES: [&str; 7] = ["source", "cfg", "inline", "opt", "isel", "alloc", "asm"];
-type Result<T> = std::result::Result<T, String>;
 
 #[derive(Default)]
 struct Case<'a> {
@@ -28,16 +26,6 @@ struct Case<'a> {
     runs: Vec<Run>,
     policy: Inlining,
     reject: Option<&'a str>,
-}
-
-fn integer(s: &str) -> Result<i32> {
-    let s = s.replace('_', "");
-    if let Some(hex) = s.strip_prefix("0x") {
-        u32::from_str_radix(hex, 16).map(|i| i as i32)
-    } else {
-        s.parse()
-    }
-    .map_err(|_| format!("expected i32, got {s}"))
 }
 
 impl<'a> Case<'a> {
@@ -123,12 +111,8 @@ impl<'a> Case<'a> {
         if self.checks.is_empty() && self.runs.is_empty() {
             return Ok(());
         }
-        let expanded = if self.policy == Inlining::Always && source.functions.len() > 1 {
-            Arc::new(
-                source
-                    .inline_all(&ids)
-                    .map_err(|e| format!("inline: {e}"))?,
-            )
+        let expanded = if self.policy.should_inline(&source) {
+            Arc::new(passes::inline_all(&source, &ids).map_err(|e| format!("inline: {e}"))?)
         } else {
             Arc::clone(&f)
         };
@@ -140,9 +124,7 @@ impl<'a> Case<'a> {
         if self.checks.is_empty() && self.runs.is_empty() {
             return Ok(());
         }
-        let opt = module
-            .simplify_bodies(&ids)
-            .map_err(|e| format!("opt: {e}"))?;
+        let opt = passes::simplify_bodies(&module, &ids).map_err(|e| format!("opt: {e}"))?;
         let (module, ids) = opt.verified_module().map_err(|e| format!("opt: {e}"))?;
         self.check("opt", || listing::hir(&module, &ids))?;
         self.interpret("opt", &opt)?;

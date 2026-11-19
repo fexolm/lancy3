@@ -1,4 +1,6 @@
-//! JIT compilation and warm execution on the same inputs across backends.
+//! JIT compilation and warm execution on the same inputs for all three backends.
+#[path = "large/mod.rs"]
+mod large;
 #[path = "../examples/workloads/matmul.rs"]
 mod matmul;
 #[path = "../examples/workloads/probe.rs"]
@@ -13,10 +15,9 @@ use criterion::{
 use relational::{Catalog, pricing_plan, query};
 use splice::{BufferArg, Codegen, Executable, Function, kernel};
 use splice_cranelift::{Cranelift, CraneliftKernel};
-#[cfg(target_arch = "x86_64")]
 use splice_lancy::{Lancy, LancyKernel};
 use splice_llvm::{Llvm, LlvmKernel};
-use std::{cell::LazyCell, hint::black_box};
+use std::{cell::LazyCell, hint::black_box, ops::Not};
 
 #[kernel]
 fn line_total(#[comptime] minimum: i32, price: i32, quantity: i32) -> i32 {
@@ -41,18 +42,17 @@ fn line_totals(
 }
 
 struct Builders<'a> {
-    #[cfg(target_arch = "x86_64")]
     lancy: &'a dyn Fn() -> splice::Result<LancyKernel>,
     llvm: &'a dyn Fn() -> splice::Result<LlvmKernel>,
     cranelift: &'a dyn Fn() -> splice::Result<CraneliftKernel>,
 }
 
-struct Workload<'a, Run> {
+struct Workload<'a, Run, T> {
     name: &'static str,
     elements: usize,
     workspace_words: usize,
-    expected: &'a dyn Fn() -> &'a [i32],
-    equal: fn(&[i32], &[i32]) -> bool,
+    expected: &'a dyn Fn() -> &'a [T],
+    equal: fn(&[T], &[T]) -> bool,
     run: Run,
 }
 
@@ -72,11 +72,12 @@ fn bench_compile<K>(
     });
 }
 
-impl<Run> Workload<'_, Run>
+impl<Run, T> Workload<'_, Run, T>
 where
-    Run: Fn(&dyn Executable, &mut [i32]) -> splice::Result<usize>,
+    Run: Fn(&dyn Executable, &mut [T]) -> splice::Result<usize>,
+    T: Copy + Default + Not<Output = T>,
 {
-    fn verify(&self, kernel: &dyn Executable, workspace: &mut [i32], backend: &str) {
+    fn verify(&self, kernel: &dyn Executable, workspace: &mut [T], backend: &str) {
         let expected = (self.expected)();
         for (word, &value) in workspace.iter_mut().zip(expected) {
             *word = !value;
@@ -105,7 +106,7 @@ where
         group.bench_function(BenchmarkId::new(backend, self.elements), |b| {
             let (kernel, workspace) = state.get_or_insert_with(|| {
                 let kernel = build().expect("compile execution benchmark");
-                let mut workspace = vec![-1; self.workspace_words];
+                let mut workspace = vec![!T::default(); self.workspace_words];
                 self.verify(&kernel, &mut workspace, backend);
                 (kernel, workspace)
             });
@@ -121,7 +122,6 @@ where
 
     fn bench_route(&self, c: &mut Criterion, route: &str, builds: Builders<'_>) {
         let mut compile = c.benchmark_group(format!("{}/compile/{route}", self.name));
-        #[cfg(target_arch = "x86_64")]
         bench_compile(&mut compile, "lancy", builds.lancy);
         bench_compile(&mut compile, "cranelift", builds.cranelift);
         bench_compile(&mut compile, "llvm", builds.llvm);
@@ -129,7 +129,6 @@ where
 
         let mut execute = c.benchmark_group(format!("{}/execute/{route}", self.name));
         execute.throughput(Throughput::Elements(self.elements as u64));
-        #[cfg(target_arch = "x86_64")]
         self.bench_execute(&mut execute, "lancy", builds.lancy);
         self.bench_execute(&mut execute, "cranelift", builds.cranelift);
         self.bench_execute(&mut execute, "llvm", builds.llvm);
@@ -155,7 +154,6 @@ where
             c,
             "from_ir",
             Builders {
-                #[cfg(target_arch = "x86_64")]
                 lancy: &|| Lancy::compile(black_box(&ir)),
                 cranelift: &|| Cranelift::compile(black_box(&ir)),
                 llvm: &|| Llvm::compile(black_box(&ir)),
@@ -194,7 +192,6 @@ fn projection(c: &mut Criterion) {
         c,
         || line_totals::ir(black_box(2)),
         Builders {
-            #[cfg(target_arch = "x86_64")]
             lancy: &|| line_totals::build::<Lancy>(black_box(2)),
             cranelift: &|| line_totals::build::<Cranelift>(black_box(2)),
             llvm: &|| line_totals::build::<Llvm>(black_box(2)),
@@ -267,7 +264,6 @@ fn sql_plan(c: &mut Criterion) {
         c,
         || query::ir(black_box(&plan)),
         Builders {
-            #[cfg(target_arch = "x86_64")]
             lancy: &|| query::build::<Lancy>(black_box(&plan)),
             cranelift: &|| query::build::<Cranelift>(black_box(&plan)),
             llvm: &|| query::build::<Llvm>(black_box(&plan)),
@@ -305,7 +301,6 @@ fn simd_matmul(c: &mut Criterion) {
         c,
         multiply::ir,
         Builders {
-            #[cfg(target_arch = "x86_64")]
             lancy: &multiply::build::<Lancy>,
             cranelift: &multiply::build::<Cranelift>,
             llvm: &multiply::build::<Llvm>,
@@ -339,7 +334,6 @@ fn simd_hash_lookup(c: &mut Criterion) {
         c,
         lookup::ir,
         Builders {
-            #[cfg(target_arch = "x86_64")]
             lancy: &lookup::build::<Lancy>,
             cranelift: &lookup::build::<Cranelift>,
             llvm: &lookup::build::<Llvm>,
@@ -350,6 +344,6 @@ fn simd_hash_lookup(c: &mut Criterion) {
 criterion_group! {
     name = backends;
     config = Criterion::default().sample_size(30);
-    targets = projection, sql_plan, simd_matmul, simd_hash_lookup
+    targets = projection, sql_plan, simd_matmul, simd_hash_lookup, large::compare
 }
 criterion_main!(backends);

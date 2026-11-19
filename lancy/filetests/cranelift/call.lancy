@@ -11,6 +11,7 @@ fn main x:i32 -> i32
   result = call callee x
   ret result
 
+@inline check: call f0
 @opt check: call f0
 @isel check: store_arg 0
 @isel nextln: call f0

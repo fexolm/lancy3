@@ -45,6 +45,7 @@ impl<I: TargetInst> Function<I> {
         })
     }
 
+    #[cfg(target_arch = "x86_64")]
     pub fn temp(&mut self, class: RegClass) -> Result<VReg, CompileError> {
         if self.vregs == VReg::MAX {
             return Err(CompileError::FunctionTooLarge);

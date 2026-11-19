@@ -162,9 +162,61 @@ AMD Ryzen 7 9800X3D, Windows x64, 16 полос `i32`. Первые четыре
 
 В предыдущем замере на этой машине поиск Lancy после `build` занимал 49,89 мс на ту же пачку. Теперь цикл читает активные слоты через `vpgatherdd zmm{k}, [base + zmm*4]`, сравнивает 16 ключей одновременно и сохраняет выбранные позиции. На обоих путях весь буфер результатов совпал с эталоном. [Ядро поиска](splice/examples/workloads/probe.rs) · [Эмиссия маскированного доступа](lancy/src/lir/x64/inst/simd.rs)
 
+### Большие скалярные ядра
+
+Четыре скалярных ядра используют фиксированные наборы данных и сверяют весь выход с независимым эталоном до и после замера. Размер указан в инструкциях точки входа переносимого IR после специализации.
+
+| Нагрузка | Данные и работа ядра | Инструкции IR |
+| --- | --- | ---: |
+| [`large_audio_low_pass`](splice/benches/large/biquad.rs) | 48 000 PCM-отсчётов, ФНЧ Баттерворта 16-го порядка из восьми Q14 biquad-секций | 219 |
+| [`large_parquet_delta`](splice/benches/large/delta.rs) | 32 769 значений `INT32`, распаковка и префиксная сумма после разбора заголовков. 256 полных блоков с ширинами мини-блоков 7, 11, 17 и 23 бита. [Формат Parquet](https://parquet.apache.org/docs/file-format/data-pages/encodings/#delta-encoding-delta_binary_packed--5) | 2 788 |
+| [`large_per_channel_requantize`](splice/benches/large/requantize.rs) | 4 096 позиций по 16 каналов, поканальные коэффициенты Q12 для активации и residual, округление и насыщение до `int8` | 356 |
+| [`large_decimal_csv`](splice/benches/large/csv.rs) | 8 192 строки по четыре знаковых значения с тремя дробными разрядами, упаковка ASCII в `i32` | 362 |
+
+```sh
+cargo bench -p splice --bench backends -- 'large_(audio|parquet|per_channel|decimal)' --warm-up-time 1 --measurement-time 2 --sample-size 30 --noplot
+```
+
+AMD Ryzen 7 9800X3D, Windows x64, 30 выборок Criterion. В таблице указано время повторного вызова в мкс на весь набор данных. Каждая ячейка содержит замеры `build / from_ir`.
+
+| Нагрузка | Lancy | Cranelift | LLVM |
+| --- | ---: | ---: | ---: |
+| ФНЧ Баттерворта | 760,5 / 753,6 | 483,0 / 493,6 | 397,2 / 407,2 |
+| Parquet delta | 18,73 / 18,73 | 14,57 / 14,25 | 11,30 / 11,39 |
+| Поканальное реквантование | 161,2 / 160,9 | 130,3 / 129,8 | 68,71 / 69,23 |
+| Экспорт CSV | 372,7 / 366,6 | 336,3 / 330,5 | 185,8 / 188,4 |
+
+Сборку стенд измеряет отдельно. На самом большом ядре, Parquet delta, прямой `build` занял 1,40 мс у Lancy, 6,54 мс у Cranelift и 142,46 мс у LLVM.
+
+### Большие SIMD-ядра
+
+Группы `large_simd_*` обрабатывают полные векторы и хвост под маской. Стенд сверяет каждое слово результата со скалярным эталоном, включая оба пути сборки.
+
+| Нагрузка | Данные и работа ядра |
+| --- | --- |
+| [`large_simd_yuv_to_rgba`](splice/benches/large/vector/yuv.rs) | 262 147 пикселей, преобразование Y′CbCr 4:4:4 в RGBA8 с целочисленной цветовой матрицей и насыщением |
+| [`large_simd_integral_moments`](splice/benches/large/vector/integral.rs) | Кадр 515×257, две интегральные таблицы для локального среднего и дисперсии |
+| [`large_simd_murmur3`](splice/benches/large/vector/hash.rs) | 65 539 составных ключей из восьми колонок `INT32`, один ключ на полосу. [Эталон MurmurHash3 x86_32](https://github.com/aappleby/smhasher/blob/master/src/MurmurHash3.cpp#L88-L138) |
+| [`large_simd_remap_rgb16`](splice/benches/large/vector/remap.rs) | Плитка 145×145, три 16-битных канала, перенос пикселей по поканальным картам радиальной коррекции |
+
+```sh
+cargo bench -p splice --bench backends -- large_simd_ --warm-up-time 0.5 --measurement-time 1 --sample-size 20 --nresamples 10000 --noplot
+```
+
+Для сравнения исполнения на другой ширине задайте `SPLICE_SIMD=avx2` или `SPLICE_SIMD=sse` и замените фильтр `large_simd_` на `'large_simd_.*/execute/'`.
+
+AMD Ryzen 7 9800X3D, Windows x64, 20 выборок Criterion. Время повторного вызова после `build` в мкс на весь набор. Порядок чисел в ячейке — Lancy / Cranelift / LLVM.
+
+| Нагрузка | `auto` (AVX‑512) | `avx2` | `sse` |
+| --- | ---: | ---: | ---: |
+| Y′CbCr → RGBA8 | 99,61 / 130,24 / 23,32 | 438,68 / 129,68 / 57,49 | 2 472,0 / 139,19 / 179,57 |
+| Интегральные таблицы | 87,05 / 94,55 / 32,38 | 128,76 / 108,99 / 60,10 | 776,59 / 116,63 / 75,58 |
+| Murmur3 | 95,52 / 185,70 / 29,62 | 412,80 / 188,18 / 73,38 | 2 370,3 / 193,64 / 272,67 |
+| Перенос RGB16 | 31,91 / 19,35 / 17,37 | 39,37 / 18,68 / 15,50 | 48,67 / 18,31 / 23,75 |
+
 ## Сборка
 
-Нужен Rust 1.94+. На Windows и Linux x86-64 доступны Lancy, Cranelift и LLVM. На Linux AArch64 доступны Cranelift и LLVM. Собственный генератор Lancy рассчитан на x86-64. Бэкенды Lancy и Cranelift собираются отдельно от LLVM. Для приложения с Cranelift достаточно зависимостей `splice` и `splice-cranelift`.
+Нужен Rust 1.94+. На Windows x86-64, Linux x86-64 и Linux AArch64 доступны Lancy, Cranelift и LLVM. Бэкенды Lancy и Cranelift собираются отдельно от LLVM. Для приложения с Cranelift достаточно зависимостей `splice` и `splice-cranelift`.
 
 * **Windows x64 MSVC.** Для `splice-llvm` выбран LLVM 19.1. Сборка находит LLVM в стандартном каталоге или в компонентах C++ Clang для Visual Studio. Для другой папки установки задайте `LLVM_SYS_191_PREFIX` до сборки. В ней должны быть `lib/LLVM-C.lib` и `bin/LLVM-C.dll`. Cargo подготавливает DLL для `cargo run`, тестов и бенчмарков. Для самостоятельного запуска готового приложения положите соответствующую DLL рядом с исполняемым файлом или добавьте её каталог в `PATH`.
 * **Linux x86-64 и AArch64.** Выбран LLVM 21.1 с динамической линковкой. Нужны инструменты разработки, включая `llvm-config-21`, и разделяемая библиотека LLVM. Для отдельной установки укажите префикс через `LLVM_SYS_211_PREFIX`.
@@ -182,7 +234,7 @@ AMD Ryzen 7 9800X3D, Windows x64, 16 полос `i32`. Первые четыре
 | Linux AArch64 | `neon` | 16 байт |
 | Linux AArch64 | `sve`, `sve2` | 16, 32 или 64 байта, в пределах SVE VL потока при первом использовании SIMD |
 
-На AArch64 `auto` предпочитает SVE2, затем SVE и NEON. LLVM выбирает инструкции SVE/SVE2 для фиксированных векторов, когда позволяет их ширина. Для 128-битных векторов LLVM может выбрать NEON. Если другой поток уменьшил SVE VL ниже ширины ядра, LLVM JIT возвращает ошибку до вызова машинного кода. Cranelift использует 128-битные части общего логического вектора и поддерживаемые им инструкции хоста. В профиле `sse` Cranelift может использовать доступные SSSE3 и SSE4.
+На AArch64 `auto` предпочитает SVE2, затем SVE и NEON. Lancy выбирает машинные формы в собственном `isel` и кодирует их своим энкодером. LLVM выбирает инструкции SVE/SVE2 для фиксированных векторов, когда позволяет их ширина. Для 128-битных векторов LLVM может выбрать NEON. Lancy и LLVM проверяют SVE VL вызывающего потока перед выполнением ядра. Cranelift использует 128-битные части общего логического вектора и поддерживаемые им инструкции хоста. В профиле `sse` Cranelift может использовать доступные SSSE3 и SSE4. [Бэкенд Lancy](lancy/README.md#бэкенд-aarch64)
 
 В PowerShell задайте профиль перед вызовом Cargo, например `$env:SPLICE_SIMD = 'avx2'`.
 
@@ -192,7 +244,7 @@ SPLICE_SIMD=avx2 cargo run -p splice-target --example simd_profile
 SPLICE_SIMD=avx2 cargo test -p splice --release --test simd
 
 # На Linux AArch64
-SPLICE_SIMD=neon cargo test --workspace --exclude lancy --exclude splice-lancy --release
+SPLICE_SIMD=neon cargo test --workspace --release
 
 # На Linux AArch64 с SVE2
 SPLICE_SIMD=sve2 cargo test -p splice-llvm --release

@@ -82,8 +82,7 @@ fn width(profile: Profile) -> Option<usize> {
     #[cfg(all(target_arch = "aarch64", target_os = "linux"))]
     match profile {
         Neon if std::arch::is_aarch64_feature_detected!("neon") => Some(16),
-        Sve if std::arch::is_aarch64_feature_detected!("sve") => sve_bytes(),
-        Sve2 if std::arch::is_aarch64_feature_detected!("sve2") => sve_bytes(),
+        Sve | Sve2 => sve_bytes(profile),
         _ => None,
     }
     #[cfg(not(any(
@@ -96,19 +95,46 @@ fn width(profile: Profile) -> Option<usize> {
 }
 
 #[cfg(all(target_arch = "aarch64", target_os = "linux"))]
-fn thread_sve_bytes() -> Option<usize> {
-    // Linux uapi/linux/prctl.h.
-    const PR_SVE_GET_VL: libc::c_int = 51;
-    const PR_SVE_VL_LEN_MASK: libc::c_int = 0xffff;
-    // SAFETY: PR_SVE_GET_VL takes no pointers and the four unused arguments
-    // are supplied as unsigned long, as required by the Linux prctl ABI.
-    let vl = unsafe { libc::prctl(PR_SVE_GET_VL, 0usize, 0usize, 0usize, 0usize) };
-    (vl >= 0).then_some((vl & PR_SVE_VL_LEN_MASK) as usize)
+fn thread_sve_bytes(profile: Profile) -> Option<usize> {
+    let available = match profile {
+        Profile::Sve => std::arch::is_aarch64_feature_detected!("sve"),
+        Profile::Sve2 => std::arch::is_aarch64_feature_detected!("sve2"),
+        _ => false,
+    };
+    // SAFETY: either Linux HWCAP above guarantees SVE in userspace.
+    available.then(|| unsafe { current_sve_bytes() })
 }
 
 #[cfg(all(target_arch = "aarch64", target_os = "linux"))]
-fn sve_bytes() -> Option<usize> {
-    let vl = thread_sve_bytes()?;
+#[target_feature(enable = "sve")]
+unsafe fn current_sve_bytes() -> usize {
+    let bytes;
+    // SAFETY: the caller checks SVE. CNTB reads the calling thread's current
+    // vector length and writes only its destination register.
+    unsafe {
+        std::arch::asm!("cntb {bytes}", bytes = out(reg) bytes, options(nomem, nostack, preserves_flags));
+    }
+    bytes
+}
+
+#[cfg(all(test, target_arch = "aarch64", target_os = "linux"))]
+#[test]
+fn execution_checks_user_constructed_sve_config() {
+    for (profile, present) in [
+        (Profile::Sve, std::arch::is_aarch64_feature_detected!("sve")),
+        (
+            Profile::Sve2,
+            std::arch::is_aarch64_feature_detected!("sve2"),
+        ),
+    ] {
+        let simd = Simd { profile, bytes: 16 };
+        assert_eq!(simd.check_execution().is_ok(), present);
+    }
+}
+
+#[cfg(all(target_arch = "aarch64", target_os = "linux"))]
+fn sve_bytes(profile: Profile) -> Option<usize> {
+    let vl = thread_sve_bytes(profile)?;
     // Lane storage and alignment support power-of-two widths through 64 bytes.
     [64, 32, 16].into_iter().find(|&bytes| bytes <= vl)
 }
@@ -118,13 +144,15 @@ impl Simd {
     /// Linux lets each thread change its SVE length independently.
     pub fn check_execution(self) -> Result<(), String> {
         #[cfg(all(target_arch = "aarch64", target_os = "linux"))]
-        if matches!(self.profile, Profile::Sve | Profile::Sve2)
-            && thread_sve_bytes().is_none_or(|vl| vl < self.bytes)
-        {
-            return Err(format!(
-                "kernel requires an SVE vector length of at least {} bytes",
-                self.bytes
-            ));
+        if matches!(self.profile, Profile::Sve | Profile::Sve2) {
+            let vl = thread_sve_bytes(self.profile)
+                .ok_or_else(|| format!("{:?} is unavailable on this CPU/OS", self.profile))?;
+            if vl < self.bytes {
+                return Err(format!(
+                    "kernel requires an SVE vector length of at least {} bytes",
+                    self.bytes
+                ));
+            }
         }
         Ok(())
     }

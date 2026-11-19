@@ -1,0 +1,1051 @@
+use super::operand::{Arrangement as A, Bank, Operand as O, PredQual, ShiftKind};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Feature {
+    Neon,
+    Sve,
+    Sve2,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct FeatureSet(u8);
+
+impl FeatureSet {
+    pub const NONE: Self = Self(0);
+    pub const ALL: Self = Self(7);
+    pub const fn with(self, feature: Feature) -> Self {
+        Self(
+            self.0
+                | match feature {
+                    Feature::Neon => 1,
+                    Feature::Sve => 2,
+                    Feature::Sve2 => 6,
+                },
+        )
+    }
+    pub const fn contains(self, feature: Feature) -> bool {
+        self.0 & Self::NONE.with(feature).0 == Self::NONE.with(feature).0
+    }
+}
+
+/// Exact instruction forms supported by the Lancy encoder.
+#[allow(non_camel_case_types)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Code {
+    Fmadd_scalar,
+    Fmla_asimd,
+    Fmla_z_p_zz,
+    Compact_z_p_z,
+    Fcvt_s_d,
+    Fcvt_d_s,
+    Scvtf_scalar,
+    Ucvtf_scalar,
+    Fcvtzs_scalar,
+    Fcvtzu_scalar,
+    Scvtf_asimd,
+    Ucvtf_asimd,
+    Fcvtzs_asimd,
+    Fcvtzu_asimd,
+    Scvtf_z_p_z,
+    Ucvtf_z_p_z,
+    Fcvtzs_z_p_z,
+    Fcvtzu_z_p_z,
+    Bsl_asimdsame,
+    Sshr_sign_asimdshf,
+    Bic_z_zz_,
+    Fcsel_scalar,
+    Addv_asimd,
+    Addp_d_asimd,
+    Uaddv_d_p_z,
+    Fcmp_scalar,
+    Cmeq_asimdsame,
+    Cmgt_asimdsame,
+    Cmge_asimdsame,
+    Cmhi_asimdsame,
+    Cmhs_asimdsame,
+    Fcmeq_asimdsame,
+    Fcmgt_asimdsame,
+    Fcmge_asimdsame,
+    Mvn_asimdmisc,
+    Cmeq0_asimdmisc,
+    Umaxv_b,
+    Umov_w_b0,
+    Cmpeq_p_p_zi0,
+    Cmpne_p_p_zi0,
+    Cmpeq_p_p_zz,
+    Cmpne_p_p_zz,
+    Cmpgt_p_p_zz,
+    Cmpge_p_p_zz,
+    Cmphi_p_p_zz,
+    Cmphs_p_p_zz,
+    Fcmeq_p_p_zz,
+    Fcmne_p_p_zz,
+    Fcmgt_p_p_zz,
+    Fcmge_p_p_zz,
+    Cpy_minus1_z_p,
+    Index_0_1_z,
+    Add_32_addsub_imm,
+    Add_64_addsub_imm,
+    Sub_32_addsub_imm,
+    Sub_64_addsub_imm,
+    Adds_32_addsub_imm,
+    Adds_64_addsub_imm,
+    Subs_32_addsub_imm,
+    Subs_64_addsub_imm,
+    Add_32_addsub_shift,
+    Add_64_addsub_shift,
+    Sub_32_addsub_shift,
+    Sub_64_addsub_shift,
+    Subs_32_addsub_shift,
+    Subs_64_addsub_shift,
+    And_32_log_shift,
+    And_64_log_shift,
+    Orr_32_log_shift,
+    Orr_64_log_shift,
+    Eor_32_log_shift,
+    Eor_64_log_shift,
+    Madd_32a_dp_3src,
+    Madd_64a_dp_3src,
+    Msub_32a_dp_3src,
+    Msub_64a_dp_3src,
+    Sdiv_32_dp_2src,
+    Sdiv_64_dp_2src,
+    Udiv_32_dp_2src,
+    Udiv_64_dp_2src,
+    Movz_32_movewide,
+    Movz_64_movewide,
+    Movk_32_movewide,
+    Movk_64_movewide,
+    Fmov_s_w,
+    Fmov_w_s,
+    Fmov_d_x,
+    Fmov_x_d,
+    Fadd_scalar,
+    Fsub_scalar,
+    Fmul_scalar,
+    Fdiv_scalar,
+    Mov_v_d1_x,
+    Sbfm_32m_bitfield,
+    Sbfm_64m_bitfield,
+    Ubfm_64m_bitfield,
+    Add_64_addsub_sxtw,
+    Ubfm_32m_bitfield,
+    Lslv_32_dp_2src,
+    Lslv_64_dp_2src,
+    Asrv_32_dp_2src,
+    Asrv_64_dp_2src,
+    Lsrv_32_dp_2src,
+    Lsrv_64_dp_2src,
+    Csel_32_condsel,
+    Csel_64_condsel,
+    Csinv_32_condsel,
+    Ldr_32_ldst_pos,
+    Ldr_64_ldst_pos,
+    Str_32_ldst_pos,
+    Str_64_ldst_pos,
+    Ldrb_32_ldst_pos,
+    Strb_32_ldst_pos,
+    Ldrh_32_ldst_pos,
+    Strh_32_ldst_pos,
+    Ldr_q_ldst_pos,
+    Str_q_ldst_pos,
+    Ldr_s_ldst_pos,
+    Str_s_ldst_pos,
+    Ldr_d_ldst_pos,
+    Str_d_ldst_pos,
+    Nop_HI_hints,
+    B_only_branch_imm,
+    Bl_only_branch_imm,
+    B_only_condbranch,
+    Cbz_32_compbranch,
+    Cbz_64_compbranch,
+    Cbnz_32_compbranch,
+    Cbnz_64_compbranch,
+    Br_64_branch_reg,
+    Blr_64_branch_reg,
+    Ret_64r_branch_reg,
+    Add_asimdsame_only,
+    Sub_asimdsame_only,
+    Mul_asimdsame_only,
+    And_asimdsame_only,
+    Orr_asimdsame_only,
+    Eor_asimdsame_only,
+    Fadd_asimdsame,
+    Fsub_asimdsame,
+    Fmul_asimdsame,
+    Fdiv_asimdsame,
+    Dup_asimdgen,
+    Saddl_asimddiff_L,
+    Ptrue_p_s_,
+    Add_z_zz_,
+    Sub_z_zz_,
+    Mul_z_zz_,
+    Mul_z_p_zz_,
+    Fadd_z_zz_,
+    Fsub_z_zz_,
+    Fmul_z_zz_,
+    Fdiv_z_p_zz_,
+    Dup_z_r,
+    Cmplt_p_p_zi0,
+    Sel_z_p_zz,
+    Ld1w_z_p_bz_sxtw,
+    Ld1d_z_p_bz_lsl,
+    And_z_zz_,
+    Orr_z_zz_,
+    Eor_z_zz_,
+    Ld1b_z_p_bi_u8,
+    Ld1h_z_p_bi_u16,
+    Ld1w_z_p_bi_u32,
+    Ld1d_z_p_bi_u64,
+    St1b_z_p_bi_,
+    St1h_z_p_bi_,
+    St1w_z_p_bi_,
+    St1d_z_p_bi_,
+    Eor3_z_zzz_,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum EncodeError {
+    #[error("expected {expected} operands, got {got}")]
+    OperandCount { expected: usize, got: usize },
+    #[error("invalid operand at index {0}")]
+    Operand(usize),
+    #[error("invalid instruction suffix {0}")]
+    Suffix(u8),
+    #[error("unaligned AArch64 instruction address {0:#x}")]
+    Address(u64),
+    #[error("branch from {pc:#x} to {target:#x} is out of range or unaligned")]
+    Branch { pc: u64, target: u64 },
+}
+
+#[derive(Clone, Copy, Debug)]
+struct Branch {
+    target: u64,
+    bits: u8,
+    shift: u8,
+}
+
+impl Branch {
+    fn field(self, pc: u64) -> Result<u32, EncodeError> {
+        let delta = i128::from(self.target) - i128::from(pc);
+        let limit = 1i128 << (self.bits + 1);
+        if delta % 4 != 0 || !(-limit..limit).contains(&delta) {
+            return Err(EncodeError::Branch {
+                pc,
+                target: self.target,
+            });
+        }
+        Ok((((delta / 4) as u32) & ((1 << self.bits) - 1)) << self.shift)
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct Instruction {
+    code: Code,
+    pc: u64,
+    word: u32,
+    branch: Option<Branch>,
+}
+
+impl Instruction {
+    pub fn with(code: Code, operands: &[O], pc: u64) -> Result<Self, EncodeError> {
+        Self::with_suffix(code, 0, operands, pc)
+    }
+
+    pub fn with_suffix(
+        code: Code,
+        suffix: u8,
+        operands: &[O],
+        pc: u64,
+    ) -> Result<Self, EncodeError> {
+        aligned(pc)?;
+        let (word, branch) = code.lower(suffix, operands)?;
+        let instruction = Self {
+            code,
+            pc,
+            word,
+            branch,
+        };
+        instruction.encode()?;
+        Ok(instruction)
+    }
+
+    pub fn code(&self) -> Code {
+        self.code
+    }
+    pub fn pc(&self) -> u64 {
+        self.pc
+    }
+    pub fn label_target(&self) -> Option<u64> {
+        self.branch.map(|branch| branch.target)
+    }
+    pub fn encode(&self) -> Result<u32, EncodeError> {
+        self.encode_at(self.pc)
+    }
+    pub fn encode_at(&self, pc: u64) -> Result<u32, EncodeError> {
+        aligned(pc)?;
+        Ok(self.word | self.branch.map_or(Ok(0), |branch| branch.field(pc))?)
+    }
+}
+
+fn aligned(pc: u64) -> Result<(), EncodeError> {
+    if pc.is_multiple_of(4) {
+        Ok(())
+    } else {
+        Err(EncodeError::Address(pc))
+    }
+}
+
+type Encoded = (u32, Option<Branch>);
+
+impl Code {
+    pub(super) fn encode(self, suffix: u8, operands: &[O], pc: u64) -> Result<u32, EncodeError> {
+        aligned(pc)?;
+        let (word, branch) = self.lower(suffix, operands)?;
+        Ok(word | branch.map_or(Ok(0), |branch| branch.field(pc))?)
+    }
+
+    pub const fn required_feature(self) -> Option<Feature> {
+        use Code::*;
+        match self {
+            Fmla_asimd => Some(Feature::Neon),
+            Fmla_z_p_zz | Compact_z_p_z => Some(Feature::Sve),
+            Scvtf_asimd | Ucvtf_asimd | Fcvtzs_asimd | Fcvtzu_asimd => Some(Feature::Neon),
+            Scvtf_z_p_z | Ucvtf_z_p_z | Fcvtzs_z_p_z | Fcvtzu_z_p_z => Some(Feature::Sve),
+            Bsl_asimdsame | Sshr_sign_asimdshf | Addv_asimd | Addp_d_asimd => Some(Feature::Neon),
+            Bic_z_zz_ | Uaddv_d_p_z => Some(Feature::Sve),
+            Cmeq_asimdsame | Cmgt_asimdsame | Cmge_asimdsame | Cmhi_asimdsame | Cmhs_asimdsame
+            | Fcmeq_asimdsame | Fcmgt_asimdsame | Fcmge_asimdsame | Mvn_asimdmisc
+            | Cmeq0_asimdmisc | Umaxv_b | Umov_w_b0 => Some(Feature::Neon),
+            Cmpeq_p_p_zi0 | Cmpne_p_p_zi0 | Cmpeq_p_p_zz | Cmpne_p_p_zz | Cmpgt_p_p_zz
+            | Cmpge_p_p_zz | Cmphi_p_p_zz | Cmphs_p_p_zz | Fcmeq_p_p_zz | Fcmne_p_p_zz
+            | Fcmgt_p_p_zz | Fcmge_p_p_zz | Cpy_minus1_z_p | Index_0_1_z => Some(Feature::Sve),
+            Ptrue_p_s_ | Add_z_zz_ | Sub_z_zz_ | Mul_z_p_zz_ | And_z_zz_ | Orr_z_zz_
+            | Eor_z_zz_ | Ld1b_z_p_bi_u8 | Ld1h_z_p_bi_u16 | Ld1w_z_p_bi_u32 | Ld1d_z_p_bi_u64
+            | St1b_z_p_bi_ | St1h_z_p_bi_ | St1w_z_p_bi_ | St1d_z_p_bi_ | Fadd_z_zz_
+            | Fsub_z_zz_ | Fmul_z_zz_ | Fdiv_z_p_zz_ | Dup_z_r | Cmplt_p_p_zi0 | Sel_z_p_zz
+            | Ld1w_z_p_bz_sxtw | Ld1d_z_p_bz_lsl => Some(Feature::Sve),
+            Eor3_z_zzz_ | Mul_z_zz_ => Some(Feature::Sve2),
+            Add_asimdsame_only | Sub_asimdsame_only | Mul_asimdsame_only | And_asimdsame_only
+            | Orr_asimdsame_only | Eor_asimdsame_only | Saddl_asimddiff_L | Ldr_q_ldst_pos
+            | Str_q_ldst_pos | Mov_v_d1_x | Fadd_asimdsame | Fsub_asimdsame | Fmul_asimdsame
+            | Fdiv_asimdsame | Dup_asimdgen => Some(Feature::Neon),
+            _ => None,
+        }
+    }
+
+    pub fn is_available(self, features: FeatureSet) -> bool {
+        self.required_feature().is_none_or(|f| features.contains(f))
+    }
+
+    fn lower(self, suffix: u8, operands: &[O]) -> Result<Encoded, EncodeError> {
+        use Code::*;
+        if suffix > u8::from(self == Saddl_asimddiff_L) {
+            return Err(EncodeError::Suffix(suffix));
+        }
+        let (base, wide, form) = match self {
+            Fmadd_scalar => (0x1f000000, false, Form::FloatFma),
+            Fmla_asimd => (0x0e20cc00, false, Form::FloatNeon),
+            Fmla_z_p_zz => (0x65200000, false, Form::SveFma),
+            Compact_z_p_z => (0x05218000, false, Form::SveCompact),
+            Fcvt_s_d => (0x1e624000, false, Form::RegPair(Bank::V, Bank::V)),
+            Fcvt_d_s => (0x1e22c000, false, Form::RegPair(Bank::V, Bank::V)),
+            Scvtf_scalar => (0x1e220000, false, Form::FloatInt(true)),
+            Ucvtf_scalar => (0x1e230000, false, Form::FloatInt(true)),
+            Fcvtzs_scalar => (0x1e380000, false, Form::FloatInt(false)),
+            Fcvtzu_scalar => (0x1e390000, false, Form::FloatInt(false)),
+            Scvtf_asimd => (0x0e21d800, false, Form::FloatNeonUnary),
+            Ucvtf_asimd => (0x2e21d800, false, Form::FloatNeonUnary),
+            Fcvtzs_asimd => (0x0ea1b800, false, Form::FloatNeonUnary),
+            Fcvtzu_asimd => (0x2ea1b800, false, Form::FloatNeonUnary),
+            Scvtf_z_p_z => (0x6594a000, false, Form::SveConvert),
+            Ucvtf_z_p_z => (0x6595a000, false, Form::SveConvert),
+            Fcvtzs_z_p_z => (0x659ca000, false, Form::SveConvert),
+            Fcvtzu_z_p_z => (0x659da000, false, Form::SveConvert),
+            Bsl_asimdsame => (0x2e601c00, false, Form::NeonBits),
+            Sshr_sign_asimdshf => (0x4f000400, false, Form::NeonSign),
+            Bic_z_zz_ => (0x04e03000, false, Form::SveBits),
+            Fcsel_scalar => (0x1e200c00, false, Form::FloatSelect),
+            Addv_asimd => (0x4e31b800, false, Form::NeonSum(false)),
+            Addp_d_asimd => (0x5ef1b800, false, Form::NeonSum(true)),
+            Uaddv_d_p_z => (0x04012000, false, Form::SveSum),
+            Fcmp_scalar => (0x1e202000, false, Form::FloatCompare),
+            Cmeq_asimdsame => (0x2e208c00, false, Form::Neon(false)),
+            Cmgt_asimdsame => (0x0e203400, false, Form::Neon(false)),
+            Cmge_asimdsame => (0x0e203c00, false, Form::Neon(false)),
+            Cmhi_asimdsame => (0x2e203400, false, Form::Neon(false)),
+            Cmhs_asimdsame => (0x2e203c00, false, Form::Neon(false)),
+            Fcmeq_asimdsame => (0x0e20e400, false, Form::FloatNeon),
+            Fcmgt_asimdsame => (0x2ea0e400, false, Form::FloatNeon),
+            Fcmge_asimdsame => (0x2e20e400, false, Form::FloatNeon),
+            Mvn_asimdmisc => (0x6e205800, false, Form::NeonUnary(true)),
+            Cmeq0_asimdmisc => (0x4e209800, false, Form::NeonUnary(false)),
+            Umaxv_b => (0x6e30a800, false, Form::RegPair(Bank::V, Bank::V)),
+            Umov_w_b0 => (0x0e013c00, false, Form::RegPair(Bank::W, Bank::V)),
+            Cmpeq_p_p_zi0 => (0x25008000, false, Form::SveCompareZero),
+            Cmpne_p_p_zi0 => (0x25008010, false, Form::SveCompareZero),
+            Cmpeq_p_p_zz => (0x2400a000, false, Form::SveCompare(false)),
+            Cmpne_p_p_zz => (0x2400a010, false, Form::SveCompare(false)),
+            Cmpgt_p_p_zz => (0x24008010, false, Form::SveCompare(false)),
+            Cmpge_p_p_zz => (0x24008000, false, Form::SveCompare(false)),
+            Cmphi_p_p_zz => (0x24000010, false, Form::SveCompare(false)),
+            Cmphs_p_p_zz => (0x24000000, false, Form::SveCompare(false)),
+            Fcmeq_p_p_zz => (0x65006000, false, Form::SveCompare(true)),
+            Fcmne_p_p_zz => (0x65006010, false, Form::SveCompare(true)),
+            Fcmgt_p_p_zz => (0x65004010, false, Form::SveCompare(true)),
+            Fcmge_p_p_zz => (0x65004000, false, Form::SveCompare(true)),
+            Cpy_minus1_z_p => (0x05101fe0, false, Form::SveMaskValue),
+            Index_0_1_z => (0x04214000, false, Form::SveIndex),
+            Add_32_addsub_imm => (0x11000000, false, Form::AddImm(false)),
+            Add_64_addsub_imm => (0x11000000, true, Form::AddImm(false)),
+            Sub_32_addsub_imm => (0x51000000, false, Form::AddImm(false)),
+            Sub_64_addsub_imm => (0x51000000, true, Form::AddImm(false)),
+            Adds_32_addsub_imm => (0x31000000, false, Form::AddImm(true)),
+            Adds_64_addsub_imm => (0x31000000, true, Form::AddImm(true)),
+            Subs_32_addsub_imm => (0x71000000, false, Form::AddImm(true)),
+            Subs_64_addsub_imm => (0x71000000, true, Form::AddImm(true)),
+            Add_32_addsub_shift => (0x0b000000, false, Form::Shift(false)),
+            Add_64_addsub_shift => (0x0b000000, true, Form::Shift(false)),
+            Sub_32_addsub_shift => (0x4b000000, false, Form::Shift(false)),
+            Sub_64_addsub_shift => (0x4b000000, true, Form::Shift(false)),
+            Subs_32_addsub_shift => (0x6b000000, false, Form::Shift(false)),
+            Subs_64_addsub_shift => (0x6b000000, true, Form::Shift(false)),
+            And_32_log_shift => (0x0a000000, false, Form::Shift(true)),
+            And_64_log_shift => (0x0a000000, true, Form::Shift(true)),
+            Orr_32_log_shift => (0x2a000000, false, Form::Shift(true)),
+            Orr_64_log_shift => (0x2a000000, true, Form::Shift(true)),
+            Eor_32_log_shift => (0x4a000000, false, Form::Shift(true)),
+            Eor_64_log_shift => (0x4a000000, true, Form::Shift(true)),
+            Madd_32a_dp_3src => (0x1b000000, false, Form::Multiply),
+            Madd_64a_dp_3src => (0x1b000000, true, Form::Multiply),
+            Msub_32a_dp_3src => (0x1b008000, false, Form::Multiply),
+            Msub_64a_dp_3src => (0x1b008000, true, Form::Multiply),
+            Sdiv_32_dp_2src => (0x1ac00c00, false, Form::Three),
+            Sdiv_64_dp_2src => (0x1ac00c00, true, Form::Three),
+            Udiv_32_dp_2src => (0x1ac00800, false, Form::Three),
+            Udiv_64_dp_2src => (0x1ac00800, true, Form::Three),
+            Movz_32_movewide => (0x52800000, false, Form::Move),
+            Movz_64_movewide => (0x52800000, true, Form::Move),
+            Movk_32_movewide => (0x72800000, false, Form::Move),
+            Movk_64_movewide => (0x72800000, true, Form::Move),
+            Fmov_s_w => (0x1e270000, false, Form::RegPair(Bank::V, Bank::W)),
+            Fmov_w_s => (0x1e260000, false, Form::RegPair(Bank::W, Bank::V)),
+            Fmov_d_x => (0x9e670000, false, Form::RegPair(Bank::V, Bank::X)),
+            Fmov_x_d => (0x9e660000, false, Form::RegPair(Bank::X, Bank::V)),
+            Fadd_scalar => (0x1e202800, false, Form::FloatScalar),
+            Fsub_scalar => (0x1e203800, false, Form::FloatScalar),
+            Fmul_scalar => (0x1e200800, false, Form::FloatScalar),
+            Fdiv_scalar => (0x1e201800, false, Form::FloatScalar),
+            Mov_v_d1_x => (0x4e181c00, false, Form::RegPair(Bank::V, Bank::X)),
+            Sbfm_32m_bitfield => (0x13000000, false, Form::Bitfield),
+            Sbfm_64m_bitfield => (0x13400000, true, Form::Bitfield),
+            Ubfm_32m_bitfield => (0x53000000, false, Form::Bitfield),
+            Ubfm_64m_bitfield => (0x53400000, true, Form::Bitfield),
+            Add_64_addsub_sxtw => (0x8b20c000, false, Form::ExtendedAdd),
+            Lslv_32_dp_2src => (0x1ac02000, false, Form::Three),
+            Lslv_64_dp_2src => (0x1ac02000, true, Form::Three),
+            Asrv_32_dp_2src => (0x1ac02800, false, Form::Three),
+            Asrv_64_dp_2src => (0x1ac02800, true, Form::Three),
+            Lsrv_32_dp_2src => (0x1ac02400, false, Form::Three),
+            Lsrv_64_dp_2src => (0x1ac02400, true, Form::Three),
+            Csel_32_condsel => (0x1a800000, false, Form::Select),
+            Csel_64_condsel => (0x1a800000, true, Form::Select),
+            Csinv_32_condsel => (0x5a800000, false, Form::Select),
+            Ldr_32_ldst_pos => (0xb9400000, false, Form::Memory(4)),
+            Ldr_64_ldst_pos => (0x79400000, true, Form::Memory(8)),
+            Str_32_ldst_pos => (0xb9000000, false, Form::Memory(4)),
+            Str_64_ldst_pos => (0x79000000, true, Form::Memory(8)),
+            Ldrb_32_ldst_pos => (0x39400000, false, Form::Memory(1)),
+            Strb_32_ldst_pos => (0x39000000, false, Form::Memory(1)),
+            Ldrh_32_ldst_pos => (0x79400000, false, Form::Memory(2)),
+            Strh_32_ldst_pos => (0x79000000, false, Form::Memory(2)),
+            Ldr_q_ldst_pos => (0x3dc00000, false, Form::Memory(16)),
+            Str_q_ldst_pos => (0x3d800000, false, Form::Memory(16)),
+            Ldr_s_ldst_pos => (0xbd400000, false, Form::FloatMemory(4)),
+            Str_s_ldst_pos => (0xbd000000, false, Form::FloatMemory(4)),
+            Ldr_d_ldst_pos => (0xfd400000, false, Form::FloatMemory(8)),
+            Str_d_ldst_pos => (0xfd000000, false, Form::FloatMemory(8)),
+            Nop_HI_hints => (0xd503201f, false, Form::None),
+            B_only_branch_imm => (0x14000000, false, Form::Branch(BranchKind::Direct)),
+            Bl_only_branch_imm => (0x94000000, false, Form::Branch(BranchKind::Direct)),
+            B_only_condbranch => (0x54000000, false, Form::Branch(BranchKind::Condition)),
+            Cbz_32_compbranch => (0x34000000, false, Form::Branch(BranchKind::Compare)),
+            Cbz_64_compbranch => (0x34000000, true, Form::Branch(BranchKind::Compare)),
+            Cbnz_32_compbranch => (0x35000000, false, Form::Branch(BranchKind::Compare)),
+            Cbnz_64_compbranch => (0x35000000, true, Form::Branch(BranchKind::Compare)),
+            Br_64_branch_reg => (0xd61f0000, false, Form::Indirect),
+            Blr_64_branch_reg => (0xd63f0000, false, Form::Indirect),
+            Ret_64r_branch_reg => (0xd65f0000, false, Form::Indirect),
+            Add_asimdsame_only => (0x0e208400, false, Form::Neon(false)),
+            Sub_asimdsame_only => (0x2e208400, false, Form::Neon(false)),
+            Mul_asimdsame_only => (0x0e209c00, false, Form::Neon(true)),
+            And_asimdsame_only => (0x0e201c00, false, Form::NeonBits),
+            Orr_asimdsame_only => (0x0ea01c00, false, Form::NeonBits),
+            Eor_asimdsame_only => (0x2e201c00, false, Form::NeonBits),
+            Fadd_asimdsame => (0x0e20d400, false, Form::FloatNeon),
+            Fsub_asimdsame => (0x0ea0d400, false, Form::FloatNeon),
+            Fmul_asimdsame => (0x2e20dc00, false, Form::FloatNeon),
+            Fdiv_asimdsame => (0x2e20fc00, false, Form::FloatNeon),
+            Dup_asimdgen => (0x4e000c00, false, Form::Dup(false)),
+            Saddl_asimddiff_L => (0x0e200000, false, Form::Widen(suffix)),
+            Ptrue_p_s_ => (0x2518e000, false, Form::Ptrue),
+            Add_z_zz_ => (0x04200000, false, Form::SveArithmetic),
+            Sub_z_zz_ => (0x04200400, false, Form::SveArithmetic),
+            Mul_z_zz_ => (0x04206000, false, Form::SveArithmetic),
+            Mul_z_p_zz_ => (0x04100000, false, Form::SveDestructive),
+            Fadd_z_zz_ => (0x65000000, false, Form::SveArithmetic),
+            Fsub_z_zz_ => (0x65000400, false, Form::SveArithmetic),
+            Fmul_z_zz_ => (0x65000800, false, Form::SveArithmetic),
+            Fdiv_z_p_zz_ => (0x650d8000, false, Form::SveDestructive),
+            Dup_z_r => (0x05203800, false, Form::Dup(true)),
+            Cmplt_p_p_zi0 => (0x25002000, false, Form::SveCompareZero),
+            Sel_z_p_zz => (0x0520c000, false, Form::SveSelect),
+            Ld1w_z_p_bz_sxtw => (0x85604000, false, Form::SveGather(A::S)),
+            Ld1d_z_p_bz_lsl => (0xc5e0c000, false, Form::SveGather(A::D)),
+            And_z_zz_ => (0x04203000, false, Form::SveBits),
+            Orr_z_zz_ => (0x04603000, false, Form::SveBits),
+            Eor_z_zz_ => (0x04a03000, false, Form::SveBits),
+            Ld1b_z_p_bi_u8 => (0xa400a000, false, Form::SveMemory(A::B, PredQual::Zero)),
+            Ld1h_z_p_bi_u16 => (0xa4a0a000, false, Form::SveMemory(A::H, PredQual::Zero)),
+            Ld1w_z_p_bi_u32 => (0xa540a000, false, Form::SveMemory(A::S, PredQual::Zero)),
+            Ld1d_z_p_bi_u64 => (0xa5e0a000, false, Form::SveMemory(A::D, PredQual::Zero)),
+            St1b_z_p_bi_ => (0xe400e000, false, Form::SveMemory(A::B, PredQual::None)),
+            St1h_z_p_bi_ => (0xe4a0e000, false, Form::SveMemory(A::H, PredQual::None)),
+            St1w_z_p_bi_ => (0xe540e000, false, Form::SveMemory(A::S, PredQual::None)),
+            St1d_z_p_bi_ => (0xe5e0e000, false, Form::SveMemory(A::D, PredQual::None)),
+            Eor3_z_zzz_ => (0x04203800, false, Form::Eor3),
+        };
+        let (fields, branch) = form.fields(operands, wide)?;
+        Ok((base | (u32::from(wide) << 31) | fields, branch))
+    }
+}
+
+#[derive(Clone, Copy)]
+enum BranchKind {
+    Direct,
+    Condition,
+    Compare,
+}
+
+enum Form {
+    None,
+    AddImm(bool),
+    Shift(bool),
+    Three,
+    Multiply,
+    Move,
+    RegPair(Bank, Bank),
+    ExtendedAdd,
+    FloatScalar,
+    FloatSelect,
+    FloatFma,
+    SveFma,
+    SveCompact,
+    FloatInt(bool),
+    FloatNeonUnary,
+    SveConvert,
+    FloatCompare,
+    NeonUnary(bool),
+    NeonSign,
+    NeonSum(bool),
+    SveSum,
+    FloatNeon,
+    Dup(bool),
+    SveCompareZero,
+    SveCompare(bool),
+    SveMaskValue,
+    SveIndex,
+    SveSelect,
+    SveGather(A),
+    Bitfield,
+    Select,
+    Memory(i64),
+    FloatMemory(i64),
+    Branch(BranchKind),
+    Indirect,
+    Neon(bool),
+    NeonBits,
+    Widen(u8),
+    Ptrue,
+    SveArithmetic,
+    SveDestructive,
+    SveBits,
+    SveMemory(A, PredQual),
+    Eor3,
+}
+
+fn reg(o: O, bank: Bank, sp: bool, i: usize) -> Result<u32, EncodeError> {
+    match o {
+        O::Register(r) if r.bank == bank && (r.number != 31 || r.sp == sp) => Ok(r.number.into()),
+        _ => Err(EncodeError::Operand(i)),
+    }
+}
+
+fn vector(o: O, bank: Bank, i: usize) -> Result<(u32, A), EncodeError> {
+    match o {
+        O::Vector(r, a) if r.bank == bank => Ok((r.number.into(), a)),
+        _ => Err(EncodeError::Operand(i)),
+    }
+}
+
+fn arranged(o: O, bank: Bank, a: A, i: usize) -> Result<u32, EncodeError> {
+    let (r, actual) = vector(o, bank, i)?;
+    if actual != a {
+        return Err(EncodeError::Operand(i));
+    }
+    Ok(r)
+}
+
+fn predicate(o: O, qual: PredQual, max: u8, i: usize) -> Result<u32, EncodeError> {
+    match o {
+        O::Predicate(p, actual) if actual == qual && p.bank == Bank::P && p.number <= max => {
+            Ok(p.number.into())
+        }
+        _ => Err(EncodeError::Operand(i)),
+    }
+}
+
+fn immediate(o: O, i: usize) -> Result<(u64, u8), EncodeError> {
+    match o {
+        O::Immediate(v) => Ok((v, 0)),
+        O::ShiftedImmediate(v, n) => Ok((v, n)),
+        _ => Err(EncodeError::Operand(i)),
+    }
+}
+
+fn size(a: A) -> Option<u32> {
+    match a {
+        A::B => Some(0),
+        A::H => Some(1),
+        A::S => Some(2),
+        A::D => Some(3),
+        _ => None,
+    }
+}
+
+impl Form {
+    fn fields(self, o: &[O], wide: bool) -> Result<Encoded, EncodeError> {
+        let expected = match self {
+            Self::None => 0,
+            Self::Indirect | Self::Branch(BranchKind::Direct) | Self::SveIndex => 1,
+            Self::Move
+            | Self::RegPair(..)
+            | Self::Dup(_)
+            | Self::Memory(_)
+            | Self::FloatMemory(_)
+            | Self::Branch(_)
+            | Self::Ptrue
+            | Self::FloatCompare
+            | Self::NeonUnary(_)
+            | Self::NeonSign
+            | Self::NeonSum(_)
+            | Self::FloatInt(_)
+            | Self::FloatNeonUnary
+            | Self::SveMaskValue => 2,
+            Self::Multiply
+            | Self::Eor3
+            | Self::Bitfield
+            | Self::Select
+            | Self::SveSelect
+            | Self::FloatSelect
+            | Self::FloatFma
+            | Self::SveFma
+            | Self::SveCompare(_)
+            | Self::SveGather(_)
+            | Self::SveDestructive => 4,
+            _ => 3,
+        };
+        if o.len() != expected {
+            return Err(EncodeError::OperandCount {
+                expected,
+                got: o.len(),
+            });
+        }
+        let gpr = if wide { Bank::X } else { Bank::W };
+        let width: u8 = if wide { 64 } else { 32 };
+        let r = |i| reg(o[i], gpr, false, i);
+        let three = || -> Result<u32, EncodeError> { Ok(r(0)? | r(1)? << 5 | r(2)? << 16) };
+        let bits = match self {
+            Self::None => 0,
+            Self::AddImm(flags) => {
+                let (v, shift) = immediate(o[2], 2)?;
+                if v > 4095 || !matches!(shift, 0 | 12) {
+                    return Err(EncodeError::Operand(2));
+                }
+                reg(o[0], gpr, !flags, 0)?
+                    | reg(o[1], gpr, true, 1)? << 5
+                    | (v as u32) << 10
+                    | u32::from(shift == 12) << 22
+            }
+            Self::Shift(logical) => {
+                let (rm, shift, n) = match o[2] {
+                    O::ShiftedRegister(rm, shift, n) => (reg(O::reg(rm), gpr, false, 2)?, shift, n),
+                    _ => (r(2)?, ShiftKind::Lsl, 0),
+                };
+                if n >= width || (!logical && shift == ShiftKind::Ror) {
+                    return Err(EncodeError::Operand(2));
+                }
+                r(0)? | r(1)? << 5 | rm << 16 | u32::from(n) << 10 | (shift as u32) << 22
+            }
+            Self::Three => three()?,
+            Self::Select => {
+                let O::Condition(c) = o[3] else {
+                    return Err(EncodeError::Operand(3));
+                };
+                three()? | (c as u32) << 12
+            }
+            Self::Multiply => three()? | r(3)? << 10,
+            Self::Move => {
+                let (v, shift) = immediate(o[1], 1)?;
+                if v > 65535 || shift >= width || shift % 16 != 0 {
+                    return Err(EncodeError::Operand(1));
+                }
+                r(0)? | (v as u32) << 5 | u32::from(shift / 16) << 21
+            }
+            Self::RegPair(a, b) => reg(o[0], a, false, 0)? | reg(o[1], b, false, 1)? << 5,
+            Self::ExtendedAdd => {
+                let O::ShiftedRegister(index, ShiftKind::Lsl, shift @ 0..=4) = o[2] else {
+                    return Err(EncodeError::Operand(2));
+                };
+                reg(o[0], Bank::X, true, 0)?
+                    | reg(o[1], Bank::X, true, 1)? << 5
+                    | u32::from(shift) << 10
+                    | reg(O::reg(index), Bank::W, false, 2)? << 16
+            }
+            Self::FloatScalar | Self::FloatSelect | Self::FloatNeon | Self::FloatFma => {
+                let (vd, a) = vector(o[0], Bank::V, 0)?;
+                let bits = match (!matches!(self, Self::FloatNeon), a) {
+                    (true, A::S) | (false, A::S2) => 0,
+                    (true, A::D) => 1 << 22,
+                    (false, A::S4) => 1 << 30,
+                    (false, A::D2) => (1 << 30) | (1 << 22),
+                    _ => return Err(EncodeError::Operand(0)),
+                };
+                let cond = if matches!(self, Self::FloatSelect) {
+                    let O::Condition(cond) = o[3] else {
+                        return Err(EncodeError::Operand(3));
+                    };
+                    (cond as u32) << 12
+                } else if matches!(self, Self::FloatFma) {
+                    arranged(o[3], Bank::V, a, 3)? << 10
+                } else {
+                    0
+                };
+                bits | vd
+                    | cond
+                    | arranged(o[1], Bank::V, a, 1)? << 5
+                    | arranged(o[2], Bank::V, a, 2)? << 16
+            }
+            Self::Dup(sve) => {
+                let (d, a) = vector(o[0], if sve { Bank::Z } else { Bank::V }, 0)?;
+                let s = if sve {
+                    size(a)
+                } else {
+                    match a {
+                        A::B16 => Some(0),
+                        A::H8 => Some(1),
+                        A::S4 => Some(2),
+                        A::D2 => Some(3),
+                        _ => None,
+                    }
+                }
+                .ok_or(EncodeError::Operand(0))?;
+                let bank = if s == 3 { Bank::X } else { Bank::W };
+                d | reg(o[1], bank, false, 1)? << 5 | if sve { s << 22 } else { (1 << s) << 16 }
+            }
+            Self::FloatCompare => {
+                let (a, arr) = vector(o[0], Bank::V, 0)?;
+                let s = match arr {
+                    A::S => 0,
+                    A::D => 1 << 22,
+                    _ => return Err(EncodeError::Operand(0)),
+                };
+                s | a << 5 | arranged(o[1], Bank::V, arr, 1)? << 16
+            }
+            Self::FloatInt(to_float) => {
+                let (v, g) = if to_float { (0, 1) } else { (1, 0) };
+                let (vd, arr) = vector(o[v], Bank::V, v)?;
+                let f = match arr {
+                    A::S => 0,
+                    A::D => 1 << 22,
+                    _ => return Err(EncodeError::Operand(v)),
+                };
+                let O::Register(r) = o[g] else {
+                    return Err(EncodeError::Operand(g));
+                };
+                if !matches!(r.bank, Bank::W | Bank::X) {
+                    return Err(EncodeError::Operand(g));
+                }
+                let rs = reg(o[g], r.bank, false, g)?;
+                f | (u32::from(r.bank == Bank::X) << 31)
+                    | if to_float { vd | rs << 5 } else { rs | vd << 5 }
+            }
+            Self::FloatNeonUnary => {
+                let (d, arr) = vector(o[0], Bank::V, 0)?;
+                let f = match arr {
+                    A::S2 => 0,
+                    A::S4 => 1 << 30,
+                    A::D2 => (1 << 30) | (1 << 22),
+                    _ => return Err(EncodeError::Operand(0)),
+                };
+                d | f | arranged(o[1], Bank::V, arr, 1)? << 5
+            }
+            Self::SveConvert => {
+                let (d, arr) = vector(o[0], Bank::Z, 0)?;
+                let f = match arr {
+                    A::S => 0,
+                    A::D => 0x420000,
+                    _ => return Err(EncodeError::Operand(0)),
+                };
+                d | f
+                    | predicate(o[1], PredQual::Merge, 7, 1)? << 10
+                    | arranged(o[2], Bank::Z, arr, 2)? << 5
+            }
+            Self::NeonUnary(bitwise) => {
+                let (d, a) = vector(o[0], Bank::V, 0)?;
+                let s = match (bitwise, a) {
+                    (_, A::B16) => 0,
+                    (false, A::H8) => 1,
+                    (false, A::S4) => 2,
+                    (false, A::D2) => 3,
+                    _ => return Err(EncodeError::Operand(0)),
+                };
+                d | arranged(o[1], Bank::V, a, 1)? << 5 | s << 22
+            }
+            Self::NeonSign => {
+                let (d, a) = vector(o[0], Bank::V, 0)?;
+                let bits = match a {
+                    A::B16 => 8,
+                    A::H8 => 16,
+                    A::S4 => 32,
+                    A::D2 => 64,
+                    _ => return Err(EncodeError::Operand(0)),
+                };
+                d | arranged(o[1], Bank::V, a, 1)? << 5 | (bits + 1) << 16
+            }
+            Self::NeonSum(pair) => {
+                let (src, a) = vector(o[1], Bank::V, 1)?;
+                let s = match (pair, a) {
+                    (false, A::B16) | (true, A::D2) => 0,
+                    (false, A::H8) => 1,
+                    (false, A::S4) => 2,
+                    _ => return Err(EncodeError::Operand(1)),
+                };
+                reg(o[0], Bank::V, false, 0)? | src << 5 | s << 22
+            }
+            Self::SveSum => {
+                let (src, arr) = vector(o[2], Bank::Z, 2)?;
+                let size = size(arr).ok_or(EncodeError::Operand(2))?;
+                reg(o[0], Bank::V, false, 0)?
+                    | predicate(o[1], PredQual::None, 7, 1)? << 10
+                    | src << 5
+                    | size << 22
+            }
+            Self::SveFma | Self::SveCompact => {
+                let (dst, a) = vector(o[0], Bank::Z, 0)?;
+                let s = match a {
+                    A::S => 2,
+                    A::D => 3,
+                    _ => return Err(EncodeError::Operand(0)),
+                };
+                let (qual, rhs) = if matches!(self, Self::SveFma) {
+                    (PredQual::Merge, arranged(o[3], Bank::Z, a, 3)? << 16)
+                } else {
+                    (PredQual::None, 0)
+                };
+                dst | predicate(o[1], qual, 7, 1)? << 10
+                    | arranged(o[2], Bank::Z, a, 2)? << 5
+                    | rhs
+                    | s << 22
+            }
+            Self::SveIndex => {
+                let (d, a) = vector(o[0], Bank::Z, 0)?;
+                d | size(a).ok_or(EncodeError::Operand(0))? << 22
+            }
+            Self::SveMaskValue => {
+                let (d, a) = vector(o[0], Bank::Z, 0)?;
+                d | predicate(o[1], PredQual::Zero, 15, 1)? << 16
+                    | size(a).ok_or(EncodeError::Operand(0))? << 22
+            }
+            Self::SveCompareZero | Self::SveCompare(_) => {
+                let (d, a) = vector(o[0], Bank::P, 0)?;
+                let s = size(a).ok_or(EncodeError::Operand(0))?;
+                if s == 0 && matches!(self, Self::SveCompare(true)) {
+                    return Err(EncodeError::Operand(0));
+                }
+                let rhs = if matches!(self, Self::SveCompare(_)) {
+                    arranged(o[3], Bank::Z, a, 3)? << 16
+                } else {
+                    0
+                };
+                d | predicate(o[1], PredQual::Zero, 7, 1)? << 10
+                    | arranged(o[2], Bank::Z, a, 2)? << 5
+                    | rhs
+                    | s << 22
+            }
+            Self::SveSelect => {
+                let (d, a) = vector(o[0], Bank::Z, 0)?;
+                let s = size(a).ok_or(EncodeError::Operand(0))?;
+                d | predicate(o[1], PredQual::None, 15, 1)? << 10
+                    | arranged(o[2], Bank::Z, a, 2)? << 5
+                    | arranged(o[3], Bank::Z, a, 3)? << 16
+                    | s << 22
+            }
+            Self::SveGather(a) => {
+                let O::Memory(base, 0) = o[2] else {
+                    return Err(EncodeError::Operand(2));
+                };
+                arranged(o[0], Bank::Z, a, 0)?
+                    | predicate(o[1], PredQual::Zero, 7, 1)? << 10
+                    | reg(O::reg(base), Bank::X, true, 2)? << 5
+                    | arranged(o[3], Bank::Z, a, 3)? << 16
+            }
+            Self::Bitfield => {
+                let (a, sa) = immediate(o[2], 2)?;
+                let (b, sb) = immediate(o[3], 3)?;
+                if a >= width.into() || sa != 0 {
+                    return Err(EncodeError::Operand(2));
+                }
+                if b >= width.into() || sb != 0 {
+                    return Err(EncodeError::Operand(3));
+                }
+                r(0)? | r(1)? << 5 | (a as u32) << 16 | (b as u32) << 10
+            }
+            Self::Memory(scale) | Self::FloatMemory(scale) => {
+                let O::Memory(base, offset) = o[1] else {
+                    return Err(EncodeError::Operand(1));
+                };
+                if offset < 0 || offset % scale != 0 || offset / scale > 4095 {
+                    return Err(EncodeError::Operand(1));
+                }
+                let rt = if scale == 16 || matches!(self, Self::FloatMemory(_)) {
+                    reg(o[0], Bank::V, false, 0)?
+                } else {
+                    r(0)?
+                };
+                rt | reg(O::reg(base), Bank::X, true, 1)? << 5 | ((offset / scale) as u32) << 10
+            }
+            Self::Indirect => reg(o[0], Bank::X, false, 0)? << 5,
+            Self::Branch(kind) => {
+                let direct = matches!(kind, BranchKind::Direct);
+                let i = usize::from(!direct);
+                let O::Label(target) = o[i] else {
+                    return Err(EncodeError::Operand(i));
+                };
+                let fields = match (kind, o[0]) {
+                    (BranchKind::Direct, _) => 0,
+                    (BranchKind::Condition, O::Condition(c)) => c as u32,
+                    (BranchKind::Compare, _) => r(0)?,
+                    _ => return Err(EncodeError::Operand(0)),
+                };
+                let (bits, shift) = if direct { (26, 0) } else { (19, 5) };
+                return Ok((
+                    fields,
+                    Some(Branch {
+                        target,
+                        bits,
+                        shift,
+                    }),
+                ));
+            }
+            Self::Neon(_) | Self::NeonBits => {
+                let (vd, a) = vector(o[0], Bank::V, 0)?;
+                let (q, s) = match a {
+                    A::B8 => (0, 0),
+                    A::B16 => (1, 0),
+                    A::H4 => (0, 1),
+                    A::H8 => (1, 1),
+                    A::S2 => (0, 2),
+                    A::S4 => (1, 2),
+                    A::D2 => (1, 3),
+                    _ => return Err(EncodeError::Operand(0)),
+                };
+                if (matches!(self, Self::NeonBits) && s != 0)
+                    || (matches!(self, Self::Neon(true)) && s == 3)
+                {
+                    return Err(EncodeError::Operand(0));
+                }
+                vd | arranged(o[1], Bank::V, a, 1)? << 5
+                    | arranged(o[2], Bank::V, a, 2)? << 16
+                    | q << 30
+                    | s << 22
+            }
+            Self::Widen(high) => {
+                let (vd, dst) = vector(o[0], Bank::V, 0)?;
+                let (s, low, upper) = match dst {
+                    A::H8 => (0, A::B8, A::B16),
+                    A::S4 => (1, A::H4, A::H8),
+                    A::D2 => (2, A::S2, A::S4),
+                    _ => return Err(EncodeError::Operand(0)),
+                };
+                let src = if high == 0 { low } else { upper };
+                vd | arranged(o[1], Bank::V, src, 1)? << 5
+                    | arranged(o[2], Bank::V, src, 2)? << 16
+                    | u32::from(high) << 30
+                    | s << 22
+            }
+            Self::Ptrue => {
+                let (p, a) = vector(o[0], Bank::P, 0)?;
+                let s = size(a).ok_or(EncodeError::Operand(0))?;
+                let O::Named(n @ (0..=13 | 29..=31)) = o[1] else {
+                    return Err(EncodeError::Operand(1));
+                };
+                p | n << 5 | s << 22
+            }
+            Self::SveArithmetic | Self::SveBits => {
+                let (d, a) = vector(o[0], Bank::Z, 0)?;
+                let s = if matches!(self, Self::SveBits) {
+                    if a != A::D {
+                        return Err(EncodeError::Operand(0));
+                    }
+                    0
+                } else {
+                    size(a).ok_or(EncodeError::Operand(0))?
+                };
+                d | arranged(o[1], Bank::Z, a, 1)? << 5
+                    | arranged(o[2], Bank::Z, a, 2)? << 16
+                    | s << 22
+            }
+            Self::SveDestructive => {
+                let (d, a) = vector(o[0], Bank::Z, 0)?;
+                let s = size(a).ok_or(EncodeError::Operand(0))?;
+                let O::Predicate(p, PredQual::Merge) = o[1] else {
+                    return Err(EncodeError::Operand(1));
+                };
+                if p.bank != Bank::P || p.number > 7 {
+                    return Err(EncodeError::Operand(1));
+                }
+                if arranged(o[2], Bank::Z, a, 2)? != d {
+                    return Err(EncodeError::Operand(2));
+                }
+                d | arranged(o[3], Bank::Z, a, 3)? << 5 | u32::from(p.number) << 10 | s << 22
+            }
+            Self::SveMemory(a, qualifier) => {
+                let O::Predicate(p, actual) = o[1] else {
+                    return Err(EncodeError::Operand(1));
+                };
+                if actual != qualifier || p.bank != Bank::P || p.number > 7 {
+                    return Err(EncodeError::Operand(1));
+                }
+                let (base, offset) = match o[2] {
+                    O::Memory(base, 0) => (base, 0),
+                    O::MemoryVl(base, offset @ -8..=7) => (base, offset),
+                    _ => return Err(EncodeError::Operand(2)),
+                };
+                arranged(o[0], Bank::Z, a, 0)?
+                    | reg(O::reg(base), Bank::X, true, 2)? << 5
+                    | u32::from(p.number) << 10
+                    | ((offset as u32) & 15) << 16
+            }
+            Self::Eor3 => {
+                let z = |i| arranged(o[i], Bank::Z, A::D, i);
+                let d = z(0)?;
+                if z(1)? != d {
+                    return Err(EncodeError::Operand(1));
+                }
+                d | z(2)? << 16 | z(3)? << 5
+            }
+        };
+        Ok((bits, None))
+    }
+}

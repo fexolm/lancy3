@@ -3,6 +3,78 @@
 use crate::CompileError;
 use crate::hir::{Block, Function, Inst, Op, Terminator, Value, transforms::ControlFlowGraph};
 use crate::support::slotmap::DenseMap;
+use regalloc2::{Block as MachineBlock, VReg};
+
+use super::TargetInst;
+
+/// Number machine blocks in reverse postorder and insert a bridge on each
+/// critical edge so the allocator can emit its parallel copies unconditionally.
+pub(super) struct Edges<'a> {
+    f: &'a Function,
+    cfg: &'a ControlFlowGraph,
+    mapping: DenseMap<Block, MachineBlock>,
+    count: usize,
+}
+
+impl<'a> Edges<'a> {
+    pub fn new(f: &'a Function, cfg: &'a ControlFlowGraph) -> Self {
+        let mut edges = Self {
+            f,
+            cfg,
+            mapping: DenseMap::filled(f.block_capacity(), MachineBlock::invalid()),
+            count: 0,
+        };
+        for &b in cfg.reverse_postorder() {
+            edges.mapping[b] = MachineBlock::new(edges.count);
+            edges.count += 1 + cfg.successors(b).filter(|&t| edges.split(b, t)).count();
+        }
+        edges
+    }
+
+    fn split(&self, source: Block, target: Block) -> bool {
+        matches!(self.f.terminator(source), Terminator::Branch { .. })
+            && self.cfg.predecessors(target).len() > 1
+    }
+
+    pub fn function<I: TargetInst>(&self) -> Result<super::Function<I>, CompileError> {
+        super::Function::new(self.count, self.f.value_count())
+    }
+
+    pub fn finish<I: TargetInst>(
+        &self,
+        body: &mut super::Function<I>,
+        b: Block,
+        reg: impl Fn(Value) -> VReg,
+        jump: impl Fn() -> I,
+    ) -> Result<(), CompileError> {
+        let term = *self.f.terminator(b);
+        let mut bridge = self.mapping[b].index() + 1;
+        for e in term.edges() {
+            let (target, args) = self.f.edge(e);
+            if self.split(b, target) {
+                body.edge(MachineBlock::new(bridge), []);
+                bridge += 1;
+            } else {
+                body.edge(self.mapping[target], args.iter().copied().map(&reg));
+            }
+        }
+        let params = if b == self.f.entry() {
+            &[]
+        } else {
+            self.f.params(b)
+        };
+        body.end_block(params.iter().copied().map(&reg))?;
+        for e in term.edges() {
+            let (target, args) = self.f.edge(e);
+            if self.split(b, target) {
+                body.push(jump());
+                body.edge(self.mapping[target], args.iter().copied().map(&reg));
+                body.end_block([])?;
+            }
+        }
+        Ok(())
+    }
+}
 
 pub(super) enum Root {
     Inst(Inst),
@@ -33,6 +105,7 @@ impl Context {
     }
     /// Only sink total computations. Memory accesses, checks and division
     /// keep their original execution point, including when their result is dead.
+    #[cfg(target_arch = "x86_64")]
     pub fn single_use(&self, v: Value) -> Option<Op> {
         let def = &self.defs[v];
         let (b, op) = def.source?;

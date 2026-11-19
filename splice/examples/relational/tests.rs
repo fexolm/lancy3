@@ -4,7 +4,6 @@ use splice::Executable;
 use splice::hir::{BufferKind, Function, Instr, SimdOp};
 use splice::simd::Lane;
 use splice_cranelift::Cranelift;
-#[cfg(target_arch = "x86_64")]
 use splice_lancy::Lancy;
 use splice_llvm::Llvm;
 
@@ -148,20 +147,16 @@ fn check_workspace_boundary(plan: &Plan, tables: &[&[Row]], kernels: &[&dyn Exec
 
 fn with_kernels(plan: &Plan, test: impl FnOnce(&[&dyn Executable])) {
     let f = query::ir(plan).unwrap();
-    #[cfg(target_arch = "x86_64")]
     let lancy = Lancy::compile(&f).unwrap();
     let llvm = Llvm::compile(&f).unwrap();
-    #[cfg(target_arch = "x86_64")]
     let direct_lancy = query::build::<Lancy>(plan).unwrap();
     let direct_llvm = query::build::<Llvm>(plan).unwrap();
     let cranelift = Cranelift::compile(&f).unwrap();
     let direct_cranelift = query::build::<Cranelift>(plan).unwrap();
     test(&[
-        #[cfg(target_arch = "x86_64")]
         &lancy,
         &llvm,
         &cranelift,
-        #[cfg(target_arch = "x86_64")]
         &direct_lancy,
         &direct_llvm,
         &direct_cranelift,
@@ -553,16 +548,10 @@ fn self_join_after_rekey_handles_collisions_and_duplicate_rows() {
         Combine::Multiply,
     );
     let f = query::ir(&plan).unwrap();
-    #[cfg(target_arch = "x86_64")]
     let lancy = Lancy::compile(&f).unwrap();
     let llvm = Llvm::compile(&f).unwrap();
-    let kernels: &[&dyn Executable] = &[
-        #[cfg(target_arch = "x86_64")]
-        &lancy,
-        &llvm,
-    ];
     let duplicate = [(3, 3); 13];
-    compare(&plan, &[&duplicate], kernels);
+    compare(&plan, &[&duplicate], &[&lancy, &llvm]);
     let mixed = [
         (1, 9),
         (9, 1),
@@ -572,7 +561,7 @@ fn self_join_after_rekey_handles_collisions_and_duplicate_rows() {
         (i32::MIN, i32::MIN),
         (1, 9),
     ];
-    compare(&plan, &[&mixed], kernels);
+    compare(&plan, &[&mixed], &[&lancy, &llvm]);
 }
 
 #[test]
@@ -611,9 +600,7 @@ fn different_plan_shapes_match_a_nested_loop_oracle() {
     for _ in 0..24 {
         let plan = tree(&mut seed, 4);
         let f = query::ir(&plan).unwrap();
-        #[cfg(target_arch = "x86_64")]
         let direct = query::build::<Lancy>(&plan).unwrap();
-        #[cfg(target_arch = "x86_64")]
         let from_ir = Lancy::compile(&f).unwrap();
         let llvm = Llvm::compile(&f).unwrap();
         compare(
@@ -623,13 +610,7 @@ fn different_plan_shapes_match_a_nested_loop_oracle() {
                 &[(7, 10), (-1, 9)],
                 &[(-1, 1), (0, -1), (7, 3)],
             ],
-            &[
-                #[cfg(target_arch = "x86_64")]
-                &direct,
-                #[cfg(target_arch = "x86_64")]
-                &from_ir,
-                &llvm,
-            ],
+            &[&direct, &from_ir, &llvm],
         );
     }
 }
@@ -646,16 +627,10 @@ fn balanced_tree_with_32_scans_runs_through_one_entry_point() {
     }
     let plan = subtree(5);
     let ir = query::ir(&plan).unwrap();
-    #[cfg(target_arch = "x86_64")]
     let lancy = Lancy::compile(&ir).unwrap();
     let llvm = Llvm::compile(&ir).unwrap();
     let cat = Catalog::new(&[&[(12, 2), (7, 3)]]).unwrap();
-    let kernels: [&dyn Executable; _] = [
-        #[cfg(target_arch = "x86_64")]
-        &lancy,
-        &llvm,
-    ];
-    for code in kernels {
+    for code in [&lancy as &dyn Executable, &llvm] {
         assert_rows(
             &plan,
             cat.run(code, &mut [0; 1024]).unwrap(),
@@ -739,10 +714,7 @@ fn plan_shape_selects_the_reachable_operator_kernels_at_build_time() {
         SimdOp::GatherSelect(_) | SimdOp::Scatter(_) | SimdOp::ScatterSelect(_)
     )));
     // The executable outlives the temporary plan passed to build().
-    #[cfg(target_arch = "x86_64")]
     let code = Lancy::compile(&scan).unwrap();
-    #[cfg(not(target_arch = "x86_64"))]
-    let code = Llvm::compile(&scan).unwrap();
     assert_eq!(
         Catalog::new(&[&[(4, 5)]])
             .unwrap()
@@ -765,10 +737,7 @@ fn workspace_exhaustion_has_an_explicit_result_and_caller_can_retry() {
     });
     let cat = Catalog::new(tables).unwrap();
     for id in [2, usize::MAX] {
-        #[cfg(target_arch = "x86_64")]
         let unknown_table = Lancy::compile(&query::ir(&Plan::Scan(id)).unwrap()).unwrap();
-        #[cfg(not(target_arch = "x86_64"))]
-        let unknown_table = Llvm::compile(&query::ir(&Plan::Scan(id)).unwrap()).unwrap();
         assert!(
             cat.run(&unknown_table, &mut [0; 8])
                 .unwrap_err()

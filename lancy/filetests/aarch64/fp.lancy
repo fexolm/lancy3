@@ -1,0 +1,89 @@
+fn main x:i32 y:i32 -> i32
+  xf = bitcast f32 x
+  yf = bitcast f32 y
+  three = literal f32 0x40400000
+  a = add xf yf
+  b = sub a three
+  c = mul b yf
+  q = div c xf
+  r = bitcast i32 q
+  ret r
+@aarch64-isel check: Float(Fadd_scalar
+@aarch64-isel check: Float(Fsub_scalar
+@aarch64-isel check: Float(Fmul_scalar
+@aarch64-isel check: Float(Fdiv_scalar
+@aarch64 all lacks 0xfffffc1f 0xd63f0000
+@run 0x40c00000 0x40000000 -> 0x3fd55555
+---
+fn main x:i32 y:i32 -> i32
+  xf = bitcast f32 x
+  yf = bitcast f32 y
+  q = div xf yf
+  r = bitcast i32 q
+  ret r
+@aarch64 all has 0xffe0fc00 0x1e201800
+@run 0x80000000 0x40000000 -> 0x80000000
+@run 0x3f800000 0x00000000 -> 0x7f800000
+---
+fn main x:i32 y:i32 -> i32
+  xf = bitcast f32 x
+  yf = bitcast f32 y
+  one = literal f32 0x3f800000
+  a = mul xf yf
+  b = sub a one
+  r = bitcast i32 b
+  ret r
+@run 0x3f800001 0x3f7ffffe -> 0
+---
+fn main x:vec.f64 y:vec.f64 -> vec.f64
+  q = simd.div x y
+  r = simd.sub x q
+  ret r
+@aarch64 neon has 0xffe0fc00 0x6e60fc00
+@aarch64 sve has 0xffffe000 0x65cd8000
+@aarch64 sve2 has 0xffffe000 0x65cd8000
+@aarch64 all lacks 0xfffffc1f 0xd63f0000
+---
+fn main dst:ptr x:i32 -> i32
+  s = cast i8 x
+  u = cast u8 x
+  sw = cast u64 s
+  uw = cast i64 u
+  store dst sw
+  one = const 1
+  next = offset dst one 8
+  store next uw
+  ret x
+@aarch64-isel check: IntCast
+@aarch64 all lacks 0xfffffc1f 0xd63f0000
+@run -128 -> -128 | 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 | 80 ff ff ff ff ff ff ff 80 00 00 00 00 00 00 00
+---
+fn main x:i32 y:i32 -> i32
+  a = bitcast f32 x
+  b = bitcast f32 y
+  minus_one = literal f32 0xbf800000
+  fused = fma a b minus_one
+  r = bitcast i32 fused
+  ret r
+@aarch64-isel check: Fma(Fmadd_scalar
+@aarch64 all has 0xffe08000 0x1f000000
+@aarch64 all lacks 0xfffffc1f 0xd63f0000
+@run 0x3f800001 0x3f7ffffe -> 0xa8800000
+---
+fn main x:i32 y:i32 -> i32
+  a = bitcast f32 x
+  b = bitcast f32 y
+  minus_one = literal f32 0xbf800000
+  av = simd.splat a
+  bv = simd.splat b
+  cv = simd.splat minus_one
+  fused = simd.fma av bv cv
+  z = const 0
+  lane = simd.extract fused z
+  r = bitcast i32 lane
+  ret r
+@aarch64 neon has 0xffe0fc00 0x4e20cc00
+@aarch64 sve has 0xffe0e000 0x65a00000
+@aarch64 sve2 has 0xffe0e000 0x65a00000
+@aarch64 all lacks 0xfffffc1f 0xd63f0000
+@run 0x3f800001 0x3f7ffffe -> 0xa8800000

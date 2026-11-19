@@ -1,0 +1,87 @@
+fn main raw:i32 -> i32
+  x = bitcast f32 raw
+  y = cast i32 x
+  ret y
+@aarch64-isel check: FloatCast(Fcvtzs_scalar
+@aarch64 all lacks 0xfffffc1f 0xd63f0000
+@run 0xbff33333 -> -1
+@run 0x3ff33333 -> 1
+@run 0x7f800000 -> 2147483647
+@run 0xff800000 -> -2147483648
+@run 0x7fc01234 -> 0
+---
+fn main raw:i32 -> i32
+  x = bitcast f32 raw
+  y = cast i8 x
+  z = cast u8 x
+  yy = cast i32 y
+  zz = cast i32 z
+  r = sub yy zz
+  ret r
+@aarch64 all lacks 0xfffffc1f 0xd63f0000
+@run 0x43960000 -> -128
+@run 0xc3960000 -> -128
+@run 0xbff33333 -> -1
+@run 0x7fc01234 -> 0
+---
+fn main raw:i32 -> i32
+  x = bitcast f32 raw
+  vec = simd.splat x
+  y = simd.cast u32 vec
+  z = const 0
+  v = simd.extract y z
+  r = bitcast i32 v
+  ret r
+@aarch64-isel check: PackedCast
+@aarch64 all lacks 0xfffffc1f 0xd63f0000
+@run 0xbff33333 -> 0
+@run 0x4f800000 -> -1
+@run 0x4f7fffff -> 0xffffff00
+@run 0x7fc01234 -> 0
+---
+fn main x:i32 -> i32
+  y = cast f32 x
+  r = bitcast i32 y
+  ret r
+@aarch64-isel check: FloatCast(Scvtf_scalar
+@run -1 -> 0xbf800000
+@run 16777217 -> 0x4b800000
+---
+fn main x:i32 -> i32
+  low = const 0
+  one = const 1
+  len = simd.lanes i8
+  high = sub len one
+  init = literal i8 0x00
+  three = literal i8 0x03
+  start = simd.splat init
+  n = cast i8 x
+  a = simd.insert start low n
+  v = simd.insert a high three
+  sum = simd.reduce add v
+  r = cast i32 sum
+  ret r
+@aarch64-isel check: Sum(
+@aarch64 all lacks 0xfffffc1f 0xd63f0000
+@run 127 -> -126
+@run -128 -> -125
+@run 255 -> 2
+---
+fn main x:i32 -> i32
+  low = const 0
+  mask = simd.splat x
+  yes = const 0x0f0f0f0f
+  no = const 0xf0f0f0f0
+  a = simd.splat yes
+  b = simd.splat no
+  selected = simd.select mask a b
+  bits = simd.bitselect mask a b
+  l = simd.extract selected low
+  r = simd.extract bits low
+  out = xor l r
+  ret out
+@aarch64-isel check: Select(
+@aarch64 all lacks 0xfffffc1f 0xd63f0000
+@run 1 -> 1
+@run 0x80000001 -> 0x7ffffffe
+@run -1 -> 0

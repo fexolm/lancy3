@@ -1,0 +1,91 @@
+fn main idx:i32 x:i32 -> i32
+  v = simd.iota i32
+  w = simd.insert v idx x
+  after = simd.extract w idx
+  before = simd.extract v idx
+  r = sub after before
+  ret r
+@aarch64-isel check: LaneAccess
+@aarch64 sve has 0xffffffe0 0x04a14000
+@aarch64 sve2 has 0xffffffe0 0x04a14000
+@aarch64 all lacks 0xfffffc1f 0xd63f0000
+@run 0 11 -> 11
+@run 3 11 -> 8
+@run -1 11 -> !bounds
+@run 0x80000000 11 -> !bounds
+@run 16 11 -> !bounds
+---
+fn main x:i32 -> i32
+  n = simd.lanes u8
+  one = const 1
+  last = sub n one
+  at = sub last x
+  v = simd.iota u8
+  lane = simd.extract v at
+  i = cast i32 lane
+  r = sub i n
+  ret r
+@run 0 -> -1
+@run 1 -> -2
+@run -1 -> !bounds
+---
+fn main x:i32 y:i32 -> i32
+  z = const 0
+  a = simd.splat x
+  b = simd.splat y
+  signed = simd.lt a b
+  s = simd.extract signed z
+  xu = bitcast u32 x
+  yu = bitcast u32 y
+  ua = simd.splat xu
+  ub = simd.splat yu
+  unsigned = simd.lt ua ub
+  um = simd.extract unsigned z
+  u = bitcast i32 um
+  s2 = add s s
+  r = add s2 u
+  ret r
+@aarch64 all lacks 0xfffffc1f 0xd63f0000
+@run -1 0 -> -2
+@run 0 -1 -> -1
+@run 1 2 -> -3
+@run 1 1 -> 0
+---
+fn main x:i32 y:i32 -> i32
+  z = const 0
+  xf = bitcast f32 x
+  yf = bitcast f32 y
+  a = simd.splat xf
+  b = simd.splat yf
+  eq = simd.eq a b
+  ne = simd.ne a b
+  lt = simd.lt a b
+  e = simd.extract eq z
+  n = simd.extract ne z
+  l = simd.extract lt z
+  two = const 2
+  four = const 4
+  n2 = mul n two
+  l4 = mul l four
+  partial = add e n2
+  r = add partial l4
+  ret r
+@aarch64 all lacks 0xfffffc1f 0xd63f0000
+@run 0x7fc01234 0x3f800000 -> -2
+@run 0x80000000 0 -> -1
+@run 0xbf800000 0x3f800000 -> -6
+@run 0x3f800000 0xbf800000 -> -2
+---
+fn main x:i32 -> i32
+  z = const 0
+  one = const 1
+  ones = simd.splat one
+  mixed = simd.insert ones z x
+  a = simd.any mixed
+  b = simd.all mixed
+  r = add a b
+  ret r
+@aarch64 all lacks 0xfffffc1f 0xd63f0000
+@run 0 -> -1
+@run 2 -> -2
+@run 0x80000000 -> -2

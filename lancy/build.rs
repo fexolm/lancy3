@@ -5,7 +5,10 @@ use std::{collections::BTreeMap, env, fs, path::Path};
 fn discover(root: &Path, dir: &Path, cases: &mut BTreeMap<String, Vec<String>>) {
     for entry in fs::read_dir(dir).unwrap() {
         let path = entry.unwrap().path();
-        if path.is_dir() {
+        if path.is_dir()
+            && (path.file_name().unwrap() != "aarch64"
+                || env::var("CARGO_CFG_TARGET_ARCH").as_deref() == Ok("aarch64"))
+        {
             discover(root, &path, cases);
         } else if path.extension().is_some_and(|ext| ext == "lancy") {
             let relative = path

@@ -1,11 +1,11 @@
-//! Compile portable Splice kernels with the Lancy x64 JIT.
+//! Compile portable Splice kernels with Lancy's native JIT.
 mod lower;
 
 use lancy::{CompileError, ScalarKernel};
 pub use lower::lower;
 use splice::{BufferArg, Codegen, Executable, Function};
 
-/// Compile Splice kernels through Lancy's SSA HIR and x64 backend.
+/// Compile Splice kernels through Lancy's SSA HIR and host backend.
 pub struct Lancy;
 
 impl Codegen for Lancy {

@@ -74,29 +74,6 @@ pub enum Binary {
 }
 
 impl Binary {
-    pub(crate) fn scalar_alu(self) -> bool {
-        matches!(
-            self,
-            Self::Add
-                | Self::Sub
-                | Self::Mul
-                | Self::Div
-                | Self::Rem
-                | Self::And
-                | Self::Or
-                | Self::Xor
-                | Self::Eq
-                | Self::Ne
-                | Self::Lt
-                | Self::Le
-                | Self::Gt
-                | Self::Ge
-                | Self::Shl
-                | Self::Shr
-                | Self::Min
-                | Self::Max
-        )
-    }
     pub(crate) fn result_type(self, ty: Type) -> Type {
         if matches!(
             self,
@@ -131,34 +108,6 @@ impl Binary {
             | Self::SaturatingSub => !lane.float(),
             _ => true,
         }
-    }
-
-    pub(crate) fn checked_eval(self, a: i32, b: i32) -> Option<i32> {
-        Some(match self {
-            Self::Add => a.wrapping_add(b),
-            Self::Sub => a.wrapping_sub(b),
-            Self::Mul => a.wrapping_mul(b),
-            Self::Div => a.checked_div(b)?,
-            Self::Rem => a.checked_rem(b)?,
-            Self::And => a & b,
-            Self::Or => a | b,
-            Self::Xor => a ^ b,
-            Self::Eq => -i32::from(a == b),
-            Self::Ne => -i32::from(a != b),
-            Self::Lt => -i32::from(a < b),
-            Self::Le => -i32::from(a <= b),
-            Self::Gt => -i32::from(a > b),
-            Self::Ge => -i32::from(a >= b),
-            Self::Shl => a.wrapping_shl(b as u32),
-            Self::Shr => a.wrapping_shr(b as u32),
-            Self::Min => a.min(b),
-            Self::Max => a.max(b),
-            Self::RotateLeft => a.rotate_left(b as u32),
-            Self::RotateRight => a.rotate_right(b as u32),
-            Self::SaturatingAdd => a.saturating_add(b),
-            Self::SaturatingSub => a.saturating_sub(b),
-            _ => return None,
-        })
     }
 }
 

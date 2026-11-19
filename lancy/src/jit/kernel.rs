@@ -1,23 +1,13 @@
 //! Install verified HIR as executable machine code.
 use super::memory::Executable;
-use crate::hir::{Function, Type};
-use crate::{CallError, CompileError};
+use crate::hir::{Function, Type, transforms::passes};
+use crate::{CallError, CompileError, Inlining};
 use std::mem::MaybeUninit;
 
-#[cfg(test)]
+#[cfg(all(test, target_arch = "x86_64"))]
 mod tests;
 
 type Entry = unsafe extern "C" fn(*const u64, *mut u64) -> u64;
-
-/// Controls expansion of runtime calls in HIR.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum Inlining {
-    /// Expand the entire acyclic graph when the resulting function is representable.
-    #[default]
-    Always,
-    /// Keep the internal call ABI while optimizing each body independently.
-    Never,
-}
 
 /// Owns the executable memory backing a compiled function and its callees.
 pub struct ScalarKernel {
@@ -29,10 +19,12 @@ pub struct ScalarKernel {
     arg_words: usize,
     result_words: usize,
     pointer_signature: bool,
+    #[cfg(target_arch = "aarch64")]
+    sites: Box<[crate::aarch64::Site]>,
 }
 
 impl ScalarKernel {
-    /// Verify the reachable functions, generate x64 code and install it for execution.
+    /// Verify the reachable functions, generate machine code and install it for execution.
     pub fn compile(function: &Function) -> Result<Self, CompileError> {
         Self::compile_with_inlining(function, Inlining::Always)
     }
@@ -44,29 +36,9 @@ impl ScalarKernel {
     ) -> Result<Self, CompileError> {
         splice_target::simd().map_err(CompileError::SimdProfile)?;
         let (source, ids) = function.verified_module()?;
-        let emit = |optimized: Function| {
-            let (module, ids) = optimized.verified_module()?;
-            crate::lir::emit(module, &ids)
-        };
-        let outlined = || emit(source.simplify_bodies(&ids)?);
-        let code = if inlining == Inlining::Always && source.functions.len() > 1 {
-            let expanded = source.inline_all(&ids).and_then(|mut body| {
-                body.simplify()?;
-                emit(body)
-            });
-            match expanded {
-                // Selection can introduce extra virtual registers and branches
-                // after the HIR expansion has passed its size check.
-                Err(CompileError::FunctionTooLarge | CompileError::BranchOutOfRange { .. }) => {
-                    outlined()
-                }
-                other => other,
-            }
-        } else {
-            outlined()
-        }?;
+        let code = passes::optimize_and_lower(&source, &ids, inlining, crate::lir::emit)?;
         let memory = Executable::new(&code.bytes)?;
-        // SAFETY: the emitter implements Entry for both supported x64 ABIs.
+        // SAFETY: the host emitter implements Entry and memory owns the sealed code.
         let entry =
             unsafe { std::mem::transmute::<*mut std::ffi::c_void, Entry>(memory.address.as_ptr()) };
         Ok(Self {
@@ -87,11 +59,13 @@ impl ScalarKernel {
                 .div_ceil(8),
             pointer_signature: function.param_types().contains(&Type::Ptr)
                 || function.return_type() == Type::Ptr,
+            #[cfg(target_arch = "aarch64")]
+            sites: code.sites,
         })
     }
     /// Size of one scalable vector for kernels compiled in this process.
     pub fn vector_bytes() -> usize {
-        crate::lir::Features::host().bytes
+        splice_target::vector_bytes()
     }
 
     pub fn code_size(&self) -> usize {
@@ -190,6 +164,17 @@ impl ScalarKernel {
     ) -> Result<u64, CallError> {
         let mut status = 0i32;
         workspace[0].write(std::ptr::from_mut(&mut status) as u64);
+        #[cfg(target_arch = "aarch64")]
+        {
+            splice_target::simd()
+                .expect("compilation validated the selected profile")
+                .check_execution()
+                .map_err(|_| CallError::VectorLength)?;
+            workspace[crate::aarch64::SITE_POINTER].write(self.sites.as_ptr() as u64);
+            // SAFETY: the executable mapping was synchronized before publication.
+            // ISB synchronizes the instruction stream on this calling core.
+            unsafe { std::arch::asm!("isb", options(nostack, preserves_flags)) };
+        }
         // SAFETY: compile verified the internal frame layout and the caller covers external memory.
         let value = unsafe { (self.entry)(args, workspace.as_mut_ptr().cast()) };
         match status {

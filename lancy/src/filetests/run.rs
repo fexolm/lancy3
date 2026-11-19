@@ -1,7 +1,7 @@
 use super::{Result, integer};
 use crate::{CallError, ScalarKernel, hir::Function};
 
-pub(super) struct Run {
+pub(crate) struct Run {
     line: usize,
     args: Vec<i32>,
     expected: std::result::Result<i32, CallError>,
@@ -20,7 +20,7 @@ fn bytes(text: &str) -> Result<Vec<u8>> {
 }
 
 impl Run {
-    pub(super) fn parse(line: usize, text: &str) -> Result<Self> {
+    pub(crate) fn parse(line: usize, text: &str) -> Result<Self> {
         let parts: Vec<_> = text.split('|').collect();
         let (call, buffer) = match parts.as_slice() {
             [call] => (*call, None),
@@ -58,7 +58,7 @@ impl Run {
         Ok(())
     }
 
-    pub(super) fn interpret(&self, stage: &str, f: &Function) -> Result<()> {
+    pub(crate) fn interpret(&self, stage: &str, f: &Function) -> Result<()> {
         let actual = if let Some((initial, expected)) = &self.buffer {
             let mut bytes = initial.clone();
             let result = f.interpret_buffer(&self.args, &mut bytes);
@@ -88,7 +88,7 @@ impl Run {
     /// # Safety
     /// The caller must have successfully interpreted this run against the
     /// source of this exact kernel, including its checked buffer accesses.
-    pub(super) unsafe fn native(&self, kernel: &ScalarKernel) -> Result<()> {
+    pub(crate) unsafe fn native(&self, kernel: &ScalarKernel) -> Result<()> {
         let actual = if let Some((initial, expected)) = &self.buffer {
             let mut bytes = initial.clone();
             let args: Vec<_> = std::iter::once(bytes.as_mut_ptr() as u64)
