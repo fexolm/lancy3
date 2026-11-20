@@ -1,4 +1,5 @@
 //! JIT compilation and warm execution on the same inputs for all three backends.
+mod gaps;
 #[path = "large/mod.rs"]
 mod large;
 #[path = "../examples/workloads/matmul.rs"]
@@ -16,7 +17,7 @@ use relational::{Catalog, pricing_plan, query};
 use splice::{BufferArg, Codegen, Executable, Function, kernel};
 use splice_cranelift::{Cranelift, CraneliftKernel};
 use splice_lancy::{Lancy, LancyKernel};
-use splice_llvm::{LlvmKernel, LlvmManualSimd};
+use splice_llvm::{Llvm, LlvmKernel, LlvmManualSimd};
 use std::{cell::LazyCell, hint::black_box, ops::Not};
 
 #[kernel]
@@ -120,11 +121,20 @@ where
         }
     }
 
-    fn bench_route(&self, c: &mut Criterion, route: &str, builds: Builders<'_>) {
+    fn bench_route(
+        &self,
+        c: &mut Criterion,
+        route: &str,
+        builds: Builders<'_>,
+        llvm_auto: Option<&dyn Fn() -> splice::Result<LlvmKernel>>,
+    ) {
         let mut compile = c.benchmark_group(format!("{}/compile/{route}", self.name));
         bench_compile(&mut compile, "lancy", builds.lancy);
         bench_compile(&mut compile, "cranelift", builds.cranelift);
         bench_compile(&mut compile, "llvm_manual_simd", builds.llvm);
+        if let Some(build) = llvm_auto {
+            bench_compile(&mut compile, "llvm_auto_simd", build);
+        }
         compile.finish();
 
         let mut execute = c.benchmark_group(format!("{}/execute/{route}", self.name));
@@ -132,6 +142,9 @@ where
         self.bench_execute(&mut execute, "lancy", builds.lancy);
         self.bench_execute(&mut execute, "cranelift", builds.cranelift);
         self.bench_execute(&mut execute, "llvm_manual_simd", builds.llvm);
+        if let Some(build) = llvm_auto {
+            self.bench_execute(&mut execute, "llvm_auto_simd", build);
+        }
         execute.finish();
     }
 
@@ -141,6 +154,16 @@ where
         stage: impl Fn() -> splice::Result<Function>,
         builds: Builders<'_>,
     ) {
+        self.compare_with_llvm_auto(c, stage, builds, None);
+    }
+
+    fn compare_with_llvm_auto(
+        &self,
+        c: &mut Criterion,
+        stage: impl Fn() -> splice::Result<Function>,
+        builds: Builders<'_>,
+        llvm_auto: Option<&dyn Fn() -> splice::Result<LlvmKernel>>,
+    ) {
         c.bench_function(&format!("{}/stage_ir", self.name), |b| {
             b.iter_batched(
                 || (),
@@ -148,8 +171,9 @@ where
                 BatchSize::PerIteration,
             );
         });
-        self.bench_route(c, "build", builds);
+        self.bench_route(c, "build", builds, llvm_auto);
         let ir = stage().expect("stage shared IR");
+        let compile_auto = || Llvm::compile(black_box(&ir));
         self.bench_route(
             c,
             "from_ir",
@@ -158,6 +182,7 @@ where
                 cranelift: &|| Cranelift::compile(black_box(&ir)),
                 llvm: &|| LlvmManualSimd::compile(black_box(&ir)),
             },
+            llvm_auto.map(|_| &compile_auto as &dyn Fn() -> splice::Result<LlvmKernel>),
         );
     }
 }
@@ -344,6 +369,6 @@ fn simd_hash_lookup(c: &mut Criterion) {
 criterion_group! {
     name = backends;
     config = Criterion::default().sample_size(30);
-    targets = projection, sql_plan, simd_matmul, simd_hash_lookup, large::compare
+    targets = projection, sql_plan, simd_matmul, simd_hash_lookup, large::compare, gaps::compare
 }
 criterion_main!(backends);

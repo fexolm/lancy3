@@ -31,6 +31,11 @@ impl BufferKind {
     pub const fn writable(self) -> bool {
         self.writable
     }
+    /// Whether two distinct parameters with these kinds may overlap in a
+    /// valid kernel call. A writable slice has exclusive access to its bytes.
+    pub const fn may_alias(self, other: Self) -> bool {
+        !self.writable() && !other.writable()
+    }
     fn accepts(self, actual: Self) -> bool {
         self.element == actual.element && (!self.writable || actual.writable)
     }
@@ -171,7 +176,7 @@ pub fn check_forwarding(
     if actual.is_empty() {
         return Ok(());
     }
-    let mut seen = HashMap::new();
+    let mut seen: HashMap<_, BufferKind> = HashMap::new();
     for (&required, &buffer) in callee.iter().zip(actual) {
         let kind = caller
             .get(buffer.index())
@@ -185,7 +190,7 @@ pub fn check_forwarding(
         if actual.len() > 1
             && seen
                 .insert(buffer, required)
-                .is_some_and(|prior| prior.writable() || required.writable())
+                .is_some_and(|prior| !prior.may_alias(required))
         {
             return Err(format!(
                 "writable buffer {} aliases another call argument",

@@ -86,6 +86,61 @@ fn column(#[comptime] positive: bool, rows: &[i32], out: &mut [i32]) -> i32 {
     out.len() as i32
 }
 
+#[kernel]
+fn overlapping_reads(left: &[i32], right: &[i32], out: &mut [i32]) -> i32 {
+    out[0] = left[0] + right[0];
+    1
+}
+
+#[test]
+fn slice_parameters_expose_their_alias_contract() {
+    struct InspectKinds;
+    impl Codegen for InspectKinds {
+        type Output = Vec<BufferKind>;
+
+        fn compile(_: &Function) -> Result<Self::Output, String> {
+            panic!("expected direct staging")
+        }
+
+        fn build(
+            _: usize,
+            kinds: &[BufferKind],
+            _: splice::frontend::Body<'_>,
+        ) -> Result<Self::Output, String> {
+            Ok(kinds.to_vec())
+        }
+    }
+
+    let direct = overlapping_reads::build::<InspectKinds>().unwrap();
+    let portable = overlapping_reads::ir().unwrap();
+    assert_eq!(direct, portable.buffer_kinds());
+    assert!(direct[0].may_alias(direct[1]));
+    assert!(!direct[0].may_alias(direct[2]));
+    assert!(!direct[2].may_alias(direct[1]));
+    assert!(!direct[2].may_alias(direct[2]));
+    let input = [17, 42];
+    for kernel in [
+        overlapping_reads::build::<splice_llvm::LlvmManualSimd>().unwrap(),
+        splice_llvm::LlvmManualSimd::compile(&portable).unwrap(),
+    ] {
+        let mut output = [0];
+        assert_eq!(
+            kernel
+                .call(
+                    &[],
+                    &mut [
+                        BufferArg::Read(&input),
+                        BufferArg::Read(&input[..1]),
+                        BufferArg::Write(&mut output),
+                    ],
+                )
+                .unwrap(),
+            1
+        );
+        assert_eq!(output, [34]);
+    }
+}
+
 #[test]
 fn generic_functions_and_nested_calls_stage_before_codegen() {
     let compiled = scaled::build::<Inspect, _, 3>(&2).unwrap();
