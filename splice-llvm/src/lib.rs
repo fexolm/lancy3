@@ -20,6 +20,10 @@ use splice::{BufferArg, BufferKind, Codegen, Executable, Function};
 /// In-process LLVM code generator.
 pub struct Llvm;
 
+/// LLVM O3 with automatic loop and SLP vectorization disabled.
+/// Explicit SIMD operations are still lowered to LLVM vectors.
+pub struct LlvmManualSimd;
+
 impl Llvm {
     /// Report the linked LLVM version after checking it matches the bindings.
     pub fn version() -> Result<(u32, u32, u32), String> {
@@ -104,13 +108,8 @@ impl Codegen for Llvm {
     type Output = LlvmKernel;
 
     fn compile(function: &Function) -> splice::Result<Self::Output> {
-        Self::version()?;
-        let (owner, entry) = jit::Jit::compile(|ctx, m| lower::populate(ctx, m, function))?;
-        Ok(LlvmKernel {
-            _owner: owner,
-            entry,
-            arity: function.arity(),
-            buffers: function.buffer_kinds().into(),
+        LlvmKernel::compile(function.arity(), function.buffer_kinds(), true, |ctx, m| {
+            lower::populate(ctx, m, function)
         })
     }
 
@@ -119,10 +118,45 @@ impl Codegen for Llvm {
         buffers: &[BufferKind],
         body: splice::frontend::Body<'_>,
     ) -> splice::Result<Self::Output> {
-        Self::version()?;
-        let (owner, entry) =
-            jit::Jit::compile(move |ctx, m| lower::populate_direct(ctx, m, arity, buffers, body))?;
-        Ok(LlvmKernel {
+        LlvmKernel::compile(arity, buffers, true, |ctx, m| {
+            lower::populate_direct(ctx, m, arity, buffers, body)
+        })
+    }
+}
+
+impl Codegen for LlvmManualSimd {
+    type Output = LlvmKernel;
+
+    fn compile(function: &Function) -> splice::Result<Self::Output> {
+        LlvmKernel::compile(
+            function.arity(),
+            function.buffer_kinds(),
+            false,
+            |ctx, m| lower::populate(ctx, m, function),
+        )
+    }
+
+    fn build(
+        arity: usize,
+        buffers: &[BufferKind],
+        body: splice::frontend::Body<'_>,
+    ) -> splice::Result<Self::Output> {
+        LlvmKernel::compile(arity, buffers, false, |ctx, m| {
+            lower::populate_direct(ctx, m, arity, buffers, body)
+        })
+    }
+}
+
+impl LlvmKernel {
+    fn compile(
+        arity: usize,
+        buffers: &[BufferKind],
+        auto_vectorize: bool,
+        populate: impl for<'ctx> FnOnce(&'ctx Context, &Module<'ctx>) -> Result<(), String>,
+    ) -> splice::Result<Self> {
+        Llvm::version()?;
+        let (owner, entry) = jit::Jit::compile(auto_vectorize, populate)?;
+        Ok(Self {
             _owner: owner,
             entry,
             arity,
@@ -216,7 +250,7 @@ mod tests {
                 assert_eq!(helper.get_linkage(), inkwell::module::Linkage::Internal);
                 assert!(helper.get_first_basic_block().is_some());
             }
-            jit::optimize(&m, &target).unwrap();
+            jit::optimize(&m, &target, true).unwrap();
             let definitions: Vec<_> = m
                 .get_functions()
                 .filter(|f| f.get_first_basic_block().is_some())
@@ -228,6 +262,64 @@ mod tests {
             Llvm::compile(&ir).unwrap(),
         ] {
             assert_eq!(native.call(&[i32::MAX], &mut []), Ok(i32::MIN));
+        }
+    }
+
+    #[test]
+    fn manual_simd_disables_loop_vectorization_and_slp() {
+        use inkwell::{memory_buffer::MemoryBuffer, values::AnyValue};
+
+        let mut ir = String::from(
+            "
+            define void @loop_mul(ptr noalias %src, ptr noalias %dst, i32 %factor) {
+            entry:
+              br label %loop
+            loop:
+              %i = phi i64 [0, %entry], [%next, %loop]
+              %from = getelementptr inbounds i32, ptr %src, i64 %i
+              %to = getelementptr inbounds i32, ptr %dst, i64 %i
+              %x = load i32, ptr %from, align 4
+              %y = mul i32 %x, %factor
+              store i32 %y, ptr %to, align 4
+              %next = add nuw i64 %i, 1
+              %done = icmp eq i64 %next, 1024
+              br i1 %done, label %exit, label %loop
+            exit:
+              ret void
+            }
+            define void @straight_line_mul(ptr noalias %src, ptr noalias %dst, i32 %factor) {
+            ",
+        );
+        use std::fmt::Write;
+        for i in 0..4 {
+            writeln!(
+                ir,
+                "  %from{i} = getelementptr inbounds i32, ptr %src, i64 {i}
+                   %to{i} = getelementptr inbounds i32, ptr %dst, i64 {i}
+                   %x{i} = load i32, ptr %from{i}, align 4
+                   %y{i} = mul i32 %x{i}, %factor
+                   store i32 %y{i}, ptr %to{i}, align 4"
+            )
+            .unwrap();
+        }
+        ir.push_str("  ret void\n}\n");
+
+        let ctx = Context::create();
+        let target = jit::host_machine().unwrap();
+        for auto_vectorize in [true, false] {
+            let text = MemoryBuffer::create_from_memory_range_copy(ir.as_bytes(), "vectorization");
+            let m = ctx.create_module_from_ir(text).unwrap();
+            m.set_triple(&target.get_triple());
+            m.set_data_layout(&target.get_target_data().get_data_layout());
+            jit::optimize(&m, &target, auto_vectorize).unwrap();
+            for function in ["loop_mul", "straight_line_mul"] {
+                let text = m
+                    .get_function(function)
+                    .unwrap()
+                    .print_to_string()
+                    .to_string();
+                assert_eq!(text.contains("mul <"), auto_vectorize, "{text}");
+            }
         }
     }
 
@@ -279,10 +371,13 @@ mod tests {
                 );
             }
             assert!(text.contains(&format!("add {ty}")));
+            jit::optimize(&m, &target, false).unwrap();
+            let text = m.print_to_string().to_string();
+            assert!(text.contains(&format!("add {ty}")), "{text}");
             let native = if direct {
-                Llvm::build(1, &kinds, Box::new(stage))
+                LlvmManualSimd::build(1, &kinds, Box::new(stage))
             } else {
-                Llvm::compile(&ir)
+                LlvmManualSimd::compile(&ir)
             }
             .unwrap();
             let mut src: Vec<u16> = (0..=lanes as u16).collect();

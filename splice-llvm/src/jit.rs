@@ -1,5 +1,6 @@
 use crate::{Entry, build_module};
 use inkwell::OptimizationLevel;
+use inkwell::attributes::{Attribute, AttributeLoc};
 use inkwell::context::Context;
 use inkwell::llvm_sys::error::{
     LLVMConsumeError, LLVMDisposeErrorMessage, LLVMErrorRef, LLVMGetErrorMessage,
@@ -127,12 +128,13 @@ impl Drop for Jit {
 
 impl Jit {
     pub fn compile(
+        auto_vectorize: bool,
         populate: impl for<'ctx> FnOnce(&'ctx Context, &Module<'ctx>) -> Result<(), String>,
     ) -> Result<(Self, Entry), String> {
         let target = host_machine()?;
         let context = Context::create();
         let module = build_module(&context, &target, populate)?;
-        optimize(&module, &target)?;
+        optimize(&module, &target, auto_vectorize)?;
         let object = target
             .write_to_memory_buffer(&module, FileType::Object)
             .map_err(|error| error.to_string())?;
@@ -177,10 +179,36 @@ impl Jit {
 }
 
 /// Both lowering paths finish defining all private callees before the module inliner runs.
-pub(crate) fn optimize(module: &Module<'_>, target: &TargetMachine) -> Result<(), String> {
-    module
-        .run_passes("default<O3>", target, PassBuilderOptions::create())
-        .map_err(|error| error.to_string())
+pub(crate) fn optimize(
+    module: &Module<'_>,
+    target: &TargetMachine,
+    auto_vectorize: bool,
+) -> Result<(), String> {
+    let run = || {
+        module
+            .run_passes("default<O3>", target, PassBuilderOptions::create())
+            .map_err(|error| error.to_string())
+    };
+    if auto_vectorize {
+        return run();
+    }
+
+    // The default<O3> alias resets both vectorization options. Both passes
+    // honor noimplicitfloat. Remove it before codegen so the target can
+    // legalize and select explicit SIMD and floating-point operations normally.
+    let kind = Attribute::get_named_enum_kind_id("noimplicitfloat");
+    let attr = module.get_context().create_enum_attribute(kind, 0);
+    for function in module.get_functions() {
+        if !function.as_global_value().is_declaration() {
+            function.add_attribute(AttributeLoc::Function, attr);
+        }
+    }
+    let result = run();
+    // O3 may inline and delete functions, so iterate over the surviving ones.
+    for function in module.get_functions() {
+        function.remove_enum_attribute(AttributeLoc::Function, kind);
+    }
+    result
 }
 
 unsafe fn check(error: LLVMErrorRef) -> Result<(), String> {

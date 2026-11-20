@@ -8,7 +8,7 @@ use criterion::Criterion;
 use splice::{BufferArg, Executable};
 use splice_cranelift::Cranelift;
 use splice_lancy::Lancy;
-use splice_llvm::Llvm;
+use splice_llvm::LlvmManualSimd;
 
 use super::samples;
 
@@ -55,7 +55,7 @@ fn yuv_to_rgba(c: &mut Criterion) {
         Builders {
             lancy: &yuv_to_rgba::build::<Lancy>,
             cranelift: &yuv_to_rgba::build::<Cranelift>,
-            llvm: &yuv_to_rgba::build::<Llvm>,
+            llvm: &yuv_to_rgba::build::<LlvmManualSimd>,
         },
     );
 }
@@ -104,7 +104,7 @@ fn integral_moments(c: &mut Criterion) {
         Builders {
             lancy: &integral_moments::build::<Lancy>,
             cranelift: &integral_moments::build::<Cranelift>,
-            llvm: &integral_moments::build::<Llvm>,
+            llvm: &integral_moments::build::<LlvmManualSimd>,
         },
     );
 }
@@ -154,7 +154,7 @@ fn hash_keys(c: &mut Criterion) {
         Builders {
             lancy: &hash_keys::build::<Lancy>,
             cranelift: &hash_keys::build::<Cranelift>,
-            llvm: &hash_keys::build::<Llvm>,
+            llvm: &hash_keys::build::<LlvmManualSimd>,
         },
     );
 }
@@ -206,7 +206,7 @@ fn remap_rgb16(c: &mut Criterion) {
         Builders {
             lancy: &remap_rgb16::build::<Lancy>,
             cranelift: &remap_rgb16::build::<Cranelift>,
-            llvm: &remap_rgb16::build::<Llvm>,
+            llvm: &remap_rgb16::build::<LlvmManualSimd>,
         },
     );
 }

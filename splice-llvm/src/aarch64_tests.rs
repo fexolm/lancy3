@@ -19,7 +19,7 @@ fn emits_aarch64_simd_and_preserves_the_logical_width() {
     let target = jit::host_machine().unwrap();
     let context = Context::create();
     let module = build_module(&context, &target, |ctx, m| lower::populate(ctx, m, &ir)).unwrap();
-    jit::optimize(&module, &target).unwrap();
+    jit::optimize(&module, &target, true).unwrap();
     let assembly = target
         .write_to_memory_buffer(&module, FileType::Assembly)
         .unwrap();

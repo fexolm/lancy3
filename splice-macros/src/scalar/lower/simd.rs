@@ -444,6 +444,23 @@ impl Lower<'_> {
             ("swizzle", 1, false) if e == Elem::I32 => {
                 self.vector_op(e, emit!(Swizzle), vec![recv, op(0, v)?], Some(v))
             }
+            ("rotate_left", 1, false) if e == Elem::I32 => {
+                let count = self.host(self.expr(&args[0])?, &args[0])?;
+                self.vector_op(
+                    e,
+                    emit!(RotateLeft({let count:u32=#count;count & 31})),
+                    vec![recv],
+                    Some(v),
+                )
+            }
+            ("simd_min" | "simd_max", 1, false) if e == Elem::I32 => {
+                let operation = if method == "simd_min" {
+                    emit!(Min)
+                } else {
+                    emit!(Max)
+                };
+                self.vector_op(e, operation, vec![recv, op(0, v)?], Some(v))
+            }
             ("prefix_sum", 0, false) if e == Elem::I32 => {
                 self.vector_op(e, emit!(PrefixSum), vec![recv], Some(v))
             }

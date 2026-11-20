@@ -134,9 +134,14 @@ impl Builder<'_> {
                 };
                 V::Shuffle(vs[0], vs[1], indices)
             }
-            Shr(n) => {
+            Shr(n) | RotateLeft(n) => {
                 let shift = self.splat_bits(Lane::I32, (n & 31).into());
-                V::Bin(Binary::Shr, vs[0], shift)
+                let op = if matches!(inst.op, Shr(_)) {
+                    Binary::Shr
+                } else {
+                    Binary::RotateLeft
+                };
+                V::Bin(op, vs[0], shift)
             }
             Count => return Ok(Some(self.mask_count(vs[0]))),
             Compress => V::Compress(vs[0], vs[1]),
@@ -212,6 +217,8 @@ impl Builder<'_> {
                     Add => Binary::Add,
                     Sub => Binary::Sub,
                     Mul => Binary::Mul,
+                    Min => Binary::Min,
+                    Max => Binary::Max,
                     SimdOp::Div => Binary::Div,
                     And | MaskAnd => Binary::And,
                     Or | MaskOr => Binary::Or,

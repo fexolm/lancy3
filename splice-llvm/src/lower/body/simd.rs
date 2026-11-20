@@ -214,6 +214,17 @@ impl<'ctx> Body<'_, 'ctx> {
                 )?
                 .into(),
             Count => self.mask_count(arg(0)?)?.into(),
+            RotateLeft(n) => {
+                let value = arg(0)?;
+                let count = self.splat(self.int((n & 31) as i32), e.lanes() as u32)?;
+                let intrinsic = inkwell::intrinsics::Intrinsic::find("llvm.fshl")
+                    .unwrap()
+                    .get_declaration(self.module, &[value.get_type().into()])
+                    .unwrap();
+                ir.build_call(intrinsic, &[value.into(), value.into(), count.into()], "")?
+                    .try_as_basic_value()
+                    .unwrap_basic()
+            }
             Add | Sub | Mul | Div => {
                 let (a, b) = (arg(0)?, arg(1)?);
                 match (inst.op, float) {
@@ -227,6 +238,21 @@ impl<'ctx> Body<'_, 'ctx> {
                     _ => unreachable!(),
                 }?
                 .into()
+            }
+            Min | Max => {
+                let (a, b) = (arg(0)?, arg(1)?);
+                let name = if inst.op == Min {
+                    "llvm.smin"
+                } else {
+                    "llvm.smax"
+                };
+                let intrinsic = inkwell::intrinsics::Intrinsic::find(name)
+                    .unwrap()
+                    .get_declaration(self.module, &[a.get_type().into()])
+                    .unwrap();
+                ir.build_call(intrinsic, &[a.into(), b.into()], "")?
+                    .try_as_basic_value()
+                    .unwrap_basic()
             }
             Eq | Ne | Lt | Le | Gt | Ge => {
                 let (a, b) = (arg(0)?, arg(1)?);

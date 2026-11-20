@@ -318,6 +318,21 @@ impl std::ops::Shr<u32> for Lane<i32> {
 }
 
 impl Lane<i32> {
+    /// Rotate the bits of each lane left by the same count, modulo 32.
+    pub fn rotate_left(self, count: u32) -> Self {
+        Self::from_fn(|i| self.at(i).rotate_left(count))
+    }
+
+    /// Signed minimum of each pair of lanes.
+    pub fn simd_min(self, rhs: Self) -> Self {
+        Self::from_fn(|i| self.at(i).min(rhs.at(i)))
+    }
+
+    /// Signed maximum of each pair of lanes.
+    pub fn simd_max(self, rhs: Self) -> Self {
+        Self::from_fn(|i| self.at(i).max(rhs.at(i)))
+    }
+
     /// Number of words before the next vector-aligned address. Does not access memory.
     pub fn alignment_prefix(src: &[i32], offset: usize) -> usize {
         let addr = src.as_ptr().wrapping_add(offset).addr();

@@ -9,7 +9,7 @@ use criterion::Criterion;
 use splice::{BufferArg, Executable};
 use splice_cranelift::Cranelift;
 use splice_lancy::Lancy;
-use splice_llvm::Llvm;
+use splice_llvm::LlvmManualSimd;
 use std::hint::black_box;
 
 pub(super) fn compare(c: &mut Criterion) {
@@ -89,7 +89,7 @@ fn parquet_delta(c: &mut Criterion) {
         Builders {
             lancy: &decode::build::<Lancy>,
             cranelift: &decode::build::<Cranelift>,
-            llvm: &decode::build::<Llvm>,
+            llvm: &decode::build::<LlvmManualSimd>,
         },
     );
 }
@@ -135,7 +135,7 @@ fn decimal_csv(c: &mut Criterion) {
         Builders {
             lancy: &export::build::<Lancy>,
             cranelift: &export::build::<Cranelift>,
-            llvm: &export::build::<Llvm>,
+            llvm: &export::build::<LlvmManualSimd>,
         },
     );
 }
@@ -191,7 +191,7 @@ fn per_channel_requantize(c: &mut Criterion) {
         Builders {
             lancy: &|| requantize::build::<Lancy>(black_box(&channels)),
             cranelift: &|| requantize::build::<Cranelift>(black_box(&channels)),
-            llvm: &|| requantize::build::<Llvm>(black_box(&channels)),
+            llvm: &|| requantize::build::<LlvmManualSimd>(black_box(&channels)),
         },
     );
 }
@@ -259,7 +259,7 @@ fn audio_low_pass(c: &mut Criterion) {
         Builders {
             lancy: &|| low_pass::build::<Lancy>(black_box(&sections)),
             cranelift: &|| low_pass::build::<Cranelift>(black_box(&sections)),
-            llvm: &|| low_pass::build::<Llvm>(black_box(&sections)),
+            llvm: &|| low_pass::build::<LlvmManualSimd>(black_box(&sections)),
         },
     );
 }

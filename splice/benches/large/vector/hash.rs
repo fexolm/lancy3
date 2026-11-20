@@ -16,13 +16,6 @@ fn logical_right(#[comptime] shift: u32, value: Lane<i32>) -> Lane<i32> {
 }
 
 #[kernel]
-fn rotate_left(#[comptime] shift: u32, value: Lane<i32>) -> Lane<i32> {
-    let factor = comptime!(1i32 << shift);
-    let low: Lane<i32> = logical_right(32 - shift, value);
-    (value * Lane::<i32>::splat(factor)) | low
-}
-
-#[kernel]
 fn packet(
     #[comptime] full: bool,
     count: i32,
@@ -42,9 +35,9 @@ fn packet(
         } else {
             Lane::load_select(keys, offset, valid, zero)
         };
-        let rotated: Lane<i32> = rotate_left(15, value * Lane::<i32>::splat(C1));
+        let rotated = (value * Lane::<i32>::splat(C1)).rotate_left(15);
         let mixed = h ^ (rotated * Lane::<i32>::splat(C2));
-        h = rotate_left(13, mixed);
+        h = mixed.rotate_left(13);
         h = h * Lane::<i32>::splat(5) + Lane::<i32>::splat(BIAS);
     }
     h ^= Lane::<i32>::splat((4 * COLUMNS) as i32);

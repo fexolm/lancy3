@@ -5,8 +5,7 @@ use splice::{kernel, simd::Lane};
 fn clamp_byte(value: Lane<i32>) -> Lane<i32> {
     let zero = Lane::<i32>::splat(0);
     let limit = Lane::<i32>::splat(255);
-    let positive = value.simd_lt(zero).select(zero, value);
-    positive.simd_gt(limit).select(limit, positive)
+    value.simd_max(zero).simd_min(limit)
 }
 
 #[kernel]

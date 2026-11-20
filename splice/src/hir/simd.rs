@@ -23,6 +23,7 @@ pub enum SimdOp {
     Swizzle,
     Count,
     Shr(u32),
+    RotateLeft(u32),
     CompressStore(Buffer),
     Last,
     ExtractWrapping,
@@ -39,6 +40,8 @@ pub enum SimdOp {
     Sub,
     Mul,
     Div,
+    Min,
+    Max,
     And,
     Or,
     Xor,
@@ -105,14 +108,16 @@ impl Simd {
             Count | CompressStore(_) => {
                 return Err("mask count and compact store require i32 lanes".into());
             }
-            Shr(_) | PrefixSum | Last if self.element == Element::I32 => &[v],
-            Shr(_) | PrefixSum | Last => {
-                return Err("shift, prefix_sum and last require i32 lanes".into());
+            Shr(_) | RotateLeft(_) | PrefixSum | Last if self.element == Element::I32 => &[v],
+            Shr(_) | RotateLeft(_) | PrefixSum | Last => {
+                return Err("shift, rotate, prefix_sum and last require i32 lanes".into());
             }
             SplatScalar if self.element == Element::I32 => &[s],
             SplatScalar => return Err("runtime splat expects an i32 element".into()),
             Div if self.element.is_float() => &[v, v],
             Div => return Err("SIMD division requires floating point elements".into()),
+            Min | Max if self.element == Element::I32 => &[v, v],
+            Min | Max => return Err("SIMD min and max require i32 lanes".into()),
             FirstN | Load(_) => &[s],
             Store(_) => &[s, v],
             LoadSelect(_) | StoreSelect(_) => &[s, m, v],

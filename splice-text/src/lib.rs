@@ -140,6 +140,7 @@ fn render(root: &Function, out: &mut String) -> fmt::Result {
                         AlignmentPrefix(b) => ("alignment_prefix", Some(b)),
                         PrefixSum => ("prefix_sum", None),
                         Shr(_) => ("shr", None),
+                        RotateLeft(_) => ("rotate_left", None),
                         Count => ("count", None),
                         CompressStore(b) => ("compress_store", Some(b)),
                         ExtractWrapping => ("extract_wrapping", None),
@@ -149,6 +150,8 @@ fn render(root: &Function, out: &mut String) -> fmt::Result {
                         Sub => ("sub", None),
                         Mul => ("mul", None),
                         Div => ("div", None),
+                        Min => ("min", None),
+                        Max => ("max", None),
                         And => ("and", None),
                         Or => ("or", None),
                         Xor => ("xor", None),
@@ -171,7 +174,7 @@ fn render(root: &Function, out: &mut String) -> fmt::Result {
                     if let Some(b) = buffer {
                         write!(out, " {}", buf(b))?;
                     }
-                    if let Shr(shift) = inst.op {
+                    if let Shr(shift) | RotateLeft(shift) = inst.op {
                         write!(out, " {shift}")?;
                     }
                     if let Splat(bits) = inst.op {

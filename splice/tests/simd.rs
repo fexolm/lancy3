@@ -93,6 +93,132 @@ macro_rules! compile_all {
 }
 
 #[kernel]
+fn signed_bounds(lhs: &[i32], rhs: &[i32], mins: &mut [i32], maxs: &mut [i32]) -> i32 {
+    let a = Lane::load(lhs, 0);
+    let b = Lane::load(rhs, 0);
+    a.simd_min(b).store(mins, 1);
+    a.simd_max(b).store(maxs, 1);
+    Lane::<i32>::lanes() as i32
+}
+
+#[test]
+fn signed_vector_min_max_stay_explicit_and_preserve_lane_order() {
+    use splice::hir::{Instr, SimdOp};
+
+    let ir = signed_bounds::ir().unwrap();
+    let ops: Vec<_> = ir
+        .instructions()
+        .iter()
+        .filter_map(|instr| match instr {
+            Instr::Simd { inst, .. } => Some(inst.op),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        ops,
+        [
+            SimdOp::Load(splice::hir::Buffer(0)),
+            SimdOp::Load(splice::hir::Buffer(1)),
+            SimdOp::Min,
+            SimdOp::Store(splice::hir::Buffer(2)),
+            SimdOp::Max,
+            SimdOp::Store(splice::hir::Buffer(3)),
+            SimdOp::Lanes,
+        ]
+    );
+    let lanes = Lane::<i32>::lanes();
+    let pairs = [
+        (i32::MIN, i32::MAX),
+        (i32::MAX, i32::MIN),
+        (-9, 4),
+        (0, -1),
+        (12, 12),
+    ];
+    let (lhs, rhs): (Vec<_>, Vec<_>) = pairs.into_iter().cycle().take(lanes).unzip();
+    let expected_min: Vec<_> = lhs.iter().zip(&rhs).map(|(&a, &b)| a.min(b)).collect();
+    let expected_max: Vec<_> = lhs.iter().zip(&rhs).map(|(&a, &b)| a.max(b)).collect();
+    for kernel in compile_all!(signed_bounds) {
+        let mut mins = vec![23; lanes + 2];
+        let mut maxs = vec![23; lanes + 2];
+        let result = kernel.call(
+            &[],
+            &mut [
+                BufferArg::Read(&lhs),
+                BufferArg::Read(&rhs),
+                BufferArg::Write(&mut mins),
+                BufferArg::Write(&mut maxs),
+            ],
+        );
+        assert_eq!(result, Ok(lanes as i32));
+        assert_eq!(mins[1..=lanes], expected_min);
+        assert_eq!(maxs[1..=lanes], expected_max);
+        assert_eq!(
+            [mins[0], mins[lanes + 1], maxs[0], maxs[lanes + 1]],
+            [23; 4]
+        );
+    }
+}
+
+#[kernel]
+fn rotate_words(#[comptime] count: u32, src: &[i32], out: &mut [i32]) -> i32 {
+    Lane::load(src, 0).rotate_left(count).store(out, 0);
+    Lane::<i32>::lanes() as i32
+}
+
+#[test]
+fn vector_rotate_wraps_the_count_and_rotates_signed_lane_bits() {
+    use splice::hir::{Instr, SimdOp};
+
+    let lanes = Lane::<i32>::lanes();
+    let source: Vec<_> = [
+        i32::MIN,
+        i32::MAX,
+        -1,
+        0,
+        1,
+        0x8000_0001u32 as i32,
+        0x1234_5678,
+    ]
+    .into_iter()
+    .cycle()
+    .take(lanes)
+    .collect();
+    for count in [0, 1, 13, 15, 31, 32, 33, u32::MAX] {
+        let ir = rotate_words::ir(count).unwrap();
+        assert!(ir.instructions().iter().any(|instr| {
+            matches!(instr, Instr::Simd { inst, .. } if inst.op == SimdOp::RotateLeft(count & 31))
+        }));
+        let mut backends = Vec::new();
+        kernels(
+            &mut backends,
+            rotate_words::build::<Lancy>(count),
+            Lancy::compile(&ir),
+        );
+        kernels(
+            &mut backends,
+            rotate_words::build::<Cranelift>(count),
+            Cranelift::compile(&ir),
+        );
+        kernels(
+            &mut backends,
+            rotate_words::build::<Llvm>(count),
+            Llvm::compile(&ir),
+        );
+        let expected: Vec<_> = source.iter().map(|v| v.rotate_left(count)).collect();
+        for kernel in backends {
+            let mut out = vec![23; lanes + 1];
+            let result = kernel.call(
+                &[],
+                &mut [BufferArg::Read(&source), BufferArg::Write(&mut out)],
+            );
+            assert_eq!(result, Ok(lanes as i32));
+            assert_eq!(out[..lanes], expected, "rotation count {count}");
+            assert_eq!(out[lanes], 23);
+        }
+    }
+}
+
+#[kernel]
 fn xor_complement(a: &[i32], b: &[i32], c: &[i32], out: &mut [i32]) -> i32 {
     let x = Lane::load(a, 0);
     let y = Lane::load(b, 0);

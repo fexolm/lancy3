@@ -1,6 +1,6 @@
 use crate::{BOUNDS, DIV_ZERO, Descriptor, OVERFLOW};
 use cranelift_codegen::ir::{
-    FuncRef, InstBuilder, MemFlags, TrapCode, Value,
+    FuncRef, InstBuilder, MemFlags, Opcode, TrapCode, Value,
     condcodes::IntCC,
     types::{I32, I64},
 };
@@ -138,6 +138,7 @@ pub(super) fn emit(
             }
             Instr::Branch { cond, yes, no } => {
                 let condition = b.use_var(var(cond));
+                let condition = branch_condition(&b, condition);
                 b.ins().brif(
                     condition,
                     labels[yes.0 as usize],
@@ -161,6 +162,19 @@ pub(super) fn emit(
     }
     b.seal_all_blocks();
     b.finalize();
+}
+
+fn branch_condition(b: &FunctionBuilder, mut value: Value) -> Value {
+    // brif only tests for zero. These operations preserve that test while
+    // forming a Splice mask. Other users still see the materialized mask.
+    let dfg = &b.func.dfg;
+    while let Some(inst) = dfg.value_def(value).inst() {
+        match dfg.insts[inst].opcode() {
+            Opcode::Ineg | Opcode::Uextend | Opcode::Bmask => value = dfg.inst_args(inst)[0],
+            _ => break,
+        }
+    }
+    value
 }
 
 fn return_if(b: &mut FunctionBuilder, condition: Value, result: Value) {

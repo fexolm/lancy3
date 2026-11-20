@@ -16,7 +16,7 @@ use relational::{Catalog, pricing_plan, query};
 use splice::{BufferArg, Codegen, Executable, Function, kernel};
 use splice_cranelift::{Cranelift, CraneliftKernel};
 use splice_lancy::{Lancy, LancyKernel};
-use splice_llvm::{Llvm, LlvmKernel};
+use splice_llvm::{LlvmKernel, LlvmManualSimd};
 use std::{cell::LazyCell, hint::black_box, ops::Not};
 
 #[kernel]
@@ -124,14 +124,14 @@ where
         let mut compile = c.benchmark_group(format!("{}/compile/{route}", self.name));
         bench_compile(&mut compile, "lancy", builds.lancy);
         bench_compile(&mut compile, "cranelift", builds.cranelift);
-        bench_compile(&mut compile, "llvm", builds.llvm);
+        bench_compile(&mut compile, "llvm_manual_simd", builds.llvm);
         compile.finish();
 
         let mut execute = c.benchmark_group(format!("{}/execute/{route}", self.name));
         execute.throughput(Throughput::Elements(self.elements as u64));
         self.bench_execute(&mut execute, "lancy", builds.lancy);
         self.bench_execute(&mut execute, "cranelift", builds.cranelift);
-        self.bench_execute(&mut execute, "llvm", builds.llvm);
+        self.bench_execute(&mut execute, "llvm_manual_simd", builds.llvm);
         execute.finish();
     }
 
@@ -156,7 +156,7 @@ where
             Builders {
                 lancy: &|| Lancy::compile(black_box(&ir)),
                 cranelift: &|| Cranelift::compile(black_box(&ir)),
-                llvm: &|| Llvm::compile(black_box(&ir)),
+                llvm: &|| LlvmManualSimd::compile(black_box(&ir)),
             },
         );
     }
@@ -194,7 +194,7 @@ fn projection(c: &mut Criterion) {
         Builders {
             lancy: &|| line_totals::build::<Lancy>(black_box(2)),
             cranelift: &|| line_totals::build::<Cranelift>(black_box(2)),
-            llvm: &|| line_totals::build::<Llvm>(black_box(2)),
+            llvm: &|| line_totals::build::<LlvmManualSimd>(black_box(2)),
         },
     );
 }
@@ -266,7 +266,7 @@ fn sql_plan(c: &mut Criterion) {
         Builders {
             lancy: &|| query::build::<Lancy>(black_box(&plan)),
             cranelift: &|| query::build::<Cranelift>(black_box(&plan)),
-            llvm: &|| query::build::<Llvm>(black_box(&plan)),
+            llvm: &|| query::build::<LlvmManualSimd>(black_box(&plan)),
         },
     );
 }
@@ -303,7 +303,7 @@ fn simd_matmul(c: &mut Criterion) {
         Builders {
             lancy: &multiply::build::<Lancy>,
             cranelift: &multiply::build::<Cranelift>,
-            llvm: &multiply::build::<Llvm>,
+            llvm: &multiply::build::<LlvmManualSimd>,
         },
     );
 }
@@ -336,7 +336,7 @@ fn simd_hash_lookup(c: &mut Criterion) {
         Builders {
             lancy: &lookup::build::<Lancy>,
             cranelift: &lookup::build::<Cranelift>,
-            llvm: &lookup::build::<Llvm>,
+            llvm: &lookup::build::<LlvmManualSimd>,
         },
     );
 }

@@ -52,6 +52,96 @@ fn instructions_of_type(f: &ir::Function, opcode: Opcode, ty: Type) -> usize {
 }
 
 #[test]
+fn branches_use_comparison_bits_and_preserve_comparison_masks() {
+    for overwrite in [false, true] {
+        let mut f = FunctionBuilder::new(2);
+        let mask = f.binary(Binary::Lt, f.arg(0), f.arg(1));
+        if overwrite {
+            f.assign(mask, f.arg(0));
+        }
+        let yes = f.label();
+        let no = f.label();
+        f.branch(mask, yes, no);
+        f.mark(yes);
+        f.ret(mask);
+        f.mark(no);
+        let fallback = f.constant(7);
+        f.ret(fallback);
+        let f = f.finish().unwrap();
+
+        let mut jit = JITModule::new(JITBuilder::new(default_libcall_names()).unwrap());
+        let module = KernelModule::lower(&mut jit, &f).unwrap();
+        let body = &module.bodies[&module.entry];
+        let branch = body
+            .layout
+            .blocks()
+            .flat_map(|b| body.layout.block_insts(b))
+            .find(|&i| body.dfg.insts[i].opcode() == Opcode::Brif)
+            .unwrap();
+        let condition = body.dfg.inst_args(branch)[0];
+        if !overwrite {
+            let cmp = body.dfg.value_def(condition).unwrap_inst();
+            assert_eq!(body.dfg.insts[cmp].opcode(), Opcode::Icmp);
+        }
+
+        let code = Cranelift::compile(&f).unwrap();
+        assert_eq!(
+            code.call(&[0, 1], &mut []),
+            Ok(if overwrite { 7 } else { -1 })
+        );
+        assert_eq!(
+            code.call(&[4, 2], &mut []),
+            Ok(if overwrite { 4 } else { 7 })
+        );
+    }
+}
+
+#[test]
+fn branches_use_vector_reduction_bits_and_preserve_scalar_masks() {
+    use splice::{
+        hir::{Simd, SimdOp},
+        simd::Element,
+    };
+
+    let mut f = FunctionBuilder::new(1);
+    let op = |op| Simd {
+        element: Element::I32,
+        op,
+    };
+    let vector_mask = f.simd(op(SimdOp::FirstN), &[f.arg(0)]).unwrap().unwrap();
+    let mask = f.simd(op(SimdOp::Any), &[vector_mask]).unwrap().unwrap();
+    let yes = f.label();
+    let no = f.label();
+    f.branch(mask, yes, no);
+    f.mark(yes);
+    f.ret(mask);
+    f.mark(no);
+    let fallback = f.constant(7);
+    f.ret(fallback);
+    let f = f.finish().unwrap();
+
+    let mut jit = JITModule::new(JITBuilder::new(default_libcall_names()).unwrap());
+    let module = KernelModule::lower(&mut jit, &f).unwrap();
+    let body = &module.bodies[&module.entry];
+    let branch = body
+        .layout
+        .blocks()
+        .flat_map(|b| body.layout.block_insts(b))
+        .find(|&i| body.dfg.insts[i].opcode() == Opcode::Brif)
+        .unwrap();
+    let condition = body.dfg.inst_args(branch)[0];
+    let reduction = body.dfg.value_def(condition).unwrap_inst();
+    assert!(matches!(
+        body.dfg.insts[reduction].opcode(),
+        Opcode::VanyTrue | Opcode::Bor
+    ));
+
+    let code = Cranelift::compile(&f).unwrap();
+    assert_eq!(code.call(&[0], &mut []), Ok(7));
+    assert_eq!(code.call(&[1], &mut []), Ok(-1));
+}
+
+#[test]
 fn nested_and_shared_calls_inline_across_function_boundaries() {
     let f = caller(caller(increment(), 2), 2);
     let graph = emitted_graph(&f, 3);

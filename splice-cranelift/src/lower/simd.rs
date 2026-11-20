@@ -474,6 +474,16 @@ fn packed(b: &mut FunctionBuilder, inst: Simd, inputs: &[Vec<Value>], part: usiz
             _ => i as u64,
         }),
         Shr(n) => b.ins().sshr_imm(arg(0), i64::from(n & 31)),
+        RotateLeft(n) => {
+            let count = n & 31;
+            let x = arg(0);
+            if count == 0 {
+                return x;
+            }
+            let high = b.ins().ishl_imm(x, i64::from(count));
+            let low = b.ins().ushr_imm(x, i64::from(32 - count));
+            b.ins().bor(high, low)
+        }
         Add if float => b.ins().fadd(arg(0), arg(1)),
         Sub if float => b.ins().fsub(arg(0), arg(1)),
         Mul if float => b.ins().fmul(arg(0), arg(1)),
@@ -481,6 +491,8 @@ fn packed(b: &mut FunctionBuilder, inst: Simd, inputs: &[Vec<Value>], part: usiz
         Add => b.ins().iadd(arg(0), arg(1)),
         Sub => b.ins().isub(arg(0), arg(1)),
         Mul => b.ins().imul(arg(0), arg(1)),
+        Min => b.ins().smin(arg(0), arg(1)),
+        Max => b.ins().smax(arg(0), arg(1)),
         And | MaskAnd => b.ins().band(arg(0), arg(1)),
         Or | MaskOr => b.ins().bor(arg(0), arg(1)),
         Xor | MaskXor => b.ins().bxor(arg(0), arg(1)),
