@@ -49,7 +49,8 @@ fn build_module<'ctx>(
     let module = context.create_module("splice");
     module.set_triple(&target.get_triple());
     module.set_data_layout(&target.get_target_data().get_data_layout());
-    populate(context, &module)?;
+    tracing::debug_span!(target: "splice::compile", "populate_llvm_ir")
+        .in_scope(|| populate(context, &module))?;
     #[cfg(target_arch = "aarch64")]
     {
         use inkwell::attributes::{Attribute, AttributeLoc};
@@ -68,7 +69,9 @@ fn build_module<'ctx>(
             }
         }
     }
-    module.verify().map_err(|error| error.to_string())?;
+    tracing::debug_span!(target: "splice::compile", "verify_llvm_ir")
+        .in_scope(|| module.verify())
+        .map_err(|error| error.to_string())?;
     Ok(module)
 }
 
@@ -108,6 +111,7 @@ impl Codegen for Llvm {
     type Output = LlvmKernel;
 
     fn compile(function: &Function) -> splice::Result<Self::Output> {
+        let _span = tracing::debug_span!(target: "splice::compile", "compile", backend = "llvm", input = "portable").entered();
         LlvmKernel::compile(function.arity(), function.buffer_kinds(), true, |ctx, m| {
             lower::populate(ctx, m, function)
         })
@@ -118,6 +122,7 @@ impl Codegen for Llvm {
         buffers: &[BufferKind],
         body: splice::frontend::Body<'_>,
     ) -> splice::Result<Self::Output> {
+        let _span = tracing::debug_span!(target: "splice::compile", "compile", backend = "llvm", input = "staged").entered();
         LlvmKernel::compile(arity, buffers, true, |ctx, m| {
             lower::populate_direct(ctx, m, arity, buffers, body)
         })
@@ -128,6 +133,7 @@ impl Codegen for LlvmManualSimd {
     type Output = LlvmKernel;
 
     fn compile(function: &Function) -> splice::Result<Self::Output> {
+        let _span = tracing::debug_span!(target: "splice::compile", "compile", backend = "llvm", input = "portable").entered();
         LlvmKernel::compile(
             function.arity(),
             function.buffer_kinds(),
@@ -141,6 +147,7 @@ impl Codegen for LlvmManualSimd {
         buffers: &[BufferKind],
         body: splice::frontend::Body<'_>,
     ) -> splice::Result<Self::Output> {
+        let _span = tracing::debug_span!(target: "splice::compile", "compile", backend = "llvm", input = "staged").entered();
         LlvmKernel::compile(arity, buffers, false, |ctx, m| {
             lower::populate_direct(ctx, m, arity, buffers, body)
         })

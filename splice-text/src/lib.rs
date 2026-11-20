@@ -32,6 +32,7 @@ impl Codegen for Text {
     type Output = String;
 
     fn compile(root: &Function) -> splice::Result<String> {
+        let _span = tracing::debug_span!(target: "splice::compile", "render_text_ir").entered();
         let mut output = String::new();
         render(root, &mut output).map_err(|error| error.to_string())?;
         Ok(output)

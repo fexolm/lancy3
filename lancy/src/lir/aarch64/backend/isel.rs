@@ -19,6 +19,7 @@ pub(super) fn select(
     entry: bool,
     callee: impl Fn(&Function) -> (FunctionId, PRegSet),
 ) -> Result<lir::Function<Inst>> {
+    let _span = tracing::debug_span!(target: "splice::compile", "select_instructions").entered();
     let reg = |v| rules::reg(f, v);
     let edges = Edges::new(f, cfg);
     let mut selected = isel::select(f, cfg, |ctx, root, out| {

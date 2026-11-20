@@ -1,5 +1,5 @@
 use crate::ScalarKernel;
-use crate::hir::{Binary, Function, Op, Scale, Terminator, Type};
+use crate::hir::{Binary, Function, Lane, Op, Scale, Simd, Terminator, Type};
 use crate::lir::x64::{
     compile::compile,
     inst::{Address, Inst, Rhs},
@@ -37,6 +37,34 @@ fn branch_covers_a_single_use_comparison_and_retains_a_shared_mask() {
         let code = ScalarKernel::compile(&f).unwrap();
         assert_eq!(code.call(&[-9]), Ok(if shared { -1 } else { -9 }));
         assert_eq!(code.call(&[2]), Ok(1));
+    }
+}
+
+#[test]
+fn all_true_branch_only_covers_an_unshared_result() {
+    let cpu = crate::lir::x64::Features::host();
+    for shared in [false, true] {
+        let mut f = Function::scalar(1);
+        let b = f.entry();
+        let x = f.params(b)[0];
+        let mask = f.append(b, Op::Simd(Simd::Splat(x))).unwrap();
+        let cond = f.append(b, Op::Simd(Simd::AllTrue(mask))).unwrap();
+        let yes = f.create_block();
+        let no = f.create_block();
+        f.set_terminator(yes, Terminator::Return(if shared { cond } else { x }));
+        f.set_terminator(no, Terminator::Return(x));
+        let yes = f.add_edge(yes, &[]);
+        let no = f.add_edge(no, &[]);
+        f.set_terminator(b, Terminator::Branch { cond, yes, no });
+        assert_eq!(
+            selected(&f)
+                .iter()
+                .any(|i| matches!(i, Inst::BranchAll(Lane::I32, _))),
+            cfg!(feature = "experimental-simd") && !shared && (cpu.bytes != 32 || cpu.avx2)
+        );
+        let code = ScalarKernel::compile(&f).unwrap();
+        assert_eq!(code.call(&[0]), Ok(0));
+        assert_eq!(code.call(&[1]), Ok(if shared { -1 } else { 1 }));
     }
 }
 

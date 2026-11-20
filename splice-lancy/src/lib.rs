@@ -16,13 +16,17 @@ impl Codegen for Lancy {
         kinds: &[splice::BufferKind],
         body: splice::frontend::Body<'_>,
     ) -> splice::Result<Self::Output> {
-        LancyKernel::new(&lower::build(arity, kinds, body)?, arity, kinds)
-            .map_err(|e| e.to_string())
+        let _span = tracing::debug_span!(target: "splice::compile", "compile", backend = "lancy", input = "staged").entered();
+        let hir = tracing::debug_span!(target: "splice::compile", "stage_lancy_hir")
+            .in_scope(|| lower::build(arity, kinds, body))?;
+        LancyKernel::new(hir, arity, kinds).map_err(|e| e.to_string())
     }
 
     fn compile(function: &Function) -> splice::Result<Self::Output> {
-        LancyKernel::new(&lower(function)?, function.arity(), function.buffer_kinds())
-            .map_err(|e| e.to_string())
+        let _span = tracing::debug_span!(target: "splice::compile", "compile", backend = "lancy", input = "portable").entered();
+        let hir = tracing::debug_span!(target: "splice::compile", "lower_lancy_hir")
+            .in_scope(|| lower(function))?;
+        LancyKernel::new(hir, function.arity(), function.buffer_kinds()).map_err(|e| e.to_string())
     }
 }
 
@@ -34,12 +38,21 @@ pub struct LancyKernel {
 
 impl LancyKernel {
     fn new(
-        function: &lancy::hir::Function,
+        mut function: lancy::hir::Function,
         arity: usize,
         kinds: &[splice::BufferKind],
     ) -> Result<Self, CompileError> {
+        if !kinds.is_empty() {
+            function.set_slice_params(
+                arity,
+                kinds
+                    .iter()
+                    .map(|kind| (kind.element().bytes() as u8, kind.writable()))
+                    .collect(),
+            );
+        }
         Ok(Self {
-            code: ScalarKernel::compile(function)?,
+            code: ScalarKernel::compile(&function)?,
             arity,
             slices: kinds.into(),
         })
@@ -64,9 +77,9 @@ impl Executable for LancyKernel {
         for slice in buffers {
             words.extend([slice.data() as u64, slice.len() as u64]);
         }
-        // SAFETY: both Splice lowering paths guard every access using the length
-        // paired with its original slice, and validate permissions on every store and call.
-        // BufferArg's Rust borrows keep writable slices disjoint from every other slice.
+        // SAFETY: BufferArg supplies initialized slices of the validated lengths
+        // for this call. Its Rust borrows ensure exclusive writable bytes and
+        // immutable shared bytes. Both lowering paths check store permissions.
         unsafe { self.code.call_raw(&words) }
             .map(|v| v as i32)
             .map_err(|e| e.to_string())

@@ -2,7 +2,7 @@ use super::{Rules, reg};
 use crate::{
     CompileError,
     hir::{Op, Scale, Simd, Type, Value, VectorAddress},
-    lir::x64::inst::{Address, Inst},
+    lir::x64::inst::{Address, Inst, VectorMask},
 };
 use regalloc2::RegClass;
 
@@ -59,18 +59,23 @@ impl Rules<'_> {
         } else {
             None
         };
+        let comparison = if cfg!(feature = "experimental-simd") {
+            self.experimental_memory_mask(ty, mask)
+        } else {
+            None
+        };
         Ok(Inst::Masked {
             ty,
             base,
             indices,
             temp,
-            mask: self.input(mask),
+            mask: comparison.unwrap_or_else(|| VectorMask::Signs(self.input(mask))),
             value: self.input(value),
             dst,
         })
     }
 
-    fn address(&mut self, v: Value) -> Result<Address, CompileError> {
+    pub(super) fn address(&mut self, v: Value) -> Result<Address, CompileError> {
         match self.ctx.single_use(v) {
             Some(Op::PtrOffset(base, index, scale)) => self.offset(base, index, scale),
             _ => Ok(Address {

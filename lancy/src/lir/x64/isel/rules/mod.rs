@@ -3,6 +3,8 @@
 mod binary;
 mod control;
 mod division;
+#[path = "../../../../hir/transforms/passes/experimental/x64.rs"]
+mod experimental;
 mod memory;
 mod native;
 mod numeric;

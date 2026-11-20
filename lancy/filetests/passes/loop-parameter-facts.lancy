@@ -1,0 +1,58 @@
+fn main start:i32 limit:i32 -> i32
+  one = const 1
+  jump head start limit
+block head i:i32 cap:i32
+  more = lt i cap
+  br more body i | done
+block body j:i32
+  next = add j one
+  jump latch next cap
+block latch k:i32 forwarded:i32
+  jump head k forwarded
+block done
+  ret start
+@source check: br
+@opt not: br
+@opt check: ret
+@run 3 7 -> 3
+@run -2 7 -> -2
+@run 2147483646 2147483647 -> 2147483646
+@run 7 -2 -> 7
+
+---
+
+# The forwarded counter adds 2 overall and can wrap before reaching MAX.
+fn main start:i32 limit:i32 -> i32
+  one = const 1
+  jump head start limit
+block head i:i32 cap:i32
+  more = lt i cap
+  next = add i one
+  br more body next | done
+block body j:i32
+  next2 = add j one
+  jump head next2 cap
+block done
+  ret start
+@opt check: br
+@run 0 3 -> 0
+
+---
+
+# A live-through header parameter also survives a direct use beyond the exit.
+fn main bound:i32 x:i32 -> i32
+  zero = const 0
+  one = const 1
+  jump head zero x
+block head i:i32 forwarded:i32
+  more = lt i bound
+  br more body i | done
+block body j:i32
+  next = add j one
+  jump head next forwarded
+block done
+  ret forwarded
+@opt not: br
+@opt check: ret v1
+@run 3 17 -> 17
+@run 0 19 -> 19

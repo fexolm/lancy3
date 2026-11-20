@@ -3,18 +3,19 @@ use super::{Features, inst::class, inst::simd};
 use super::{
     compile::{CompiledFunction, compile},
     frame::{CHILD_ARGS, Frame},
-    inst::{Address, Alu, Cond, Inst, Quotient, Rhs, SelectCond},
+    inst::{Address, Alu, Cond, Inst, Quotient, Rhs, SelectCond, VectorMask},
 };
 use crate::hir::operation::Action;
 use crate::{
     CompileError,
-    hir::{Function, Type, ssa::VerifiedBody},
+    hir::{Binary, Function, Type, ssa::VerifiedBody},
     module::{FunctionId, FunctionIds, Module},
     support::slotmap::DenseMap,
 };
 use iced_x86::{IcedError, code_asm::*};
 use regalloc2::RegClass;
 use regalloc2::{Allocation, Block, Edit, Function as _, InstOrEdit};
+use simd::{XMM, YMM, ZMM};
 
 pub(super) type Constants = Vec<(CodeLabel, [u8; 64], usize)>;
 type AsmResult = Result<(), IcedError>;
@@ -93,6 +94,7 @@ pub(crate) fn emit(
 }
 
 pub(super) fn emit_compiled(module: &Module<CompiledFunction>) -> Result<Code, CompileError> {
+    let _span = tracing::debug_span!(target: "splice::compile", "emit_machine_code").entered();
     let entry = module.call_graph.root();
     let mut a = CodeAssembler::new(64)?;
     let entries = DenseMap::from_fn(module.functions.len(), |_| a.create_label());
@@ -200,7 +202,10 @@ impl Emitter<'_> {
                                     self.a.jmp(labels[target])?;
                                 }
                             }
-                            inst @ (Inst::Branch(_) | Inst::BranchAny(_) | Inst::BrCmp(..)) => {
+                            inst @ (Inst::Branch(_)
+                            | Inst::BranchAny(_)
+                            | Inst::BranchAll(..)
+                            | Inst::BrCmp(..)) => {
                                 let succ = body.block_succs(b);
                                 let (yes, no) = (succ[0].index(), succ[1].index());
                                 let condition = if let Inst::BranchAny(_) = inst {
@@ -210,6 +215,14 @@ impl Emitter<'_> {
                                         gpr(allocs[0]),
                                     )?;
                                     Cond::Ne
+                                } else if let Inst::BranchAll(lane, _) = inst {
+                                    simd::test_all(
+                                        self.a,
+                                        super::Features::host(),
+                                        lane,
+                                        gpr(allocs[0]),
+                                    )?;
+                                    Cond::Eq
                                 } else if let Inst::BrCmp(cc, _, rhs) = inst {
                                     cmp(self.a, &self.machine.frame, allocs, rhs)?;
                                     cc
@@ -547,21 +560,101 @@ impl Emitter<'_> {
                 indices,
                 dst,
                 temp,
+                mask,
                 ..
             } => {
                 let i = 1 + usize::from(indices.is_some());
+                let (mask, value) = match mask {
+                    VectorMask::Signs(_) => (VectorMask::Signs(reg(i)), i + 1),
+                    VectorMask::Compare {
+                        predicate, signed, ..
+                    } => (
+                        VectorMask::Compare {
+                            lhs: reg(i),
+                            rhs: reg(i + 1),
+                            predicate,
+                            signed,
+                        },
+                        i + 2,
+                    ),
+                };
                 simd::MaskedMemory {
                     ty,
                     base: reg(0),
                     index: indices.map(|_| reg(1)),
-                    mask: reg(i),
-                    value: reg(i + 1),
-                    dst: dst.map(|_| reg(i + 2)),
+                    mask,
+                    value: reg(value),
+                    dst: dst.map(|_| reg(value + 1)),
                     temp: temp.map(|_| reg(allocs.len() - 1)),
                 }
                 .emit(a, super::Features::host())
             }
             Inst::Load(ty, _, addr) => load(a, ty, reg(allocs.len() - 1), memory(addr, allocs)),
+            Inst::PackedMemory(kind, lane, _, _, addr) => {
+                let src = reg(allocs.len() - 2);
+                let dst = reg(allocs.len() - 1);
+                let addr = memory(addr, allocs);
+                if kind == Binary::Add {
+                    return match (Features::host().bytes, lane.bytes()) {
+                        (32, 4) => a.vpaddd(YMM[dst], YMM[src], addr),
+                        (32, 8) => a.vpaddq(YMM[dst], YMM[src], addr),
+                        (64, 4) => a.vpaddd(ZMM[dst], ZMM[src], addr),
+                        (64, 8) => a.vpaddq(ZMM[dst], ZMM[src], addr),
+                        _ => unreachable!(),
+                    };
+                }
+                match (Features::host().bytes, kind) {
+                    (32, Binary::And) => a.vpand(YMM[dst], YMM[src], addr),
+                    (32, Binary::Or) => a.vpor(YMM[dst], YMM[src], addr),
+                    (32, Binary::Xor) => a.vpxor(YMM[dst], YMM[src], addr),
+                    (64, Binary::And) => a.vpandd(ZMM[dst], ZMM[src], addr),
+                    (64, Binary::Or) => a.vpord(ZMM[dst], ZMM[src], addr),
+                    (64, Binary::Xor) => a.vpxord(ZMM[dst], ZMM[src], addr),
+                    _ => unreachable!(),
+                }
+            }
+            Inst::BroadcastMemory(lane, _, addr) => {
+                let dst = reg(allocs.len() - 1);
+                let addr = memory(addr, allocs);
+                match (Features::host().bytes, lane.bytes()) {
+                    (32, 4) => a.vpbroadcastd(YMM[dst], addr),
+                    (32, 8) => a.vpbroadcastq(YMM[dst], addr),
+                    (64, 4) => a.vpbroadcastd(ZMM[dst], addr),
+                    (64, 8) => a.vpbroadcastq(ZMM[dst], addr),
+                    _ => unreachable!(),
+                }
+            }
+            Inst::BroadcastLane(_, _, lane) => {
+                let src = reg(0);
+                let dst = reg(1);
+                let width = Features::host().bytes;
+                let imm = i32::from(lane % 4) * 0x55;
+                if width == 16 {
+                    return a.pshufd(XMM[dst], XMM[src], imm);
+                }
+                let chunk = i32::from(lane / 4);
+                let low = if chunk == 0 {
+                    XMM[src]
+                } else {
+                    if width == 32 {
+                        a.vextracti128(XMM[dst], YMM[src], chunk)?;
+                    } else {
+                        a.vextracti32x4(XMM[dst], ZMM[src], chunk)?;
+                    }
+                    XMM[dst]
+                };
+                let lane = if imm == 0 {
+                    low
+                } else {
+                    a.vpshufd(XMM[dst], low, imm)?;
+                    XMM[dst]
+                };
+                if width == 32 {
+                    a.vpbroadcastd(YMM[dst], lane)
+                } else {
+                    a.vpbroadcastd(ZMM[dst], lane)
+                }
+            }
             Inst::Store(ty, addr, _) => store(a, ty, memory(addr, allocs), reg(allocs.len() - 1)),
             Inst::StoreArg(i, ty, _) => store(a, ty, slot(frame.slots + CHILD_ARGS + i), reg(0)),
             Inst::Call { target, .. } => {
@@ -591,7 +684,11 @@ impl Emitter<'_> {
                 a.jmp(self.epilogue)
             }
             Inst::Ret(_) => a.jmp(slot(0)),
-            Inst::Jump | Inst::Branch(_) | Inst::BranchAny(_) | Inst::BrCmp(..) => {
+            Inst::Jump
+            | Inst::Branch(_)
+            | Inst::BranchAny(_)
+            | Inst::BranchAll(..)
+            | Inst::BrCmp(..) => {
                 unreachable!("emitted with block successors")
             }
         }

@@ -91,6 +91,8 @@ struct Definition {
 pub(super) struct Context {
     defs: DenseMap<Value, Definition>,
     current: Block,
+    previous: Option<(Value, Op)>,
+    covered: Option<Value>,
 }
 
 impl Context {
@@ -114,6 +116,19 @@ impl Context {
         let (b, op) = def.source?;
         (b == self.current && def.uses == 1 && op.pure(None)).then_some(op)
     }
+
+    pub fn adjacent_single_use(&self, v: Value) -> Option<Op> {
+        let (previous, op) = self.previous?;
+        (previous == v && self.defs[v].uses == 1).then_some(op)
+    }
+
+    pub fn cover_adjacent_load(&mut self, v: Value) {
+        debug_assert!(matches!(
+            self.adjacent_single_use(v),
+            Some(Op::Load(..) | Op::Simd(crate::hir::Simd::Load(..)))
+        ));
+        self.covered = Some(v);
+    }
 }
 
 pub(super) fn select<I>(
@@ -124,6 +139,8 @@ pub(super) fn select<I>(
     let mut ctx = Context {
         defs: DenseMap::filled(f.value_count(), Definition::default()),
         current: f.entry(),
+        previous: None,
+        covered: None,
     };
     for &b in cfg.reverse_postorder() {
         for i in f.instructions(b) {
@@ -157,7 +174,16 @@ pub(super) fn select<I>(
         };
         emit(&mut ctx, Root::Term(*f.terminator(b)))?;
         instructions.extend(f.instructions(b));
-        for i in instructions.drain(..).rev() {
+        while let Some(i) = instructions.pop() {
+            if let Some(covered) = ctx.covered.take() {
+                debug_assert_eq!(f.result(i), Some(covered));
+                continue;
+            }
+            if cfg!(feature = "experimental-simd") {
+                ctx.previous = instructions
+                    .last()
+                    .and_then(|&prev| Some((f.result(prev)?, *f.op(prev))));
+            }
             if f.result(i)
                 .is_some_and(|v| !ctx.defs[v].register && f.op(i).pure(Some(f.value_type(v))))
             {
@@ -165,6 +191,7 @@ pub(super) fn select<I>(
             }
             emit(&mut ctx, Root::Inst(i))?;
         }
+        ctx.previous = None;
         out.reverse();
     }
     Ok(blocks)

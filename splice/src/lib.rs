@@ -23,6 +23,7 @@ pub trait Codegen {
     /// By default, verify a portable function and pass it to the backend.
     /// Native backends may consume the operation stream directly.
     fn build(arity: usize, kinds: &[BufferKind], body: frontend::Body<'_>) -> Result<Self::Output> {
+        let _span = tracing::debug_span!(target: "splice::compile", "build", backend = std::any::type_name::<Self>()).entered();
         Self::compile(&frontend::materialize(arity, kinds, body)?)
     }
 }

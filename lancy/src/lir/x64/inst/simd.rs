@@ -116,38 +116,8 @@ impl Native {
                 return a.neg(emit::R32[dst]);
             }
             Action::AllTrue => {
+                test_all(a, self.cpu, lane, src)?;
                 let g = emit::R32[dst];
-
-                match self.bytes {
-                    64 => match lane.bytes() {
-                        1 => {
-                            a.vptestmb(k1, ZMM[src], ZMM[src])?;
-                            a.knotq(k1, k1)?;
-                            a.kortestq(k1, k1)?;
-                        }
-                        2 => {
-                            a.vptestmw(k1, ZMM[src], ZMM[src])?;
-                            a.knotd(k1, k1)?;
-                            a.kortestd(k1, k1)?;
-                        }
-                        4 => {
-                            a.vptestmd(k1, ZMM[src], ZMM[src])?;
-                            a.knotw(k1, k1)?;
-                            a.kortestw(k1, k1)?;
-                        }
-                        _ => {
-                            a.vptestmq(k1, ZMM[src], ZMM[src])?;
-                            if self.cpu.dq {
-                                a.knotb(k1, k1)?;
-                                a.kortestb(k1, k1)?;
-                            } else {
-                                a.kmovw(g, k1)?;
-                                a.cmp(g, 255)?;
-                            }
-                        }
-                    },
-                    _ => unreachable!("selected full-width mask test"),
-                }
                 a.mov(g, 0)?;
                 a.sete(emit::R8[dst])?;
                 return a.neg(g);
@@ -597,6 +567,71 @@ pub(in crate::lir::x64) fn copy(
 }
 
 /// Sets ZF exactly when every bit of the vector is zero.
+/// Set ZF if every lane is nonzero.
+pub(in crate::lir::x64) fn test_all(
+    a: &mut CodeAssembler,
+    cpu: Features,
+    lane: Lane,
+    src: usize,
+) -> Result<(), IcedError> {
+    match cpu.bytes {
+        16 => {
+            let t = XMM[super::SCRATCH];
+            a.pxor(t, t)?;
+            match lane.bytes() {
+                1 => a.pcmpeqb(t, XMM[src])?,
+                2 => a.pcmpeqw(t, XMM[src])?,
+                4 => a.pcmpeqd(t, XMM[src])?,
+                8 => a.pcmpeqq(t, XMM[src])?,
+                _ => unreachable!(),
+            }
+            a.pmovmskb(r10d, t)?;
+            a.test(r10d, r10d)
+        }
+        32 => {
+            let t = YMM[super::SCRATCH];
+            a.vpxor(t, t, t)?;
+            match lane.bytes() {
+                1 => a.vpcmpeqb(t, t, YMM[src])?,
+                2 => a.vpcmpeqw(t, t, YMM[src])?,
+                4 => a.vpcmpeqd(t, t, YMM[src])?,
+                8 => a.vpcmpeqq(t, t, YMM[src])?,
+                _ => unreachable!(),
+            }
+            a.vptest(t, t)
+        }
+        64 => match lane.bytes() {
+            1 => {
+                a.vptestmb(k1, ZMM[src], ZMM[src])?;
+                a.knotq(k1, k1)?;
+                a.kortestq(k1, k1)
+            }
+            2 => {
+                a.vptestmw(k1, ZMM[src], ZMM[src])?;
+                a.knotd(k1, k1)?;
+                a.kortestd(k1, k1)
+            }
+            4 => {
+                a.vptestmd(k1, ZMM[src], ZMM[src])?;
+                a.knotw(k1, k1)?;
+                a.kortestw(k1, k1)
+            }
+            8 => {
+                a.vptestmq(k1, ZMM[src], ZMM[src])?;
+                if cpu.dq {
+                    a.knotb(k1, k1)?;
+                    a.kortestb(k1, k1)
+                } else {
+                    a.kmovw(r10d, k1)?;
+                    a.cmp(r10d, 255)
+                }
+            }
+            _ => unreachable!(),
+        },
+        _ => unreachable!(),
+    }
+}
+
 pub(in crate::lir::x64) fn test_any(
     a: &mut CodeAssembler,
     cpu: Features,
@@ -652,11 +687,38 @@ fn mask_from_signs(
     }
 }
 
+fn emit_memory_mask(
+    a: &mut CodeAssembler,
+    cpu: Features,
+    size: usize,
+    mask: super::VectorMask<usize>,
+) -> Result<(), IcedError> {
+    use super::VectorMask;
+    match mask {
+        VectorMask::Signs(reg) => mask_from_signs(a, cpu, size, reg),
+        VectorMask::Compare {
+            lhs,
+            rhs,
+            signed,
+            predicate,
+        } => {
+            let (lhs, rhs) = (ZMM[lhs], ZMM[rhs]);
+            match (size, signed) {
+                (4, true) => a.vpcmpd(k1, lhs, rhs, predicate),
+                (4, false) => a.vpcmpud(k1, lhs, rhs, predicate),
+                (8, true) => a.vpcmpq(k1, lhs, rhs, predicate),
+                (8, false) => a.vpcmpuq(k1, lhs, rhs, predicate),
+                _ => unreachable!(),
+            }
+        }
+    }
+}
+
 pub(in crate::lir::x64) struct MaskedMemory {
     pub ty: Type,
     pub base: usize,
     pub index: Option<usize>,
-    pub mask: usize,
+    pub mask: super::VectorMask<usize>,
     pub value: usize,
     pub dst: Option<usize>,
     pub temp: Option<usize>,
@@ -685,7 +747,7 @@ impl MaskedMemory {
             if let Some(i) = index
                 && matches!(size, 4 | 8)
             {
-                mask_from_signs(a, cpu, size, mask)?;
+                emit_memory_mask(a, cpu, size, mask)?;
                 macro_rules! indexed {
                     ($r:ident) => {{
                         let address = ptr(R64[base] + $r[i] * size as i32);
@@ -718,7 +780,7 @@ impl MaskedMemory {
                 };
             }
             if index.is_none() && (matches!(size, 4 | 8) || size <= 2 && cpu.bw) {
-                mask_from_signs(a, cpu, size, mask)?;
+                emit_memory_mask(a, cpu, size, mask)?;
                 if let Some(d) = dst
                     && d != value
                 {
@@ -751,6 +813,9 @@ impl MaskedMemory {
                 };
             }
         }
+        let super::VectorMask::Signs(mask) = mask else {
+            unreachable!("comparison masks require 512-bit EVEX memory instructions")
+        };
         if width == 32 && matches!(size, 4 | 8) {
             if let (Some(i), Some(d)) = (index, dst)
                 && cpu.avx2

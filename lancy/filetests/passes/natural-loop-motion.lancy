@@ -1,0 +1,93 @@
+# A conditional block remains in the loop; only its total multiply moves.
+fn main n:i32 x:i32 y:i32 -> i32
+  z = const 0
+  one = const 1
+  jump head z z
+block head i:i32 acc:i32
+  more = lt i n
+  br more choose | done acc
+block choose
+  first = eq i z
+  br first yes | no
+block yes
+  term = mul x y
+  total = add acc term
+  jump latch total
+block no
+  jump latch acc
+block latch sum:i32
+  next = add i one
+  jump head next sum
+block done result:i32
+  ret result
+@source check: br
+@source check: Mul
+@opt check: Mul v1 v2
+@opt nextln: jump
+@opt check: br
+@opt not: Mul
+@run 0 9 2 -> 0
+@run 3 9 2 -> 18
+@run 2 2147483647 2 -> -2
+
+---
+
+# The outer induction value limits how far the invariant can move.
+# The inner check keeps the loop present so the placement of Mul can be verified.
+fn main outer_count:i32 inner_count:i32 y:i32 -> i32
+  z = const 0
+  one = const 1
+  jump outer z z
+block outer i:i32 acc:i32
+  more_outer = lt i outer_count
+  br more_outer inner_pre | done acc
+block inner_pre
+  jump inner z acc
+block inner j:i32 inner_acc:i32
+  more_inner = lt j inner_count
+  br more_inner body | outer_latch inner_acc
+block body
+  bounds j y
+  term = mul i y
+  next_acc = add inner_acc term
+  next_j = add j one
+  jump inner next_j next_acc
+block outer_latch result:i32
+  next_i = add i one
+  jump outer next_i result
+block done value:i32
+  ret value
+@source check: br
+@source check: br
+@source check: Mul
+@opt not: Mul
+@opt check: br
+@opt check: Mul
+@opt nextln: jump
+@opt check: br
+@opt not: Mul
+@run 3 2 5 -> 30
+@run 0 2 5 -> 0
+@run 3 0 5 -> 0
+
+---
+
+# A load-free irreducible cycle has two entries.
+fn main c:i32 n:i32 -> i32
+  z = const 0
+  one = const 1
+  br c a n | b n
+block a i:i32
+  prev = sub i one
+  jump b prev
+block b j:i32
+  more = gt j z
+  next = sub j one
+  br more a next | done
+block done
+  ret j
+@opt check: br
+@opt check: br
+@run 0 3 -> -1
+@run 1 3 -> 0
+@run 1 -1 -> -2

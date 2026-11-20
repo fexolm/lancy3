@@ -1,3 +1,5 @@
+#[cfg(feature = "experimental-simd")]
+use super::experimental;
 use crate::hir::{
     Binary, Block, Function, IrError, Op, Simd, Terminator, Ternary, Type,
     ssa::VerifiedBody,
@@ -7,7 +9,7 @@ use crate::module::{FunctionIds, Module};
 use crate::support::slotmap::DenseMap;
 use std::{collections::HashMap, sync::Arc};
 
-use super::{local_cfg, sccp};
+use super::{local_cfg, loops, sccp};
 
 /// Canonicalize dataflow before instruction selection. Division,
 /// memory operations and checks remain ordered on every executable path.
@@ -38,9 +40,23 @@ fn simplify_with_cfg(f: &mut Function, cfg: &ControlFlowGraph) -> Result<(), IrE
         aliases[param] = value;
     }
     let mut vector_orderings = HashMap::new();
+    #[cfg(feature = "experimental-simd")]
+    let mut definitions = HashMap::new();
     let mut changed_cfg = false;
     for &b in cfg.reverse_postorder() {
+        #[cfg(feature = "experimental-simd")]
+        let mut vector_constants = HashMap::new();
         f.rewrite_instructions(b, |op, result, types| {
+            #[cfg(feature = "experimental-simd")]
+            let op = experimental::simplify_simd(
+                op,
+                result,
+                types,
+                &facts,
+                &aliases,
+                &mut definitions,
+                &mut vector_constants,
+            )?;
             match (op, result) {
                 (
                     Op::Simd(Simd::Bin(
@@ -144,14 +160,38 @@ fn simplify_with_cfg(f: &mut Function, cfg: &ControlFlowGraph) -> Result<(), IrE
         cfg
     };
     let dom = DomTree::compute(cfg);
-    if cfg.has_cycle() {
+    let (updated_cfg, updated_dom);
+    let (cfg, dom) = if cfg.has_cycle() {
         // Mechanical forwarding across loop edges can lengthen hot live ranges
         // and prevent the allocator from splitting them at block boundaries.
-        local_cfg::hoist_loop_invariants(f, cfg, &dom);
+        if loops::simplify_loops(f, cfg, &dom) {
+            f.prune_unreachable()?;
+            let mut current_cfg = ControlFlowGraph::compute(f)?;
+            let mut current_dom = DomTree::compute(&current_cfg);
+            // Refresh loop proofs only after productive CFG edits. Two
+            // more rounds cover short pipelines without unbounded work.
+            for _ in 0..2 {
+                if !current_cfg.has_cycle() || !loops::simplify_loops(f, &current_cfg, &current_dom)
+                {
+                    break;
+                }
+                f.prune_unreachable()?;
+                current_cfg = ControlFlowGraph::compute(f)?;
+                current_dom = DomTree::compute(&current_cfg);
+            }
+            updated_cfg = current_cfg;
+            updated_dom = current_dom;
+            (&updated_cfg, &updated_dom)
+        } else {
+            (cfg, &dom)
+        }
     } else {
         local_cfg::forward_params(f, cfg);
-    }
-    remove_redundant_checks(f, &dom);
+        (cfg, &dom)
+    };
+    #[cfg(feature = "experimental-simd")]
+    experimental::remove_full_packet_checks(f, cfg, dom);
+    remove_redundant_checks(f, dom);
     remove_dead_computations(f, cfg);
     Ok(())
 }
@@ -202,6 +242,8 @@ fn remove_redundant_checks(f: &mut Function, dom: &DomTree) {
 
 fn remove_dead_computations(f: &mut Function, cfg: &ControlFlowGraph) {
     let mut live = DenseMap::filled(f.value_count(), false);
+    #[cfg(feature = "experimental-simd")]
+    let zero = experimental::zero_constants(f, cfg);
     for &b in cfg.reverse_postorder() {
         let term = *f.terminator(b);
         if let Terminator::Branch { cond: v, .. } | Terminator::Return(v) = term {
@@ -219,7 +261,11 @@ fn remove_dead_computations(f: &mut Function, cfg: &ControlFlowGraph) {
         for i in instructions.drain(..).rev() {
             let op = *f.op(i);
             if let Some(result) = f.result(i) {
-                if !live[result] && op.pure(Some(f.value_type(result))) {
+                #[cfg(feature = "experimental-simd")]
+                let first_lane = experimental::accesses_first_lane(op, &zero);
+                #[cfg(not(feature = "experimental-simd"))]
+                let first_lane = false;
+                if !live[result] && (first_lane || op.pure(Some(f.value_type(result)))) {
                     continue;
                 }
                 live[result] = true;

@@ -131,14 +131,16 @@ impl Jit {
         auto_vectorize: bool,
         populate: impl for<'ctx> FnOnce(&'ctx Context, &Module<'ctx>) -> Result<(), String>,
     ) -> Result<(Self, Entry), String> {
-        let target = host_machine()?;
+        let target = tracing::debug_span!(target: "splice::compile", "llvm_target")
+            .in_scope(host_machine)?;
         let context = Context::create();
         let module = build_module(&context, &target, populate)?;
         optimize(&module, &target, auto_vectorize)?;
-        let object = target
-            .write_to_memory_buffer(&module, FileType::Object)
+        let object = tracing::debug_span!(target: "splice::compile", "emit_llvm_object")
+            .in_scope(|| target.write_to_memory_buffer(&module, FileType::Object))
             .map_err(|error| error.to_string())?;
-        Self::link(object)
+        tracing::debug_span!(target: "splice::compile", "link_llvm_object")
+            .in_scope(|| Self::link(object))
     }
 
     /// Inkwell owns the module, optimizer and object generation. Its llvm-sys
@@ -184,6 +186,8 @@ pub(crate) fn optimize(
     target: &TargetMachine,
     auto_vectorize: bool,
 ) -> Result<(), String> {
+    let _span = tracing::debug_span!(target: "splice::compile", "optimize_llvm_ir", auto_vectorize)
+        .entered();
     let run = || {
         module
             .run_passes("default<O3>", target, PassBuilderOptions::create())

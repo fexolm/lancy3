@@ -22,6 +22,58 @@ use splice_llvm::Llvm;
 
 const SENTINEL: i32 = -123_456_789;
 
+#[splice::kernel]
+fn invariant_loop_branch(n: i32, mode: i32, out: &mut [i32]) -> i32 {
+    let mut i = 0;
+    let mut sum = 0;
+    while i < n {
+        if mode != 0 {
+            sum += i + 2;
+        } else {
+            sum -= i + 1;
+        }
+        out[i as usize] = sum;
+        i += 1;
+    }
+    sum
+}
+
+#[test]
+fn invariant_loop_branch_matches_rust_on_both_build_paths() {
+    let check = |name: &str, kernel: &dyn Executable| {
+        for (n, mode) in [(0, 0), (0, 1), (4, 0), (4, -1)] {
+            let mut expected = [SENTINEL; 5];
+            let sum = invariant_loop_branch(n, mode, &mut expected);
+            let mut out = [SENTINEL; 5];
+            let actual = kernel
+                .call(&[n, mode], &mut [BufferArg::Write(&mut out)])
+                .unwrap();
+            assert_eq!((actual, out), (sum, expected), "{name}, n={n}, mode={mode}");
+        }
+        for mode in [0, -1] {
+            let mut expected = [SENTINEL; 5];
+            invariant_loop_branch(5, mode, &mut expected);
+            let mut out = [SENTINEL; 5];
+            assert!(
+                kernel
+                    .call(&[6, mode], &mut [BufferArg::Write(&mut out)])
+                    .is_err(),
+                "{name}, mode={mode}"
+            );
+            assert_eq!(out, expected, "{name}, mode={mode}");
+        }
+    };
+    check_backends(invariant_loop_branch::ir().unwrap(), check);
+    check(
+        "direct Lancy",
+        &invariant_loop_branch::build::<Lancy>().unwrap(),
+    );
+    check(
+        "direct LLVM",
+        &invariant_loop_branch::build::<Llvm>().unwrap(),
+    );
+}
+
 fn check_backends(ir: Function, check: impl Fn(&str, &dyn Executable)) {
     check("Lancy", &Lancy::compile(&ir).unwrap());
     check("Cranelift", &Cranelift::compile(&ir).unwrap());
@@ -182,7 +234,7 @@ fn yuv_converts_known_colors_across_packets_and_tail() {
         .take(count)
         .map(|&(_, rgba)| i32::from_le_bytes(rgba))
         .collect();
-    check_backends(yuv::yuv_to_rgba::ir().unwrap(), |name, kernel| {
+    let check = |name: &str, kernel: &dyn Executable| {
         let mut out = vec![SENTINEL; count + 1];
         let short = kernel
             .call(
@@ -195,16 +247,23 @@ fn yuv_converts_known_colors_across_packets_and_tail() {
             .unwrap();
         assert_eq!(short, -1, "{name}");
         assert!(out.iter().all(|&pixel| pixel == SENTINEL), "{name}");
-        let written = kernel
-            .call(
-                &[],
-                &mut [BufferArg::Read(&pixels), BufferArg::Write(&mut out)],
-            )
-            .unwrap();
-        assert_eq!(written, count as i32, "{name}");
-        assert_eq!(out[..count], expected, "{name}");
-        assert_eq!(out[count], SENTINEL, "{name}");
-    });
+        let width = Lane::<i32>::lanes();
+        for len in [0, width - 1, width, width + 1, count] {
+            out.fill(SENTINEL);
+            let written = kernel
+                .call(
+                    &[],
+                    &mut [BufferArg::Read(&pixels[..len]), BufferArg::Write(&mut out)],
+                )
+                .unwrap();
+            assert_eq!(written, len as i32, "{name} at {len}");
+            assert_eq!(out[..len], expected[..len], "{name} at {len}");
+            assert!(out[len..].iter().all(|&x| x == SENTINEL), "{name} at {len}");
+        }
+    };
+    check_backends(yuv::yuv_to_rgba::ir().unwrap(), check);
+    check("direct Lancy", &yuv::yuv_to_rgba::build::<Lancy>().unwrap());
+    check("direct LLVM", &yuv::yuv_to_rgba::build::<Llvm>().unwrap());
 }
 
 #[test]
@@ -264,7 +323,7 @@ fn murmur_hash_matches_a_known_key_and_rejects_incomplete_columns() {
 
 #[test]
 fn rgb16_remap_supports_unsigned_indices_and_stops_on_an_invalid_plane() {
-    check_backends(remap::remap_rgb16::ir().unwrap(), |name, kernel| {
+    let check = |name: &str, kernel: &dyn Executable| {
         let mut src = vec![0u16; 65536];
         src[1] = 200;
         src[32768] = 300;
@@ -295,5 +354,29 @@ fn rgb16_remap_supports_unsigned_indices_and_stops_on_an_invalid_plane() {
         );
         assert!(result.is_err(), "{name}");
         assert_eq!(out, [300, u16::MAX, u16::MAX, u16::MAX], "{name}");
-    });
+
+        let width = splice::simd::Lane::<u16>::lanes();
+        let mut map = vec![1u16; 6 * width];
+        map[width + 1] = u16::MAX;
+        let mut out = vec![u16::MAX; map.len()];
+        let result = kernel.call(
+            &[],
+            &mut [
+                BufferArg::ReadU16(&src[..65535]),
+                BufferArg::ReadU16(&map),
+                BufferArg::WriteU16(&mut out),
+            ],
+        );
+        assert!(result.is_err(), "{name}");
+        for plane in out.chunks_exact(2 * width) {
+            assert!(plane[..width].iter().all(|&v| v == 200), "{name}");
+            assert!(plane[width..].iter().all(|&v| v == u16::MAX), "{name}");
+        }
+    };
+    check_backends(remap::remap_rgb16::ir().unwrap(), check);
+    check(
+        "direct Lancy",
+        &remap::remap_rgb16::build::<Lancy>().unwrap(),
+    );
+    check("direct LLVM", &remap::remap_rgb16::build::<Llvm>().unwrap());
 }

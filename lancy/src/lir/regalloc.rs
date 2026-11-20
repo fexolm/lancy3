@@ -6,6 +6,7 @@ pub(super) fn allocate<I: TargetInst>(
     f: &Function<I>,
     ctx: &mut Ctx,
 ) -> Result<Output, CompileError> {
+    let _span = tracing::debug_span!(target: "splice::compile", "allocate_registers").entered();
     let options = RegallocOptions {
         algorithm: Algorithm::Ion,
         validate_ssa: cfg!(any(test, debug_assertions)),

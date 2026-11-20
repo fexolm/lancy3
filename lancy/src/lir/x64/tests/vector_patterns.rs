@@ -42,6 +42,132 @@ fn check(k: &ScalarKernel, args: &[u64], expected: &[u64]) {
     assert_eq!(result, expected);
 }
 
+#[cfg(feature = "experimental-simd")]
+#[test]
+fn adjacent_vector_load_can_be_a_packed_memory_operand() {
+    let ty = Type::Vector(Lane::I32);
+    let mut f = Function::new(&[Type::Ptr, ty], ty);
+    let b = f.entry();
+    let [p, mask] = f.params(b).try_into().unwrap();
+    let v = f.append(b, Op::Simd(Simd::Load(Lane::I32, p))).unwrap();
+    let r = f
+        .append(b, Op::Simd(Simd::Bin(Binary::And, v, mask)))
+        .unwrap();
+    f.set_terminator(b, Terminator::Return(r));
+    let k = ScalarKernel::compile(&f).unwrap();
+    let n = ScalarKernel::vector_bytes();
+    let mem = [0xbcu8; 65];
+    // Use an address with an odd low bit regardless of the stack layout.
+    let offset = usize::from(mem.as_ptr() as usize & 1 == 0);
+    let p = mem[offset..].as_ptr();
+    let mut args = vec![p as u64];
+    args.extend(vec![0x7f7f_7f7f_7f7f_7f7f; n / 8]);
+    let mut out = vec![0; n / 8];
+    // SAFETY: p addresses at least n readable bytes in the live array.
+    unsafe { k.call_words_raw(&args, &mut out) }.unwrap();
+    assert_eq!(out, vec![0x3c3c_3c3c_3c3c_3c3c; n / 8]);
+    let cpu = Features::host();
+    if cpu.bytes == 64 || cpu.bytes == 32 && cpu.avx2 {
+        let (m, ids) = f.verified_module().unwrap();
+        let code = x64::emit(m, &ids).unwrap();
+        assert!(
+            Decoder::new(64, &code.bytes[..code.text_len], DecoderOptions::NONE)
+                .iter()
+                .any(
+                    |i| matches!(i.mnemonic(), Mnemonic::Vpand | Mnemonic::Vpandd)
+                        && i.op2_kind() == iced_x86::OpKind::Memory
+                )
+        );
+    }
+}
+
+#[cfg(feature = "experimental-simd")]
+#[test]
+fn constant_shuffle_broadcasts_the_selected_table_lane() {
+    let ty = Type::Vector(Lane::I32);
+    let n = ScalarKernel::vector_bytes() / 4;
+    let values: Vec<_> = (1..=2 * n).map(|v| v as u128).collect();
+    let args = words(Lane::I32, &values);
+    for index in [0, n - 1, n, 2 * n - 1, 2 * n] {
+        let mut f = Function::new(&[ty, ty], ty);
+        let b = f.entry();
+        let [x, y] = f.params(b).try_into().unwrap();
+        let i = f.append(b, Op::Const(index as i32)).unwrap();
+        let i = f.append(b, Op::Simd(Simd::Splat(i))).unwrap();
+        let out = f.append(b, Op::Simd(Simd::Shuffle(x, y, i))).unwrap();
+        f.set_terminator(b, Terminator::Return(out));
+        let k = ScalarKernel::compile(&f).unwrap();
+        let value = values.get(index).copied().unwrap_or(0);
+        check(&k, &args, &words(Lane::I32, &vec![value; n]));
+        let cpu = Features::host();
+        if index < 2 * n && (cpu.bytes != 32 || cpu.avx2) {
+            let expected = if cpu.bytes == 16 {
+                Mnemonic::Pshufd
+            } else {
+                Mnemonic::Vpbroadcastd
+            };
+            assert!(instructions(&f).contains(&expected));
+        }
+    }
+}
+
+#[cfg(feature = "experimental-simd")]
+#[test]
+fn masked_load_uses_the_comparison_mask_directly_on_avx512() {
+    for lane in [Lane::I32, Lane::U32, Lane::I64, Lane::U64] {
+        let ty = Type::Vector(lane);
+        let mut f = Function::new(&[Type::Ptr, ty, ty], ty);
+        let b = f.entry();
+        let [base, lhs, rhs] = f.params(b).try_into().unwrap();
+        let mask = f
+            .append(b, Op::Simd(Simd::Bin(Binary::Lt, lhs, rhs)))
+            .unwrap();
+        let out = f
+            .append(
+                b,
+                Op::Simd(Simd::MaskedLoad {
+                    address: VectorAddress {
+                        base,
+                        indices: None,
+                    },
+                    mask,
+                    passthrough: lhs,
+                }),
+            )
+            .unwrap();
+        f.set_terminator(b, Terminator::Return(out));
+        let size = lane.bytes();
+        let n = ScalarKernel::vector_bytes() / size;
+        let top = 1u128 << (size * 8 - 1);
+        let lhs: Vec<_> = (0..n).map(|i| if i % 2 == 0 { top } else { 0 }).collect();
+        let memory = words(lane, &vec![42; n]);
+        let mut args = vec![memory.as_ptr() as u64];
+        args.extend(words(lane, &lhs));
+        args.extend(words(lane, &vec![1; n]));
+        let mut out = vec![0; memory.len()];
+        let expected: Vec<_> = lhs
+            .into_iter()
+            .map(|x| if lane.signed() || x == 0 { 42 } else { x })
+            .collect();
+        let k = ScalarKernel::compile(&f).unwrap();
+        // SAFETY: the live memory buffer contains a full vector of initialized lanes.
+        unsafe { k.call_words_raw(&args, &mut out) }.unwrap();
+        assert_eq!(out, words(lane, &expected));
+        if Features::host().bytes == 64 {
+            let (m, ids) = f.verified_module().unwrap();
+            let code = x64::emit(m, &ids).unwrap();
+            assert!(
+                Decoder::new(64, &code.bytes[..code.text_len], DecoderOptions::NONE)
+                    .iter()
+                    .any(|i| matches!(
+                        i.mnemonic(),
+                        Mnemonic::Vpcmpd | Mnemonic::Vpcmpud | Mnemonic::Vpcmpq | Mnemonic::Vpcmpuq
+                    ) && i.op0_register() == iced_x86::Register::K1)
+            );
+        }
+    }
+}
+
 #[test]
 fn two_table_shuffle_checks_the_entire_unsigned_index() {
     for (lane, idx) in [
@@ -385,6 +511,7 @@ fn selected_rearrangements_respect_feature_subsets_and_smaller_register_widths()
                 (s, s, Action::Shuffle, &[1, 2, 3, 4]),
                 (w, w, Action::Shuffle, &[1, 2, 3, 4]),
                 (s, small.scalar(), Action::Reduce(Binary::Add), &[1, 0]),
+                (s, small.scalar(), Action::Reduce(Binary::Xor), &[1, 0]),
             ] {
                 let Some(native) = Native::select(action, input, output, cpu) else {
                     continue;

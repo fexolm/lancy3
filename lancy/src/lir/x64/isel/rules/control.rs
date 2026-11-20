@@ -11,18 +11,20 @@ impl Rules<'_> {
         match term {
             Terminator::Return(v) => Inst::Ret(self.input(v)),
             Terminator::Jump(_) => Inst::Jump,
-            Terminator::Branch { cond, .. } => {
-                if let Some(Op::Simd(Simd::AnyTrue(v))) = self.ctx.single_use(cond) {
-                    Inst::BranchAny(self.input(v))
-                } else if let Some(Op::Bin(kind, a, b)) = self.ctx.single_use(cond)
-                    && self.ty(a) == Type::I32
-                    && let Some(cc) = Cond::from_binary(kind)
-                {
-                    Inst::BrCmp(cc, self.input(a), self.rhs(b))
-                } else {
-                    Inst::Branch(self.input(cond))
+            Terminator::Branch { cond, .. } => match self.ctx.single_use(cond) {
+                Some(Op::Simd(Simd::AnyTrue(v))) => Inst::BranchAny(self.input(v)),
+                Some(Op::Simd(Simd::AllTrue(v))) if cfg!(feature = "experimental-simd") => self
+                    .experimental_all_true(v)
+                    .unwrap_or_else(|| Inst::Branch(self.input(cond))),
+                Some(Op::Bin(kind, a, b)) if self.ty(a) == Type::I32 => {
+                    if let Some(cc) = Cond::from_binary(kind) {
+                        Inst::BrCmp(cc, self.input(a), self.rhs(b))
+                    } else {
+                        Inst::Branch(self.input(cond))
+                    }
                 }
-            }
+                _ => Inst::Branch(self.input(cond)),
+            },
         }
     }
 

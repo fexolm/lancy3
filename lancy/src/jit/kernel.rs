@@ -34,10 +34,14 @@ impl ScalarKernel {
         function: &Function,
         inlining: Inlining,
     ) -> Result<Self, CompileError> {
+        let _span =
+            tracing::debug_span!(target: "splice::compile", "lancy_jit", inlining = ?inlining)
+                .entered();
         splice_target::simd().map_err(CompileError::SimdProfile)?;
         let (source, ids) = function.verified_module()?;
         let code = passes::optimize_and_lower(&source, &ids, inlining, crate::lir::emit)?;
-        let memory = Executable::new(&code.bytes)?;
+        let memory = tracing::debug_span!(target: "splice::compile", "install_code")
+            .in_scope(|| Executable::new(&code.bytes))?;
         // SAFETY: the host emitter implements Entry and memory owns the sealed code.
         let entry =
             unsafe { std::mem::transmute::<*mut std::ffi::c_void, Entry>(memory.address.as_ptr()) };
@@ -97,6 +101,9 @@ impl ScalarKernel {
     /// Each pointer must be valid for every executed access, including addresses
     /// derived from it or loaded transitively. The caller must uphold lifetimes,
     /// initialization and Rust aliasing rules for the duration of the call.
+    /// For declared slice parameters the length must be nonnegative and the
+    /// entire slice must be valid and initialized, even for a zero-trip loop.
+    /// Writable slices must be exclusive and shared slices remain immutable.
     pub unsafe fn call_raw(&self, args: &[u64]) -> Result<u64, CallError> {
         if self.result_words != 1 || self.arity != self.arg_words {
             return Err(CallError::WideSignature);

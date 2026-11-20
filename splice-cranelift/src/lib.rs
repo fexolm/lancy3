@@ -107,14 +107,17 @@ impl Codegen for Cranelift {
     type Output = CraneliftKernel;
 
     fn compile(function: &Function) -> Result<CraneliftKernel> {
+        let _span = tracing::debug_span!(target: "splice::compile", "compile", backend = "cranelift", input = "portable").entered();
         let mut memory = CodeMemory(Some(JITModule::new(builder()?)));
         let module = memory.0.as_mut().unwrap();
         let kernel = module::KernelModule::lower(module, function)?;
         let id = kernel.entry;
         kernel.emit(&mut module.make_context(), |id, ctx| {
-            module.define_function(id, ctx).map_err(|e| e.to_string())
+            tracing::debug_span!(target: "splice::compile", "emit_cranelift_code")
+                .in_scope(|| module.define_function(id, ctx).map_err(|e| e.to_string()))
         })?;
-        module.finalize_definitions().map_err(|e| e.to_string())?;
+        tracing::debug_span!(target: "splice::compile", "finalize_cranelift_code")
+            .in_scope(|| module.finalize_definitions().map_err(|e| e.to_string()))?;
         let address = module.get_finalized_function(id);
         // SAFETY: KernelModule declares the entry with the host C calling convention,
         // two pointer parameters and an i64 return. The kernel owns its module.

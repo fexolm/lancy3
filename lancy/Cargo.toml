@@ -5,7 +5,11 @@ edition = "2024"
 rust-version = "1.94"
 description = "A CPU JIT with SSA HIR and x86-64 and AArch64 code generation"
 
+[features]
+experimental-simd = []
+
 [dependencies]
+tracing.workspace = true
 splice-target = { path = "../splice-target" }
 regalloc2 = "0.15.3"
 thiserror = "2"

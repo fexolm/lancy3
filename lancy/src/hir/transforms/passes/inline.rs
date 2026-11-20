@@ -27,6 +27,7 @@ pub(crate) fn inline_all(
     for (id, source) in module.functions.iter() {
         let src = source.function;
         let mut body = Function::new(src.param_types(), src.return_type());
+        body.copy_slice_params(src);
         let entry = body.entry();
         let args = body.params(entry).to_vec();
         let mut copy = Copier::new(src, &source.cfg, &mut body, entry, &args);

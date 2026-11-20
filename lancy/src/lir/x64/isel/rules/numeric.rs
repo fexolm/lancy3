@@ -9,6 +9,11 @@ use regalloc2::RegClass;
 
 impl Rules<'_> {
     pub(super) fn numeric(&mut self, op: Op) -> Result<Inst, CompileError> {
+        if cfg!(feature = "experimental-simd")
+            && let Some(inst) = self.experimental_numeric(op)?
+        {
+            return Ok(inst);
+        }
         let (action, input, output, args) =
             operation(op, |v| self.ty(v)).expect("numeric instruction");
 

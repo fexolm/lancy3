@@ -3,8 +3,10 @@ use criterion::Criterion;
 use splice::{BufferArg, Executable, kernel};
 use splice_cranelift::Cranelift;
 use splice_lancy::Lancy;
-use splice_llvm::{Llvm, LlvmKernel, LlvmManualSimd};
+use splice_llvm::LlvmManualSimd;
 use std::hint::black_box;
+
+mod loops;
 
 // A small correction curve applied as three whole-buffer passes, or one fused pass.
 #[kernel]
@@ -115,7 +117,10 @@ fn ramp_integral(spans: &[i32], out: &mut [i32]) -> i32 {
 #[kernel]
 fn calibrate(#[comptime] hoist: bool, src: &[i32], coefficients: &[i32], out: &mut [i32]) -> i32 {
     let n = src.len() as i32;
-    if coefficients.len() < 4 || n > out.len() as i32 / 2 {
+    if coefficients.len() < 4 {
+        return -1;
+    }
+    if n > out.len() as i32 / 2 {
         return -1;
     }
     if hoist {
@@ -176,7 +181,6 @@ fn run_unary(
     c: &mut Criterion,
     stage: impl Fn() -> splice::Result<splice::Function>,
     builds: Builders<'_>,
-    llvm_auto: impl Fn() -> splice::Result<LlvmKernel>,
 ) {
     Workload {
         name,
@@ -189,7 +193,7 @@ fn run_unary(
             usize::try_from(count).map_err(|_| "invalid benchmark buffers".into())
         },
     }
-    .compare_with_llvm_auto(c, stage, builds, Some(&llvm_auto));
+    .compare(c, stage, builds);
 }
 
 pub(super) fn compare(c: &mut Criterion) {
@@ -224,7 +228,6 @@ pub(super) fn compare(c: &mut Criterion) {
                 cranelift: &|| tone_curve::build::<Cranelift>(black_box(fused)),
                 llvm: &|| tone_curve::build::<LlvmManualSimd>(black_box(fused)),
             },
-            || tone_curve::build::<Llvm>(black_box(fused)),
         );
     }
 
@@ -247,7 +250,6 @@ pub(super) fn compare(c: &mut Criterion) {
             cranelift: &local_energy::build::<Cranelift>,
             llvm: &local_energy::build::<LlvmManualSimd>,
         },
-        local_energy::build::<Llvm>,
     );
 
     let scores: Vec<_> = samples
@@ -269,7 +271,6 @@ pub(super) fn compare(c: &mut Criterion) {
             cranelift: &feature_score::build::<Cranelift>,
             llvm: &feature_score::build::<LlvmManualSimd>,
         },
-        feature_score::build::<Llvm>,
     );
 
     let coefficients = [733, -179, -1261, 583];
@@ -296,7 +297,7 @@ pub(super) fn compare(c: &mut Criterion) {
                 usize::try_from(count).map_err(|_| "invalid calibration buffers".into())
             },
         }
-        .compare_with_llvm_auto(
+        .compare(
             c,
             || calibrate::ir(black_box(hoist)),
             Builders {
@@ -304,7 +305,6 @@ pub(super) fn compare(c: &mut Criterion) {
                 cranelift: &|| calibrate::build::<Cranelift>(black_box(hoist)),
                 llvm: &|| calibrate::build::<LlvmManualSimd>(black_box(hoist)),
             },
-            Some(&|| calibrate::build::<Llvm>(black_box(hoist))),
         );
     }
 
@@ -332,7 +332,6 @@ pub(super) fn compare(c: &mut Criterion) {
             cranelift: &ramp_integral::build::<Cranelift>,
             llvm: &ramp_integral::build::<LlvmManualSimd>,
         },
-        ramp_integral::build::<Llvm>,
     );
 
     let mut state = (0i64, 0i64, 0i64, 0u32);
@@ -363,6 +362,7 @@ pub(super) fn compare(c: &mut Criterion) {
             cranelift: &envelope::build::<Cranelift>,
             llvm: &envelope::build::<LlvmManualSimd>,
         },
-        envelope::build::<Llvm>,
     );
+
+    loops::compare(c);
 }

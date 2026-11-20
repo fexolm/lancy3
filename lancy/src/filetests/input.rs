@@ -338,6 +338,23 @@ fn body<'a>(
         if let ["block", name, ..] = words.as_slice() {
             block = blocks[name];
             ended = false;
+        } else if let ["slices", first, layout @ ..] = words.as_slice() {
+            let first = first
+                .parse::<usize>()
+                .map_err(|_| format!("line {line}: invalid slice parameter index"))?;
+            let slices = layout
+                .iter()
+                .map(|&entry| match entry {
+                    "read2" => Ok((2, false)),
+                    "read4" => Ok((4, false)),
+                    "read8" => Ok((8, false)),
+                    "write2" => Ok((2, true)),
+                    "write4" => Ok((4, true)),
+                    "write8" => Ok((8, true)),
+                    _ => Err(format!("line {line}: invalid slice layout {entry}")),
+                })
+                .collect::<Result<Box<_>>>()?;
+            f.set_slice_params(first, slices);
         } else {
             if ended {
                 return Err(format!("line {line}: instruction after terminator"));

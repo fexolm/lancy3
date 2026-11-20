@@ -8,6 +8,17 @@ use crate::{lir::TargetInst, module::FunctionId};
 use regalloc2::{MachineEnv, Operand, PReg, PRegSet, RegClass, VReg};
 use simd::Native;
 
+#[derive(Clone, Copy, Debug)]
+pub(super) enum VectorMask<R> {
+    Signs(R),
+    Compare {
+        lhs: R,
+        rhs: R,
+        predicate: i32,
+        signed: bool,
+    },
+}
+
 const fn gpr(enc: usize) -> PReg {
     PReg::new(enc, RegClass::Int)
 }
@@ -225,15 +236,19 @@ pub(super) enum Inst {
     CheckBounds(VReg, VReg),
     CheckMask(VReg),
     BranchAny(VReg),
+    BranchAll(Lane, VReg),
     Movsxd(VReg, VReg),
     Lea(VReg, Address),
     Load(Type, VReg, Address),
+    PackedMemory(Binary, Lane, VReg, VReg, Address),
+    BroadcastMemory(Lane, VReg, Address),
+    BroadcastLane(VReg, VReg, u8),
     Masked {
         ty: Type,
         base: VReg,
         indices: Option<VReg>,
         temp: Option<VReg>,
-        mask: VReg,
+        mask: VectorMask<VReg>,
         value: VReg,
         dst: Option<VReg>,
     },
@@ -346,10 +361,15 @@ impl TargetInst for Inst {
             }
             Self::CheckBounds(i, n) => out.extend([O::reg_use(i), O::any_use(n)]),
             Self::Movsxd(d, a) => out.extend([O::reg_use(a), O::reg_def(d)]),
-            Self::Lea(d, addr) | Self::Load(_, d, addr) => {
+            Self::Lea(d, addr) | Self::Load(_, d, addr) | Self::BroadcastMemory(_, d, addr) => {
                 addr.operands(out);
                 out.push(O::reg_def(d));
             }
+            Self::PackedMemory(_, _, d, value, addr) => {
+                addr.operands(out);
+                out.extend([O::reg_use(value), O::reg_def(d)]);
+            }
+            Self::BroadcastLane(d, src, _) => out.extend([O::reg_use(src), O::reg_def(d)]),
             Self::Masked {
                 base,
                 indices,
@@ -361,7 +381,13 @@ impl TargetInst for Inst {
             } => {
                 out.push(O::reg_use(base));
                 out.extend(indices.map(O::reg_use));
-                out.extend([O::reg_use(mask), O::reg_use(value)]);
+                match mask {
+                    VectorMask::Signs(v) => out.push(O::reg_use(v)),
+                    VectorMask::Compare { lhs, rhs, .. } => {
+                        out.extend([O::reg_use(lhs), O::reg_use(rhs)]);
+                    }
+                }
+                out.push(O::reg_use(value));
                 out.extend(dst.map(O::reg_def));
                 out.extend(temp.map(O::reg_temp));
             }
@@ -369,9 +395,11 @@ impl TargetInst for Inst {
                 addr.operands(out);
                 out.push(O::reg_use(value));
             }
-            Self::CheckMask(v) | Self::BranchAny(v) | Self::StoreArg(_, _, v) | Self::Branch(v) => {
-                out.push(O::reg_use(v))
-            }
+            Self::CheckMask(v)
+            | Self::BranchAny(v)
+            | Self::BranchAll(_, v)
+            | Self::StoreArg(_, _, v)
+            | Self::Branch(v) => out.push(O::reg_use(v)),
             Self::Call { dst, .. } => out.push(O::reg_fixed_def(dst, return_reg(dst))),
             Self::Ret(v) => out.push(O::reg_fixed_use(v, return_reg(v))),
             Self::Jump => {}
@@ -401,7 +429,11 @@ impl TargetInst for Inst {
     fn is_branch(&self) -> bool {
         matches!(
             self,
-            Self::Jump | Self::Branch(_) | Self::BranchAny(_) | Self::BrCmp(..)
+            Self::Jump
+                | Self::Branch(_)
+                | Self::BranchAny(_)
+                | Self::BranchAll(..)
+                | Self::BrCmp(..)
         )
     }
     fn is_ret(&self) -> bool {

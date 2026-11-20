@@ -83,6 +83,8 @@ pub struct Function {
     calls: DenseMap<Call, CallData>,
     operands: Vec<Value>,
     types: DenseMap<Value, Type>,
+    slice_base: usize,
+    slices: Box<[(u8, bool)]>,
 }
 
 impl Function {
@@ -106,6 +108,8 @@ impl Function {
             calls: DenseMap::new(),
             operands: Vec::new(),
             types: DenseMap::with_capacity(arity),
+            slice_base: arity,
+            slices: Box::new([]),
         };
         let entry = f.create_block();
         for ty in params {
@@ -125,6 +129,60 @@ impl Function {
     }
     pub fn value_type(&self, value: Value) -> Type {
         self.types[value]
+    }
+
+    /// Declare consecutive (pointer, i32 length) parameters as initialized
+    /// slices, given the (element byte width, writable) pair for each.
+    /// This is part of the raw call contract. Writable bytes are exclusively
+    /// borrowed and shared bytes stay immutable throughout the call.
+    pub fn set_slice_params(&mut self, first: usize, slices: Box<[(u8, bool)]>) {
+        let params = &self.param_types()[first..first + 2 * slices.len()];
+        assert!(
+            params
+                .chunks_exact(2)
+                .all(|pair| pair == [Type::Ptr, Type::I32])
+        );
+        assert!(slices.iter().all(|&(bytes, _)| matches!(bytes, 2 | 4 | 8)));
+        self.slice_base = first;
+        self.slices = slices;
+    }
+
+    pub(crate) fn copy_slice_params(&mut self, source: &Self) {
+        self.slice_base = source.slice_base;
+        self.slices.clone_from(&source.slices);
+    }
+
+    pub(in crate::hir) fn slice_param(&self, ptr: Value) -> Option<(Value, u8, bool)> {
+        let offset = ptr.index().checked_sub(self.slice_base)?;
+        if !offset.is_multiple_of(2) {
+            return None;
+        }
+        let &(bytes, writable) = self.slices.get(offset / 2)?;
+        Some((Value::from_index(ptr.index() + 1), bytes, writable))
+    }
+
+    pub(in crate::hir) fn has_slice_params(&self) -> bool {
+        !self.slices.is_empty()
+    }
+
+    pub(in crate::hir) fn is_slice_length(&self, value: Value) -> bool {
+        value
+            .index()
+            .checked_sub(1)
+            .and_then(|index| self.slice_param(Value::from_index(index)))
+            .is_some_and(|(len, _, _)| len == value)
+    }
+
+    pub(in crate::hir) fn replace_op_preserving_type(&mut self, inst: Inst, op: Op) {
+        self.insts[inst].op = op;
+    }
+
+    pub(in crate::hir) fn disjoint_buffer_params(&self, a: Value, b: Value) -> bool {
+        a != b
+            && self
+                .slice_param(a)
+                .zip(self.slice_param(b))
+                .is_some_and(|((_, _, write_a), (_, _, write_b))| write_a || write_b)
     }
     pub fn entry(&self) -> Block {
         Block::from_index(0)
@@ -467,20 +525,22 @@ impl Function {
         block.last = prev;
     }
 
-    /// Move selected instructions to the end of a dominating block in layout
-    /// order. The caller proves availability and that speculation is safe.
+    /// Move instructions to the ends of earlier dominating blocks.
+    /// The caller proves operand availability and that speculation is safe.
     pub(in crate::hir) fn hoist_instructions(
         &mut self,
         from: Block,
-        to: Block,
-        mut hoist: impl FnMut(Op, Value, &DenseMap<Value, Type>) -> bool,
+        mut destination: impl FnMut(Op, Value, &DenseMap<Value, Type>) -> Option<(Block, Op)>,
     ) {
         let mut prev = Inst::INVALID;
         let mut i = self.blocks[from].first;
         while i != Inst::INVALID {
             let inst = &self.insts[i];
             let next = inst.next;
-            if inst.result != Value::INVALID && hoist(inst.op, inst.result, &self.types) {
+            if inst.result != Value::INVALID
+                && let Some((to, op)) = destination(inst.op, inst.result, &self.types)
+            {
+                debug_assert_ne!(from, to);
                 if prev == Inst::INVALID {
                     self.blocks[from].first = next;
                 } else {
@@ -493,6 +553,7 @@ impl Function {
                     self.insts[target.last].next = i;
                 }
                 target.last = i;
+                self.insts[i].op = op;
                 self.insts[i].next = Inst::INVALID;
             } else {
                 prev = i;
@@ -541,6 +602,11 @@ impl Function {
             || scalars.iter().any(|&t| t != Type::I32)
         {
             return Err("expected (ptr, i32...) -> i32 matching the run arguments".into());
+        }
+        if let Some((_, width, _)) = self.slice_param(Value::from_index(0))
+            && (args[0] < 0 || args[0] as usize > buffer.len() / usize::from(width))
+        {
+            return Err("declared slice extends beyond the run buffer".into());
         }
         self.verified_module().map_err(|e| e.to_string())?;
         let words: Vec<_> = std::iter::once(0)

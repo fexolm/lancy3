@@ -20,6 +20,7 @@ pub(super) fn select(
     root: bool,
     callee_info: impl Fn(&Function) -> (FunctionId, PRegSet),
 ) -> Result<lir::Function<Inst>, CompileError> {
+    let _span = tracing::debug_span!(target: "splice::compile", "select_instructions").entered();
     let reg = |v| rules::reg(f, v);
     let cpu = Features::host();
     let edges = Edges::new(f, cfg);

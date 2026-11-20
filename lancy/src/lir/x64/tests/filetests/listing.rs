@@ -183,6 +183,7 @@ fn opcode(inst: Inst) -> String {
         Inst::BrCmp(cc, _, arg) => format!("brcmp.{cc:?}{}", rhs(arg)),
         Inst::CheckMask(_) => "bounds.mask".into(),
         Inst::BranchAny(_) => "branch.any".into(),
+        Inst::BranchAll(lane, _) => format!("branch.all.{lane:?}"),
         Inst::CheckBounds(..) => "bounds".into(),
         Inst::Cdq { .. } => "cdq".into(),
         Inst::IDiv { remainder, .. } => if remainder { "irem" } else { "idiv" }.into(),
@@ -202,6 +203,9 @@ fn opcode(inst: Inst) -> String {
             if dst.is_some() { "load" } else { "store" }
         ),
         Inst::Load(t, _, a) => format!("load.{t:?} {}", addr(a)),
+        Inst::PackedMemory(kind, _, _, _, a) => format!("packed.{kind:?}.mem {}", addr(a)),
+        Inst::BroadcastMemory(lane, _, a) => format!("broadcast.{lane:?}.mem {}", addr(a)),
+        Inst::BroadcastLane(_, _, lane) => format!("broadcast.lane {lane}"),
         Inst::Store(t, a, _) => format!("store.{t:?} {}", addr(a)),
         Inst::StoreArg(i, ..) => format!("store_arg {i}"),
         Inst::Call {

@@ -57,7 +57,9 @@ impl Rule {
             Action::Reduce(op)
                 if !e.float()
                     && n <= 8
-                    && (c.bytes == 16 || c.avx2)
+                    && (c.bytes == 16
+                        || c.avx2
+                        || cfg!(feature = "experimental-simd") && c.bytes == 32)
                     && match op {
                         B::Add | B::And | B::Or | B::Xor => true,
                         B::Mul => n == 2 || n == 4 && c.sse41,

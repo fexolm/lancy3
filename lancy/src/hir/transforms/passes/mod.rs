@@ -1,6 +1,9 @@
 //! HIR optimization passes, shared by all targets.
+#[cfg(feature = "experimental-simd")]
+mod experimental;
 mod inline;
 mod local_cfg;
+mod loops;
 mod prune;
 mod sccp;
 mod simplify;
@@ -37,20 +40,27 @@ pub(crate) fn optimize_and_lower<T>(
     inlining: Inlining,
     lower: impl Fn(Module<VerifiedBody<'_>>, &FunctionIds<Function>) -> Result<T, CompileError>,
 ) -> Result<T, CompileError> {
+    let _span =
+        tracing::debug_span!(target: "splice::compile", "optimize_and_lower_lancy").entered();
     let emit = |body: Function| {
         let (module, ids) = body.verified_module()?;
         lower(module, &ids)
     };
     if inlining.should_inline(source) {
-        let expanded = inline_all(source, ids).and_then(|mut body| {
-            simplify(&mut body)?;
-            emit(body)
-        });
+        let expanded = tracing::debug_span!(target: "splice::compile", "inline_lancy_hir")
+            .in_scope(|| inline_all(source, ids))
+            .and_then(|mut body| {
+                tracing::debug_span!(target: "splice::compile", "optimize_lancy_hir")
+                    .in_scope(|| simplify(&mut body))?;
+                emit(body)
+            });
         match expanded {
             // Lowering can also run out of virtual registers or branch range.
             Err(CompileError::FunctionTooLarge | CompileError::BranchOutOfRange { .. }) => {}
             other => return other,
         }
     }
-    emit(simplify_bodies(source, ids)?)
+    let body = tracing::debug_span!(target: "splice::compile", "optimize_lancy_hir")
+        .in_scope(|| simplify_bodies(source, ids))?;
+    emit(body)
 }

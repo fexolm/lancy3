@@ -6,10 +6,12 @@ rust-version = "1.94"
 description = "A staged Rust kernel language with a portable code generation interface"
 
 [dependencies]
+tracing.workspace = true
 splice-target = { path = "../splice-target" }
 splice-macros = { path = "../splice-macros" }
 
 [dev-dependencies]
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt"] }
 criterion = { version = "0.8", features = ["html_reports"] }
 splice-cranelift = { path = "../splice-cranelift" }
 splice-lancy = { path = "../splice-lancy" }

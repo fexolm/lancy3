@@ -50,6 +50,7 @@ pub(super) struct KernelModule {
 
 impl KernelModule {
     pub fn lower(module: &mut JITModule, root: &Function) -> splice::Result<Self> {
+        let _span = tracing::debug_span!(target: "splice::compile", "lower_cranelift_ir").entered();
         let entry = declare(module, root, true)?;
         let mut pending = vec![(root, entry)];
         let mut ids = HashMap::from([(std::ptr::from_ref(root), entry)]);
@@ -116,7 +117,9 @@ impl KernelModule {
         let mut pending = vec![(self.entry, root)];
         while let Some((id, func)) = pending.pop() {
             ctx.func = func;
-            ctx.inline(&mut inliner).map_err(|e| e.to_string())?;
+            tracing::debug_span!(target: "splice::compile", "inline_cranelift_ir")
+                .in_scope(|| ctx.inline(&mut inliner))
+                .map_err(|e| e.to_string())?;
             for child in local_callees(&ctx.func) {
                 if seen.insert(child) {
                     pending.push((child, bodies[&child].clone()));

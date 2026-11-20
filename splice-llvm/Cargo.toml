@@ -6,6 +6,7 @@ rust-version = "1.94"
 description = "LLVM ORC JIT code generator for Splice kernels"
 
 [dependencies]
+tracing.workspace = true
 splice = { path = "../splice" }
 splice-target = { path = "../splice-target" }
 

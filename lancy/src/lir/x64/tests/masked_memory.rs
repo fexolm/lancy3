@@ -74,7 +74,7 @@ fn exercise(
         ty: Type::Vector(lane),
         base: 8,
         index,
-        mask,
+        mask: super::super::inst::VectorMask::Signs(mask),
         value,
         dst,
         temp: (!evex && cpu.avx2 && gather).then_some(4),

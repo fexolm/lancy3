@@ -6,6 +6,7 @@ rust-version = "1.94"
 description = "Lancy native code generation for Splice kernels"
 
 [dependencies]
+tracing.workspace = true
 splice = { path = "../splice" }
 splice-target = { path = "../splice-target" }
 lancy = { path = "../lancy" }

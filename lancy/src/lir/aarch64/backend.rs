@@ -635,6 +635,7 @@ pub(crate) fn emit(source: Module<VerifiedBody<'_>>, ids: &FunctionIds<Function>
 }
 
 fn emit_compiled(module: &Module<Compiled>, config: Simd) -> Result<Code> {
+    let _span = tracing::debug_span!(target: "splice::compile", "emit_machine_code").entered();
     let root = module.call_graph.root();
     let mut a = Assembler::default();
     let mut sites = Vec::new();

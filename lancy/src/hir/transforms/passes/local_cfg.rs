@@ -1,5 +1,5 @@
-use crate::hir::transforms::{ControlFlowGraph, DomTree};
-use crate::hir::{Binary, Block, Function, Op, Terminator, Ternary, Type, Value, ssa::Edge};
+use crate::hir::transforms::ControlFlowGraph;
+use crate::hir::{Function, Op, Terminator, Ternary, Type, Value, ssa::Edge};
 use crate::support::slotmap::DenseMap;
 
 /// Turn a single i32 merge into a select when neither arm computes anything.
@@ -120,76 +120,5 @@ pub(super) fn forward_params(f: &mut Function, cfg: &ControlFlowGraph) {
         }
         f.remove_aliased_params(&aliases);
         f.substitute_values(&aliases);
-    }
-}
-
-/// Hoist total i32 arithmetic in natural loops with an existing preheader
-/// and a straight-line body. Reject internal branches and side entries
-/// rather than building a loop forest or cloning CFG.
-pub(super) fn hoist_loop_invariants(f: &mut Function, cfg: &ControlFlowGraph, dom: &DomTree) {
-    let mut defs = None;
-    let mut body = Vec::new();
-    for &header in cfg.reverse_postorder() {
-        let &[a, b] = cfg.predecessors(header) else {
-            continue;
-        };
-        let (preheader, latch) = if dom.dominates(header, b) {
-            (a, b)
-        } else {
-            (b, a)
-        };
-        if dom.dominates(header, preheader)
-            || !dom.dominates(header, latch)
-            || !matches!(*f.terminator(preheader), Terminator::Jump(_))
-            || (latch != header && !matches!(*f.terminator(latch), Terminator::Jump(_)))
-        {
-            continue;
-        }
-        body.clear();
-        let mut cursor = latch;
-        while cursor != header {
-            let &[pred] = cfg.predecessors(cursor) else {
-                break;
-            };
-            if pred != header && !matches!(*f.terminator(pred), Terminator::Jump(_)) {
-                break;
-            }
-            body.push(cursor);
-            cursor = pred;
-        }
-        if cursor != header {
-            continue;
-        }
-        body.push(header);
-        let defs = defs.get_or_insert_with(|| {
-            let mut defs = DenseMap::filled(f.value_count(), Block::INVALID);
-            for block in f.blocks() {
-                for &v in f.params(block) {
-                    defs[v] = block;
-                }
-                for i in f.instructions(block) {
-                    if let Some(v) = f.result(i) {
-                        defs[v] = block;
-                    }
-                }
-            }
-            defs
-        });
-        for &block in body.iter().rev() {
-            f.hoist_instructions(block, preheader, |op, result, types| {
-                let Op::Bin(kind, a, b) = op else {
-                    return false;
-                };
-                if types[a] == Type::I32
-                    && !matches!(kind, Binary::Div | Binary::Rem)
-                    && dom.dominates(defs[a], preheader)
-                    && dom.dominates(defs[b], preheader)
-                {
-                    defs[result] = preheader;
-                    return true;
-                }
-                false
-            });
-        }
     }
 }

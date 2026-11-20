@@ -77,7 +77,7 @@ block step
 block exit divisor:i32
   q = div x divisor
   ret q
-@opt check: br
+@opt not: br
 @isel check: idiv.imm=7 Reciprocal
 @run 21 0 -> 3
 @run -21 3 -> -3

@@ -1,0 +1,18 @@
+# A low bit is enough for all; a zero in the last lane is enough to fail.
+fn main x:i32 -> i32
+  one = const 1
+  splat = simd.splat one
+  count = simd.lanes i32
+  last = sub count one
+  mask = simd.insert splat last x
+  all = simd.all mask
+  br all nonzero | empty
+block nonzero
+  yes = const 17
+  ret yes
+block empty
+  no = const 23
+  ret no
+@run 0 -> 23
+@run 1 -> 17
+@run 0x80000000 -> 17

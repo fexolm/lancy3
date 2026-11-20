@@ -1,0 +1,104 @@
+# A unit-stride loop with a strict signed bound terminates from any initial i32.
+fn main start:i32 end:i32 x:i32 -> i32
+  z = const 0
+  one = const 1
+  jump head start z
+block head i:i32 acc:i32
+  more = lt i end
+  br more body | done
+block body
+  next = add i one
+  sum = add acc x
+  jump head next sum
+block done
+  ret x
+@source check: br
+@opt not: br
+@opt not: Add
+@opt check: ret
+@run 0 3 7 -> 7
+@run -3 0 8 -> 8
+@run 2147483646 2147483647 9 -> 9
+@run 0 -1 10 -> 10
+
+---
+
+# <= permits overflow and a nonterminating cycle at MAX.
+fn main end:i32 x:i32 -> i32
+  z = const 0
+  one = const 1
+  jump head z
+block head i:i32
+  more = le i end
+  br more body | done
+block body
+  next = add i one
+  jump head next
+block done
+  ret x
+@opt check: br
+@run 3 7 -> 7
+@run -1 8 -> 8
+
+---
+
+# The final induction value is max(end, 0) even when the loop never runs.
+fn main end:i32 -> i32
+  z = const 0
+  one = const 1
+  jump head z
+block head i:i32
+  more = lt i end
+  br more body | done
+block body
+  next = add i one
+  jump head next
+block done
+  ret i
+@opt check: Max
+@opt not: br
+@opt check: ret
+@run 3 -> 3
+@run -1 -> 0
+
+---
+
+fn main p:ptr n:i32 x:i32 d:i32 -> i32
+  store p x
+  z = const 0
+  one = const 1
+  jump head z
+block head i:i32
+  more = lt i n
+  br more body | done
+block body
+  dead = div x d
+  next = add i one
+  jump head next
+block done
+  ret x
+@opt check: store
+@opt check: br
+@opt check: Div
+@run 0 7 0 -> 7 | aa aa aa aa | 07 00 00 00
+@run 1 7 0 -> !zero | aa aa aa aa | 07 00 00 00
+
+---
+
+fn main p:ptr n:i32 -> i32
+  z = const 0
+  one = const 1
+  jump head z
+block head i:i32
+  more = lt i n
+  br more body | done
+block body
+  store p i
+  next = add i one
+  jump head next
+block done
+  ret n
+@opt check: br
+@opt check: store
+@run 0 -> 0 | aa aa aa aa | aa aa aa aa
+@run 3 -> 3 | aa aa aa aa | 02 00 00 00

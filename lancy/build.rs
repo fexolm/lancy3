@@ -42,6 +42,9 @@ fn main() {
             tests.push_str(&format!("mod {name} {{ use super::fixture;\n"));
         }
         for (i, file) in files.iter().enumerate() {
+            if file.starts_with("passes/experimental/") {
+                tests.push_str("#[cfg(feature = \"experimental-simd\")]\n");
+            }
             let test = if collision {
                 format!("case_{}", i + 1)
             } else {
