@@ -185,6 +185,15 @@ fn opcode(inst: Inst) -> String {
         Inst::CheckBounds(..) => "bounds".into(),
         Inst::Cdq { .. } => "cdq".into(),
         Inst::IDiv { remainder, .. } => if remainder { "irem" } else { "idiv" }.into(),
+        Inst::DivImm {
+            remainder,
+            divisor,
+            quotient,
+            ..
+        } => format!(
+            "{}.imm={divisor} {quotient:?}",
+            if remainder { "irem" } else { "idiv" },
+        ),
         Inst::Movsxd(..) => "movsxd".into(),
         Inst::Lea(_, a) => format!("lea {}", addr(a)),
         Inst::Masked { ty, dst, .. } => format!(

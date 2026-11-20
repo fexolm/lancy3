@@ -141,6 +141,39 @@ pub(super) enum Rhs {
     Imm(i32),
 }
 
+#[derive(Clone, Copy, Debug)]
+pub(super) enum Quotient {
+    PowerOfTwo(i32),
+    Reciprocal { multiplier: u32, shift: i32 },
+}
+
+impl Quotient {
+    // The caller has handled ±1 and zero.
+    pub fn for_divisor(divisor: i32) -> Self {
+        let magnitude = divisor.unsigned_abs();
+        let log = magnitude.ilog2();
+        if magnitude.is_power_of_two() {
+            return Self::PowerOfTwo(log as i32);
+        }
+        let d = u64::from(magnitude);
+        let mut shift = 31 + log;
+        let scale = 1u64 << shift;
+        let mut multiplier = scale.div_ceil(d);
+        // For n >= 0, the error in n*m/scale must be strictly below 1/d.
+        // For n < 0 the result is rounded down, then incremented to
+        // truncate toward zero. The reciprocal rounds up strictly for all
+        // non-powers of two. One extra bit always meets the error bound.
+        if multiplier * d - scale > 1u64 << log {
+            shift += 1;
+            multiplier = (1u64 << shift).div_ceil(d);
+        }
+        Self::Reciprocal {
+            multiplier: multiplier as u32,
+            shift: shift as i32,
+        }
+    }
+}
+
 impl Rhs {
     fn operands(self, out: &mut Vec<Operand>) {
         if let Self::Reg(r) = self {
@@ -201,6 +234,13 @@ pub(super) enum Inst {
         lo: VReg,
         hi: VReg,
         divisor: VReg,
+    },
+    DivImm {
+        remainder: bool,
+        dst: VReg,
+        value: VReg,
+        divisor: i32,
+        quotient: Quotient,
     },
     CheckBounds(VReg, VReg),
     CheckMask(VReg),
@@ -310,6 +350,9 @@ impl TargetInst for Inst {
                 O::reg_use(divisor),
                 O::reg_fixed_def(dst, if remainder { DX } else { AX }),
             ]),
+            Self::DivImm { dst, value, .. } => {
+                out.extend([O::reg_use(value), O::reg_def_at_start(dst)])
+            }
             Self::CheckBounds(i, n) => out.extend([O::reg_use(i), O::any_use(n)]),
             Self::Movsxd(d, a) => out.extend([O::reg_use(a), O::reg_def(d)]),
             Self::Lea(d, addr) | Self::Load(_, d, addr) => {

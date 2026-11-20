@@ -1,5 +1,5 @@
 use crate::hir::{
-    Binary, Block, Function, IrError, Op, Terminator,
+    Binary, Block, Function, IrError, Op, Simd, Terminator, Ternary, Type,
     ssa::VerifiedBody,
     transforms::{ControlFlowGraph, DomTree},
 };
@@ -7,15 +7,16 @@ use crate::module::{FunctionIds, Module};
 use crate::support::slotmap::DenseMap;
 use std::{collections::HashMap, sync::Arc};
 
-/// Canonicalize scalar dataflow before instruction selection. Division,
+/// Canonicalize dataflow before instruction selection. Division,
 /// memory operations and checks remain ordered on every executable path.
 pub(crate) fn simplify(f: &mut Function) -> Result<(), IrError> {
     let mut cfg = ControlFlowGraph::compute(f)?;
     let mut aliases = DenseMap::from_fn(f.value_count(), |v| v);
     let mut constants = DenseMap::filled(f.value_count(), None);
+    let mut vector_orderings = HashMap::new();
     let mut changed_cfg = false;
     for &b in cfg.reverse_postorder() {
-        f.rewrite_instructions(b, |op, result| {
+        f.rewrite_instructions(b, |op, result, types| {
             match (op, result) {
                 (Op::Copy(v), Some(dst)) => aliases[dst] = aliases[v],
                 (Op::Const(n), Some(dst)) => constants[dst] = Some(n),
@@ -25,6 +26,32 @@ pub(crate) fn simplify(f: &mut Function) -> Result<(), IrError> {
                     {
                         constants[dst] = Some(n);
                         return Some(Op::Const(n));
+                    }
+                }
+                (
+                    Op::Simd(Simd::Bin(
+                        kind @ (Binary::Lt | Binary::Le | Binary::Gt | Binary::Ge),
+                        x,
+                        y,
+                    )),
+                    Some(dst),
+                ) if matches!(types[x], Type::Vector(lane) if !lane.float()) => {
+                    vector_orderings.insert(dst, (kind, aliases[x], aliases[y]));
+                }
+                (Op::Simd(Simd::Ternary(Ternary::Select, mask, yes, no)), _) => {
+                    if let Some(&(kind, x, y)) = vector_orderings.get(&aliases[mask]) {
+                        let left_is_min = matches!(kind, Binary::Lt | Binary::Le);
+                        let yes = aliases[yes];
+                        let no = aliases[no];
+                        let select_min = if (yes, no) == (x, y) {
+                            left_is_min
+                        } else if (yes, no) == (y, x) {
+                            !left_is_min
+                        } else {
+                            return Some(op);
+                        };
+                        let kind = if select_min { Binary::Min } else { Binary::Max };
+                        return Some(Op::Simd(Simd::Bin(kind, yes, no)));
                     }
                 }
                 _ => {}
@@ -79,7 +106,7 @@ fn fold_i32(op: Binary, a: i32, b: i32) -> Option<i32> {
 fn remove_redundant_checks(f: &mut Function, dom: &DomTree) {
     let mut checks = HashMap::new();
     for &b in dom.preorder() {
-        f.rewrite_instructions(b, |op, _| {
+        f.rewrite_instructions(b, |op, _, _| {
             if let Op::BoundsCheck(i, n) = op {
                 let previous = checks.entry((i, n)).or_insert(Block::INVALID);
                 if dom.dominates(*previous, b) {
@@ -118,7 +145,9 @@ fn remove_dead_computations(f: &mut Function, cfg: &ControlFlowGraph) {
             }
             f.visit_operands(i, |v| live[v] = true);
         }
-        f.rewrite_instructions(b, |op, result| result.is_none_or(|v| live[v]).then_some(op));
+        f.rewrite_instructions(b, |op, result, _| {
+            result.is_none_or(|v| live[v]).then_some(op)
+        });
     }
 }
 

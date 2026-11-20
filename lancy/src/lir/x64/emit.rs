@@ -3,7 +3,7 @@ use super::{Features, inst::class, inst::simd};
 use super::{
     compile::{CompiledFunction, compile},
     frame::{CHILD_ARGS, Frame},
-    inst::{Address, Alu, Cond, Inst, Rhs},
+    inst::{Address, Alu, Cond, Inst, Quotient, Rhs},
 };
 use crate::numbers::Math;
 use crate::{
@@ -461,6 +461,47 @@ impl Emitter<'_> {
                 a.je(overflow)?;
                 bind(a, divide)?;
                 a.idiv(r(2))
+            }
+            Inst::DivImm {
+                remainder,
+                divisor,
+                quotient,
+                ..
+            } => {
+                let input = r(0);
+                let dst = r(1);
+                match quotient {
+                    Quotient::PowerOfTwo(shift) => {
+                        let bias = ((1u32 << shift) - 1) as i32;
+                        a.lea(dst, ptr(q(0) + bias))?;
+                        a.test(input, input)?;
+                        a.cmovns(dst, input)?;
+                        a.sar(dst, shift)?;
+                    }
+                    Quotient::Reciprocal { multiplier, shift } => {
+                        a.movsxd(q(1), input)?;
+                        if let Ok(multiplier) = i32::try_from(multiplier) {
+                            a.imul_3(q(1), q(1), multiplier)?;
+                        } else {
+                            // R10 is reserved for scratch and cannot hold an input.
+                            a.mov(r10d, multiplier)?;
+                            a.imul_2(q(1), r10)?;
+                        }
+                        a.sar(q(1), shift)?;
+                        a.mov(r10d, input)?;
+                        a.shr(r10d, 31)?;
+                        a.add(dst, r10d)?;
+                    }
+                }
+                if remainder {
+                    // The product used the positive magnitude. Its wrapped
+                    // negation also covers a divisor of i32::MIN.
+                    a.imul_3(dst, dst, (divisor.unsigned_abs() as i32).wrapping_neg())?;
+                    a.add(dst, input)?;
+                } else if divisor < 0 {
+                    a.neg(dst)?;
+                }
+                Ok(())
             }
             Inst::CheckMask(_) => {
                 let fail = *self.failures[0].get_or_insert_with(|| a.create_label());

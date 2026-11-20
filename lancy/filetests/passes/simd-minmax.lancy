@@ -1,0 +1,86 @@
+# Signed clamp. Both compare masks become dead after replacing the selects.
+fn main x:i32 -> i32
+  a = simd.splat x
+  zero = const 0
+  zeros = simd.splat zero
+  cap = const 255
+  caps = simd.splat cap
+  below = simd.lt a zeros
+  positive = simd.select below zeros a
+  above = simd.le caps positive
+  chosen = simd.select above caps positive
+  result = simd.extract chosen zero
+  ret result
+@source check: Ternary(Select)
+@opt not: Binary(Lt)
+@opt not: Ternary(Select)
+@opt check: Binary(Max)
+@opt not: Binary(Le)
+@opt not: Ternary(Select)
+@opt check: Binary(Min)
+@opt not: Ternary(Select)
+@opt check: ret
+@isel check: native.Vector(I32).Binary(Max)
+@isel check: native.Vector(I32).Binary(Min)
+@run 0x80000000 -> 0
+@run -1 -> 0
+@run 0 -> 0
+@run 254 -> 254
+@run 255 -> 255
+@run 256 -> 255
+@run 2147483647 -> 255
+---
+# Unsigned ordering, with aliases and another use of the comparison.
+fn main x:i32 y:i32 -> i32
+  xu = bitcast u32 x
+  yu = bitcast u32 y
+  a = simd.splat xu
+  b = simd.splat yu
+  ge = simd.ge a b
+  mask = copy ge
+  left = copy b
+  smaller = simd.select mask left a
+  zero = const 0
+  result = simd.extract smaller zero
+  bits = bitcast i32 result
+  flag = simd.any ge
+  combined = add bits flag
+  ret combined
+@opt check: Binary(Ge)
+@opt check: Binary(Min)
+@opt not: Ternary(Select)
+@opt check: ret
+@run -1 1 -> 0
+@run 1 -1 -> 1
+@run 2 2 -> 1
+---
+# Selecting a value absent from the comparison cannot become a min or max.
+fn main x:i32 y:i32 z:i32 -> i32
+  a = simd.splat x
+  b = simd.splat y
+  c = simd.splat z
+  below = simd.lt a b
+  chosen = simd.select below a c
+  zero = const 0
+  result = simd.extract chosen zero
+  ret result
+@opt check: Binary(Lt)
+@opt check: Ternary(Select)
+@run 5 3 99 -> 99
+@run 3 5 99 -> 3
+---
+# Floating min would discard the NaN returned by this ordered comparison and select.
+fn main -> i32
+  one = literal f32 3f800000
+  nan = literal f32 7fc12345
+  a = simd.splat one
+  b = simd.splat nan
+  below = simd.lt a b
+  chosen = simd.select below a b
+  zero = const 0
+  result = simd.extract chosen zero
+  bits = bitcast i32 result
+  ret bits
+@opt check: Binary(Lt)
+@opt check: Ternary(Select)
+@run -> 0x7fc12345

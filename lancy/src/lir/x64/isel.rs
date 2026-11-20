@@ -1,7 +1,7 @@
 use super::{
     Features,
     inst::simd::Native,
-    inst::{Address, Alu, Cond, Inst, Rhs, class},
+    inst::{Address, Alu, Cond, Inst, Quotient, Rhs, class},
 };
 use crate::CompileError;
 use crate::hir::{Binary, Function, Op, Scale, Terminator, Value, transforms::ControlFlowGraph};
@@ -281,6 +281,25 @@ impl Rules<'_> {
         }
         Ok(Some(match kind {
             Binary::Div | Binary::Rem => {
+                if let Some(divisor) = self.ctx.constant(b) {
+                    let remainder = kind == Binary::Rem;
+                    if divisor == 1 {
+                        return Ok(Some(if remainder {
+                            Inst::Imm(dst, 0)
+                        } else {
+                            Inst::Copy(dst, self.input(a))
+                        }));
+                    }
+                    if !matches!(divisor, 0 | -1) {
+                        return Ok(Some(Inst::DivImm {
+                            remainder,
+                            dst,
+                            value: self.input(a),
+                            divisor,
+                            quotient: Quotient::for_divisor(divisor),
+                        }));
+                    }
+                }
                 let a = self.input(a);
                 let hi = self.body.temp(RegClass::Int)?;
                 self.out.push(Inst::Cdq { lo: a, hi });

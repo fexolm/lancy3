@@ -409,7 +409,7 @@ impl Function {
     pub(in crate::hir) fn rewrite_instructions(
         &mut self,
         block: Block,
-        mut rewrite: impl FnMut(Op, Option<Value>) -> Option<Op>,
+        mut rewrite: impl FnMut(Op, Option<Value>, &DenseMap<Value, Type>) -> Option<Op>,
     ) {
         let block = &mut self.blocks[block];
         let mut prev = Inst::INVALID;
@@ -420,6 +420,7 @@ impl Function {
             if let Some(op) = rewrite(
                 inst.op,
                 (inst.result != Value::INVALID).then_some(inst.result),
+                &self.types,
             ) {
                 inst.op = op;
                 prev = i;

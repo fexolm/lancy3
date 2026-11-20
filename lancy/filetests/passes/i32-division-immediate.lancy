@@ -1,0 +1,86 @@
+fn main out:ptr x:i32 -> i32
+  d = const -7
+  q = div x d
+  r = rem x d
+  store out q
+  ret r
+@isel check: idiv.imm=-7 Reciprocal
+@isel check: irem.imm=-7 Reciprocal
+@asm not: idiv
+@asm check: imul
+@asm not: idiv
+@asm check: ret
+@run -8 -> -1 | 00 00 00 00 | 01 00 00 00
+@run 8 -> 1 | 00 00 00 00 | ff ff ff ff
+@run -2147483648 -> -2 | 00 00 00 00 | 92 24 49 12
+
+---
+
+fn main x:i32 -> i32
+  d = const 10
+  q = div x d
+  ret q
+@isel check: idiv.imm=10 Reciprocal { multiplier: 1717986919, shift: 34 }
+@asm not: idiv
+@asm check: imul
+@run -2147483648 -> -214748364
+@run 2147483647 -> 214748364
+@run -9 -> 0
+@run -10 -> -1
+
+---
+
+fn main out:ptr x:i32 -> i32
+  d = const 8
+  q = div x d
+  r = rem x d
+  store out q
+  ret r
+@isel check: idiv.imm=8 PowerOfTwo(3)
+@isel check: irem.imm=8 PowerOfTwo(3)
+@asm not: idiv
+@asm check: sar
+@asm not: idiv
+@asm check: ret
+@run -9 -> -1 | 00 00 00 00 | ff ff ff ff
+@run -2147483648 -> 0 | 00 00 00 00 | 00 00 00 f0
+
+---
+
+fn main out:ptr x:i32 -> i32
+  d = const -2147483648
+  q = div x d
+  r = rem x d
+  store out q
+  ret r
+@isel check: idiv.imm=-2147483648 PowerOfTwo(31)
+@isel check: irem.imm=-2147483648 PowerOfTwo(31)
+@run -2147483647 -> -2147483647 | aa aa aa aa | 00 00 00 00
+@run -2147483648 -> 0 | aa aa aa aa | 01 00 00 00
+
+---
+
+fn main out:ptr x:i32 -> i32
+  d = const -1
+  store out x
+  dead = rem x d
+  one = const 1
+  next = offset out one 4
+  store next x
+  ret x
+@isel check: store.I32
+@isel check: irem
+@isel check: store.I32
+@asm check: idiv
+@run -2147483648 -> !overflow | aa aa aa aa bb bb bb bb | 00 00 00 80 bb bb bb bb
+@run 7 -> 7 | aa aa aa aa bb bb bb bb | 07 00 00 00 07 00 00 00
+
+---
+
+fn main x:i32 -> i32
+  d = const 0
+  q = div x d
+  ret q
+@isel check: idiv
+@asm check: idiv
+@run 7 -> !zero
