@@ -1,6 +1,8 @@
 use splice::{Codegen, Executable, kernel};
+use splice_cranelift::Cranelift;
 use splice_lancy::Lancy;
 use splice_llvm::Llvm;
+use splice_text::Text;
 use std::{
     io::{self, Write},
     sync::{Arc, Mutex},
@@ -48,25 +50,35 @@ fn staged_and_portable_compilation_report_stage_durations() {
         ] {
             assert_eq!(kernel.call(&[41], &mut []), Ok(42));
         }
+        let kernel = increment::build::<Cranelift>().unwrap();
+        assert_eq!(kernel.call(&[41], &mut []), Ok(42));
+        assert!(Text::compile(&ir).unwrap().starts_with("fn increment("));
     });
     let bytes = output.lock().unwrap();
     let log = std::str::from_utf8(&bytes).unwrap();
     for (stage, expected_count) in [
+        ("materialize_ir", 2),
         ("stage_lancy_hir", 1),
         ("lower_lancy_hir", 1),
+        ("verify_lancy_hir", 4),
+        ("optimize_lancy_hir", 2),
         ("select_instructions", 2),
         ("allocate_registers", 2),
         ("emit_machine_code", 2),
         ("install_code", 2),
         ("populate_llvm_ir", 2),
-        ("optimize_llvm_ir", 2),
+        ("verify_llvm_ir", 2),
+        ("optimize_llvm_ir{auto_vectorize=true}", 2),
         ("emit_llvm_object", 2),
         ("link_llvm_object", 2),
+        ("lower_cranelift_ir", 1),
+        ("inline_cranelift_ir", 1),
+        ("emit_cranelift_code", 1),
+        ("finalize_cranelift_code", 1),
+        ("render_text_ir", 1),
     ] {
-        let count = log
-            .lines()
-            .filter(|line| line.contains(&format!("{stage}:")) && line.contains("time.busy="))
-            .count();
+        let close = format!("{stage}: splice::compile: close time.busy=");
+        let count = log.lines().filter(|line| line.contains(&close)).count();
         assert_eq!(count, expected_count, "{stage}\n{log}");
     }
 }
