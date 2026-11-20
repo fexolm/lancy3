@@ -3,7 +3,7 @@ use super::{Features, inst::class, inst::simd};
 use super::{
     compile::{CompiledFunction, compile},
     frame::{CHILD_ARGS, Frame},
-    inst::{Address, Alu, Cond, Inst, Quotient, Rhs},
+    inst::{Address, Alu, Cond, Inst, Quotient, Rhs, SelectCond},
 };
 use crate::hir::operation::Action;
 use crate::{
@@ -453,6 +453,27 @@ impl Emitter<'_> {
                 }?;
                 a.movzx(r(dst), byte)?;
                 a.neg(r(dst))
+            }
+            Inst::SelectI32 { cond, .. } => {
+                let cc = match cond {
+                    SelectCond::Nonzero(_) => {
+                        a.test(r(2), r(2))?;
+                        Cond::Ne
+                    }
+                    SelectCond::Compare(cc, _, rhs) => {
+                        cmp(a, frame, &allocs[2..], rhs)?;
+                        cc
+                    }
+                };
+                let dst = r(allocs.len() - 1);
+                match cc {
+                    Cond::Eq => rm32!(cmove, dst, 1),
+                    Cond::Ne => rm32!(cmovne, dst, 1),
+                    Cond::Lt => rm32!(cmovl, dst, 1),
+                    Cond::Le => rm32!(cmovle, dst, 1),
+                    Cond::Gt => rm32!(cmovg, dst, 1),
+                    Cond::Ge => rm32!(cmovge, dst, 1),
+                }
             }
             Inst::Cdq { .. } => a.cdq(),
             Inst::IDiv { .. } => {

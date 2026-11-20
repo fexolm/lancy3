@@ -7,27 +7,41 @@ use crate::module::{FunctionIds, Module};
 use crate::support::slotmap::DenseMap;
 use std::{collections::HashMap, sync::Arc};
 
+use super::{local_cfg, sccp};
+
 /// Canonicalize dataflow before instruction selection. Division,
 /// memory operations and checks remain ordered on every executable path.
 pub(crate) fn simplify(f: &mut Function) -> Result<(), IrError> {
-    let mut cfg = ControlFlowGraph::compute(f)?;
+    let cfg = ControlFlowGraph::compute(f)?;
+    simplify_with_cfg(f, &cfg)
+}
+
+fn simplify_with_cfg(f: &mut Function, cfg: &ControlFlowGraph) -> Result<(), IrError> {
+    let facts = sccp::analyze(f, cfg);
+    let mut replacements = Vec::new();
+    let mut entry_constants = HashMap::new();
+    let entry = f.entry();
+    for &b in &cfg.reverse_postorder()[1..] {
+        for &param in f.params(b) {
+            if let Some(n) = facts[param].constant() {
+                replacements.push((param, n));
+            }
+        }
+    }
     let mut aliases = DenseMap::from_fn(f.value_count(), |v| v);
-    let mut constants = DenseMap::filled(f.value_count(), None);
+    for &(param, n) in &replacements {
+        let value = *entry_constants.entry(n).or_insert_with(|| {
+            let value = f.append(entry, Op::Const(n)).unwrap();
+            assert_eq!(aliases.insert(value), value);
+            value
+        });
+        aliases[param] = value;
+    }
     let mut vector_orderings = HashMap::new();
     let mut changed_cfg = false;
     for &b in cfg.reverse_postorder() {
         f.rewrite_instructions(b, |op, result, types| {
             match (op, result) {
-                (Op::Copy(v), Some(dst)) => aliases[dst] = aliases[v],
-                (Op::Const(n), Some(dst)) => constants[dst] = Some(n),
-                (Op::Bin(kind, x, y), Some(dst)) => {
-                    if let (Some(x), Some(y)) = (constants[aliases[x]], constants[aliases[y]])
-                        && let Some(n) = fold_i32(kind, x, y)
-                    {
-                        constants[dst] = Some(n);
-                        return Some(Op::Const(n));
-                    }
-                }
                 (
                     Op::Simd(Simd::Bin(
                         kind @ (Binary::Lt | Binary::Le | Binary::Gt | Binary::Ge),
@@ -56,26 +70,93 @@ pub(crate) fn simplify(f: &mut Function) -> Result<(), IrError> {
                 }
                 _ => {}
             }
+            if let Some(dst) = result {
+                if let Op::Copy(v) = op {
+                    aliases[dst] = aliases[v];
+                    return None;
+                }
+                if let Some(n) = facts.get(dst).and_then(|fact| fact.constant()) {
+                    return Some(Op::Const(n));
+                }
+                let copy = match op {
+                    Op::Bin(kind, x, y) if types[x] == Type::I32 => {
+                        let a = facts[x].constant();
+                        let b = facts[y].constant();
+                        match sccp::reduce(kind, aliases[x], aliases[y], a, b) {
+                            Some(Op::Copy(v)) => Some(v),
+                            Some(op) => return Some(op),
+                            None if a.is_some() && b.is_none() => {
+                                let flipped = match kind {
+                                    Binary::Lt => Binary::Gt,
+                                    Binary::Le => Binary::Ge,
+                                    Binary::Gt => Binary::Lt,
+                                    Binary::Ge => Binary::Le,
+                                    Binary::Add
+                                    | Binary::Mul
+                                    | Binary::And
+                                    | Binary::Or
+                                    | Binary::Xor
+                                    | Binary::Min
+                                    | Binary::Max
+                                    | Binary::Eq
+                                    | Binary::Ne
+                                    | Binary::SaturatingAdd => kind,
+                                    _ => return Some(op),
+                                };
+                                return Some(Op::Bin(flipped, y, x));
+                            }
+                            _ => None,
+                        }
+                    }
+                    Op::Ternary(Ternary::Select, c, yes, no) => match facts[c].constant() {
+                        Some(0) => Some(no),
+                        Some(_) => Some(yes),
+                        None if aliases[yes] == aliases[no] => Some(yes),
+                        None => None,
+                    },
+                    _ => None,
+                };
+                if let Some(v) = copy {
+                    aliases[dst] = aliases[v];
+                    return None;
+                }
+            }
             Some(op)
         });
         if let Terminator::Branch { cond, yes, no } = *f.terminator(b)
-            && let Some(n) = constants[aliases[cond]]
+            && let Some(n) = facts[cond].constant()
         {
             f.set_terminator(b, Terminator::Jump(if n != 0 { yes } else { no }));
             changed_cfg = true;
         }
     }
-    f.substitute_values(&aliases);
-    if changed_cfg {
-        f.prune_unreachable()?;
-        cfg = ControlFlowGraph::compute(f)?;
+    if !replacements.is_empty() {
+        f.remove_aliased_params(&aliases);
     }
-    remove_redundant_checks(f, &DomTree::compute(&cfg));
-    remove_dead_computations(f, &cfg);
+    f.substitute_values(&aliases);
+    changed_cfg |= local_cfg::convert_branches(f, cfg);
+    let rebuilt;
+    let cfg = if changed_cfg {
+        f.prune_unreachable()?;
+        rebuilt = ControlFlowGraph::compute(f)?;
+        &rebuilt
+    } else {
+        cfg
+    };
+    let dom = DomTree::compute(cfg);
+    if cfg.has_cycle() {
+        // Mechanical forwarding across loop edges can lengthen hot live ranges
+        // and prevent the allocator from splitting them at block boundaries.
+        local_cfg::hoist_loop_invariants(f, cfg, &dom);
+    } else {
+        local_cfg::forward_params(f, cfg);
+    }
+    remove_redundant_checks(f, &dom);
+    remove_dead_computations(f, cfg);
     Ok(())
 }
 
-fn fold_i32(op: Binary, a: i32, b: i32) -> Option<i32> {
+pub(super) fn fold_i32(op: Binary, a: i32, b: i32) -> Option<i32> {
     Some(match op {
         Binary::Add => a.wrapping_add(b),
         Binary::Sub => a.wrapping_sub(b),
@@ -159,7 +240,7 @@ pub(crate) fn simplify_bodies(
     let mut bodies = DenseMap::with_capacity(module.functions.len());
     for (id, source) in module.functions.iter() {
         let mut body = source.function.clone();
-        simplify(&mut body)?;
+        simplify_with_cfg(&mut body, &source.cfg)?;
         for target in body.callees_mut() {
             if let Some(&child) = ids.get(&Arc::as_ptr(target))
                 && let Some(callee) = bodies.get(child)

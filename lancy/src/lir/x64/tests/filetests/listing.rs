@@ -179,6 +179,7 @@ fn opcode(inst: Inst) -> String {
             format!("{}{}", if left { "shl" } else { "sar" }, rhs(count))
         }
         Inst::Compare(cc, _, _, arg) => format!("cmp.{cc:?}{}", rhs(arg)),
+        Inst::SelectI32 { .. } => "select.i32".into(),
         Inst::BrCmp(cc, _, arg) => format!("brcmp.{cc:?}{}", rhs(arg)),
         Inst::CheckMask(_) => "bounds.mask".into(),
         Inst::BranchAny(_) => "branch.any".into(),

@@ -1,4 +1,4 @@
-use crate::simd::Element;
+use crate::simd::{Element, LaneElement};
 use std::collections::HashMap;
 
 /// A buffer parameter in a function's separate buffer argument list.
@@ -56,8 +56,23 @@ pub enum BufferArg<'a> {
     WriteF64(&'a mut [f64]),
 }
 
+/// An element type that can be borrowed from a [`BufferArg`].
+pub trait BufferElement: LaneElement {
+    #[doc(hidden)]
+    fn borrow<'a>(buffer: &'a BufferArg<'_>) -> Option<&'a [Self]>;
+}
+
 macro_rules! buffer_from {
     ($ty:ty,$read:ident,$write:ident) => {
+        impl BufferElement for $ty {
+            fn borrow<'a>(buffer: &'a BufferArg<'_>) -> Option<&'a [Self]> {
+                match buffer {
+                    BufferArg::$read(slice) => Some(slice),
+                    BufferArg::$write(slice) => Some(slice),
+                    _ => None,
+                }
+            }
+        }
         impl<'a> From<&'a [$ty]> for BufferArg<'a> {
             fn from(s: &'a [$ty]) -> Self {
                 Self::$read(s)
@@ -123,13 +138,9 @@ impl BufferArg<'_> {
             Self::WriteF64(s) => s.as_mut_ptr().cast(),
         }
     }
-    /// Access an i32 buffer. Panics if this argument has a different element type.
-    pub fn as_slice(&self) -> &[i32] {
-        match self {
-            Self::Read(s) => s,
-            Self::Write(s) => s,
-            _ => panic!("expected an i32 buffer"),
-        }
+    /// Borrow the slice as `T`. Panics if this argument has a different element type.
+    pub fn as_slice<T: BufferElement>(&self) -> &[T] {
+        T::borrow(self).unwrap_or_else(|| panic!("expected a {} buffer", T::ELEMENT.name()))
     }
 }
 

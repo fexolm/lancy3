@@ -9,7 +9,7 @@ pub mod hir;
 pub mod simd;
 
 pub use frontend::ComptimeKey;
-pub use hir::{BufferArg, BufferKind, Function, validate_buffers};
+pub use hir::{BufferArg, BufferElement, BufferKind, Function, validate_buffers};
 pub use splice_macros::{ComptimeKey, kernel};
 
 /// Result of a Splice operation, with the staging or backend error message.

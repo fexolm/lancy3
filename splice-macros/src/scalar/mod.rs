@@ -78,9 +78,19 @@ pub(super) fn expand(root: Path, mut native: ItemFn) -> Result<TokenStream> {
             "expected a kernel return type",
         ));
     };
-    let result_type = Scalar::from_type(ty)
+    let types: Vec<_> = sig.generics.type_params().map(|ty| &ty.ident).collect();
+    let result_type = Scalar::from_type(ty, &types)
         .filter(|t| matches!(t, Scalar::Int | Scalar::Vector(_) | Scalar::Mask(_)))
         .ok_or_else(|| Error::new_spanned(ty, "expected i32, Lane<T> or Mask<T>"))?;
+    if matches!(
+        result_type,
+        Scalar::Vector(Elem::Param(_)) | Scalar::Mask(Elem::Param(_))
+    ) {
+        return Err(Error::new_spanned(
+            ty,
+            "a kernel cannot return vectors or masks with generic elements",
+        ));
+    }
     let name = &sig.ident;
     let generic = &sig.generics;
     let where_ = &generic.where_clause;
@@ -106,10 +116,42 @@ pub(super) fn expand(root: Path, mut native: ItemFn) -> Result<TokenStream> {
     let mut reg_names = Vec::new();
     let mut buffer_names = Vec::new();
     let mut buffer_kinds = Vec::new();
+    let mut columns = None;
+    let mut column_parameter = None;
     let mut call_decls = Vec::new();
     let mut copy_mutable = Vec::new();
+    let mut source_decls = Vec::new();
+    let mut source_params = Vec::new();
+    let mut source_args = Vec::new();
     for arg in &sig.inputs {
-        let (id, ty, formal) = parameter(arg)?;
+        let (id, ty, formal) = parameter(arg, &types)?;
+        let source = emit!(#root::frontend::source);
+        if matches!(formal, Binding::Host) {
+            source_decls.push(emit!(#support::Host(#id): #support::Host<#ty>));
+        } else {
+            source_decls.push(emit!(#id: impl #source::Argument));
+            source_args.push(emit!(#source::Argument::source(#id)));
+            let writable = matches!(formal, Binding::Reg(_, true));
+            let prefix = if writable { "mut " } else { "" };
+            let source_ty = if matches!(formal, Binding::Columns) {
+                emit!(concat!("&[", stringify!(#root::BufferArg), "<'_>]"))
+            } else {
+                emit!(::core::any::type_name::<#ty>())
+            };
+            source_params.push(emit!(
+                format!("{}{}: {}", #prefix, stringify!(#id), #source_ty)
+            ));
+        }
+        if matches!(formal, Binding::Columns) {
+            let FnArg::Typed(arg) = arg else {
+                unreachable!()
+            };
+            let layout = arg.attrs[0].parse_args::<syn::Expr>()?;
+            if columns.replace(layout).is_some() {
+                return Err(Error::new_spanned(arg, "a kernel accepts one column table"));
+            }
+            column_parameter = Some(id.clone());
+        }
         helper_args.push(if matches!(formal, Binding::Host) {
             emit!(#support::Host(#id))
         } else {
@@ -122,11 +164,21 @@ pub(super) fn expand(root: Path, mut native: ItemFn) -> Result<TokenStream> {
                 inline_args.push(emit!(#support::Host(#id)));
                 emit!(#support::Host(#id): #support::Host<#ty>)
             }
+            Binding::Columns => {
+                inline_args.push(emit!((__splice_columns, #hir::Buffer(__splice_column_base))));
+                emit!(#id: (&[#hir::BufferKind], #hir::Buffer))
+            }
             Binding::Buffer(writable) => {
+                if columns.is_some() {
+                    return Err(Error::new_spanned(
+                        arg,
+                        "declare the column table after other buffers",
+                    ));
+                }
                 let index = buffer_names.len() as u32;
                 inline_args.push(emit!(#hir::Buffer(#index)));
                 buffer_names.push(id);
-                let elem = writable.elem.tokens(&root);
+                let elem = writable.elem.tokens(&root, &types);
                 let write = writable.write;
                 buffer_kinds.push(emit!(#hir::BufferKind::new(#elem,#write)));
                 emit!(#id: #hir::Buffer)
@@ -152,6 +204,7 @@ pub(super) fn expand(root: Path, mut native: ItemFn) -> Result<TokenStream> {
     let flow = flow::analyze(&native.block, &bindings);
     let lower = Lower {
         root: &root,
+        types: &types,
         name,
         result_type,
         formals: &formals,
@@ -162,6 +215,63 @@ pub(super) fn expand(root: Path, mut native: ItemFn) -> Result<TokenStream> {
         region_depth: 0,
     };
     let code = lower.kernel_body(&native.block)?;
+    let source_support = emit!(#root::frontend::source);
+    let source_body = match lower.source_body(&native.block) {
+        Ok(body) => emit!(let __splice_printed = #body;),
+        Err(error) => {
+            let error = error.to_string();
+            emit!(return Err(#error.to_owned());)
+        }
+    };
+    let source_aliases = types.iter().map(|ty| {
+        emit!((
+            stringify!(#ty).to_owned(),
+            format!("type {} = {};", stringify!(#ty), ::core::any::type_name::<#ty>())
+        ))
+    }).chain(generic.const_params().map(|param| {
+        let name = &param.ident;
+        let ty = &param.ty;
+        emit!((stringify!(#name).to_owned(), format!("const {}: {} = {};", stringify!(#name), stringify!(#ty), #source_support::literal(#name))))
+    }));
+    let source_entry = {
+        let source_layout = columns.as_ref().map(|layout| emit! {
+            let __splice_layout = #layout;
+            let __splice_column_layout: &[#root::BufferKind] = ::core::convert::AsRef::as_ref(&__splice_layout);
+        });
+        let nested_source = if columns.is_none() {
+            emit! {
+                #[doc(hidden)]
+                #[allow(clippy::too_many_arguments)]
+                #vis fn __splice_source_call #generic (#(#source_decls,)* __splice_source: &mut #source_support::Source) -> #root::Result<String> #where_ {
+                    let name = Self::__splice_print #fish (#(#host_names,)* __splice_source)?;
+                    let arguments: &[String] = &[#(#source_args),*];
+                    Ok(format!("{}({})", name, arguments.join(", ")))
+                }
+            }
+        } else {
+            emit!()
+        };
+        emit! {
+            #vis fn print #generic (#host_decls) -> #root::Result<String> #where_ {
+                let mut source = #source_support::Source::default();
+                Self::__splice_print #fish (#(#host_names,)* &mut source)?;
+                Ok(format!("#[allow(unused_imports)]\nuse {}::simd::{{Lane, Mask}};\n\n{}", stringify!(#root), source.functions.join("\n")))
+            }
+            #[allow(unused_variables, unreachable_code)]
+            fn __splice_print #generic (#host_decls __splice_source: &mut #source_support::Source) -> #root::Result<String> #where_ {
+                let _guard = #support::enter_expansion()?;
+                let (id, name) = __splice_source.function(stringify!(#name));
+                let transfer = __splice_source.transfer.take();
+                #source_layout
+                let __splice_printed: String;
+                #source_body
+                __splice_source.transfer = transfer;
+                __splice_source.functions[id] = #source_support::function(&name, &[#(#source_params),*], ::core::any::type_name::<#ty>(), &[#(#source_aliases),*], &__splice_printed);
+                Ok(name)
+            }
+            #nested_source
+        }
+    };
     let kinds = emit!(const { &[#(#buffer_kinds),*] });
     // Rust requires lifetime parameters before the backend type; the backend
     // is still the first argument at the usual lifetime-elided turbofish.
@@ -190,7 +300,14 @@ pub(super) fn expand(root: Path, mut native: ItemFn) -> Result<TokenStream> {
         || formals
             .iter()
             .any(|f| matches!(f, Binding::Reg(Scalar::Vector(_) | Scalar::Mask(_), _)));
-    let result_value_type = result_type.value_type(&root);
+    let result_value_type = result_type.value_type(&root, &types);
+    let source = emit! {
+        __splice_builder.set_source(&#root::frontend::KernelSource {
+            name: stringify!(#name),
+            scalars: &[#(stringify!(#reg_names)),*],
+            buffers: &[#(stringify!(#buffer_names)),*],
+        });
+    };
     let standalone = emit! {
             #vis fn build #compile_generics (#host_decls) -> #root::Result<<#backend as #root::Codegen>::Output> #where_ {
                 <#backend as #root::Codegen>::build(#arity, #kinds, #callback)
@@ -199,11 +316,7 @@ pub(super) fn expand(root: Path, mut native: ItemFn) -> Result<TokenStream> {
                 #root::frontend::materialize(#arity, #kinds, #callback)
             }
             fn __stage_body #generic (#host_decls __splice_builder: &mut #factory) -> #root::Result<()> #where_ {
-                __splice_builder.set_source(&#root::frontend::KernelSource {
-                    name: stringify!(#name),
-                    scalars: &[#(stringify!(#reg_names)),*],
-                    buffers: &[#(stringify!(#buffer_names)),*],
-                });
+                #source
                 let output = Self::__splice_inline #fish (#(#inline_args,)* __splice_builder)?;
                 __splice_builder.ret(output);
                 Ok(())
@@ -224,7 +337,38 @@ pub(super) fn expand(root: Path, mut native: ItemFn) -> Result<TokenStream> {
     };
     // The public kernel ABI transports i32 scalars and slices. SIMD helpers
     // expand into their caller so vectors and masks stay in typed registers.
-    let entry_points = if typed_helper {
+    let entry_points = if let Some(layout) = columns {
+        if typed_helper {
+            return Err(Error::new_spanned(
+                sig,
+                "a column-table entry point requires the scalar calling convention",
+            ));
+        }
+        let base = buffer_names.len() as u32;
+        let setup = emit! {
+            let __splice_layout = #layout;
+            let __splice_columns: &[#hir::BufferKind] = ::core::convert::AsRef::as_ref(&__splice_layout);
+            let __splice_column_base = #base;
+            let mut __splice_kinds = (#kinds).to_vec();
+            __splice_kinds.extend_from_slice(__splice_columns);
+            let __splice_body: #frontend::Body<'_> = ::std::boxed::Box::new(move |__splice_builder| {
+                #source
+                let output = Self::__splice_inline #fish (#(#inline_args,)* __splice_builder)?;
+                __splice_builder.ret(output);
+                Ok(())
+            });
+        };
+        emit! {
+            #vis fn build #compile_generics (#host_decls) -> #root::Result<<#backend as #root::Codegen>::Output> #where_ {
+                #setup
+                <#backend as #root::Codegen>::build(#arity, &__splice_kinds, __splice_body)
+            }
+            #vis fn ir #generic (#host_decls) -> #root::Result<#hir::Function> #where_ {
+                #setup
+                #root::frontend::materialize(#arity, &__splice_kinds, __splice_body)
+            }
+        }
+    } else if typed_helper {
         emit! {
             #[doc(hidden)]
             #[allow(clippy::too_many_arguments)]
@@ -245,6 +389,7 @@ pub(super) fn expand(root: Path, mut native: ItemFn) -> Result<TokenStream> {
             #[doc(hidden)]
             #vis const __SPLICE_RETURN: #hir::ValueType = #result_value_type;
             #entry_points
+            #source_entry
             #[allow(unreachable_code, clippy::too_many_arguments)]
             fn __splice_inline #generic (#(#call_decls,)* __splice_builder:&mut #factory)
                 -> #root::Result<#hir::Reg> #where_ {
@@ -265,11 +410,17 @@ pub(super) fn expand(root: Path, mut native: ItemFn) -> Result<TokenStream> {
         }
     }
     Native.visit_block_mut(&mut native.block);
+    if let Some(id) = column_parameter {
+        native.block.stmts.insert(
+            0,
+            syn::parse_quote!(let #id: &[#root::BufferArg<'_>] = #id;),
+        );
+    }
     native.attrs.push(syn::parse_quote!(#[allow(dead_code)]));
     Ok(emit!(#native #generated))
 }
 
-fn parameter(arg: &FnArg) -> Result<(&Ident, &Type, Binding)> {
+fn parameter<'a>(arg: &'a FnArg, types: &[&Ident]) -> Result<(&'a Ident, &'a Type, Binding)> {
     let FnArg::Typed(arg) = arg else {
         return Err(Error::new_spanned(arg, "kernel methods are unsupported"));
     };
@@ -282,15 +433,33 @@ fn parameter(arg: &FnArg) -> Result<(&Ident, &Type, Binding)> {
             }
             Binding::Host
         }
+        [attr] if matches!(&attr.meta, Meta::List(list) if list.path.is_ident("columns")) => {
+            let valid = match &*arg.ty {
+                Type::Reference(r) if r.mutability.is_none() => match &*r.elem {
+                    Type::Slice(s) => {
+                        matches!(&*s.elem, Type::Path(p) if p.path.segments.last().is_some_and(|s| s.ident == "BufferArg"))
+                    }
+                    _ => false,
+                },
+                _ => false,
+            };
+            if mutable || !valid {
+                return Err(Error::new_spanned(
+                    arg,
+                    "expected columns: &[BufferArg<'_>]",
+                ));
+            }
+            Binding::Columns
+        }
         [] if matches!(
-            Scalar::from_type(&arg.ty),
+            Scalar::from_type(&arg.ty, types),
             Some(Scalar::Int | Scalar::Vector(_) | Scalar::Mask(_))
         ) =>
         {
-            Binding::Reg(Scalar::from_type(&arg.ty).unwrap(), mutable)
+            Binding::Reg(Scalar::from_type(&arg.ty, types).unwrap(), mutable)
         }
         [] => {
-            let writable = slice_type(&arg.ty).ok_or_else(|| {
+            let writable = slice_type(&arg.ty, types).ok_or_else(|| {
                 Error::new_spanned(
                     &arg.ty,
                     "runtime parameters must be i32 or a slice of u16, i32, i64, f32, or f64",
@@ -307,7 +476,7 @@ fn parameter(arg: &FnArg) -> Result<(&Ident, &Type, Binding)> {
         _ => {
             return Err(Error::new_spanned(
                 arg,
-                "expected #[comptime] or an unannotated runtime argument",
+                "expected #[comptime], #[columns(layout)], or an unannotated runtime argument",
             ));
         }
     };
@@ -349,7 +518,7 @@ fn named(pat: &Pat) -> Result<&syn::PatIdent> {
     }
 }
 
-fn slice_type(ty: &syn::Type) -> Option<BufferType> {
+fn slice_type(ty: &syn::Type, types: &[&Ident]) -> Option<BufferType> {
     let syn::Type::Reference(reference) = ty else {
         return None;
     };
@@ -357,7 +526,7 @@ fn slice_type(ty: &syn::Type) -> Option<BufferType> {
         return None;
     };
     Some(BufferType {
-        elem: Elem::parse(&slice.elem)?,
+        elem: Elem::parse(&slice.elem, types)?,
         write: reference.mutability.is_some(),
     })
 }

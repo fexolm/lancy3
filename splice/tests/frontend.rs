@@ -141,6 +141,56 @@ fn slice_parameters_expose_their_alias_contract() {
     }
 }
 
+#[kernel]
+fn shared_read_after_store(index: i32, src: &[i32], dst: &mut [i32]) -> i32 {
+    let before = src[0];
+    dst[0] = before;
+    dst[index as usize] = 11;
+    before + src[0]
+}
+
+#[kernel]
+fn mutable_read_after_store(buf: &mut [i32]) -> i32 {
+    let before = buf[0];
+    buf[0] = 11;
+    before + buf[0]
+}
+
+#[test]
+fn repeated_slice_reads_preserve_writes_and_errors() {
+    fn check_shared(kernel: impl Executable) {
+        for (src, index, output, result) in [
+            (&[7][..], 1, [7, 11], Some(14)),
+            (&[7][..], 2, [7, 0], None),
+            (&[][..], 1, [0, 0], None),
+        ] {
+            let mut dst = [0, 0];
+            let actual = kernel.call(
+                &[index],
+                &mut [BufferArg::Read(src), BufferArg::Write(&mut dst)],
+            );
+            assert_eq!(actual.ok(), result);
+            assert_eq!(dst, output);
+        }
+    }
+
+    fn check_mutable(kernel: impl Executable) {
+        let mut buf = [7];
+        assert_eq!(kernel.call(&[], &mut [BufferArg::Write(&mut buf)]), Ok(18));
+        assert_eq!(buf, [11]);
+    }
+
+    fn check<B: Codegen<Output: Executable>>() {
+        check_shared(shared_read_after_store::build::<B>().unwrap());
+        check_shared(B::compile(&shared_read_after_store::ir().unwrap()).unwrap());
+        check_mutable(mutable_read_after_store::build::<B>().unwrap());
+        check_mutable(B::compile(&mutable_read_after_store::ir().unwrap()).unwrap());
+    }
+
+    check::<splice_lancy::Lancy>();
+    check::<splice_llvm::Llvm>();
+}
+
 #[test]
 fn generic_functions_and_nested_calls_stage_before_codegen() {
     let compiled = scaled::build::<Inspect, _, 3>(&2).unwrap();

@@ -5,6 +5,8 @@ use std::{collections::HashMap, sync::Arc};
 
 /// Lower a verified portable function and its callees using the same SSA
 /// construction as direct Splice staging. Preserve shared callee identities.
+/// Raw invocation of the result must uphold Splice's slice contract:
+/// immutable buffers may overlap and writable buffers have exclusive access.
 pub fn lower(root: &Function) -> Result<hir::Function, String> {
     splice_target::simd()?;
     let mut callees = HashMap::new();
@@ -59,8 +61,7 @@ fn lower_body(
             }
             Instr::Load { dst, buffer, index } => {
                 let index = b.read(*index);
-                let addr = b.address(*buffer, index, false);
-                b.define(*dst, Op::Load(hir::Type::I32, addr));
+                b.define_load(*dst, *buffer, index);
             }
             Instr::Call {
                 dst,

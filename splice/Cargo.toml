@@ -25,6 +25,10 @@ name = "sql_plan"
 test = true
 
 [[example]]
+name = "schema_plan"
+test = true
+
+[[example]]
 name = "simd_matmul"
 test = true
 

@@ -181,6 +181,36 @@ impl Function {
         let (block, args) = self.edges[edge];
         (block, &self.operands[args.range()])
     }
+
+    pub(in crate::hir) fn edge_count(&self) -> usize {
+        self.edges.len()
+    }
+
+    /// Remove parameters whose uses are replaced by a dominating value.
+    pub(in crate::hir) fn remove_aliased_params(&mut self, aliases: &DenseMap<Value, Value>) {
+        // Include retired edges only when their spans still describe current parameters.
+        // An edge can be referenced by multiple terminators, so compact each record once.
+        for (target, span) in self.edges.values_mut() {
+            let Some(block) = self.blocks.get(*target) else {
+                continue;
+            };
+            if span.len as usize != block.params.len() {
+                continue;
+            }
+            let args = &mut self.operands[span.range()];
+            let mut kept = 0;
+            for (i, &param) in block.params.iter().enumerate() {
+                if aliases[param] == param {
+                    args[kept] = args[i];
+                    kept += 1;
+                }
+            }
+            span.len = kept as u32;
+        }
+        for block in self.blocks.values_mut() {
+            block.params.retain(|&p| aliases[p] == p);
+        }
+    }
     pub fn call(&self, call: Call) -> (&Arc<Function>, &[Value]) {
         let data = &self.calls[call];
         (&data.callee, &self.operands[data.args.range()])
@@ -435,6 +465,41 @@ impl Function {
             i = next;
         }
         block.last = prev;
+    }
+
+    /// Move selected instructions to the end of a dominating block in layout
+    /// order. The caller proves availability and that speculation is safe.
+    pub(in crate::hir) fn hoist_instructions(
+        &mut self,
+        from: Block,
+        to: Block,
+        mut hoist: impl FnMut(Op, Value, &DenseMap<Value, Type>) -> bool,
+    ) {
+        let mut prev = Inst::INVALID;
+        let mut i = self.blocks[from].first;
+        while i != Inst::INVALID {
+            let inst = &self.insts[i];
+            let next = inst.next;
+            if inst.result != Value::INVALID && hoist(inst.op, inst.result, &self.types) {
+                if prev == Inst::INVALID {
+                    self.blocks[from].first = next;
+                } else {
+                    self.insts[prev].next = next;
+                }
+                let target = &mut self.blocks[to];
+                if target.last == Inst::INVALID {
+                    target.first = i;
+                } else {
+                    self.insts[target.last].next = i;
+                }
+                target.last = i;
+                self.insts[i].next = Inst::INVALID;
+            } else {
+                prev = i;
+            }
+            i = next;
+        }
+        self.blocks[from].last = prev;
     }
 
     pub(in crate::hir) fn callees_mut(&mut self) -> impl Iterator<Item = &mut Arc<Function>> {

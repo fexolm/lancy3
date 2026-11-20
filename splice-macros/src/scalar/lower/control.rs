@@ -29,7 +29,7 @@ impl Lower<'_> {
             let code = v.code;
             return match to {
                 Stage::Reg(t) => {
-                    let ty = t.value_type(self.root);
+                    let ty = t.value_type(self.root, self.types);
                     Ok(emit!({#code; __splice_builder.typed_local(#ty)}))
                 }
                 Stage::Never | Stage::Unit => Ok(code),
@@ -114,7 +114,7 @@ impl Lower<'_> {
         let inner = self.nested_region();
         let yes_code = inner.delimit(self.write_arm(yes, stage, &at)?);
         let no_code = inner.delimit(self.write_arm(no, stage, &at)?);
-        let (init, result) = result_slot(stage, self.root);
+        let (init, result) = result_slot(stage, self);
         Ok(Value::new(
             stage,
             emit!({
@@ -332,7 +332,7 @@ impl Lower<'_> {
                 __splice_builder.mark(__splice_next_arm);
             }));
         }
-        let (init, result) = result_slot(stage, self.root);
+        let (init, result) = result_slot(stage, self);
         Ok(Value::new(
             stage,
             emit!({
@@ -405,9 +405,9 @@ impl Lower<'_> {
     }
 }
 
-fn result_slot(stage: Stage, root: &syn::Path) -> (TokenStream, TokenStream) {
+fn result_slot(stage: Stage, lower: &Lower<'_>) -> (TokenStream, TokenStream) {
     if let Stage::Reg(t) = stage {
-        let ty = t.value_type(root);
+        let ty = t.value_type(lower.root, lower.types);
         (
             emit!(let __splice_branch_result = __splice_builder.typed_local(#ty);),
             emit!(__splice_branch_result),

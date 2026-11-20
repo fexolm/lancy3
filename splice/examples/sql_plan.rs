@@ -21,8 +21,12 @@ fn main() -> Result<(), String> {
             print!("{}", query::build::<Text>(&plan)?);
             Ok(())
         }
+        Some("rust") => {
+            print!("{}", query::print(&plan)?);
+            Ok(())
+        }
         Some(other) => Err(format!(
-            "unknown backend {other}; choose lancy, cranelift, llvm or text"
+            "unknown backend {other}; choose lancy, cranelift, llvm, text or rust"
         )),
     }
 }

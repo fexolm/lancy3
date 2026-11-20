@@ -1,0 +1,42 @@
+# Shape emitted by Splice when the input slice is shared and the output is exclusive.
+# Splice's staging test verifies the elimination itself; this checks x64 lowering.
+fn main src:ptr src_len:i32 dst:ptr dst_len:i32 i:i32 -> i32
+  j = const 0
+  bounds j src_len
+  src_addr = offset src j 4
+  a = load i32 src_addr
+  bounds i dst_len
+  dst_addr = offset dst i 4
+  store dst_addr a
+  result = add a a
+  ret result
+
+@opt check: load
+@opt not: load
+@opt check: ret
+@isel check: load.I32
+@isel not: load.I32
+@isel check: store.I32
+@isel not: load.I32
+@isel check: ret
+@alloc check: spill_slots=0
+
+---
+
+# The raw pointer IR has no disjointness guarantee.
+fn main p:ptr i:i32 x:i32 -> i32
+  q = offset p i 4
+  a = load i32 p
+  store q x
+  b = load i32 p
+  result = add a b
+  ret result
+
+@opt check: load
+@opt nextln: store
+@opt nextln: load
+@isel check: load.I32
+@isel check: store.I32
+@isel check: load.I32
+@run 0 11 -> 18 | 07 00 00 00 09 00 00 00 | 0b 00 00 00 09 00 00 00
+@run 1 11 -> 14 | 07 00 00 00 09 00 00 00 | 07 00 00 00 0b 00 00 00

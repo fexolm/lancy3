@@ -161,6 +161,12 @@ impl Address {
 }
 
 #[derive(Clone, Copy, Debug)]
+pub(super) enum SelectCond {
+    Nonzero(VReg),
+    Compare(Cond, VReg, Rhs),
+}
+
+#[derive(Clone, Copy, Debug)]
 pub(super) enum Inst {
     Argv(VReg),
     LoadArg {
@@ -191,6 +197,12 @@ pub(super) enum Inst {
         count: Rhs,
     },
     Compare(Cond, VReg, VReg, Rhs),
+    SelectI32 {
+        dst: VReg,
+        no: VReg,
+        cond: SelectCond,
+        yes: VReg,
+    },
     BrCmp(Cond, VReg, Rhs),
     Cdq {
         lo: VReg,
@@ -298,6 +310,17 @@ impl TargetInst for Inst {
                 out.push(O::reg_use(a));
                 b.operands(out);
                 out.push(O::reg_def(d));
+            }
+            Self::SelectI32 { dst, no, cond, yes } => {
+                out.extend([O::reg_use(no), O::any_use(yes)]);
+                match cond {
+                    SelectCond::Nonzero(v) => out.push(O::reg_use(v)),
+                    SelectCond::Compare(_, a, b) => {
+                        out.push(O::reg_use(a));
+                        b.operands(out);
+                    }
+                }
+                out.push(O::reg_reuse_def(dst, 0));
             }
             Self::BrCmp(_, a, b) => {
                 out.push(O::reg_use(a));

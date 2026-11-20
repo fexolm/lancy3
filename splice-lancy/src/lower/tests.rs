@@ -2,6 +2,33 @@ use super::*;
 mod simd;
 
 #[test]
+fn reuses_shared_loads_across_writes_in_both_staging_paths() {
+    fn body(b: &mut dyn KernelBuilder) -> Result<(), String> {
+        let zero = b.constant(0);
+        let before = b.load(Buffer(0), zero);
+        b.store(Buffer(1), b.arg(0), before);
+        let zero = b.constant(0);
+        let after = b.load(Buffer(0), zero);
+        let sum = b.binary(Binary::Add, before, after);
+        b.ret(sum);
+        Ok(())
+    }
+
+    for input in [BufferKind::Read, BufferKind::Write] {
+        let kinds = [input, BufferKind::Write];
+        let direct = build(1, &kinds, Box::new(body)).unwrap();
+        let portable = splice::frontend::materialize(1, &kinds, Box::new(body)).unwrap();
+        for graph in [direct, lower(&portable).unwrap()] {
+            let count = graph
+                .instructions(graph.entry())
+                .filter(|&i| matches!(graph.op(i), Op::Load(..)))
+                .count();
+            assert_eq!(count, if input.writable() { 2 } else { 1 });
+        }
+    }
+}
+
+#[test]
 fn portable_calls_share_one_lowered_body_and_preserve_argument_reassignment() {
     use splice::hir::FunctionBuilder;
 

@@ -1,6 +1,8 @@
 //! HIR optimization passes, shared by all targets.
 mod inline;
+mod local_cfg;
 mod prune;
+mod sccp;
 mod simplify;
 #[cfg(test)]
 mod tests;

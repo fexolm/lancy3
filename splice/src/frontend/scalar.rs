@@ -101,3 +101,23 @@ impl Drop for ExpansionGuard {
         EXPANSION_DEPTH.with(|depth| depth.set(depth.get() - 1));
     }
 }
+/// Resolve a read-only column against the layout supplied at specialization.
+#[doc(hidden)]
+pub fn column(
+    (kinds, base): (&[crate::BufferKind], crate::hir::Buffer),
+    slot: usize,
+    element: crate::simd::Element,
+) -> crate::Result<crate::hir::Buffer> {
+    match kinds.get(slot) {
+        Some(kind) if kind.element() == element => {
+            let index = base
+                .index()
+                .checked_add(slot)
+                .and_then(|i| u32::try_from(i).ok())
+                .ok_or_else(|| format!("column {slot} is not representable"))?;
+            Ok(crate::hir::Buffer(index))
+        }
+        Some(_) => Err(format!("column {slot} expects {} elements", element.name())),
+        None => Err(format!("unknown column {slot}")),
+    }
+}

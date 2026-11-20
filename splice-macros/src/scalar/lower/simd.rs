@@ -10,6 +10,8 @@ pub(crate) enum Elem {
     I64,
     F32,
     F64,
+    Param(usize),
+    Index(usize),
 }
 #[derive(Copy, Clone, PartialEq, Eq)]
 pub(crate) struct BufferType {
@@ -24,6 +26,7 @@ impl Elem {
             Self::I64 => ("i64", "I64"),
             Self::F32 => ("f32", "F32"),
             Self::F64 => ("f64", "F64"),
+            Self::Param(_) | Self::Index(_) => unreachable!("named primitive element"),
         }
     }
     fn named(name: &str) -> Option<Self> {
@@ -31,46 +34,67 @@ impl Elem {
             .into_iter()
             .find(|v| v.names().0 == name)
     }
-    pub(crate) fn parse(t: &Type) -> Option<Self> {
+    pub(crate) fn parse(t: &Type, types: &[&Ident]) -> Option<Self> {
         let Type::Path(p) = t else { return None };
-        Self::named(&p.path.get_ident()?.to_string())
+        let name = p.path.get_ident()?;
+        Self::named(&name.to_string())
+            .or_else(|| types.iter().position(|ty| *ty == name).map(Self::Param))
     }
-    pub(crate) fn tokens(self, root: &Path) -> TokenStream {
-        let id = format_ident!("{}", self.names().1);
-        emit!(#root::simd::Element::#id)
+    pub(crate) fn tokens(self, root: &Path, types: &[&Ident]) -> TokenStream {
+        match self {
+            Self::Param(_) | Self::Index(_) => {
+                let ty = self.ty(root, types);
+                emit!(<#ty as #root::simd::LaneElement>::ELEMENT)
+            }
+            _ => {
+                let id = format_ident!("{}", self.names().1);
+                emit!(#root::simd::Element::#id)
+            }
+        }
     }
-    fn ty(self) -> Ident {
-        Ident::new(self.names().0, Span::call_site())
+    pub(super) fn ty(self, root: &Path, types: &[&Ident]) -> TokenStream {
+        match self {
+            Self::Param(i) => types[i].to_token_stream(),
+            Self::Index(i) => {
+                let ty = types[i];
+                emit!(<#ty as #root::simd::LaneElement>::Index)
+            }
+            _ => Ident::new(self.names().0, Span::call_site()).to_token_stream(),
+        }
     }
     fn index(self) -> Self {
         match self {
             Self::F32 => Self::I32,
             Self::F64 => Self::I64,
+            Self::Param(i) => Self::Index(i),
             x => x,
         }
     }
 }
-fn generic(seg: &syn::PathSegment) -> Option<Elem> {
+fn generic(seg: &syn::PathSegment, types: &[&Ident]) -> Option<Elem> {
     let PathArguments::AngleBracketed(a) = &seg.arguments else {
         return None;
     };
-    element_argument(a)
+    element_argument(a, types)
 }
-fn element_argument(a: &syn::AngleBracketedGenericArguments) -> Option<Elem> {
+pub(super) fn element_argument(
+    a: &syn::AngleBracketedGenericArguments,
+    types: &[&Ident],
+) -> Option<Elem> {
     if a.args.len() != 1 {
         return None;
     }
     let GenericArgument::Type(t) = a.args.first()? else {
         return None;
     };
-    Elem::parse(t)
+    Elem::parse(t, types)
 }
 fn splat_element(expr: &Expr) -> Option<Elem> {
     match expr {
         Expr::Paren(p) => splat_element(&p.expr),
         Expr::Group(g) => splat_element(&g.expr),
         Expr::Unary(u) if matches!(u.op, syn::UnOp::Neg(_)) => splat_element(&u.expr),
-        Expr::Cast(c) => Elem::parse(&c.ty),
+        Expr::Cast(c) => Elem::parse(&c.ty, &[]),
         Expr::Lit(l) => match &l.lit {
             syn::Lit::Int(v) => Elem::named(v.suffix()),
             syn::Lit::Float(v) => Elem::named(v.suffix()),
@@ -79,13 +103,13 @@ fn splat_element(expr: &Expr) -> Option<Elem> {
         _ => None,
     }
 }
-pub(super) fn vector_type(t: &Type) -> Option<Scalar> {
+pub(super) fn vector_type(t: &Type, types: &[&Ident]) -> Option<Scalar> {
     let Type::Path(p) = t else { return None };
     let s = p.path.segments.last()?;
     if s.ident == "Lane" {
-        Some(Scalar::Vector(generic(s)?))
+        Some(Scalar::Vector(generic(s, types)?))
     } else if s.ident == "Mask" {
-        Some(Scalar::Mask(generic(s)?))
+        Some(Scalar::Mask(generic(s, types)?))
     } else {
         None
     }
@@ -116,14 +140,14 @@ pub(super) fn uses_lane(e: &Expr) -> bool {
     f.0
 }
 impl Scalar {
-    pub(in crate::scalar) fn value_type(self, root: &Path) -> TokenStream {
+    pub(in crate::scalar) fn value_type(self, root: &Path, types: &[&Ident]) -> TokenStream {
         match self {
             Self::Vector(e) => {
-                let e = e.tokens(root);
+                let e = e.tokens(root, types);
                 emit!(#root::hir::ValueType::Vector(#e))
             }
             Self::Mask(e) => {
-                let e = e.tokens(root);
+                let e = e.tokens(root, types);
                 emit!(#root::hir::ValueType::Mask(#e))
             }
             _ => emit!(#root::hir::ValueType::Scalar),
@@ -139,7 +163,7 @@ impl Lower<'_> {
         output: Option<Scalar>,
     ) -> Value {
         let root = self.root;
-        let elem = e.tokens(root);
+        let elem = e.tokens(root, self.types);
         let res = emit!(__splice_builder.simd(#root::hir::Simd{element:#elem,op:#root::hir::SimdOp::#op},&__splice_operands)?);
         let args = emit!(let __splice_operands=[#(#inputs),*];);
         match output {
@@ -180,7 +204,7 @@ impl Lower<'_> {
             return Ok(None);
         };
         let lane = p.path.segments.iter().rev().nth(1).unwrap();
-        let explicit = generic(lane);
+        let explicit = generic(lane, self.types);
         if !matches!(lane.arguments, PathArguments::None) && explicit.is_none() {
             return err(lane, "expected Lane<T> with one of u16, i32, i64, f32, f64");
         }
@@ -229,13 +253,12 @@ impl Lower<'_> {
         let mask = Scalar::Mask(elem);
         let idx = Scalar::Vector(elem.index());
         let root = self.root;
-        let ty = elem.ty();
+        let ty = elem.ty(root, self.types);
         let mut lane_path = p.path.clone();
         lane_path.segments.pop();
         lane_path.segments.pop_punct();
-        lane_path.segments.last_mut().unwrap().arguments =
-            PathArguments::AngleBracketed(syn::parse_quote!(::<#ty>));
-        let witness = emit!(let _: ::core::marker::PhantomData<#root::simd::Lane<#ty>>=::core::marker::PhantomData::<#lane_path>;);
+        lane_path.segments.last_mut().unwrap().arguments = PathArguments::None;
+        let witness = emit!(let _: ::core::marker::PhantomData<#root::simd::Lane<#ty>>=::core::marker::PhantomData::<#lane_path<#ty>>;);
         let get = |j: usize, t| self.simd_operand(&c.args[j], t);
         let mut pre = TokenStream::new();
         let mut result = match name.as_str() {
@@ -494,7 +517,7 @@ impl Lower<'_> {
                 let data_type = m
                     .turbofish
                     .as_ref()
-                    .and_then(element_argument)
+                    .and_then(|args| element_argument(args, self.types))
                     .map(Scalar::Vector);
                 let (first, second) =
                     self.paired_operands(&args[0], &args[1], data_type.or(hint), Some(v))?;

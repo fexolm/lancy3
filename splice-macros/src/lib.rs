@@ -15,6 +15,7 @@ pub fn comptime_key(item: TokenStream) -> TokenStream {
 
 /// Define a Splice kernel. `name::build::<Backend>(...)` stages its comptime
 /// parameters into the selected backend. `name::ir(...)` builds portable IR.
+/// `name::print(...)` specializes the Rust source without building IR.
 #[proc_macro_attribute]
 pub fn kernel(options: TokenStream, item: TokenStream) -> TokenStream {
     let function = parse_macro_input!(item as ItemFn);

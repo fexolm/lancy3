@@ -3,6 +3,8 @@
 pub use crate::hir::FunctionBuilder;
 #[doc(hidden)]
 pub mod scalar;
+#[doc(hidden)]
+pub mod source;
 mod specialization;
 pub use specialization::{ComptimeKey, KeyArgument, MaybeKey, Specialization};
 

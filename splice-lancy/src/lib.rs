@@ -66,6 +66,7 @@ impl Executable for LancyKernel {
         }
         // SAFETY: both Splice lowering paths guard every access using the length
         // paired with its original slice, and validate permissions on every store and call.
+        // BufferArg's Rust borrows keep writable slices disjoint from every other slice.
         unsafe { self.code.call_raw(&words) }
             .map(|v| v as i32)
             .map_err(|e| e.to_string())

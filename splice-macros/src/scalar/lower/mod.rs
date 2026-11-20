@@ -2,6 +2,7 @@
 mod control;
 mod memory;
 pub(super) mod simd;
+mod source;
 pub(super) use simd::{BufferType, Elem};
 
 use proc_macro2::{Ident, TokenStream};
@@ -31,8 +32,8 @@ impl Scalar {
             self
         }
     }
-    pub(super) fn from_type(ty: &syn::Type) -> Option<Self> {
-        if let Some(t) = simd::vector_type(ty) {
+    pub(super) fn from_type(ty: &syn::Type, types: &[&Ident]) -> Option<Self> {
+        if let Some(t) = simd::vector_type(ty, types) {
             return Some(t);
         }
         let name = match ty {
@@ -74,6 +75,7 @@ impl Stage {
 #[derive(Clone, Copy)]
 pub(super) enum Binding {
     Host,
+    Columns,
     Locals(Scalar, bool),
     Reg(Scalar, bool),
     Buffer(BufferType),
@@ -108,6 +110,7 @@ pub(super) enum LoopKind {
 #[derive(Clone)]
 pub(super) struct Lower<'a> {
     pub(super) root: &'a Path,
+    pub(super) types: &'a [&'a Ident],
     pub(super) name: &'a Ident,
     pub(super) result_type: Scalar,
     pub(super) formals: &'a [Binding],
@@ -136,7 +139,9 @@ impl<'ast> Visit<'ast> for HostCheck<'_> {
         if let Some(id) = p.path.get_ident()
             && matches!(
                 self.names.get(&id.to_string()),
-                Some(Binding::Reg(..) | Binding::Buffer(_) | Binding::Locals(..))
+                Some(
+                    Binding::Reg(..) | Binding::Buffer(_) | Binding::Locals(..) | Binding::Columns
+                )
             )
         {
             self.error = Some(Error::new_spanned(
@@ -422,7 +427,7 @@ impl Lower<'_> {
             };));
         }
         let hint = if let Pat::Type(t) = &local.pat {
-            Scalar::from_type(&t.ty)
+            Scalar::from_type(&t.ty, self.types)
         } else {
             None
         };
@@ -445,11 +450,14 @@ impl Lower<'_> {
                 return err(pat, "a runtime slice binding must be a fixed reference");
             }
             (
-                Binding::Buffer(ty.and_then(super::slice_type).unwrap_or(writable)),
+                Binding::Buffer(
+                    ty.and_then(|ty| super::slice_type(ty, self.types))
+                        .unwrap_or(writable),
+                ),
                 value.code,
             )
         } else {
-            let annotation = ty.and_then(Scalar::from_type);
+            let annotation = ty.and_then(|ty| Scalar::from_type(ty, self.types));
             let scalar = match value.stage {
                 Stage::Reg(t) | Stage::Literal(t) => t,
                 Stage::Host => match annotation {
@@ -505,6 +513,10 @@ impl Lower<'_> {
             Expr::Path(p) if matches!(self.binding(p), Some(Binding::Locals(..))) => {
                 err(p, "index kernel locals with a comptime index")
             }
+            Expr::Path(p) if matches!(self.binding(p), Some(Binding::Columns)) => err(
+                p,
+                "use columns[comptime_index].as_slice::<T>() to bind a typed column",
+            ),
             Expr::Path(p) => Ok(self.path(p)),
             Expr::Paren(x) => self.expr_with_hint(&x.expr, hint),
             Expr::Group(x) => self.expr_with_hint(&x.expr, hint),
@@ -762,6 +774,9 @@ impl Lower<'_> {
             return Ok(Value::new(Stage::Host, emit!(#p(#(#values),*))));
         }
         let recursive = p.path.is_ident(self.name);
+        if recursive && self.formals.iter().any(|p| matches!(p, Binding::Columns)) {
+            return err(c, "a column-table entry point cannot call itself");
+        }
         let output = if recursive {
             self.result_type
         } else {
@@ -784,7 +799,7 @@ impl Lower<'_> {
         } else {
             let mut path = p.path.clone();
             let fish = std::mem::take(&mut path.segments.last_mut().unwrap().arguments);
-            let expected = output.value_type(root);
+            let expected = output.value_type(root, self.types);
             check = emit!(const {assert!(matches!(#path::__SPLICE_RETURN,#expected),"annotate the kernel helper result with its Lane<T> or Mask<T> type")};);
             emit!(#path::__splice_call #fish)
         };

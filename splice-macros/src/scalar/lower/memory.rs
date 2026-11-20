@@ -6,6 +6,28 @@ use syn::{BinOp, Expr, ExprCast, ExprIndex, ExprMethodCall, ExprReference, Resul
 
 impl Lower<'_> {
     pub(super) fn method(&self, m: &ExprMethodCall, hint: Option<Scalar>) -> Result<Value> {
+        if let Expr::Index(index) = &*m.receiver
+            && let Expr::Path(table) = &*index.expr
+            && matches!(self.binding(table), Some(super::Binding::Columns))
+        {
+            if m.method != "as_slice" || !m.args.is_empty() {
+                return err(m, "use as_slice::<T>() to bind a typed column");
+            }
+            let Some(elem) = m
+                .turbofish
+                .as_ref()
+                .and_then(|args| super::simd::element_argument(args, self.types))
+            else {
+                return err(m, "as_slice::<T>() requires u16, i32, i64, f32, or f64");
+            };
+            let slot = self.host(self.expr(&index.index)?, &index.index)?;
+            let root = self.root;
+            let element = elem.tokens(root, self.types);
+            return Ok(Value::new(
+                Stage::Buffer(super::BufferType { elem, write: false }),
+                emit!(#root::frontend::scalar::column(#table, #slot, #element)?),
+            ));
+        }
         let data_type = if matches!(
             m.method.to_string().as_str(),
             "store" | "store_select" | "scatter" | "scatter_select"
@@ -62,7 +84,8 @@ impl Lower<'_> {
 
     pub(super) fn cast(&self, cast: &ExprCast) -> Result<Value> {
         let value = self.expr(&cast.expr)?;
-        let Some(kind @ (Scalar::Int | Scalar::Index)) = Scalar::from_type(&cast.ty) else {
+        let Some(kind @ (Scalar::Int | Scalar::Index)) = Scalar::from_type(&cast.ty, self.types)
+        else {
             return err(
                 &cast.ty,
                 "runtime casts support i32 and usize slice indices",

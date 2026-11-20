@@ -13,10 +13,10 @@ mod packed_rearrange;
 
 pub(in crate::lir::x64) use packed::packed_half;
 
-use super::super::inst::{Inst, class};
+use super::super::inst::{Cond, Inst, SelectCond, class};
 use crate::{
     CompileError,
-    hir::{Function, Op, Simd, Type, Value},
+    hir::{Function, Op, Simd, Ternary, Type, Value},
     lir::{
         self,
         isel::{Context, Root},
@@ -87,6 +87,22 @@ impl Rules<'_> {
                 Inst::Copy(self.dst(), self.input(v))
             }
             Op::Bin(kind, a, b) => self.binary(kind, a, b)?,
+            Op::Ternary(Ternary::Select, cond, yes, no) if self.ty(yes) == Type::I32 => {
+                let cond = if let Some(Op::Bin(kind, a, b)) = self.ctx.single_use(cond)
+                    && self.ty(a) == Type::I32
+                    && let Some(cc) = Cond::from_binary(kind)
+                {
+                    SelectCond::Compare(cc, self.input(a), self.rhs(b))
+                } else {
+                    SelectCond::Nonzero(self.input(cond))
+                };
+                Inst::SelectI32 {
+                    dst: self.dst(),
+                    no: self.input(no),
+                    cond,
+                    yes: self.input(yes),
+                }
+            }
             Op::BoundsCheck(index, length) => self.bounds_check(index, length),
             Op::PtrOffset(base, index, scale) => self.pointer_offset(base, index, scale)?,
             Op::Load(ty, ptr) => self.load(ty, ptr)?,

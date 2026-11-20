@@ -8,7 +8,9 @@ mod simd;
 mod verify;
 pub use simd::{Simd, SimdOp, ValueType};
 
-pub use buffer::{Buffer, BufferArg, BufferKind, check_forwarding, validate_buffers};
+pub use buffer::{
+    Buffer, BufferArg, BufferElement, BufferKind, check_forwarding, validate_buffers,
+};
 pub use builder::FunctionBuilder;
 
 use std::sync::Arc;

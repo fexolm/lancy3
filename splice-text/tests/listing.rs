@@ -2,6 +2,50 @@ use splice::{Codegen, hir::FunctionBuilder, kernel};
 use splice_text::Text;
 use std::sync::Arc;
 
+#[kernel]
+fn stop_early(#[comptime] bail: bool, x: i32) -> i32 {
+    if bail {
+        return 17;
+    }
+    if x < 0 {
+        return 23;
+    }
+    x.wrapping_add(42)
+}
+
+#[kernel]
+fn unroll_until(#[comptime] steps: &[i32], mut x: i32) -> i32 {
+    for step in steps {
+        if *step == 0 {
+            continue;
+        }
+        if *step == 9 {
+            break;
+        }
+        x += *step;
+    }
+    x
+}
+
+#[test]
+fn rust_source_prunes_host_transfers_but_keeps_runtime_control() -> splice::Result<()> {
+    let early = stop_early::print(true)?;
+    assert!(early.contains("return 17"));
+    assert!(!early.contains("23"));
+    assert!(!early.contains("42"));
+    let normal = stop_early::print(false)?;
+    assert!(!normal.contains("17"));
+    assert!(normal.contains("if x < 0"));
+    assert!(normal.contains("return 23"));
+    assert!(normal.contains("wrapping_add(42)"));
+    let unrolled = unroll_until::print(&[7, 0, 8, 9, 111])?;
+    assert!(unrolled.contains("x += 7"));
+    assert!(unrolled.contains("x += 8"));
+    assert!(!unrolled.contains("111"));
+    assert!(!unrolled.contains("match block"));
+    Ok(())
+}
+
 #[derive(splice::ComptimeKey)]
 enum Step {
     Scale(i32),

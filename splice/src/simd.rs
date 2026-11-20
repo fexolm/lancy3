@@ -63,7 +63,7 @@ impl Element {
 mod sealed {
     pub trait Sealed {}
 }
-pub trait LaneElement: sealed::Sealed + Copy + Default + PartialOrd {
+pub trait LaneElement: sealed::Sealed + Copy + Default + PartialOrd + std::fmt::Debug {
     type Storage: Copy + AsRef<[Self]> + AsMut<[Self]>;
     type Index: LaneIndex;
     const ELEMENT: Element;

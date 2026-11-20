@@ -88,6 +88,9 @@ impl<'a> Builder<'a> {
             labels: Vec::new(),
             immediate: None,
             error: None,
+            has_shared_i32: kinds.contains(&BufferKind::Read),
+            constants: HashMap::new(),
+            shared_loads: HashMap::new(),
         })
     }
 }
@@ -133,6 +136,15 @@ struct Builder<'a> {
     labels: Vec<Destination>,
     immediate: Option<(Reg, bool)>,
     error: Option<String>,
+    has_shared_i32: bool,
+    constants: HashMap<Value, i32>,
+    shared_loads: HashMap<(Buffer, LoadIndex), Value>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum LoadIndex {
+    Constant(i32),
+    Value(Value),
 }
 
 impl Builder<'_> {
@@ -225,7 +237,40 @@ impl Builder<'_> {
     fn define(&mut self, r: Reg, op: Op) {
         if let Some(b) = self.current {
             let v = self.graph.append(b, op).expect("operation defines a value");
+            if let Op::Const(n) = op
+                && self.has_shared_i32
+            {
+                self.constants.insert(v, n);
+            }
             self.blocks[b].defs.insert(r, v);
+        }
+    }
+    fn define_load(&mut self, dst: Reg, buffer: Buffer, index: Value) {
+        let Some(block) = self.current else {
+            return;
+        };
+        let shared = self.kinds.get(buffer.index()) == Some(&BufferKind::Read);
+        let key = if shared {
+            // A Splice shared slice cannot be modified via another parameter
+            // or a callee. The first load already checked this index.
+            let index = self
+                .constants
+                .get(&index)
+                .copied()
+                .map_or(LoadIndex::Value(index), LoadIndex::Constant);
+            let key = (buffer, index);
+            if let Some(&value) = self.shared_loads.get(&key) {
+                self.blocks[block].defs.insert(dst, value);
+                return;
+            }
+            Some(key)
+        } else {
+            None
+        };
+        let address = self.address(buffer, index, false);
+        self.define(dst, Op::Load(hir::Type::I32, address));
+        if let Some(key) = key {
+            self.shared_loads.insert(key, self.blocks[block].defs[&dst]);
         }
     }
     fn call_op(&mut self, callee: Arc<Function>, args: &[Reg], buffers: &[Buffer]) -> Op {
@@ -286,6 +331,8 @@ impl Builder<'_> {
         self.immediate = None;
         if let Some(b) = self.current.take() {
             self.blocks[b].exit = Some(exit);
+            self.constants.clear();
+            self.shared_loads.clear();
         }
     }
 }
@@ -326,8 +373,10 @@ impl KernelBuilder for Builder<'_> {
     }
     fn load(&mut self, buffer: Buffer, index: Reg) -> Reg {
         let index = self.scalar(index);
-        let addr = self.address(buffer, index, false);
-        self.result(Op::Load(hir::Type::I32, addr))
+        self.immediate = None;
+        let dst = self.local();
+        self.define_load(dst, buffer, index);
+        dst
     }
     fn store(&mut self, buffer: Buffer, index: Reg, value: Reg) {
         let (index, value) = (self.scalar(index), self.scalar(value));

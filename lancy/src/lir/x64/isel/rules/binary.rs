@@ -66,7 +66,15 @@ impl Rules<'_> {
             },
             Binary::Add => Inst::Alu(Alu::Add, dst, self.input(a), self.rhs(b)),
             Binary::Sub => Inst::Alu(Alu::Sub, dst, self.input(a), self.rhs(b)),
-            Binary::Mul => Inst::Alu(Alu::Mul, dst, self.input(a), self.rhs(b)),
+            Binary::Mul => match self.ctx.constant(b).map(|n| n as u32) {
+                Some(n) if n.is_power_of_two() => Inst::Shift {
+                    left: true,
+                    dst,
+                    value: self.input(a),
+                    count: Rhs::Imm(n.trailing_zeros() as i32),
+                },
+                _ => Inst::Alu(Alu::Mul, dst, self.input(a), self.rhs(b)),
+            },
             Binary::And => Inst::Alu(Alu::And, dst, self.input(a), self.rhs(b)),
             Binary::Or => Inst::Alu(Alu::Or, dst, self.input(a), self.rhs(b)),
             Binary::Xor => Inst::Alu(Alu::Xor, dst, self.input(a), self.rhs(b)),
