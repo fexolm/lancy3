@@ -1,7 +1,7 @@
 use super::*;
 
 #[derive(Clone, Copy, Debug)]
-pub(in crate::lir::x64::inst::simd) enum Rule {
+pub(in crate::lir::x64) enum Rule {
     FloatWidth,
     Shuffle,
     Widen(bool),
@@ -9,70 +9,9 @@ pub(in crate::lir::x64::inst::simd) enum Rule {
     Reduce(B),
 }
 impl Rule {
-    pub(super) fn select(m: Math, c: Features) -> Option<Self> {
-        let e = m.input.lane()?;
-        let to = m.output.lane()?;
-        let n = e.bytes();
-        Some(match m.action {
-            Action::Widen(_) | Action::Narrow
-                if matches!((e, to), (Lane::F32, Lane::F64) | (Lane::F64, Lane::F32))
-                    || matches!((e, to), (Lane::F32, Lane::F16) | (Lane::F16, Lane::F32))
-                        && (c.bytes == 64 || c.f16c)
-                    || matches!((e, to), (Lane::F32, Lane::BF16) | (Lane::BF16, Lane::F32))
-                        && (c.bytes == 16 || c.avx2) =>
-            {
-                Self::FloatWidth
-            }
-            Action::Shuffle
-                if c.bytes == 64
-                    && (matches!(n, 4 | 8) || n == 2 && c.bw || n == 1 && c.bw && c.vbmi)
-                    || c.bytes == 32 && c.avx2 && n == 4 =>
-            {
-                Self::Shuffle
-            }
-            Action::Widen(high)
-                if !e.float()
-                    && !to.float()
-                    && to.bytes() == 2 * n
-                    && to.bytes() <= 8
-                    && (c.bytes == 16
-                        || c.bytes == 32 && c.avx2
-                        || c.bytes == 64 && (n >= 2 || c.bw)) =>
-            {
-                Self::Widen(high)
-            }
-            Action::Narrow
-                if !e.float()
-                    && !to.float()
-                    && n == 2 * to.bytes()
-                    && n <= 8
-                    && (c.bytes == 16
-                        || c.bytes == 32 && c.avx2
-                        || c.bytes == 64 && (n >= 4 || c.bw)) =>
-            {
-                Self::Narrow
-            }
-            Action::Reduce(op)
-                if !e.float()
-                    && n <= 8
-                    && (c.bytes == 16 || c.avx2)
-                    && match op {
-                        B::Add | B::And | B::Or | B::Xor => true,
-                        B::Mul => n == 2 || n == 4 && c.sse41,
-                        B::Min | B::Max => {
-                            n <= 4 && (c.sse41 || matches!((n, e.signed()), (1, false) | (2, true)))
-                        }
-                        _ => false,
-                    } =>
-            {
-                Self::Reduce(op)
-            }
-            _ => return None,
-        })
-    }
-    pub(super) fn temps(self, m: Math, c: Features) -> usize {
+    pub(super) fn temps(self, action: Action, input: Type, c: Features) -> usize {
         match self {
-            Self::FloatWidth => match (m.action, m.input.lane().unwrap()) {
+            Self::FloatWidth => match (action, input.lane().unwrap()) {
                 (Action::Widen(high), Lane::F32) => usize::from(high),
                 (Action::Widen(_), _) => 4,
                 (_, Lane::F64) => 2,
@@ -85,12 +24,20 @@ impl Rule {
             Self::Narrow | Self::Reduce(_) => 2,
         }
     }
-    pub(super) fn emit(self, v: &mut Vector, m: Math, r: &[usize], t: &[usize]) -> Result {
+    pub(super) fn emit(
+        self,
+        v: &mut Vector,
+        action: Action,
+        input: Type,
+        output: Type,
+        r: &[usize],
+        t: &[usize],
+    ) -> Result {
         let (x, y, d) = (r[0], r[1], *r.last().unwrap());
-        let e = m.input.lane().unwrap();
+        let e = input.lane().unwrap();
         let n = e.bytes();
         match self {
-            Self::FloatWidth => float_width(v, m, r, t),
+            Self::FloatWidth => float_width(v, action, input, output, r, t),
             Self::Shuffle if v.width == 64 => {
                 let i = r[2];
                 v.splat(t[0], n, (2 * v.width / n) as u64)?;
@@ -310,12 +257,19 @@ fn canonical_f32(v: &mut Vector, d: usize, x: usize, tmp: &[usize]) -> Result {
     v.or(c, c, b)?;
     integer::select_bits(v, d, m, c, x, b)
 }
-fn float_width(v: &mut Vector, m: Math, r: &[usize], t: &[usize]) -> Result {
+fn float_width(
+    v: &mut Vector,
+    action: Action,
+    input: Type,
+    output: Type,
+    r: &[usize],
+    t: &[usize],
+) -> Result {
     let x = r[0];
     let d = *r.last().unwrap();
-    let from = m.input.lane().unwrap();
-    let to = m.output.lane().unwrap();
-    if let Action::Widen(high) = m.action {
+    let from = input.lane().unwrap();
+    let to = output.lane().unwrap();
+    if let Action::Widen(high) = action {
         let s = if high {
             upper(v, t[0], x)?;
             t[0]
@@ -376,12 +330,14 @@ fn float_width(v: &mut Vector, m: Math, r: &[usize], t: &[usize]) -> Result {
         }
     }
     if to == Lane::BF16 {
-        let spec = Math {
-            action: Action::Narrow,
-            input: Type::Vector(Lane::U32),
-            output: Type::Vector(Lane::U16),
-        };
-        Rule::Narrow.emit(v, spec, &[a, b, d], &t[2..4])
+        Rule::Narrow.emit(
+            v,
+            Action::Narrow,
+            Type::Vector(Lane::U32),
+            Type::Vector(Lane::U16),
+            &[a, b, d],
+            &t[2..4],
+        )
     } else {
         join(v, d, a, b)
     }

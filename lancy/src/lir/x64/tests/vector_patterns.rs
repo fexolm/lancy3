@@ -342,9 +342,9 @@ fn avx512_selects_packed_permutation_reduction_and_integer_conversions() {
 #[test]
 fn selected_rearrangements_respect_feature_subsets_and_smaller_register_widths() {
     use super::packed_code::{body, executable, host_supports, profiles, supports};
+    use crate::hir::{eval::evaluate, operation::Action};
     use crate::jit::packed_test;
     use crate::lir::x64::inst::simd::Native;
-    use crate::numbers::{Action, Math};
     use iced_x86::code_asm::{CodeAssembler, rax, xmm0};
 
     let [sse2, avx2, foundation, extended] = profiles();
@@ -386,22 +386,20 @@ fn selected_rearrangements_respect_feature_subsets_and_smaller_register_widths()
                 (w, w, Action::Shuffle, &[1, 2, 3, 4]),
                 (s, small.scalar(), Action::Reduce(Binary::Add), &[1, 0]),
             ] {
-                let spec = Math {
-                    input,
-                    output,
-                    action,
-                };
-                let Some(native) = Native::select(spec, cpu) else {
+                let Some(native) = Native::select(action, input, output, cpu) else {
                     continue;
                 };
                 let (mut bytes, text_len) = body(native, regs);
                 let mut host_ok = cpu.bytes <= Features::host().bytes;
                 for inst in Decoder::new(64, &bytes[..text_len], DecoderOptions::NONE) {
-                    assert!(!inst.is_invalid(), "{spec:?} {cpu:?}");
+                    assert!(
+                        !inst.is_invalid(),
+                        "{action:?} {input:?} {output:?} {cpu:?}"
+                    );
                     for &feature in inst.cpuid_features() {
                         assert!(
                             supports(cpu, feature),
-                            "{spec:?} on {cpu:?} emitted {:?} requiring {feature:?}",
+                            "{action:?} {input:?} {output:?} on {cpu:?} emitted {:?} requiring {feature:?}",
                             inst.code()
                         );
                         host_ok &= host_supports(feature);
@@ -442,21 +440,26 @@ fn selected_rearrangements_respect_feature_subsets_and_smaller_register_widths()
                                         &indices[(i + phase) % indices.len()].to_le_bytes()[..size],
                                     );
                                 }
-                                let expected = spec
-                                    .eval(slots[..3].try_into().unwrap(), cpu.bytes)
-                                    .unwrap();
+                                let expected = evaluate(
+                                    action,
+                                    input,
+                                    output,
+                                    slots[..3].try_into().unwrap(),
+                                    cpu.bytes,
+                                )
+                                .unwrap();
                                 let mut actual = slots;
                                 call(&mut actual);
                                 let len = output.bytes(cpu.bytes);
                                 assert_eq!(
                                     &actual[num_inputs.max(2)][..len],
                                     &expected[..len],
-                                    "{spec:?} {cpu:?}"
+                                    "{action:?} {input:?} {output:?} {cpu:?}"
                                 );
                                 assert_eq!(
                                     actual[..num_inputs],
                                     slots[..num_inputs],
-                                    "{spec:?} clobbered live input"
+                                    "{action:?} {input:?} {output:?} clobbered live input"
                                 );
                             }
                         })

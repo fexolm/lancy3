@@ -1,5 +1,5 @@
-use super::{Function, LANES, Lane, Math, Op, ScalarKernel, Terminator, Ternary};
-use crate::numbers::Action;
+use super::{Function, LANES, Lane, Op, ScalarKernel, Terminator, Ternary};
+use crate::hir::{eval::evaluate, operation::Action};
 
 fn scalar_cast(from: Lane, to: Lane) -> Function {
     let mut f = Function::new(&[from.scalar()], to.scalar());
@@ -110,15 +110,17 @@ fn scalar_casts_match_reference_across_ieee_and_word_boundaries() {
         let cases = inputs(from);
         for to in LANES {
             let kernel = ScalarKernel::compile(&scalar_cast(from, to)).unwrap();
-            let math = Math {
-                action: Action::Cast,
-                input: from.scalar(),
-                output: to.scalar(),
-            };
             for &bits in &cases {
                 let mut args = [[0; 64]; 3];
                 args[0][..16].copy_from_slice(&bits.to_le_bytes());
-                let reference = math.eval(&args, ScalarKernel::vector_bytes()).unwrap();
+                let reference = evaluate(
+                    Action::Cast,
+                    from.scalar(),
+                    to.scalar(),
+                    &args,
+                    ScalarKernel::vector_bytes(),
+                )
+                .unwrap();
                 let mask = u128::MAX >> (128 - to.bytes() * 8);
                 let reference = u128::from_le_bytes(reference[..16].try_into().unwrap()) & mask;
                 let mut out = [0u64; 2];

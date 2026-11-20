@@ -5,7 +5,10 @@ mod rounding;
 use crate::{
     CallError, ScalarKernel,
     hir::{Binary, Function, Lane, Op, Simd, Terminator, Ternary, Type, Unary, Value},
-    numbers::{Bits, Math},
+    hir::{
+        eval::{Bits, evaluate},
+        operation::operation,
+    },
 };
 
 const LANES: [Lane; 16] = {
@@ -35,7 +38,7 @@ fn differential(params: &[Type], ret: Type, make_op: impl FnOnce(&[Value]) -> Op
     let mut f = Function::new(params, ret);
     let b = f.entry();
     let op = make_op(f.params(b));
-    let (math, _) = Math::from_op(op, |v| f.value_type(v)).unwrap();
+    let (action, input_type, output_type, _) = operation(op, |v| f.value_type(v)).unwrap();
     let v = f.append(b, op).unwrap();
     f.set_terminator(b, Terminator::Return(v));
     let k = ScalarKernel::compile(&f).unwrap_or_else(|e| panic!("{params:?} {op:?}: {e}"));
@@ -54,7 +57,7 @@ fn differential(params: &[Type], ret: Type, make_op: impl FnOnce(&[Value]) -> Op
                 .map(|p| u64::from_le_bytes(p.try_into().unwrap())),
         );
     }
-    let expected = math.eval(&bits, width).unwrap();
+    let expected = evaluate(action, input_type, output_type, &bits, width).unwrap();
     let n = ret.bytes(width);
     let mut out = vec![0; n.div_ceil(8)];
     k.call_words(&args, &mut out)

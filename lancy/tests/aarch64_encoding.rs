@@ -300,3 +300,75 @@ fn sve_memory_and_sve2_arithmetic_match_llvm_mc() {
     assert!(!Mul_z_zz_.is_available(FeatureSet::NONE.with(Feature::Sve)));
     assert!(Ld1w_z_p_bi_u32.is_available(FeatureSet::NONE.with(Feature::Sve2)));
 }
+
+#[test]
+fn wide_arithmetic_and_permutations_match_llvm_mc() {
+    use Code::*;
+    let r = Operand::reg;
+    let v = Operand::vec;
+    let p = Operand::pred;
+    let imm = Operand::imm;
+    let cases: &[(Code, &[Operand], u32)] = &[
+        (Adc_64, &[r(R::X0), r(R::X1), r(R::X2)], 0x9a02_0020),
+        (Dup_q0_z, &[r(R::Z0), r(R::Z1)], 0x0530_2020),
+        (
+            Bsl_z_zzz_,
+            &[
+                v(R::Z7, A::D),
+                v(R::Z7, A::D),
+                v(R::Z11, A::D),
+                v(R::Z19, A::D),
+            ],
+            0x042b_3e67,
+        ),
+        (
+            Trn1_p_pp,
+            &[v(R::P1, A::D), v(R::P3, A::D), v(R::P2, A::D)],
+            0x05e2_5061,
+        ),
+        (
+            Lsl_z_zi,
+            &[v(R::Z0, A::D), v(R::Z1, A::D), imm(63)],
+            0x04ff_9c20,
+        ),
+        (Orr_32_log_imm, &[r(R::W0), r(R::W1), imm(256)], 0x3218_0020),
+        (Dupm_z, &[v(R::Z0, A::B), imm(7)], 0x05c0_0640),
+        (
+            Tbl_asimd,
+            &[v(R::V0, A::B8), v(R::V1, A::B16), v(R::V2, A::B8)],
+            0x0e02_0020,
+        ),
+        (
+            Fcvt_z_d_p_s,
+            &[v(R::Z0, A::D), p(R::P1, PredQual::Merge), v(R::Z1, A::S)],
+            0x65cb_a420,
+        ),
+        (
+            Histcnt_z_p_zz,
+            &[
+                v(R::Z0, A::S),
+                p(R::P0, PredQual::Zero),
+                v(R::Z1, A::S),
+                v(R::Z2, A::S),
+            ],
+            0x45a2_c020,
+        ),
+    ];
+    for &(code, operands, expected) in cases {
+        assert_eq!(
+            Instruction::with(code, operands, 0).unwrap().encode(),
+            Ok(expected),
+            "{code:?}"
+        );
+    }
+    let out = v(R::V0, A::S4);
+    let src = v(R::V1, A::S4);
+    assert!(Instruction::with(Sshr_asimd_imm, &[out, src, imm(0)], 0).is_err());
+    assert!(Instruction::with(Sshr_asimd_imm, &[out, src, imm(33)], 0).is_err());
+    assert!(Instruction::with(Orr_32_log_imm, &[r(R::W0), r(R::W1), imm(0)], 0).is_err());
+    let sve = FeatureSet::NONE.with(Feature::Sve);
+    assert!(Dup_q0_z.is_available(sve));
+    assert!(!Histcnt_z_p_zz.is_available(sve));
+    assert!(!Bsl_z_zzz_.is_available(sve));
+    assert!(Bsl_z_zzz_.is_available(sve.with(Feature::Sve2)));
+}

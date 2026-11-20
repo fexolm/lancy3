@@ -2,8 +2,8 @@
 //! R10 is the allocator's move scratch and is available inside a pseudo-op.
 pub(super) mod lanes;
 pub(super) mod simd;
+use crate::hir::operation::Action;
 use crate::hir::{Binary, Lane, Scale, Type};
-use crate::numbers::Math;
 use crate::{lir::TargetInst, module::FunctionId};
 use regalloc2::{MachineEnv, Operand, PReg, PRegSet, RegClass, VReg};
 use simd::Native;
@@ -112,17 +112,6 @@ pub(super) enum Cond {
 }
 
 impl Cond {
-    pub fn from_binary(op: Binary) -> Option<Self> {
-        Some(match op {
-            Binary::Eq => Self::Eq,
-            Binary::Ne => Self::Ne,
-            Binary::Lt => Self::Lt,
-            Binary::Le => Self::Le,
-            Binary::Gt => Self::Gt,
-            Binary::Ge => Self::Ge,
-            _ => return None,
-        })
-    }
     pub fn inverse(self) -> Self {
         match self {
             Self::Eq => Self::Ne,
@@ -145,33 +134,6 @@ pub(super) enum Rhs {
 pub(super) enum Quotient {
     PowerOfTwo(i32),
     Reciprocal { multiplier: u32, shift: i32 },
-}
-
-impl Quotient {
-    // The caller has handled ±1 and zero.
-    pub fn for_divisor(divisor: i32) -> Self {
-        let magnitude = divisor.unsigned_abs();
-        let log = magnitude.ilog2();
-        if magnitude.is_power_of_two() {
-            return Self::PowerOfTwo(log as i32);
-        }
-        let d = u64::from(magnitude);
-        let mut shift = 31 + log;
-        let scale = 1u64 << shift;
-        let mut multiplier = scale.div_ceil(d);
-        // For n >= 0, the error in n*m/scale must be strictly below 1/d.
-        // For n < 0 the result is rounded down, then incremented to
-        // truncate toward zero. The reciprocal rounds up strictly for all
-        // non-powers of two. One extra bit always meets the error bound.
-        if multiplier * d - scale > 1u64 << log {
-            shift += 1;
-            multiplier = (1u64 << shift).div_ceil(d);
-        }
-        Self::Reciprocal {
-            multiplier: multiplier as u32,
-            shift: shift as i32,
-        }
-    }
 }
 
 impl Rhs {
@@ -208,7 +170,13 @@ pub(super) enum Inst {
         index: usize,
     },
     Native(Native, VReg, [Option<VReg>; 3], [Option<VReg>; 6]),
-    Lanes(Math, VReg, [Option<VReg>; 3]),
+    Lanes {
+        action: Action,
+        input: Type,
+        output: Type,
+        dst: VReg,
+        args: [Option<(Type, VReg)>; 3],
+    },
     Literal(Lane, u128, VReg),
     Iota(Lane, VReg),
     BitMove(Type, Type, VReg, VReg),
@@ -301,9 +269,9 @@ impl TargetInst for Inst {
                 });
                 out.extend(temps.into_iter().flatten().map(O::reg_temp));
             }
-            Self::Lanes(_, d, args) => {
-                out.extend(args.into_iter().flatten().map(O::reg_use));
-                out.push(O::reg_fixed_def(d, return_reg(d)));
+            Self::Lanes { dst, args, .. } => {
+                out.extend(args.into_iter().flatten().map(|(_, reg)| O::reg_use(reg)));
+                out.push(O::reg_fixed_def(dst, return_reg(dst)));
             }
             Self::Literal(_, _, d) | Self::Iota(_, d) => out.push(O::reg_def(d)),
             Self::BitMove(_, _, d, a) => out.extend([O::reg_use(a), O::reg_def(d)]),
@@ -389,10 +357,12 @@ impl TargetInst for Inst {
     fn clobbers(&self) -> PRegSet {
         match self {
             Self::Call { clobbers, .. } => *clobbers,
-            Self::Lanes(spec, dst, _) => {
+            Self::Lanes {
+                action, input, dst, ..
+            } => {
                 // The inline expansions use only these scratch registers. A real
                 // math call may also overwrite the upper halves of Windows YMM/ZMM6..15.
-                let mut set = if lanes::calls_library(*spec) {
+                let mut set = if lanes::calls_library(*action, *input) {
                     let wide = super::Features::host().bytes > 16;
                     VOLATILE | SIMD | if wide { SAVED_SIMD } else { PRegSet::empty() }
                 } else {

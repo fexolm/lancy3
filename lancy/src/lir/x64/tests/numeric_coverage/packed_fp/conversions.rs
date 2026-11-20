@@ -208,16 +208,11 @@ fn packed_float_and_double_widen_and_narrow_keep_lane_order() {
 }
 
 fn decoded_conversion(cpu: Features, from: Lane, to: Lane, action: Action) -> Vec<Instruction> {
-    let spec = Math {
-        action,
-        input: Type::Vector(from),
-        output: Type::Vector(to),
-    };
-    let Some(op) = Native::select(spec, cpu) else {
+    let Some(op) = Native::select(action, Type::Vector(from), Type::Vector(to), cpu) else {
         return Vec::new();
     };
     let (bytes, len) = body(op, &registers(op, arity(action)));
-    decoded(cpu, spec, &bytes[..len])
+    decoded(cpu, op, &bytes[..len])
 }
 
 #[test]

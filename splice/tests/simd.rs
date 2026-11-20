@@ -93,6 +93,74 @@ macro_rules! compile_all {
 }
 
 #[kernel]
+fn xor_complement(a: &[i32], b: &[i32], c: &[i32], out: &mut [i32]) -> i32 {
+    let x = Lane::load(a, 0);
+    let y = Lane::load(b, 0);
+    let z = Lane::load(c, 0);
+    (!(x ^ y ^ z)).store(out, 0);
+    Lane::<i32>::lanes() as i32
+}
+
+#[test]
+fn triple_xor_and_complement_preserve_every_lane_and_the_tail() {
+    let lanes = Lane::<i32>::lanes();
+    let a: Vec<_> = (0..64).collect();
+    let b: Vec<_> = a.iter().map(|&x| 0x7654_3210 ^ (x << 16)).collect();
+    let c: Vec<_> = a.iter().map(|&x| !(x << 8)).collect();
+    let mut expected = vec![77; a.len()];
+    for i in 0..lanes {
+        expected[i] = !(a[i] ^ b[i] ^ c[i]);
+    }
+    for kernel in compile_all!(xor_complement) {
+        let mut out = vec![77; a.len()];
+        let result = kernel.call(
+            &[],
+            &mut [
+                a.as_slice().into(),
+                b.as_slice().into(),
+                c.as_slice().into(),
+                out.as_mut_slice().into(),
+            ],
+        );
+        assert_eq!(result, Ok(lanes as i32));
+        assert_eq!(out, expected);
+    }
+}
+
+#[kernel]
+fn floating_iotas(singles: &mut [f32], doubles: &mut [f64]) -> i32 {
+    Lane::<f32>::iota().store(singles, 0);
+    Lane::<f64>::iota().store(doubles, 0);
+    Lane::<f32>::lanes() as i32
+}
+
+#[test]
+fn floating_iota_uses_numeric_lane_indices() {
+    let (n, m) = (Lane::<f32>::lanes(), Lane::<f64>::lanes());
+    let mut expected_singles = [-1.0_f32; 64];
+    let mut expected_doubles = [-1.0_f64; 64];
+    for (i, value) in expected_singles[..n].iter_mut().enumerate() {
+        *value = i as f32;
+    }
+    for (i, value) in expected_doubles[..m].iter_mut().enumerate() {
+        *value = i as f64;
+    }
+    for kernel in compile_all!(floating_iotas) {
+        let mut singles = [-1.0_f32; 64];
+        let mut doubles = [-1.0_f64; 64];
+        assert_eq!(
+            kernel.call(
+                &[],
+                &mut [singles.as_mut_slice().into(), doubles.as_mut_slice().into()]
+            ),
+            Ok(n as i32)
+        );
+        assert_eq!(singles, expected_singles);
+        assert_eq!(doubles, expected_doubles);
+    }
+}
+
+#[kernel]
 fn greater_lanes(a: Lane<i32>, b: Lane<i32>) -> Mask<i32> {
     a.simd_ge(b)
 }
@@ -1144,7 +1212,7 @@ fn register_refill_and_wrapping_lane_index_match_across_backends() {
         .map(|i| 0x1234_5678 + i * 0x0103_0709)
         .collect();
     let kernels = compile_all!(refill_lanes);
-    for bits in [0, u32::MAX, 0x5a5a, 0xf069, 1 << (width - 1)] {
+    for bits in [0, 1, u32::MAX, 0x5a5a, 0xf069, 1 << (width - 1)] {
         let flags: Vec<_> = (0..width).map(|i| ((bits >> i) & 1) as i32).collect();
         for idx in [-1, 0, width as i32, i32::MIN, i32::MAX] {
             let mut source = src.iter();
@@ -1161,11 +1229,12 @@ fn register_refill_and_wrapping_lane_index_match_across_backends() {
                 .collect();
             let position = idx as usize % width;
             let selected = std::mem::replace(&mut want[position], -99);
-            let mut dst = vec![0; width];
+            want.extend([976; 2]);
+            let mut dst = vec![976; width + 2];
             assert_eq!(refill_lanes(&src, &flags, &mut dst, idx), selected);
             assert_eq!(dst, want);
             for kernel in &kernels {
-                dst.fill(-1);
+                dst.fill(976);
                 assert_eq!(
                     kernel.call(
                         &[idx],
@@ -1219,4 +1288,40 @@ fn specialization_sized_locals_have_independent_registers() {
             .unwrap_err()
             .contains("local index out of bounds")
     );
+}
+#[kernel]
+fn mul_i64_block(lhs: &[i64], rhs: &[i64], dst: &mut [i64]) -> i32 {
+    (Lane::load(lhs, 0) * Lane::load(rhs, 0)).store(dst, 0);
+    Lane::<i64>::lanes() as i32
+}
+
+#[test]
+fn i64_multiply_keeps_the_low_word_of_every_product() {
+    let n = Lane::<i64>::lanes();
+    let inputs = [
+        (-1_i64, 2_i64),
+        ((1 << 32) + 1, (1 << 32) + 1),
+        (1 << 32, 3),
+        (0xffffffff, (1 << 32) + 1),
+        (i64::MIN, -3),
+    ];
+    for k in compile_all!(mul_i64_block) {
+        for offset in [0, 2] {
+            let (lhs, rhs): (Vec<_>, Vec<_>) =
+                inputs.into_iter().cycle().skip(offset).take(n).unzip();
+            let mut dst = vec![33; n + 1];
+            let result = k.call(
+                &[],
+                &mut [(&lhs[..]).into(), (&rhs[..]).into(), (&mut dst[..]).into()],
+            );
+            assert_eq!(result.unwrap(), n as i32);
+            let expected = lhs
+                .iter()
+                .zip(rhs)
+                .map(|(&a, b)| a.wrapping_mul(b))
+                .collect::<Vec<_>>();
+            assert_eq!(&dst[..n], &expected);
+            assert_eq!(dst[n], 33);
+        }
+    }
 }

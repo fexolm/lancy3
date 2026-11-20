@@ -1,6 +1,6 @@
 use super::{
     Result,
-    inst::{Inst, Masked, nonvolatile},
+    inst::{Inst, nonvolatile},
     isel,
 };
 use crate::{
@@ -57,12 +57,7 @@ pub(super) fn compile(
                 Inst::StoreArg(ty, off, _) => {
                     arg_bytes = arg_bytes.max(off + ty.bytes(config.bytes).next_multiple_of(8));
                 }
-                Inst::Libcall(..)
-                | Inst::LaneAccess { .. }
-                | Inst::Masked {
-                    kind: Masked::Lanes,
-                    ..
-                } => needs_temp = true,
+                Inst::Libcall(..) | Inst::LaneAccess { .. } => needs_temp = true,
                 _ => {}
             }
         }

@@ -5,7 +5,7 @@ use super::{
     frame::{CHILD_ARGS, Frame},
     inst::{Address, Alu, Cond, Inst, Quotient, Rhs},
 };
-use crate::numbers::Math;
+use crate::hir::operation::Action;
 use crate::{
     CompileError,
     hir::{Function, Type, ssa::VerifiedBody},
@@ -16,7 +16,7 @@ use iced_x86::{IcedError, code_asm::*};
 use regalloc2::RegClass;
 use regalloc2::{Allocation, Block, Edit, Function as _, InstOrEdit};
 
-pub(super) type Constants = Vec<(CodeLabel, crate::numbers::Bits, usize)>;
+pub(super) type Constants = Vec<(CodeLabel, [u8; 64], usize)>;
 type AsmResult = Result<(), IcedError>;
 
 pub(super) const R64: [AsmRegister64; 16] = [
@@ -251,22 +251,27 @@ impl Emitter<'_> {
         Ok(())
     }
 
-    fn lanes(&mut self, spec: Math, allocs: &[Allocation]) -> AsmResult {
+    fn lanes(
+        &mut self,
+        action: Action,
+        input: Type,
+        output: Type,
+        args: [Option<Type>; 3],
+        allocs: &[Allocation],
+    ) -> AsmResult {
         use super::inst::lanes::{self, FRAME, INPUT, OUTPUT, WORKSPACE};
         let a = &mut self.a;
         a.sub(rsp, FRAME)?;
         a.mov(qword_ptr(rsp + WORKSPACE), r11)?;
-        for &i in spec.inputs() {
-            store(a, spec.operand_type(i), ptr(rsp + INPUT[i]), gpr(allocs[i]))?;
+        let mut allocs = allocs.iter().copied();
+        for (arg, offset) in args.into_iter().zip(INPUT) {
+            if let Some(ty) = arg {
+                store(a, ty, ptr(rsp + offset), gpr(allocs.next().unwrap()))?;
+            }
         }
         let mut faults = [None; 3];
-        lanes::emit(a, spec, &mut faults)?;
-        load(
-            a,
-            spec.output,
-            gpr(*allocs.last().unwrap()),
-            ptr(rsp + OUTPUT),
-        )?;
+        lanes::emit(a, action, input, output, &mut faults)?;
+        load(a, output, gpr(allocs.next().unwrap()), ptr(rsp + OUTPUT))?;
         a.mov(r11, qword_ptr(rsp + WORKSPACE))?;
         a.add(rsp, FRAME)?;
         if faults.iter().any(Option::is_some) {
@@ -329,7 +334,19 @@ impl Emitter<'_> {
                     regs[..allocs.len()].split_at(allocs.len() - native.temporaries());
                 native.emit_allocated(a, operands, temps, Some(self.constants))
             }
-            Inst::Lanes(spec, ..) => self.lanes(spec, allocs),
+            Inst::Lanes {
+                action,
+                input,
+                output,
+                args,
+                ..
+            } => self.lanes(
+                action,
+                input,
+                output,
+                args.map(|arg| arg.map(|(ty, _)| ty)),
+                allocs,
+            ),
             Inst::Literal(l, bits, _) => match l.bytes() {
                 16 => {
                     let label = a.create_label();
@@ -352,18 +369,7 @@ impl Emitter<'_> {
             Inst::Iota(l, _) => {
                 let label = a.create_label();
                 let width = Features::host().bytes;
-                let mut bits = [0; 64];
-                for (index, lane) in bits[..width].chunks_exact_mut(l.bytes()).enumerate() {
-                    let value = match l {
-                        crate::hir::Lane::F16 | crate::hir::Lane::BF16 => u128::from(
-                            crate::numbers::half::Format::for_lane(l).encode(index as f64, 0.),
-                        ),
-                        crate::hir::Lane::F32 => u128::from((index as f32).to_bits()),
-                        crate::hir::Lane::F64 => u128::from((index as f64).to_bits()),
-                        _ => index as u128,
-                    };
-                    lane.copy_from_slice(&value.to_le_bytes()[..l.bytes()]);
-                }
+                let bits = super::super::constants::iota_bytes(l, width);
                 self.constants.push((label, bits, width));
                 simd::load(a, reg(0), ptr(label), width)
             }

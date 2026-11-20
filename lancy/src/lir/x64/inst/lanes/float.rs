@@ -96,15 +96,15 @@ fn round_bits(a: &mut CodeAssembler, lane: Lane, op: U, src: i32, out: i32) -> R
     put(a, out, lane.bytes())
 }
 
-fn bits(a: &mut CodeAssembler, spec: Math, p: Args) -> Result {
-    let lane = spec.input.lane().unwrap();
+fn bits(a: &mut CodeAssembler, action: Action, input: Type, output: Type, p: Args) -> Result {
+    let lane = input.lane().unwrap();
     let size = lane.bytes();
     let fmt = convert::Float::new(lane);
     let (sign, inf, normal) = (fmt.sign, fmt.infinity(), 1u64 << fmt.fraction);
     word(a, 0, p.x, size, false)?;
     a.mov(r8, sign)?;
     a.mov(r9, sign - 1)?;
-    match spec.action {
+    match action {
         Action::Unary(U::Signum) => {
             let done = a.create_label();
             a.and(r9, rax)?;
@@ -188,19 +188,17 @@ fn bits(a: &mut CodeAssembler, spec: Math, p: Args) -> Result {
         }
         _ => unreachable!(),
     }
-    put(a, p.out, spec.output.lane().unwrap().bytes())
+    put(a, p.out, output.lane().unwrap().bytes())
 }
 
-// Math functions with no exact instruction use the platform scalar math ABI.
+// Functions with no exact instruction use the platform scalar math ABI.
 // The call site contains only the address of the concrete function; its
 // arguments and result are plain floating point values (XMM0..2 on both ABIs).
-pub(super) fn math_function(spec: Math) -> Option<u64> {
-    let lane = spec.input.lane()?;
+pub(super) fn math_function(action: Action, lane: Lane) -> Option<u64> {
     if !lane.float() {
         return None;
     }
     let single = lane == Lane::F32;
-    let action = spec.action;
     macro_rules! unary {
         ($op:ident) => {{
             extern "C" fn f(x: f32) -> f32 {
@@ -318,18 +316,23 @@ fn half_fma(a: &mut CodeAssembler, lane: Lane, out: i32) -> Result {
     convert::to_float(a, Lane::F64, lane, TEMP, out, Some(TEMP + 8))
 }
 
-pub(super) fn emit(a: &mut CodeAssembler, spec: Math, p: Args) -> Result {
-    let lane = spec.input.lane().unwrap();
+pub(super) fn emit(
+    a: &mut CodeAssembler,
+    action: Action,
+    input: Type,
+    output: Type,
+    p: Args,
+) -> Result {
+    let lane = input.lane().unwrap();
     let single = lane == Lane::F32;
-    if let Action::Unary(op @ (U::Floor | U::Ceil | U::Trunc | U::Round | U::Nearest)) = spec.action
-    {
+    if let Action::Unary(op @ (U::Floor | U::Ceil | U::Trunc | U::Round | U::Nearest)) = action {
         return round_bits(a, lane, op, p.x, p.out);
     }
-    if matches!(spec.action, Action::Unary(U::Signum)) {
-        return bits(a, spec, p);
+    if matches!(action, Action::Unary(U::Signum)) {
+        return bits(a, action, input, output, p);
     }
     if matches!(
-        spec.action,
+        action,
         Action::Unary(
             U::Abs
                 | U::Neg
@@ -343,23 +346,28 @@ pub(super) fn emit(a: &mut CodeAssembler, spec: Math, p: Args) -> Result {
                 | U::IsSubnormal
         ) | Action::Binary(B::CopySign)
     ) {
-        return bits(a, spec, p);
+        return bits(a, action, input, output, p);
     }
     let half = matches!(lane, Lane::F16 | Lane::BF16);
+    let arity = match action {
+        Action::Unary(_) => 1,
+        Action::Binary(_) => 2,
+        Action::Ternary(Ternary::MulAdd) => 3,
+        _ => unreachable!("verified scalar floating-point operation"),
+    };
     let mut source = [p.x, p.y, p.z];
     if half {
-        for &i in spec.inputs() {
+        for (i, offset) in source[..arity].iter_mut().enumerate() {
             let dst = TEMP + 8 * i as i32;
-            convert::emit(a, lane, Lane::F64, source[i], dst)?;
-            source[i] = dst;
+            convert::emit(a, lane, Lane::F64, *offset, dst)?;
+            *offset = dst;
         }
     }
-    for &i in spec.inputs() {
-        let reg = [xmm0, xmm1, xmm2][i];
+    for (&offset, reg) in source[..arity].iter().zip([xmm0, xmm1, xmm2]) {
         if single {
-            a.movss(reg, dword_ptr(rsp + source[i]))?;
+            a.movss(reg, dword_ptr(rsp + offset))?;
         } else {
-            a.movq(reg, qword_ptr(rsp + source[i]))?;
+            a.movq(reg, qword_ptr(rsp + offset))?;
         }
     }
     macro_rules! fp {
@@ -371,7 +379,7 @@ pub(super) fn emit(a: &mut CodeAssembler, spec: Math, p: Args) -> Result {
             }
         };
     }
-    match spec.action {
+    match action {
         Action::Unary(U::Fract) => {
             let format = if single { Lane::F32 } else { Lane::F64 };
             round_bits(a, format, U::Trunc, source[0], TEMP + 24)?;
@@ -448,13 +456,13 @@ pub(super) fn emit(a: &mut CodeAssembler, spec: Math, p: Args) -> Result {
             }
             a.movzx(eax, al)?;
             a.neg(rax)?;
-            return put(a, p.out, spec.output.lane().unwrap().bytes());
+            return put(a, p.out, output.lane().unwrap().bytes());
         }
         Action::Ternary(Ternary::MulAdd) if half => return half_fma(a, lane, p.out),
         _ => {
             a.mov(
                 r10,
-                math_function(spec).expect("verified scalar math operation"),
+                math_function(action, lane).expect("verified scalar math operation"),
             )?;
             a.call(r10)?;
         }

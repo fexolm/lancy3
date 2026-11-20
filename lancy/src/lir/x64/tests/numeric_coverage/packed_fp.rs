@@ -4,8 +4,8 @@ mod conversions;
 use super::super::packed_code::{body, executable, host_supports, profiles, supports};
 use super::{Binary, Function, Lane, Op, ScalarKernel, Simd, Terminator, Type, Unary};
 use crate::{
+    hir::operation::Action,
     lir::x64::{Features, inst::simd::Native},
-    numbers::{Action, Math},
 };
 use iced_x86::{Decoder, DecoderOptions, EncodingKind, Instruction, Mnemonic};
 use std::num::FpCategory;
@@ -82,22 +82,22 @@ fn registers(op: Native, arity: usize) -> Vec<usize> {
     regs
 }
 
-fn decoded(cpu: Features, spec: Math, bytes: &[u8]) -> Vec<Instruction> {
+fn decoded(cpu: Features, native: Native, bytes: &[u8]) -> Vec<Instruction> {
     Decoder::new(64, bytes, DecoderOptions::NONE)
         .into_iter()
         .inspect(|i| {
-            assert!(!i.is_invalid(), "{spec:?} for {cpu:?}");
+            assert!(!i.is_invalid(), "{native:?} for {cpu:?}");
             for operand in 0..i.op_count() {
                 let reg = i.op_register(operand);
                 assert!(
                     !reg.is_vector_register() || reg.size() <= cpu.bytes,
-                    "{spec:?} for {cpu:?}: {i:?} exceeds the supported vector width"
+                    "{native:?} for {cpu:?}: {i:?} exceeds the supported vector width"
                 );
             }
             for &feature in i.cpuid_features() {
                 assert!(
                     supports(cpu, feature),
-                    "{spec:?} for {cpu:?}: {i:?} requires {feature:?}"
+                    "{native:?} for {cpu:?}: {i:?} requires {feature:?}"
                 );
             }
         })
@@ -130,11 +130,7 @@ fn run_profiles(from: Lane, to: Lane, op: Action, run_cases: impl Fn(usize, &dyn
         }
     });
 
-    let spec = Math {
-        action: op,
-        input: Type::Vector(from),
-        output: Type::Vector(to),
-    };
+    let (action, input, output) = (op, Type::Vector(from), Type::Vector(to));
     let [sse2, avx2, foundation, extended] = profiles();
     let avx1 = Features { bytes: 32, ..sse2 };
     let mut targets = vec![sse2, avx1, avx2, foundation, extended];
@@ -151,12 +147,12 @@ fn run_profiles(from: Lane, to: Lane, op: Action, run_cases: impl Fn(usize, &dyn
         });
     }
     for cpu in targets {
-        let Some(native) = Native::select(spec, cpu) else {
+        let Some(native) = Native::select(action, input, output, cpu) else {
             continue;
         };
         let regs = registers(native, arity);
         let (bytes, text_len) = body(native, &regs);
-        let instructions = decoded(cpu, spec, &bytes[..text_len]);
+        let instructions = decoded(cpu, native, &bytes[..text_len]);
         let available = instructions
             .iter()
             .flat_map(Instruction::cpuid_features)
@@ -455,15 +451,11 @@ fn signed_float_casts_select_packed_conversions_at_each_x64_width() {
     for cpu in ordinary.into_iter().chain(avx10_1_profiles()) {
         let bytes = cpu.bytes;
         for (from, to) in [(Lane::F32, Lane::I32), (Lane::I32, Lane::F32)] {
-            let spec = Math {
-                action: Action::Cast,
-                input: Type::Vector(from),
-                output: Type::Vector(to),
-            };
-            let op = Native::select(spec, cpu)
+            let (action, input, output) = (Action::Cast, Type::Vector(from), Type::Vector(to));
+            let op = Native::select(action, input, output, cpu)
                 .unwrap_or_else(|| panic!("missing packed {from:?}->{to:?} at width {bytes}"));
             let (code, text_len) = body(op, &[1, 2]);
-            let instructions = decoded(cpu, spec, &code[..text_len]);
+            let instructions = decoded(cpu, op, &code[..text_len]);
             let conversion = match (from, bytes) {
                 (Lane::F32, 16) => Mnemonic::Cvttps2dq,
                 (Lane::F32, _) => Mnemonic::Vcvttps2dq,

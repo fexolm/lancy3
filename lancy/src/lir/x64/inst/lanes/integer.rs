@@ -52,21 +52,28 @@ fn zeros(a: &mut CodeAssembler, leading: bool, bits: i32) -> Result {
     }
 }
 
-pub(super) fn emit(a: &mut CodeAssembler, spec: Math, p: Args, faults: &mut Faults) -> Result {
-    let lane = spec.input.lane().unwrap();
+pub(super) fn emit(
+    a: &mut CodeAssembler,
+    action: Action,
+    input: Type,
+    output: Type,
+    p: Args,
+    faults: &mut Faults,
+) -> Result {
+    let lane = input.lane().unwrap();
     let size = lane.bytes();
     if size == 16 {
-        return wide(a, spec, p, faults);
+        return wide(a, action, input, output, p, faults);
     }
     let signed = lane.signed();
     let bits = (size * 8) as i32;
     let sign_extend = signed
         && !matches!(
-            spec.action,
+            action,
             Action::Unary(U::Popcnt | U::LeadingZeros | U::TrailingZeros)
         );
     word(a, 0, p.x, size, sign_extend)?;
-    match spec.action {
+    match action {
         Action::Unary(op) => match op {
             U::Neg => a.neg(rax)?,
             U::Abs if signed => {
@@ -187,7 +194,7 @@ pub(super) fn emit(a: &mut CodeAssembler, spec: Math, p: Args, faults: &mut Faul
         }
         _ => unreachable!("compound integer operation"),
     }
-    put(a, p.out, spec.output.lane().unwrap().bytes())
+    put(a, p.out, output.lane().unwrap().bytes())
 }
 
 fn negate(a: &mut CodeAssembler, lo: AsmRegister64, hi: AsmRegister64) -> Result {
@@ -318,11 +325,18 @@ fn shift_wide(a: &mut CodeAssembler, op: B, signed: bool) -> Result {
     }
 }
 
-fn wide(a: &mut CodeAssembler, spec: Math, p: Args, faults: &mut Faults) -> Result {
-    let signed = spec.input.lane().unwrap().signed();
+fn wide(
+    a: &mut CodeAssembler,
+    action: Action,
+    input: Type,
+    output: Type,
+    p: Args,
+    faults: &mut Faults,
+) -> Result {
+    let signed = input.lane().unwrap().signed();
     a.mov(rax, qword_ptr(rsp + p.x))?;
     a.mov(rdx, qword_ptr(rsp + p.x + 8))?;
-    match spec.action {
+    match action {
         Action::Unary(op) => match op {
             U::Neg => negate(a, rax, rdx)?,
             U::Abs if signed => abs(a, rax, rdx)?,
@@ -429,5 +443,5 @@ fn wide(a: &mut CodeAssembler, spec: Math, p: Args, faults: &mut Faults) -> Resu
         }
         _ => unreachable!(),
     }
-    put(a, p.out, spec.output.lane().unwrap().bytes())
+    put(a, p.out, output.lane().unwrap().bytes())
 }

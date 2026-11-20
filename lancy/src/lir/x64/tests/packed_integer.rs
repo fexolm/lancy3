@@ -1,9 +1,9 @@
 use super::packed_code::{body, executable, host_supports, profiles, supports};
 use crate::{
     hir::{Binary as B, Lane, Type, Unary as U},
+    hir::{eval::evaluate, operation::Action},
     jit::packed_test,
     lir::x64::{Features, inst::simd::Native},
-    numbers::{Action, Math},
 };
 use iced_x86::{Decoder, DecoderOptions, Mnemonic};
 
@@ -18,9 +18,9 @@ const INTS: [Lane; 8] = [
     Lane::U64,
 ];
 
-fn operands(spec: Math, width: usize, seed: usize) -> [[u8; 64]; 3] {
+fn operands(action: Action, lane: Lane, width: usize, seed: usize) -> [[u8; 64]; 3] {
     let mut slots = [[0u8; 64]; 3];
-    let size = spec.input.lane().unwrap().bytes();
+    let size = lane.bytes();
     let bits = 8 * size;
     let mask = u64::MAX >> (64 - bits);
     let sign = 1u64 << (bits - 1);
@@ -59,13 +59,10 @@ fn operands(spec: Math, width: usize, seed: usize) -> [[u8; 64]; 3] {
         sign,
     ];
     let shift = matches!(
-        spec.action,
+        action,
         Action::Binary(B::Shl | B::Shr | B::RotateLeft | B::RotateRight)
     );
-    let saturating = matches!(
-        spec.action,
-        Action::Binary(B::SaturatingAdd | B::SaturatingSub)
-    );
+    let saturating = matches!(action, Action::Binary(B::SaturatingAdd | B::SaturatingSub));
     for i in 0..width / size {
         let j = (seed + i) % xs.len();
         let (x, y) = if saturating {
@@ -92,16 +89,12 @@ fn operands(spec: Math, width: usize, seed: usize) -> [[u8; 64]; 3] {
 
 fn exercise(cpu: Features, lane: Lane, action: Action) {
     let ty = Type::Vector(lane);
-    let spec = Math {
-        input: ty,
-        output: match action {
-            Action::Binary(op) => op.result_type(ty),
-            _ => ty,
-        },
-        action,
+    let output = match action {
+        Action::Binary(op) => op.result_type(ty),
+        _ => ty,
     };
-    let op =
-        Native::select(spec, cpu).unwrap_or_else(|| panic!("missing packed {spec:?} for {cpu:?}"));
+    let op = Native::select(action, ty, output, cpu)
+        .unwrap_or_else(|| panic!("missing packed {action:?} for {cpu:?}"));
     let binary = matches!(action, Action::Binary(_));
     let unary: &[&[usize]] = &[&[1, 1], &[1, 3]];
     let distinct: &[&[usize]] = &[&[1, 2, 1], &[1, 2, 2], &[1, 2, 3], &[1, 1, 1], &[1, 1, 3]];
@@ -117,8 +110,8 @@ fn exercise(cpu: Features, lane: Lane, action: Action) {
         let mut can_run = cpu.bytes <= host.bytes;
         let mut packed_operation = false;
         for inst in Decoder::new(64, &bytes[..text_len], DecoderOptions::NONE) {
-            assert!(!inst.is_invalid(), "{spec:?} {regs:?}");
-            assert_ne!(inst.mnemonic(), Mnemonic::Call, "{spec:?} {regs:?}");
+            assert!(!inst.is_invalid(), "{action:?} {regs:?}");
+            assert_ne!(inst.mnemonic(), Mnemonic::Call, "{action:?} {regs:?}");
             let copies = matches!(
                 inst.mnemonic(),
                 Mnemonic::Movaps
@@ -137,7 +130,7 @@ fn exercise(cpu: Features, lane: Lane, action: Action) {
             for &f in inst.cpuid_features() {
                 assert!(
                     supports(cpu, f),
-                    "{spec:?} for {cpu:?} emitted {:?} requiring {f:?}",
+                    "{action:?} for {cpu:?} emitted {:?} requiring {f:?}",
                     inst.code()
                 );
                 can_run &= host_supports(f);
@@ -145,11 +138,11 @@ fn exercise(cpu: Features, lane: Lane, action: Action) {
         }
         // With equal inputs a comparison or min/max may be a copy or constant.
         if (!binary || regs[0] != regs[1])
-            && !matches!(spec.action,Action::Unary(U::Abs) if !lane.signed())
+            && !matches!(action,Action::Unary(U::Abs) if !lane.signed())
         {
             assert!(
                 packed_operation,
-                "{spec:?} width {} contains only moves or scalar operations",
+                "{action:?} width {} contains only moves or scalar operations",
                 cpu.bytes
             );
         }
@@ -162,23 +155,23 @@ fn exercise(cpu: Features, lane: Lane, action: Action) {
         unsafe {
             packed_test::with_kernel(&code, |call| {
                 for seed in 0..10 {
-                    let mut slots = operands(spec, cpu.bytes, seed);
+                    let mut slots = operands(action, lane, cpu.bytes, seed);
                     if binary && regs[0] == regs[1] {
                         slots[1] = slots[0];
                     }
                     let before = slots;
-                    let expected = spec.eval(&before, cpu.bytes).unwrap();
+                    let expected = evaluate(action, ty, output, &before, cpu.bytes).unwrap();
                     call(&mut slots);
                     assert_eq!(
                         slots[2], expected,
-                        "{spec:?} width {} {regs:?} seed {seed}",
+                        "{action:?} width {} {regs:?} seed {seed}",
                         cpu.bytes
                     );
                     for (i, &reg) in regs[..regs.len() - 1].iter().enumerate() {
                         if reg != dst {
                             assert_eq!(
                                 slots[i], before[i],
-                                "{spec:?} clobbered source {i}, regs {regs:?}"
+                                "{action:?} clobbered source {i}, regs {regs:?}"
                             );
                         }
                     }
@@ -300,17 +293,7 @@ fn packed_bit_counts_handle_zero_and_the_top_bit() {
                 };
                 // An alternative packed expansion is valid on a lower ISA;
                 // decode it there too to catch accidental AVX-512 instructions.
-                if required
-                    || Native::select(
-                        Math {
-                            input: ty,
-                            output: ty,
-                            action,
-                        },
-                        cpu,
-                    )
-                    .is_some()
-                {
+                if required || Native::select(action, ty, ty, cpu).is_some() {
                     exercise(cpu, lane, action);
                 }
             }

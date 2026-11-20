@@ -1,6 +1,6 @@
 use super::*;
 #[derive(Clone, Copy, Debug)]
-pub(in crate::lir::x64::inst::simd) enum Rule {
+pub(in crate::lir::x64) enum Rule {
     Sign(Unary),
     CopySign,
     Class(Unary),
@@ -13,58 +13,26 @@ pub(in crate::lir::x64::inst::simd) enum Rule {
 }
 
 impl Rule {
-    pub(super) fn select(m: Math, c: Features) -> Option<Self> {
-        let e = m.input.lane()?;
-        let to = m.output.lane()?;
-        if matches!(m.action, Action::Cast) && e.bytes() == to.bytes() && e.float() != to.float() {
-            let int = if e.float() { to } else { e };
-            let w = int.bytes();
-            if matches!(w, 4 | 8)
-                && (w == 4 && int.signed() || (c.bytes == 64 || c.avx10 >= 1) && (w == 4 || c.dq))
-                && (!e.float() || c.avx10 < 2)
-            {
-                return Some(Self::Convert);
-            }
-        }
-        if !e.float() {
-            return None;
-        }
-        Some(match m.action {
-            Action::Unary(u @ (Unary::Abs | Unary::Neg)) => Self::Sign(u),
-            Action::Binary(B::CopySign) => Self::CopySign,
-            _ if e.bytes() < 4 => return None,
-            Action::Binary(B::Ordered) => Self::Compare(7, false),
-            Action::Binary(B::Unordered) => Self::Compare(3, false),
-            Action::Binary(B::Gt) if c.bytes == 16 => Self::Compare(1, true),
-            Action::Binary(B::Ge) if c.bytes == 16 => Self::Compare(2, true),
-            Action::Unary(
-                u @ (Unary::IsNan
-                | Unary::IsNormal
-                | Unary::IsInfinite
-                | Unary::IsFinite
-                | Unary::IsSubnormal
-                | Unary::SignBit),
-            ) => Self::Class(u),
-            Action::Unary(Unary::Recip) => Self::Recip,
-            Action::Unary(Unary::Fract) if c.bytes >= 32 || c.sse41 => Self::Fract,
-            Action::Unary(Unary::Round) if c.bytes >= 32 || c.sse41 => Self::Round,
-            Action::Binary(op @ (B::Min | B::Max)) => Self::MinMax(op),
-            _ => return None,
-        })
-    }
-    pub(super) fn temps(self, m: Math, _: Features) -> usize {
+    pub(super) fn temps(self, input: Type) -> usize {
         match self {
             Self::Sign(_) | Self::Recip | Self::Fract | Self::Compare(..) => 0,
             Self::CopySign => 1,
             Self::MinMax(_) => 2,
-            Self::Convert if !m.input.lane().unwrap().float() => 0,
+            Self::Convert if !input.lane().unwrap().float() => 0,
             Self::Class(_) | Self::Convert => 2,
             Self::Round => 3,
         }
     }
-    pub(super) fn emit(self, v: &mut Vector, m: Math, r: &[usize], t: &[usize]) -> Result {
+    pub(super) fn emit(
+        self,
+        v: &mut Vector,
+        input: Type,
+        output: Type,
+        r: &[usize],
+        t: &[usize],
+    ) -> Result {
         let (x, y, d) = (r[0], r[1], *r.last().unwrap());
-        let e = m.input.lane().unwrap();
+        let e = input.lane().unwrap();
         let n = e.bytes();
         let sign = 1u64 << (8 * n - 1);
         let fp = |a: f64| {
@@ -181,7 +149,7 @@ impl Rule {
                 (_, false, _) => evex_convert!(vcvtuqq2pd),
             },
             Self::Convert => {
-                let signed = m.output.lane().unwrap().signed();
+                let signed = output.lane().unwrap().signed();
                 match (n, signed, v.width) {
                     (4, true, 16) => v.a.cvttps2dq(XMM[d], XMM[x]),
                     (4, true, 32) => v.a.vcvttps2dq(YMM[d], YMM[x]),

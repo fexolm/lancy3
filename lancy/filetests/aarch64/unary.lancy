@@ -1,0 +1,174 @@
+fn main x:i32 -> i32
+  a = bitcast f32 x
+  b = round a
+  r = bitcast i32 b
+  ret r
+@aarch64-isel check: Unary(Float(Native(Frinta_scalar
+@aarch64 all lacks 0xfffffc1f 0xd63f0000
+@run 0x40200000 -> 0x40400000
+@run 0xc0200000 -> 0xc0400000
+@run 0x3effffff -> 0
+@run 0xbeffffff -> 0x80000000
+---
+fn main x:i32 -> i32
+  a = bitcast f32 x
+  b = nearest a
+  r = bitcast i32 b
+  ret r
+@aarch64-isel check: Unary(Float(Native(Frintn_scalar
+@aarch64 all lacks 0xfffffc1f 0xd63f0000
+@run 0x40200000 -> 0x40000000
+@run 0xc0200000 -> 0xc0000000
+@run 0xbf000000 -> 0x80000000
+---
+fn main x:i32 -> i32
+  a = bitcast f32 x
+  b = sqrt a
+  r = bitcast i32 b
+  ret r
+@aarch64-isel check: Unary(Float(Native(Fsqrt_scalar
+@aarch64 all lacks 0xfffffc1f 0xd63f0000
+@run 0x40800000 -> 0x40000000
+@run 0x80000000 -> 0x80000000
+---
+fn main x:i32 -> i32
+  a = bitcast f32 x
+  b = recip a
+  r = bitcast i32 b
+  ret r
+@aarch64-isel check: Unary(Float(Recip
+@aarch64 all lacks 0xfffffc1f 0xd63f0000
+@run 0x40400000 -> 0x3eaaaaab
+@run 0x80000000 -> 0xff800000
+---
+fn main x:i32 -> i32
+  a = bitcast f32 x
+  b = fract a
+  r = bitcast i32 b
+  ret r
+@aarch64-isel check: Unary(Float(Fract(Frintz_scalar
+@aarch64 all lacks 0xfffffc1f 0xd63f0000
+@run 0xbfa00000 -> 0xbe800000
+@run 0x80000000 -> 0
+@run 0xc0000000 -> 0
+---
+fn main x:i32 -> i32
+  lane = bitcast f32 x
+  first = literal f32 0x3f800000
+  uniform = simd.splat first
+  lanes = simd.lanes f32
+  one = const 1
+  last = sub lanes one
+  data = simd.insert uniform last lane
+  rounded = simd.round data
+  result = simd.extract rounded last
+  r = bitcast i32 result
+  ret r
+@aarch64-isel check: Unary(Float(Native(
+@aarch64 neon has 0xfffffc00 0x6e218800
+@aarch64 sve has 0xffffe000 0x6584a000
+@aarch64 sve2 has 0xffffe000 0x6584a000
+@aarch64 all lacks 0xfffffc1f 0xd63f0000
+@run 0xc0200000 -> 0xc0400000
+@run 0xbeffffff -> 0x80000000
+---
+fn main x:i32 -> i32
+  a = cast u8 x
+  lz = leadingzeros a
+  tz = trailingzeros a
+  pop = popcnt a
+  l = cast i32 lz
+  t = cast i32 tz
+  p = cast i32 pop
+  hundred = const 100
+  ten = const 10
+  lh = mul l hundred
+  tt = mul t ten
+  sum = add lh tt
+  r = add sum p
+  ret r
+@aarch64-isel check: Unary(Integer(LeadingZeros
+@aarch64-isel check: Unary(Integer(TrailingZeros
+@aarch64-isel check: Unary(Integer(Popcnt
+@aarch64 all lacks 0xfffffc1f 0xd63f0000
+@run 0 -> 880
+@run 128 -> 71
+@run -255 -> 701
+@run 255 -> 8
+---
+fn main x:i32 -> i32
+  a = cast u16 x
+  v = simd.splat a
+  c = simd.popcnt v
+  zero = const 0
+  n = simd.extract c zero
+  r = cast i32 n
+  ret r
+@aarch64 neon has 0xfffffc00 0x6e202800
+@aarch64 sve has 0xffffe000 0x045aa000
+@aarch64 sve2 has 0xffffe000 0x045aa000
+@aarch64 all lacks 0xfffffc1f 0xd63f0000
+@run 0x8101 -> 3
+@run 0xff00 -> 8
+---
+fn main idx:i32 -> i32
+  values = simd.iota f16
+  lane = simd.extract values idx
+  bits = bitcast u16 lane
+  r = cast i32 bits
+  ret r
+@aarch64 sve has 0xffffe000 0x6553a000
+@aarch64 sve2 has 0xffffe000 0x6553a000
+@aarch64 all lacks 0xfffffc1f 0xd63f0000
+@run 0 -> 0
+@run 1 -> 0x3c00
+@run 3 -> 0x4200
+@run 7 -> 0x4700
+@run -1 -> !bounds
+---
+fn main raw:i32 -> i32
+  f = bitcast f32 raw
+  out = nextup f
+  r = bitcast i32 out
+  ret r
+@aarch64-isel check: FloatSpecial(
+@aarch64 all lacks 0xfffffc1f 0xd63f0000
+@run 0x80000000 -> 1
+@run 0x80000001 -> 0x80000000
+@run 0x80800000 -> 0x807fffff
+@run 0x7f7fffff -> 0x7f800000
+@run 0xff800000 -> 0xff7fffff
+@run 0x7f800042 -> 0x7f800042
+@run 0xffc54321 -> 0xffc54321
+---
+fn main raw:i32 donor:i32 -> i32
+  f = bitcast f32 raw
+  d = bitcast f32 donor
+  out = copysign f d
+  r = bitcast i32 out
+  ret r
+@aarch64-isel check: FloatSpecial(
+@aarch64 all lacks 0xfffffc1f 0xd63f0000
+@run 0x7f800042 0x80000000 -> 0xff800042
+@run 0xff800042 0x7fc54321 -> 0x7f800042
+@run 0 0xffc54321 -> 0x80000000
+---
+fn main left:i32 right:i32 -> i32
+  a = bitcast f32 left
+  b = bitcast f32 right
+  av = simd.splat a
+  bv = simd.splat b
+  mask = simd.unordered av bv
+  one = const 1
+  n = simd.lanes i32
+  last = sub n one
+  out = simd.extract mask last
+  ret out
+@aarch64-isel check: Packed(FloatOrder(
+@aarch64 sve has 0xffe0e010 0x6580c000
+@aarch64 sve2 has 0xffe0e010 0x6580c000
+@aarch64 all lacks 0xfffffc1f 0xd63f0000
+@run 0x7fc00042 0x3f800000 -> -1
+@run 0x40800000 0xff800031 -> -1
+@run 0x7f800000 0xff800000 -> 0
+@run 0x80000000 0 -> 0

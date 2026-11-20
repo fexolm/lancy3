@@ -1,4 +1,7 @@
 mod error;
+#[cfg(any(test, target_arch = "aarch64"))]
+pub(crate) mod eval;
+pub(crate) mod operation;
 pub mod ssa;
 pub mod transforms;
 

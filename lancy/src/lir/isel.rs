@@ -98,14 +98,17 @@ impl Context {
         self.defs[v].register = true;
     }
     pub fn constant(&self, v: Value) -> Option<i32> {
-        match self.defs[v].source {
-            Some((_, Op::Const(n))) => Some(n),
+        match self.defining_op(v) {
+            Some(Op::Const(n)) => Some(n),
             _ => None,
         }
     }
+
+    pub fn defining_op(&self, v: Value) -> Option<Op> {
+        self.defs[v].source.map(|(_, op)| op)
+    }
     /// Only sink total computations. Memory accesses, checks and division
     /// keep their original execution point, including when their result is dead.
-    #[cfg(target_arch = "x86_64")]
     pub fn single_use(&self, v: Value) -> Option<Op> {
         let def = &self.defs[v];
         let (b, op) = def.source?;

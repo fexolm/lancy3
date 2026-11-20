@@ -1,11 +1,18 @@
+use super::groups::z;
 use super::inst::{IntBinary, IntOp, Packed, Select};
 use super::{
     A, C, Cond, Emitter, O, PredQual, R, Result, SITE_POINTER, ShiftKind, TEMP_WORD_BYTES, invert,
 };
-use crate::{CallError, hir::Type, numbers::Math};
+use crate::{
+    CallError,
+    hir::{Lane, Type},
+    hir::{eval::evaluate, operation::Action},
+};
 
 pub(crate) struct Site {
-    math: Math,
+    action: Action,
+    input: Type,
+    output: Type,
     sizes: [usize; 3],
     width: usize,
 }
@@ -27,14 +34,14 @@ unsafe extern "C" fn primitive(site: &Site, area: *mut u8) -> u32 {
         }
         data
     });
-    match site.math.eval(&args, site.width) {
+    match evaluate(site.action, site.input, site.output, &args, site.width) {
         Ok(value) => {
             // SAFETY: the compiler reserves a separate output slot of TEMP_WORD_BYTES bytes.
             unsafe {
                 std::ptr::copy_nonoverlapping(
                     value.as_ptr(),
                     area.add(3 * TEMP_WORD_BYTES),
-                    site.math.output.bytes(site.width),
+                    site.output.bytes(site.width),
                 )
             };
             0
@@ -133,6 +140,13 @@ impl Emitter<'_> {
                     }
                 }
             }
+            Select::ScalarBits => {
+                let x = |n| O::reg(R::x(n).unwrap());
+                let tmp = x(9);
+                self.a.put(C::Eor_64_log_shift, &[tmp, x(yes), x(no)])?;
+                self.a.put(C::And_64_log_shift, &[tmp, tmp, x(mask)])?;
+                self.a.put(C::Eor_64_log_shift, &[x(dst), x(no), tmp])
+            }
             Select::Neon(arr) => {
                 if let Some(arr) = arr {
                     self.a
@@ -164,42 +178,54 @@ impl Emitter<'_> {
                 self.a.put(C::Bic_z_zz_, &[z(dst), z(no), z(mask)])?;
                 self.a.put(C::Orr_z_zz_, &[z(dst), z(dst), z(16)])
             }
+            Select::Wide(scalable) => {
+                let (code, value, form) = if scalable {
+                    (C::Trn2_z_zz, z(16, A::D), Select::Sve(Some(A::D)))
+                } else {
+                    (C::Trn2_asimd, v(16, A::D2), Select::Neon(Some(A::D2)))
+                };
+                let mask = if scalable {
+                    z(mask, A::D)
+                } else {
+                    v(mask, A::D2)
+                };
+                self.a.put(code, &[value, mask, mask])?;
+                self.select(form, 16, yes, no, dst)
+            }
         }
     }
 
-    pub(super) fn sum(&mut self, arr: A, size: usize, src: u8, dst: u8) -> Result {
-        let out = O::reg(R::V16);
-        if matches!(arr, A::B | A::H | A::S | A::D) {
-            self.predicate(R::P1, arr, self.config.bytes / size)?;
-            self.a.put(
-                C::Uaddv_d_p_z,
-                &[
-                    out,
-                    O::pred(R::P1, PredQual::None),
-                    O::vec(R::z(src).unwrap(), arr),
-                ],
-            )?;
-        } else {
-            let code = if arr == A::D2 {
-                C::Addp_d_asimd
+    pub(super) fn sve_iota(&mut self, lane: Lane, dst: u8) -> Result {
+        let size = lane.bytes();
+        let arr = super::arrangements(size.min(8)).1;
+        let d = O::vec(R::z(dst).unwrap(), arr);
+        self.a.put(C::Index_0_1_z, &[d])?;
+        if size == 16 {
+            let zero = O::vec(R::Z16, A::D);
+            self.a.put(C::Eor_z_zz_, &[zero, zero, zero])?;
+            self.a.put(C::Zip1_z_zz, &[d, d, zero])?;
+        } else if lane.float() {
+            let code = if matches!(lane, Lane::F16 | Lane::BF16) {
+                C::Ucvtf_half_z_p_z
             } else {
-                C::Addv_asimd
+                C::Ucvtf_z_p_z
             };
-            self.a.put(code, &[out, O::vec(R::v(src).unwrap(), arr)])?;
-        }
-        if size == 8 {
-            self.float_move(Type::F64, false, 16, dst)
-        } else {
-            self.float_move(Type::F32, false, 16, dst)?;
-            if size < 4 {
-                let to = O::reg(R::w(dst).unwrap());
-                self.a.put(
-                    C::Ubfm_32m_bitfield,
-                    &[to, to, O::imm(0), O::imm((size * 8 - 1) as u64)],
-                )?;
+            self.predicate(R::P1, arr, self.config.bytes / size)?;
+            self.a.put(code, &[d, O::pred(R::P1, PredQual::Merge), d])?;
+            if lane == Lane::BF16 {
+                // Indices up to 31 are exact in both formats. Convert the
+                // exponent bias after dropping the excess FP16 fraction bits.
+                self.a.put(C::Lsr_z_zi, &[d, d, O::imm(3)])?;
+                self.a.imm(R::W9, (127 - 15) << 7)?;
+                let bias = z(16, A::H);
+                self.a.put(C::Dup_z_r, &[bias, O::reg(R::W9)])?;
+                self.a.put(C::Add_z_zz_, &[d, d, bias])?;
+                self.predicate(R::P1, A::H, 1)?;
+                self.a
+                    .put(C::Cpy_zero_z_p, &[d, O::pred(R::P1, PredQual::Merge)])?;
             }
-            Ok(())
         }
+        Ok(())
     }
 
     pub(super) fn packed_cast(&mut self, code: C, arr: A, src: u8, dst: u8) -> Result {
@@ -314,6 +340,21 @@ impl Emitter<'_> {
         self.bool_mask(zero, dst)
     }
 
+    pub(super) fn wide_mask_test(&mut self, all: bool, scalable: bool, src: u8, dst: u8) -> Result {
+        if !scalable {
+            return self.mask_test(false, A::B16, src, dst);
+        }
+        if !all {
+            return self.mask_test(false, A::D, src, dst);
+        }
+        let input = z(src, A::D);
+        let (low, high) = (z(16, A::D), z(17, A::D));
+        self.a.put(C::Trn1_z_zz, &[low, input, input])?;
+        self.a.put(C::Trn2_z_zz, &[high, input, input])?;
+        self.a.put(C::Orr_z_zz_, &[low, low, high])?;
+        self.mask_test(true, A::D, 16, dst)
+    }
+
     pub(super) fn lane_access(
         &mut self,
         ty: Type,
@@ -409,52 +450,18 @@ impl Emitter<'_> {
         Ok(())
     }
 
-    pub(super) fn sve_masked(
+    pub(super) fn primitive(
         &mut self,
-        (code, arr): (C, A),
-        base: R,
-        mask: u8,
-        value: u8,
-        indices: Option<u8>,
-        dst: Option<u8>,
+        action: Action,
+        input: Type,
+        output: Type,
+        sizes: [usize; 3],
     ) -> Result {
-        let vector = |n| O::vec(R::z(n).unwrap(), arr);
-        self.sign_predicate(arr, mask)?;
-        if let Some(dst) = dst {
-            let loaded = if dst == value { 16 } else { dst };
-            let mut operands = [
-                vector(loaded),
-                O::pred(R::P1, PredQual::Zero),
-                O::mem(base),
-                O::reg(R::XZR),
-            ];
-            let mut len = 3;
-            if let Some(indices) = indices {
-                operands[len] = vector(indices);
-                len += 1;
-            }
-            self.a.put(code, &operands[..len])?;
-            self.a.put(
-                C::Sel_z_p_zz,
-                &[
-                    vector(dst),
-                    O::pred(R::P1, PredQual::None),
-                    vector(loaded),
-                    vector(value),
-                ],
-            )
-        } else {
-            self.a.put(
-                code,
-                &[vector(value), O::pred(R::P1, PredQual::None), O::mem(base)],
-            )
-        }
-    }
-
-    pub(super) fn primitive(&mut self, math: Math, sizes: [usize; 3]) -> Result {
         let index = self.sites.len() * std::mem::size_of::<Site>();
         self.sites.push(Site {
-            math,
+            action,
+            input,
+            output,
             sizes,
             width: self.config.bytes,
         });
@@ -475,72 +482,6 @@ impl Emitter<'_> {
         self.a.access(false, 4, 0, (R::X10, 0))?;
         self.a.jump(self.epilogue);
         self.a.bind(success);
-        Ok(())
-    }
-
-    pub(super) fn masked(
-        &mut self,
-        ty: Type,
-        base: R,
-        mask: u8,
-        value: u8,
-        indices: Option<u8>,
-        dst: Option<u8>,
-    ) -> Result {
-        let lane = ty.lane().unwrap().bytes();
-        let width = self.config.bytes;
-        self.access(false, width, mask, self.temp(0))?;
-        self.access(false, width, value, self.temp(1))?;
-        if let Some(indices) = indices {
-            self.access(false, width, indices, self.temp(2))?;
-        }
-        let temporary = self.frame.temporary;
-        let slot = |i, offset| (R::X19, temporary + i * TEMP_WORD_BYTES + offset);
-        for offset in (0..width).step_by(lane) {
-            let inactive = self.a.label();
-            self.a.access(true, 1, 9, slot(0, offset + lane - 1))?;
-            self.a.put(
-                C::Subs_32_addsub_imm,
-                &[O::reg(R::WZR), O::reg(R::W9), O::imm(128)],
-            )?;
-            self.a.skip_if(Cond::Cs)?;
-            self.a.jump(inactive);
-            if indices.is_some() {
-                // The low 64 bits suffice even for a 128-bit index, since the address wraps.
-                self.a.access(true, lane.min(8), 9, slot(2, offset))?;
-                if lane < 8 {
-                    self.a.put(
-                        C::Sbfm_64m_bitfield,
-                        &[
-                            O::reg(R::X9),
-                            O::reg(R::X9),
-                            O::imm(0),
-                            O::imm((lane * 8 - 1) as u64),
-                        ],
-                    )?;
-                }
-                self.a.put(
-                    C::Add_64_addsub_shift,
-                    &[
-                        O::reg(R::X10),
-                        O::reg(base),
-                        O::shifted(R::X9, ShiftKind::Lsl, lane.trailing_zeros() as u8),
-                    ],
-                )?;
-            } else {
-                self.a.addr(R::X10, base, offset)?;
-            }
-            let scratch = (R::X19, self.temp(1).1 + offset);
-            if dst.is_some() {
-                self.a.copy_lane(scratch, (R::X10, 0), lane)?;
-            } else {
-                self.a.copy_lane((R::X10, 0), scratch, lane)?;
-            }
-            self.a.bind(inactive);
-        }
-        if let Some(dst) = dst {
-            self.access(true, width, dst, self.temp(1))?;
-        }
         Ok(())
     }
 
@@ -635,6 +576,83 @@ impl Emitter<'_> {
         match op {
             Packed::Neon(code, arr) => self.a.put(code, &[v(d, arr), v(a, arr), v(b, arr)]),
             Packed::Sve(code, arr) => self.a.put(code, &[z(d, arr), z(a, arr), z(b, arr)]),
+            Packed::NeonMinMax64(cmp, max) => {
+                let (lhs, rhs) = if max { (a, b) } else { (b, a) };
+                self.a
+                    .put(cmp, &[v(16, A::D2), v(lhs, A::D2), v(rhs, A::D2)])?;
+                let v = |n| v(n, A::B16);
+                if d == a {
+                    self.a.put(C::Bif_asimd, &[v(d), v(b), v(16)])
+                } else if d == b {
+                    self.a.put(C::Bit_asimd, &[v(d), v(a), v(16)])
+                } else {
+                    self.a.put(C::Bsl_asimdsame, &[v(16), v(a), v(b)])?;
+                    self.copy_vec(d, 16, false)
+                }
+            }
+            Packed::NeonShift(code, arr, right) => {
+                let (bits, mask_arr) = match arr {
+                    A::B16 => (8, A::B16),
+                    A::H8 => (16, A::H8),
+                    A::S4 => (32, A::S4),
+                    // SSHL/USHL only read the low byte of each shift count.
+                    A::D2 => (64, A::S4),
+                    _ => unreachable!("NEON shift lane arrangement"),
+                };
+                self.a
+                    .put(C::Movi_asimd, &[v(16, mask_arr), O::imm(bits - 1)])?;
+                let mask = v(16, A::B16);
+                self.a
+                    .put(C::And_asimdsame_only, &[mask, v(b, A::B16), mask])?;
+                let count = v(16, arr);
+                if right {
+                    self.a.put(C::Neg_asimd, &[count, count])?;
+                }
+                self.a.put(code, &[v(d, arr), v(a, arr), count])
+            }
+            Packed::SveShift(code, arr) => {
+                let bits = (sve_lane_bytes(arr) * 8) as u64;
+                self.a.put(C::Dupm_z, &[z(16, arr), O::imm(bits - 1)])?;
+                let mask = z(16, A::D);
+                self.a.put(C::And_z_zz_, &[mask, z(b, A::D), mask])?;
+                self.copy_vec(d, a, true)?;
+                self.sve_binary(code, arr, d, 16)
+            }
+            Packed::FloatOrder(arr, unordered) => {
+                if matches!(arr, A::S | A::D) {
+                    self.predicate(R::P2, arr, self.config.bytes / sve_lane_bytes(arr))?;
+                    self.a.put(
+                        C::Fcmuo_p_p_zz,
+                        &[
+                            O::vec(R::P1, arr),
+                            O::pred(R::P2, PredQual::Zero),
+                            z(a, arr),
+                            z(b, arr),
+                        ],
+                    )?;
+                    if !unordered {
+                        let q = |r| O::vec(r, A::B);
+                        self.a.put(
+                            C::Bic_p_p_pp,
+                            &[q(R::P1), O::pred(R::P2, PredQual::Zero), q(R::P2), q(R::P1)],
+                        )?;
+                    }
+                    return self.a.put(
+                        C::Cpy_minus1_z_p,
+                        &[z(d, arr), O::pred(R::P1, PredQual::Zero)],
+                    );
+                }
+                self.a
+                    .put(C::Fcmeq_asimdsame, &[v(16, arr), v(a, arr), v(a, arr)])?;
+                self.a
+                    .put(C::Fcmeq_asimdsame, &[v(d, arr), v(b, arr), v(b, arr)])?;
+                let (d, temp) = (v(d, A::B16), v(16, A::B16));
+                self.a.put(C::And_asimdsame_only, &[d, d, temp])?;
+                if unordered {
+                    self.a.put(C::Mvn_asimdmisc, &[d, d])?;
+                }
+                Ok(())
+            }
             Packed::NeonCompare {
                 code,
                 arrangement: arr,
@@ -673,23 +691,23 @@ impl Emitter<'_> {
                     (a, b, d)
                 };
                 self.copy_vec(write, src, true)?;
-                self.predicate(R::P1, arr, self.config.bytes / sve_lane_bytes(arr))?;
-                self.a.put(
-                    code,
-                    &[
-                        z(write, arr),
-                        O::pred(R::P1, PredQual::Merge),
-                        z(write, arr),
-                        z(rhs, arr),
-                    ],
-                )?;
+                self.sve_binary(code, arr, write, rhs)?;
                 self.copy_vec(d, write, true)
             }
         }
     }
+
+    fn sve_binary(&mut self, code: C, arr: A, dst: u8, rhs: u8) -> Result {
+        self.predicate(R::P1, arr, self.config.bytes / sve_lane_bytes(arr))?;
+        let z = |n| O::vec(R::z(n).unwrap(), arr);
+        self.a.put(
+            code,
+            &[z(dst), O::pred(R::P1, PredQual::Merge), z(dst), z(rhs)],
+        )
+    }
 }
 
-fn sve_lane_bytes(a: A) -> usize {
+pub(super) fn sve_lane_bytes(a: A) -> usize {
     match a {
         A::B => 1,
         A::H => 2,

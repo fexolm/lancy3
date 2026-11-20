@@ -5,12 +5,12 @@ mod convert;
 mod float;
 mod integer;
 
+use crate::hir::operation::Action;
 use crate::hir::{Binary, Lane, Ternary, Type, Unary};
 use crate::lir::x64::{
     Features,
     emit::{R32, R64, bind},
 };
-use crate::numbers::{Action, Math};
 use iced_x86::{IcedError, code_asm::*};
 type Result = std::result::Result<(), IcedError>;
 type Faults = [Option<CodeLabel>; 3];
@@ -92,15 +92,22 @@ struct Args {
     z: i32,
     out: i32,
 }
-fn elem(a: &mut CodeAssembler, spec: Math, p: Args, faults: &mut Faults) -> Result {
+fn elem(
+    a: &mut CodeAssembler,
+    action: Action,
+    input: Type,
+    output: Type,
+    p: Args,
+    faults: &mut Faults,
+) -> Result {
     let Args { x, y, z, out } = p;
-    let lane = spec.input.lane().unwrap();
+    let lane = input.lane().unwrap();
     let size = lane.bytes();
-    let dest = spec.output.lane().unwrap();
-    match spec.action {
+    let dest = output.lane().unwrap();
+    match action {
         Action::Cast | Action::Widen(_) | Action::Narrow => convert::emit(a, lane, dest, x, out),
         Action::Ternary(Ternary::Select) => {
-            if matches!(spec.input, Type::Vector(_)) {
+            if matches!(input, Type::Vector(_)) {
                 a.test(byte_ptr(rsp + x + size as i32 - 1), 0x80)?;
             } else {
                 a.cmp(dword_ptr(rsp + x), 0)?;
@@ -120,7 +127,7 @@ fn elem(a: &mut CodeAssembler, spec: Math, p: Args, faults: &mut Faults) -> Resu
             let part = size.min(8);
             for i in (0..size as i32).step_by(part) {
                 word(a, 0, x + i, part, false)?;
-                match spec.action {
+                match action {
                     Action::Unary(_) => a.not(rax)?,
                     Action::Binary(op) => {
                         word(a, 1, y + i, part, false)?;
@@ -142,27 +149,36 @@ fn elem(a: &mut CodeAssembler, spec: Math, p: Args, faults: &mut Faults) -> Resu
             }
             Ok(())
         }
-        _ if lane.float() => float::emit(a, spec, p),
-        _ => integer::emit(a, spec, p, faults),
+        _ if lane.float() => float::emit(a, action, input, output, p),
+        _ => integer::emit(a, action, input, output, p, faults),
     }
 }
-pub(super) fn calls_library(spec: Math) -> bool {
-    float::math_function(spec).is_some()
+pub(super) fn calls_library(action: Action, input: Type) -> bool {
+    input
+        .lane()
+        .and_then(|lane| float::math_function(action, lane))
+        .is_some()
 }
 
-pub(in crate::lir::x64) fn emit(a: &mut CodeAssembler, spec: Math, faults: &mut Faults) -> Result {
+pub(in crate::lir::x64) fn emit(
+    a: &mut CodeAssembler,
+    action: Action,
+    input: Type,
+    output: Type,
+    faults: &mut Faults,
+) -> Result {
     let width = Features::host().bytes;
-    let lane = spec.input.lane().unwrap();
+    let lane = input.lane().unwrap();
     let size = lane.bytes();
     let n = size as i32;
-    let dest = spec.output.lane().unwrap();
+    let dest = output.lane().unwrap();
     let d = dest.bytes() as i32;
     let [x, y, z] = INPUT;
     let out = OUTPUT;
     let count = width as i32 / n;
-    match spec.action {
+    match action {
         Action::AnyTrue | Action::AllTrue => {
-            let all = matches!(spec.action, Action::AllTrue);
+            let all = matches!(action, Action::AllTrue);
             let stop = a.create_label();
             let end = a.create_label();
             for i in 0..count {
@@ -197,7 +213,7 @@ pub(in crate::lir::x64) fn emit(a: &mut CodeAssembler, spec: Math, faults: &mut 
             a.cmp(eax, count)?;
             a.jae(fail)?;
             a.shl(rax, size.trailing_zeros() as i32)?;
-            if matches!(spec.action, Action::Extract) {
+            if matches!(action, Action::Extract) {
                 copy(a, ptr(rsp + out), ptr(rsp + rax + x), size)
             } else {
                 for i in (0..width as i32).step_by(8) {
@@ -215,7 +231,7 @@ pub(in crate::lir::x64) fn emit(a: &mut CodeAssembler, spec: Math, faults: &mut 
                 let skip = a.create_label();
                 a.test(byte_ptr(rsp + y + (i + 1) * n - 1), 0x80)?;
                 a.jz(skip)?;
-                let (to, from) = if matches!(spec.action, Action::Compress) {
+                let (to, from) = if matches!(action, Action::Compress) {
                     (ptr(rsp + r9 + out), ptr(rsp + x + i * n))
                 } else {
                     (ptr(rsp + out + i * n), ptr(rsp + r9 + x))
@@ -253,14 +269,12 @@ pub(in crate::lir::x64) fn emit(a: &mut CodeAssembler, spec: Math, faults: &mut 
         }
         Action::Reduce(op) => {
             copy(a, ptr(rsp + out), ptr(rsp + x), size)?;
-            let scalar = Math {
-                action: Action::Binary(op),
-                input: lane.scalar(),
-                output: lane.scalar(),
-            };
+            let scalar = lane.scalar();
             for i in 1..count {
                 elem(
                     a,
+                    Action::Binary(op),
+                    scalar,
                     scalar,
                     Args {
                         x: out,
@@ -275,10 +289,10 @@ pub(in crate::lir::x64) fn emit(a: &mut CodeAssembler, spec: Math, faults: &mut 
         }
         Action::Iota | Action::Bitcast => unreachable!("selected before compound lowering"),
         _ => {
-            let len = spec.output.bytes(width) as i32 / d;
+            let len = output.bytes(width) as i32 / d;
             for i in 0..len {
                 let offset = i * n
-                    + if matches!(spec.action, Action::Widen(true)) {
+                    + if matches!(action, Action::Widen(true)) {
                         width as i32 / 2
                     } else {
                         0
@@ -290,7 +304,9 @@ pub(in crate::lir::x64) fn emit(a: &mut CodeAssembler, spec: Math, faults: &mut 
                 };
                 elem(
                     a,
-                    spec,
+                    action,
+                    input,
+                    output,
                     Args {
                         x: source,
                         y: y + i * n,

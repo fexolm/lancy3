@@ -1,0 +1,158 @@
+fn main x:i32 y:i32 -> i32
+  a = cast i8 x
+  b = cast i8 y
+  av = simd.splat a
+  bv = simd.splat b
+  signed = simd.min av bv
+  ax = simd.bitcast u8 av
+  bx = simd.bitcast u8 bv
+  unsigned = simd.max ax bx
+  zero = const 0
+  s = simd.extract signed zero
+  u = simd.extract unsigned zero
+  s32 = cast i32 s
+  u32 = cast i32 u
+  three = const 3
+  base = mul s32 three
+  result = add base u32
+  ret result
+@aarch64-isel check: Packed(
+@aarch64 neon has 0xff20fc00 0x4e206c00
+@aarch64 neon has 0xff20fc00 0x6e206400
+@aarch64 sve has 0xff3fe000 0x040a0000
+@aarch64 sve2 has 0xff3fe000 0x04090000
+@aarch64 all lacks 0xfffffc1f 0xd63f0000
+@run -128 127 -> -256
+@run 127 -128 -> -256
+@run 17 17 -> 68
+---
+fn main x:i32 y:i32 -> i32
+  a = cast i8 x
+  b = cast i8 y
+  av = simd.splat a
+  bv = simd.splat b
+  signed = simd.saturatingadd av bv
+  ax = simd.bitcast u8 av
+  bx = simd.bitcast u8 bv
+  unsigned = simd.saturatingsub ax bx
+  zero = const 0
+  s = simd.extract signed zero
+  u = simd.extract unsigned zero
+  s32 = cast i32 s
+  u32 = cast i32 u
+  three = const 3
+  base = mul s32 three
+  result = add base u32
+  ret result
+@aarch64-isel check: Packed(
+@aarch64 neon has 0xff20fc00 0x4e200c00
+@aarch64 neon has 0xff20fc00 0x6e202c00
+@aarch64 sve has 0xff20fc00 0x04201000
+@aarch64 sve2 has 0xff20fc00 0x04201c00
+@aarch64 all lacks 0xfffffc1f 0xd63f0000
+@run 127 1 -> 507
+@run -128 -1 -> -384
+@run 7 9 -> 48
+---
+fn main x:i32 count:i32 -> i32
+  a = cast i8 x
+  c = cast i8 count
+  v = simd.splat a
+  amounts = simd.splat c
+  left = simd.shl v amounts
+  signed = simd.shr v amounts
+  unsigned_value = simd.bitcast u8 v
+  unsigned_amounts = simd.bitcast u8 amounts
+  unsigned = simd.shr unsigned_value unsigned_amounts
+  zero = const 0
+  l = simd.extract left zero
+  s = simd.extract signed zero
+  u = simd.extract unsigned zero
+  l32 = cast i32 l
+  s32 = cast i32 s
+  u32 = cast i32 u
+  scale = const 3
+  left3 = mul l32 scale
+  first = add left3 s32
+  result = add first u32
+  ret result
+@aarch64-isel check: Packed(
+@aarch64 neon has 0xff20fc00 0x4e204400
+@aarch64 sve has 0xff3fe000 0x04108000
+@aarch64 sve2 has 0xff3fe000 0x04138000
+@aarch64 all lacks 0xfffffc1f 0xd63f0000
+@run -127 8 -> -379
+@run -127 9 -> 6
+@run -127 -1 -> -384
+---
+fn main x:i32 -> i32
+  a = cast i8 x
+  count = literal i8 0xff
+  v = simd.splat a
+  shift = simd.splat count
+  result = simd.shr v shift
+  zero = const 0
+  n = simd.extract result zero
+  r = cast i32 n
+  ret r
+@aarch64-isel check: PackedShiftImm(
+@aarch64 neon has 0xfffffc00 0x4f090400
+@aarch64 sve has 0xfffffc00 0x04299000
+@aarch64 sve2 has 0xfffffc00 0x04299000
+@run -127 -> -1
+@run 64 -> 0
+---
+fn main x:i32 -> i32
+  a = cast i8 x
+  count = literal i8 0x08
+  v = simd.splat a
+  shift = simd.splat count
+  result = simd.shr v shift
+  zero = const 0
+  n = simd.extract result zero
+  r = cast i32 n
+  ret r
+@aarch64-isel check: Splat(
+@aarch64-isel not: Shift
+@aarch64-isel check: LaneAccess
+@run -127 -> -127
+@run 64 -> 64
+---
+fn main a:i32 b:i32 -> i32
+  x = cast i8 a
+  y = cast i8 b
+  value = saturatingadd x y
+  r = cast i32 value
+  ret r
+@aarch64-isel check: ScalarSaturate(
+@aarch64 all has 0xffe0fc00 0x4e200c00
+@aarch64 all lacks 0xfffffc1f 0xd63f0000
+@run 127 1 -> 127
+@run -128 -1 -> -128
+@run 127 -128 -> -1
+@run -9 7 -> -2
+---
+fn main a:i32 b:i32 -> i32
+  x = cast u8 a
+  y = cast u8 b
+  value = saturatingsub x y
+  r = cast i32 value
+  ret r
+@aarch64 all lacks 0xfffffc1f 0xd63f0000
+@run 0 1 -> 0
+@run 1 255 -> 0
+@run 255 1 -> 254
+@run 12 5 -> 7
+---
+fn main a:i32 b:i32 -> i32
+  x = cast u8 a
+  y = cast u8 b
+  value = rotateleft x y
+  r = cast i32 value
+  ret r
+@aarch64-isel check: Rotate(
+@aarch64 all has 0x7fe0fc00 0x1ac02c00
+@aarch64 all lacks 0xfffffc1f 0xd63f0000
+@run 0x81 1 -> 3
+@run 0x81 8 -> 0x81
+@run 0x81 -1 -> 0xc0

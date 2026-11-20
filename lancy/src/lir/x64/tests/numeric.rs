@@ -112,7 +112,7 @@ fn fp_results_include_signed_zero_nan_and_fused_rounding() {
             let bits: Vec<_> = out.into_iter().flat_map(u64::to_le_bytes).collect();
             bits[..bytes]
                 .chunks_exact(lane.bytes())
-                .map(|x| crate::numbers::read(x) as u64)
+                .map(|x| crate::hir::eval::read(x) as u64)
                 .collect::<Vec<_>>()
         };
         let sqrt = kernel(&[ty], ty, |v| {
@@ -235,8 +235,8 @@ fn unaligned_vector_store_precedes_trap() {
 #[test]
 fn instruction_encodings_require_their_exact_isa() {
     use crate::{
+        hir::operation::Action,
         lir::x64::{Features, inst::simd::Native},
-        numbers::{Action, Math},
     };
     use iced_x86::{Code, Decoder, DecoderOptions, code_asm::CodeAssembler};
     let base = Features {
@@ -263,14 +263,7 @@ fn instruction_encodings_require_their_exact_isa() {
     let avx512 = Features { bytes: 64, ..avx2 };
     let vector = Type::Vector;
     let encode = |features, action, input, output, regs: &[usize]| {
-        let op = Native::select(
-            Math {
-                action,
-                input,
-                output,
-            },
-            features,
-        )?;
+        let op = Native::select(action, input, output, features)?;
         let mut a = CodeAssembler::new(64).unwrap();
         op.emit(&mut a, regs).unwrap();
         Some(a.assemble(0).unwrap())
@@ -397,22 +390,12 @@ fn instruction_encodings_require_their_exact_isa() {
 #[test]
 fn avx512_splat_reads_integer_gprs_and_floating_point_xmm_sources() {
     use super::packed_code::{body, profiles};
-    use crate::{
-        lir::x64::inst::simd::Native,
-        numbers::{Action, Math},
-    };
+    use crate::{hir::operation::Action, lir::x64::inst::simd::Native};
     use iced_x86::{Decoder, DecoderOptions, Mnemonic, Register};
 
     let [_, avx2, foundation, full] = profiles();
     let encoding = |cpu, lane: Lane| {
-        let op = Native::select(
-            Math {
-                action: Action::Splat,
-                input: lane.scalar(),
-                output: Type::Vector(lane),
-            },
-            cpu,
-        )?;
+        let op = Native::select(Action::Splat, lane.scalar(), Type::Vector(lane), cpu)?;
         let (bytes, text) = body(op, &[1, 3]);
         Some(
             Decoder::new(64, &bytes[..text], DecoderOptions::NONE)

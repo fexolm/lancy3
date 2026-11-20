@@ -1,7 +1,5 @@
 //! Binary16 and bfloat16 use the same sign/exponent/fraction layout with
 //! different exponent biases. Widening either format to binary64 is exact.
-#[cfg(any(test, target_arch = "aarch64"))]
-use super::{Action, Binary, Ternary, Unary, reference::float64};
 use crate::hir::Lane;
 
 pub(crate) struct Format {
@@ -23,7 +21,12 @@ impl Format {
             _ => unreachable!(),
         }
     }
-    fn infinity(&self) -> u16 {
+    #[cfg(any(test, target_arch = "aarch64"))]
+    pub fn fraction_bits(&self) -> u32 {
+        self.fraction
+    }
+
+    pub fn infinity(&self) -> u16 {
         0x7fff & !((1 << self.fraction) - 1)
     }
     #[cfg(any(test, target_arch = "aarch64"))]
@@ -69,70 +72,6 @@ impl Format {
         };
         let base = ((e + self.bias - 1) as u16) << self.fraction;
         sign | (base + rounded as u16)
-    }
-
-    #[cfg(any(test, target_arch = "aarch64"))]
-    pub fn eval(&self, action: Action, x: u16, y: u16, z: u16) -> u128 {
-        let a = self.decode(x);
-        let b = self.decode(y);
-        let c = self.decode(z);
-        let mag = x & 0x7fff;
-        match action {
-            Action::Unary(Unary::Neg) => return u128::from(x ^ 0x8000),
-            Action::Unary(Unary::Abs) => return mag.into(),
-            Action::Binary(Binary::CopySign) => return u128::from(mag | y & 0x8000),
-            Action::Unary(Unary::IsNormal) => {
-                return if mag >= 1 << self.fraction && mag < self.infinity() {
-                    u128::MAX
-                } else {
-                    0
-                };
-            }
-            Action::Unary(Unary::IsSubnormal) => {
-                return if mag != 0 && mag < 1 << self.fraction {
-                    u128::MAX
-                } else {
-                    0
-                };
-            }
-            Action::Unary(op @ (Unary::NextUp | Unary::NextDown)) => {
-                let up = op == Unary::NextUp;
-                let result = if a.is_nan() || (a.is_infinite() && up == a.is_sign_positive()) {
-                    x
-                } else if mag == 0 {
-                    if up { 1 } else { 0x8001 }
-                } else if up == a.is_sign_positive() {
-                    x + 1
-                } else {
-                    x - 1
-                };
-                return result.into();
-            }
-            Action::Ternary(Ternary::MulAdd) => {
-                let product = a * b;
-                let sum = product + c;
-                // The significand product is exact in f64. FastTwoSum recovers the rounding residual.
-                let residual = if product.abs() >= c.abs() {
-                    (product - sum) + c
-                } else {
-                    (c - sum) + product
-                };
-                return self.encode(sum, residual).into();
-            }
-            _ => {}
-        }
-        let bits = float64(action, a.to_bits(), b.to_bits(), c.to_bits());
-        match action {
-            Action::Unary(op) if op.result_type(crate::hir::Type::F64) == crate::hir::Type::I32 => {
-                bits
-            }
-            Action::Binary(op)
-                if op.result_type(crate::hir::Type::F64) == crate::hir::Type::I32 =>
-            {
-                bits
-            }
-            _ => self.encode(f64::from_bits(bits as u64), 0.).into(),
-        }
     }
 }
 

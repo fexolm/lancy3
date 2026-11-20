@@ -85,12 +85,12 @@ pub(super) fn hir(module: &Module<VerifiedBody>, ids: &FunctionIds<Function>) ->
                         } else {
                             ""
                         };
-                        let (m, args) =
-                            crate::numbers::Math::from_op(op, |v| f.value_type(v)).unwrap();
+                        let (action, _, output, args) =
+                            crate::hir::operation::operation(op, |v| f.value_type(v)).unwrap();
                         format!(
                             "{prefix}{:?} {:?} {}",
-                            m.action,
-                            m.output,
+                            action,
+                            output,
                             list(args.into_iter().flatten().map(v))
                         )
                     }
@@ -166,8 +166,8 @@ fn opcode(inst: Inst) -> String {
     match inst {
         Inst::Argv(_) => "argv".into(),
         Inst::LoadArg { index, .. } => format!("arg {index}"),
-        Inst::Native(n, ..) => format!("native.{:?}.{:?}", n.math.input, n.math.action),
-        Inst::Lanes(m, ..) => format!("lanes.{:?}.{:?}", m.input, m.action),
+        Inst::Native(n, ..) => format!("native.{:?}.{:?}", n.input, n.action),
+        Inst::Lanes { input, action, .. } => format!("lanes.{input:?}.{action:?}"),
         Inst::Literal(l, n, _) => format!("literal.{l:?} {n:#x}"),
         Inst::Iota(l, _) => format!("iota.{l:?}"),
         Inst::BitMove(from, to, ..) => format!("bitcast.{from:?}.{to:?}"),

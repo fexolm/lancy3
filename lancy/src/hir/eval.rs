@@ -1,162 +1,165 @@
 //! Portable numeric semantics used by the SSA reference and AArch64 libcalls.
-use super::{Action, Bits, Math, half::Format};
+use super::operation::Action;
+use crate::support::float16::Format;
 use crate::{
     CallError,
     hir::{Binary, Lane, Ternary, Type, Unary},
 };
+pub(crate) type Bits = [u8; 64];
+
 pub(crate) fn read(bytes: &[u8]) -> u128 {
     let mut word = [0; 16];
     word[..bytes.len()].copy_from_slice(bytes);
     u128::from_le_bytes(word)
 }
 
-impl Math {
-    pub fn eval(self, args: &[Bits; 3], width: usize) -> Result<Bits, CallError> {
-        let lane = match self.input {
-            // Pointer-to-word bitcasts preserve the address bits without an element type.
-            Type::Ptr if matches!(self.action, Action::Bitcast) => return Ok(args[0]),
-            ty => ty.lane().expect("numeric operand"),
-        };
-        let size = lane.bytes();
-        let mut out = [0; 64];
-        let [a, b, c] = args;
-        match self.action {
-            Action::Bitcast => return Ok(*a),
-            Action::Iota => {
-                for (i, elem) in out[..width].chunks_exact_mut(size).enumerate() {
-                    elem.copy_from_slice(&cast(Lane::Usize, lane, i as u128).to_le_bytes()[..size]);
-                }
+pub(crate) fn evaluate(
+    action: Action,
+    input: Type,
+    output: Type,
+    args: &[Bits; 3],
+    width: usize,
+) -> Result<Bits, CallError> {
+    let lane = match input {
+        // Pointer-to-word bitcasts preserve the address bits without an element type.
+        Type::Ptr if matches!(action, Action::Bitcast) => return Ok(args[0]),
+        ty => ty.lane().expect("numeric operand"),
+    };
+    let size = lane.bytes();
+    let mut out = [0; 64];
+    let [a, b, c] = args;
+    match action {
+        Action::Bitcast => return Ok(*a),
+        Action::Iota => {
+            for (i, elem) in out[..width].chunks_exact_mut(size).enumerate() {
+                elem.copy_from_slice(&cast(Lane::Usize, lane, i as u128).to_le_bytes()[..size]);
             }
-            Action::AnyTrue | Action::AllTrue => {
-                let mut lanes = a[..width].chunks_exact(size).map(|e| read(e) != 0);
-                let yes = if matches!(self.action, Action::AnyTrue) {
-                    lanes.any(|x| x)
-                } else {
-                    lanes.all(|x| x)
-                };
-                out[..4].copy_from_slice(&(-i32::from(yes)).to_le_bytes());
-            }
-            Action::Widen(_) | Action::Narrow => {
-                let dst = self.output.lane().unwrap();
-                for (i, elem) in out[..width].chunks_exact_mut(dst.bytes()).enumerate() {
-                    let start = i * size
-                        + if matches!(self.action, Action::Widen(true)) {
-                            width / 2
-                        } else {
-                            0
-                        };
-                    let source = if start >= width { b } else { a };
-                    let offset = start % width;
-                    let n = cast(lane, dst, read(&source[offset..offset + size]));
-                    elem.copy_from_slice(&n.to_le_bytes()[..dst.bytes()]);
-                }
-            }
-            Action::Ternary(Ternary::Select) if !matches!(self.input, Type::Vector(_)) => {
-                out = if read(&a[..4]) != 0 { *b } else { *c };
-            }
-            Action::Compress | Action::Expand => {
-                let mut pos = 0;
-                for i in (0..width).step_by(size) {
-                    if b[i + size - 1] & 0x80 == 0 {
-                        continue;
-                    }
-                    let (src, dst) = if matches!(self.action, Action::Compress) {
-                        (i, pos)
+        }
+        Action::AnyTrue | Action::AllTrue => {
+            let mut lanes = a[..width].chunks_exact(size).map(|e| read(e) != 0);
+            let yes = if matches!(action, Action::AnyTrue) {
+                lanes.any(|x| x)
+            } else {
+                lanes.all(|x| x)
+            };
+            out[..4].copy_from_slice(&(-i32::from(yes)).to_le_bytes());
+        }
+        Action::Widen(_) | Action::Narrow => {
+            let dst = output.lane().unwrap();
+            for (i, elem) in out[..width].chunks_exact_mut(dst.bytes()).enumerate() {
+                let start = i * size
+                    + if matches!(action, Action::Widen(true)) {
+                        width / 2
                     } else {
-                        (pos, i)
+                        0
                     };
-                    out[dst..dst + size].copy_from_slice(&a[src..src + size]);
-                    pos += size;
-                }
+                let source = if start >= width { b } else { a };
+                let offset = start % width;
+                let n = cast(lane, dst, read(&source[offset..offset + size]));
+                elem.copy_from_slice(&n.to_le_bytes()[..dst.bytes()]);
             }
-            Action::Shuffle => {
-                let count = width / size;
-                for (index, elem) in c[..width]
-                    .chunks_exact(size)
-                    .zip(out[..width].chunks_exact_mut(size))
-                {
-                    let i = read(index);
-                    if i < (2 * count) as u128 {
-                        let src = if i < count as u128 { a } else { b };
-                        let start = i as usize % count * size;
-                        elem.copy_from_slice(&src[start..start + size]);
-                    }
+        }
+        Action::Ternary(Ternary::Select) if !matches!(input, Type::Vector(_)) => {
+            out = if read(&a[..4]) != 0 { *b } else { *c };
+        }
+        Action::Compress | Action::Expand => {
+            let mut pos = 0;
+            for i in (0..width).step_by(size) {
+                if b[i + size - 1] & 0x80 == 0 {
+                    continue;
                 }
-            }
-            Action::Reduce(op) => {
-                let scalar = Math {
-                    action: Action::Binary(op),
-                    input: lane.scalar(),
-                    output: lane.scalar(),
-                };
-                let mut pair = [[0; 64]; 3];
-                let mut elems = a[..width].chunks_exact(size);
-                pair[0][..size].copy_from_slice(elems.next().unwrap());
-                for v in elems {
-                    pair[1][..size].copy_from_slice(v);
-                    pair[0] = scalar.eval(&pair, width)?;
-                }
-                out = pair[0];
-            }
-            Action::Extract | Action::Insert => {
-                let index = read(&b[..4]) as usize;
-                if index >= width / size {
-                    return Err(CallError::OutOfBounds);
-                }
-                let range = index * size..(index + 1) * size;
-                if matches!(self.action, Action::Insert) {
-                    out = *a;
-                    out[range].copy_from_slice(&c[..size]);
+                let (src, dst) = if matches!(action, Action::Compress) {
+                    (i, pos)
                 } else {
-                    out[..size].copy_from_slice(&a[range]);
-                }
+                    (pos, i)
+                };
+                out[dst..dst + size].copy_from_slice(&a[src..src + size]);
+                pos += size;
             }
-            Action::Splat => {
-                for elem in out[..width].chunks_exact_mut(size) {
-                    elem.copy_from_slice(&a[..size]);
-                }
-            }
-            action => {
-                let dest = self.output.lane().unwrap();
-                let result_size = dest.bytes();
-                let mask = u128::MAX >> (128 - size * 8);
-                for (i, slot) in out[..self.output.bytes(width)]
-                    .chunks_exact_mut(result_size)
-                    .enumerate()
-                {
-                    let range = i * size..(i + 1) * size;
-                    let x = read(&a[range.clone()]);
-                    let y = read(&b[range.clone()]);
-                    let z = read(&c[range]);
-                    let result = match action {
-                        Action::Cast => cast(lane, dest, x),
-                        Action::Ternary(Ternary::Select) => {
-                            if x & (1 << (size * 8 - 1)) != 0 {
-                                y
-                            } else {
-                                z
-                            }
-                        }
-                        Action::Ternary(Ternary::BitSelect) => (x & y) | (!x & z),
-                        Action::Unary(Unary::Not) => !x,
-                        Action::Binary(Binary::And) => x & y,
-                        Action::Binary(Binary::Or) => x | y,
-                        Action::Binary(Binary::Xor) => x ^ y,
-                        _ if lane.float() => match lane {
-                            Lane::F16 | Lane::BF16 => {
-                                Format::for_lane(lane).eval(action, x as u16, y as u16, z as u16)
-                            }
-                            Lane::F32 => float32(action, x as u32, y as u32, z as u32),
-                            _ => float64(action, x as u64, y as u64, z as u64),
-                        },
-                        _ => integer(action, lane, x, y, mask)?,
-                    };
-                    slot.copy_from_slice(&result.to_le_bytes()[..result_size]);
+        }
+        Action::Shuffle => {
+            let count = width / size;
+            for (index, elem) in c[..width]
+                .chunks_exact(size)
+                .zip(out[..width].chunks_exact_mut(size))
+            {
+                let i = read(index);
+                if i < (2 * count) as u128 {
+                    let src = if i < count as u128 { a } else { b };
+                    let start = i as usize % count * size;
+                    elem.copy_from_slice(&src[start..start + size]);
                 }
             }
         }
-        Ok(out)
+        Action::Reduce(op) => {
+            let scalar = lane.scalar();
+            let mut pair = [[0; 64]; 3];
+            let mut elems = a[..width].chunks_exact(size);
+            pair[0][..size].copy_from_slice(elems.next().unwrap());
+            for v in elems {
+                pair[1][..size].copy_from_slice(v);
+                pair[0] = evaluate(Action::Binary(op), scalar, scalar, &pair, width)?;
+            }
+            out = pair[0];
+        }
+        Action::Extract | Action::Insert => {
+            let index = read(&b[..4]) as usize;
+            if index >= width / size {
+                return Err(CallError::OutOfBounds);
+            }
+            let range = index * size..(index + 1) * size;
+            if matches!(action, Action::Insert) {
+                out = *a;
+                out[range].copy_from_slice(&c[..size]);
+            } else {
+                out[..size].copy_from_slice(&a[range]);
+            }
+        }
+        Action::Splat => {
+            for elem in out[..width].chunks_exact_mut(size) {
+                elem.copy_from_slice(&a[..size]);
+            }
+        }
+        action => {
+            let dest = output.lane().unwrap();
+            let result_size = dest.bytes();
+            let mask = u128::MAX >> (128 - size * 8);
+            for (i, slot) in out[..output.bytes(width)]
+                .chunks_exact_mut(result_size)
+                .enumerate()
+            {
+                let range = i * size..(i + 1) * size;
+                let x = read(&a[range.clone()]);
+                let y = read(&b[range.clone()]);
+                let z = read(&c[range]);
+                let result = match action {
+                    Action::Cast => cast(lane, dest, x),
+                    Action::Ternary(Ternary::Select) => {
+                        if x & (1 << (size * 8 - 1)) != 0 {
+                            y
+                        } else {
+                            z
+                        }
+                    }
+                    Action::Ternary(Ternary::BitSelect) => (x & y) | (!x & z),
+                    Action::Unary(Unary::Not) => !x,
+                    Action::Binary(Binary::And) => x & y,
+                    Action::Binary(Binary::Or) => x | y,
+                    Action::Binary(Binary::Xor) => x ^ y,
+                    _ if lane.float() => match lane {
+                        Lane::F16 | Lane::BF16 => {
+                            float16(Format::for_lane(lane), action, x as u16, y as u16, z as u16)
+                        }
+                        Lane::F32 => float32(action, x as u32, y as u32, z as u32),
+                        _ => float64(action, x as u64, y as u64, z as u64),
+                    },
+                    _ => integer(action, lane, x, y, mask)?,
+                };
+                slot.copy_from_slice(&result.to_le_bytes()[..result_size]);
+            }
+        }
     }
+    Ok(out)
 }
 
 fn signed(x: u128, bits: u32) -> i128 {
@@ -344,6 +347,65 @@ macro_rules! float_eval {
 }
 float_eval!(float32, f32, u32);
 float_eval!(float64, f64, u64);
+
+fn float16(format: Format, action: Action, x: u16, y: u16, z: u16) -> u128 {
+    let a = format.decode(x);
+    let b = format.decode(y);
+    let c = format.decode(z);
+    let mag = x & 0x7fff;
+    match action {
+        Action::Unary(Unary::Neg) => return u128::from(x ^ 0x8000),
+        Action::Unary(Unary::Abs) => return mag.into(),
+        Action::Binary(Binary::CopySign) => return u128::from(mag | y & 0x8000),
+        Action::Unary(Unary::IsNormal) => {
+            return if mag >= 1 << format.fraction_bits() && mag < format.infinity() {
+                u128::MAX
+            } else {
+                0
+            };
+        }
+        Action::Unary(Unary::IsSubnormal) => {
+            return if mag != 0 && mag < 1 << format.fraction_bits() {
+                u128::MAX
+            } else {
+                0
+            };
+        }
+        Action::Unary(op @ (Unary::NextUp | Unary::NextDown)) => {
+            let up = op == Unary::NextUp;
+            let result = if a.is_nan() || (a.is_infinite() && up == a.is_sign_positive()) {
+                x
+            } else if mag == 0 {
+                if up { 1 } else { 0x8001 }
+            } else if up == a.is_sign_positive() {
+                x + 1
+            } else {
+                x - 1
+            };
+            return result.into();
+        }
+        Action::Ternary(Ternary::MulAdd) => {
+            let product = a * b;
+            let sum = product + c;
+            // The significand product is exact in f64. FastTwoSum recovers the rounding residual.
+            let residual = if product.abs() >= c.abs() {
+                (product - sum) + c
+            } else {
+                (c - sum) + product
+            };
+            return format.encode(sum, residual).into();
+        }
+        _ => {}
+    }
+    let bits = float64(action, a.to_bits(), b.to_bits(), c.to_bits());
+    match action {
+        Action::Unary(op) if op.result_type(crate::hir::Type::F64) == crate::hir::Type::I32 => bits,
+        Action::Binary(op) if op.result_type(crate::hir::Type::F64) == crate::hir::Type::I32 => {
+            bits
+        }
+        _ => format.encode(f64::from_bits(bits as u64), 0.).into(),
+    }
+}
 
 fn cast(from: Lane, to: Lane, x: u128) -> u128 {
     let a = signed(x, from.bytes() as u32 * 8);

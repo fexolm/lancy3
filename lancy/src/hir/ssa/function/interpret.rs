@@ -1,5 +1,8 @@
 use crate::hir::{Block, Edge, Function, Inst, Op, Simd, Terminator, Type, Value};
-use crate::numbers::{Bits, Math, read};
+use crate::hir::{
+    eval::{Bits, evaluate, read},
+    operation::operation,
+};
 use crate::support::slotmap::DenseMap;
 
 struct Frame<'a> {
@@ -219,9 +222,10 @@ pub(super) unsafe fn run(
                 continue;
             }
             op => {
-                let (math, inputs) = Math::from_op(op, |v| graph.value_type(v)).unwrap();
+                let (action, input, output, inputs) =
+                    operation(op, |v| graph.value_type(v)).unwrap();
                 let args = inputs.map(|v| v.map_or([0; 64], |v| f.values[v]));
-                math.eval(&args, width).map_err(|e| match e {
+                evaluate(action, input, output, &args, width).map_err(|e| match e {
                     crate::CallError::DivisionOverflow => "signed division overflow".to_owned(),
                     crate::CallError::DivisionByZero => "integer division by zero".to_owned(),
                     e => e.to_string(),

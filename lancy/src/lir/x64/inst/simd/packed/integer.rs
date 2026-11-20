@@ -1,7 +1,7 @@
 use super::*;
 
 #[derive(Clone, Copy, Debug)]
-pub(in crate::lir::x64::inst::simd) enum Rule {
+pub(in crate::lir::x64) enum Rule {
     Neg,
     Abs,
     Mul,
@@ -14,77 +14,20 @@ pub(in crate::lir::x64::inst::simd) enum Rule {
 }
 
 impl Rule {
-    pub(super) fn select(m: Math, c: Features) -> Option<Self> {
-        let lane = m.input.lane()?;
-        let n = lane.bytes();
-        if matches!(m.action, Action::Ternary(Ternary::BitSelect)) {
-            return Some(Self::BitSelect);
-        }
-        if lane.float() || n > 8 || c.bytes == 32 && !c.avx2 || c.bytes == 64 && n < 4 && !c.bw {
-            return None;
-        }
-        Some(match m.action {
-            Action::Unary(Unary::Neg) => Self::Neg,
-            Action::Unary(Unary::Abs)
-                if !lane.signed() || (n == 8 && c.bytes != 64) || (c.bytes == 16 && !c.ssse3) =>
-            {
-                Self::Abs
-            }
-            Action::Binary(B::Mul)
-                if n == 1
-                    || n == 8 && !(c.bytes == 64 && c.dq)
-                    || n == 4 && c.bytes == 16 && !c.sse41 =>
-            {
-                Self::Mul
-            }
-            Action::Binary(op @ (B::Eq | B::Ne | B::Lt | B::Le | B::Gt | B::Ge))
-                if c.bytes != 64
-                    && !matches!(
-                        (op, n, lane.signed()),
-                        (B::Eq, 1 | 2 | 4, _) | (B::Gt, 1 | 2 | 4, true)
-                    ) =>
-            {
-                Self::Cmp(op)
-            }
-            Action::Binary(op @ (B::Min | B::Max))
-                if c.bytes != 64
-                    && (n == 8
-                        || c.bytes == 16
-                            && !c.sse41
-                            && !matches!((n, lane.signed()), (1, false) | (2, true))) =>
-            {
-                Self::MinMax(op)
-            }
-            Action::Binary(op @ (B::Shl | B::Shr | B::RotateLeft | B::RotateRight))
-                if c.bytes >= 32 && (n >= 4 || n == 2 && c.bytes == 64) =>
-            {
-                Self::Shift(op)
-            }
-            Action::Unary(Unary::TrailingZeros)
-                if c.bytes == 64 && (n >= 4 && c.vpopcnt || n <= 2 && c.bitalg) =>
-            {
-                Self::Ctz
-            }
-            Action::Binary(op @ (B::SaturatingAdd | B::SaturatingSub)) if n >= 4 => {
-                Self::Saturate(op)
-            }
-            _ => return None,
-        })
-    }
-    pub(super) fn temps(self, m: Math, _: Features) -> usize {
+    pub(super) fn temps(self, input: Type) -> usize {
         match self {
             Self::Neg => 0,
-            Self::Abs if !m.input.lane().unwrap().signed() => 0,
+            Self::Abs if !input.lane().unwrap().signed() => 0,
             Self::Ctz | Self::BitSelect => 1,
             Self::Shift(_) | Self::Mul => 2,
             _ => 3,
         }
     }
-    pub(super) fn emit(self, v: &mut Vector, m: Math, r: &[usize], t: &[usize]) -> Result {
+    pub(super) fn emit(self, v: &mut Vector, input: Type, r: &[usize], t: &[usize]) -> Result {
         let d = *r.last().unwrap();
         let x = r[0];
         let y = r[1];
-        let lane = m.input.lane().unwrap();
+        let lane = input.lane().unwrap();
         let n = lane.bytes();
         match self {
             Self::Neg => {

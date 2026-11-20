@@ -1,5 +1,5 @@
 use super::{Binary, Function, Lane, Op, ScalarKernel, Terminator, Unary};
-use crate::numbers::{Action, Math};
+use crate::hir::{eval::evaluate, operation::Action};
 
 fn layout(lane: Lane) -> (u32, u64) {
     match lane {
@@ -46,16 +46,18 @@ fn rounded_values_at_halfway_and_signed_zero_match_ieee_reference() {
             let v = f.append(b, Op::Unary(op, f.params(b)[0])).unwrap();
             f.set_terminator(b, Terminator::Return(v));
             let k = ScalarKernel::compile(&f).unwrap();
-            let spec = Math {
-                action: Action::Unary(op),
-                input: ty,
-                output: ty,
-            };
             for &input in &inputs {
                 for raw in [input, input | sign] {
                     let mut args = [[0u8; 64]; 3];
                     args[0][..8].copy_from_slice(&raw.to_le_bytes());
-                    let expected = spec.eval(&args, ScalarKernel::vector_bytes()).unwrap();
+                    let expected = evaluate(
+                        Action::Unary(op),
+                        ty,
+                        ty,
+                        &args,
+                        ScalarKernel::vector_bytes(),
+                    )
+                    .unwrap();
                     let expected = u64::from_le_bytes(expected[..8].try_into().unwrap());
                     let mut out = [0];
                     k.call_words(&[raw], &mut out).unwrap();

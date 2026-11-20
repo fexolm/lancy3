@@ -1,91 +1,67 @@
 //! Multi-instruction packed operations. Additional live intermediates are
 //! explicit regalloc temporaries. Constants in installed kernels are RIP-relative.
 use super::*;
-mod float;
-mod integer;
-mod rearrange;
+use crate::lir::x64::isel::packed_half;
+pub(in crate::lir::x64) mod float;
+pub(in crate::lir::x64) mod integer;
+pub(in crate::lir::x64) mod rearrange;
 
 type Result = std::result::Result<(), IcedError>;
 #[derive(Clone, Copy, Debug)]
-pub(super) enum Recipe {
+pub(in crate::lir::x64) enum Recipe {
     Halves,
     Int(integer::Rule),
     Float(float::Rule),
     Rearrange(rearrange::Rule),
 }
 impl Recipe {
-    pub fn select(m: Math, c: Features) -> Option<Self> {
-        integer::Rule::select(m, c)
-            .map(Self::Int)
-            .or_else(|| float::Rule::select(m, c).map(Self::Float))
-            .or_else(|| rearrange::Rule::select(m, c).map(Self::Rearrange))
-            .or_else(|| {
-                let lane = m.input.lane()?;
-                if lane.float()
-                    || lane.bytes() > 8
-                    || !(c.bytes == 32 && !c.avx2
-                        || c.bytes == 64 && !c.bw && lane.bytes() < 4 && c.avx2)
-                {
-                    return None;
-                }
-                match m.action {
-                    // Logical operations already have full-width AVX forms.
-                    Action::Binary(B::And | B::Or | B::Xor) | Action::Unary(Unary::Not) => None,
-                    Action::Unary(_) | Action::Binary(_) => half(m, c).map(|_| Self::Halves),
-                    _ => None,
-                }
-            })
-    }
-    pub fn temporaries(self, m: Math, c: Features) -> usize {
+    pub fn temporaries(self, action: Action, input: Type, output: Type, c: Features) -> usize {
         match self {
             Self::Halves => {
-                half(m, c).unwrap().temporaries()
-                    + match m.action {
+                packed_half(action, input, output, c).unwrap().temporaries()
+                    + match action {
                         Action::Unary(_) => 2,
                         _ => 3,
                     }
             }
-            Self::Int(r) => r.temps(m, c),
-            Self::Float(r) => r.temps(m, c),
-            Self::Rearrange(r) => r.temps(m, c),
+            Self::Int(r) => r.temps(input),
+            Self::Float(r) => r.temps(input),
+            Self::Rearrange(r) => r.temps(action, input, c),
         }
     }
     pub fn emit(
         self,
         a: &mut CodeAssembler,
-        m: Math,
-        c: Features,
+        native: Native,
         regs: &[usize],
         temps: &[usize],
         pool: Option<&mut emit::Constants>,
     ) -> Result {
+        let Native {
+            action,
+            input,
+            output,
+            cpu,
+            ..
+        } = native;
         let mut v = Vector {
             a,
-            width: c.bytes,
-            cpu: c,
+            width: cpu.bytes,
+            cpu,
             pool,
         };
         match self {
-            Self::Halves => emit_halves(&mut v, m, regs, temps),
-            Self::Int(r) => r.emit(&mut v, m, regs, temps),
-            Self::Float(r) => r.emit(&mut v, m, regs, temps),
-            Self::Rearrange(r) => r.emit(&mut v, m, regs, temps),
+            Self::Halves => emit_halves(&mut v, native, regs, temps),
+            Self::Int(r) => r.emit(&mut v, input, regs, temps),
+            Self::Float(r) => r.emit(&mut v, input, output, regs, temps),
+            Self::Rearrange(r) => r.emit(&mut v, action, input, output, regs, temps),
         }
     }
 }
 
-fn half(m: Math, c: Features) -> Option<Native> {
-    Native::select(
-        m,
-        Features {
-            bytes: c.bytes / 2,
-            ..c
-        },
-    )
-}
-
-fn emit_halves(v: &mut Vector, m: Math, r: &[usize], temps: &[usize]) -> Result {
-    let half = half(m, v.cpu).expect("selected packed half");
+fn emit_halves(v: &mut Vector, native: Native, r: &[usize], temps: &[usize]) -> Result {
+    let half = packed_half(native.action, native.input, native.output, v.cpu)
+        .expect("selected packed half");
     let (d, inputs) = r.split_last().unwrap();
     let (held, inner) = temps.split_at(inputs.len() + 1);
     let high = held[inputs.len()];

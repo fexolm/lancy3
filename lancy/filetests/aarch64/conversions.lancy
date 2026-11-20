@@ -61,7 +61,7 @@ fn main x:i32 -> i32
   sum = simd.reduce add v
   r = cast i32 sum
   ret r
-@aarch64-isel check: Sum(
+@aarch64-isel check: Reduce(Integer(
 @aarch64 all lacks 0xfffffc1f 0xd63f0000
 @run 127 -> -126
 @run -128 -> -125
@@ -85,3 +85,57 @@ fn main x:i32 -> i32
 @run 1 -> 1
 @run 0x80000001 -> 0x7ffffffe
 @run -1 -> 0
+---
+fn main x:i32 -> i32
+  v = cast u16 x
+  a = cast bf16 v
+  r = bitcast u16 a
+  bits = cast i32 r
+  ret bits
+@aarch64-isel check: IntegerFloatCast(
+@aarch64 all lacks 0xfffffc1f 0xd63f0000
+@run 256 -> 0x4380
+@run 257 -> 0x4380
+@run 259 -> 0x4382
+---
+fn main x:i32 -> i32
+  raw = cast u16 x
+  v = bitcast f16 raw
+  a = simd.splat v
+  b = simd.cast i16 a
+  n = simd.lanes i16
+  one = const 1
+  last = sub n one
+  s = simd.extract b last
+  r = cast i32 s
+  ret r
+@aarch64-isel check: IntegerFloatCast(
+@aarch64 all lacks 0xfffffc1f 0xd63f0000
+@run 0xbe00 -> -1
+@run 0x7bff -> 32767
+@run 0xfbff -> -32768
+@run 0xfe09 -> 0
+---
+fn main m:i32 yes:i32 no:i32 -> i32
+  a = cast u8 m
+  b = cast u8 yes
+  c = cast u8 no
+  sel = bitselect a b c
+  r = cast i32 sel
+  ret r
+@aarch64-isel check: Select(ScalarBits
+@aarch64 all lacks 0xfffffc1f 0xd63f0000
+@run 0xa5 0x96 0x3c -> 0x9c
+@run 0x25 0x96 0x3c -> 0x1c
+@run 0 0x96 0x3c -> 0x3c
+@run 0xff 0x96 0x3c -> 0x96
+---
+fn main m:i32 yes:i32 no:i32 -> i32
+  a = bitcast f32 m
+  b = bitcast f32 yes
+  c = bitcast f32 no
+  s = bitselect a b c
+  r = bitcast i32 s
+  ret r
+@aarch64 all lacks 0xfffffc1f 0xd63f0000
+@run 0x807fffff 0x80000042 0x7fffffff -> 0xff800042

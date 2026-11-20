@@ -17,7 +17,6 @@ pub mod hir;
 pub mod jit;
 mod lir;
 mod module;
-mod numbers;
 pub mod support;
 
 pub use lir::aarch64;
