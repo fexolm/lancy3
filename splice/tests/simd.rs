@@ -1383,37 +1383,35 @@ fn register_refill_and_wrapping_lane_index_match_across_backends() {
 }
 
 #[kernel]
-fn staged_locals(#[comptime] size: usize, #[comptime] slot: usize, input: i32) -> i32 {
-    let mut words = vec![input; size];
+fn scratch_slots(#[comptime] slot: usize, input: i32, words: &mut [i32]) -> i32 {
+    words[0] = input;
+    words[1] = input;
     let before = words[0];
     words[slot] += 7;
     before + words[0] + words[slot]
 }
 
 #[test]
-fn specialization_sized_locals_have_independent_registers() {
+fn host_scratch_slots_retain_independent_runtime_values() {
     for slot in [0, 1] {
-        let ir = staged_locals::ir(2, slot).unwrap();
+        let ir = scratch_slots::ir(slot).unwrap();
         let want = if slot == 0 { 29 } else { 22 };
-        assert_eq!(staged_locals(2, slot, 5), want);
-        for result in [
-            Lancy::compile(&ir).unwrap().call(&[5], &mut []),
-            staged_locals::build::<Lancy>(2, slot)
-                .unwrap()
-                .call(&[5], &mut []),
-            Llvm::compile(&ir).unwrap().call(&[5], &mut []),
-            staged_locals::build::<Llvm>(2, slot)
-                .unwrap()
-                .call(&[5], &mut []),
+        let mut expected = [0; 2];
+        assert_eq!(scratch_slots(slot, 5, &mut expected), want);
+        for kernel in [
+            &Lancy::compile(&ir).unwrap() as &dyn Executable,
+            &scratch_slots::build::<Lancy>(slot).unwrap(),
+            &Llvm::compile(&ir).unwrap(),
+            &scratch_slots::build::<Llvm>(slot).unwrap(),
         ] {
-            assert_eq!(result, Ok(want));
+            let mut words = [-1; 2];
+            assert_eq!(
+                kernel.call(&[5], &mut [words.as_mut_slice().into()]),
+                Ok(want)
+            );
+            assert_eq!(words, expected);
         }
     }
-    assert!(
-        staged_locals::ir(1, 1)
-            .unwrap_err()
-            .contains("local index out of bounds")
-    );
 }
 #[kernel]
 fn mul_i64_block(lhs: &[i64], rhs: &[i64], dst: &mut [i64]) -> i32 {

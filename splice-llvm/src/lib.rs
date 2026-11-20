@@ -10,6 +10,7 @@ compile_error!("splice-llvm supports x86-64 Windows and Linux, and AArch64 Linux
 
 mod jit;
 mod lower;
+mod target;
 
 #[cfg(all(test, target_arch = "aarch64"))]
 mod aarch64_tests;
@@ -79,7 +80,7 @@ fn build_module<'ctx>(
 pub fn to_llvm_ir(function: &Function) -> Result<String, String> {
     Llvm::version()?;
     let context = Context::create();
-    Ok(build_module(&context, &jit::host_machine()?, |ctx, m| {
+    Ok(build_module(&context, &target::host_machine()?, |ctx, m| {
         lower::populate(ctx, m, function)
     })?
     .print_to_string()
@@ -241,7 +242,7 @@ mod tests {
             Ok(())
         }
         let ir = splice::frontend::materialize(1, &[], Box::new(staged)).unwrap();
-        let target = jit::host_machine().unwrap();
+        let target = target::host_machine().unwrap();
         let ctx = Context::create();
         for direct in [false, true] {
             let m = build_module(&ctx, &target, |ctx, m| {
@@ -312,7 +313,7 @@ mod tests {
         ir.push_str("  ret void\n}\n");
 
         let ctx = Context::create();
-        let target = jit::host_machine().unwrap();
+        let target = target::host_machine().unwrap();
         for auto_vectorize in [true, false] {
             let text = MemoryBuffer::create_from_memory_range_copy(ir.as_bytes(), "vectorization");
             let m = ctx.create_module_from_ir(text).unwrap();
@@ -357,7 +358,7 @@ mod tests {
         let ir = frontend::materialize(1, &kinds, Box::new(stage)).unwrap();
         let lanes = Element::U16.lanes();
         let ty = format!("<{lanes} x i16>");
-        let target = jit::host_machine().unwrap();
+        let target = target::host_machine().unwrap();
         let ctx = Context::create();
         for direct in [true, false] {
             let m = build_module(&ctx, &target, |ctx, m| {
@@ -481,7 +482,7 @@ mod tests {
         }
 
         let ir = frontend::materialize(1, &kinds, Box::new(stage)).unwrap();
-        let target = jit::host_machine().unwrap();
+        let target = target::host_machine().unwrap();
         let ctx = Context::create();
         let n = Element::I32.lanes();
         for direct in [false, true] {

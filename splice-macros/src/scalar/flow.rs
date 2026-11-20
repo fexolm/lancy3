@@ -19,7 +19,7 @@ pub(super) fn key<T>(node: &T) -> usize {
 pub(super) fn analyze(block: &Block, bindings: &HashMap<String, Binding>) -> Flow {
     let names = bindings
         .iter()
-        .map(|(s, b)| (s.clone(), (!matches!(b, Binding::Host), None)))
+        .map(|(s, b)| (s.clone(), (!matches!(b, Binding::Host(_)), None)))
         .collect();
     let mut flow = Flow::default();
     loop {
@@ -63,7 +63,6 @@ impl Flow {
     }
     fn expr(&mut self, e: &Expr, names: &Names, control: bool) -> bool {
         match e {
-            Expr::Macro(m) if m.mac.path.is_ident("vec") => true,
             Expr::Path(p) => p
                 .path
                 .get_ident()

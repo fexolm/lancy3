@@ -29,6 +29,28 @@ impl Function {
                     return Err(format!("duplicate label {l:?}"));
                 }
             }
+            if let Instr::Call {
+                dst,
+                function,
+                args,
+                buffers,
+            } = op
+            {
+                super::check_call(
+                    function.arity(),
+                    function.buffer_kinds(),
+                    args.iter().map(|&r| self.checked_reg_type(r)),
+                    &self.buffer_kinds,
+                    buffers,
+                )
+                .map_err(|e| format!("call at instruction {i}: {e}"))?;
+                if self.checked_reg_type(*dst) != Some(ValueType::Scalar) {
+                    return Err(format!(
+                        "invalid result register for call at instruction {i}"
+                    ));
+                }
+                continue;
+            }
             if op
                 .reads()
                 .chain(op.written())
@@ -57,32 +79,20 @@ impl Function {
                 }
                 _ => {}
             }
-            match op {
-                Instr::BufferLen { buffer, .. }
-                | Instr::Load { buffer, .. }
-                | Instr::Store { buffer, .. } => {
-                    let kind = self
-                        .buffer_kinds
-                        .get(buffer.index())
-                        .ok_or_else(|| format!("invalid buffer at instruction {i}"))?;
-                    if !matches!(op, Instr::BufferLen { .. }) && kind.element() != Element::I32 {
-                        return Err("scalar element access requires an i32 buffer".into());
-                    }
-                    if matches!(op, Instr::Store { .. }) && !kind.writable() {
-                        return Err(format!("store to read-only buffer at instruction {i}"));
-                    }
+            if let Instr::BufferLen { buffer, .. }
+            | Instr::Load { buffer, .. }
+            | Instr::Store { buffer, .. } = op
+            {
+                let kind = self
+                    .buffer_kinds
+                    .get(buffer.index())
+                    .ok_or_else(|| format!("invalid buffer at instruction {i}"))?;
+                if !matches!(op, Instr::BufferLen { .. }) && kind.element() != Element::I32 {
+                    return Err("scalar element access requires an i32 buffer".into());
                 }
-                Instr::Call {
-                    function,
-                    args,
-                    buffers,
-                    ..
-                } => {
-                    function
-                        .check_call(&self.buffer_kinds, args, buffers)
-                        .map_err(|e| format!("call at instruction {i}: {e}"))?;
+                if matches!(op, Instr::Store { .. }) && !kind.writable() {
+                    return Err(format!("store to read-only buffer at instruction {i}"));
                 }
-                _ => {}
             }
         }
         starts.push(self.code.len());

@@ -21,6 +21,8 @@ mod backend;
 mod instruction;
 mod operand;
 
+#[cfg(all(test, target_arch = "aarch64"))]
+pub(crate) use backend::check_machine;
 #[cfg(target_arch = "aarch64")]
 pub(crate) use backend::{SITE_POINTER, Site, emit};
 

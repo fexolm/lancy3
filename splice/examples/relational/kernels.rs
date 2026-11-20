@@ -118,12 +118,26 @@ fn read_indices(arena: &[i32], indices: Lane<i32>, count: i32) -> Lane<i32> {
 }
 
 #[kernel]
-pub fn query(#[comptime] plan: &Plan, offsets: &[i32], data: &[i32], arena: &mut [i32]) -> i32 {
+pub fn query(
+    #[comptime] plan: &Plan,
+    offsets: &[i32],
+    data: &[i32],
+    arena: &mut [i32],
+    state: &mut [i32],
+) -> i32 {
     let program = comptime!(Program::new(plan));
-    let mut saved = vec![0; program.indices];
-    let mut bases = vec![0; program.indices];
-    let mut sizes = vec![0; program.indices];
-    let mut duplicates = vec![0; program.indices];
+    let required = program.state_words();
+    if state.len() < required {
+        return -1;
+    }
+    let bases = program.indices;
+    let sizes = bases + program.indices;
+    let duplicates = sizes + program.indices;
+    let counts = duplicates + program.indices;
+    for word in 0..counts as i32 {
+        state[word as usize] = 0;
+    }
+    let lanes = comptime!(Lane::<i32>::lanes());
     let width = Lane::<i32>::lanes() as i32;
     let zero = Lane::<i32>::splat(0);
     let mut low = 0;
@@ -131,26 +145,27 @@ pub fn query(#[comptime] plan: &Plan, offsets: &[i32], data: &[i32], arena: &mut
     for task in &program.tasks {
         match task {
             Task::Save(id, high_side) => {
-                saved[*id] = if *high_side { low } else { high };
+                state[*id] = if *high_side { low } else { high };
             }
             Task::Run(pipe) => {
                 let last = pipe.steps.len();
-                // Each boundary holds at most one packet. The compiled plan has
-                // one scalar count and SIMD locals per boundary, indexed at build time.
-                let mut counts = vec![0; last + 1];
-                let mut keys = vec![zero; last + 1];
-                let mut vals = vec![zero; last + 1];
-                let mut heads = vec![zero; last + 1];
-                // A probe retains just the unresolved prefix and its next addresses.
-                let mut pending = vec![0; last];
-                let mut pkeys = vec![zero; last];
-                let mut pvals = vec![zero; last];
-                let mut positions = vec![zero; last];
+                // Boundary queues and retry queues reuse the same scratch between pipes.
+                let keys = counts + last + 1;
+                let vals = keys + (last + 1) * lanes;
+                let heads = vals + (last + 1) * lanes;
+                let pending = heads + (last + 1) * lanes;
+                let pkeys = pending + last;
+                let pvals = pkeys + last * lanes;
+                let positions = pvals + last * lanes;
+                let end = positions + last * lanes;
+                for word in counts as i32..end as i32 {
+                    state[word as usize] = 0;
+                }
                 let start = if pipe.high { high } else { low };
                 let first = offsets[pipe.table];
                 let mut rows = (offsets[pipe.table.saturating_add(1)] - first) >> 1;
                 for id in pipe.dependencies() {
-                    if sizes[id] == 0 {
+                    if state[sizes + id] == 0 {
                         rows = 0;
                     }
                 }
@@ -161,20 +176,21 @@ pub fn query(#[comptime] plan: &Plan, offsets: &[i32], data: &[i32], arena: &mut
                 let mut row = 0;
                 let mut done = false;
                 while !done {
-                    if counts[0] == 0 && row < rows {
+                    if state[counts] == 0 && row < rows {
                         let n = (rows - row).min(limit);
                         limit = width;
                         let offset = first + row;
                         if n == width {
-                            keys[0] = Lane::<i32>::load(data, offset as usize);
-                            vals[0] = Lane::<i32>::load(data, (offset + rows) as usize);
+                            Lane::<i32>::load(data, offset as usize).store(state, keys);
+                            Lane::<i32>::load(data, (offset + rows) as usize).store(state, vals);
                         } else {
                             let active = Lane::<i32>::first_n(n as usize);
-                            keys[0] = Lane::load_select(data, offset as usize, active, zero);
-                            vals[0] =
-                                Lane::load_select(data, (offset + rows) as usize, active, zero);
+                            Lane::load_select(data, offset as usize, active, zero)
+                                .store(state, keys);
+                            Lane::load_select(data, (offset + rows) as usize, active, zero)
+                                .store(state, vals);
                         }
-                        counts[0] = n;
+                        state[counts] = n;
                         row += n;
                     }
                     // An empty queue may still receive input. Only propagate EOF
@@ -182,63 +198,68 @@ pub fn query(#[comptime] plan: &Plan, offsets: &[i32], data: &[i32], arena: &mut
                     let mut drained = row == rows;
                     for (i, step) in pipe.steps.iter().enumerate() {
                         let j = i + 1;
-                        let n = counts[i];
-                        if counts[j] == 0 {
+                        let n = state[counts + i];
+                        if state[counts + j] == 0 {
                             match step {
                                 Step::Filter(pred) => {
                                     if n != 0 {
-                                        let k = keys[i];
-                                        let v = vals[i];
+                                        let k = Lane::<i32>::load(state, keys + i * lanes);
+                                        let v = Lane::<i32>::load(state, vals + i * lanes);
                                         let keep = Lane::<i32>::first_n(n as usize)
                                             & matches_rows(pred, k, v);
-                                        keys[j] = k.compress(keep);
-                                        vals[j] = v.compress(keep);
-                                        counts[j] = keep.count();
-                                        counts[i] = 0;
+                                        k.compress(keep).store(state, keys + j * lanes);
+                                        v.compress(keep).store(state, vals + j * lanes);
+                                        state[counts + j] = keep.count();
+                                        state[counts + i] = 0;
                                     }
                                 }
                                 Step::Project(kexpr, vexpr) => {
                                     if n != 0 {
-                                        let k = keys[i];
-                                        let v = vals[i];
-                                        keys[j] = eval(kexpr, k, v);
-                                        vals[j] = eval(vexpr, k, v);
-                                        counts[j] = n;
-                                        counts[i] = 0;
+                                        let k = Lane::<i32>::load(state, keys + i * lanes);
+                                        let v = Lane::<i32>::load(state, vals + i * lanes);
+                                        eval(kexpr, k, v).store(state, keys + j * lanes);
+                                        eval(vexpr, k, v).store(state, vals + j * lanes);
+                                        state[counts + j] = n;
+                                        state[counts + i] = 0;
                                     }
                                 }
                                 Step::Find(id) | Step::Values(id, _) => {
-                                    let mut live = pending[i];
-                                    let mut k = pkeys[i];
-                                    let mut v = pvals[i];
-                                    let mut pos = positions[i];
-                                    let mask = Lane::<i32>::splat(sizes[*id] - 1);
+                                    let mut live = state[pending + i];
+                                    let mut k = Lane::<i32>::load(state, pkeys + i * lanes);
+                                    let mut v = Lane::<i32>::load(state, pvals + i * lanes);
+                                    let mut pos = Lane::<i32>::load(state, positions + i * lanes);
+                                    let mask = Lane::<i32>::splat(state[sizes + *id] - 1);
                                     let take = n.min(width - live);
                                     if take != 0 {
-                                        let fresh = keys[i];
+                                        let fresh = Lane::<i32>::load(state, keys + i * lanes);
                                         let addr = match step {
                                             Step::Find(_) => (fresh ^ (fresh >> 16)) & mask,
-                                            _ => heads[i],
+                                            _ => Lane::<i32>::load(state, heads + i * lanes),
                                         };
                                         if live == 0 {
                                             k = fresh;
-                                            v = vals[i];
+                                            v = Lane::<i32>::load(state, vals + i * lanes);
                                             pos = addr;
                                         } else {
                                             let free = Lane::<i32>::iota()
                                                 .simd_ge(Lane::<i32>::splat(live));
                                             k = fresh.expand(free, k);
-                                            v = vals[i].expand(free, v);
+                                            v = Lane::<i32>::load(state, vals + i * lanes)
+                                                .expand(free, v);
                                             pos = addr.expand(free, pos);
                                         }
-                                        counts[i] = n - take;
+                                        state[counts + i] = n - take;
                                         if n != take {
                                             let shift =
                                                 Lane::<i32>::iota() + Lane::<i32>::splat(take);
-                                            keys[i] = fresh.swizzle(shift);
-                                            vals[i] = vals[i].swizzle(shift);
+                                            fresh.swizzle(shift).store(state, keys + i * lanes);
+                                            Lane::<i32>::load(state, vals + i * lanes)
+                                                .swizzle(shift)
+                                                .store(state, vals + i * lanes);
                                             if comptime!(step.carries_heads()) {
-                                                heads[i] = heads[i].swizzle(shift);
+                                                Lane::<i32>::load(state, heads + i * lanes)
+                                                    .swizzle(shift)
+                                                    .store(state, heads + i * lanes);
                                             }
                                         }
                                         live += take;
@@ -246,7 +267,7 @@ pub fn query(#[comptime] plan: &Plan, offsets: &[i32], data: &[i32], arena: &mut
                                     if live == width || (drained && live > 0) {
                                         match step {
                                             Step::Find(_) => {
-                                                let base = bases[*id];
+                                                let base = state[bases + *id];
                                                 let candidates: Lane<i32> = read_indices(
                                                     arena,
                                                     pos + Lane::<i32>::splat(base),
@@ -254,7 +275,9 @@ pub fn query(#[comptime] plan: &Plan, offsets: &[i32], data: &[i32], arena: &mut
                                                 );
                                                 let links: Lane<i32> = read_indices(
                                                     arena,
-                                                    pos + Lane::<i32>::splat(base + sizes[*id]),
+                                                    pos + Lane::<i32>::splat(
+                                                        base + state[sizes + *id],
+                                                    ),
                                                     live,
                                                 );
                                                 let occupied = links.simd_ne(zero);
@@ -262,16 +285,18 @@ pub fn query(#[comptime] plan: &Plan, offsets: &[i32], data: &[i32], arena: &mut
                                                 let hit = occupied & equal;
                                                 let retry = occupied & !equal;
                                                 if hit.all() {
-                                                    keys[j] = k;
-                                                    vals[j] = v;
-                                                    heads[j] = links;
-                                                    counts[j] = width;
+                                                    k.store(state, keys + j * lanes);
+                                                    v.store(state, vals + j * lanes);
+                                                    links.store(state, heads + j * lanes);
+                                                    state[counts + j] = width;
                                                     live = 0;
                                                 } else {
-                                                    keys[j] = k.compress(hit);
-                                                    vals[j] = v.compress(hit);
-                                                    heads[j] = links.compress(hit);
-                                                    counts[j] = hit.count();
+                                                    k.compress(hit).store(state, keys + j * lanes);
+                                                    v.compress(hit).store(state, vals + j * lanes);
+                                                    links
+                                                        .compress(hit)
+                                                        .store(state, heads + j * lanes);
+                                                    state[counts + j] = hit.count();
                                                     if retry.any() {
                                                         k = k.compress(retry);
                                                         v = v.compress(retry);
@@ -287,13 +312,14 @@ pub fn query(#[comptime] plan: &Plan, offsets: &[i32], data: &[i32], arena: &mut
                                             Step::Values(_, combine) => {
                                                 let payload: Lane<i32> =
                                                     read_indices(arena, pos, live);
-                                                keys[j] = k;
-                                                vals[j] = match combine {
+                                                k.store(state, keys + j * lanes);
+                                                (match combine {
                                                     Combine::Add => v + payload,
                                                     Combine::Multiply => v * payload,
-                                                };
-                                                counts[j] = live;
-                                                if duplicates[*id] != 0 {
+                                                })
+                                                .store(state, vals + j * lanes);
+                                                state[counts + j] = live;
+                                                if state[duplicates + *id] != 0 {
                                                     let next: Lane<i32> = read_indices(
                                                         arena,
                                                         pos - Lane::<i32>::splat(1),
@@ -311,28 +337,34 @@ pub fn query(#[comptime] plan: &Plan, offsets: &[i32], data: &[i32], arena: &mut
                                             _ => {}
                                         }
                                     }
-                                    pending[i] = live;
-                                    pkeys[i] = k;
-                                    pvals[i] = v;
-                                    positions[i] = pos;
+                                    state[pending + i] = live;
+                                    k.store(state, pkeys + i * lanes);
+                                    v.store(state, pvals + i * lanes);
+                                    pos.store(state, positions + i * lanes);
                                 }
                             }
                         }
-                        drained = drained && counts[i] == 0 && pending[i] == 0;
+                        drained = drained && state[counts + i] == 0 && state[pending + i] == 0;
                     }
-                    let n = counts[last];
+                    let n = state[counts + last];
                     if n != 0 {
                         if n > ((high - low) >> 1) {
                             return -1;
                         }
                         let addr = if pipe.high { high - 2 * n } else { low };
-                        write_rows(arena, addr, n, keys[last], vals[last]);
+                        write_rows(
+                            arena,
+                            addr,
+                            n,
+                            Lane::<i32>::load(state, keys + last * lanes),
+                            Lane::<i32>::load(state, vals + last * lanes),
+                        );
                         if pipe.high {
                             high = addr;
                         } else {
                             low += 2 * n;
                         }
-                        counts[last] = 0;
+                        state[counts + last] = 0;
                     }
                     done = drained;
                 }
@@ -341,9 +373,9 @@ pub fn query(#[comptime] plan: &Plan, offsets: &[i32], data: &[i32], arena: &mut
                         // Dependent indices lived at the opposite end. Reclaim them
                         // before allocating the directory for the newly built index.
                         if pipe.high {
-                            low = saved[id];
+                            low = state[id];
                         } else {
-                            high = saved[id];
+                            high = state[id];
                         }
                         let begin = if pipe.high { high } else { start };
                         let end = if pipe.high { start } else { low };
@@ -365,9 +397,9 @@ pub fn query(#[comptime] plan: &Plan, offsets: &[i32], data: &[i32], arena: &mut
                                 buckets *= 2;
                             }
                             let base = if pipe.high { high - 2 * buckets } else { low };
-                            duplicates[id] = build_index(arena, begin, end, base, buckets);
-                            sizes[id] = buckets;
-                            bases[id] = base;
+                            state[duplicates + id] = build_index(arena, begin, end, base, buckets);
+                            state[sizes + id] = buckets;
+                            state[bases + id] = base;
                             if pipe.high {
                                 high = base;
                             } else {

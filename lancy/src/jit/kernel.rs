@@ -1,6 +1,6 @@
 //! Install verified HIR as executable machine code.
 use super::memory::Executable;
-use crate::hir::{Function, Type, transforms::passes};
+use crate::hir::{Function, Type};
 use crate::{CallError, CompileError, Inlining};
 use std::mem::MaybeUninit;
 
@@ -39,7 +39,7 @@ impl ScalarKernel {
                 .entered();
         splice_target::simd().map_err(CompileError::SimdProfile)?;
         let (source, ids) = function.verified_module()?;
-        let code = passes::optimize_and_lower(&source, &ids, inlining, crate::lir::emit)?;
+        let code = super::optimize_and_lower(&source, &ids, inlining, crate::lir::emit)?;
         let memory = tracing::debug_span!(target: "splice::compile", "install_code")
             .in_scope(|| Executable::new(&code.bytes))?;
         // SAFETY: the host emitter implements Entry and memory owns the sealed code.

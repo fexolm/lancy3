@@ -22,58 +22,6 @@ use splice_llvm::Llvm;
 
 const SENTINEL: i32 = -123_456_789;
 
-#[splice::kernel]
-fn invariant_loop_branch(n: i32, mode: i32, out: &mut [i32]) -> i32 {
-    let mut i = 0;
-    let mut sum = 0;
-    while i < n {
-        if mode != 0 {
-            sum += i + 2;
-        } else {
-            sum -= i + 1;
-        }
-        out[i as usize] = sum;
-        i += 1;
-    }
-    sum
-}
-
-#[test]
-fn invariant_loop_branch_matches_rust_on_both_build_paths() {
-    let check = |name: &str, kernel: &dyn Executable| {
-        for (n, mode) in [(0, 0), (0, 1), (4, 0), (4, -1)] {
-            let mut expected = [SENTINEL; 5];
-            let sum = invariant_loop_branch(n, mode, &mut expected);
-            let mut out = [SENTINEL; 5];
-            let actual = kernel
-                .call(&[n, mode], &mut [BufferArg::Write(&mut out)])
-                .unwrap();
-            assert_eq!((actual, out), (sum, expected), "{name}, n={n}, mode={mode}");
-        }
-        for mode in [0, -1] {
-            let mut expected = [SENTINEL; 5];
-            invariant_loop_branch(5, mode, &mut expected);
-            let mut out = [SENTINEL; 5];
-            assert!(
-                kernel
-                    .call(&[6, mode], &mut [BufferArg::Write(&mut out)])
-                    .is_err(),
-                "{name}, mode={mode}"
-            );
-            assert_eq!(out, expected, "{name}, mode={mode}");
-        }
-    };
-    check_backends(invariant_loop_branch::ir().unwrap(), check);
-    check(
-        "direct Lancy",
-        &invariant_loop_branch::build::<Lancy>().unwrap(),
-    );
-    check(
-        "direct LLVM",
-        &invariant_loop_branch::build::<Llvm>().unwrap(),
-    );
-}
-
 fn check_backends(ir: Function, check: impl Fn(&str, &dyn Executable)) {
     check("Lancy", &Lancy::compile(&ir).unwrap());
     check("Cranelift", &Cranelift::compile(&ir).unwrap());
@@ -194,6 +142,21 @@ fn biquad_starts_with_zero_state_on_every_call() {
     check_backends(low_pass::ir(&sections).unwrap(), |name, kernel| {
         let pcm = [3, -5, 6, 0, 0, 0];
         let mut out = [SENTINEL; 7];
+        let mut state = [SENTINEL; 2];
+        assert_eq!(
+            kernel.call(
+                &[],
+                &mut [
+                    BufferArg::Read(&pcm),
+                    BufferArg::Write(&mut out),
+                    BufferArg::Write(&mut state[..1]),
+                ]
+            ),
+            Ok(-1),
+            "{name}"
+        );
+        assert_eq!(out, [SENTINEL; 7], "{name}");
+        assert_eq!(state, [SENTINEL; 2], "{name}");
         let mut run = |capacity: usize| {
             let count = kernel
                 .call(
@@ -201,6 +164,7 @@ fn biquad_starts_with_zero_state_on_every_call() {
                     &mut [
                         BufferArg::Read(&pcm),
                         BufferArg::Write(&mut out[..capacity]),
+                        BufferArg::Write(&mut state),
                     ],
                 )
                 .unwrap();

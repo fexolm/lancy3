@@ -1,6 +1,7 @@
 use super::{Binding, LoopKind, Lower, Scalar, Stage, Value, err};
-use proc_macro2::{Span, TokenStream};
+use proc_macro2::{Ident, Span, TokenStream};
 use quote::{ToTokens, format_ident};
+use syn::visit::{self, Visit};
 use syn::visit_mut::{self, VisitMut};
 use syn::{Block, Expr, Result, Stmt};
 
@@ -13,39 +14,42 @@ impl Lower<'_> {
             &format!("'__splice_source_{}", crate::scalar::flow::key(block)),
             Span::mixed_site(),
         );
+        scope.source_fault = Some(end.clone());
         for (i, stmt) in block.stmts.iter().enumerate() {
             let rendered = match stmt {
                 Stmt::Local(local) => {
                     let init = local.init.as_ref().expect("validated local");
-                    let value = if let Expr::Macro(m) = &*init.expr
-                        && m.mac.path.is_ident("vec")
-                    {
-                        let tokens = &m.mac.tokens;
-                        let repeat: syn::ExprRepeat = syn::parse2(emit!([#tokens]))?;
-                        let len = scope.host_raw(&repeat.len)?;
-                        let value = scope.source_expr(&repeat.expr, None)?;
-                        emit!(format!("vec![{}; {}]", #value, #len))
-                    } else {
-                        let hint = match &local.pat {
-                            syn::Pat::Type(p) => Scalar::from_type(&p.ty, scope.types),
-                            _ => None,
-                        };
-                        let val = scope.expr_with_hint(&init.expr, hint)?;
-                        if val.stage.is_host()
-                            && !scope.flow.locals.contains(&crate::scalar::flow::key(local))
-                        {
-                            let binding = scope.local(local)?;
-                            statements.push(binding);
-                            continue;
-                        }
-                        scope.source_expr(&init.expr, hint)?
+                    let hint = match &local.pat {
+                        syn::Pat::Type(p) => Scalar::from_type(&p.ty, scope.types),
+                        _ => None,
                     };
+                    let val = scope.expr_with_hint(&init.expr, hint)?;
+                    if val.stage.is_host()
+                        && !scope.flow.locals.contains(&crate::scalar::flow::key(local))
+                    {
+                        let binding = scope.local(local)?;
+                        statements.push(binding);
+                        continue;
+                    }
+                    let value = scope.source_expr(&init.expr, hint)?;
                     let pat = &local.pat;
                     scope.local(local)?;
                     emit!(format!("let {} = {};", stringify!(#pat), #value))
                 }
                 Stmt::Expr(expr, semi) => {
                     let last = i + 1 == block.stmts.len() && semi.is_none();
+                    if !last
+                        && matches!(
+                            expr,
+                            Expr::MethodCall(_) | Expr::Call(_) | Expr::Assign(_) | Expr::Binary(_)
+                        )
+                        && let Ok(code) = scope.host_raw(expr)
+                        && matches!(scope.expr(expr)?.stage, Stage::Host | Stage::Unit)
+                    {
+                        // Execute discarded host operations while specializing the listing.
+                        statements.push(emit!(#code;));
+                        continue;
+                    }
                     let rendered = scope.source_expr(expr, last.then_some(result_type))?;
                     if last {
                         rendered
@@ -61,29 +65,56 @@ impl Lower<'_> {
             };
             statements.push(emit!({ let text = #rendered; if !text.is_empty() {
                 __splice_text.push_str(&text); __splice_text.push('\n');
-            } if __splice_source.transfer.is_some() { break #end; }}));
+            } if __splice_source.transfer.is_some() { break #end String::new(); }}));
             if let Stmt::Expr(Expr::Return(_) | Expr::Break(_) | Expr::Continue(_), _) = stmt {
                 break;
             }
         }
-        Ok(
-            emit!({ let mut __splice_text = String::new(); #[allow(unused_labels)] #end: { #(#statements)* } __splice_text }),
-        )
+        Ok(emit!({ let mut __splice_text = String::new();
+                #[allow(unused_labels)] let fault = #end: { #(#statements)* String::new() };
+                __splice_text.push_str(&fault); __splice_text }))
     }
 
     fn source_expr(&self, e: &Expr, hint: Option<Scalar>) -> Result<TokenStream> {
         let root = self.root;
         let support = emit!(#root::frontend::source);
         let braces = |body: TokenStream| emit!(#support::block(&#body));
+        let loop_body = match e {
+            Expr::ForLoop(f) => Some(&f.body),
+            Expr::While(w) => Some(&w.body),
+            Expr::Loop(l) => Some(&l.body),
+            _ => None,
+        };
+        if let Some(body) = loop_body
+            && let Some(code) = self.host_loop(e, body)?
+        {
+            return Ok(emit!({ #code; String::new() }));
+        }
         match e {
             Expr::Block(b) => return Ok(braces(self.source_body(&b.block)?)),
             Expr::If(i) => {
                 let cond = self.expr(&i.cond)?;
-                let yes = braces(self.source_body(&i.then_branch)?);
+                let scope = if cond.stage.is_host() {
+                    self.clone()
+                } else {
+                    self.nested_region()
+                };
+                let yes = braces(scope.source_body(&i.then_branch)?);
                 let no = i
                     .else_branch
                     .as_ref()
-                    .map(|(_, e)| self.source_expr(e, hint))
+                    .map(|(_, e)| {
+                        if cond.stage.is_host() {
+                            scope.source_expr(e, hint)
+                        } else {
+                            let no = scope.isolated_expr(e, hint)?;
+                            Ok(if matches!(&**e, Expr::If(_)) {
+                                braces(no)
+                            } else {
+                                no
+                            })
+                        }
+                    })
                     .transpose()?;
                 if cond.stage.is_host() {
                     let no = no.unwrap_or_else(|| emit!("{}".to_owned()));
@@ -91,7 +122,6 @@ impl Lower<'_> {
                 }
                 let cond = self.source_expr(&i.cond, Some(Scalar::Bool))?;
                 let yes = isolate(yes);
-                let no = no.map(isolate);
                 return Ok(match no {
                     Some(no) => emit!(format!("if {} {} else {}", #cond, #yes, #no)),
                     None => emit!(format!("if {} {}", #cond, #yes)),
@@ -117,12 +147,13 @@ impl Lower<'_> {
                     return Ok(emit!(match #value { #(#arms)* }));
                 }
                 let test = self.source_expr(&m.expr, None)?;
+                let scope = self.nested_region();
                 let mut arms = Vec::new();
                 for arm in &m.arms {
                     let pat = &arm.pat;
-                    let body = isolate(self.source_expr(&arm.body, hint)?);
+                    let body = scope.isolated_expr(&arm.body, hint)?;
                     let guard = if let Some((_, g)) = &arm.guard {
-                        let guard = self.source_expr(g, Some(Scalar::Bool))?;
+                        let guard = scope.isolated_expr(g, Some(Scalar::Bool))?;
                         emit!(format!(" if {}", #guard))
                     } else {
                         emit!(String::new())
@@ -160,7 +191,7 @@ impl Lower<'_> {
                         } else { #support::block(&text) }
                     }));
                 }
-                let mut scope = self.clone();
+                let mut scope = self.nested_region();
                 scope.loop_kind = Some(LoopKind::Runtime);
                 crate::scalar::bind_pattern(
                     &mut scope.bindings,
@@ -174,14 +205,14 @@ impl Lower<'_> {
                 ));
             }
             Expr::While(w) => {
-                let cond = self.source_expr(&w.cond, Some(Scalar::Bool))?;
-                let mut scope = self.clone();
+                let mut scope = self.nested_region();
+                let cond = scope.isolated_expr(&w.cond, Some(Scalar::Bool))?;
                 scope.loop_kind = Some(LoopKind::Runtime);
                 let body = isolate(braces(scope.source_body(&w.body)?));
                 return Ok(emit!(format!("while {} {}", #cond, #body)));
             }
             Expr::Loop(l) => {
-                let mut scope = self.clone();
+                let mut scope = self.nested_region();
                 scope.loop_kind = Some(LoopKind::Runtime);
                 let body = isolate(braces(scope.source_body(&l.body)?));
                 return Ok(emit!(format!("loop {}", #body)));
@@ -264,6 +295,12 @@ impl Lower<'_> {
                         emit!(if #lhs { "true".to_owned() } else { #rhs })
                     });
                 }
+                let lhs = self.source_expr(&binary.left, Some(Scalar::Bool))?;
+                let rhs = self
+                    .nested_region()
+                    .isolated_expr(&binary.right, Some(Scalar::Bool))?;
+                let op = &binary.op;
+                return Ok(emit!(format!("{} {} {}", #lhs, stringify!(#op), #rhs)));
             }
             Expr::Range(_) => {
                 return self.source_syntax(e);
@@ -280,29 +317,53 @@ impl Lower<'_> {
         self.source_syntax(e)
     }
 
-    fn source_syntax(&self, e: &Expr) -> Result<TokenStream> {
-        struct Children<'a, 'b> {
-            lower: &'a Lower<'b>,
-            arguments: Vec<TokenStream>,
-            error: Option<syn::Error>,
+    fn isolated_expr(&self, expr: &Expr, hint: Option<Scalar>) -> Result<TokenStream> {
+        Ok(isolate(self.source_operand(expr, hint)?))
+    }
+
+    fn source_operand(&self, expr: &Expr, hint: Option<Scalar>) -> Result<TokenStream> {
+        if self.region_depth == 0 {
+            return self.source_expr(expr, hint);
         }
-        impl VisitMut for Children<'_, '_> {
-            fn visit_expr_mut(&mut self, e: &mut Expr) {
-                if self.error.is_some() {
-                    return;
-                }
-                match self.lower.source_expr(e, None) {
-                    Ok(value) => {
-                        let id = format_ident!(
-                            "__splice_source_child_{}",
-                            self.arguments.len(),
-                            span = Span::mixed_site()
-                        );
-                        self.arguments.push(value);
-                        *e = syn::parse_quote!(#id);
-                    }
-                    Err(e) => self.error = Some(e),
-                }
+        // A fault in this operand must preserve earlier operands in the listing.
+        let mut scope = self.clone();
+        let label = syn::Lifetime::new(
+            &format!("'__splice_source_expr_{}", crate::scalar::flow::key(expr)),
+            Span::mixed_site(),
+        );
+        scope.source_fault = Some(label.clone());
+        let code = scope.source_expr(expr, hint)?;
+        Ok(emit!({ #[allow(unused_labels)] #label: { #code } }))
+    }
+
+    fn source_syntax(&self, e: &Expr) -> Result<TokenStream> {
+        // Analyze the original child nodes: flow facts are keyed by their addresses.
+        #[derive(Default)]
+        struct Children<'a>(Vec<&'a Expr>);
+        impl<'a> Visit<'a> for Children<'a> {
+            fn visit_expr(&mut self, e: &'a Expr) {
+                self.0.push(e);
+            }
+            fn visit_expr_call(&mut self, call: &'a syn::ExprCall) {
+                self.0.extend(&call.args);
+            }
+        }
+        let mut children = Children::default();
+        visit::visit_expr(&mut children, e);
+        let original = e.to_token_stream().to_string();
+        if children.0.is_empty() {
+            return Ok(emit!(#original.to_owned()));
+        }
+        // A marker absent even from literal text cannot collide with a user's path.
+        let mut marker = "__splice_source_child_".to_owned();
+        while original.contains(&marker) {
+            marker.push('_');
+        }
+        struct Mark(Ident);
+        impl VisitMut for Mark {
+            fn visit_expr_mut(&mut self, expr: &mut Expr) {
+                let id = &self.0;
+                *expr = syn::parse_quote!(#id);
             }
 
             fn visit_expr_call_mut(&mut self, call: &mut syn::ExprCall) {
@@ -311,24 +372,38 @@ impl Lower<'_> {
                 }
             }
         }
-        let mut e = e.clone();
-        let mut children = Children {
-            lower: self,
-            arguments: Vec::new(),
-            error: None,
-        };
-        visit_mut::visit_expr_mut(&mut children, &mut e);
-        if let Some(error) = children.error {
-            return Err(error);
+        let mut template = e.clone();
+        visit_mut::visit_expr_mut(&mut Mark(format_ident!("{marker}")), &mut template);
+        let format = template
+            .to_token_stream()
+            .to_string()
+            .replace('{', "{{")
+            .replace('}', "}}")
+            .replace(&marker, "{}");
+        let args = children
+            .0
+            .into_iter()
+            .map(|expr| self.source_operand(expr, None))
+            .collect::<Result<Vec<_>>>()?;
+        if self.region_depth == 0 {
+            return Ok(emit!(format!(#format, #(#args),*)));
         }
-        if children.arguments.is_empty() {
-            let text = e.to_token_stream().to_string();
-            return Ok(emit!(#text.to_owned()));
-        }
+        let label = syn::Lifetime::new(
+            &format!("'__splice_source_operands_{}", crate::scalar::flow::key(e)),
+            Span::mixed_site(),
+        );
         let root = self.root;
-        let args = children.arguments;
-        let template = e.to_token_stream().to_string();
-        Ok(emit!(#root::frontend::source::syntax(#template, &[#(#args),*])))
+        let indices = 0..args.len();
+        Ok(emit!(#label: {
+            let mut operands = Vec::new();
+            #(
+                operands.push(#args);
+                if __splice_source.transfer.is_some() {
+                    break #label (#root::frontend::source::block(&operands.join(";\n")));
+                }
+            )*
+            format!(#format, #(operands[#indices]),*)
+        }))
     }
 }
 

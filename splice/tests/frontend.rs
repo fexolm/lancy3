@@ -51,6 +51,82 @@ fn host_associated_functions_can_belong_to_a_type_named_lane() {
     );
 }
 
+#[kernel]
+fn staged_weights(#[comptime] size: usize, value: i32) -> i32 {
+    let mut weights = comptime!(std::vec![1; size]);
+    weights.push(2);
+    weights[size] += 2;
+    let bias = weights.iter().sum::<i32>();
+    value + bias
+}
+
+#[test]
+fn only_the_scalar_result_of_host_collection_operations_reaches_codegen() -> splice::Result<()> {
+    use splice_lancy::Lancy;
+    use splice_llvm::Llvm;
+
+    let ir = staged_weights::ir(3)?;
+    assert!(
+        ir.instructions()
+            .iter()
+            .any(|i| matches!(i, Instr::Const(_, 7)))
+    );
+    assert!(ir.instructions().iter().all(|i| matches!(
+        i,
+        Instr::Const(..)
+            | Instr::Bin(_, Binary::Add, ..)
+            | Instr::Copy(..)
+            | Instr::Label(_)
+            | Instr::Jump(_)
+            | Instr::Return(_)
+    )));
+    let source = staged_weights::print(3)?;
+    assert!(
+        source.contains("fn staged_weights(value: i32) -> i32 {\n    value + 7\n}"),
+        "{source}"
+    );
+    let direct = staged_weights::build::<Lancy>(3)?;
+    let portable = Lancy::compile(&ir)?;
+    let llvm_direct = staged_weights::build::<Llvm>(3)?;
+    let llvm_portable = Llvm::compile(&ir)?;
+    for kernel in [
+        &direct as &dyn Executable,
+        &portable,
+        &llvm_direct,
+        &llvm_portable,
+    ] {
+        assert_eq!(kernel.call(&[10], &mut [])?, staged_weights(3, 10));
+    }
+    Ok(())
+}
+
+#[kernel]
+fn conditional_weight(#[comptime] divisor: i32, x: i32) -> i32 {
+    if x > 0 {
+        let weights = comptime!(vec![12 / divisor; 2]);
+        weights[0] + x
+    } else {
+        x
+    }
+}
+
+#[test]
+fn division_in_host_vec_is_guarded_by_the_runtime_branch() -> splice::Result<()> {
+    use splice_lancy::Lancy;
+    use splice_llvm::Llvm;
+    let ir = conditional_weight::ir(0)?;
+    for kernel in [
+        &Lancy::compile(&ir)? as &dyn Executable,
+        &Llvm::compile(&ir)?,
+        &conditional_weight::build::<Lancy>(0)?,
+        &conditional_weight::build::<Llvm>(0)?,
+    ] {
+        assert_eq!(kernel.call(&[-4], &mut [])?, conditional_weight(0, -4));
+        assert!(kernel.call(&[1], &mut []).is_err());
+    }
+    Ok(())
+}
+
 trait Factor {
     fn factor(&self) -> i32;
 }

@@ -14,13 +14,18 @@ impl Lower<'_> {
         body: &Block,
         runtime: impl FnOnce() -> Result<Value>,
     ) -> Result<Value> {
+        if let Some(code) = self.host_loop(expr, body)? {
+            return Ok(Value::unit(code));
+        }
+        runtime()
+    }
+    pub(super) fn host_loop(&self, expr: &Expr, body: &Block) -> Result<Option<TokenStream>> {
         if self.flow.loops.contains(&crate::scalar::flow::key(body)) {
-            return runtime();
+            return Ok(None);
         }
         let mut node = expr.clone();
         Native.visit_expr_mut(&mut node);
-        let code = self.host_raw(&node)?;
-        Ok(Value::unit(code))
+        self.host_raw(&node).map(Some)
     }
     // Join two generated Rust arms of a host conditional. A terminating arm
     // can hand back an unreachable register for the surrounding build code.

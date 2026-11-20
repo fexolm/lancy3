@@ -235,7 +235,7 @@ fn sql_plan(c: &mut Criterion) {
     let workload = Workload {
         name: "sql_plan",
         elements: SALES as usize,
-        workspace_words,
+        workspace_words: workspace_words + plan.state_words(),
         expected: &|| &data.1,
         equal: |actual, expected| {
             // Every sale for a given product has the same quantity. Compare
@@ -258,7 +258,8 @@ fn sql_plan(c: &mut Criterion) {
             })
         },
         run: |kernel: &dyn Executable, arena: &mut [i32]| {
-            data.0.run(kernel, arena).map(<[i32]>::len)
+            let (arena, state) = arena.split_at_mut(workspace_words);
+            data.0.run(kernel, arena, state).map(<[i32]>::len)
         },
     };
     workload.compare(

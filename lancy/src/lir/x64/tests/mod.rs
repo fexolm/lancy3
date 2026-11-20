@@ -1,7 +1,7 @@
 mod arithmetic;
 mod calls;
 mod control_flow;
-mod filetests;
+pub(super) mod filetests;
 mod generated;
 mod integer_runtests;
 mod isel;

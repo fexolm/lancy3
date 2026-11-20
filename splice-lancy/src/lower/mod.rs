@@ -62,7 +62,16 @@ impl<'a> Builder<'a> {
         for _ in kinds {
             params.extend([hir::Type::Ptr, hir::Type::I32]);
         }
-        let graph = Function::new(&params, hir::Type::I32);
+        let mut graph = Function::new(&params, hir::Type::I32);
+        // BufferArg enforces these borrows at entry; call-site validation
+        // preserves them when a nested kernel receives forwarded buffers.
+        graph.set_slice_params(
+            arity,
+            kinds
+                .iter()
+                .map(|kind| (kind.element().bytes() as u8, kind.writable()))
+                .collect(),
+        );
         let entry = graph.entry();
         let mut first = State::default();
         first.defs.extend(
@@ -290,13 +299,13 @@ impl Builder<'_> {
         key: Option<Specialization>,
         body: Body<'_>,
     ) -> splice::Result<Reg> {
-        if args.len() != arity {
-            return Err(format!(
-                "expected {arity} scalar arguments, got {}",
-                args.len()
-            ));
-        }
-        splice::hir::check_forwarding(self.kinds, kinds, buffers)?;
+        splice::hir::check_call(
+            arity,
+            kinds,
+            args.iter().map(|&r| self.reg_type(r)),
+            self.kinds,
+            buffers,
+        )?;
         let callee = if let Some(hit) = key.as_ref().and_then(|k| self.callees.get(k)) {
             hit.clone()
         } else {

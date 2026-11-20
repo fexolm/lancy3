@@ -187,6 +187,84 @@ fn a_failed_body_can_be_retried_and_its_completed_children_reused() {
     }
 }
 
+#[test]
+fn invalid_arguments_are_rejected_before_staging_or_reusing_a_callee() -> splice::Result<()> {
+    use splice::frontend::{KernelBuilder, Specialization};
+    use splice::hir::{Buffer, Reg, ValueType};
+    use splice::simd::Element;
+    use splice::{BufferArg, BufferKind};
+
+    fn stage(root: &mut dyn KernelBuilder) -> splice::Result<()> {
+        struct Child;
+        let arg = root.arg(0);
+        let vector = root.typed_local(ValueType::Vector(Element::I32));
+        let mask = root.typed_local(ValueType::Mask(Element::I32));
+        fn unexpected(_: &mut dyn KernelBuilder) -> splice::Result<()> {
+            panic!("staged an invalid call")
+        }
+        for args in [&[][..], &[Reg(u32::MAX)], &[vector], &[mask]] {
+            assert!(
+                root.call_kernel(1, &[], args, &[], Box::new(unexpected))
+                    .is_err()
+            );
+        }
+        let read = [BufferKind::Read];
+        for (kinds, buffers) in [
+            (&read[..], &[][..]),
+            (&read, &[Buffer(2)]),
+            (&[BufferKind::Write], &[Buffer(0)]),
+            (&[BufferKind::new(Element::I64, false)], &[Buffer(0)]),
+            (
+                &[BufferKind::Read, BufferKind::Write],
+                &[Buffer(1), Buffer(1)],
+            ),
+        ] {
+            assert!(
+                root.call_kernel(1, kinds, &[arg], buffers, Box::new(unexpected))
+                    .is_err()
+            );
+        }
+        let key = || Specialization::new::<Child>(1, &[BufferKind::Read, BufferKind::Read]);
+        let shared = [Buffer(1), Buffer(1)];
+        assert!(
+            root.call_specialized(key(), &[vector], &shared, Box::new(unexpected))
+                .is_err()
+        );
+        let result = root.call_specialized(
+            key(),
+            &[arg],
+            &shared,
+            Box::new(|child| {
+                child.ret(child.arg(0));
+                Ok(())
+            }),
+        )?;
+        assert!(
+            root.call_specialized(key(), &[mask], &shared, Box::new(unexpected))
+                .is_err()
+        );
+        root.ret(result);
+        Ok(())
+    }
+    let kinds = [BufferKind::Read, BufferKind::Write];
+    let ir = splice::frontend::materialize(1, &kinds, Box::new(stage))?;
+    for code in [
+        Box::new(Lancy::build(1, &kinds, Box::new(stage))?) as Box<dyn Executable>,
+        Box::new(Llvm::build(1, &kinds, Box::new(stage))?),
+        Box::new(Lancy::compile(&ir)?),
+        Box::new(Llvm::compile(&ir)?),
+    ] {
+        assert_eq!(
+            code.call(
+                &[37],
+                &mut [BufferArg::Read(&[]), BufferArg::Write(&mut [])]
+            )?,
+            37
+        );
+    }
+    Ok(())
+}
+
 #[kernel]
 fn store_ratio(dst: &mut [i32], x: i32, d: i32) -> i32 {
     dst[0] = x;

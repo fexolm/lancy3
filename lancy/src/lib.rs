@@ -7,7 +7,6 @@
 )))]
 compile_error!("lancy supports x86-64 Windows and Linux, and little-endian AArch64 Linux");
 
-mod call_graph;
 mod error;
 #[cfg(test)]
 mod filetests;

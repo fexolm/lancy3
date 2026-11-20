@@ -8,3 +8,5 @@ mod isel;
 mod tests;
 
 pub(crate) use emit::emit;
+#[cfg(test)]
+pub(crate) use tests::filetests::check_machine;

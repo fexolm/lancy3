@@ -121,7 +121,7 @@ impl<'ctx> Body<'_, 'ctx> {
                 ir.build_right_shift(bytes, self.int(2), false, "prefix")?
                     .into()
             }
-            Compress | Expand if crate::jit::x86_compress(e.lanes()) => {
+            Compress | Expand if crate::target::x86_compress(e.lanes()) => {
                 let data = arg(0)?;
                 let (name, fallback) = if inst.op == Compress {
                     (

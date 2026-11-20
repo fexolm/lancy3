@@ -13,6 +13,7 @@ pub use buffer::{
 };
 pub use builder::FunctionBuilder;
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -163,23 +164,31 @@ pub struct Function {
     labels: usize,
 }
 
-impl Function {
-    fn check_call(
-        &self,
-        caller: &[BufferKind],
-        args: &[Reg],
-        buffers: &[Buffer],
-    ) -> crate::Result<()> {
-        if args.len() != self.arity {
-            return Err(format!(
-                "expected {} scalar arguments, got {}",
-                self.arity,
-                args.len()
-            ));
-        }
-        check_forwarding(caller, &self.buffer_kinds, buffers)
+/// Validate a nested kernel's scalar and buffer arguments in its caller.
+pub fn check_call(
+    arity: usize,
+    kinds: &[BufferKind],
+    args: impl ExactSizeIterator<Item = Option<ValueType>>,
+    caller_kinds: &[BufferKind],
+    buffers: &[Buffer],
+) -> crate::Result<()> {
+    if args.len() != arity {
+        return Err(format!(
+            "expected {arity} scalar arguments, got {}",
+            args.len()
+        ));
     }
+    for (i, ty) in args.enumerate() {
+        match ty {
+            Some(ValueType::Scalar) => {}
+            Some(_) => return Err(format!("expected a scalar register for call argument {i}")),
+            None => return Err(format!("invalid register for call argument {i}")),
+        }
+    }
+    check_forwarding(caller_kinds, kinds, buffers)
+}
 
+impl Function {
     pub fn source(&self) -> Option<&'static crate::frontend::KernelSource> {
         self.source
     }
@@ -216,6 +225,27 @@ impl Function {
     /// channel for memory operations or fallible integer arithmetic.
     pub fn needs_status(&self) -> bool {
         self.needs_status
+    }
+
+    /// Number reachable bodies in first-use, breadth-first order, with the root at zero.
+    /// Multiple calls to the same shared body receive one number.
+    pub fn reachable_functions(&self) -> (Vec<&Self>, HashMap<*const Self, usize>) {
+        let mut functions = vec![self];
+        let mut ids = HashMap::from([(std::ptr::from_ref(self), 0)]);
+        let mut i = 0;
+        while i < functions.len() {
+            for inst in functions[i].instructions() {
+                if let Instr::Call { function, .. } = inst {
+                    ids.entry(Arc::as_ptr(function)).or_insert_with(|| {
+                        let id = functions.len();
+                        functions.push(function);
+                        id
+                    });
+                }
+            }
+            i += 1;
+        }
+        (functions, ids)
     }
 
     pub fn instructions(&self) -> &[Instr] {

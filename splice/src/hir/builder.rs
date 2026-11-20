@@ -134,7 +134,13 @@ impl FunctionBuilder {
         args: &[Reg],
         buffers: &[Buffer],
     ) -> Result<Reg, String> {
-        function.check_call(&self.function.buffer_kinds, args, buffers)?;
+        super::check_call(
+            function.arity(),
+            function.buffer_kinds(),
+            args.iter().map(|&r| self.reg_type(r)),
+            &self.function.buffer_kinds,
+            buffers,
+        )?;
         Ok(self.emit_call(Arc::new(function), args, buffers))
     }
     fn emit_call(&mut self, function: Arc<Function>, args: &[Reg], buffers: &[Buffer]) -> Reg {
@@ -154,13 +160,13 @@ impl FunctionBuilder {
         key: Option<Specialization>,
         body: Body<'_>,
     ) -> crate::Result<Reg> {
-        if arity != args.len() {
-            return Err(format!(
-                "expected {arity} scalar arguments, got {}",
-                args.len()
-            ));
-        }
-        super::check_forwarding(&self.function.buffer_kinds, kinds, buffers)?;
+        super::check_call(
+            arity,
+            kinds,
+            args.iter().map(|&r| self.reg_type(r)),
+            &self.function.buffer_kinds,
+            buffers,
+        )?;
         if let Some(callee) = key.as_ref().and_then(|k| self.callees.get(k)).cloned() {
             return Ok(self.emit_call(callee, args, buffers));
         }

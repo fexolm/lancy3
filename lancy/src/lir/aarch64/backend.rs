@@ -16,6 +16,8 @@ mod shuffle;
 mod special;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+pub(crate) use tests::check_machine;
 mod unary;
 mod wide;
 mod width;

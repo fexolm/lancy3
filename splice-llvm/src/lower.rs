@@ -11,9 +11,7 @@ use inkwell::context::Context;
 use inkwell::module::{Linkage, Module};
 use inkwell::values::{BasicMetadataValueEnum, FunctionValue, IntValue};
 use splice::Function;
-use splice::hir::{BufferKind, Instr};
-use std::collections::HashMap;
-use std::sync::Arc;
+use splice::hir::BufferKind;
 
 // Only internal kernel functions use the fast calling convention.
 const FAST_CALL: u32 = inkwell::llvm_sys::LLVMCallConv::LLVMFastCallConv as u32;
@@ -23,21 +21,7 @@ pub(crate) fn populate<'ctx>(
     module: &Module<'ctx>,
     root: &Function,
 ) -> Result<(), String> {
-    let mut functions = vec![root];
-    let mut ids = HashMap::from([(std::ptr::from_ref(root), 0)]);
-    let mut i = 0;
-    while i < functions.len() {
-        for inst in functions[i].instructions() {
-            if let Instr::Call { function, .. } = inst {
-                ids.entry(Arc::as_ptr(function)).or_insert_with(|| {
-                    let id = functions.len();
-                    functions.push(function);
-                    id
-                });
-            }
-        }
-        i += 1;
-    }
+    let (functions, ids) = root.reachable_functions();
 
     let mut declarations = Vec::with_capacity(functions.len());
     for (id, f) in functions.iter().enumerate() {

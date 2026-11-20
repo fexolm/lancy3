@@ -1,5 +1,17 @@
 //! The Splice frontend stages a kernel directly into its chosen backend.
 //! A portable function can also be materialized for inspection and reuse.
+//!
+//! A runtime branch cannot mutate a collection captured from specialization.
+//! Pass a writable slice for runtime state.
+//! ```compile_fail,E0502
+//! use splice::kernel;
+//! #[kernel]
+//! fn conditional_push(x: i32) -> i32 {
+//!     let mut values = vec![0];
+//!     if x > 0 { values.push(1); }
+//!     values.len() as i32
+//! }
+//! ```
 #![forbid(unsafe_code)]
 
 extern crate self as splice;

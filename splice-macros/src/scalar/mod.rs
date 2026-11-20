@@ -126,7 +126,7 @@ pub(super) fn expand(root: Path, mut native: ItemFn) -> Result<TokenStream> {
     for arg in &sig.inputs {
         let (id, ty, formal) = parameter(arg, &types)?;
         let source = emit!(#root::frontend::source);
-        if matches!(formal, Binding::Host) {
+        if matches!(formal, Binding::Host(_)) {
             source_decls.push(emit!(#support::Host(#id): #support::Host<#ty>));
         } else {
             source_decls.push(emit!(#id: impl #source::Argument));
@@ -152,13 +152,13 @@ pub(super) fn expand(root: Path, mut native: ItemFn) -> Result<TokenStream> {
             }
             column_parameter = Some(id.clone());
         }
-        helper_args.push(if matches!(formal, Binding::Host) {
+        helper_args.push(if matches!(formal, Binding::Host(_)) {
             emit!(#support::Host(#id))
         } else {
             emit!(#id)
         });
         let decl = match formal {
-            Binding::Host => {
+            Binding::Host(_) => {
                 host_names.push(id);
                 host_types.push(ty);
                 inline_args.push(emit!(#support::Host(#id)));
@@ -183,7 +183,6 @@ pub(super) fn expand(root: Path, mut native: ItemFn) -> Result<TokenStream> {
                 buffer_kinds.push(emit!(#hir::BufferKind::new(#elem,#write)));
                 emit!(#id: #hir::Buffer)
             }
-            Binding::Locals(..) => unreachable!("local register collections are not parameters"),
             Binding::Reg(_, mutable) => {
                 let index = reg_names.len();
                 inline_args.push(emit!(__splice_builder.arg(#index)));
@@ -213,6 +212,7 @@ pub(super) fn expand(root: Path, mut native: ItemFn) -> Result<TokenStream> {
         fish: emit!(#fish),
         loop_kind: None,
         region_depth: 0,
+        source_fault: None,
     };
     let code = lower.kernel_body(&native.block)?;
     let source_support = emit!(#root::frontend::source);
@@ -431,7 +431,7 @@ fn parameter<'a>(arg: &'a FnArg, types: &[&Ident]) -> Result<(&'a Ident, &'a Typ
             if mutable {
                 return Err(Error::new_spanned(pat, "comptime arguments are immutable"));
             }
-            Binding::Host
+            Binding::Host(0)
         }
         [attr] if matches!(&attr.meta, Meta::List(list) if list.path.is_ident("columns")) => {
             let valid = match &*arg.ty {
@@ -545,6 +545,90 @@ mod tests {
         };
         let error = expand(parse_quote!(::splice), f).unwrap_err();
         assert!(error.to_string().contains("expected a comptime value"));
+    }
+
+    #[test]
+    fn standard_library_cannot_consume_runtime_values() {
+        for (body, diagnostic) in [
+            (
+                parse_quote!({
+                    let slots = vec![x; 2];
+                    slots[0]
+                }),
+                "runtime value used in a comptime expression",
+            ),
+            (
+                parse_quote!({ std::vec![0, x][0] }),
+                "runtime value used in a comptime expression",
+            ),
+            (
+                parse_quote!({
+                    let mut seen = 0;
+                    let _slots = vec![
+                        {
+                            if x > 0 {
+                                seen = 1;
+                            }
+                            5
+                        };
+                        2
+                    ];
+                    seen
+                }),
+                "runtime value used in a comptime expression",
+            ),
+            (
+                parse_quote!({ vec![0; x as usize].len() as i32 }),
+                "runtime value used in a comptime expression",
+            ),
+            (
+                parse_quote!({
+                    let slots = vec![0; 2];
+                    slots[x as usize]
+                }),
+                "index a runtime",
+            ),
+            (
+                parse_quote!({
+                    let mut slots = vec![0; 2];
+                    slots[0] = x;
+                    slots[0]
+                }),
+                "index a runtime",
+            ),
+            (
+                parse_quote!({
+                    let mut slots = Vec::new();
+                    slots.push(x);
+                    0
+                }),
+                "host method cannot consume runtime values",
+            ),
+            (
+                parse_quote!({ std::cmp::max(x, 3) }),
+                "standard library calls require comptime arguments",
+            ),
+            (
+                parse_quote!({ comptime!(vec![x; 2].len()) as i32 }),
+                "runtime value used in a comptime expression",
+            ),
+            (
+                parse_quote!({
+                    print!("{x}");
+                    x
+                }),
+                "expected a let binding or scalar kernel expression",
+            ),
+        ] {
+            let mut f: ItemFn = parse_quote!(
+                fn example(x: i32) -> i32 {
+                    x
+                }
+            );
+            f.block = body;
+            let error = expand(parse_quote!(::splice), f).unwrap_err();
+            assert!(error.to_string().contains(diagnostic), "{error}");
+        }
     }
 
     #[test]

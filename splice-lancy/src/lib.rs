@@ -38,19 +38,10 @@ pub struct LancyKernel {
 
 impl LancyKernel {
     fn new(
-        mut function: lancy::hir::Function,
+        function: lancy::hir::Function,
         arity: usize,
         kinds: &[splice::BufferKind],
     ) -> Result<Self, CompileError> {
-        if !kinds.is_empty() {
-            function.set_slice_params(
-                arity,
-                kinds
-                    .iter()
-                    .map(|kind| (kind.element().bytes() as u8, kind.writable()))
-                    .collect(),
-            );
-        }
         Ok(Self {
             code: ScalarKernel::compile(&function)?,
             arity,

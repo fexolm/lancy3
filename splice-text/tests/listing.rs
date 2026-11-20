@@ -46,6 +46,86 @@ fn rust_source_prunes_host_transfers_but_keeps_runtime_control() -> splice::Resu
     Ok(())
 }
 
+#[kernel]
+fn host_iterations(#[comptime] n: i32, x: i32) -> i32 {
+    let mut k = 0;
+    while k < n {
+        k += 1;
+    }
+    for _i in 0..n {
+        k += 1;
+    }
+    loop {
+        k += 1;
+        if k > n * 2 {
+            break;
+        }
+    }
+    x + k
+}
+
+#[kernel]
+fn print_division(#[comptime] d: i32, x: i32) -> i32 {
+    if x > 0 {
+        let q = 100 / d;
+        x + q
+    } else {
+        9
+    }
+}
+
+#[kernel]
+fn print_remainder(#[comptime] a: i32, #[comptime] d: i32, marks: &mut [i32], x: i32) -> i32 {
+    match x {
+        0 => 9,
+        _ => {
+            ({
+                marks[0] = x;
+                x
+            }) + (a % d).wrapping_sub(0)
+        }
+    }
+}
+
+mod __splice_source_child_0 {
+    pub use splice::simd::Lane;
+}
+
+#[kernel]
+fn identifier_in_path(x: i32) -> i32 {
+    __splice_source_child_0::Lane::<i32>::splat(x).last()
+}
+
+#[test]
+fn printer_and_builder_specialize_host_iterations() -> splice::Result<()> {
+    assert_eq!(host_iterations(3, 5), 12);
+    assert!(host_iterations::print(3)?.contains("x + 7"));
+    assert!(host_iterations::build::<Text>(3)?.contains(" = 7\n"));
+    Ok(())
+}
+
+#[test]
+fn division_under_runtime_control_faults_only_in_the_selected_arm() -> splice::Result<()> {
+    assert_eq!(print_division(0, 0), 9);
+    let text = print_division::print(0)?;
+    assert!(text.contains("if x > 0"));
+    assert!(text.contains("panic!") && text.contains("else") && text.contains('9'));
+    assert!(print_division::build::<Text>(0)?.contains(" / "));
+    assert!(print_division::print(4)?.contains("x + 25"));
+    let remainder = print_remainder::print(i32::MIN, -1)?;
+    let (prefix, _) = remainder.split_once("signed division overflow").unwrap();
+    assert!(prefix.contains("marks [0] = x"));
+    assert!(print_remainder::build::<Text>(i32::MIN, -1)?.contains(" % "));
+    Ok(())
+}
+
+#[test]
+fn source_substitutions_leave_other_identifiers_intact() -> splice::Result<()> {
+    assert!(identifier_in_path::print()?.contains("__splice_source_child_0"));
+    assert!(identifier_in_path::build::<Text>()?.contains("return"));
+    Ok(())
+}
+
 #[derive(splice::ComptimeKey)]
 enum Step {
     Scale(i32),

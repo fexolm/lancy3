@@ -13,7 +13,7 @@ use inkwell::{
 use splice::{
     BufferKind,
     frontend::{Body as StagedBody, KernelBuilder, Specialization},
-    hir::{Binary, Buffer, Label, Reg, Simd, ValueType, check_forwarding},
+    hir::{Binary, Buffer, Label, Reg, Simd, ValueType, check_call},
     simd::Element,
 };
 use std::{
@@ -358,16 +358,13 @@ impl Direct<'_, '_> {
         key: Option<Specialization>,
         stage: StagedBody<'_>,
     ) -> splice::Result<Reg> {
-        if arity != args.len() {
-            return Err("wrong scalar arity at LLVM call".into());
-        }
-        if args
-            .iter()
-            .any(|r| r.0 as usize >= self.native.register_count())
-        {
-            return Err("invalid argument register in LLVM call".into());
-        }
-        check_forwarding(self.kinds, kinds, buffers)?;
+        check_call(
+            arity,
+            kinds,
+            args.iter().map(|&r| self.reg_type(r)),
+            self.kinds,
+            buffers,
+        )?;
         let (callee, fallible) = self.graph.function(arity, kinds, key, stage)?;
         let dst = self.result(args, |ir, d| {
             ir.call_function(d, callee, fallible, args, buffers)

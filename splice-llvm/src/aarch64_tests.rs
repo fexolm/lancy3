@@ -1,4 +1,4 @@
-use super::{Llvm, build_module, jit, lower};
+use super::{Llvm, build_module, jit, lower, target};
 use inkwell::{context::Context, targets::FileType};
 use splice::{Codegen, Executable, kernel, simd::Lane};
 use splice_target::{Profile, simd};
@@ -16,7 +16,7 @@ fn xor_three(a: &[i32], b: &[i32], c: &[i32], out: &mut [i32]) -> i32 {
 fn emits_aarch64_simd_and_preserves_the_logical_width() {
     let config = simd().unwrap();
     let ir = xor_three::ir().unwrap();
-    let target = jit::host_machine().unwrap();
+    let target = target::host_machine().unwrap();
     let context = Context::create();
     let module = build_module(&context, &target, |ctx, m| lower::populate(ctx, m, &ir)).unwrap();
     jit::optimize(&module, &target, true).unwrap();

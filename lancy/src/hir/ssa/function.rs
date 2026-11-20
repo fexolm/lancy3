@@ -152,7 +152,9 @@ impl Function {
         self.slices.clone_from(&source.slices);
     }
 
-    pub(in crate::hir) fn slice_param(&self, ptr: Value) -> Option<(Value, u8, bool)> {
+    /// For a declared slice pointer, return its length parameter, element byte width
+    /// and whether the caller grants exclusive writable access.
+    pub fn slice_param(&self, ptr: Value) -> Option<(Value, u8, bool)> {
         let offset = ptr.index().checked_sub(self.slice_base)?;
         if !offset.is_multiple_of(2) {
             return None;

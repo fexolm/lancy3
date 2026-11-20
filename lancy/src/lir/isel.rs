@@ -91,7 +91,9 @@ struct Definition {
 pub(super) struct Context {
     defs: DenseMap<Value, Definition>,
     current: Block,
+    #[cfg(target_arch = "x86_64")]
     previous: Option<(Value, Op)>,
+    #[cfg(target_arch = "x86_64")]
     covered: Option<Value>,
 }
 
@@ -117,11 +119,13 @@ impl Context {
         (b == self.current && def.uses == 1 && op.pure(None)).then_some(op)
     }
 
+    #[cfg(target_arch = "x86_64")]
     pub fn adjacent_single_use(&self, v: Value) -> Option<Op> {
         let (previous, op) = self.previous?;
         (previous == v && self.defs[v].uses == 1).then_some(op)
     }
 
+    #[cfg(target_arch = "x86_64")]
     pub fn cover_adjacent_load(&mut self, v: Value) {
         debug_assert!(matches!(
             self.adjacent_single_use(v),
@@ -139,7 +143,9 @@ pub(super) fn select<I>(
     let mut ctx = Context {
         defs: DenseMap::filled(f.value_count(), Definition::default()),
         current: f.entry(),
+        #[cfg(target_arch = "x86_64")]
         previous: None,
+        #[cfg(target_arch = "x86_64")]
         covered: None,
     };
     for &b in cfg.reverse_postorder() {
@@ -175,11 +181,13 @@ pub(super) fn select<I>(
         emit(&mut ctx, Root::Term(*f.terminator(b)))?;
         instructions.extend(f.instructions(b));
         while let Some(i) = instructions.pop() {
+            #[cfg(target_arch = "x86_64")]
             if let Some(covered) = ctx.covered.take() {
                 debug_assert_eq!(f.result(i), Some(covered));
                 continue;
             }
-            if cfg!(feature = "experimental-simd") {
+            #[cfg(all(target_arch = "x86_64", feature = "experimental-simd"))]
+            {
                 ctx.previous = instructions
                     .last()
                     .and_then(|&prev| Some((f.result(prev)?, *f.op(prev))));
@@ -191,7 +199,10 @@ pub(super) fn select<I>(
             }
             emit(&mut ctx, Root::Inst(i))?;
         }
-        ctx.previous = None;
+        #[cfg(all(target_arch = "x86_64", feature = "experimental-simd"))]
+        {
+            ctx.previous = None;
+        }
         out.reverse();
     }
     Ok(blocks)

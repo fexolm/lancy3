@@ -1,10 +1,25 @@
 //! A module owns the function bodies for one compilation stage. Function IDs
 //! are stable across lowering and numbered in callee-first order.
-use crate::{CompileError, call_graph::CallGraph, support::slotmap::DenseMap};
+use crate::{CompileError, support::slotmap::DenseMap};
 use std::collections::HashMap;
 
 crate::slot_key!(pub(crate) FunctionId);
 pub(crate) type FunctionIds<T> = HashMap<*const T, FunctionId>;
+
+/// Call edges are transferred intact when lowering preserves function identities.
+pub(crate) struct CallGraph {
+    root: FunctionId,
+    callees: DenseMap<FunctionId, Vec<FunctionId>>,
+}
+
+impl CallGraph {
+    pub fn root(&self) -> FunctionId {
+        self.root
+    }
+    pub fn callees(&self, caller: FunctionId) -> &[FunctionId] {
+        &self.callees[caller]
+    }
+}
 
 pub(crate) struct Module<T> {
     pub functions: DenseMap<FunctionId, T>,
@@ -59,7 +74,7 @@ impl<T> Module<T> {
         Ok((
             Self {
                 functions,
-                call_graph: CallGraph::new(root, callees),
+                call_graph: CallGraph { root, callees },
             },
             ids,
         ))

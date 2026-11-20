@@ -76,6 +76,9 @@ impl Lower<'_> {
                 self.bin(op, left, right),
             ));
         }
+        if receiver.stage.is_host() {
+            return err(m, "a host method cannot consume runtime values");
+        }
         err(
             m,
             "expected slice.len/is_empty, i32.min/max, or i32.wrapping_add/sub/mul",

@@ -1,4 +1,4 @@
-//! Opt-in instruction selection rules for manually vectorized kernels.
+//! Opt-in x64 instruction selection rules for manually vectorized kernels.
 use super::Rules;
 use crate::{
     CompileError,

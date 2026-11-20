@@ -74,9 +74,8 @@ impl Stage {
 }
 #[derive(Clone, Copy)]
 pub(super) enum Binding {
-    Host,
+    Host(usize), // Region in which the Rust binding was introduced.
     Columns,
-    Locals(Scalar, bool),
     Reg(Scalar, bool),
     Buffer(BufferType),
 }
@@ -118,6 +117,7 @@ pub(super) struct Lower<'a> {
     pub(super) fish: TokenStream,
     pub(super) loop_kind: Option<LoopKind>,
     pub(super) region_depth: usize,
+    pub(super) source_fault: Option<syn::Lifetime>,
     pub(super) flow: &'a super::flow::Flow,
 }
 
@@ -125,8 +125,17 @@ fn err<T>(at: impl ToTokens, msg: &str) -> Result<T> {
     Err(Error::new_spanned(at, msg))
 }
 
+fn vec_macro(path: &Path) -> bool {
+    path.is_ident("vec")
+        || (path.segments.len() == 2
+            && (path.segments[0].ident == "std" || path.segments[0].ident == "alloc")
+            && path.segments[1].ident == "vec")
+}
+
 struct HostCheck<'a> {
     names: &'a HashMap<String, Binding>,
+    region: usize,
+    outer: Vec<Ident>,
     error: Option<Error>,
     division: bool,
 }
@@ -136,22 +145,31 @@ impl<'ast> Visit<'ast> for HostCheck<'_> {
         syn::visit::visit_expr_binary(self, binary);
     }
     fn visit_expr_path(&mut self, p: &'ast syn::ExprPath) {
-        if let Some(id) = p.path.get_ident()
-            && matches!(
-                self.names.get(&id.to_string()),
-                Some(
-                    Binding::Reg(..) | Binding::Buffer(_) | Binding::Locals(..) | Binding::Columns
-                )
-            )
-        {
-            self.error = Some(Error::new_spanned(
-                id,
-                "runtime value used in a comptime expression",
-            ));
+        if let Some(id) = p.path.get_ident() {
+            match self.names.get(&id.to_string()) {
+                Some(Binding::Host(depth)) if *depth < self.region && !self.outer.contains(id) => {
+                    self.outer.push(id.clone());
+                }
+                Some(Binding::Reg(..) | Binding::Buffer(_) | Binding::Columns) => {
+                    self.error = Some(Error::new_spanned(
+                        id,
+                        "runtime value used in a comptime expression",
+                    ));
+                }
+                _ => {}
+            }
         }
         syn::visit::visit_expr_path(self, p);
     }
     fn visit_macro(&mut self, m: &'ast syn::Macro) {
+        if vec_macro(&m.path) {
+            let tokens = &m.tokens;
+            match syn::parse2::<Expr>(emit!([#tokens])) {
+                Ok(elements) => self.visit_expr(&elements),
+                Err(error) => self.error = Some(error),
+            }
+            return;
+        }
         self.error = Some(Error::new_spanned(
             m,
             "put nested Rust macros in a host helper outside the kernel",
@@ -161,6 +179,21 @@ impl<'ast> Visit<'ast> for HostCheck<'_> {
 
 struct GuardHostDivision<'a, 'ast>(&'a Lower<'ast>);
 impl VisitMut for GuardHostDivision<'_, '_> {
+    fn visit_macro_mut(&mut self, m: &mut syn::Macro) {
+        if vec_macro(&m.path) {
+            let tokens = &m.tokens;
+            let mut elements: Expr = syn::parse_quote!([#tokens]);
+            self.visit_expr_mut(&mut elements);
+            m.tokens = match elements {
+                Expr::Array(a) => a.elems.into_token_stream(),
+                Expr::Repeat(a) => {
+                    let (value, len) = (a.expr, a.len);
+                    emit!(#value; #len)
+                }
+                _ => unreachable!("validated vec! arguments"),
+            };
+        }
+    }
     fn visit_expr_mut(&mut self, expr: &mut Expr) {
         // These Rust bodies have their own execution context. A branch in the
         // surrounding JIT function cannot terminate inside one of them.
@@ -198,6 +231,8 @@ impl Lower<'_> {
     fn host_raw(&self, e: &Expr) -> Result<TokenStream> {
         let mut check = HostCheck {
             names: &self.bindings,
+            region: self.region_depth,
+            outer: Vec::new(),
             error: None,
             division: false,
         };
@@ -205,12 +240,25 @@ impl Lower<'_> {
         if let Some(error) = check.error {
             return Err(error);
         }
-        if self.region_depth > 0 && check.division {
+        let code = if self.region_depth > 0 && check.division {
             let mut expr = e.clone();
             GuardHostDivision(self).visit_expr_mut(&mut expr);
-            return Ok(emit!(#expr));
+            emit!(#expr)
+        } else {
+            emit!(#e)
+        };
+        let outer = check.outer;
+        if outer.is_empty() {
+            return Ok(code);
         }
-        Ok(emit!(#e))
+        // The generator visits both runtime arms. A method call in one arm
+        // must not mutate a captured host collection that the other arm sees.
+        Ok(emit!({
+            let __splice_borrowed = (#(&#outer,)*);
+            let __splice_value = #code;
+            let _ = &__splice_borrowed;
+            __splice_value
+        }))
     }
     fn host(&self, v: Value, at: impl ToTokens) -> Result<TokenStream> {
         match v.stage {
@@ -326,7 +374,7 @@ impl Lower<'_> {
     }
     fn with_pattern(&self, pat: &Pat) -> Self {
         let mut scope = self.clone();
-        super::bind_pattern(&mut scope.bindings, pat, Binding::Host);
+        super::bind_pattern(&mut scope.bindings, pat, Binding::Host(self.region_depth));
         scope
     }
 
@@ -402,30 +450,6 @@ impl Lower<'_> {
         if init.diverge.is_some() || !local.attrs.is_empty() {
             return err(local, "expected a kernel let binding");
         }
-        // A specialization-sized collection of independent runtime locals. Only
-        // the builder owns this Vec. Every element becomes a scalar or SIMD register.
-        if let Expr::Macro(m) = &*init.expr
-            && m.mac.path.is_ident("vec")
-        {
-            let tokens = &m.mac.tokens;
-            let repeat: syn::ExprRepeat = syn::parse2(emit!([#tokens]))?;
-            let name = super::named(&local.pat)?;
-            let id = &name.ident;
-            let len = self.host_raw(&repeat.len)?;
-            let initial = self.expr(&repeat.expr)?;
-            let (Stage::Reg(t) | Stage::Literal(t)) = initial.stage else {
-                return err(&repeat.expr, "expected a typed runtime local initializer");
-            };
-            let initial = self.reg(initial, t, &repeat.expr)?;
-            self.bindings.insert(
-                id.to_string(),
-                Binding::Locals(t, name.mutability.is_some()),
-            );
-            return Ok(emit!(let #id = {
-                let initial = #initial;
-                (0..#len).map(|_| __splice_builder.copy(initial)).collect::<::std::vec::Vec<_>>()
-            };));
-        }
         let hint = if let Pat::Type(t) = &local.pat {
             Scalar::from_type(&t.ty, self.types)
         } else {
@@ -434,7 +458,7 @@ impl Lower<'_> {
         let value = self.expr_with_hint(&init.expr, hint)?;
         let pat = &local.pat;
         if value.stage.is_host() && !self.flow.locals.contains(&super::flow::key(local)) {
-            super::bind_pattern(&mut self.bindings, pat, Binding::Host);
+            super::bind_pattern(&mut self.bindings, pat, Binding::Host(self.region_depth));
             return Ok(emit!(let #pat = #value;));
         }
 
@@ -510,9 +534,6 @@ impl Lower<'_> {
                 },
                 e,
             )),
-            Expr::Path(p) if matches!(self.binding(p), Some(Binding::Locals(..))) => {
-                err(p, "index kernel locals with a comptime index")
-            }
             Expr::Path(p) if matches!(self.binding(p), Some(Binding::Columns)) => err(
                 p,
                 "use columns[comptime_index].as_slice::<T>() to bind a typed column",
@@ -545,8 +566,11 @@ impl Lower<'_> {
                 let region = self.region();
                 Ok(Value::new(Stage::Never, emit!({#ret; break #region;})))
             }
-            Expr::Binary(x) => self.binary(x, hint),
-            Expr::Assign(x) => self.assignment(&x.left, &x.right, None),
+            Expr::Binary(x) => match super::compound_op(&x.op) {
+                Some(op) => self.assignment(e, &x.left, &x.right, Some((op, &x.op))),
+                None => self.binary(x, hint),
+            },
+            Expr::Assign(x) => self.assignment(e, &x.left, &x.right, None),
             Expr::Unary(x) => {
                 let v = self.expr(&x.expr)?;
                 let op = &x.op;
@@ -575,19 +599,13 @@ impl Lower<'_> {
                 Ok(Value::new(Stage::Reg(t.base()), code))
             }
             Expr::Call(x) => self.call(x, hint),
-            Expr::Index(x) => {
-                if let Some((place, t, _)) = self.local_element(x)? {
-                    Ok(Value::new(
-                        Stage::Reg(t),
-                        emit!(__splice_builder.copy(#place)),
-                    ))
-                } else {
-                    self.index(x)
-                }
-            }
+            Expr::Index(x) => self.index(x),
             Expr::Cast(x) => self.cast(x),
             Expr::MethodCall(x) => self.method(x, hint),
             Expr::Reference(x) => self.reference(x),
+            Expr::Macro(m) if vec_macro(&m.mac.path) => {
+                Ok(Value::new(Stage::Host, self.host_raw(e)?))
+            }
             Expr::Macro(m) if m.mac.path.is_ident("comptime") => {
                 let expr = m.mac.parse_body::<Expr>()?;
                 Ok(Value::new(Stage::Host, self.host_raw(&expr)?))
@@ -599,36 +617,18 @@ impl Lower<'_> {
             ),
         }
     }
-    fn local_element(&self, idx: &syn::ExprIndex) -> Result<Option<(TokenStream, Scalar, bool)>> {
-        let Expr::Path(path) = &*idx.expr else {
-            return Ok(None);
-        };
-        let Some(Binding::Locals(t, mutable)) = self.binding(path) else {
-            return Ok(None);
-        };
-        let index = self.host_raw(&idx.index)?;
-        Ok(Some((
-            emit!(*#path.get(#index).ok_or("kernel local index out of bounds")?),
-            t,
-            mutable,
-        )))
-    }
-    fn assignment(&self, left: &Expr, right: &Expr, op: Option<(&str, &BinOp)>) -> Result<Value> {
+    fn assignment(
+        &self,
+        expr: &Expr,
+        left: &Expr,
+        right: &Expr,
+        op: Option<(&str, &BinOp)>,
+    ) -> Result<Value> {
         if let Expr::Index(index) = left {
-            if let Some((place, t, mutable)) = self.local_element(index)? {
-                if !mutable {
-                    return err(left, "assignment requires mutable kernel locals");
-                }
-                let rhs = self.operand(right, t)?;
-                let value = match op {
-                    Some((op, _)) if matches!(t, Scalar::Vector(_) | Scalar::Mask(_)) => {
-                        self.simd_operator(t, op, vec![emit!(dst), rhs], left)?.code
-                    }
-                    Some((op, _)) => self.bin(op, emit!(dst), rhs),
-                    None => rhs,
-                };
-                return Ok(Value::unit(emit!({let dst = #place; let value = #value;
-                    __splice_builder.assign(dst, value); })));
+            if !simd::uses_lane(expr)
+                && let Ok(code) = self.host_raw(expr)
+            {
+                return Ok(Value::new(Stage::Host, code));
             }
             return self.store(index, right, op);
         }
@@ -636,7 +636,7 @@ impl Lower<'_> {
             return err(left, "assign to a mutable runtime variable");
         };
         let binding = self.binding(p);
-        if matches!(binding, Some(Binding::Host)) {
+        if matches!(binding, Some(Binding::Host(_))) {
             let rhs = self.host(self.expr(right)?, right)?;
             let code = if let Some((_, op)) = op {
                 emit!(#left #op #rhs)
@@ -667,9 +667,6 @@ impl Lower<'_> {
     fn binary(&self, x: &syn::ExprBinary, hint: Option<Scalar>) -> Result<Value> {
         use BinOp::*;
         let op = &x.op;
-        if let Some(operation) = super::compound_op(op) {
-            return self.assignment(&x.left, &x.right, Some((operation, op)));
-        }
         let (left, right) = if matches!(op, And(_) | Or(_)) {
             let left = self.expr(&x.left)?;
             let right = if matches!(left.stage, Stage::Reg(_)) {
@@ -745,16 +742,24 @@ impl Lower<'_> {
             _ => return emit!((#lhs) #op (#rhs)),
         };
         let (root, region) = (self.root, self.region());
+        let fault = if let Some(label) = &self.source_fault {
+            emit! {
+                __splice_source.transfer = Some(#root::frontend::source::Transfer::Return);
+                break #label (#root::frontend::source::division_fault(z));
+            }
+        } else {
+            emit! {
+                let (a, z) = (__splice_builder.constant(a), __splice_builder.constant(z));
+                let fault = __splice_builder.binary(#root::hir::Binary::#operation, a, z);
+                __splice_builder.ret(fault);
+                break #region;
+            }
+        };
         emit!({
             use #root::frontend::scalar::DivisionGuard as _;
             let operands = (#lhs, #rhs);
             if let Some((a, z)) = (&operands).faulting_i32_division() {
-                let (a, z) = (__splice_builder.constant(a), __splice_builder.constant(z));
-                let fault = __splice_builder.binary(#root::hir::Binary::#operation, a, z);
-                // This arm always faults. Terminate its CFG and stop staging
-                // subsequent host code without inventing a result value.
-                __splice_builder.ret(fault);
-                break #region;
+                #fault
             }
             operands.0 #op operands.1
         })
@@ -773,6 +778,13 @@ impl Lower<'_> {
         if values.iter().all(|v| v.stage.is_host()) {
             return Ok(Value::new(Stage::Host, emit!(#p(#(#values),*))));
         }
+        if p.path
+            .segments
+            .first()
+            .is_some_and(|s| s.ident == "std" || s.ident == "alloc" || s.ident == "core")
+        {
+            return err(c, "standard library calls require comptime arguments");
+        }
         let recursive = p.path.is_ident(self.name);
         if recursive && self.formals.iter().any(|p| matches!(p, Binding::Columns)) {
             return err(c, "a column-table entry point cannot call itself");
@@ -785,7 +797,7 @@ impl Lower<'_> {
         };
         let mut check = TokenStream::new();
         let target = if recursive {
-            if !self.formals.iter().any(|p| matches!(p, Binding::Host)) {
+            if !self.formals.iter().any(|p| matches!(p, Binding::Host(_))) {
                 return err(
                     c,
                     "runtime recursion is unsupported; recursive expansion needs a terminating #[comptime] plan",
@@ -817,7 +829,7 @@ impl Lower<'_> {
                     return err(expr, "expected a runtime slice of the required mutability");
                 }
                 (_, stage) if stage.is_host() => emit!(#support::Host(#value)),
-                (Some(Binding::Host), _) => {
+                (Some(Binding::Host(_)), _) => {
                     return err(
                         expr,
                         "expected a comptime value; found a runtime expression",

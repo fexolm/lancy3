@@ -245,11 +245,19 @@ fn audio_low_pass(c: &mut Criterion) {
     Workload {
         name: "large_audio_low_pass",
         elements: pcm.len(),
-        workspace_words: expected.len(),
+        workspace_words: expected.len() + 2 * sections.len(),
         expected: &|| &expected,
         equal: <[i32]>::eq,
         run: |kernel: &dyn Executable, out: &mut [i32]| {
-            let count = kernel.call(&[], &mut [BufferArg::Read(&pcm), BufferArg::Write(out)])?;
+            let (out, state) = out.split_at_mut(pcm.len());
+            let count = kernel.call(
+                &[],
+                &mut [
+                    BufferArg::Read(&pcm),
+                    BufferArg::Write(out),
+                    BufferArg::Write(state),
+                ],
+            )?;
             usize::try_from(count).map_err(|_| "invalid audio filter buffers".into())
         },
     }

@@ -21,7 +21,6 @@
 
 use splice::hir::{Binary, Buffer, Instr, Reg};
 use splice::{Codegen, Function};
-use std::collections::{HashMap, hash_map::Entry};
 use std::fmt::{self, Write};
 use std::sync::Arc;
 
@@ -61,13 +60,8 @@ impl fmt::Display for Operand {
 }
 
 fn render(root: &Function, out: &mut String) -> fmt::Result {
-    // Number bodies in first-use order. Two specializations of the same Rust
-    // function have distinct identities, while a shared callee has just one.
-    let mut ids = HashMap::from([(std::ptr::from_ref(root), 0)]);
-    let mut bodies = vec![root];
-    let mut id = 0;
-    while id < bodies.len() {
-        let f = bodies[id];
+    let (bodies, ids) = root.reachable_functions();
+    for (id, f) in bodies.into_iter().enumerate() {
         let reg = |Reg(i)| {
             Operand(
                 f.source().and_then(|s| s.scalars.get(i as usize)).copied(),
@@ -225,15 +219,7 @@ fn render(root: &Function, out: &mut String) -> fmt::Result {
                     args,
                     buffers,
                 } => {
-                    let callee = match ids.entry(Arc::as_ptr(function)) {
-                        Entry::Occupied(entry) => *entry.get(),
-                        Entry::Vacant(entry) => {
-                            let next = bodies.len();
-                            entry.insert(next);
-                            bodies.push(function);
-                            next
-                        }
-                    };
+                    let callee = ids[&Arc::as_ptr(function)];
                     write!(out, "    {} = {}(", reg(*dst), symbol(function, callee))?;
                     for (i, arg) in args
                         .iter()
@@ -252,7 +238,6 @@ fn render(root: &Function, out: &mut String) -> fmt::Result {
             }
         }
         writeln!(out, "}}")?;
-        id += 1;
     }
     Ok(())
 }

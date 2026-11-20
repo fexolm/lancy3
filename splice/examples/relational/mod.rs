@@ -78,6 +78,7 @@ impl Catalog {
         &self,
         code: &(impl Executable + ?Sized),
         workspace: &'a mut [i32],
+        state: &mut [i32],
     ) -> Result<&'a [i32], String> {
         let rows = code.call(
             &[],
@@ -85,6 +86,7 @@ impl Catalog {
                 BufferArg::Read(self.offsets()),
                 BufferArg::Read(self.data()),
                 BufferArg::Write(workspace),
+                BufferArg::Write(state),
             ],
         )?;
         if rows < 0 {

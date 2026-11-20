@@ -76,25 +76,12 @@ pub fn literal<T: std::fmt::Debug>(value: T) -> String {
     }
 }
 
-pub fn syntax(template: &str, arguments: &[String]) -> String {
-    let mut out = String::new();
-    let mut parts = template.split("__splice_source_child_");
-    out.push_str(parts.next().unwrap_or_default());
-    for part in parts {
-        let end = part
-            .find(|c: char| !c.is_ascii_digit())
-            .unwrap_or(part.len());
-        if let Ok(i) = part[..end].parse::<usize>()
-            && let Some(argument) = arguments.get(i)
-        {
-            out.push_str(argument);
-            out.push_str(&part[end..]);
-        } else {
-            out.push_str("__splice_source_child_");
-            out.push_str(part);
-        }
+pub fn division_fault(divisor: i32) -> String {
+    if divisor == 0 {
+        r#"panic!("kernel integer division by zero")"#.to_owned()
+    } else {
+        r#"panic!("kernel signed division overflow")"#.to_owned()
     }
-    out
 }
 
 pub fn function(

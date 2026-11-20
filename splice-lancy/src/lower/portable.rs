@@ -69,7 +69,6 @@ fn lower_body(
                 args,
                 buffers,
             } => {
-                splice::hir::check_forwarding(b.kinds, function.buffer_kinds(), buffers)?;
                 let op = b.call_op(callees[&Arc::as_ptr(function)].clone(), args, buffers);
                 b.define(*dst, op);
             }

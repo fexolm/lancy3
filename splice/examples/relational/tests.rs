@@ -92,14 +92,24 @@ fn compare(plan: &Plan, tables: &[&[Row]], kernels: &[&dyn Executable]) {
     let cat = Catalog::new(tables).unwrap();
     let expected = reference(plan, tables);
     let input_rows = tables.iter().map(|t| t.len()).sum::<usize>();
+    let mut state = vec![-1; plan.state_words()];
     let mut scratch = vec![0x7fff; (expected.len() + input_rows) * 8 + 512];
     for &code in kernels {
         scratch.fill(i32::MIN + 37);
-        assert_rows(plan, cat.run(code, &mut scratch).unwrap(), &expected);
+        state.fill(-1);
+        let short = state.len() - 1;
+        assert!(cat.run(code, &mut scratch, &mut state[..short]).is_err());
+        assert!(scratch.iter().all(|&v| v == i32::MIN + 37));
+        assert!(state.iter().all(|&v| v == -1));
+        assert_rows(
+            plan,
+            cat.run(code, &mut scratch, &mut state).unwrap(),
+            &expected,
+        );
     }
     scratch.fill(-8);
     assert_eq!(
-        query(plan, cat.offsets(), cat.data(), &mut scratch) as usize,
+        query(plan, cat.offsets(), cat.data(), &mut scratch, &mut state) as usize,
         expected.len()
     );
     assert_rows(plan, &scratch[..2 * expected.len()], &expected);
@@ -111,7 +121,9 @@ fn check_workspace_boundary(plan: &Plan, tables: &[&[Row]], kernels: &[&dyn Exec
     let sentinel = -1_234_567;
     let mut enough = 8 * (tables.iter().map(|t| t.len()).sum::<usize>() + 2 * want.len()) + 256;
     let mut storage = vec![sentinel; enough + 2];
-    let run = |words: &mut [i32]| query(plan, catalog.offsets(), catalog.data(), words);
+    let mut state = vec![-1; plan.state_words()];
+    let mut run =
+        |words: &mut [i32]| query(plan, catalog.offsets(), catalog.data(), words, &mut state);
     assert_eq!(run(&mut storage[1..=enough]) as usize, want.len());
     let mut short = 0;
     while enough - short > 1 {
@@ -131,13 +143,17 @@ fn check_workspace_boundary(plan: &Plan, tables: &[&[Row]], kernels: &[&dyn Exec
     for &kernel in kernels {
         storage.fill(sentinel);
         assert_eq!(
-            catalog.run(kernel, &mut storage[1..=short]).unwrap_err(),
+            catalog
+                .run(kernel, &mut storage[1..=short], &mut state)
+                .unwrap_err(),
             "query workspace is too small"
         );
         assert_eq!(storage, failed);
         assert_rows(
             plan,
-            catalog.run(kernel, &mut storage[1..=enough]).unwrap(),
+            catalog
+                .run(kernel, &mut storage[1..=enough], &mut state)
+                .unwrap(),
             &want,
         );
         assert_eq!(storage[0], sentinel);
@@ -234,6 +250,7 @@ fn short_scan_filter_project_batches_fit_shifted_workspaces() {
         .collect();
     let sentinel = 0x1234_5678;
     with_kernels(&plan, |kernels| {
+        let mut state = vec![-1; plan.state_words()];
         for rows in [1, width - 1, width + 1, table.len()] {
             // Table one follows a different table in the catalog. The input
             // and output addresses need not have the same vector alignment.
@@ -250,7 +267,7 @@ fn short_scan_filter_project_batches_fit_shifted_workspaces() {
                     storage.fill(sentinel);
                     assert_eq!(
                         catalog
-                            .run(kernel, &mut storage[start..start + words])
+                            .run(kernel, &mut storage[start..start + words], &mut state)
                             .unwrap(),
                         want
                     );
@@ -279,6 +296,7 @@ fn fused_scan_filter_project_needs_only_two_words_for_one_survivor() {
     );
     let n = 128 * width + 3;
     with_kernels(&plan, |kernels| {
+        let mut state = vec![-1; plan.state_words()];
         for survivor in [width + 1, n - 1] {
             let mut rows: Vec<_> = (0..n).map(|i| (i as i32, -1)).collect();
             rows[survivor].1 = 7;
@@ -286,13 +304,22 @@ fn fused_scan_filter_project_needs_only_two_words_for_one_survivor() {
             let expected = [7, survivor as i32 + 7];
             let mut guarded = [-9; 4];
             assert_eq!(
-                query(&plan, catalog.offsets(), catalog.data(), &mut guarded[1..3]),
+                query(
+                    &plan,
+                    catalog.offsets(),
+                    catalog.data(),
+                    &mut guarded[1..3],
+                    &mut state
+                ),
                 1
             );
             assert_eq!(guarded, [-9, expected[0], expected[1], -9]);
             for &kernel in kernels {
                 guarded.fill(-9);
-                assert_eq!(catalog.run(kernel, &mut guarded[1..3]).unwrap(), expected);
+                assert_eq!(
+                    catalog.run(kernel, &mut guarded[1..3], &mut state).unwrap(),
+                    expected
+                );
                 assert_eq!((guarded[0], guarded[3]), (-9, -9));
             }
         }
@@ -335,6 +362,7 @@ fn fused_join_streams_all_hits_and_stays_successful_as_workspace_grows() {
     let mut storage = [-971; 98];
     let mut fits = false;
     with_kernels(&plan, |kernels| {
+        let mut state = vec![-1; plan.state_words()];
         for capacity in 0..=96 {
             storage.fill(-971);
             let n = query(
@@ -342,6 +370,7 @@ fn fused_join_streams_all_hits_and_stays_successful_as_workspace_grows() {
                 catalog.offsets(),
                 catalog.data(),
                 &mut storage[1..1 + capacity],
+                &mut state,
             );
             if n < 0 {
                 assert_eq!(n, -1);
@@ -352,7 +381,7 @@ fn fused_join_streams_all_hits_and_stays_successful_as_workspace_grows() {
             }
             for &kernel in kernels {
                 storage.fill(-971);
-                let result = catalog.run(kernel, &mut storage[1..1 + capacity]);
+                let result = catalog.run(kernel, &mut storage[1..1 + capacity], &mut state);
                 if fits {
                     assert_rows(&plan, result.unwrap(), &expected);
                 } else {
@@ -633,7 +662,8 @@ fn balanced_tree_with_32_scans_runs_through_one_entry_point() {
     for code in [&lancy as &dyn Executable, &llvm] {
         assert_rows(
             &plan,
-            cat.run(code, &mut [0; 1024]).unwrap(),
+            cat.run(code, &mut [0; 1024], &mut vec![0; plan.state_words()])
+                .unwrap(),
             &[(12, 64), (7, 96)],
         );
     }
@@ -678,7 +708,12 @@ fn plan_shape_selects_the_reachable_operator_kernels_at_build_time() {
         assert_eq!(f.arity(), 0);
         assert_eq!(
             f.buffer_kinds(),
-            [BufferKind::Read, BufferKind::Read, BufferKind::Write]
+            [
+                BufferKind::Read,
+                BufferKind::Read,
+                BufferKind::Write,
+                BufferKind::Write
+            ]
         );
     }
     let scan_ops = simd_ops(&scan);
@@ -718,7 +753,11 @@ fn plan_shape_selects_the_reachable_operator_kernels_at_build_time() {
     assert_eq!(
         Catalog::new(&[&[(4, 5)]])
             .unwrap()
-            .run(&code, &mut [0; 2])
+            .run(
+                &code,
+                &mut [0; 2],
+                &mut vec![0; Plan::Scan(0).state_words()]
+            )
             .unwrap(),
         [4, 5]
     );
@@ -739,9 +778,13 @@ fn workspace_exhaustion_has_an_explicit_result_and_caller_can_retry() {
     for id in [2, usize::MAX] {
         let unknown_table = Lancy::compile(&query::ir(&Plan::Scan(id)).unwrap()).unwrap();
         assert!(
-            cat.run(&unknown_table, &mut [0; 8])
-                .unwrap_err()
-                .contains("bounds")
+            cat.run(
+                &unknown_table,
+                &mut [0; 8],
+                &mut vec![0; Plan::Scan(id).state_words()]
+            )
+            .unwrap_err()
+            .contains("bounds")
         );
     }
 }

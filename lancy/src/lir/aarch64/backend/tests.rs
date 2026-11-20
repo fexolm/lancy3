@@ -1,89 +1,43 @@
-use crate::{CallError, CompileError, Inlining, ScalarKernel, hir::Function};
+use super::compile::Compiled;
+use crate::filetests::{Case, Result, input, integer};
 use crate::{
-    filetests::{Result, Run, input, integer},
-    hir::transforms::passes,
+    CallError, Inlining, ScalarKernel,
+    hir::{Function, ssa::VerifiedBody},
+    module::{FunctionIds, Module},
 };
-use filecheck::{CheckerBuilder, NO_VARIABLES};
 use regalloc2::{Block, Function as _, InstOrEdit};
 use splice_target::Profile;
 use std::fmt::Write;
 
-use super::compile::Compiled;
-
-fn fixture(file: &str, text: &str) {
-    let lines: Vec<_> = text.lines().collect();
-    for case in lines.split(|line| line.trim() == "---") {
-        check(case).unwrap_or_else(|error| panic!("{file}: {error}"));
-    }
-}
-
-fn check(lines: &[&str]) -> Result<()> {
-    let mut ir = input::Lines::new();
-    let mut runs = Vec::new();
-    let mut directives = Vec::new();
-    let mut selection = Vec::new();
-    let mut allocation = Vec::new();
-    let mut reject = None;
-    let mut policy = Inlining::Always;
-    for (i, line) in lines.iter().map(|line| line.trim()).enumerate() {
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        if let Some(run) = line.strip_prefix("@run ") {
-            runs.push(Run::parse(i + 1, run)?);
-        } else if let Some(reason) = line.strip_prefix("@reject ") {
-            reject = Some(reason);
-        } else if let Some(assertion) = line.strip_prefix("@aarch64 ") {
-            directives.push(assertion);
-        } else if let Some(assertion) = line.strip_prefix("@aarch64-isel ") {
-            selection.push(assertion);
-        } else if let Some(assertion) = line.strip_prefix("@aarch64-alloc ") {
-            allocation.push(assertion);
-        } else if line == "@policy never" {
-            policy = Inlining::Never;
-        } else if !line.starts_with('@') {
-            ir.push((i + 1, line));
-        }
-    }
-    if runs.is_empty()
-        && directives.is_empty()
-        && selection.is_empty()
-        && allocation.is_empty()
-        && reject.is_none()
-    {
+pub(crate) fn check_machine(
+    case: &mut Case<'_>,
+    module: Module<VerifiedBody<'_>>,
+    ids: &FunctionIds<Function>,
+) -> Result<()> {
+    if case.checks.is_empty() && case.encodings.is_empty() {
         return Ok(());
     }
-    let f = input::parse(&ir)?;
-    let verified = f.verified_module();
-    if let Some(reason) = reject {
-        return match verified {
-            Err(CompileError::InvalidIr(e)) if e.to_string().contains(reason) => Ok(()),
-            _ => Err(format!("expected verifier error: {reason}")),
-        };
-    }
-    let (module, ids) = verified.map_err(|e| e.to_string())?;
-    for run in &runs {
-        run.interpret("source", &f)?;
-    }
-    if !directives.is_empty() || !selection.is_empty() || !allocation.is_empty() {
-        let simd = splice_target::simd()?;
-        let compiled = passes::optimize_and_lower(&module, &ids, policy, |module, ids| {
-            super::compile(module, ids, simd)
-        })
-        .map_err(|e| e.to_string())?;
-        let root = &compiled.functions[compiled.call_graph.root()];
-        check_listing("isel", &selection, || selected(root))?;
-        check_listing("alloc", &allocation, || allocated(root))?;
+    let simd = splice_target::simd()?;
+    let compiled = super::compile(module, ids, simd)
+        .map_err(|error| format!("aarch64 allocation: {error}"))?;
+    let root = &compiled.functions[compiled.call_graph.root()];
+    case.check("aarch64-isel", || selected(root))?;
+    case.check("aarch64-alloc", || allocated(root))?;
+    if !case.encodings.is_empty() {
         let code = super::emit_compiled(&compiled, simd).map_err(|e| e.to_string())?;
-        for assertion in directives {
+        for &(line, assertion) in &case.encodings {
             let parts: Vec<_> = assertion.split_whitespace().collect();
             let [profile, presence, mask, opcode] = parts.as_slice() else {
-                return Err(format!("invalid AArch64 assertion: {assertion}"));
+                return Err(format!(
+                    "line {line}: invalid AArch64 assertion: {assertion}"
+                ));
             };
             if !matches!(*profile, "all" | "neon" | "sve" | "sve2")
                 || !matches!(*presence, "has" | "lacks")
             {
-                return Err(format!("invalid AArch64 assertion: {assertion}"));
+                return Err(format!(
+                    "line {line}: invalid AArch64 assertion: {assertion}"
+                ));
             }
             let select = match simd.profile {
                 Profile::Neon => "neon",
@@ -94,8 +48,8 @@ fn check(lines: &[&str]) -> Result<()> {
             if *profile != "all" && *profile != select {
                 continue;
             }
-            let mask = integer(mask)? as u32;
-            let opcode = integer(opcode)? as u32;
+            let mask = integer(mask).map_err(|e| format!("line {line}: {e}"))? as u32;
+            let opcode = integer(opcode).map_err(|e| format!("line {line}: {e}"))? as u32;
             let found = code
                 .bytes
                 .as_chunks::<4>()
@@ -103,41 +57,13 @@ fn check(lines: &[&str]) -> Result<()> {
                 .iter()
                 .any(|word| u32::from_le_bytes(*word) & mask == opcode);
             if found != (*presence == "has") {
-                return Err(format!("failed AArch64 assertion: {assertion}"));
+                return Err(format!(
+                    "line {line}: failed AArch64 assertion: {assertion}"
+                ));
             }
         }
     }
-    let kernel = ScalarKernel::compile_with_inlining(&f, policy).map_err(|e| e.to_string())?;
-    for run in runs {
-        // SAFETY: checked interpretation above validates every fixture access.
-        unsafe { run.native(&kernel)? };
-    }
     Ok(())
-}
-
-fn check_listing(stage: &str, directives: &[&str], listing: impl FnOnce() -> String) -> Result<()> {
-    if directives.is_empty() {
-        return Ok(());
-    }
-    let mut builder = CheckerBuilder::new();
-    for directive in directives {
-        if !builder.directive(directive).map_err(|e| e.to_string())? {
-            return Err(format!("unknown FileCheck directive {directive}"));
-        }
-    }
-    let listing = listing();
-    if std::env::var_os("LANCY_FILETEST_DUMP").is_some() {
-        eprintln!("[aarch64-{stage}]\n{listing}");
-    }
-    let (ok, explanation) = builder
-        .finish()
-        .explain(&listing, NO_VARIABLES)
-        .map_err(|e| e.to_string())?;
-    if ok {
-        Ok(())
-    } else {
-        Err(format!("aarch64-{stage}:\n{explanation}"))
-    }
 }
 
 fn selected(machine: &Compiled) -> String {
@@ -186,8 +112,6 @@ fn allocated(machine: &Compiled) -> String {
     }
     text
 }
-
-include!(concat!(env!("OUT_DIR"), "/filetests.rs"));
 
 fn parse(text: &str) -> std::sync::Arc<Function> {
     let lines: input::Lines<'_> = text

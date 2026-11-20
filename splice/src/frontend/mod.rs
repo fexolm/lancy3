@@ -51,6 +51,7 @@ pub trait KernelBuilder {
     fn jump(&mut self, label: Label);
     fn branch(&mut self, cond: Reg, yes: Label, no: Label);
     fn ret(&mut self, value: Reg);
+    /// Reject mismatched call arguments before staging the callee body.
     fn call_kernel(
         &mut self,
         arity: usize,

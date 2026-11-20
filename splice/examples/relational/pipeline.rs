@@ -21,6 +21,11 @@ pub(super) struct Pipe<'a> {
 }
 
 impl Pipe<'_> {
+    fn state_words(&self, lanes: usize) -> usize {
+        // Each boundary and each retry queue has a count and three packets.
+        (2 * self.steps.len() + 1) * (1 + 3 * lanes)
+    }
+
     pub fn dependencies(&self) -> impl Iterator<Item = usize> + '_ {
         self.steps.iter().filter_map(|step| match step {
             Step::Find(id) => Some(*id),
@@ -39,7 +44,27 @@ pub(super) struct Program<'a> {
     pub indices: usize,
 }
 
+impl Plan {
+    pub fn state_words(&self) -> usize {
+        Program::new(self).state_words()
+    }
+}
+
 impl<'a> Program<'a> {
+    pub fn state_words(&self) -> usize {
+        let lanes = splice::simd::Lane::<i32>::lanes();
+        let largest_pipe = self
+            .tasks
+            .iter()
+            .filter_map(|task| match task {
+                Task::Run(pipe) => Some(pipe.state_words(lanes)),
+                Task::Save(..) => None,
+            })
+            .max()
+            .unwrap_or(0);
+        4 * self.indices + largest_pipe
+    }
+
     pub fn new(plan: &'a Plan) -> Self {
         let mut program = Self {
             tasks: Vec::new(),

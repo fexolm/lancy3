@@ -181,6 +181,95 @@ fn checked_nested_call_preserves_writes_before_failure() {
 }
 
 #[test]
+fn lowered_call_graphs_retain_slice_contracts_for_out_of_line_calls() {
+    use lancy::{Inlining, ScalarKernel};
+    use splice::{BufferArg, Executable, kernel};
+
+    #[kernel]
+    fn read_first(#[comptime] guard: bool, n: i32, xs: &[i32]) -> i32 {
+        if guard && xs.is_empty() {
+            return -1;
+        }
+        let mut sum = 0;
+        let mut i = 0;
+        while i < n {
+            sum += xs[0];
+            i += 1;
+        }
+        sum
+    }
+    #[kernel]
+    fn reader(#[comptime] guard: bool, n: i32, xs: &[i32]) -> i32 {
+        read_first(guard, n, xs)
+    }
+    #[kernel]
+    fn write_first(n: i32, xs: &mut [i32]) -> i32 {
+        let mut sum = 0;
+        let mut i = 0;
+        while i < n {
+            sum += xs[0];
+            xs[0] += 1;
+            i += 1;
+        }
+        sum
+    }
+    #[kernel]
+    fn writer(n: i32, xs: &mut [i32]) -> i32 {
+        write_first(n, xs)
+    }
+
+    fn out_of_line(ir: splice::Function, writable: bool) -> crate::LancyKernel {
+        let root = crate::lower(&ir).unwrap();
+        let child = root
+            .blocks()
+            .flat_map(|block| root.instructions(block))
+            .find_map(|inst| {
+                let Op::Call(call) = root.op(inst) else {
+                    return None;
+                };
+                Some(root.call(*call).0)
+            })
+            .unwrap();
+        for function in [&root, child] {
+            let [scalar, ptr, len] = function.params(function.entry()).try_into().unwrap();
+            assert_eq!(function.slice_param(scalar), None);
+            assert_eq!(function.slice_param(ptr), Some((len, 4, writable)));
+        }
+        crate::LancyKernel {
+            code: ScalarKernel::compile_with_inlining(&root, Inlining::Never).unwrap(),
+            arity: ir.arity(),
+            slices: ir.buffer_kinds().into(),
+        }
+    }
+    for guard in [false, true] {
+        for kernel in [
+            out_of_line(reader::ir(guard).unwrap(), false),
+            reader::build::<crate::Lancy>(guard).unwrap(),
+        ] {
+            assert_eq!(kernel.call(&[3], &mut [BufferArg::Read(&[7])]), Ok(21));
+            assert_eq!(
+                kernel.call(&[0], &mut [BufferArg::Read(&[])]),
+                Ok(if guard { -1 } else { 0 })
+            );
+            let empty = kernel.call(&[1], &mut [BufferArg::Read(&[])]);
+            if guard {
+                assert_eq!(empty, Ok(-1));
+            } else {
+                assert!(empty.is_err());
+            }
+        }
+    }
+    for kernel in [
+        out_of_line(writer::ir().unwrap(), true),
+        writer::build::<crate::Lancy>().unwrap(),
+    ] {
+        let mut xs = [7];
+        assert_eq!(kernel.call(&[2], &mut [BufferArg::Write(&mut xs)]), Ok(15));
+        assert_eq!(xs, [9]);
+    }
+}
+
+#[test]
 fn rejects_undefined_labels_and_aliased_writable_arguments() {
     let undefined = build(
         0,
