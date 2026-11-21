@@ -4,6 +4,7 @@ mod binary;
 mod control;
 mod division;
 mod experimental;
+mod mask;
 mod memory;
 mod native;
 mod numeric;
@@ -17,7 +18,7 @@ pub(in crate::lir::x64) use packed::packed_half;
 use super::super::inst::{Cond, Inst, SelectCond, class};
 use crate::{
     CompileError,
-    hir::{Function, Op, Simd, Ternary, Type, Value},
+    hir::{Function, Lane, Op, Simd, Ternary, Type, Value},
     lir::{
         self,
         isel::{Context, Root},
@@ -140,5 +141,13 @@ impl Rules<'_> {
         // Only the selected form should mark its register operands live.
         self.ctx.require(v);
         reg(self.f, v)
+    }
+
+    fn dword_constant(&self, value: Value) -> Option<u32> {
+        match self.ctx.defining_op(value)? {
+            Op::Const(n) => Some(n as u32),
+            Op::Literal(Lane::I32 | Lane::U32, bits) => Some(bits as u32),
+            _ => None,
+        }
     }
 }

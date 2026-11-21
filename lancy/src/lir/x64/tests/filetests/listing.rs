@@ -1,7 +1,7 @@
 use crate::filetests::listing::list;
 use crate::lir::{
     self,
-    x64::inst::{Address, Inst, Rhs},
+    x64::inst::{Address, Inst, Rhs, VectorMask},
 };
 use crate::module::FunctionId;
 use iced_x86::{Decoder, DecoderOptions, Formatter, IntelFormatter};
@@ -19,6 +19,13 @@ fn opcode(inst: Inst) -> String {
             a.index.map_or(0, |(_, s)| 1 << s as u8),
             a.disp
         )
+    };
+    let mask_kind = |mask| match mask {
+        VectorMask::Compare {
+            active: Some(_), ..
+        } => ".compare.and",
+        VectorMask::Compare { .. } => ".compare",
+        VectorMask::Lanes(_) => "",
     };
     match inst {
         Inst::Argv(_) => "argv".into(),
@@ -38,8 +45,10 @@ fn opcode(inst: Inst) -> String {
         Inst::Compare(cc, _, _, arg) => format!("cmp.{cc:?}{}", rhs(arg)),
         Inst::SelectI32 { .. } => "select.i32".into(),
         Inst::BrCmp(cc, _, arg) => format!("brcmp.{cc:?}{}", rhs(arg)),
-        Inst::CheckMask(_) => "bounds.mask".into(),
-        Inst::BranchAny(_) => "branch.any".into(),
+        Inst::CheckMask(mask) => format!("bounds.mask{}", mask_kind(mask)),
+        Inst::BranchAny(mask) => format!("branch.any{}", mask_kind(mask)),
+        Inst::AnyComparison(_, mask) => format!("any.mask{}", mask_kind(mask)),
+        Inst::SelectComparison { mask, .. } => format!("select.mask{}", mask_kind(mask)),
         Inst::BranchAll(lane, _) => format!("branch.all.{lane:?}"),
         Inst::CheckBounds(..) => "bounds".into(),
         Inst::Cdq { .. } => "cdq".into(),
@@ -55,14 +64,20 @@ fn opcode(inst: Inst) -> String {
         ),
         Inst::Movsxd(..) => "movsxd".into(),
         Inst::Lea(_, a) => format!("lea {}", addr(a)),
-        Inst::Masked { ty, dst, .. } => format!(
-            "masked{}.{ty:?}",
-            if dst.is_some() { "load" } else { "store" }
+        Inst::Masked { ty, dst, mask, .. } => format!(
+            "masked{}.{ty:?}{}",
+            if dst.is_some() { "load" } else { "store" },
+            mask_kind(mask)
         ),
         Inst::Load(t, _, a) => format!("load.{t:?} {}", addr(a)),
         Inst::PackedMemory(kind, _, _, _, a) => format!("packed.{kind:?}.mem {}", addr(a)),
         Inst::BroadcastMemory(lane, _, a) => format!("broadcast.{lane:?}.mem {}", addr(a)),
         Inst::BroadcastLane(_, _, lane) => format!("broadcast.lane {lane}"),
+        Inst::ExtractLane(lane, _, _, index) => format!("extract.{lane:?} {index}"),
+        Inst::ShiftDwords(_, _, count) => format!("shift.dwords {count}"),
+        Inst::VectorShiftImm(kind, lane, _, _, count) => {
+            format!("packed.{lane:?}.{kind:?} imm={count}")
+        }
         Inst::Store(t, a, _) => format!("store.{t:?} {}", addr(a)),
         Inst::DebugStore(t, offset, _) => format!("debug_store.{t:?} {offset}"),
         Inst::DebugPoint(id) => format!("debug_point {id}"),

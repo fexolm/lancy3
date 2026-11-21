@@ -1,5 +1,42 @@
 use super::*;
 
+pub(in crate::lir::x64) fn shift_dword_bits(
+    a: &mut CodeAssembler,
+    cpu: Features,
+    kind: B,
+    lane: Lane,
+    dst: usize,
+    src: usize,
+    count: u8,
+) -> Result {
+    let count = i32::from(count);
+    let mut v = Vector {
+        a,
+        width: cpu.bytes,
+        cpu,
+        pool: None,
+    };
+    match kind {
+        B::Shl => immediate!(v, dst, src, count, pslld, vpslld),
+        B::Shr if lane.signed() => immediate!(v, dst, src, count, psrad, vpsrad),
+        B::Shr => immediate!(v, dst, src, count, psrld, vpsrld),
+        B::RotateLeft if cpu.bytes == 64 => v.a.vprold(ZMM[dst], ZMM[src], count),
+        B::RotateRight if cpu.bytes == 64 => v.a.vprord(ZMM[dst], ZMM[src], count),
+        B::RotateLeft | B::RotateRight => {
+            let left = if kind == B::RotateLeft {
+                count
+            } else {
+                32 - count
+            };
+            let scratch = crate::lir::x64::inst::SCRATCH;
+            immediate!(v, scratch, src, 32 - left, psrld, vpsrld)?;
+            immediate!(v, dst, src, left, pslld, vpslld)?;
+            v.or(dst, dst, scratch)
+        }
+        _ => unreachable!(),
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 pub(in crate::lir::x64) enum Rule {
     Neg,

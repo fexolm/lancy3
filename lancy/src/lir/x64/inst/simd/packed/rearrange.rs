@@ -1,4 +1,117 @@
 use super::*;
+use crate::lir::x64::inst::SCRATCH;
+
+pub(in crate::lir::x64) fn shift_dwords(
+    a: &mut CodeAssembler,
+    width: usize,
+    dst: usize,
+    src: usize,
+    count: u8,
+) -> Result {
+    let bytes = 4 * i32::from(count);
+    match width {
+        16 => {
+            if dst != src {
+                a.movaps(XMM[dst], XMM[src])?;
+            }
+            a.pslldq(XMM[dst], bytes)
+        }
+        32 => {
+            let (dst, src, low) = (YMM[dst], YMM[src], YMM[SCRATCH]);
+            if bytes == 16 {
+                return a.vperm2i128(dst, src, src, 0x08);
+            }
+            a.vperm2i128(low, src, src, 0x08)?;
+            if bytes < 16 {
+                a.vpalignr(dst, src, low, 16 - bytes)
+            } else {
+                a.vpslldq(dst, low, bytes - 16)
+            }
+        }
+        64 => {
+            let zero = ZMM[SCRATCH];
+            a.vpxord(zero, zero, zero)?;
+            a.valignd(ZMM[dst], ZMM[src], zero, 16 - i32::from(count))
+        }
+        _ => unreachable!(),
+    }
+}
+
+pub(in crate::lir::x64) fn extract_lane(
+    a: &mut CodeAssembler,
+    cpu: Features,
+    lane: Lane,
+    dst: usize,
+    src: usize,
+    index: u8,
+) -> Result {
+    use emit::{R8, R32, R64};
+    let size = lane.bytes();
+    let byte = usize::from(index) * size;
+    let chunk = (byte / 16) as i32;
+    let vector_result = matches!(lane, Lane::F32 | Lane::F64 | Lane::I128 | Lane::U128);
+    let wide = cpu.bytes > 16;
+    let source = if chunk == 0 {
+        XMM[src]
+    } else {
+        // GPR destinations can have the same number as an unrelated live XMM.
+        let target = XMM[if vector_result { dst } else { SCRATCH }];
+        if cpu.bytes == 32 {
+            a.vextractf128(target, YMM[src], chunk)?;
+        } else {
+            a.vextracti32x4(target, ZMM[src], chunk)?;
+        }
+        target
+    };
+    let offset = (byte % 16) as i32;
+    macro_rules! encoding {
+        ($sse:ident, $vex:ident, $($args:expr),+) => {
+            if wide { a.$vex($($args),+) } else { a.$sse($($args),+) }
+        };
+    }
+    if vector_result {
+        let target = XMM[dst];
+        return if offset != 0 {
+            encoding!(
+                pshufd,
+                vpshufd,
+                target,
+                source,
+                if size == 8 { 0x4e } else { offset / 4 }
+            )
+        } else if target != source {
+            encoding!(movaps, vmovaps, target, source)
+        } else {
+            Ok(())
+        };
+    }
+    let dword = R32[dst];
+    match size {
+        1 if wide || cpu.sse41 => encoding!(pextrb, vpextrb, dword, source, offset),
+        1 => {
+            a.pextrw(dword, source, offset / 2)?;
+            if offset % 2 == 0 {
+                a.movzx(dword, R8[dst])
+            } else {
+                a.shr(dword, 8)
+            }
+        }
+        2 => encoding!(pextrw, vpextrw, dword, source, offset / 2),
+        4 if offset == 0 => encoding!(movd, vmovd, dword, source),
+        8 if offset == 0 => encoding!(movq, vmovq, R64[dst], source),
+        4 if wide || cpu.sse41 => encoding!(pextrd, vpextrd, dword, source, offset / 4),
+        8 if wide || cpu.sse41 => encoding!(pextrq, vpextrq, R64[dst], source, offset / 8),
+        _ => {
+            let shifted = XMM[SCRATCH];
+            a.pshufd(shifted, source, if size == 8 { 0x4e } else { offset / 4 })?;
+            if size == 4 {
+                a.movd(dword, shifted)
+            } else {
+                a.movq(R64[dst], shifted)
+            }
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug)]
 pub(in crate::lir::x64) enum Rule {

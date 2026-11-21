@@ -1,9 +1,38 @@
+use super::Rules;
 use crate::{
     hir::operation::Action,
-    hir::{Binary as B, Ternary, Type, Unary},
-    lir::x64::inst::simd::packed::integer::Rule,
+    hir::{Binary as B, Lane, Op, Simd, Ternary, Type, Unary},
+    lir::x64::inst::{Inst, simd::packed::integer::Rule},
 };
 use splice_target::Features;
+
+impl Rules<'_> {
+    pub(super) fn immediate_vector_shift(&mut self, op: Op) -> Option<Inst> {
+        let Op::Simd(Simd::Bin(
+            kind @ (B::Shl | B::Shr | B::RotateLeft | B::RotateRight),
+            src,
+            count,
+        )) = op
+        else {
+            return None;
+        };
+        let lane = self.ty(src).lane()?;
+        if !matches!(lane, Lane::I32 | Lane::U32) || (self.cpu.bytes == 32 && !self.cpu.avx2) {
+            return None;
+        }
+        let Op::Simd(Simd::Splat(scalar)) = self.ctx.defining_op(count)? else {
+            return None;
+        };
+        let count = (self.dword_constant(scalar)? & 31) as u8;
+        let dst = self.dst();
+        let src = self.input(src);
+        Some(if count == 0 {
+            Inst::Copy(dst, src)
+        } else {
+            Inst::VectorShiftImm(kind, lane, dst, src, count)
+        })
+    }
+}
 
 impl Rule {
     pub(in crate::lir::x64) fn select(action: Action, input: Type, c: Features) -> Option<Self> {

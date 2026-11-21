@@ -11,6 +11,10 @@ fn main x:i32 count:i32 -> i32
   ret result
 @source check: Binary(Shl)
 @source check: Binary(RotateRight)
+@isel check: arg 0
+@isel not: packed.I32.Shl imm=
+@isel not: packed.I32.RotateRight imm=
+@isel check: ret
 @asm check: endbr64
 @asm not: call
 @asm check: ret
@@ -36,3 +40,17 @@ fn main x:i32 y:i32 -> i32
 @run 127 2 -> -1
 @run 128 2 -> 0
 @run 255 1 -> -1
+---
+# The immediate is reduced modulo 32. Signed right shift replicates the sign.
+fn main x:i32 -> i32
+  data = simd.splat x
+  count = const 33
+  counts = simd.splat count
+  shifted = simd.shr data counts
+  lane = const 0
+  result = simd.extract shifted lane
+  ret result
+@isel regex: SHR=packed\.I32\.Shr imm=1|lanes\.Vector\(I32\)\.Binary\(Shr\)
+@isel check: $SHR
+@run 0x80000004 -> -1073741822
+@run 7 -> 3

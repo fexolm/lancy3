@@ -10,13 +10,49 @@ use simd::Native;
 
 #[derive(Clone, Copy, Debug)]
 pub(super) enum VectorMask<R> {
-    Signs(R),
+    Lanes(R),
     Compare {
         lhs: R,
         rhs: R,
+        lane: Lane,
         predicate: i32,
-        signed: bool,
+        active: Option<R>,
     },
+}
+
+impl<R> VectorMask<R> {
+    pub(super) fn map<T>(self, mut reg: impl FnMut(R) -> T) -> VectorMask<T> {
+        match self {
+            Self::Lanes(v) => VectorMask::Lanes(reg(v)),
+            Self::Compare {
+                lhs,
+                rhs,
+                lane,
+                predicate,
+                active,
+            } => VectorMask::Compare {
+                lhs: reg(lhs),
+                rhs: reg(rhs),
+                lane,
+                predicate,
+                active: active.map(reg),
+            },
+        }
+    }
+}
+
+impl VectorMask<VReg> {
+    fn operands(self, out: &mut Vec<Operand>) {
+        match self {
+            Self::Lanes(v) => out.push(Operand::reg_use(v)),
+            Self::Compare {
+                lhs, rhs, active, ..
+            } => {
+                out.extend([Operand::reg_use(lhs), Operand::reg_use(rhs)]);
+                out.extend(active.map(Operand::reg_use));
+            }
+        }
+    }
 }
 
 const fn gpr(enc: usize) -> PReg {
@@ -234,15 +270,26 @@ pub(super) enum Inst {
         quotient: Quotient,
     },
     CheckBounds(VReg, VReg),
-    CheckMask(VReg),
-    BranchAny(VReg),
+    CheckMask(VectorMask<VReg>),
+    BranchAny(VectorMask<VReg>),
     BranchAll(Lane, VReg),
+    AnyComparison(VReg, VectorMask<VReg>),
+    SelectComparison {
+        lane: Lane,
+        mask: VectorMask<VReg>,
+        yes: VReg,
+        no: VReg,
+        dst: VReg,
+    },
     Movsxd(VReg, VReg),
     Lea(VReg, Address),
     Load(Type, VReg, Address),
     PackedMemory(Binary, Lane, VReg, VReg, Address),
     BroadcastMemory(Lane, VReg, Address),
     BroadcastLane(VReg, VReg, u8),
+    ExtractLane(Lane, VReg, VReg, u8),
+    ShiftDwords(VReg, VReg, u8),
+    VectorShiftImm(Binary, Lane, VReg, VReg, u8),
     Masked {
         ty: Type,
         base: VReg,
@@ -371,7 +418,20 @@ impl TargetInst for Inst {
                 addr.operands(out);
                 out.extend([O::reg_use(value), O::reg_def(d)]);
             }
-            Self::BroadcastLane(d, src, _) => out.extend([O::reg_use(src), O::reg_def(d)]),
+            Self::BroadcastLane(d, src, _)
+            | Self::ExtractLane(_, d, src, _)
+            | Self::VectorShiftImm(_, _, d, src, _)
+            | Self::ShiftDwords(d, src, _) => out.extend([O::reg_use(src), O::reg_def(d)]),
+            Self::AnyComparison(d, mask) => {
+                mask.operands(out);
+                out.push(O::reg_def(d));
+            }
+            Self::SelectComparison {
+                mask, yes, no, dst, ..
+            } => {
+                mask.operands(out);
+                out.extend([O::reg_use(yes), O::reg_use(no), O::reg_def(dst)]);
+            }
             Self::Masked {
                 base,
                 indices,
@@ -383,12 +443,7 @@ impl TargetInst for Inst {
             } => {
                 out.push(O::reg_use(base));
                 out.extend(indices.map(O::reg_use));
-                match mask {
-                    VectorMask::Signs(v) => out.push(O::reg_use(v)),
-                    VectorMask::Compare { lhs, rhs, .. } => {
-                        out.extend([O::reg_use(lhs), O::reg_use(rhs)]);
-                    }
-                }
+                mask.operands(out);
                 out.push(O::reg_use(value));
                 out.extend(dst.map(O::reg_def));
                 out.extend(temp.map(O::reg_temp));
@@ -397,9 +452,8 @@ impl TargetInst for Inst {
                 addr.operands(out);
                 out.push(O::reg_use(value));
             }
-            Self::CheckMask(v)
-            | Self::BranchAny(v)
-            | Self::BranchAll(_, v)
+            Self::CheckMask(mask) | Self::BranchAny(mask) => mask.operands(out),
+            Self::BranchAll(_, v)
             | Self::StoreArg(_, _, v)
             | Self::DebugStore(_, _, v)
             | Self::Branch(v) => out.push(O::reg_use(v)),

@@ -1,0 +1,72 @@
+# A positive shift draws from the first table and zero-fills low lanes.
+fn main bias:i32 -> i32
+  i = simd.iota i32
+  one = const 1
+  ones = simd.splat one
+  offsets = simd.sub i ones
+  base = simd.splat bias
+  table = simd.add i base
+  shifted = simd.shuffle table ones offsets
+  begin = simd.ge i ones
+  zero = const 0
+  zeros = simd.splat zero
+  previous = simd.add offsets base
+  expected = simd.select begin previous zeros
+  bad = simd.ne shifted expected
+  result = simd.any bad
+  ret result
+@isel regex: SHIFT=shift.dwords 1|lanes\.Vector\(I32\)\.Shuffle
+@isel check: $SHIFT
+@run 19 -> 0
+@run 2147483647 -> 0
+---
+# A negative shift can enter the second table at the upper end.
+fn main marker:i32 -> i32
+  i = simd.iota i32
+  minus_one = const -1
+  delta = simd.splat minus_one
+  offsets = simd.sub i delta
+  second = simd.splat marker
+  shifted = simd.shuffle i second offsets
+  n = simd.lanes i32
+  one = const 1
+  last = sub n one
+  result = simd.extract shifted last
+  ret result
+@isel not: shift.dwords
+@run 97 -> 97
+---
+# Compile-time in-range extraction reads a register lane.
+fn main bias:i32 -> i32
+  seq = simd.iota i32
+  base = simd.splat bias
+  table = simd.add seq base
+  index = const 3
+  result = simd.extract table index
+  ret result
+@isel check: extract.I32 3
+@run 5 -> 8
+@run 2147483647 -> -2147483646
+---
+# Extract still traps for an invalid index, even with an unused result.
+fn main x:i32 -> i32
+  table = simd.splat x
+  index = const -1
+  unused = simd.extract table index
+  ret x
+@isel check: lanes.Vector(I32).Extract
+@run 7 -> !bounds
+---
+# Computing the second table can trap even when all selected lanes come from the first.
+fn main divisor:i32 -> i32
+  i = simd.iota i32
+  one = const 1
+  splat = simd.splat one
+  indices = simd.sub i splat
+  divisors = simd.splat divisor
+  second = simd.div splat divisors
+  shifted = simd.shuffle i second indices
+  result = simd.any shifted
+  ret result
+@run 0 -> !zero
+@run 1 -> -1

@@ -2,10 +2,9 @@
 use super::Rules;
 use crate::{
     CompileError,
-    hir::{Binary, Op, Simd, Type, Value},
-    lir::x64::inst::{Inst, VectorMask},
+    hir::{Binary, Op, Simd, Value},
+    lir::x64::inst::Inst,
 };
-use regalloc2::VReg;
 
 impl Rules<'_> {
     pub(super) fn experimental_numeric(&mut self, op: Op) -> Result<Option<Inst>, CompileError> {
@@ -63,37 +62,6 @@ impl Rules<'_> {
             }
         }
         Ok(None)
-    }
-
-    pub(super) fn experimental_memory_mask(
-        &mut self,
-        ty: Type,
-        mask: Value,
-    ) -> Option<VectorMask<VReg>> {
-        if self.cpu.bytes == 64
-            && matches!(ty.lane().unwrap().bytes(), 4 | 8)
-            && let Some(Op::Simd(Simd::Bin(kind, lhs, rhs))) = self.ctx.single_use(mask)
-            && let Some(lane) = self.ty(lhs).lane()
-            && !lane.float()
-        {
-            let predicate = match kind {
-                Binary::Eq => Some(0),
-                Binary::Lt => Some(1),
-                Binary::Le => Some(2),
-                Binary::Ne => Some(4),
-                Binary::Ge => Some(5),
-                Binary::Gt => Some(6),
-                _ => None,
-            };
-            predicate.map(|predicate| VectorMask::Compare {
-                lhs: self.input(lhs),
-                rhs: self.input(rhs),
-                predicate,
-                signed: lane.signed(),
-            })
-        } else {
-            None
-        }
     }
 
     pub(super) fn experimental_all_true(&mut self, v: Value) -> Option<Inst> {

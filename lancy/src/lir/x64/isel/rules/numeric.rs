@@ -9,6 +9,13 @@ use regalloc2::RegClass;
 
 impl Rules<'_> {
     pub(super) fn numeric(&mut self, op: Op) -> Result<Inst, CompileError> {
+        if let Some(inst) = self
+            .immediate_rearrangement(op)
+            .or_else(|| self.immediate_vector_shift(op))
+            .or_else(|| self.masked_numeric(op))
+        {
+            return Ok(inst);
+        }
         if cfg!(feature = "experimental-simd")
             && let Some(inst) = self.experimental_numeric(op)?
         {

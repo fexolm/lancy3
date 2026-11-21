@@ -15,11 +15,21 @@ use crate::{
 };
 use iced_x86::{BlockEncoderOptions, IcedError, code_asm::*};
 use regalloc2::RegClass;
-use regalloc2::{Allocation, Block, Edit, Function as _, InstOrEdit};
+use regalloc2::{Allocation, Block, Edit, Function as _, InstOrEdit, VReg};
 use simd::{XMM, YMM, ZMM};
 
 pub(super) type Constants = Vec<(CodeLabel, [u8; 64], usize)>;
 type AsmResult = Result<(), IcedError>;
+
+fn allocate_mask(mask: VectorMask<VReg>, regs: &[Allocation]) -> (VectorMask<usize>, usize) {
+    let mut next = 0;
+    let mask = mask.map(|_| {
+        let reg = gpr(regs[next]);
+        next += 1;
+        reg
+    });
+    (mask, next)
+}
 
 pub(super) const R64: [AsmRegister64; 16] = [
     rax, rcx, rdx, rbx, rsp, rbp, rsi, rdi, r8, r9, r10, r11, r12, r13, r14, r15,
@@ -301,11 +311,11 @@ impl Emitter<'_> {
                             | Inst::BrCmp(..)) => {
                                 let succ = body.block_succs(b);
                                 let (yes, no) = (succ[0].index(), succ[1].index());
-                                let condition = if let Inst::BranchAny(_) = inst {
-                                    simd::test_any(
+                                let condition = if let Inst::BranchAny(mask) = inst {
+                                    simd::test_vector_mask(
                                         self.a,
                                         super::Features::host(),
-                                        gpr(allocs[0]),
+                                        allocate_mask(mask, allocs).0,
                                     )?;
                                     Cond::Ne
                                 } else if let Inst::BranchAll(lane, _) = inst {
@@ -447,6 +457,32 @@ impl Emitter<'_> {
                 let (operands, temps) =
                     regs[..allocs.len()].split_at(allocs.len() - native.temporaries());
                 native.emit_allocated(a, operands, temps, Some(self.constants))
+            }
+            Inst::ExtractLane(lane, _, _, index) => simd::packed::rearrange::extract_lane(
+                a,
+                Features::host(),
+                lane,
+                reg(1),
+                reg(0),
+                index,
+            ),
+            Inst::ShiftDwords(_, _, count) => simd::packed::rearrange::shift_dwords(
+                a,
+                Features::host().bytes,
+                reg(1),
+                reg(0),
+                count,
+            ),
+            Inst::VectorShiftImm(kind, lane, _, _, count) => {
+                simd::packed::integer::shift_dword_bits(
+                    a,
+                    Features::host(),
+                    kind,
+                    lane,
+                    reg(1),
+                    reg(0),
+                    count,
+                )
             }
             Inst::Lanes {
                 action,
@@ -644,10 +680,29 @@ impl Emitter<'_> {
                 }
                 Ok(())
             }
-            Inst::CheckMask(_) => {
+            Inst::CheckMask(mask) => {
                 let fail = *self.failures[0].get_or_insert_with(|| a.create_label());
-                simd::test_any(a, super::Features::host(), reg(0))?;
+                simd::test_vector_mask(a, Features::host(), allocate_mask(mask, allocs).0)?;
                 a.jne(fail)
+            }
+            Inst::AnyComparison(_, mask) => {
+                let (mask, dst) = allocate_mask(mask, allocs);
+                simd::test_vector_mask(a, Features::host(), mask)?;
+                a.mov(r(dst), 0)?;
+                a.setne(R8[reg(dst)])?;
+                a.neg(r(dst))
+            }
+            Inst::SelectComparison { lane, mask, .. } => {
+                let (mask, first) = allocate_mask(mask, allocs);
+                simd::blend_comparison(
+                    a,
+                    Features::host(),
+                    lane,
+                    mask,
+                    reg(first + 2),
+                    reg(first),
+                    reg(first + 1),
+                )
             }
             Inst::CheckBounds(..) => {
                 let fail = *self.failures[0].get_or_insert_with(|| a.create_label());
@@ -665,20 +720,8 @@ impl Emitter<'_> {
                 ..
             } => {
                 let i = 1 + usize::from(indices.is_some());
-                let (mask, value) = match mask {
-                    VectorMask::Signs(_) => (VectorMask::Signs(reg(i)), i + 1),
-                    VectorMask::Compare {
-                        predicate, signed, ..
-                    } => (
-                        VectorMask::Compare {
-                            lhs: reg(i),
-                            rhs: reg(i + 1),
-                            predicate,
-                            signed,
-                        },
-                        i + 2,
-                    ),
-                };
+                let (mask, operands) = allocate_mask(mask, &allocs[i..]);
+                let value = i + operands;
                 simd::MaskedMemory {
                     ty,
                     base: reg(0),

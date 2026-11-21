@@ -2,7 +2,7 @@ use super::{Rules, reg};
 use crate::{
     CompileError,
     hir::{Op, Scale, Simd, Type, Value, VectorAddress},
-    lir::x64::inst::{Address, Inst, VectorMask},
+    lir::x64::inst::{Address, Inst, VectorMask, simd::evex_masked_memory},
 };
 use regalloc2::RegClass;
 
@@ -11,7 +11,7 @@ impl Rules<'_> {
         if self.ctx.constant(length) == Some(1)
             && let Some(Op::Simd(Simd::AnyTrue(mask))) = self.ctx.single_use(index)
         {
-            return Inst::CheckMask(self.input(mask));
+            return Inst::CheckMask(self.vector_mask(mask));
         }
         Inst::CheckBounds(self.input(index), self.input(length))
     }
@@ -59,17 +59,17 @@ impl Rules<'_> {
         } else {
             None
         };
-        let comparison = if cfg!(feature = "experimental-simd") {
-            self.experimental_memory_mask(ty, mask)
+        let mask = if evex_masked_memory(self.cpu, ty.lane().unwrap().bytes(), indices.is_some()) {
+            self.vector_mask(mask)
         } else {
-            None
+            VectorMask::Lanes(self.input(mask))
         };
         Ok(Inst::Masked {
             ty,
             base,
             indices,
             temp,
-            mask: comparison.unwrap_or_else(|| VectorMask::Signs(self.input(mask))),
+            mask,
             value: self.input(value),
             dst,
         })

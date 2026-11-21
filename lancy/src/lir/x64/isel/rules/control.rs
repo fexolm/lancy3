@@ -12,7 +12,7 @@ impl Rules<'_> {
             Terminator::Return(v) => Inst::Ret(self.input(v)),
             Terminator::Jump(_) => Inst::Jump,
             Terminator::Branch { cond, .. } => match self.ctx.single_use(cond) {
-                Some(Op::Simd(Simd::AnyTrue(v))) => Inst::BranchAny(self.input(v)),
+                Some(Op::Simd(Simd::AnyTrue(v))) => Inst::BranchAny(self.vector_mask(v)),
                 Some(Op::Simd(Simd::AllTrue(v))) if cfg!(feature = "experimental-simd") => self
                     .experimental_all_true(v)
                     .unwrap_or_else(|| Inst::Branch(self.input(cond))),
