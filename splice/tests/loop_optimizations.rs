@@ -1,3 +1,4 @@
+use splice::simd::Lane;
 use splice::{BufferArg, Codegen, Executable, kernel};
 use splice_cranelift::Cranelift;
 use splice_lancy::Lancy;
@@ -100,6 +101,127 @@ fn check<B: Codegen<Output: Executable>>() {
 
 #[test]
 fn loop_memory_optimizations_preserve_partial_writes() {
+    check::<Lancy>();
+    check::<LlvmManualSimd>();
+}
+
+#[kernel]
+fn vector_store_reload(src: &[u16], dst: &mut [u16]) -> i32 {
+    let stored = Lane::<u16>::load(src, 0);
+    stored.store(dst, 0);
+    let loaded = Lane::<u16>::load(dst, 0);
+    if loaded.simd_eq(stored).all() { 1 } else { 0 }
+}
+
+#[test]
+fn vector_store_reload_preserves_the_short_store_prefix() {
+    fn check<B: Codegen<Output: Executable>>() {
+        let lanes = Lane::<u16>::lanes();
+        let src: Vec<_> = (0..lanes).map(|i| 65534 - i as u16).collect();
+        for code in [
+            vector_store_reload::build::<B>().unwrap(),
+            B::compile(&vector_store_reload::ir().unwrap()).unwrap(),
+        ] {
+            for len in [0, lanes - 1, lanes, lanes + 1] {
+                let mut out = vec![17; lanes + 1];
+                let result = code.call(
+                    &[],
+                    &mut [
+                        BufferArg::ReadU16(&src),
+                        BufferArg::WriteU16(&mut out[..len]),
+                    ],
+                );
+                if len >= lanes {
+                    assert_eq!(result, Ok(1));
+                } else {
+                    assert!(result.is_err());
+                }
+                let mut expected = vec![17; lanes + 1];
+                let written = len.min(lanes);
+                expected[..written].copy_from_slice(&src[..written]);
+                assert_eq!(out, expected, "len={len}");
+            }
+        }
+    }
+    check::<Lancy>();
+    check::<LlvmManualSimd>();
+}
+
+#[kernel]
+fn packet_passes(
+    #[comptime] validate_lengths: bool,
+    n: i32,
+    adjust: i32,
+    src: &[u16],
+    dst: &mut [u16],
+) -> i32 {
+    if validate_lengths {
+        if n > src.len() as i32 {
+            return -1;
+        }
+        if n > dst.len() as i32 {
+            return -1;
+        }
+    }
+    let lanes = Lane::<u16>::lanes() as i32;
+    let mut i = 0;
+    while n - i >= lanes {
+        let x = Lane::<u16>::load(src, i as usize);
+        let y = x + Lane::<u16>::splat(1);
+        let selected = if adjust != 0 { y } else { x };
+        selected.store(dst, i as usize);
+        i += lanes;
+    }
+    let mut j = 0;
+    while n - j >= lanes {
+        let x = Lane::<u16>::load(dst, j as usize);
+        (x + Lane::<u16>::splat(2)).store(dst, j as usize);
+        j += lanes;
+    }
+    n
+}
+
+#[test]
+fn packet_loops_preserve_tail_and_partial_store_semantics() {
+    fn check<B: Codegen<Output: Executable>>() {
+        let lanes = Lane::<u16>::lanes();
+        let n = 2 * lanes + 3;
+        let src: Vec<_> = (0..n).map(|i| u16::MAX - i as u16).collect();
+        for guarded in [true, false] {
+            let ir = packet_passes::ir(guarded).unwrap();
+            for code in [
+                packet_passes::build::<B>(guarded).unwrap(),
+                B::compile(&ir).unwrap(),
+            ] {
+                for (len, adjust) in [(n, 0), (n, 2), (n, i32::MIN), (lanes + 2, 1)] {
+                    let mut out = vec![257; len];
+                    let result = code.call(
+                        &[n as i32, adjust],
+                        &mut [BufferArg::ReadU16(&src), BufferArg::WriteU16(&mut out)],
+                    );
+                    let mut expected = vec![257; len];
+                    let first = u16::from(adjust != 0);
+                    if len == n {
+                        assert_eq!(result, Ok(n as i32));
+                        for (dst, &x) in expected[..2 * lanes].iter_mut().zip(&src) {
+                            *dst = x.wrapping_add(first + 2);
+                        }
+                    } else if guarded {
+                        assert_eq!(result, Ok(-1));
+                    } else {
+                        assert!(result.is_err());
+                        for (dst, &x) in expected.iter_mut().zip(&src) {
+                            *dst = x.wrapping_add(first);
+                        }
+                    }
+                    assert_eq!(
+                        out, expected,
+                        "guarded={guarded}, len={len}, adjust={adjust}"
+                    );
+                }
+            }
+        }
+    }
     check::<Lancy>();
     check::<LlvmManualSimd>();
 }

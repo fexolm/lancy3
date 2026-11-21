@@ -1,7 +1,33 @@
-use super::{Definition, definitions};
 use crate::hir::transforms::{ControlFlowGraph, DomTree};
-use crate::hir::{Block, Function, Inst, Op, Value};
+use crate::hir::{Block, Function, Inst, Lane, Op, Simd, Value};
 use crate::support::slotmap::DenseMap;
+
+#[derive(Clone, Copy)]
+pub(super) struct Definition {
+    pub(super) block: Block,
+    inst: Inst,
+}
+
+fn definitions(f: &Function) -> DenseMap<Value, Definition> {
+    let mut defs = DenseMap::filled(
+        f.value_count(),
+        Definition {
+            block: Block::INVALID,
+            inst: Inst::INVALID,
+        },
+    );
+    for block in f.blocks() {
+        for &value in f.params(block) {
+            defs[value].block = block;
+        }
+        for inst in f.instructions(block) {
+            if let Some(value) = f.result(inst) {
+                defs[value] = Definition { block, inst };
+            }
+        }
+    }
+    defs
+}
 
 pub(super) struct Facts {
     pub(super) defs: DenseMap<Value, Definition>,
@@ -77,6 +103,22 @@ impl Facts {
             Some(Op::Const(n)) => Some(n),
             _ => None,
         }
+    }
+
+    /// Integer division and remainder can fail for zero and signed MIN / -1.
+    pub(super) fn nontrapping_divisor(&self, f: &Function, divisor: Value) -> bool {
+        let constant = match self.op(f, divisor) {
+            Some(Op::Simd(Simd::Splat(scalar))) => self.op(f, scalar),
+            op => op,
+        };
+        let (lane, bits) = match constant {
+            Some(Op::Const(n)) => (Lane::I32, u128::from(n as u32)),
+            Some(Op::Literal(lane, bits)) if !lane.float() => (lane, bits),
+            _ => return false,
+        };
+        let mask = u128::MAX >> (128 - lane.bytes() * 8);
+        let bits = bits & mask;
+        bits != 0 && (!lane.signed() || bits != mask)
     }
 
     pub(super) fn append(&mut self, f: &mut Function, block: Block, op: Op) -> Value {

@@ -1,0 +1,116 @@
+# Independent SIMD shifts initially precede the whole reduction. The old order
+# needs at least eighteen vector registers. Consuming terms as they become
+# ready brings the peak below the register budget on the x64 allocator.
+fn main x:i32 -> i32
+  data = simd.splat x
+  c1 = const 1
+  count1 = simd.splat c1
+  term1 = simd.shl data count1
+  c2 = const 2
+  count2 = simd.splat c2
+  term2 = simd.shl data count2
+  c3 = const 3
+  count3 = simd.splat c3
+  term3 = simd.shl data count3
+  c4 = const 4
+  count4 = simd.splat c4
+  term4 = simd.shl data count4
+  c5 = const 5
+  count5 = simd.splat c5
+  term5 = simd.shl data count5
+  c6 = const 6
+  count6 = simd.splat c6
+  term6 = simd.shl data count6
+  c7 = const 7
+  count7 = simd.splat c7
+  term7 = simd.shl data count7
+  c8 = const 8
+  count8 = simd.splat c8
+  term8 = simd.shl data count8
+  c9 = const 9
+  count9 = simd.splat c9
+  term9 = simd.shl data count9
+  c10 = const 10
+  count10 = simd.splat c10
+  term10 = simd.shl data count10
+  c11 = const 11
+  count11 = simd.splat c11
+  term11 = simd.shl data count11
+  c12 = const 12
+  count12 = simd.splat c12
+  term12 = simd.shl data count12
+  c13 = const 13
+  count13 = simd.splat c13
+  term13 = simd.shl data count13
+  c14 = const 14
+  count14 = simd.splat c14
+  term14 = simd.shl data count14
+  c15 = const 15
+  count15 = simd.splat c15
+  term15 = simd.shl data count15
+  c16 = const 16
+  count16 = simd.splat c16
+  term16 = simd.shl data count16
+  c17 = const 17
+  count17 = simd.splat c17
+  term17 = simd.shl data count17
+  c18 = const 18
+  count18 = simd.splat c18
+  term18 = simd.shl data count18
+  acc2 = simd.xor term1 term2
+  acc3 = simd.xor acc2 term3
+  acc4 = simd.xor acc3 term4
+  acc5 = simd.xor acc4 term5
+  acc6 = simd.xor acc5 term6
+  acc7 = simd.xor acc6 term7
+  acc8 = simd.xor acc7 term8
+  acc9 = simd.xor acc8 term9
+  acc10 = simd.xor acc9 term10
+  acc11 = simd.xor acc10 term11
+  acc12 = simd.xor acc11 term12
+  acc13 = simd.xor acc12 term13
+  acc14 = simd.xor acc13 term14
+  acc15 = simd.xor acc14 term15
+  acc16 = simd.xor acc15 term16
+  acc17 = simd.xor acc16 term17
+  acc18 = simd.xor acc17 term18
+  zero = const 0
+  result = simd.extract acc18 zero
+  ret result
+@isel check: packed.I32.Shl imm=18
+@isel check: native.Vector(I32).Binary(Xor)
+@alloc check: spill_slots=0
+@alloc check: native.Vector(I32).Binary(Xor)
+@alloc check: packed.I32.Shl imm=18
+@run 1 -> 524286
+@run -1 -> 174762
+@run 0x76543210 -> 0xd41823e0
+
+---
+
+# The dynamic store can alias either word. The first load must see the
+# original value and the second must see the store when i = 0. A bounds
+# failure keeps that first store and prevents the final one.
+fn main p:ptr n:i32 i:i32 x:i32 -> i32
+  q = offset p i 4
+  a = load i32 p
+  masked = xor a x
+  store q x
+  b = load i32 p
+  mixed = add masked b
+  one = const 1
+  doubled = shl masked one
+  bounds i n
+  result = xor mixed doubled
+  store p result
+  ret result
+@alloc check: load.I32
+@alloc check: store.I32
+@alloc check: load.I32
+@alloc check: bounds
+@alloc check: store.I32
+@alloc check: ret
+@run 2 0 11 -> 15 | 07 00 00 00 09 00 00 00 | 0f 00 00 00 09 00 00 00
+@run 2 1 11 -> 11 | 07 00 00 00 09 00 00 00 | 0b 00 00 00 0b 00 00 00
+@run 0 0 11 -> !bounds | 07 00 00 00 09 00 00 00 | 0b 00 00 00 09 00 00 00
+@run 1 1 11 -> !bounds | 07 00 00 00 09 00 00 00 | 07 00 00 00 0b 00 00 00

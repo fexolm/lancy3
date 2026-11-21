@@ -1,0 +1,310 @@
+# Each eight-byte element is produced and consumed in the same iteration.
+fn main p:ptr n:i32 -> i32
+  zero = const 0
+  one = const 1
+  two = literal f64 4000000000000000
+  jump first zero
+block first i:i32
+  more = lt i n
+  br more first_body | bridge
+block first_body
+  next = add i one
+  addr = offset p i 8
+  value = cast f64 next
+  store addr value
+  jump first next
+block bridge
+  jump second zero
+block second j:i32
+  more_b = lt j n
+  br more_b second_body | done
+block second_body
+  addr_b = offset p j 8
+  input = load f64 addr_b
+  product = mul input two
+  store addr_b product
+  next_b = add j one
+  jump second next_b
+block done
+  ret n
+@source check: br
+@source check: br
+@opt check: br
+@opt not: br
+@opt not: load
+@opt check: store
+@opt not: br
+@opt not: store
+@opt check: ret
+@run 2 -> 2 | aa aa aa aa aa aa aa aa aa aa aa aa aa aa aa aa be ef | 00 00 00 00 00 00 00 40 00 00 00 00 00 00 10 40 be ef
+@run 0 -> 0 | be ef | be ef
+
+---
+
+# A two-element stride at scale eight leaves a full u128 slot per iteration.
+fn main p:ptr -> i32
+  zero = const 0
+  step = const 2
+  bound = const 4
+  high = literal u128 10000000000000000000000000000000
+  increment = literal u128 2
+  jump first zero
+block first i:i32
+  more = lt i bound
+  br more first_body | bridge
+block first_body
+  addr = offset p i 8
+  wide = cast u128 i
+  value = add high wide
+  store addr value
+  next = add i step
+  jump first next
+block bridge
+  jump second zero
+block second j:i32
+  more_b = lt j bound
+  br more_b second_body | done
+block second_body
+  addr_b = offset p j 8
+  input = load u128 addr_b
+  value_b = add input increment
+  store addr_b value_b
+  next_b = add j step
+  jump second next_b
+block done
+  ret bound
+@source check: br
+@source check: br
+@opt check: br
+@opt not: br
+@opt not: load
+@opt check: store
+@opt not: br
+@opt not: store
+@opt check: ret
+@run -> 4 | aa aa aa aa aa aa aa aa aa aa aa aa aa aa aa aa aa aa aa aa aa aa aa aa aa aa aa aa aa aa aa aa be ef | 02 00 00 00 00 00 00 00 00 00 00 00 00 00 00 10 04 00 00 00 00 00 00 00 00 00 00 00 00 00 00 10 be ef
+
+---
+
+# Each iteration consumes a complete SIMD packet at the preceding store.
+# The explicit full/short branches model Splice's checked vector stores.
+# Thirty-two u16 elements form whole packets on every supported SIMD profile.
+fn main p:ptr n:i32 x:i32 -> i32
+  zero = const 0
+  one_i32 = const 1
+  one = literal u16 1
+  width = simd.lanes u16
+  last = sub width one_i32
+  narrow = cast u16 x
+  value = simd.splat narrow
+  increment = simd.splat one
+  jump first zero
+block first i:i32
+  remaining = sub n i
+  full = ge remaining width
+  br full first_body | bridge
+block first_body
+  bounds i n
+  addr = offset p i 2
+  next = add i width
+  available = sub n i
+  fits = ge available width
+  br fits first_full | first_short
+block first_full
+  simd.store addr value
+  jump first next
+block first_short
+  bounds n n
+  jump first next
+block bridge
+  jump second zero
+block second j:i32
+  remaining_b = sub n j
+  full_b = ge remaining_b width
+  br full_b second_body | done
+block second_body
+  bounds j n
+  addr_b = offset p j 2
+  available_b = sub n j
+  bounds last available_b
+  input = simd.load u16 addr_b
+  result = simd.add input increment
+  next_b = add j width
+  fits_b = ge available_b width
+  br fits_b second_full | second_short
+block second_full
+  simd.store addr_b result
+  jump second next_b
+block second_short
+  bounds n n
+  jump second next_b
+block done
+  ret n
+@source check: br
+@source check: br
+@opt check: br
+@opt not: br
+@opt not: bounds
+@opt not: simd.load
+@opt check: simd.store
+@opt not: br
+@opt not: simd.store
+@opt not: bounds
+@opt check: ret
+@run 33 511 -> 33 | aa aa aa aa aa aa aa aa aa aa aa aa aa aa aa aa aa aa aa aa aa aa aa aa aa aa aa aa aa aa aa aa aa aa aa aa aa aa aa aa aa aa aa aa aa aa aa aa aa aa aa aa aa aa aa aa aa aa aa aa aa aa aa aa be ef | 00 02 00 02 00 02 00 02 00 02 00 02 00 02 00 02 00 02 00 02 00 02 00 02 00 02 00 02 00 02 00 02 00 02 00 02 00 02 00 02 00 02 00 02 00 02 00 02 00 02 00 02 00 02 00 02 00 02 00 02 00 02 00 02 be ef
+@run -2147483648 511 -> -2147483648 | be ef | be ef
+
+---
+
+# At scale four, the next u64 store changes the previous slot's high word.
+fn main p:ptr n:i32 -> i32
+  zero = const 0
+  one = const 1
+  thirty_two = literal u64 20
+  jump first zero
+block first i:i32
+  more = lt i n
+  br more first_body | bridge
+block first_body
+  next = add i one
+  value = cast u64 next
+  addr = offset p i 4
+  store addr value
+  jump first next
+block bridge
+  jump second zero zero
+block second j:i32 sum:i32
+  more_b = lt j n
+  br more_b second_body | done
+block second_body
+  addr_b = offset p j 4
+  input = load u64 addr_b
+  high = shr input thirty_two
+  word = cast i32 high
+  new_sum = add sum word
+  next_b = add j one
+  jump second next_b new_sum
+block done
+  ret sum
+@opt check: br
+@opt check: br
+@opt check: load U64
+@run 2 -> 2 | aa aa aa aa aa aa aa aa aa aa aa aa | 01 00 00 00 02 00 00 00 00 00 00 00
+
+---
+
+# Both accesses fit their own stride. Different scales still create a
+# dependence on a later iteration of the producer on the shared base.
+fn main p:ptr n:i32 -> i32
+  zero = const 0
+  one = const 1
+  jump first zero
+block first i:i32
+  more = lt i n
+  br more first_body | bridge
+block first_body
+  next = add i one
+  addr = offset p i 4
+  store addr next
+  jump first next
+block bridge
+  jump second zero zero
+block second j:i32 sum:i32
+  more_b = lt j n
+  br more_b second_body | done
+block second_body
+  addr_b = offset p j 8
+  input = load i32 addr_b
+  new_sum = add sum input
+  next_b = add j one
+  jump second next_b new_sum
+block done
+  ret sum
+@opt check: br
+@opt check: br
+@opt check: load I32
+@run 3 -> 98 | 5a 00 00 00 5b 00 00 00 5c 00 00 00 5d 00 00 00 5e 00 00 00 | 01 00 00 00 02 00 00 00 03 00 00 00 5d 00 00 00 5e 00 00 00
+
+---
+
+# Declared slices give disjoint regions; the raw accesses here are not
+# proved to stay in either region.
+fn main p:ptr p_len:i32 q:ptr q_len:i32 n:i32 -> i32
+  slices 0 write4 read4
+  zero = const 0
+  one = const 1
+  jump first zero
+block first i:i32
+  more = lt i n
+  br more first_body | bridge
+block first_body
+  next = add i one
+  addr = offset p i 4
+  store addr next
+  jump first next
+block bridge
+  jump second zero zero
+block second j:i32 sum:i32
+  more_b = lt j n
+  br more_b second_body | done
+block second_body
+  addr_b = offset q j 4
+  value = load i32 addr_b
+  new_sum = add sum value
+  next_b = add j one
+  jump second next_b new_sum
+block done
+  ret sum
+@opt check: br
+@opt check: br
+
+---
+
+# Both access ranges fit within the declared, disjoint slices.
+fn main p:ptr p_len:i32 q:ptr q_len:i32 n:i32 -> i32
+  slices 0 write8 read8
+  zero = const 0
+  one = const 1
+  p_fits = le n p_len
+  br p_fits check_q | reject
+block check_q
+  q_fits = le n q_len
+  br q_fits init | reject
+block reject
+  ret zero
+block init
+  jump first zero
+block first i:i32
+  more = lt i n
+  br more first_body | bridge
+block first_body
+  next = add i one
+  addr = offset p i 8
+  value = cast u64 next
+  store addr value
+  jump first next
+block bridge
+  jump second zero zero
+block second j:i32 sum:i32
+  more_b = lt j n
+  br more_b second_body | done
+block second_body
+  addr_b = offset q j 8
+  other = load u64 addr_b
+  word = cast i32 other
+  new_sum = add sum word
+  next_b = add j one
+  jump second next_b new_sum
+block done
+  ret sum
+@source check: br
+@source check: br
+@source check: br
+@source check: br
+@opt check: br
+@opt check: br
+@opt check: br
+@opt not: br
+@opt check: load U64
+@opt not: br
+@opt check: ret

@@ -1,20 +1,43 @@
-use super::{CountedLoop, Facts, NaturalLoops};
+use super::{Count, CountedLoop, Facts, NaturalLoops, at_least};
 use crate::hir::transforms::{ControlFlowGraph, DomTree};
-use crate::hir::{Binary, Block, Function, Op, Scale, Terminator, Type, Value};
+use crate::hir::{Binary, Block, Function, Op, Simd, Terminator, Type, Value};
 use crate::support::slotmap::DenseMap;
 use std::collections::HashMap;
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
-enum Operand {
+enum Index {
     Constant(i32),
     Ssa(Value),
 }
 
-/// Bound the work per query even on CFGs that repeat an equivalent guard.
-fn record<K: Eq + std::hash::Hash>(table: &mut HashMap<K, Vec<Block>>, key: K, block: Block) {
+fn index(f: &Function, facts: &Facts, value: Value) -> Index {
+    facts
+        .constant(f, value)
+        .map_or(Index::Ssa(facts.root(value)), Index::Constant)
+}
+
+fn remaining(f: &Function, facts: &Facts, value: Value) -> (Value, Index) {
+    match facts.op(f, value) {
+        Some(Op::Bin(Binary::Sub, len, i)) => (facts.root(len), index(f, facts, i)),
+        _ => (facts.root(value), Index::Constant(0)),
+    }
+}
+
+fn last_lane(f: &Function, facts: &Facts, value: Value) -> Option<Count> {
+    match facts.op(f, value)? {
+        Op::Bin(Binary::Sub, count, one) if facts.constant(f, one) == Some(1) => {
+            Count::of(f, facts, count)
+        }
+        Op::Const(n) if n >= 0 => Some(Count::Fixed(n.checked_add(1)?)),
+        _ => None,
+    }
+}
+
+/// Each query only needs a small number of dominating witnesses.
+fn record<K: Eq + std::hash::Hash, V>(table: &mut HashMap<K, Vec<V>>, key: K, witness: V) {
     let witnesses = table.entry(key).or_default();
     if witnesses.len() < 4 {
-        witnesses.push(block);
+        witnesses.push(witness);
     }
 }
 
@@ -28,178 +51,266 @@ fn unsigned_slice_length(f: &Function, facts: &Facts, value: Value) -> Option<Va
     })
 }
 
-pub(super) fn optimize(
-    f: &mut Function,
-    cfg: &ControlFlowGraph,
-    dom: &DomTree,
-    loops: &NaturalLoops,
-    facts: &mut Facts,
-    counted: &DenseMap<Block, Option<CountedLoop>>,
-) {
-    let readonly = f.has_slice_params();
-    if !readonly && !counted.values().any(Option::is_some) {
-        return;
-    }
-    let operand = |f: &Function, value| {
-        let v = facts.root(value);
-        facts
-            .constant(f, v)
-            .map_or(Operand::Ssa(v), Operand::Constant)
-    };
-    let mut before = HashMap::new();
-    let mut checked = HashMap::new();
-    let mut minimum_lengths: HashMap<Value, Vec<(i32, Block)>> = HashMap::new();
-    for &block in cfg.reverse_postorder() {
-        if readonly {
-            for inst in f.instructions(block) {
-                if let Op::BoundsCheck(index, len) = *f.op(inst) {
-                    record(&mut checked, (operand(f, index), facts.root(len)), block);
+#[derive(Default)]
+pub(super) struct Bounds {
+    before: HashMap<(Value, Value), Vec<Block>>,
+    checked: HashMap<(Index, Value), Vec<Block>>,
+    minimum_lengths: HashMap<Value, Vec<(i32, Block)>>,
+    packets: HashMap<(Value, Index), Vec<(Count, Block)>>,
+    checked_packets: HashMap<(Value, Index), Vec<(Count, Block)>>,
+}
+
+impl Bounds {
+    pub(super) fn new(f: &Function, cfg: &ControlFlowGraph, facts: &Facts) -> Self {
+        let mut bounds = Self::default();
+        let declared = f.has_slice_params();
+        for &block in cfg.reverse_postorder() {
+            if declared {
+                for inst in f.instructions(block) {
+                    if let Op::BoundsCheck(i, len) = *f.op(inst) {
+                        record(
+                            &mut bounds.checked,
+                            (index(f, facts, i), facts.root(len)),
+                            block,
+                        );
+                        if let Some(count) = last_lane(f, facts, i) {
+                            record(
+                                &mut bounds.checked_packets,
+                                remaining(f, facts, len),
+                                (count, block),
+                            );
+                        }
+                    }
                 }
             }
-        }
-        let Terminator::Branch { cond, yes, no } = *f.terminator(block) else {
-            continue;
-        };
-        let yes = f.edge(yes).0;
-        let no = f.edge(no).0;
-        if yes == no {
-            continue;
-        }
-        let Some(Op::Bin(kind, a, b)) = facts.op(f, cond) else {
-            continue;
-        };
-        let a = facts.root(a);
-        let b = facts.root(b);
-        if f.value_type(a) != Type::I32 {
-            continue;
-        }
-        // Each fact holds only after a specific edge. A single-predecessor
-        // destination makes block dominance sufficient to use that fact.
-        let relations = match kind {
-            Binary::Lt | Binary::Le => [(a, b, yes), (b, a, no)],
-            Binary::Gt | Binary::Ge => [(b, a, yes), (a, b, no)],
-            _ => continue,
-        };
-        for (low, high, scope) in relations {
-            if cfg.predecessors(scope) != [block] {
+            let Terminator::Branch { cond, yes, no } = *f.terminator(block) else {
+                continue;
+            };
+            let yes = f.edge(yes).0;
+            let no = f.edge(no).0;
+            if yes == no {
                 continue;
             }
-            record(&mut before, (low, high), scope);
-            if readonly && let Some(min) = facts.constant(f, low) {
-                // Splice lowers usize comparisons to signed comparisons
-                // after flipping the sign bit. Only decode this guard for
-                // declared slice lengths and thresholds in the i32 range.
-                let (len, min) = if min < 0 {
-                    let Some(len) = unsigned_slice_length(f, facts, high) else {
-                        continue;
+            let Some(Op::Bin(kind, a, b)) = facts.op(f, cond) else {
+                continue;
+            };
+            let a = facts.root(a);
+            let b = facts.root(b);
+            if f.value_type(a) != Type::I32 {
+                continue;
+            }
+            let Some((high, low, on_yes)) = at_least(kind, a, b) else {
+                continue;
+            };
+            let (enough, short) = if on_yes { (yes, no) } else { (no, yes) };
+            // An edge is a witness only when its destination has no other
+            // predecessor. The other outcome also implies high <= low.
+            for (lower, upper, scope) in [(low, high, enough), (high, low, short)] {
+                if cfg.predecessors(scope) != [block] {
+                    continue;
+                }
+                record(&mut bounds.before, (lower, upper), scope);
+                if declared && let Some(minimum) = facts.constant(f, lower) {
+                    let (length, minimum) = if minimum < 0 {
+                        let Some(length) = unsigned_slice_length(f, facts, upper) else {
+                            continue;
+                        };
+                        (length, minimum ^ i32::MIN)
+                    } else {
+                        (upper, minimum)
                     };
-                    (len, min ^ i32::MIN)
-                } else {
-                    (high, min)
-                };
-                let entries = minimum_lengths.entry(len).or_default();
-                if entries.len() < 4 {
-                    entries.push((min, scope));
+                    record(&mut bounds.minimum_lengths, length, (minimum, scope));
                 }
             }
+            if declared
+                && cfg.predecessors(enough) == [block]
+                && let Some(count) = Count::of(f, facts, low)
+            {
+                record(
+                    &mut bounds.packets,
+                    remaining(f, facts, high),
+                    (count, enough),
+                );
+            }
         }
+        bounds
     }
-    let dominates = |witnesses: Option<&Vec<Block>>, at| {
-        witnesses.is_some_and(|blocks| blocks.iter().any(|&b| dom.dominates(b, at)))
-    };
-    let covered = |index, len, at| {
-        dominates(checked.get(&(index, len)), at)
-            || matches!(index, Operand::Constant(i) if i >= 0 &&
-                minimum_lengths.get(&len).is_some_and(|bounds| bounds.iter().any(
-                    |&(min, block)| i < min && dom.dominates(block, at))))
-    };
 
-    // A check in the selected body is redundant when the signed induction
-    // variable starts nonnegative and is below an upper bound <= length.
-    for &block in cfg.reverse_postorder() {
-        let Some(lp) = counted.get(loops.owner[block]).copied().flatten() else {
-            continue;
-        };
-        let body = f.edge(lp.body).0;
-        if facts.constant(f, lp.start).is_none_or(|n| n < 0)
-            || body == lp.header
-            || cfg.predecessors(body) != [lp.header]
-            || !dom.dominates(body, block)
+    pub(super) fn loop_covers(
+        &self,
+        f: &Function,
+        facts: &Facts,
+        dom: &DomTree,
+        lp: CountedLoop,
+        len: Value,
+        count: Count,
+    ) -> bool {
+        facts.constant(f, lp.start).is_some_and(|n| n >= 0)
+            && count.at_most(lp.packet_size().unwrap_or(Count::Fixed(1)))
+            && (lp.bound == len
+                || self.before.get(&(lp.bound, len)).is_some_and(|blocks| {
+                    blocks
+                        .iter()
+                        .any(|&block| dom.dominates(block, lp.preheader))
+                }))
+    }
+
+    // Only declared slice lengths are used here. They are nonnegative, so
+    // len - i cannot wrap if i is nonnegative. The unsigned last-lane check
+    // also needs a separate proof that the starting index fits.
+    fn invariant_covers(
+        &self,
+        dom: &DomTree,
+        i: Index,
+        len: Value,
+        count: Count,
+        at: Block,
+    ) -> bool {
+        let dominates = |block| dom.dominates(block, at);
+        if let Index::Constant(n) = i
+            && n >= 0
+            && self.minimum_lengths.get(&len).is_some_and(|bounds| {
+                bounds.iter().any(|&(min, block)| {
+                    i64::from(n) + i64::from(count.at_width(64)) <= i64::from(min)
+                        && dominates(block)
+                })
+            })
         {
-            continue;
+            return true;
         }
-        f.rewrite_instructions(block, |op, _, _| {
-            if let Op::BoundsCheck(index, len) = op
-                && facts.root(index) == lp.iv
-            {
-                let len = facts.root(len);
-                if lp.bound == len || dominates(before.get(&(lp.bound, len)), lp.preheader) {
-                    return None;
-                }
-            }
-            Some(op)
-        });
+        let first = self
+            .checked
+            .get(&(i, len))
+            .is_some_and(|blocks| blocks.iter().any(|&block| dominates(block)))
+            || matches!(i, Index::Constant(n) if n >= 0 &&
+            self.minimum_lengths.get(&len).is_some_and(|bounds| {
+                bounds.iter().any(|&(min, block)| n < min && dominates(block))
+            }));
+        let applies = |witnesses: Option<&Vec<(Count, Block)>>| {
+            witnesses.is_some_and(|entries| {
+                entries
+                    .iter()
+                    .any(|&(width, block)| count.at_most(width) && dominates(block))
+            })
+        };
+        (first && (count == Count::Fixed(1) || applies(self.checked_packets.get(&(len, i)))))
+            || ((first || matches!(i, Index::Constant(n) if n >= 0))
+                && applies(self.packets.get(&(len, i))))
     }
 
-    if !readonly {
-        return;
-    }
-    let mut moves = Vec::new();
-    let mut redundant = Vec::new();
-    for &block in cfg.reverse_postorder() {
-        let Some(&target) = loops.preheader.get(loops.owner[block]) else {
-            continue;
-        };
-        if target == Block::INVALID {
-            continue;
-        }
-        redundant.clear();
-        for inst in f.instructions(block) {
-            if let Op::BoundsCheck(index, len) = *f.op(inst)
-                && covered(operand(f, index), facts.root(len), target)
-            {
-                redundant.push((index, len));
+    pub(super) fn optimize(
+        &self,
+        f: &mut Function,
+        cfg: &ControlFlowGraph,
+        dom: &DomTree,
+        loops: &NaturalLoops,
+        facts: &mut Facts,
+        counted: &DenseMap<Block, Option<CountedLoop>>,
+    ) -> bool {
+        let declared = f.has_slice_params();
+        let mut changed_cfg = false;
+        let mut moves = Vec::new();
+        let mut redundant = Vec::new();
+        for &block in cfg.reverse_postorder() {
+            let owner = loops.owner[block];
+            let Some(&preheader) = loops.preheader.get(owner) else {
+                continue;
+            };
+            if preheader == Block::INVALID {
+                continue;
             }
-            let Op::Load(Type::I32, ptr) = *f.op(inst) else {
-                continue;
-            };
-            let Some(Op::PtrOffset(base, index, Scale::Four)) = facts.op(f, ptr) else {
-                continue;
-            };
-            let Some(base) = facts.available(base, target, dom) else {
-                continue;
-            };
-            let Some((len, 4, false)) = f.slice_param(base) else {
-                continue;
-            };
-            let key = operand(f, index);
-            if covered(key, len, target)
-                && (matches!(key, Operand::Constant(_))
-                    || facts.available(index, target, dom).is_some())
-            {
-                moves.push((target, inst, base, key));
-            }
-        }
-        if !redundant.is_empty() {
-            redundant.sort_unstable();
-            f.rewrite_instructions(block, |op, _, _| match op {
-                Op::BoundsCheck(index, len) if redundant.binary_search(&(index, len)).is_ok() => {
-                    None
-                }
-                _ => Some(op),
+            let active = counted[owner].filter(|lp| {
+                let body = f.edge(lp.body).0;
+                body != lp.header
+                    && cfg.predecessors(body) == [lp.header]
+                    && dom.dominates(body, block)
             });
-        }
-    }
-    let mut hoisted = HashMap::new();
-    for (target, inst, base, key) in moves {
-        let value = *hoisted.entry((target, base, key)).or_insert_with(|| {
-            let index = match key {
-                Operand::Constant(n) => facts.append(f, target, Op::Const(n)),
-                Operand::Ssa(v) => v,
+            let covered = |f: &Function, i, len, count| {
+                active.is_some_and(|lp| {
+                    i == Index::Ssa(lp.iv) && self.loop_covers(f, facts, dom, lp, len, count)
+                }) || (declared
+                    && f.is_slice_length(len)
+                    && self.invariant_covers(dom, i, len, count, preheader))
             };
-            let addr = facts.append(f, target, Op::PtrOffset(base, index, Scale::Four));
-            facts.append(f, target, Op::Load(Type::I32, addr))
-        });
-        f.replace_op_preserving_type(inst, Op::Copy(value));
+            redundant.clear();
+            for inst in f.instructions(block) {
+                let (ty, ptr) = match *f.op(inst) {
+                    Op::BoundsCheck(i, len) => {
+                        if covered(f, index(f, facts, i), facts.root(len), Count::Fixed(1))
+                            || last_lane(f, facts, i).is_some_and(|count| {
+                                let (len, i) = remaining(f, facts, len);
+                                covered(f, i, len, count)
+                            })
+                        {
+                            redundant.push((i, len));
+                        }
+                        continue;
+                    }
+                    Op::Load(ty, ptr) if declared => (ty, ptr),
+                    Op::Simd(Simd::Load(lane, ptr)) if declared => (Type::Vector(lane), ptr),
+                    _ => continue,
+                };
+                let Some(Op::PtrOffset(base, i, scale)) = facts.op(f, ptr) else {
+                    continue;
+                };
+                let Some(base) = facts.available(base, preheader, dom) else {
+                    continue;
+                };
+                let Some((len, element, false)) = f.slice_param(base) else {
+                    continue;
+                };
+                let stride = 1 << scale as u8;
+                let i = index(f, facts, i);
+                if stride == usize::from(element)
+                    && self.invariant_covers(dom, i, len, Count::access(ty, stride), preheader)
+                    && (matches!(i, Index::Constant(_))
+                        || matches!(i, Index::Ssa(v) if facts.available(v, preheader, dom).is_some()))
+                {
+                    moves.push((preheader, inst, base, i, scale, ty));
+                }
+            }
+            if !redundant.is_empty() {
+                redundant.sort_unstable();
+                f.rewrite_instructions(block, |op, _, _| match op {
+                    Op::BoundsCheck(i, n) if redundant.binary_search(&(i, n)).is_ok() => None,
+                    _ => Some(op),
+                });
+            }
+            // A full packet loop already guarantees the full branch of a
+            // checked SIMD store. Its short-store path is unreachable.
+            if let Some(lp) = active
+                && let Terminator::Branch { cond, yes, no } = *f.terminator(block)
+                && let Some(Op::Bin(kind, a, b)) = facts.op(f, cond)
+                && f.value_type(a) == Type::I32
+                && let Some((left, right, full_on_yes)) = at_least(kind, a, b)
+                && let Some(count) = Count::of(f, facts, right)
+                && let (len, Index::Ssa(i)) = remaining(f, facts, left)
+                && i == lp.iv
+                && self.loop_covers(f, facts, dom, lp, len, count)
+            {
+                f.set_terminator(block, Terminator::Jump(if full_on_yes { yes } else { no }));
+                changed_cfg = true;
+            }
+        }
+
+        let mut hoisted = HashMap::new();
+        for (target, inst, base, i, scale, ty) in moves {
+            let value = *hoisted
+                .entry((target, base, i, scale, ty))
+                .or_insert_with(|| {
+                    let i = match i {
+                        Index::Constant(n) => facts.append(f, target, Op::Const(n)),
+                        Index::Ssa(v) => v,
+                    };
+                    let addr = facts.append(f, target, Op::PtrOffset(base, i, scale));
+                    let op = match ty {
+                        Type::Vector(lane) => Op::Simd(Simd::Load(lane, addr)),
+                        _ => Op::Load(ty, addr),
+                    };
+                    facts.append(f, target, op)
+                });
+            f.replace_op_preserving_type(inst, Op::Copy(value));
+        }
+        changed_cfg
     }
 }

@@ -1,7 +1,7 @@
 #[cfg(feature = "experimental-simd")]
 use super::experimental;
 use crate::hir::{
-    Binary, Block, Function, IrError, Op, Simd, Terminator, Ternary, Type,
+    Binary, Block, Function, IrError, Lane, Op, Simd, Terminator, Ternary, Type, Value,
     ssa::VerifiedBody,
     transforms::{ControlFlowGraph, DomTree},
 };
@@ -9,7 +9,28 @@ use crate::module::{FunctionIds, Module};
 use crate::support::slotmap::DenseMap;
 use std::{collections::HashMap, sync::Arc};
 
-use super::{local_cfg, loops, sccp};
+use super::{local_cfg, loops, memory, sccp};
+
+fn entry_literal(
+    f: &mut Function,
+    aliases: &mut DenseMap<Value, Value>,
+    literals: &mut HashMap<(Lane, u128), Value>,
+    lane: Lane,
+    bits: u128,
+) -> Value {
+    *literals.entry((lane, bits)).or_insert_with(|| {
+        let value = f.prepend(f.entry(), sccp::literal(lane, bits)).unwrap();
+        assert_eq!(aliases.insert(value), value);
+        value
+    })
+}
+
+fn constant_op(ty: Type, bits: u128, literals: &HashMap<(Lane, u128), Value>) -> Option<Op> {
+    match ty {
+        Type::Vector(lane) => Some(Op::Simd(Simd::Splat(*literals.get(&(lane, bits))?))),
+        _ => Some(sccp::literal(ty.lane()?, bits)),
+    }
+}
 
 /// Canonicalize dataflow before instruction selection. Division,
 /// memory operations and checks remain ordered on every executable path.
@@ -20,24 +41,46 @@ pub(crate) fn simplify(f: &mut Function) -> Result<(), IrError> {
 
 fn simplify_with_cfg(f: &mut Function, cfg: &ControlFlowGraph) -> Result<(), IrError> {
     let facts = sccp::analyze(f, cfg);
+    let known = |value| facts.get(value).and_then(|fact| fact.bits());
     let mut replacements = Vec::new();
     let mut entry_constants = HashMap::new();
+    let mut literals = HashMap::new();
+    let mut uniform = Vec::new();
     let entry = f.entry();
-    for &b in &cfg.reverse_postorder()[1..] {
-        for &param in f.params(b) {
-            if let Some(n) = facts[param].constant() {
-                replacements.push((param, n));
+    for &b in cfg.reverse_postorder() {
+        if b != entry {
+            for &param in f.params(b) {
+                if let Some(bits) = known(param) {
+                    replacements.push((param, bits));
+                }
+            }
+        }
+        for i in f.instructions(b) {
+            if let Some(dst) = f.result(i)
+                && let Some(bits) = known(dst)
+                && let Type::Vector(lane) = f.value_type(dst)
+                && !matches!(f.op(i), Op::Simd(Simd::Splat(_)))
+            {
+                uniform.push((lane, bits));
             }
         }
     }
     let mut aliases = DenseMap::from_fn(f.value_count(), |v| v);
-    for &(param, n) in &replacements {
-        let value = *entry_constants.entry(n).or_insert_with(|| {
-            let value = f.append(entry, Op::Const(n)).unwrap();
-            assert_eq!(aliases.insert(value), value);
-            value
-        });
+    for &(param, bits) in &replacements {
+        let ty = f.value_type(param);
+        let value = match ty {
+            Type::Vector(lane) => *entry_constants.entry((lane, bits)).or_insert_with(|| {
+                let scalar = entry_literal(f, &mut aliases, &mut literals, lane, bits);
+                let value = f.append(entry, Op::Simd(Simd::Splat(scalar))).unwrap();
+                assert_eq!(aliases.insert(value), value);
+                value
+            }),
+            _ => entry_literal(f, &mut aliases, &mut literals, ty.lane().unwrap(), bits),
+        };
         aliases[param] = value;
+    }
+    for (lane, bits) in uniform {
+        entry_literal(f, &mut aliases, &mut literals, lane, bits);
     }
     let mut vector_orderings = HashMap::new();
     #[cfg(feature = "experimental-simd")]
@@ -91,17 +134,24 @@ fn simplify_with_cfg(f: &mut Function, cfg: &ControlFlowGraph) -> Result<(), IrE
                     aliases[dst] = aliases[v];
                     return None;
                 }
-                if let Some(n) = facts.get(dst).and_then(|fact| fact.constant()) {
-                    return Some(Op::Const(n));
+                if let Some(bits) = known(dst)
+                    && !matches!(op, Op::Simd(Simd::Splat(_)))
+                    && let Some(literal) = constant_op(types[dst], bits, &literals)
+                {
+                    return Some(literal);
                 }
                 let copy = match op {
-                    Op::Bin(kind, x, y) if types[x] == Type::I32 => {
-                        let a = facts[x].constant();
-                        let b = facts[y].constant();
-                        match sccp::reduce(kind, aliases[x], aliases[y], a, b) {
-                            Some(Op::Copy(v)) => Some(v),
-                            Some(op) => return Some(op),
-                            None if a.is_some() && b.is_none() => {
+                    Op::Bin(kind, x, y) | Op::Simd(Simd::Bin(kind, x, y))
+                        if types[x].lane().is_some_and(|lane| !lane.float()) =>
+                    {
+                        let a = known(x);
+                        let b = known(y);
+                        match sccp::reduce(kind, types[x], aliases[x], aliases[y], a, b) {
+                            Some(sccp::Reduced::Copy(v)) => Some(v),
+                            Some(sccp::Reduced::Constant(bits)) => {
+                                return constant_op(types[dst], bits, &literals).or(Some(op));
+                            }
+                            None if matches!(op, Op::Bin(..)) && a.is_some() && b.is_none() => {
                                 let flipped = match kind {
                                     Binary::Lt => Binary::Gt,
                                     Binary::Le => Binary::Ge,
@@ -124,12 +174,21 @@ fn simplify_with_cfg(f: &mut Function, cfg: &ControlFlowGraph) -> Result<(), IrE
                             _ => None,
                         }
                     }
-                    Op::Ternary(Ternary::Select, c, yes, no) => match facts[c].constant() {
-                        Some(0) => Some(no),
-                        Some(_) => Some(yes),
-                        None if aliases[yes] == aliases[no] => Some(yes),
-                        None => None,
-                    },
+                    Op::Ternary(Ternary::Select, c, yes, no)
+                    | Op::Simd(Simd::Ternary(Ternary::Select, c, yes, no)) => {
+                        if aliases[yes] == aliases[no] {
+                            Some(yes)
+                        } else {
+                            known(c).map(|bits| {
+                                let cond = if matches!(op, Op::Simd(_)) {
+                                    bits >> (types[c].lane().unwrap().bytes() * 8 - 1) != 0
+                                } else {
+                                    bits != 0
+                                };
+                                if cond { yes } else { no }
+                            })
+                        }
+                    }
                     _ => None,
                 };
                 if let Some(v) = copy {
@@ -140,7 +199,7 @@ fn simplify_with_cfg(f: &mut Function, cfg: &ControlFlowGraph) -> Result<(), IrE
             Some(op)
         });
         if let Terminator::Branch { cond, yes, no } = *f.terminator(b)
-            && let Some(n) = facts[cond].constant()
+            && let Some(n) = known(cond)
         {
             f.set_terminator(b, Terminator::Jump(if n != 0 { yes } else { no }));
             changed_cfg = true;
@@ -192,36 +251,9 @@ fn simplify_with_cfg(f: &mut Function, cfg: &ControlFlowGraph) -> Result<(), IrE
     #[cfg(feature = "experimental-simd")]
     experimental::remove_full_packet_checks(f, cfg, dom);
     remove_redundant_checks(f, dom);
+    memory::optimize(f, cfg, dom);
     remove_dead_computations(f, cfg);
     Ok(())
-}
-
-pub(super) fn fold_i32(op: Binary, a: i32, b: i32) -> Option<i32> {
-    Some(match op {
-        Binary::Add => a.wrapping_add(b),
-        Binary::Sub => a.wrapping_sub(b),
-        Binary::Mul => a.wrapping_mul(b),
-        Binary::Div => a.checked_div(b)?,
-        Binary::Rem => a.checked_rem(b)?,
-        Binary::And => a & b,
-        Binary::Or => a | b,
-        Binary::Xor => a ^ b,
-        Binary::Eq => -i32::from(a == b),
-        Binary::Ne => -i32::from(a != b),
-        Binary::Lt => -i32::from(a < b),
-        Binary::Le => -i32::from(a <= b),
-        Binary::Gt => -i32::from(a > b),
-        Binary::Ge => -i32::from(a >= b),
-        Binary::Shl => a.wrapping_shl(b as u32),
-        Binary::Shr => a.wrapping_shr(b as u32),
-        Binary::Min => a.min(b),
-        Binary::Max => a.max(b),
-        Binary::RotateLeft => a.rotate_left(b as u32),
-        Binary::RotateRight => a.rotate_right(b as u32),
-        Binary::SaturatingAdd => a.saturating_add(b),
-        Binary::SaturatingSub => a.saturating_sub(b),
-        _ => return None,
-    })
 }
 
 fn remove_redundant_checks(f: &mut Function, dom: &DomTree) {

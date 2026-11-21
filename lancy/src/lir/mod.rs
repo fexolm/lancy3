@@ -3,7 +3,9 @@ mod constants;
 mod function;
 mod inst;
 mod isel;
+mod layout;
 mod regalloc;
+mod schedule;
 #[cfg(target_arch = "x86_64")]
 mod x64;
 

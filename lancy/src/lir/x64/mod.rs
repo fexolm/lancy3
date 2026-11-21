@@ -4,6 +4,7 @@ mod frame;
 pub(crate) use splice_target::Features;
 mod inst;
 mod isel;
+mod schedule;
 #[cfg(test)]
 mod tests;
 

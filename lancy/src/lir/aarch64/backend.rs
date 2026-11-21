@@ -30,6 +30,7 @@ use crate::{
     CompileError,
     hir::{Function, Type, ssa::VerifiedBody},
     jit::{DebugFrame, DebugFunction},
+    lir::layout,
     module::{FunctionId, FunctionIds, Module},
     support::slotmap::DenseMap,
 };
@@ -405,6 +406,7 @@ impl Emitter<'_> {
         allocs: &[Allocation],
         succs: &[Block],
         labels: &[Label],
+        next: Option<Block>,
     ) -> Result {
         let n = |i| number(allocs[i]);
         let g = |i| x(allocs[i]);
@@ -590,16 +592,24 @@ impl Emitter<'_> {
             }
             Inst::LibResult(ty, _) => self.value_access(true, ty, n(0), self.temp(3)),
             Inst::Jump => {
-                self.a.jump(labels[succs[0].index()]);
+                if Some(succs[0]) != next {
+                    self.a.jump(labels[succs[0].index()]);
+                }
                 Ok(())
             }
             Inst::Branch(_) => {
                 self.a
                     .put(C::Subs_32_addsub_imm, &[r(R::WZR), r(word(0)), O::imm(0)])?;
-                self.a.skip_if(Cond::Eq)?;
-                self.a.jump(labels[succs[0].index()]);
-                self.a.jump(labels[succs[1].index()]);
-                Ok(())
+                let [yes, no] = [succs[0], succs[1]];
+                if Some(yes) == next {
+                    self.a.jump_if(Cond::Eq, labels[no.index()])
+                } else {
+                    self.a.jump_if(Cond::Ne, labels[yes.index()])?;
+                    if Some(no) != next {
+                        self.a.jump(labels[no.index()]);
+                    }
+                    Ok(())
+                }
             }
             Inst::Return(ty, _, root) => {
                 if root && size(ty) > 8 {
@@ -720,9 +730,9 @@ fn emit_compiled(module: &Module<Compiled>, config: Simd, debug: bool) -> Result
             byte_predicate: false,
             failures: [None; 3],
         };
-        for (index, &label) in labels.iter().enumerate() {
-            let block = Block::new(index);
-            out.a.bind(label);
+        let order = layout::place(&machine.body);
+        for (index, &block) in order.iter().enumerate() {
+            out.a.bind(labels[block.index()]);
             out.byte_predicate = false;
             let succs = machine.body.block_succs(block);
             for item in machine
@@ -736,7 +746,13 @@ fn emit_compiled(module: &Module<Compiled>, config: Simd, debug: bool) -> Result
                         if debug && let Inst::DebugPoint(id) = inst {
                             points.push((id, out.a.words.len() as u64 * 4));
                         }
-                        out.inst(inst, machine.allocation.inst_allocs(i), succs, &labels)?;
+                        out.inst(
+                            inst,
+                            machine.allocation.inst_allocs(i),
+                            succs,
+                            &labels,
+                            order.get(index + 1).copied(),
+                        )?;
                     }
                 }
             }

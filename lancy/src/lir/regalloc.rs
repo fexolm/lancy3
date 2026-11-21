@@ -1,11 +1,19 @@
-use super::{Function, TargetInst};
+use super::{
+    Function, TargetInst,
+    schedule::{self, Schedulable},
+};
 use crate::CompileError;
 use regalloc2::{Algorithm, Ctx, Output, RegallocOptions};
 
-pub(super) fn allocate<I: TargetInst>(
-    f: &Function<I>,
+pub(super) fn allocate<I: TargetInst + Schedulable>(
+    f: &mut Function<I>,
     ctx: &mut Ctx,
 ) -> Result<Output, CompileError> {
+    {
+        let _span =
+            tracing::debug_span!(target: "splice::compile", "schedule_instructions").entered();
+        schedule::run(f);
+    }
     let _span = tracing::debug_span!(target: "splice::compile", "allocate_registers").entered();
     let options = RegallocOptions {
         algorithm: Algorithm::Ion,

@@ -7,7 +7,10 @@ use super::{A, C, Cond};
 use crate::{
     hir::operation::Action,
     hir::{Lane, Scale, Type, Unary},
-    lir::TargetInst,
+    lir::{
+        TargetInst,
+        schedule::{Schedulable, Scheduling},
+    },
     module::FunctionId,
 };
 use regalloc2::{MachineEnv, Operand, PReg, PRegSet, RegClass, VReg};
@@ -503,6 +506,52 @@ impl TargetInst for Inst {
             splice_target::vector_bytes() / 8
         } else {
             1
+        }
+    }
+}
+
+impl Schedulable for Inst {
+    fn scheduling(&self) -> Scheduling {
+        use Scheduling::{Barrier, Compute, Ordered};
+        match *self {
+            Self::Load(..) => Ordered(5),
+            Self::Masked {
+                dst: Some(_),
+                indices,
+                ..
+            } => Ordered(if indices.is_some() { 9 } else { 5 }),
+            Self::Check(..) | Self::Store(..) | Self::Masked { .. } => Ordered(1),
+            Self::Int(
+                IntBinary {
+                    op: IntOp::Divide { .. },
+                    ..
+                },
+                ..,
+            )
+            | Self::VectorDivide(..)
+            | Self::LaneAccess { .. } => Ordered(12),
+            Self::Int(
+                IntBinary {
+                    op: IntOp::Multiply(_),
+                    ..
+                },
+                ..,
+            )
+            | Self::Float(..)
+            | Self::Fma(..)
+            | Self::Packed(..) => Compute(4),
+            Self::Literal(..)
+            | Self::Copy(..)
+            | Self::BitMove(..)
+            | Self::Imm(..)
+            | Self::Int(..)
+            | Self::Offset(..)
+            | Self::IntCast(..)
+            | Self::Select(..)
+            | Self::Splat(..)
+            | Self::SveIota(..)
+            | Self::PackedShiftImm(..) => Compute(1),
+            _ => Barrier,
         }
     }
 }

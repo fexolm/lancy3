@@ -1,12 +1,11 @@
+use super::facts::Facts;
 use crate::hir::transforms::{ControlFlowGraph, DomTree};
-use crate::hir::{Binary, Block, Function, Inst, Op, Terminator, Type, Value, ssa::Edge};
+use crate::hir::{Binary, Block, Function, Op, Simd, Terminator, Type, Unary, Value, ssa::Edge};
 use crate::support::slotmap::DenseMap;
-mod facts;
 mod fusion;
 mod memory;
 mod recurrence;
 mod unswitch;
-use facts::Facts;
 
 struct NaturalLoops {
     headers: Vec<Block>,
@@ -72,33 +71,6 @@ impl NaturalLoops {
     }
 }
 
-#[derive(Clone, Copy)]
-struct Definition {
-    block: Block,
-    inst: Inst,
-}
-
-fn definitions(f: &Function) -> DenseMap<Value, Definition> {
-    let mut defs = DenseMap::filled(
-        f.value_count(),
-        Definition {
-            block: Block::INVALID,
-            inst: Inst::INVALID,
-        },
-    );
-    for block in f.blocks() {
-        for &v in f.params(block) {
-            defs[v].block = block;
-        }
-        for inst in f.instructions(block) {
-            if let Some(v) = f.result(inst) {
-                defs[v] = Definition { block, inst };
-            }
-        }
-    }
-    defs
-}
-
 pub(super) fn simplify_loops(f: &mut Function, cfg: &ControlFlowGraph, dom: &DomTree) -> bool {
     let loops = NaturalLoops::discover(cfg, dom);
     if loops
@@ -114,10 +86,11 @@ pub(super) fn simplify_loops(f: &mut Function, cfg: &ControlFlowGraph, dom: &Dom
     for &header in &loops.headers {
         counted[header] = counted_loop(f, cfg, dom, &loops, &facts, header);
     }
-    memory::optimize(f, cfg, dom, &loops, &mut facts, &counted);
-    delete_finite_dead_loops(f, cfg, dom, &loops, &facts, &counted)
+    let bounds = memory::Bounds::new(f, cfg, &facts);
+    bounds.optimize(f, cfg, dom, &loops, &mut facts, &counted)
+        || delete_finite_dead_loops(f, cfg, dom, &loops, &facts, &counted)
         || recurrence::collapse(f, cfg, dom, &loops, &facts, &counted)
-        || fusion::fuse(f, cfg, dom, &loops, &facts, &counted)
+        || fusion::fuse(f, cfg, dom, &loops, &facts, &counted, &bounds)
         || unswitch::run(f, cfg, dom, &loops, &facts.defs)
 }
 
@@ -134,6 +107,39 @@ fn hoist(f: &mut Function, dom: &DomTree, loops: &NaturalLoops, facts: &mut Fact
             .filter(|&b| b != Block::INVALID)
             .unwrap_or(loops.preheader[header]);
     }
+
+    // Hoisting many vector-valued expressions across a backedge can trade
+    // cheap recomputation for spills. Restrict new kinds of hoists to linear,
+    // low-pressure bodies. Count definitions as an upper bound on loop-local
+    // vector register demand and leave room for incoming live values.
+    const VECTOR_BUDGET: usize = 12;
+    let mut vector_values = DenseMap::filled(f.block_capacity(), 0);
+    for &block in dom.preorder() {
+        let Some(pressure) = vector_values.get_mut(loops.owner[block]) else {
+            continue;
+        };
+        if *pressure > VECTOR_BUDGET {
+            continue;
+        }
+        if block != loops.owner[block] && matches!(f.terminator(block), Terminator::Branch { .. }) {
+            *pressure = VECTOR_BUDGET + 1;
+            continue;
+        }
+        *pressure += f
+            .params(block)
+            .iter()
+            .copied()
+            .chain(f.instructions(block).filter_map(|inst| f.result(inst)))
+            .filter(|&v| match f.value_type(v) {
+                Type::Vector(_) => true,
+                ty => ty
+                    .lane()
+                    .is_some_and(|lane| lane.float() || lane.bytes() == 16),
+            })
+            .count();
+    }
+
+    let mut total_divisions = Vec::new();
     for &block in dom.preorder() {
         let header = loops.owner[block];
         if header == Block::INVALID {
@@ -141,24 +147,117 @@ fn hoist(f: &mut Function, dom: &DomTree, loops: &NaturalLoops, facts: &mut Fact
         }
         let nearest = loops.preheader[header];
         let outermost = outer[header];
-        f.hoist_instructions(block, |op, result, types| {
-            let available = |target, v| facts.available(v, target, dom).is_some();
-            let target = [outermost, nearest].into_iter().find(|&target| match op {
-                Op::Bin(kind, a, b)
-                    if types[a] == Type::I32 && !matches!(kind, Binary::Div | Binary::Rem) =>
+        if nearest == Block::INVALID && outermost == Block::INVALID {
+            continue;
+        }
+        let extended = nearest != Block::INVALID && vector_values[header] <= VECTOR_BUDGET;
+        total_divisions.clear();
+        if extended {
+            for inst in f.instructions(block) {
+                if let Op::Bin(Binary::Div | Binary::Rem, _, divisor)
+                | Op::Simd(Simd::Bin(Binary::Div | Binary::Rem, _, divisor)) = *f.op(inst)
+                    && facts.nontrapping_divisor(f, divisor)
                 {
-                    available(target, a) && available(target, b)
+                    total_divisions.push(f.result(inst).unwrap());
                 }
-                #[cfg(feature = "experimental-simd")]
-                _ => super::experimental::invariant_simd(op, |v| available(target, v)),
-                #[cfg(not(feature = "experimental-simd"))]
+            }
+            total_divisions.sort_unstable();
+        }
+        f.hoist_instructions(block, |op, result, types| {
+            let scalar_i32 = matches!(op, Op::Bin(kind, a, _) if types[a] == Type::I32
+                && !matches!(kind, Binary::Div | Binary::Rem));
+            if !scalar_i32 && !extended {
+                return None;
+            }
+            let cheap = match op {
+                Op::Bin(kind, ..) | Op::Simd(Simd::Bin(kind, ..)) => {
+                    !matches!(kind, Binary::Pow | Binary::Atan2 | Binary::Hypot)
+                }
+                Op::Unary(kind, ..) | Op::Simd(Simd::Unary(kind, ..)) => matches!(
+                    kind,
+                    Unary::Neg
+                        | Unary::Abs
+                        | Unary::Not
+                        | Unary::Popcnt
+                        | Unary::LeadingZeros
+                        | Unary::TrailingZeros
+                ),
+                Op::Cast(..)
+                | Op::Bitcast(..)
+                | Op::Ternary(..)
+                | Op::Simd(
+                    Simd::Cast(..)
+                    | Simd::Bitcast(..)
+                    | Simd::Ternary(..)
+                    | Simd::LaneCount(_)
+                    | Simd::Iota(_)
+                    | Simd::Splat(_),
+                ) => true,
                 _ => false,
-            })?;
+            };
+            if !cheap
+                || (!op.pure(Some(types[result]))
+                    && total_divisions.binary_search(&result).is_err())
+            {
+                return None;
+            }
+            let target = [if scalar_i32 { outermost } else { nearest }, nearest]
+                .into_iter()
+                .find(|&target| {
+                    if target == Block::INVALID {
+                        return false;
+                    }
+                    let mut available = true;
+                    let mut operands = op;
+                    operands.map_operands(|value| {
+                        available &= facts.available(value, target, dom).is_some();
+                        value
+                    });
+                    available
+                })?;
             let mut op = op;
             op.map_operands(|v| facts.root(v));
             facts.defs[result].block = target;
             Some((target, op))
         });
+    }
+}
+
+/// Positive counts that can be compared without fixing the backend's SIMD width.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum Count {
+    Fixed(i32),
+    Lanes(usize),
+}
+
+impl Count {
+    fn of(f: &Function, facts: &Facts, value: Value) -> Option<Self> {
+        match facts.op(f, value)? {
+            Op::Const(n) if n > 0 => Some(Self::Fixed(n)),
+            Op::Simd(Simd::LaneCount(lane)) => Some(Self::Lanes(lane.bytes())),
+            _ => None,
+        }
+    }
+
+    fn access(ty: Type, scale: usize) -> Self {
+        match ty {
+            Type::Vector(_) => Self::Lanes(scale),
+            _ => Self::Fixed(ty.bytes(0).div_ceil(scale) as i32),
+        }
+    }
+
+    fn at_width(self, bytes: usize) -> i32 {
+        match self {
+            Self::Fixed(n) => n,
+            Self::Lanes(element) => bytes.div_ceil(element) as i32,
+        }
+    }
+
+    fn at_most(self, other: Self) -> bool {
+        // Counts are constant or linear in the supported vector widths.
+        [16, 64]
+            .into_iter()
+            .all(|bytes| self.at_width(bytes) <= other.at_width(bytes))
     }
 }
 
@@ -171,9 +270,32 @@ struct CountedLoop {
     iv: Value,
     start: Value,
     bound: Value,
+    step: Count,
+    guard: Value,
+    packet: Option<(Count, Value)>,
 }
 
-/// A strict signed bound and unit increment terminate without wrapping.
+impl CountedLoop {
+    fn packet_size(self) -> Option<Count> {
+        self.packet.map(|(size, _)| size)
+    }
+
+    fn strict_unit_step(self) -> bool {
+        self.packet.is_none() && self.step == Count::Fixed(1)
+    }
+}
+
+/// Normalize an edge that guarantees a signed lower bound.
+fn at_least(kind: Binary, a: Value, b: Value) -> Option<(Value, Value, bool)> {
+    match kind {
+        Binary::Ge => Some((a, b, true)),
+        Binary::Le => Some((b, a, true)),
+        Binary::Lt => Some((a, b, false)),
+        Binary::Gt => Some((b, a, false)),
+        _ => None,
+    }
+}
+
 /// Analyze SSA forwarding without extending live ranges in the actual IR.
 fn counted_loop(
     f: &Function,
@@ -195,9 +317,29 @@ fn counted_loop(
     else {
         return None;
     };
-    let Op::Bin(Binary::Lt, iv, bound) = facts.op(f, cond)? else {
+    let Op::Bin(kind, a, b) = facts.op(f, cond)? else {
         return None;
     };
+    if f.value_type(a) != Type::I32 {
+        return None;
+    }
+    let (iv, bound, body, exit, packet) =
+        if kind == Binary::Lt && f.params(header).binary_search(&facts.root(a)).is_ok() {
+            (a, b, body, exit, None)
+        } else {
+            let (remaining, amount, yes) = at_least(kind, a, b)?;
+            let Op::Bin(Binary::Sub, bound, iv) = facts.op(f, remaining)? else {
+                return None;
+            };
+            let (body, exit) = if yes { (body, exit) } else { (exit, body) };
+            (
+                iv,
+                bound,
+                body,
+                exit,
+                Some((Count::of(f, facts, amount)?, facts.root(remaining))),
+            )
+        };
     let iv = facts.root(iv);
     let bound = facts.available(bound, preheader, dom)?;
     let index = f.params(header).binary_search(&iv).ok()?;
@@ -211,6 +353,7 @@ fn counted_loop(
         return None;
     };
     let start = facts.root(f.edge(enter).1[index]);
+    let mut step = None;
     for &latch in cfg.predecessors(header) {
         if latch == preheader {
             continue;
@@ -225,12 +368,35 @@ fn counted_loop(
                 return None;
             };
             let (a, b) = (facts.root(a), facts.root(b));
-            if !(a == iv && facts.constant(f, b) == Some(1)
-                || b == iv && facts.constant(f, a) == Some(1))
-            {
+            let amount = if a == iv {
+                b
+            } else if b == iv {
+                a
+            } else {
+                return None;
+            };
+            let count = Count::of(f, facts, amount)?;
+            if *step.get_or_insert(count) != count {
                 return None;
             }
         }
+    }
+    let step = step?;
+    if let Some((packet, _)) = packet {
+        // Starting at zero, a negative bound fails the first packet test.
+        // Otherwise both operands of the subtraction must be nonnegative.
+        let initial = facts.constant(f, start)?;
+        let nonnegative_bound =
+            f.is_slice_length(bound) || facts.constant(f, bound).is_some_and(|n| n >= 0);
+        if initial < 0 || (initial != 0 && !nonnegative_bound) || !step.at_most(packet) {
+            return None;
+        }
+    } else if step != Count::Fixed(1)
+        && facts
+            .constant(f, bound)
+            .is_none_or(|n| n > i32::MAX - (step.at_width(64) - 1))
+    {
+        return None;
     }
     Some(CountedLoop {
         header,
@@ -240,6 +406,9 @@ fn counted_loop(
         iv,
         start,
         bound,
+        step,
+        guard: facts.root(cond),
+        packet,
     })
 }
 

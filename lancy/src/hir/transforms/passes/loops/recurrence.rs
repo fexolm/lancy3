@@ -321,7 +321,7 @@ pub(super) fn collapse(
         let Some(info) = counted[header] else {
             continue;
         };
-        if has_child[header] {
+        if has_child[header] || !info.strict_unit_step() {
             continue;
         }
         let mut latches = cfg

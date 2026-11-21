@@ -17,7 +17,7 @@ pub(super) fn simplify_simd(
     vector_constants: &mut HashMap<Result<u8, Value>, Value>,
 ) -> Option<Op> {
     let definition = |v| definitions.get(&aliases[v]).copied();
-    let first_lane = |v| facts[v].constant() == Some(0);
+    let first_lane = |v| facts.get(v).and_then(|fact| fact.bits()) == Some(0);
     let splat_index = |v| match definition(v) {
         Some(Op::Simd(Simd::Splat(i))) => Some(i),
         _ => None,
@@ -26,8 +26,9 @@ pub(super) fn simplify_simd(
         let Some(Op::Simd(Simd::Splat(scalar))) = definition(v) else {
             return None;
         };
-        if let Some(n) = facts[scalar].constant() {
-            return Some(n < 0);
+        if let Some(bits) = facts.get(scalar).and_then(|fact| fact.bits()) {
+            let lane = types[scalar].lane()?;
+            return Some((bits >> (lane.bytes() * 8 - 1)) & 1 != 0);
         }
         let Some(Op::Literal(lane, bits)) = definition(scalar) else {
             return None;
@@ -183,14 +184,6 @@ pub(super) fn accesses_first_lane(op: Op, zero: &DenseMap<Value, bool>) -> bool 
     // Every supported vector has a lane zero. Other lane accesses can trap.
     match op {
         Op::Simd(Simd::ExtractLane(_, i) | Simd::InsertLane(_, i, _)) => zero[i],
-        _ => false,
-    }
-}
-
-pub(super) fn invariant_simd(op: Op, available: impl Fn(Value) -> bool) -> bool {
-    match op {
-        Op::Simd(Simd::Iota(_)) => true,
-        Op::Simd(Simd::Splat(v)) => available(v),
         _ => false,
     }
 }

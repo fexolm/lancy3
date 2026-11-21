@@ -1,9 +1,11 @@
 //! HIR optimization passes, shared by all targets.
 #[cfg(feature = "experimental-simd")]
 mod experimental;
+mod facts;
 mod inline;
 mod local_cfg;
 mod loops;
+mod memory;
 mod prune;
 mod sccp;
 mod simplify;

@@ -7,7 +7,7 @@ pub use simd::{Simd, VectorAddress};
 crate::slot_key!(pub Value);
 
 /// Byte stride for scaled pointer arithmetic.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 #[repr(u8)]
 pub enum Scale {
     One = 0,

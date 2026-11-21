@@ -1,4 +1,5 @@
-use super::{Definition, NaturalLoops};
+use super::NaturalLoops;
+use crate::hir::transforms::passes::facts::Definition;
 use crate::hir::transforms::{ControlFlowGraph, DomTree};
 use crate::hir::{Block, Edge, Function, Op, Terminator, Value};
 use crate::support::slotmap::DenseMap;

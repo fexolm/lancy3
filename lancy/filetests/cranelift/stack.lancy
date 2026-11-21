@@ -7,9 +7,12 @@ fn main base:ptr x:i32 -> i32
   store dst x
   result = load i32 dst
   ret result
-@isel check: lea scale=0 disp=1
-@isel check: store.I32
-@isel nextln: load.I32
+@opt check: store
+@opt not: load
+@opt check: ret
+@isel check: store.I32 scale=0 disp=1
+@isel not: load.I32
+@isel check: ret
 @run 0 -> 0 | aa bb cc dd ee ff | aa 00 00 00 00 ff
 @run 1 -> 1 | aa bb cc dd ee ff | aa 01 00 00 00 ff
 @run -1 -> -1 | aa bb cc dd ee ff | aa ff ff ff ff ff

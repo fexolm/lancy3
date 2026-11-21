@@ -1,0 +1,333 @@
+# Typed scalar arithmetic and its casts are available before the loop.
+fn main n:i32 x:i32 y:i32 -> i32
+  zero = const 0
+  one = const 1
+  jump head zero zero
+block head i:i32 acc:i32
+  more = lt i n
+  br more body | done acc
+block body
+  a = cast f64 x
+  b = cast f64 y
+  product = mul a b
+  term = cast i32 product
+  sum = xor acc term
+  next = add i one
+  jump head next sum
+block done result:i32
+  ret result
+@source check: br
+@source check: Cast F64
+@source check: Mul
+@opt check: Cast F64
+@opt check: Cast F64
+@opt check: Mul
+@opt check: Cast I32
+@opt check: jump
+@opt check: br
+@opt not: Mul
+@opt check: Xor
+@run 0 3 7 -> 0
+@run 3 3 7 -> 21
+@run 3 -3 7 -> -21
+
+---
+
+# The SIMD expression chain is invariant except for the splat of the induction value.
+fn main n:i32 x:i32 y:i32 -> i32
+  zero = const 0
+  one = const 1
+  jump head zero zero
+block head i:i32 acc:i32
+  more = lt i n
+  br more body | done acc
+block body
+  fixed = simd.splat x
+  ramp = simd.iota i32
+  adjusted = simd.add fixed ramp
+  other = simd.splat y
+  mask = simd.lt ramp other
+  chosen = simd.select mask adjusted other
+  changing = simd.splat i
+  mixed = simd.add chosen changing
+  lane = simd.extract mixed zero
+  sum = xor acc lane
+  next = add i one
+  jump head next sum
+block done result:i32
+  ret result
+@source check: br
+@source check: simd.Iota
+@opt check: simd.Splat Vector(I32) v1
+@opt check: simd.Iota
+@opt check: simd.Binary(Add)
+@opt check: simd.Ternary(Select)
+@opt check: jump
+@opt check: br
+@opt check: simd.Splat Vector(I32)
+@opt check: simd.Binary(Add)
+@run 0 7 4 -> 0
+@run 3 7 4 -> 6
+@run 3 7 -5 -> -6
+
+---
+
+# A known nonzero signed divisor other than -1 licenses motion.
+fn main n:i32 x:i32 -> i32
+  zero = const 0
+  one = const 1
+  two = literal i64 2
+  jump head zero zero
+block head i:i32 acc:i32
+  more = lt i n
+  br more body | done acc
+block body
+  numerator = cast i64 x
+  divided = div numerator two
+  value = cast i32 divided
+  sum = xor acc value
+  next = add i one
+  jump head next sum
+block done result:i32
+  ret result
+@source check: br
+@source check: Div
+@opt check: Div
+@opt check: jump
+@opt check: br
+@opt not: Div
+@opt check: ret
+@run 0 -7 -> 0
+@run 3 -7 -> -3
+
+---
+
+# A SIMD signed division by -1 can overflow in the loop body.
+fn main n:i32 x:i32 -> i32
+  zero = const 0
+  one = const 1
+  minus_one = literal i16 ffff
+  jump head zero zero
+block head i:i32 acc:i32
+  more = lt i n
+  br more body | done acc
+block body
+  numerator = cast i16 x
+  a = simd.splat numerator
+  b = simd.splat minus_one
+  quotient = simd.div a b
+  item = simd.extract quotient zero
+  value = cast i32 item
+  sum = xor acc value
+  next = add i one
+  jump head next sum
+block done result:i32
+  ret result
+@opt not: simd.Binary(Div)
+@opt check: br
+@opt check: simd.Binary(Div)
+@run 0 -32768 -> 0
+@run 1 -32768 -> !overflow
+@run 3 -7 -> 7
+
+---
+
+# A dynamic extract cannot be moved from a loop that might never run.
+fn main n:i32 x:i32 index:i32 -> i32
+  zero = const 0
+  one = const 1
+  jump head zero zero
+block head i:i32 acc:i32
+  more = lt i n
+  br more body | done acc
+block body
+  v = simd.splat x
+  item = simd.extract v index
+  sum = xor acc item
+  next = add i one
+  jump head next sum
+block done result:i32
+  ret result
+@opt check: simd.Splat
+@opt not: simd.Extract
+@opt check: br
+@opt check: simd.Extract
+@run 0 7 64 -> 0
+@run 1 7 64 -> !bounds
+@run 3 7 0 -> 7
+
+---
+
+# The checked immutable eight-byte element can be loaded before the loop.
+fn main p:ptr len:i32 n:i32 -> i32
+  slices 0 read8
+  zero = const 0
+  one = const 1
+  bounds zero len
+  jump head zero zero
+block head i:i32 acc:i32
+  more = lt i n
+  br more body | done acc
+block body
+  bounds zero len
+  addr = offset p zero 8
+  coeff = load f64 addr
+  term = cast i32 coeff
+  sum = xor acc term
+  next = add i one
+  jump head next sum
+block done result:i32
+  ret result
+@source check: br
+@source check: load F64
+@opt check: bounds
+@opt check: load F64
+@opt check: jump
+@opt check: br
+@opt not: load F64
+@opt check: ret
+@run 1 0 -> 0 | 00 00 00 00 00 00 1c 40 | 00 00 00 00 00 00 1c 40
+@run 1 3 -> 7 | 00 00 00 00 00 00 1c 40 | 00 00 00 00 00 00 1c 40
+@run 0 0 -> !bounds | |
+
+---
+
+# The same address in a writable slice must be reloaded after the previous store.
+fn main p:ptr len:i32 n:i32 -> i32
+  slices 0 write8
+  zero = const 0
+  one = const 1
+  one64 = literal i64 1
+  bounds zero len
+  jump head zero zero
+block head i:i32 acc:i32
+  more = lt i n
+  br more body | done acc
+block body
+  addr = offset p zero 8
+  current = load i64 addr
+  updated = add current one64
+  store addr updated
+  result = cast i32 updated
+  next = add i one
+  jump head next result
+block done result_out:i32
+  ret result_out
+@opt not: load I64
+@opt check: br
+@opt check: load I64
+@opt check: store
+@run 1 0 -> 0 | 07 00 00 00 00 00 00 00 | 07 00 00 00 00 00 00 00
+@run 1 2 -> 9 | 07 00 00 00 00 00 00 00 | 09 00 00 00 00 00 00 00
+
+---
+
+# A dominating signed length comparison proves the entire immutable vector readable.
+fn main p:ptr len:i32 n:i32 -> i32
+  slices 0 read4
+  zero = const 0
+  one = const 1
+  width = simd.lanes f32
+  full = ge len width
+  br full preheader | short
+block short
+  ret zero
+block preheader
+  jump head zero zero
+block head i:i32 acc:i32
+  more = lt i n
+  br more body | done acc
+block body
+  addr = offset p zero 4
+  packet = simd.load f32 addr
+  coeff = simd.extract packet zero
+  term = cast i32 coeff
+  sum = xor acc term
+  next = add i one
+  jump head next sum
+block done result:i32
+  ret result
+@source check: br
+@source check: br
+@source check: simd.load F32
+@opt check: br
+@opt check: simd.load F32
+@opt check: jump
+@opt check: br
+@opt not: simd.load F32
+@opt check: ret
+@run 16 3 -> 3 | 00 00 40 40 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 | 00 00 40 40 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+@run 1 3 -> 0 | 00 00 40 40 | 00 00 40 40
+
+---
+
+# The first readable lane cannot justify speculation of the full vector.
+fn main p:ptr len:i32 n:i32 -> i32
+  slices 0 read4
+  zero = const 0
+  one = const 1
+  width = simd.lanes f32
+  last = sub width one
+  bounds zero len
+  jump head zero zero
+block head i:i32 acc:i32
+  more = lt i n
+  br more body | done acc
+block body
+  bounds last len
+  addr = offset p zero 4
+  packet = simd.load f32 addr
+  coeff = simd.extract packet zero
+  term = cast i32 coeff
+  sum = xor acc term
+  next = add i one
+  jump head next sum
+block done result:i32
+  ret result
+@opt check: bounds
+@opt not: simd.load F32
+@opt check: br
+@opt check: bounds
+@opt check: simd.load F32
+@run 1 0 -> 0 | 00 00 40 40 | 00 00 40 40
+@run 1 1 -> !bounds | 00 00 40 40 | 00 00 40 40
+@run 16 3 -> 3 | 00 00 40 40 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 | 00 00 40 40 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+
+---
+
+# An adjacent loop with two incoming edges has no preheader for its iota.
+fn main n:i32 pick:i32 -> i32
+  zero = const 0
+  one = const 1
+  jump first zero zero
+block first i:i32 acc:i32
+  more = lt i n
+  br more first_body | choose
+block first_body
+  value = xor acc i
+  next = add i one
+  jump first next value
+block choose
+  br pick a | b
+block a
+  add_one = add acc one
+  jump second zero add_one
+block b
+  sub_one = sub acc one
+  jump second zero sub_one
+block second j:i32 sum:i32
+  more_b = lt j n
+  br more_b second_body | done
+block second_body
+  lanes = simd.iota i32
+  lane = simd.extract lanes zero
+  value_b = xor sum lane
+  next_b = add j one
+  jump second next_b value_b
+block done
+  ret sum
+@opt check: br
+@opt check: simd.Iota
+@run 0 1 -> 1
+@run 2 1 -> 2
+@run 2 0 -> 0

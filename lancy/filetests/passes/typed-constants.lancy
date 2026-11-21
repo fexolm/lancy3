@@ -1,0 +1,219 @@
+# Shift counts are masked to the operand width. Thirty-two shifts an i64.
+fn main -> i32
+  one = literal i64 0x1
+  count = literal i64 0x20
+  high = shl one count
+  expected = literal i64 0x100000000
+  correct = eq high expected
+  ret correct
+@source check: Shl
+@opt not: Shl
+@opt not: Eq
+@opt check: const -1
+@opt nextln: ret
+@run -> -1
+
+---
+
+# A dynamic i64 shifted right by 32 must not become the input value.
+fn main x:i32 -> i32
+  input = cast i64 x
+  count = literal i64 0x20
+  high = shr input count
+  result = cast i32 high
+  ret result
+@opt check: Shr
+@run 33 -> 0
+@run -33 -> -1
+
+---
+
+# The ordering is unsigned and the scalar comparison gives a canonical i32 mask.
+fn main -> i32
+  huge = literal u64 0xffffffffffffffff
+  one = literal u64 0x1
+  greater = gt huge one
+  br greater live greater | dead
+block dead
+  fail = const 42
+  ret fail
+block live answer:i32
+  ret answer
+@source check: Gt
+@opt not: Gt
+@opt not: br
+@opt check: const -1
+@run -> -1
+
+---
+
+# Arithmetic truncates to the narrow signed type before subsequent use.
+fn main -> i32
+  top = literal i8 0x7f
+  one = literal i8 0x1
+  wrapped = add top one
+  signed = cast i32 wrapped
+  ret signed
+@source check: Add
+@opt not: Add
+@opt check: Literal(128) I8
+@opt check: ret
+@run -> -128
+
+---
+
+# A propagated literal can occupy the high word of a 128-bit value.
+fn main -> i32
+  one = literal u128 0x1
+  count = literal u128 0x7f
+  high = shl one count
+  plain = literal u128 0x80000000000000000000000000000000
+  correct = eq high plain
+  ret correct
+@source check: Shl
+@opt not: Shl
+@opt not: Eq
+@opt check: const -1
+@opt nextln: ret
+@run -> -1
+
+---
+
+# Constant block arguments with equal bits still have different store widths.
+fn main p:ptr flag:i32 -> i32
+  wide = literal i64 0xff
+  narrow = literal u8 0xff
+  eight = const 8
+  zero = const 0
+  br flag join wide narrow | join wide narrow
+block join value:i64 byte:u8
+  store p value
+  tail = offset p eight 1
+  store tail byte
+  ret zero
+@source check: I64
+@source check: U8
+@opt not: br
+@opt check: store
+@opt check: store
+@opt check: ret
+@run 1 -> 0 | aa aa aa aa aa aa aa aa bb 11 22 33 44 55 66 77 | ff 00 00 00 00 00 00 00 ff 11 22 33 44 55 66 77
+@run 0 -> 0 | aa aa aa aa aa aa aa aa bb 11 22 33 44 55 66 77 | ff 00 00 00 00 00 00 00 ff 11 22 33 44 55 66 77
+
+---
+
+# A known signed overflow traps even when the quotient is dead.
+fn main p:ptr x:i32 -> i32
+  low = literal i8 0x80
+  minus_one = literal i8 0xff
+  zero = const 0
+  store p x
+  unused = div low minus_one
+  ret zero
+@opt check: store
+@opt nextln: Div
+@run 23 -> !overflow | aa aa aa aa | 17 00 00 00
+
+---
+
+# A known zero divisor preserves writes before the trap.
+fn main p:ptr x:i32 -> i32
+  one = literal u16 0x1
+  zero = literal u16 0x0
+  answer = const 0
+  store p x
+  unused = rem one zero
+  ret answer
+@opt check: store
+@opt nextln: Rem
+@run 23 -> !zero | aa aa aa aa | 17 00 00 00
+
+---
+
+# Splat arithmetic folds without choosing the machine's vector width.
+fn main -> i32
+  maximum = literal u16 0xffff
+  two = literal u16 0x2
+  zero = const 0
+  a = simd.splat maximum
+  b = simd.splat two
+  total = simd.add a b
+  lane = simd.extract total zero
+  result = cast i32 lane
+  ret result
+@source check: Add
+@opt not: Add
+@opt check: ret
+@run -> 1
+
+---
+
+# Uniform comparison results use the entire lane for a true mask.
+fn main -> i32
+  high = literal u16 0x8000
+  low = literal u16 0x7fff
+  index = const 0
+  a = simd.splat high
+  b = simd.splat low
+  mask = simd.gt a b
+  lane = simd.extract mask index
+  result = cast i32 lane
+  ret result
+@source check: Gt
+@opt not: Gt
+@opt check: ret
+@run -> 65535
+
+---
+
+# Distinct definitions of the same scalar literal survive a varying condition.
+fn main c:i32 -> i32
+  x = literal u64 0xffffffffffffffff
+  y = literal u64 0xffffffffffffffff
+  floor = literal u64 0x1
+  pick = select c x y
+  result = gt pick floor
+  ret result
+@source check: Select
+@opt not: Select
+@opt not: Gt
+@opt check: const -1
+@opt nextln: ret
+@run 0 -> -1
+@run 7 -> -1
+
+---
+
+# A reachable backedge revises a provisional typed constant.
+fn main n:i32 -> i32
+  zero = const 0
+  one = const 1
+  initial = literal u64 0xffffffffffffffff
+  updated = literal u64 0x1
+  jump head zero initial
+block head i:i32 value:u64
+  more = lt i n
+  br more step | exit value
+block step
+  next = add i one
+  jump head next updated
+block exit final:u64
+  result = gt final updated
+  ret result
+@opt check: br
+@opt check: Gt
+@run 0 -> -1
+@run 1 -> 0
+@run 3 -> 0
+
+---
+
+# Subtracting a NaN from itself does not give the integer identity x-x=0.
+fn main bits:i32 -> i32
+  input = bitcast f32 bits
+  diff = sub input input
+  result = isnan diff
+  ret result
+@opt check: Sub
+@run 0x7fc00001 -> -1
+@run 0x3f800000 -> 0

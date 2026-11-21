@@ -1,23 +1,23 @@
 use crate::hir::transforms::ControlFlowGraph;
 use crate::hir::{
-    Binary, Block, Function, Op, Terminator, Ternary, Type, Value,
+    Binary, Block, Function, Lane, Op, Simd, Terminator, Ternary, Type, Value,
     ssa::{Edge, Inst},
 };
 use crate::support::slotmap::DenseMap;
 
-use super::simplify::fold_i32;
+use crate::hir::integer::{binary as integer_binary, mask as lane_mask};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Fact {
     Unknown,
-    Constant(i32),
+    Constant(u128),
     Varying,
 }
 
 impl Fact {
-    pub(super) fn constant(self) -> Option<i32> {
+    pub(super) fn bits(self) -> Option<u128> {
         match self {
-            Self::Constant(n) => Some(n),
+            Self::Constant(bits) => Some(bits),
             _ => None,
         }
     }
@@ -31,37 +31,64 @@ impl Fact {
     }
 }
 
-/// Cheap, total integer identities. The producers of discarded operands
-/// remain live if they can trap or have other observable effects.
+pub(super) fn literal(lane: Lane, bits: u128) -> Op {
+    if lane == Lane::I32 {
+        Op::Const(bits as i32)
+    } else {
+        Op::Literal(lane, bits)
+    }
+}
+
+pub(super) enum Reduced {
+    Constant(u128),
+    Copy(Value),
+}
+
+fn integer(ty: Type) -> bool {
+    ty.lane().is_some_and(|lane| !lane.float())
+}
+
+/// Exact integer constants and total arithmetic identities for one scalar
+/// or a uniform vector. Discarded operands that can trap remain effects.
 pub(super) fn reduce(
     kind: Binary,
+    ty: Type,
     lhs: Value,
     rhs: Value,
-    a: Option<i32>,
-    b: Option<i32>,
-) -> Option<Op> {
+    a: Option<u128>,
+    b: Option<u128>,
+) -> Option<Reduced> {
     use Binary::*;
+    use Reduced::*;
+    let lane = ty.lane().filter(|lane| !lane.float())?;
+    let filled = lane_mask(lane);
     if let (Some(a), Some(b)) = (a, b) {
-        return fold_i32(kind, a, b).map(Op::Const);
+        let bits = integer_binary(kind, lane, a, b).ok()?;
+        return Some(Constant(
+            bits & lane_mask(kind.result_type(ty).lane().unwrap()),
+        ));
     }
     if lhs == rhs {
         match kind {
-            Sub | Xor | Ne | Lt | Gt => return Some(Op::Const(0)),
-            Eq | Le | Ge => return Some(Op::Const(-1)),
-            And | Or | Min | Max => return Some(Op::Copy(lhs)),
+            Sub | Xor | Ne | Lt | Gt => return Some(Constant(0)),
+            Eq | Le | Ge => return Some(Constant(lane_mask(kind.result_type(ty).lane().unwrap()))),
+            And | Or | Min | Max => return Some(Copy(lhs)),
             _ => {}
         }
     }
     match (kind, a, b) {
-        (Add | Or | Xor, Some(0), _) | (Mul, Some(1), _) | (And, Some(-1), _) => {
-            Some(Op::Copy(rhs))
-        }
+        (Add | Or | Xor, Some(0), _) | (Mul, Some(1), _) => Some(Copy(rhs)),
         (Add | Sub | Or | Xor | SaturatingAdd | SaturatingSub, _, Some(0))
-        | (Mul | Div, _, Some(1))
-        | (And, _, Some(-1)) => Some(Op::Copy(lhs)),
-        (Shl | Shr | RotateLeft | RotateRight, _, Some(n)) if n & 31 == 0 => Some(Op::Copy(lhs)),
-        (Mul | And, Some(0), _) | (Mul | And, _, Some(0)) | (Rem, _, Some(1)) => Some(Op::Const(0)),
-        (Or, Some(-1), _) | (Or, _, Some(-1)) => Some(Op::Const(-1)),
+        | (Mul | Div, _, Some(1)) => Some(Copy(lhs)),
+        (And, Some(n), _) if n == filled => Some(Copy(rhs)),
+        (And, _, Some(n)) if n == filled => Some(Copy(lhs)),
+        (Shl | Shr | RotateLeft | RotateRight, _, Some(n))
+            if n & (lane.bytes() as u128 * 8 - 1) == 0 =>
+        {
+            Some(Copy(lhs))
+        }
+        (Mul | And, Some(0), _) | (Mul | And, _, Some(0)) | (Rem, _, Some(1)) => Some(Constant(0)),
+        (Or, Some(n), _) | (Or, _, Some(n)) if n == filled => Some(Constant(filled)),
         _ => None,
     }
 }
@@ -69,24 +96,33 @@ pub(super) fn reduce(
 fn evaluate(f: &Function, facts: &DenseMap<Value, Fact>, op: Op) -> Fact {
     use Fact::*;
     match op {
-        Op::Const(n) => Constant(n),
-        Op::Copy(v) => facts[v],
-        Op::Bin(kind, a, b) if f.value_type(a) == Type::I32 => {
+        Op::Const(n) => Constant(u128::from(n as u32)),
+        Op::Literal(lane, bits) => Constant(bits & lane_mask(lane)),
+        Op::Copy(v) | Op::Simd(Simd::Splat(v)) => facts[v],
+        Op::Bin(kind, a, b) | Op::Simd(Simd::Bin(kind, a, b)) if integer(f.value_type(a)) => {
             let (x, y) = (facts[a], facts[b]);
-            match reduce(kind, a, b, x.constant(), y.constant()) {
-                Some(Op::Const(n)) => Constant(n),
-                Some(Op::Copy(v)) => facts[v],
+            match reduce(kind, f.value_type(a), a, b, x.bits(), y.bits()) {
+                Some(Reduced::Constant(bits)) => Constant(bits),
+                Some(Reduced::Copy(v)) => facts[v],
                 _ if x == Unknown || y == Unknown => Unknown,
                 _ => Varying,
             }
         }
-        Op::Ternary(Ternary::Select, c, yes, no) if f.value_type(yes) == Type::I32 => {
+        Op::Ternary(Ternary::Select, c, yes, no)
+        | Op::Simd(Simd::Ternary(Ternary::Select, c, yes, no)) => {
             if yes == no {
                 return facts[yes];
             }
+            let vector = matches!(op, Op::Simd(_));
             match facts[c] {
-                Constant(0) => facts[no],
-                Constant(_) => facts[yes],
+                Constant(bits) => {
+                    let cond = if vector {
+                        bits >> (f.value_type(c).lane().unwrap().bytes() * 8 - 1) != 0
+                    } else {
+                        bits != 0
+                    };
+                    facts[if cond { yes } else { no }]
+                }
                 Varying => facts[yes].meet(facts[no]),
                 Unknown => Unknown,
             }
@@ -142,14 +178,17 @@ impl Solver<'_> {
             for inst in self.f.instructions(block) {
                 let user = User::Inst(block, inst);
                 match *self.f.op(inst) {
-                    Op::Copy(v) => self.add_use(v, user),
-                    Op::Bin(_, a, b) if self.f.value_type(a) == Type::I32 => {
+                    Op::Copy(v) | Op::Simd(Simd::Splat(v)) => self.add_use(v, user),
+                    Op::Bin(_, a, b) | Op::Simd(Simd::Bin(_, a, b))
+                        if integer(self.f.value_type(a)) =>
+                    {
                         self.add_use(a, user);
                         if a != b {
                             self.add_use(b, user);
                         }
                     }
-                    Op::Ternary(Ternary::Select, c, a, b) if self.f.value_type(a) == Type::I32 => {
+                    Op::Ternary(Ternary::Select, c, a, b)
+                    | Op::Simd(Simd::Ternary(Ternary::Select, c, a, b)) => {
                         self.add_use(c, user);
                         self.add_use(a, user);
                         self.add_use(b, user);

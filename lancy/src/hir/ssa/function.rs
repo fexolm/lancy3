@@ -290,7 +290,31 @@ impl Function {
         value
     }
     pub fn append_inst(&mut self, b: Block, op: Op) -> Inst {
+        let id = self.new_instruction(op);
         let last = self.blocks[b].last;
+        if last == Inst::INVALID {
+            self.blocks[b].first = id;
+        } else {
+            self.insts[last].next = id;
+        }
+        self.blocks[b].last = id;
+        id
+    }
+
+    /// Insert before the first instruction. Operands must already dominate
+    /// the start of the block.
+    pub(in crate::hir) fn prepend(&mut self, b: Block, op: Op) -> Option<Value> {
+        let id = self.new_instruction(op);
+        let block = &mut self.blocks[b];
+        self.insts[id].next = block.first;
+        if block.last == Inst::INVALID {
+            block.last = id;
+        }
+        block.first = id;
+        self.result(id)
+    }
+
+    fn new_instruction(&mut self, op: Op) -> Inst {
         let result = if op.produces_value() {
             let ty = match op {
                 Op::Simd(op) => op
@@ -316,18 +340,11 @@ impl Function {
         } else {
             Value::INVALID
         };
-        let id = self.insts.insert(InstData {
+        self.insts.insert(InstData {
             op,
             result,
             next: Inst::INVALID,
-        });
-        if last == Inst::INVALID {
-            self.blocks[b].first = id;
-        } else {
-            self.insts[last].next = id;
-        }
-        self.blocks[b].last = id;
-        id
+        })
     }
     pub fn append(&mut self, b: Block, op: Op) -> Option<Value> {
         let id = self.append_inst(b, op);

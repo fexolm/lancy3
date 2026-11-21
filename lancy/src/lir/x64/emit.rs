@@ -10,12 +10,13 @@ use crate::{
     CompileError,
     hir::{Binary, Function, Type, ssa::VerifiedBody},
     jit::{DebugFrame, DebugFunction},
+    lir::layout,
     module::{FunctionId, FunctionIds, Module},
     support::slotmap::DenseMap,
 };
 use iced_x86::{BlockEncoderOptions, IcedError, code_asm::*};
 use regalloc2::RegClass;
-use regalloc2::{Allocation, Block, Edit, Function as _, InstOrEdit, VReg};
+use regalloc2::{Allocation, Edit, Function as _, InstOrEdit, VReg};
 use simd::{XMM, YMM, ZMM};
 
 pub(super) type Constants = Vec<(CodeLabel, [u8; 64], usize)>;
@@ -288,9 +289,10 @@ impl Emitter<'_> {
         let labels: Vec<_> = (0..body.num_blocks())
             .map(|_| self.a.create_label())
             .collect();
-        for (i, &label) in labels.iter().enumerate() {
-            let b = Block::new(i);
-            bind(self.a, label)?;
+        let order = layout::place(body);
+        for (i, &b) in order.iter().enumerate() {
+            let next = order.get(i + 1).map(|b| b.index());
+            bind(self.a, labels[b.index()])?;
             for op in self.machine.allocation.block_insts_and_edits(body, b) {
                 match op {
                     InstOrEdit::Edit(&Edit::Move { from, to }) => {
@@ -301,7 +303,7 @@ impl Emitter<'_> {
                         match body.insts()[j.index()] {
                             Inst::Jump => {
                                 let target = body.block_succs(b)[0].index();
-                                if target != i + 1 {
+                                if Some(target) != next {
                                     self.a.jmp(labels[target])?;
                                 }
                             }
@@ -334,11 +336,11 @@ impl Emitter<'_> {
                                     self.a.test(r, r)?;
                                     Cond::Ne
                                 };
-                                if yes == i + 1 {
+                                if Some(yes) == next {
                                     jcc(self.a, condition.inverse(), labels[no])?;
                                 } else {
                                     jcc(self.a, condition, labels[yes])?;
-                                    if no != i + 1 {
+                                    if Some(no) != next {
                                         self.a.jmp(labels[no])?;
                                     }
                                 }

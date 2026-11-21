@@ -52,13 +52,14 @@ fn selected(
     let mut ctx = regalloc2::Ctx::default();
     for (id, src) in module.functions.iter() {
         let root = id == module.call_graph.root();
-        let f = isel::select(src.function, &src.cfg, root, |callee| {
+        let mut f = isel::select(src.function, &src.cfg, root, |callee| {
             let id = ids[&std::ptr::from_ref(callee)];
             (id, clobbers[id])
         })?;
         listing::lir(&mut out, id, &f, None);
         if !root {
-            clobbers.insert(written_regs(&f, &regalloc::allocate(&f, &mut ctx)?).0);
+            let allocation = regalloc::allocate(&mut f, &mut ctx)?;
+            clobbers.insert(written_regs(&f, &allocation).0);
         }
     }
     Ok(out)

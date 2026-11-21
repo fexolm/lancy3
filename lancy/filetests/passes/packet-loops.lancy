@@ -1,0 +1,180 @@
+# The packet test establishes both bounds when the destination is at least n.
+fn main p:ptr n:i32 len:i32 -> i32
+  zero = const 0
+  one = const 1
+  width = simd.lanes i32
+  last = sub width one
+  enough = le n len
+  br enough init | reject
+block init
+  jump head zero
+block head i:i32
+  remaining = sub n i
+  full = ge remaining width
+  br full body i | done
+block body j:i32
+  bounds j len
+  available = sub len j
+  bounds last available
+  next = add j width
+  store p next
+  jump head next
+block done
+  ret i
+block reject
+  ret zero
+@source check: bounds
+@source check: bounds
+@opt not: bounds
+@opt check: store
+@opt not: bounds
+@opt check: ret
+@run 48 52 -> 48 | aa aa aa aa | 30 00 00 00
+@run 1 1 -> 0 | aa aa aa aa | aa aa aa aa
+@run -2147483648 1 -> 0 | aa aa aa aa | aa aa aa aa
+@run 48 47 -> 0 | aa aa aa aa | aa aa aa aa
+
+---
+
+# The strict bound using a step greater than one still guarantees termination.
+fn main start:i32 result:i32 -> i32
+  limit = const 7
+  step = const 2
+  jump head start
+block head i:i32
+  more = lt i limit
+  br more body | done
+block body
+  next = add i step
+  jump head next
+block done
+  ret result
+@source check: br
+@opt not: br
+@opt not: Add
+@opt check: ret
+@run -1 13 -> 13
+@run 6 5 -> 5
+@run 7 29 -> 29
+
+---
+
+# With an upper bound of MAX the next step can wrap to MIN.
+fn main start:i32 result:i32 -> i32
+  limit = const 2147483647
+  step = const 2
+  jump head start
+block head i:i32
+  more = lt i limit
+  br more body | done
+block body
+  next = add i step
+  jump head next
+block done
+  ret result
+@opt check: br
+@opt check: Add
+@run 2147483647 13 -> 13
+@run 2147483645 29 -> 29
+
+---
+
+# A scalar index can fit while the last lane is outside the slice.
+fn main p:ptr n:i32 -> i32
+  zero = const 0
+  one = const 1
+  marker = const 7
+  width = simd.lanes i32
+  last = sub width one
+  jump head zero
+block head i:i32
+  more = lt i n
+  br more body | done
+block body
+  bounds i n
+  store p marker
+  remaining = sub n i
+  bounds last remaining
+  next = add i width
+  store p next
+  jump head next
+block done
+  ret i
+@opt check: store
+@opt check: bounds
+@opt check: store
+@run 0 -> 0 | aa aa aa aa | aa aa aa aa
+@run 1 -> !bounds | aa aa aa aa | 07 00 00 00
+
+---
+
+# MIN - 1 wraps to MAX, so the packet guard alone is insufficient.
+fn main p:ptr n:i32 len:i32 -> i32
+  zero = const 0
+  one = const 1
+  min = const -2147483648
+  marker = const 7
+  width = simd.lanes i32
+  last = sub width one
+  enough = le n len
+  br enough init | reject
+block init
+  jump head one
+block head i:i32
+  remaining = sub n i
+  full = ge remaining width
+  br full body | done
+block body
+  bounds i len
+  store p marker
+  available = sub len i
+  bounds last available
+  stop = eq n min
+  br stop done | advance
+block advance
+  next = add i width
+  jump head next
+block done
+  ret i
+block reject
+  ret zero
+@opt check: bounds
+@opt check: store
+@opt check: bounds
+@run -2147483648 1 -> !bounds | aa aa aa aa | aa aa aa aa
+@run 1 1 -> 1 | aa aa aa aa | aa aa aa aa
+
+---
+
+# A second backedge with a negative step can leave the index below zero.
+fn main p:ptr n:i32 retreat:i32 -> i32
+  zero = const 0
+  one = const 1
+  marker = const 7
+  width = simd.lanes i32
+  last = sub width one
+  jump head zero
+block head i:i32
+  remaining = sub n i
+  full = ge remaining width
+  br full body | done
+block body
+  bounds i n
+  bounds last remaining
+  below = lt i zero
+  br below done | update
+block update
+  store p marker
+  br retreat backward | forward
+block backward
+  previous = sub i one
+  jump head previous
+block forward
+  next = add i width
+  jump head next
+block done
+  ret i
+@opt check: bounds
+@opt check: store
+@run 48 0 -> 48 | aa aa aa aa | 07 00 00 00
+@run 48 1 -> !bounds | aa aa aa aa | 07 00 00 00

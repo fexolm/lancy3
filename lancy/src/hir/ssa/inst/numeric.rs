@@ -1,9 +1,9 @@
 //! Numeric types and element-wise arithmetic shared by scalar and SIMD instructions.
 macro_rules! numeric_types {
     ($($name:ident: $bytes:literal),+) => {
-        #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+        #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
         pub enum Lane { $($name),+ }
-        #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+        #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
         pub enum Type { Ptr, $($name),+, Vector(Lane) }
         impl Lane {
             pub const fn bytes(self) -> usize {

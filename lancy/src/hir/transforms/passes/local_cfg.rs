@@ -1,8 +1,8 @@
 use crate::hir::transforms::ControlFlowGraph;
-use crate::hir::{Function, Op, Terminator, Ternary, Type, Value, ssa::Edge};
+use crate::hir::{Binary, Function, Op, Simd, Terminator, Ternary, Type, Value, ssa::Edge};
 use crate::support::slotmap::DenseMap;
 
-/// Turn a single i32 merge into a select when neither arm computes anything.
+/// Turn a single numeric merge into a select when neither arm computes anything.
 /// Bypassing a forwarding arm is legal even if other branches still use it.
 pub(super) fn convert_branches(f: &mut Function, cfg: &ControlFlowGraph) -> bool {
     fn endpoint(f: &Function, edge: Edge, bypass: bool) -> (Edge, &[Value], &[Value]) {
@@ -60,13 +60,27 @@ pub(super) fn convert_branches(f: &mut Function, cfg: &ControlFlowGraph) -> bool
             changed = true;
             continue;
         };
-        if f.value_type(x) != Type::I32 || second.is_some() {
+        let ty = f.value_type(x);
+        if ty == Type::Ptr || second.is_some() {
             continue;
         }
         let mut args: Vec<_> = left_args().collect();
-        args[index] = f
-            .append(block, Op::Ternary(Ternary::Select, cond, x, y))
-            .unwrap();
+        let select = if matches!(ty, Type::Vector(_)) {
+            // Branches test nonzero; SIMD selects test the sign bit per lane.
+            let zero = f.append(block, Op::Const(0)).unwrap();
+            let truth = f.append(block, Op::Bin(Binary::Ne, cond, zero)).unwrap();
+            let mask_type = ty.mask_type().lane().unwrap().scalar();
+            let mask = if mask_type == Type::I32 {
+                truth
+            } else {
+                f.append(block, Op::Cast(mask_type, truth)).unwrap()
+            };
+            let mask = f.append(block, Op::Simd(Simd::Splat(mask))).unwrap();
+            Op::Simd(Simd::Ternary(Ternary::Select, mask, x, y))
+        } else {
+            Op::Ternary(Ternary::Select, cond, x, y)
+        };
+        args[index] = f.append(block, select).unwrap();
         f.jump(block, target, &args);
         changed = true;
     }

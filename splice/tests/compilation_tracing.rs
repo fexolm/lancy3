@@ -64,6 +64,7 @@ fn staged_and_portable_compilation_report_stage_durations() {
         ("verify_lancy_hir", 4),
         ("optimize_lancy_hir", 2),
         ("select_instructions", 2),
+        ("schedule_instructions", 2),
         ("allocate_registers", 2),
         ("emit_machine_code", 2),
         ("install_code", 2),

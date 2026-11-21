@@ -1,5 +1,8 @@
 //! Portable numeric semantics used by the SSA reference and AArch64 libcalls.
-use super::operation::Action;
+use super::{
+    integer::{evaluate as integer, mask, signed},
+    operation::Action,
+};
 use crate::support::float16::Format;
 use crate::{
     CallError,
@@ -123,7 +126,7 @@ pub(crate) fn evaluate(
         action => {
             let dest = output.lane().unwrap();
             let result_size = dest.bytes();
-            let mask = u128::MAX >> (128 - size * 8);
+            let mask = mask(lane);
             for (i, slot) in out[..output.bytes(width)]
                 .chunks_exact_mut(result_size)
                 .enumerate()
@@ -143,9 +146,9 @@ pub(crate) fn evaluate(
                     }
                     Action::Ternary(Ternary::BitSelect) => (x & y) | (!x & z),
                     Action::Unary(Unary::Not) => !x,
-                    Action::Binary(Binary::And) => x & y,
-                    Action::Binary(Binary::Or) => x | y,
-                    Action::Binary(Binary::Xor) => x ^ y,
+                    Action::Binary(Binary::And | Binary::Or | Binary::Xor) => {
+                        integer(action, lane, x, y, mask)?
+                    }
                     _ if lane.float() => match lane {
                         Lane::F16 | Lane::BF16 => {
                             float16(Format::for_lane(lane), action, x as u16, y as u16, z as u16)
@@ -160,93 +163,6 @@ pub(crate) fn evaluate(
         }
     }
     Ok(out)
-}
-
-fn signed(x: u128, bits: u32) -> i128 {
-    ((x << (128 - bits)) as i128) >> (128 - bits)
-}
-
-fn integer(action: Action, lane: Lane, x: u128, y: u128, mask: u128) -> Result<u128, CallError> {
-    use Binary::*;
-    let bits = lane.bytes() as u32 * 8;
-    let (a, b) = (signed(x, bits), signed(y, bits));
-    let min = signed(1 << (bits - 1), bits);
-    let max = !min;
-    let shift = (y as u32) & (bits - 1);
-    let sign = lane.signed();
-    let order = if sign { a.cmp(&b) } else { x.cmp(&y) };
-    let value = match action {
-        Action::Unary(op) => match op {
-            Unary::Neg => x.wrapping_neg(),
-            Unary::Abs => {
-                if sign {
-                    a.unsigned_abs()
-                } else {
-                    x
-                }
-            }
-            Unary::Popcnt => x.count_ones() as u128,
-            Unary::LeadingZeros => (x.leading_zeros() - (128 - bits)) as u128,
-            Unary::TrailingZeros => x.trailing_zeros().min(bits) as u128,
-            _ => unreachable!("verified integer unary"),
-        },
-        Action::Binary(op) => match op {
-            Add => x.wrapping_add(y),
-            Sub => x.wrapping_sub(y),
-            Mul => x.wrapping_mul(y),
-            Div | Rem => {
-                if y == 0 {
-                    return Err(CallError::DivisionByZero);
-                }
-                if sign && a == min && b == -1 {
-                    return Err(CallError::DivisionOverflow);
-                }
-                match (sign, op) {
-                    (true, Div) => (a / b) as u128,
-                    (true, _) => (a % b) as u128,
-                    (false, Div) => x / y,
-                    _ => x % y,
-                }
-            }
-            Shl => x << shift,
-            Shr if sign => (a >> shift) as u128,
-            Shr => x >> shift,
-            RotateLeft => (x << shift) | (x >> ((bits - shift) & (bits - 1))),
-            RotateRight => (x >> shift) | (x << ((bits - shift) & (bits - 1))),
-            SaturatingAdd if sign => a.saturating_add(b).clamp(min, max) as u128,
-            SaturatingSub if sign => a.saturating_sub(b).clamp(min, max) as u128,
-            SaturatingAdd => x.saturating_add(y).min(mask),
-            SaturatingSub => x.saturating_sub(y),
-            Min => {
-                if order.is_lt() {
-                    x
-                } else {
-                    y
-                }
-            }
-            Max => {
-                if order.is_gt() {
-                    x
-                } else {
-                    y
-                }
-            }
-            Eq | Ne | Lt | Le | Gt | Ge => {
-                let yes = match op {
-                    Eq => order.is_eq(),
-                    Ne => order.is_ne(),
-                    Lt => order.is_lt(),
-                    Le => order.is_le(),
-                    Gt => order.is_gt(),
-                    _ => order.is_ge(),
-                };
-                if yes { u128::MAX } else { 0 }
-            }
-            _ => unreachable!("verified integer binary"),
-        },
-        _ => unreachable!("verified integer operation"),
-    };
-    Ok(value)
 }
 
 macro_rules! float_eval {

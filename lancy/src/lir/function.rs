@@ -61,6 +61,24 @@ impl<I: TargetInst> Function<I> {
         self.insts.push(inst);
     }
 
+    pub(super) fn reorder(&mut self, start: usize, order: &[usize], scratch: &mut Vec<I>) {
+        let end = start + order.len();
+        scratch.clear();
+        scratch.extend(order.iter().map(|&i| self.insts[start + i]));
+        self.insts[start..end].copy_from_slice(scratch);
+
+        // A permutation leaves the total operand count and other blocks' offsets intact.
+        let mut at = self.operand_ends[start];
+        let mut operands = Vec::new();
+        for i in start..end {
+            operands.clear();
+            self.insts[i].operands(&mut operands);
+            self.operands[at..at + operands.len()].copy_from_slice(&operands);
+            at += operands.len();
+            self.operand_ends[i + 1] = at;
+        }
+    }
+
     pub fn edge(&mut self, target: Block, args: impl IntoIterator<Item = VReg>) {
         self.predecessors[target.index()].push(Block::new(self.blocks.len()));
         self.successors.push(target);
