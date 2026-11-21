@@ -48,6 +48,8 @@ pub enum BufferArg<'a> {
     Write(&'a mut [i32]),
     ReadU16(&'a [u16]),
     WriteU16(&'a mut [u16]),
+    ReadU32(&'a [u32]),
+    WriteU32(&'a mut [u32]),
     ReadI64(&'a [i64]),
     WriteI64(&'a mut [i64]),
     ReadF32(&'a [f32]),
@@ -87,6 +89,7 @@ macro_rules! buffer_from {
 }
 buffer_from!(i32, Read, Write);
 buffer_from!(u16, ReadU16, WriteU16);
+buffer_from!(u32, ReadU32, WriteU32);
 buffer_from!(i64, ReadI64, WriteI64);
 buffer_from!(f32, ReadF32, WriteF32);
 buffer_from!(f64, ReadF64, WriteF64);
@@ -98,6 +101,8 @@ impl BufferArg<'_> {
             Self::Write(_) => BufferKind::new(Element::I32, true),
             Self::ReadU16(_) => BufferKind::new(Element::U16, false),
             Self::WriteU16(_) => BufferKind::new(Element::U16, true),
+            Self::ReadU32(_) => BufferKind::new(Element::U32, false),
+            Self::WriteU32(_) => BufferKind::new(Element::U32, true),
             Self::ReadI64(_) => BufferKind::new(Element::I64, false),
             Self::WriteI64(_) => BufferKind::new(Element::I64, true),
             Self::ReadF32(_) => BufferKind::new(Element::F32, false),
@@ -112,6 +117,8 @@ impl BufferArg<'_> {
             Self::Write(s) => s.len(),
             Self::ReadU16(s) => s.len(),
             Self::WriteU16(s) => s.len(),
+            Self::ReadU32(s) => s.len(),
+            Self::WriteU32(s) => s.len(),
             Self::ReadI64(s) => s.len(),
             Self::WriteI64(s) => s.len(),
             Self::ReadF32(s) => s.len(),
@@ -130,6 +137,8 @@ impl BufferArg<'_> {
             Self::Write(s) => s.as_mut_ptr().cast(),
             Self::ReadU16(s) => s.as_ptr().cast_mut().cast(),
             Self::WriteU16(s) => s.as_mut_ptr().cast(),
+            Self::ReadU32(s) => s.as_ptr().cast_mut().cast(),
+            Self::WriteU32(s) => s.as_mut_ptr().cast(),
             Self::ReadI64(s) => s.as_ptr().cast_mut().cast(),
             Self::WriteI64(s) => s.as_mut_ptr().cast(),
             Self::ReadF32(s) => s.as_ptr().cast_mut().cast(),

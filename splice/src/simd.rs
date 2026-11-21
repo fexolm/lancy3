@@ -18,6 +18,7 @@ use std::{
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub enum Element {
     U16,
+    U32,
     I32,
     I64,
     F32,
@@ -32,7 +33,7 @@ impl Element {
     pub const fn bytes(self) -> usize {
         match self {
             Self::U16 => 2,
-            Self::I32 | Self::F32 => 4,
+            Self::I32 | Self::U32 | Self::F32 => 4,
             Self::I64 | Self::F64 => 8,
         }
     }
@@ -49,9 +50,13 @@ impl Element {
     pub const fn is_float(self) -> bool {
         matches!(self, Self::F32 | Self::F64)
     }
+    pub const fn is_unsigned(self) -> bool {
+        matches!(self, Self::U16 | Self::U32)
+    }
     pub const fn name(self) -> &'static str {
         match self {
             Self::U16 => "u16",
+            Self::U32 => "u32",
             Self::I32 => "i32",
             Self::I64 => "i64",
             Self::F32 => "f32",
@@ -124,6 +129,7 @@ macro_rules! integer {
     };
 }
 integer!(u16, U16);
+integer!(u32, U32);
 integer!(i32, I32);
 integer!(i64, I64);
 element!(
@@ -317,7 +323,30 @@ impl std::ops::Shr<u32> for Lane<i32> {
     }
 }
 
+impl std::ops::Shr<u32> for Lane<u32> {
+    type Output = Self;
+    fn shr(self, count: u32) -> Self {
+        Self::from_fn(|i| self.at(i).wrapping_shr(count))
+    }
+}
+
+impl Lane<u32> {
+    pub fn rotate_left(self, count: u32) -> Self {
+        Self::from_fn(|i| self.at(i).rotate_left(count))
+    }
+    pub fn simd_min(self, rhs: Self) -> Self {
+        Self::from_fn(|i| self.at(i).min(rhs.at(i)))
+    }
+    pub fn simd_max(self, rhs: Self) -> Self {
+        Self::from_fn(|i| self.at(i).max(rhs.at(i)))
+    }
+}
+
 impl Lane<i32> {
+    /// Sum all lanes with wrapping addition.
+    pub fn reduce_sum(self) -> i32 {
+        (0..Self::lanes()).fold(0i32, |sum, i| sum.wrapping_add(self.at(i)))
+    }
     /// Rotate the bits of each lane left by the same count, modulo 32.
     pub fn rotate_left(self, count: u32) -> Self {
         Self::from_fn(|i| self.at(i).rotate_left(count))
@@ -505,3 +534,97 @@ macro_rules! float_div {
 }
 float_div!(f32);
 float_div!(f64);
+
+macro_rules! float_math {
+    ($ty:ty) => {
+        impl Lane<$ty> {
+            pub fn sqrt(self) -> Self {
+                Self::from_fn(|i| self.at(i).sqrt())
+            }
+            /// Multiply and add with one rounding per lane.
+            pub fn mul_add(self, multiplier: Self, addend: Self) -> Self {
+                Self::from_fn(|i| self.at(i).mul_add(multiplier.at(i), addend.at(i)))
+            }
+        }
+    };
+}
+float_math!(f32);
+float_math!(f64);
+
+/// Numeric conversion of one lane, using the corresponding Rust cast.
+pub trait LaneCast<T: LaneElement>: LaneElement {
+    #[doc(hidden)]
+    fn cast_lane(self) -> T;
+}
+
+impl<T: LaneElement> LaneCast<T> for T {
+    fn cast_lane(self) -> T {
+        self
+    }
+}
+
+macro_rules! lane_cast_pair {
+    ($a:ty, $b:ty) => {
+        impl LaneCast<$b> for $a {
+            fn cast_lane(self) -> $b {
+                self as $b
+            }
+        }
+        impl LaneCast<$a> for $b {
+            fn cast_lane(self) -> $a {
+                self as $a
+            }
+        }
+    };
+}
+lane_cast_pair!(i32, u32);
+lane_cast_pair!(i32, f32);
+lane_cast_pair!(u32, f32);
+lane_cast_pair!(i64, f64);
+lane_cast_pair!(u16, i32);
+lane_cast_pair!(u16, u32);
+lane_cast_pair!(i32, i64);
+lane_cast_pair!(u32, i64);
+lane_cast_pair!(f32, f64);
+
+impl<T: LaneElement> Lane<T> {
+    /// Convert lanes without changing their width.
+    pub fn cast<U: LaneElement>(self) -> Lane<U>
+    where
+        T: LaneCast<U>,
+    {
+        assert_eq!(size_of::<T>(), size_of::<U>());
+        Lane::from_fn(|i| self.at(i).cast_lane())
+    }
+    /// Convert the lower half into lanes twice as wide.
+    pub fn widen_low<U: LaneElement>(self) -> Lane<U>
+    where
+        T: LaneCast<U>,
+    {
+        assert_eq!(size_of::<T>() * 2, size_of::<U>());
+        Lane::from_fn(|i| self.at(i).cast_lane())
+    }
+    /// Convert the upper half into lanes twice as wide.
+    pub fn widen_high<U: LaneElement>(self) -> Lane<U>
+    where
+        T: LaneCast<U>,
+    {
+        assert_eq!(size_of::<T>() * 2, size_of::<U>());
+        Lane::from_fn(|i| self.at(i + Lane::<U>::lanes()).cast_lane())
+    }
+    /// Convert and concatenate the two vectors into lanes half as wide.
+    pub fn narrow<U: LaneElement>(self, high: Self) -> Lane<U>
+    where
+        T: LaneCast<U>,
+    {
+        assert_eq!(size_of::<T>(), size_of::<U>() * 2);
+        let n = Self::lanes();
+        Lane::from_fn(|i| {
+            if i < n {
+                self.at(i).cast_lane()
+            } else {
+                high.at(i - n).cast_lane()
+            }
+        })
+    }
+}

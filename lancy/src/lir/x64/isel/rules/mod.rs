@@ -16,6 +16,7 @@ mod packed_rearrange;
 pub(in crate::lir::x64) use packed::packed_half;
 
 use super::super::inst::{Cond, Inst, SelectCond, class};
+use super::masks::Masks;
 use crate::{
     CompileError,
     hir::{Function, Lane, Op, Simd, Ternary, Type, Value},
@@ -28,16 +29,12 @@ use crate::{
 use regalloc2::{PRegSet, VReg};
 use splice_target::Features;
 
-pub(super) fn reg(f: &Function, v: Value) -> VReg {
-    VReg::new(v.index(), class(f.value_type(v)))
-}
-
 pub(super) fn select(
     ctx: &mut Context,
     f: &Function,
     body: &mut lir::Function<Inst>,
     out: &mut Vec<Inst>,
-    cpu: Features,
+    target: (Features, &Masks),
     root: Root,
     callee: impl Fn(&Function) -> (FunctionId, PRegSet),
 ) -> Result<(), CompileError> {
@@ -46,7 +43,8 @@ pub(super) fn select(
         f,
         body,
         out,
-        cpu,
+        cpu: target.0,
+        masks: target.1,
         result: None,
     };
     let inst = match root {
@@ -66,6 +64,7 @@ struct Rules<'a> {
     body: &'a mut lir::Function<Inst>,
     out: &'a mut Vec<Inst>,
     cpu: Features,
+    masks: &'a Masks,
     result: Option<Value>,
 }
 
@@ -134,19 +133,21 @@ impl Rules<'_> {
     }
 
     fn dst(&self) -> VReg {
-        reg(self.f, self.result.expect("value-producing instruction"))
+        self.masks
+            .reg(self.f, self.result.expect("value-producing instruction"))
     }
 
     fn input(&mut self, v: Value) -> VReg {
         // Only the selected form should mark its register operands live.
         self.ctx.require(v);
-        reg(self.f, v)
+        self.masks.reg(self.f, v)
     }
 
     fn dword_constant(&self, value: Value) -> Option<u32> {
         match self.ctx.defining_op(value)? {
             Op::Const(n) => Some(n as u32),
             Op::Literal(Lane::I32 | Lane::U32, bits) => Some(bits as u32),
+            Op::Simd(Simd::LaneCount(lane)) => Some((self.cpu.bytes / lane.bytes()) as u32),
             _ => None,
         }
     }

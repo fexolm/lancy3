@@ -9,6 +9,7 @@ use splice::{
 fn lane(e: Element) -> Lane {
     match e {
         Element::U16 => Lane::U16,
+        Element::U32 => Lane::U32,
         Element::I32 => Lane::I32,
         Element::I64 => Lane::I64,
         Element::F32 => Lane::F32,
@@ -27,7 +28,7 @@ pub(super) fn native_type(ty: ValueType) -> Type {
 fn stride(e: Element) -> Scale {
     match e {
         Element::U16 => Scale::Two,
-        Element::I32 | Element::F32 => Scale::Four,
+        Element::I32 | Element::U32 | Element::F32 => Scale::Four,
         Element::I64 | Element::F64 => Scale::Eight,
     }
 }
@@ -65,6 +66,17 @@ impl Builder<'_> {
                 return Ok(Some(self.first_lanes(e, count)));
             }
             SimdOp::SplatScalar => V::Splat(vs[0]),
+            Sqrt => V::Unary(Unary::Sqrt, vs[0]),
+            MulAdd => V::Ternary(Ternary::MulAdd, vs[0], vs[1], vs[2]),
+            ReduceSum => V::Reduce(Binary::Add, vs[0]),
+            Cast(to) if to == e || !to.is_float() && !e.is_float() => V::Bitcast(lane(to), vs[0]),
+            Cast(to) => V::Cast(lane(to), vs[0]),
+            Widen { to, high } => V::Widen {
+                to: lane(to),
+                high,
+                value: vs[0],
+            },
+            Narrow(to) => V::Narrow(lane(to), vs[0], vs[1]),
             Splat(bits) => {
                 let x = self.val(Op::Literal(lane(e), bits.into()));
                 V::Splat(x)
@@ -135,7 +147,7 @@ impl Builder<'_> {
                 V::Shuffle(vs[0], vs[1], indices)
             }
             Shr(n) | RotateLeft(n) => {
-                let shift = self.splat_bits(Lane::I32, (n & 31).into());
+                let shift = self.splat_bits(lane(e), (n & 31).into());
                 let op = if matches!(inst.op, Shr(_)) {
                     Binary::Shr
                 } else {
@@ -398,7 +410,7 @@ impl Builder<'_> {
         } else {
             // Buffer validation caps every length at i32::MAX. Reinterpreting
             // negative indices as unsigned puts them above every valid length.
-            let unsigned = if idx == Lane::I32 {
+            let unsigned = if idx.bytes() == 4 {
                 Lane::U32
             } else {
                 Lane::U64
@@ -407,6 +419,11 @@ impl Builder<'_> {
             let limit = self.vec_op(V::Bitcast(unsigned, limit));
             let invalid = self.vec_op(V::Bin(Binary::Ge, offsets, limit));
             let invalid = self.vec_op(V::Bitcast(idx, invalid));
+            let indices = if idx == Lane::U32 {
+                self.vec_op(V::Bitcast(Lane::I32, indices))
+            } else {
+                indices
+            };
             (
                 invalid,
                 VectorAddress {

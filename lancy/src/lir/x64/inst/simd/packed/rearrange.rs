@@ -1,6 +1,155 @@
 use super::*;
 use crate::lir::x64::inst::SCRATCH;
 
+#[derive(Clone, Copy, Debug)]
+pub(in crate::lir::x64) enum PairedShuffle {
+    Interleave(bool),
+    Deinterleave(bool),
+}
+
+impl PairedShuffle {
+    pub fn index(self, i: usize, lanes: usize) -> usize {
+        match self {
+            Self::Interleave(high) => i / 2 + i % 2 * lanes + usize::from(high) * lanes / 2,
+            Self::Deinterleave(odd) => 2 * i + usize::from(odd),
+        }
+    }
+
+    pub fn emit(
+        self,
+        a: &mut CodeAssembler,
+        pool: &mut emit::Constants,
+        width: usize,
+        [dst, lhs, rhs]: [usize; 3],
+    ) -> Result {
+        match width {
+            16 => {
+                let target = if dst == rhs && lhs != rhs {
+                    SCRATCH
+                } else {
+                    dst
+                };
+                if target != lhs {
+                    a.movaps(XMM[target], XMM[lhs])?;
+                }
+                match self {
+                    Self::Interleave(false) => a.punpckldq(XMM[target], XMM[rhs])?,
+                    Self::Interleave(true) => a.punpckhdq(XMM[target], XMM[rhs])?,
+                    Self::Deinterleave(odd) => {
+                        a.shufps(XMM[target], XMM[rhs], if odd { 0xdd } else { 0x88 })?;
+                    }
+                }
+                if target != dst {
+                    a.movaps(XMM[dst], XMM[target])?;
+                }
+                Ok(())
+            }
+            32 => match self {
+                Self::Interleave(high) => {
+                    let low = YMM[SCRATCH];
+                    let (d, x, y) = (YMM[dst], YMM[lhs], YMM[rhs]);
+                    a.vpunpckldq(low, x, y)?;
+                    a.vpunpckhdq(d, x, y)?;
+                    a.vperm2i128(d, low, d, if high { 0x31 } else { 0x20 })
+                }
+                Self::Deinterleave(odd) => {
+                    let d = YMM[dst];
+                    a.vshufps(d, YMM[lhs], YMM[rhs], if odd { 0xdd } else { 0x88 })?;
+                    a.vpermq(d, d, 0xd8)
+                }
+            },
+            _ => {
+                let label = a.create_label();
+                let mut bits = [0u8; 64];
+                for (i, word) in bits.chunks_exact_mut(4).enumerate() {
+                    word.copy_from_slice(&(self.index(i, 16) as u32).to_le_bytes());
+                }
+                pool.push((label, bits, 64));
+                load(a, SCRATCH, ptr(label), 64)?;
+                if dst == rhs && lhs != rhs {
+                    a.vpermi2d(ZMM[SCRATCH], ZMM[lhs], ZMM[rhs])?;
+                    copy(a, dst, SCRATCH, 64)
+                } else {
+                    if dst != lhs {
+                        copy(a, dst, lhs, 64)?;
+                    }
+                    a.vpermt2d(ZMM[dst], ZMM[SCRATCH], ZMM[rhs])
+                }
+            }
+        }
+    }
+}
+
+pub(in crate::lir::x64) fn extract_dword(
+    a: &mut CodeAssembler,
+    width: usize,
+    lane: Lane,
+    [dst, src, index]: [usize; 3],
+) -> Result {
+    use emit::R32;
+    let x = XMM[SCRATCH];
+    a.vmovd(x, R32[index])?;
+    if width == 32 {
+        a.vpermd(YMM[SCRATCH], YMM[SCRATCH], YMM[src])?;
+    } else {
+        a.vpermd(ZMM[SCRATCH], ZMM[SCRATCH], ZMM[src])?;
+    }
+    if lane.float() {
+        a.vmovaps(XMM[dst], x)
+    } else {
+        a.vmovd(R32[dst], x)
+    }
+}
+
+pub(in crate::lir::x64) fn insert_dword(
+    a: &mut CodeAssembler,
+    pool: &mut emit::Constants,
+    width: usize,
+    lane: Lane,
+    [dst, src, index]: [usize; 3],
+    replacement: usize,
+    temp: Option<usize>,
+) -> Result {
+    use emit::R32;
+    let label = a.create_label();
+    pool.push((
+        label,
+        crate::lir::constants::iota_bytes(Lane::I32, width),
+        width,
+    ));
+    if width == 32 {
+        let scratch = YMM[SCRATCH];
+        let temp = temp.unwrap();
+        a.vmovd(XMM[SCRATCH], R32[index])?;
+        a.vpbroadcastd(scratch, XMM[SCRATCH])?;
+        a.vpcmpeqd(scratch, scratch, ymmword_ptr(label))?;
+        let scalar = if lane.float() {
+            XMM[replacement]
+        } else {
+            a.vmovd(XMM[temp], R32[replacement])?;
+            XMM[temp]
+        };
+        a.vpbroadcastd(YMM[temp], scalar)?;
+        a.vblendvps(YMM[dst], YMM[src], YMM[temp], scratch)
+    } else {
+        let scratch = ZMM[SCRATCH];
+        a.vpbroadcastd(scratch, R32[index])?;
+        a.vpcmpd(k1, scratch, zmmword_ptr(label), 0)?;
+        if lane.float() && dst == replacement && dst != src {
+            a.vpbroadcastd(scratch, XMM[replacement])?;
+            return a.vpblendmd(ZMM[dst].k1(), ZMM[src], scratch);
+        }
+        if dst != src {
+            copy(a, dst, src, width)?;
+        }
+        if lane.float() {
+            a.vpbroadcastd(ZMM[dst].k1(), XMM[replacement])
+        } else {
+            a.vpbroadcastd(ZMM[dst].k1(), R32[replacement])
+        }
+    }
+}
+
 pub(in crate::lir::x64) fn shift_dwords(
     a: &mut CodeAssembler,
     width: usize,
@@ -130,7 +279,7 @@ impl Rule {
                 (_, Lane::F64) => 2,
                 _ => 5,
             },
-            Self::Shuffle if c.bytes == 32 => 3,
+            Self::Shuffle if c.bytes == 32 && !evex(c) => 3,
             Self::Widen(false) if c.bytes != 16 || c.sse41 => 0,
             Self::Shuffle | Self::Widen(_) => 1,
             Self::Narrow if c.bytes == 64 => 1,
@@ -151,22 +300,30 @@ impl Rule {
         let n = e.bytes();
         match self {
             Self::FloatWidth => float_width(v, action, input, output, r, t),
-            Self::Shuffle if v.width == 64 => {
+            Self::Shuffle if evex(v.cpu) => {
                 let i = r[2];
                 v.splat(t[0], n, (2 * v.width / n) as u64)?;
+                macro_rules! shuffle {
+                    ($r:ident, $cmp:ident, $permute:ident) => {{
+                        v.a.$cmp(k1, $r[i], $r[t[0]], 1)?;
+                        v.mov(d, x)?;
+                        v.a.$permute($r[d].k1().z(), $r[i], $r[y])
+                    }};
+                }
+                macro_rules! width {
+                    ($cmp:ident, $permute:ident) => {
+                        match v.width {
+                            16 => shuffle!(XMM, $cmp, $permute),
+                            32 => shuffle!(YMM, $cmp, $permute),
+                            _ => shuffle!(ZMM, $cmp, $permute),
+                        }
+                    };
+                }
                 match n {
-                    1 => v.a.vpcmpub(k1, ZMM[i], ZMM[t[0]], 1),
-                    2 => v.a.vpcmpuw(k1, ZMM[i], ZMM[t[0]], 1),
-                    4 => v.a.vpcmpud(k1, ZMM[i], ZMM[t[0]], 1),
-                    _ => v.a.vpcmpuq(k1, ZMM[i], ZMM[t[0]], 1),
-                }?;
-                v.mov(d, x)?;
-                let dest = ZMM[d].k1().z();
-                match n {
-                    1 => v.a.vpermt2b(dest, ZMM[i], ZMM[y]),
-                    2 => v.a.vpermt2w(dest, ZMM[i], ZMM[y]),
-                    4 => v.a.vpermt2d(dest, ZMM[i], ZMM[y]),
-                    _ => v.a.vpermt2q(dest, ZMM[i], ZMM[y]),
+                    1 => width!(vpcmpub, vpermt2b),
+                    2 => width!(vpcmpuw, vpermt2w),
+                    4 => width!(vpcmpud, vpermt2d),
+                    _ => width!(vpcmpuq, vpermt2q),
                 }
             }
             Self::Shuffle => {

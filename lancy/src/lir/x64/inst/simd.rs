@@ -1,4 +1,5 @@
 //! Native arithmetic and unaligned moves for each physical SIMD width.
+pub(in crate::lir::x64) mod opmask;
 pub(in crate::lir::x64) mod packed;
 use super::VectorMask;
 use crate::lir::x64::{Features, emit};
@@ -20,6 +21,38 @@ pub(in crate::lir::x64) const ZMM: [AsmRegisterZmm; 16] = [
     zmm0, zmm1, zmm2, zmm3, zmm4, zmm5, zmm6, zmm7, zmm8, zmm9, zmm10, zmm11, zmm12, zmm13, zmm14,
     zmm15,
 ];
+pub(in crate::lir::x64) const K: [AsmRegisterK; 8] = [k0, k1, k2, k3, k4, k5, k6, k7];
+
+macro_rules! predicated {
+    ($operand:expr, $mask:expr) => {
+        match $mask {
+            1 => $operand.k1(),
+            2 => $operand.k2(),
+            3 => $operand.k3(),
+            4 => $operand.k4(),
+            5 => $operand.k5(),
+            6 => $operand.k6(),
+            7 => $operand.k7(),
+            _ => unreachable!("EVEX needs a nonzero mask register"),
+        }
+    };
+}
+
+pub(in crate::lir::x64) fn evex(cpu: Features) -> bool {
+    cpu.bytes == 64 || cpu.avx10 >= 1
+}
+
+pub(in crate::lir::x64) fn mask_lanes(cpu: Features, lane: Lane) -> bool {
+    match lane.bytes() {
+        1 | 2 => cpu.bw,
+        4 | 8 => true,
+        _ => false,
+    }
+}
+
+pub(in crate::lir::x64) fn compact_lanes(cpu: Features, lane: Lane) -> bool {
+    evex(cpu) && mask_lanes(cpu, lane) && (lane.bytes() >= 4 || cpu.vbmi2)
+}
 
 #[derive(Clone, Copy, Debug)]
 pub(in crate::lir::x64) struct Native {
@@ -45,7 +78,9 @@ impl Native {
             return false;
         }
         matches!(self.action, Action::Ternary(Ternary::MulAdd))
-            || (self.bytes <= 16 && matches!(self.action, Action::Binary(_)))
+            || (self.bytes <= 16
+                && self.input != Type::Vector(Lane::F16)
+                && matches!(self.action, Action::Binary(_)))
     }
 
     #[cfg(test)]
@@ -183,12 +218,20 @@ impl Native {
                     };
                 }
                 mask_from_signs(a, self.cpu, lane.bytes(), src)?;
-                return blend(a, lane, dst, rhs, no);
+                return blend(a, self.bytes, lane, [dst, rhs, no], 1);
             }
             _ => {}
         }
         if lane == Lane::F16 {
-            macro_rules! ph {($op:ident,$($r:ident),+) => {if self.bytes==64 {a.$op($(ZMM[$r]),+)}else{a.$op($(YMM[$r]),+)}}; }
+            macro_rules! ph {
+                ($op:ident,$($r:ident),+) => {
+                    match self.bytes {
+                        16 => a.$op($(XMM[$r]),+),
+                        32 => a.$op($(YMM[$r]),+),
+                        _ => a.$op($(ZMM[$r]),+),
+                    }
+                };
+            }
             return match self.action {
                 Action::Binary(B::Add) => ph!(vaddph, dst, src, rhs),
                 Action::Binary(B::Sub) => ph!(vsubph, dst, src, rhs),
@@ -246,17 +289,15 @@ impl Native {
             }
             Action::Compress | Action::Expand => {
                 mask_from_signs(a, self.cpu, lane.bytes(), rhs)?;
-                let d = ZMM[dst].k1().z();
-                match (self.action, lane.bytes()) {
-                    (Action::Compress, 1) => a.vpcompressb(d, ZMM[src]),
-                    (Action::Compress, 2) => a.vpcompressw(d, ZMM[src]),
-                    (Action::Compress, 4) => a.vpcompressd(d, ZMM[src]),
-                    (Action::Compress, 8) => a.vpcompressq(d, ZMM[src]),
-                    (_, 1) => a.vpexpandb(d, ZMM[src]),
-                    (_, 2) => a.vpexpandw(d, ZMM[src]),
-                    (_, 4) => a.vpexpandd(d, ZMM[src]),
-                    _ => a.vpexpandq(d, ZMM[src]),
-                }
+                compact(
+                    a,
+                    self.bytes,
+                    lane,
+                    matches!(self.action, Action::Expand),
+                    dst,
+                    src,
+                    1,
+                )
             }
             Action::Unary(Unary::Abs) => {
                 macro_rules! abs {
@@ -281,6 +322,7 @@ impl Native {
                 if self.bytes == 64 {
                     compare_mask(
                         a,
+                        64,
                         k1,
                         lane,
                         src,
@@ -539,8 +581,7 @@ pub(in crate::lir::x64) fn copy(
     }
 }
 
-/// Sets ZF exactly when every bit of the vector is zero.
-/// Set ZF if every lane is nonzero.
+/// Sets ZF when every lane is nonzero.
 pub(in crate::lir::x64) fn test_all(
     a: &mut CodeAssembler,
     cpu: Features,
@@ -605,6 +646,7 @@ pub(in crate::lir::x64) fn test_all(
     }
 }
 
+/// Sets ZF when every bit of the vector is zero.
 pub(in crate::lir::x64) fn test_any(
     a: &mut CodeAssembler,
     cpu: Features,
@@ -686,26 +728,35 @@ pub(in crate::lir::x64) fn comparison_predicate(lane: Lane, op: B) -> Option<i32
     })
 }
 
-fn compare_mask(
+pub(in crate::lir::x64) fn compare_mask(
     a: &mut CodeAssembler,
+    width: usize,
     dst: AsmRegisterK,
     lane: Lane,
     lhs: usize,
     rhs: usize,
     cc: i32,
 ) -> Result<(), IcedError> {
-    let (lhs, rhs) = (ZMM[lhs], ZMM[rhs]);
+    macro_rules! cmp {
+        ($op:ident) => {
+            match width {
+                16 => a.$op(dst, XMM[lhs], XMM[rhs], cc),
+                32 => a.$op(dst, YMM[lhs], YMM[rhs], cc),
+                _ => a.$op(dst, ZMM[lhs], ZMM[rhs], cc),
+            }
+        };
+    }
     match (lane, lane.bytes(), lane.signed()) {
-        (Lane::F32, ..) => a.vcmpps(dst, lhs, rhs, cc),
-        (Lane::F64, ..) => a.vcmppd(dst, lhs, rhs, cc),
-        (_, 1, true) => a.vpcmpb(dst, lhs, rhs, cc),
-        (_, 1, false) => a.vpcmpub(dst, lhs, rhs, cc),
-        (_, 2, true) => a.vpcmpw(dst, lhs, rhs, cc),
-        (_, 2, false) => a.vpcmpuw(dst, lhs, rhs, cc),
-        (_, 4, true) => a.vpcmpd(dst, lhs, rhs, cc),
-        (_, 4, false) => a.vpcmpud(dst, lhs, rhs, cc),
-        (_, 8, true) => a.vpcmpq(dst, lhs, rhs, cc),
-        (_, 8, false) => a.vpcmpuq(dst, lhs, rhs, cc),
+        (Lane::F32, ..) => cmp!(vcmpps),
+        (Lane::F64, ..) => cmp!(vcmppd),
+        (_, 1, true) => cmp!(vpcmpb),
+        (_, 1, false) => cmp!(vpcmpub),
+        (_, 2, true) => cmp!(vpcmpw),
+        (_, 2, false) => cmp!(vpcmpuw),
+        (_, 4, true) => cmp!(vpcmpd),
+        (_, 4, false) => cmp!(vpcmpud),
+        (_, 8, true) => cmp!(vpcmpq),
+        (_, 8, false) => cmp!(vpcmpuq),
         _ => unreachable!(),
     }
 }
@@ -721,9 +772,10 @@ fn emit_opmask(
     size: usize,
     mask: VectorMask<usize>,
     bits: MaskBits,
-) -> Result<(), IcedError> {
+) -> Result<usize, IcedError> {
     match mask {
         VectorMask::Lanes(reg) => mask_from_signs(a, cpu, size, reg),
+        VectorMask::Register(_, reg) => return Ok(reg),
         VectorMask::Compare {
             lhs,
             rhs,
@@ -748,9 +800,10 @@ fn emit_opmask(
             } else {
                 k1
             };
-            compare_mask(a, dst, lane, lhs, rhs, predicate)
+            compare_mask(a, cpu.bytes, dst, lane, lhs, rhs, predicate)
         }
-    }
+    }?;
+    Ok(1)
 }
 
 pub(in crate::lir::x64) fn test_vector_mask(
@@ -760,30 +813,38 @@ pub(in crate::lir::x64) fn test_vector_mask(
 ) -> Result<(), IcedError> {
     let lane = match mask {
         VectorMask::Lanes(reg) => return test_any(a, cpu, reg),
-        VectorMask::Compare { lane, .. } => lane,
+        VectorMask::Register(lane, _) | VectorMask::Compare { lane, .. } => lane,
     };
     let size = lane.bytes();
-    emit_opmask(a, cpu, size, mask, MaskBits::Nonzero)?;
-    match size {
-        1 => a.kortestq(k1, k1),
-        2 => a.kortestd(k1, k1),
-        _ => a.kortestw(k1, k1),
+    let k = K[emit_opmask(a, cpu, size, mask, MaskBits::Nonzero)?];
+    match cpu.bytes / size {
+        64 => a.kortestq(k, k),
+        32 => a.kortestd(k, k),
+        _ => a.kortestw(k, k),
     }
 }
 
 fn blend(
     a: &mut CodeAssembler,
+    width: usize,
     lane: Lane,
-    dst: usize,
-    yes: usize,
-    no: usize,
+    [dst, yes, no]: [usize; 3],
+    mask: usize,
 ) -> Result<(), IcedError> {
-    let (d, no, yes) = (ZMM[dst].k1(), ZMM[no], ZMM[yes]);
+    macro_rules! merge {
+        ($op:ident) => {
+            match width {
+                16 => a.$op(predicated!(XMM[dst], mask), XMM[no], XMM[yes]),
+                32 => a.$op(predicated!(YMM[dst], mask), YMM[no], YMM[yes]),
+                _ => a.$op(predicated!(ZMM[dst], mask), ZMM[no], ZMM[yes]),
+            }
+        };
+    }
     match lane.bytes() {
-        1 => a.vpblendmb(d, no, yes),
-        2 => a.vpblendmw(d, no, yes),
-        4 => a.vpblendmd(d, no, yes),
-        _ => a.vpblendmq(d, no, yes),
+        1 => merge!(vpblendmb),
+        2 => merge!(vpblendmw),
+        4 => merge!(vpblendmd),
+        _ => merge!(vpblendmq),
     }
 }
 
@@ -796,13 +857,42 @@ pub(in crate::lir::x64) fn blend_comparison(
     yes: usize,
     no: usize,
 ) -> Result<(), IcedError> {
-    emit_opmask(a, cpu, lane.bytes(), mask, MaskBits::Sign)?;
-    blend(a, lane, dst, yes, no)
+    let mask = emit_opmask(a, cpu, lane.bytes(), mask, MaskBits::Sign)?;
+    blend(a, cpu.bytes, lane, [dst, yes, no], mask)
+}
+
+pub(in crate::lir::x64) fn compact(
+    a: &mut CodeAssembler,
+    width: usize,
+    lane: Lane,
+    expand: bool,
+    dst: usize,
+    src: usize,
+    mask: usize,
+) -> Result<(), IcedError> {
+    macro_rules! permute {
+        ($op:ident) => {
+            match width {
+                16 => a.$op(predicated!(XMM[dst], mask).z(), XMM[src]),
+                32 => a.$op(predicated!(YMM[dst], mask).z(), YMM[src]),
+                _ => a.$op(predicated!(ZMM[dst], mask).z(), ZMM[src]),
+            }
+        };
+    }
+    match (expand, lane.bytes()) {
+        (false, 1) => permute!(vpcompressb),
+        (false, 2) => permute!(vpcompressw),
+        (false, 4) => permute!(vpcompressd),
+        (false, _) => permute!(vpcompressq),
+        (true, 1) => permute!(vpexpandb),
+        (true, 2) => permute!(vpexpandw),
+        (true, 4) => permute!(vpexpandd),
+        (true, _) => permute!(vpexpandq),
+    }
 }
 
 pub(in crate::lir::x64) fn evex_masked_memory(cpu: Features, size: usize, indexed: bool) -> bool {
-    (cpu.bytes == 64 || cpu.avx10 >= 1)
-        && (matches!(size, 4 | 8) || !indexed && size <= 2 && cpu.bw)
+    evex(cpu) && (matches!(size, 4 | 8) || !indexed && size <= 2 && cpu.bw)
 }
 
 pub(in crate::lir::x64) struct MaskedMemory {
@@ -810,7 +900,7 @@ pub(in crate::lir::x64) struct MaskedMemory {
     pub base: usize,
     pub index: Option<usize>,
     pub mask: VectorMask<usize>,
-    pub value: usize,
+    pub value: Option<usize>,
     pub dst: Option<usize>,
     pub temp: Option<usize>,
 }
@@ -835,16 +925,18 @@ impl MaskedMemory {
         let scratch = super::SCRATCH;
         // AVX10 also exposes EVEX memory instructions at its supported vector length.
         if evex_masked_memory(cpu, size, index.is_some()) {
-            emit_opmask(a, cpu, size, mask, MaskBits::Sign)?;
+            let mask = emit_opmask(a, cpu, size, mask, MaskBits::Sign)?;
             if let Some(i) = index {
+                // VSIB clears its mask. K1 is reserved for destructive operands.
+                if mask != 1 {
+                    a.kmovw(k1, K[mask])?;
+                }
                 macro_rules! indexed {
                     ($r:ident) => {{
                         let address = ptr(R64[base] + $r[i] * size as i32);
                         if let Some(d) = dst {
                             let target = if d == i { scratch } else { d };
-                            if target != value {
-                                copy(a, target, value, width)?;
-                            }
+                            init_gather(a, target, value, width)?;
                             if size == 4 {
                                 a.vpgatherdd($r[target].k1(), dword_ptr(address))?;
                             } else {
@@ -856,9 +948,9 @@ impl MaskedMemory {
                             Ok(())
                         // VPSCATTER orders overlapping element writes from low to high lanes.
                         } else if size == 4 {
-                            a.vpscatterdd(dword_ptr(address).k1(), $r[value])
+                            a.vpscatterdd(dword_ptr(address).k1(), $r[value.unwrap()])
                         } else {
-                            a.vpscatterqq(qword_ptr(address).k1(), $r[value])
+                            a.vpscatterqq(qword_ptr(address).k1(), $r[value.unwrap()])
                         }
                     }};
                 }
@@ -868,7 +960,7 @@ impl MaskedMemory {
                     _ => indexed!(ZMM),
                 };
             }
-            if let Some(d) = dst
+            if let (Some(d), Some(value)) = (dst, value)
                 && d != value
             {
                 copy(a, d, value, width)?;
@@ -877,9 +969,10 @@ impl MaskedMemory {
                 ($r:ident,$mem:ident,$op:ident) => {{
                     let mem = $mem(R64[base]);
                     if let Some(d) = dst {
-                        a.$op($r[d].k1(), mem)
+                        let dst = predicated!($r[d], mask);
+                        a.$op(if value.is_some() { dst } else { dst.z() }, mem)
                     } else {
-                        a.$op(mem.k1(), $r[value])
+                        a.$op(predicated!(mem, mask), $r[value.unwrap()])
                     }
                 }};
             }
@@ -911,9 +1004,7 @@ impl MaskedMemory {
                 let m = temp.expect("AVX2 gather mask temporary");
                 let target = if d == i { scratch } else { d };
                 a.vmovaps(YMM[m], YMM[mask])?;
-                if target != value {
-                    a.vmovaps(YMM[target], YMM[value])?;
-                }
+                init_gather(a, target, value, width)?;
                 let address = ptr(R64[base] + YMM[i] * size as i32);
                 if size == 4 {
                     a.vpgatherdd_3(YMM[target], dword_ptr(address), YMM[m])?;
@@ -929,6 +1020,13 @@ impl MaskedMemory {
             if index.is_none() {
                 let mem = ymmword_ptr(R64[base]);
                 if let Some(d) = dst {
+                    let Some(value) = value else {
+                        return if size == 4 {
+                            a.vmaskmovps(YMM[d], YMM[mask], mem)
+                        } else {
+                            a.vmaskmovpd(YMM[d], YMM[mask], mem)
+                        };
+                    };
                     if size == 4 {
                         a.vmaskmovps(YMM[scratch], YMM[mask], mem)?;
                         return a.vblendvps(YMM[d], YMM[value], YMM[scratch], YMM[mask]);
@@ -937,9 +1035,9 @@ impl MaskedMemory {
                     return a.vblendvpd(YMM[d], YMM[value], YMM[scratch], YMM[mask]);
                 }
                 return if size == 4 {
-                    a.vmaskmovps(mem, YMM[mask], YMM[value])
+                    a.vmaskmovps(mem, YMM[mask], YMM[value.unwrap()])
                 } else {
-                    a.vmaskmovpd(mem, YMM[mask], YMM[value])
+                    a.vmaskmovpd(mem, YMM[mask], YMM[value.unwrap()])
                 };
             }
         }
@@ -951,7 +1049,12 @@ impl MaskedMemory {
         a.sub(rsp, saved + 8)?;
         a.mov(qword_ptr(rsp + saved), r11)?;
         store(a, ptr(rsp), mask, width)?;
-        store(a, ptr(rsp + data), value, width)?;
+        store(
+            a,
+            ptr(rsp + data),
+            value.expect("scalar masked memory needs a vector"),
+            width,
+        )?;
         if let Some(index) = index {
             store(a, ptr(rsp + indices), index, width)?;
         }
@@ -1010,5 +1113,22 @@ impl MaskedMemory {
         }
         a.mov(r11, qword_ptr(rsp + saved))?;
         a.add(rsp, saved + 8)
+    }
+}
+
+fn init_gather(
+    a: &mut CodeAssembler,
+    target: usize,
+    value: Option<usize>,
+    width: usize,
+) -> Result<(), IcedError> {
+    match value {
+        Some(value) if value != target => copy(a, target, value, width),
+        Some(_) => Ok(()),
+        None => match width {
+            16 => a.vxorps(XMM[target], XMM[target], XMM[target]),
+            32 => a.vxorps(YMM[target], YMM[target], YMM[target]),
+            _ => a.vpxord(ZMM[target], ZMM[target], ZMM[target]),
+        },
     }
 }

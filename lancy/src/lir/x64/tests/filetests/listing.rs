@@ -25,6 +25,7 @@ fn opcode(inst: Inst) -> String {
             active: Some(_), ..
         } => ".compare.and",
         VectorMask::Compare { .. } => ".compare",
+        VectorMask::Register(..) => ".register",
         VectorMask::Lanes(_) => "",
     };
     match inst {
@@ -47,8 +48,28 @@ fn opcode(inst: Inst) -> String {
         Inst::BrCmp(cc, _, arg) => format!("brcmp.{cc:?}{}", rhs(arg)),
         Inst::CheckMask(mask) => format!("bounds.mask{}", mask_kind(mask)),
         Inst::BranchAny(mask) => format!("branch.any{}", mask_kind(mask)),
-        Inst::AnyComparison(_, mask) => format!("any.mask{}", mask_kind(mask)),
-        Inst::SelectComparison { mask, .. } => format!("select.mask{}", mask_kind(mask)),
+        Inst::AnyMask(_, mask) => format!("any.mask{}", mask_kind(mask)),
+        Inst::AllMask(lane, ..) => format!("all.mask.{lane:?}"),
+        Inst::SelectMask { mask, .. } => format!("select.mask{}", mask_kind(mask)),
+        Inst::MaskCompare(lane, cc, ..) => format!("mask.cmp.{lane:?} {cc}"),
+        Inst::MaskLogic(lane, op, ..) => format!("mask.{op:?}.{lane:?}"),
+        Inst::MaskNot(lane, ..) => format!("mask.not.{lane:?}"),
+        Inst::MaskImmediate(_, bits) => format!("mask.imm {bits:#x}"),
+        Inst::MaskPrefix(..) => "mask.prefix".into(),
+        Inst::MaskCount(..) => "mask.count".into(),
+        Inst::CompactStore { .. } => "compress.store".into(),
+        Inst::CompactLookup(expand, ..) => if expand {
+            "expand.lookup"
+        } else {
+            "compress.lookup"
+        }
+        .into(),
+        Inst::MaskCompact(lane, expand, ..) => {
+            format!(
+                "mask.{}.{lane:?}",
+                if expand { "expand" } else { "compress" }
+            )
+        }
         Inst::BranchAll(lane, _) => format!("branch.all.{lane:?}"),
         Inst::CheckBounds(..) => "bounds".into(),
         Inst::Cdq { .. } => "cdq".into(),
@@ -75,6 +96,20 @@ fn opcode(inst: Inst) -> String {
         Inst::BroadcastLane(_, _, lane) => format!("broadcast.lane {lane}"),
         Inst::ExtractLane(lane, _, _, index) => format!("extract.{lane:?} {index}"),
         Inst::ShiftDwords(_, _, count) => format!("shift.dwords {count}"),
+        Inst::PairedShuffle(form, ..) => format!("shuffle.{form:?}"),
+        Inst::DwordLane {
+            checked,
+            replacement,
+            ..
+        } => format!(
+            "{}.dword{}",
+            if replacement.is_some() {
+                "insert"
+            } else {
+                "extract"
+            },
+            if checked { ".checked" } else { "" },
+        ),
         Inst::VectorShiftImm(kind, lane, _, _, count) => {
             format!("packed.{lane:?}.{kind:?} imm={count}")
         }
@@ -97,6 +132,7 @@ fn location(a: Allocation) -> String {
         "r13", "r14", "r15",
     ];
     match a.as_reg() {
+        Some(r) if r.class() == regalloc2::RegClass::Float => format!("k{}", r.hw_enc()),
         Some(r) if r.class() == regalloc2::RegClass::Vector => format!(
             "{}{}",
             match crate::ScalarKernel::vector_bytes() {

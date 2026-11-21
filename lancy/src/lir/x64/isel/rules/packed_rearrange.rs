@@ -1,12 +1,108 @@
 use super::Rules;
 use crate::{
+    hir::Value,
     hir::operation::Action,
     hir::{Binary as B, Lane, Op, Simd, Type},
-    lir::x64::inst::{Inst, simd::packed::rearrange::Rule},
+    lir::x64::inst::{
+        Inst,
+        simd::packed::rearrange::{PairedShuffle, Rule},
+    },
 };
+use regalloc2::RegClass;
 use splice_target::Features;
 
 impl Rules<'_> {
+    pub(super) fn dynamic_dword_lane(
+        &mut self,
+        op: Op,
+    ) -> Result<Option<Inst>, crate::CompileError> {
+        let (value, index, replacement) = match op {
+            Op::Simd(Simd::ExtractLane(x, i)) => (x, i, None),
+            Op::Simd(Simd::InsertLane(x, i, y)) => (x, i, Some(y)),
+            _ => return Ok(None),
+        };
+        let lane = self.ty(value).lane().unwrap();
+        if lane.bytes() != 4 || self.cpu.bytes == 16 || self.cpu.bytes == 32 && !self.cpu.avx2 {
+            return Ok(None);
+        }
+        let count = self.cpu.bytes as u32 / 4;
+        let constant = self.dword_constant(index);
+        if constant.is_some_and(|n| n >= count) {
+            return Ok(None);
+        }
+        let masked = matches!(self.ctx.defining_op(index), Some(Op::Bin(B::And, a, b))
+            if [a, b].into_iter().any(|v| self.dword_constant(v).is_some_and(|n| n < count)));
+        let checked = !masked && constant.is_none();
+        let temp = if replacement.is_some() && self.cpu.bytes == 32 {
+            Some(self.body.temp(RegClass::Vector)?)
+        } else {
+            None
+        };
+        Ok(Some(Inst::DwordLane {
+            lane,
+            checked,
+            dst: self.dst(),
+            value: self.input(value),
+            index: self.input(index),
+            replacement: replacement.map(|v| self.input(v)),
+            temp,
+        }))
+    }
+
+    pub(super) fn paired_shuffle(&mut self, op: Op) -> Option<Inst> {
+        let Op::Simd(Simd::Shuffle(lhs, rhs, index)) = op else {
+            return None;
+        };
+        if self.ty(lhs).lane()?.bytes() != 4 || self.cpu.bytes == 32 && !self.cpu.avx2 {
+            return None;
+        }
+        let n = self.cpu.bytes / 4;
+        let index = self.constant_indices(index, 5)?;
+        let form = [
+            PairedShuffle::Interleave(false),
+            PairedShuffle::Interleave(true),
+            PairedShuffle::Deinterleave(false),
+            PairedShuffle::Deinterleave(true),
+        ]
+        .into_iter()
+        .find(|s| {
+            index[..n]
+                .iter()
+                .enumerate()
+                .all(|(i, &j)| j as usize == s.index(i, n))
+        })?;
+        Some(Inst::PairedShuffle(
+            form,
+            self.dst(),
+            self.input(lhs),
+            self.input(rhs),
+        ))
+    }
+
+    fn constant_indices(&self, value: Value, depth: u8) -> Option<[u32; 16]> {
+        match self.ctx.defining_op(value)? {
+            Op::Simd(Simd::Iota(Lane::I32 | Lane::U32)) => Some(std::array::from_fn(|i| i as u32)),
+            Op::Simd(Simd::Splat(value)) => Some([self.dword_constant(value)?; 16]),
+            Op::Simd(Simd::Bin(op, a, b)) if depth != 0 => {
+                let left = self.constant_indices(a, depth - 1)?;
+                let right = self.constant_indices(b, depth - 1)?;
+                let combine = match op {
+                    B::Add => u32::wrapping_add,
+                    B::Sub => u32::wrapping_sub,
+                    B::Mul => u32::wrapping_mul,
+                    B::And => |a, b| a & b,
+                    B::Shr if self.ty(a) == Type::Vector(Lane::I32) => {
+                        |a, b| (a as i32).wrapping_shr(b) as u32
+                    }
+                    B::Shr => u32::wrapping_shr,
+                    _ => return None,
+                };
+                Some(std::array::from_fn(|i| combine(left[i], right[i])))
+            }
+            _ => None,
+        }
+    }
+
     pub(super) fn immediate_rearrangement(&mut self, op: Op) -> Option<Inst> {
         match op {
             Op::Simd(Simd::ExtractLane(vector, index)) => {
@@ -65,7 +161,7 @@ impl Rule {
                 Self::FloatWidth
             }
             Action::Shuffle
-                if c.bytes == 64
+                if crate::lir::x64::inst::simd::evex(c)
                     && (matches!(n, 4 | 8) || n == 2 && c.bw || n == 1 && c.bw && c.vbmi)
                     || c.bytes == 32 && c.avx2 && n == 4 =>
             {

@@ -6,6 +6,7 @@ use syn::{Expr, GenericArgument, Path, PathArguments, Result, Type, visit::Visit
 #[derive(Copy, Clone, PartialEq, Eq)]
 pub(crate) enum Elem {
     U16,
+    U32,
     I32,
     I64,
     F32,
@@ -22,6 +23,7 @@ impl Elem {
     fn names(self) -> (&'static str, &'static str) {
         match self {
             Self::U16 => ("u16", "U16"),
+            Self::U32 => ("u32", "U32"),
             Self::I32 => ("i32", "I32"),
             Self::I64 => ("i64", "I64"),
             Self::F32 => ("f32", "F32"),
@@ -30,9 +32,16 @@ impl Elem {
         }
     }
     fn named(name: &str) -> Option<Self> {
-        [Self::U16, Self::I32, Self::I64, Self::F32, Self::F64]
-            .into_iter()
-            .find(|v| v.names().0 == name)
+        [
+            Self::U16,
+            Self::U32,
+            Self::I32,
+            Self::I64,
+            Self::F32,
+            Self::F64,
+        ]
+        .into_iter()
+        .find(|v| v.names().0 == name)
     }
     pub(crate) fn parse(t: &Type, types: &[&Ident]) -> Option<Self> {
         let Type::Path(p) = t else { return None };
@@ -206,7 +215,10 @@ impl Lower<'_> {
         let lane = p.path.segments.iter().rev().nth(1).unwrap();
         let explicit = generic(lane, self.types);
         if !matches!(lane.arguments, PathArguments::None) && explicit.is_none() {
-            return err(lane, "expected Lane<T> with one of u16, i32, i64, f32, f64");
+            return err(
+                lane,
+                "expected Lane<T> with one of u16, u32, i32, i64, f32, f64",
+            );
         }
         let name = p.path.segments.last().unwrap().ident.to_string();
         if c.args.len() != n {
@@ -375,10 +387,12 @@ impl Lower<'_> {
         r: Value,
         at: &syn::ExprBinary,
     ) -> Result<Value> {
-        if t == Scalar::Vector(Elem::I32) && matches!(op, syn::BinOp::Shr(_)) {
+        if let Scalar::Vector(elem @ (Elem::I32 | Elem::U32)) = t
+            && matches!(op, syn::BinOp::Shr(_))
+        {
             let shift = self.host(r, &at.right)?;
             return Ok(self.vector_op(
-                Elem::I32,
+                elem,
                 emit!(Shr({let shift:u32=#shift;shift & 31})),
                 vec![self.reg(l, t, at)?],
                 Some(t),
@@ -467,7 +481,7 @@ impl Lower<'_> {
             ("swizzle", 1, false) if e == Elem::I32 => {
                 self.vector_op(e, emit!(Swizzle), vec![recv, op(0, v)?], Some(v))
             }
-            ("rotate_left", 1, false) if e == Elem::I32 => {
+            ("rotate_left", 1, false) if matches!(e, Elem::I32 | Elem::U32) => {
                 let count = self.host(self.expr(&args[0])?, &args[0])?;
                 self.vector_op(
                     e,
@@ -476,13 +490,45 @@ impl Lower<'_> {
                     Some(v),
                 )
             }
-            ("simd_min" | "simd_max", 1, false) if e == Elem::I32 => {
+            ("simd_min" | "simd_max", 1, false) if matches!(e, Elem::I32 | Elem::U32) => {
                 let operation = if method == "simd_min" {
                     emit!(Min)
                 } else {
                     emit!(Max)
                 };
                 self.vector_op(e, operation, vec![recv, op(0, v)?], Some(v))
+            }
+            ("sqrt", 0, false) => self.vector_op(e, emit!(Sqrt), vec![recv], Some(v)),
+            ("mul_add", 2, false) => {
+                self.vector_op(e, emit!(MulAdd), vec![recv, op(0, v)?, op(1, v)?], Some(v))
+            }
+            ("reduce_sum", 0, false) if e == Elem::I32 => {
+                self.vector_op(e, emit!(ReduceSum), vec![recv], Some(Scalar::Int))
+            }
+            ("cast" | "widen_low" | "widen_high", 0, false) | ("narrow", 1, false) => {
+                let Some(Scalar::Vector(to)) = m
+                    .turbofish
+                    .as_ref()
+                    .and_then(|a| element_argument(a, self.types))
+                    .map(Scalar::Vector)
+                    .or(hint)
+                else {
+                    return err(m, "specify the output lane type");
+                };
+                let output = to.tokens(self.root, self.types);
+                let mut inputs = vec![recv];
+                let kind = match method.as_str() {
+                    "cast" => emit!(Cast(#output)),
+                    "narrow" => {
+                        inputs.push(op(0, v)?);
+                        emit!(Narrow(#output))
+                    }
+                    _ => {
+                        let high = method == "widen_high";
+                        emit!(Widen { to: #output, high: #high })
+                    }
+                };
+                self.vector_op(e, kind, inputs, Some(Scalar::Vector(to)))
             }
             ("prefix_sum", 0, false) if e == Elem::I32 => {
                 self.vector_op(e, emit!(PrefixSum), vec![recv], Some(v))

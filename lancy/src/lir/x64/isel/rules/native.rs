@@ -41,7 +41,7 @@ impl Native {
             let supported = lane == Lane::F16
                 && packed
                 && cpu.fp16
-                && (bytes == 64 || (bytes == 32 && cpu.avx10 >= 1))
+                && crate::lir::x64::inst::simd::evex(cpu)
                 && matches!(
                     action,
                     Action::Binary(B::Add | B::Sub | B::Mul | B::Div)
@@ -63,13 +63,7 @@ impl Native {
                     }
             }
             Action::Compress | Action::Expand => {
-                bytes == 64
-                    && packed
-                    && match lane.bytes() {
-                        1 | 2 => cpu.vbmi2 && cpu.bw,
-                        4 | 8 => true,
-                        _ => false,
-                    }
+                packed && crate::lir::x64::inst::simd::compact_lanes(cpu, lane)
             }
             Action::Unary(Unary::Abs) if lane.signed() => {
                 int && match lane.bytes() {

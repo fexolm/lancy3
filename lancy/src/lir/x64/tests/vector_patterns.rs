@@ -3,7 +3,7 @@ use crate::hir::{
     Binary, Function, Lane, Op, Simd, Terminator, Ternary, Type, Value, VectorAddress,
 };
 use crate::lir::x64::{self, Features};
-use iced_x86::{Decoder, DecoderOptions, Mnemonic};
+use iced_x86::{Decoder, DecoderOptions, Instruction, Mnemonic};
 
 fn function(params: &[Type], result: Type, make: impl FnOnce(&[Value]) -> Simd) -> Function {
     let mut f = Function::new(params, result);
@@ -15,11 +15,14 @@ fn function(params: &[Type], result: Type, make: impl FnOnce(&[Value]) -> Simd) 
 }
 
 fn instructions(f: &Function) -> Vec<Mnemonic> {
+    decoded(f).iter().map(Instruction::mnemonic).collect()
+}
+
+fn decoded(f: &Function) -> Vec<Instruction> {
     let (module, ids) = f.verified_module().unwrap();
     let code = x64::emit(module, &ids).unwrap();
     Decoder::new(64, &code.bytes[..code.text_len], DecoderOptions::NONE)
-        .iter()
-        .map(|i| i.mnemonic())
+        .into_iter()
         .collect()
 }
 
@@ -42,6 +45,231 @@ fn check(k: &ScalarKernel, args: &[u64], expected: &[u64]) {
     let mut result = vec![0; expected.len()];
     k.call_words(args, &mut result).unwrap();
     assert_eq!(result, expected);
+}
+
+#[test]
+fn zero_masked_load_has_no_merge_and_negative_zero_keeps_its_bits() {
+    let cpu = Features::host();
+    let n = cpu.bytes / 4;
+    let ty = Type::Vector(Lane::F32);
+    for fallback in [0, 0x8000_0000] {
+        let mut f = Function::new(&[Type::Ptr, Type::I32], ty);
+        let b = f.entry();
+        let [ptr, count] = f.params(b).try_into().unwrap();
+        let iota = f.append(b, Op::Simd(Simd::Iota(Lane::I32))).unwrap();
+        let count = f.append(b, Op::Simd(Simd::Splat(count))).unwrap();
+        let mask = f
+            .append(b, Op::Simd(Simd::Bin(Binary::Lt, iota, count)))
+            .unwrap();
+        let pass = f.append(b, Op::Literal(Lane::F32, fallback)).unwrap();
+        let pass = f.append(b, Op::Simd(Simd::Splat(pass))).unwrap();
+        let out = f
+            .append(
+                b,
+                Op::Simd(Simd::MaskedLoad {
+                    address: VectorAddress {
+                        base: ptr,
+                        indices: None,
+                    },
+                    mask,
+                    passthrough: pass,
+                }),
+            )
+            .unwrap();
+        f.set_terminator(b, Terminator::Return(out));
+        let kernel = ScalarKernel::compile(&f).unwrap();
+        let mem = [7.0f32];
+        let mut out = vec![0; cpu.bytes / 8];
+        // SAFETY: the active lane reads the one initialized word in mem.
+        unsafe { kernel.call_words_raw(&[mem.as_ptr() as u64, 1], &mut out) }.unwrap();
+        let mut expected = vec![fallback; n];
+        expected[0] = u128::from(mem[0].to_bits());
+        assert_eq!(out, words(Lane::F32, &expected));
+        let ops = decoded(&f);
+        if cpu.bytes == 64 {
+            let load = ops
+                .iter()
+                .find(|i| i.mnemonic() == Mnemonic::Vmovdqu32 && i.has_op_mask())
+                .unwrap();
+            assert_eq!(load.zeroing_masking(), fallback == 0);
+        } else if cpu.bytes == 32 && cpu.avx10 == 0 {
+            assert!(ops.iter().any(|i| i.mnemonic() == Mnemonic::Vmaskmovps));
+            assert_eq!(
+                ops.iter().any(|i| i.mnemonic() == Mnemonic::Vblendvps),
+                fallback != 0
+            );
+        }
+    }
+}
+
+#[test]
+fn pack_and_expand_preserve_lane_order_for_all_byte_masks() {
+    let cpu = Features::host();
+    let n = cpu.bytes / 4;
+    let ty = Type::Vector(Lane::I32);
+    let mask_width = n.min(8);
+    let values: Vec<_> = (0..n).map(|i| 0x8000_0000u128 + i as u128).collect();
+    for expand in [false, true] {
+        let f = function(&[ty, ty], ty, |args| {
+            if expand {
+                Simd::Expand(args[0], args[1])
+            } else {
+                Simd::Compress(args[0], args[1])
+            }
+        });
+        let kernel = ScalarKernel::compile(&f).unwrap();
+        for bits in 0..(1usize << mask_width) {
+            let active = |i: usize| bits & (1 << (i % mask_width)) != 0;
+            let mask: Vec<_> = (0..n)
+                .map(|i| if active(i) { 0x8000_0000 } else { 1 })
+                .collect();
+            let inputs = [words(Lane::I32, &values), words(Lane::I32, &mask)].concat();
+            let mut expected = vec![0; n];
+            for (k, i) in (0..n).filter(|&i| active(i)).enumerate() {
+                if expand {
+                    expected[i] = values[k];
+                } else {
+                    expected[k] = values[i];
+                }
+            }
+            check(&kernel, &inputs, &words(Lane::I32, &expected));
+        }
+        if cpu.bytes == 32 && cpu.avx2 && cpu.avx10 == 0 {
+            assert!(instructions(&f).contains(&Mnemonic::Vpermd));
+        } else if cpu.bytes == 16 && cpu.avx10 == 0 {
+            let ops = instructions(&f);
+            assert!(ops.contains(&Mnemonic::Movmskps));
+            if cpu.ssse3 {
+                assert!(ops.contains(&Mnemonic::Pshufb));
+            } else {
+                assert!(ops.contains(&Mnemonic::Pshufd) && ops.contains(&Mnemonic::Pand));
+            }
+        }
+    }
+}
+
+#[test]
+fn avx10_short_fp16_arithmetic_uses_the_requested_width() {
+    use super::packed_code::{body, executable, host_supports, profiles, supports};
+    use crate::hir::operation::Action;
+    use crate::jit::packed_test;
+    use crate::lir::x64::inst::simd::Native;
+
+    for bytes in [16, 32] {
+        let cpu = Features {
+            bytes,
+            avx10: 1,
+            fp16: true,
+            ..profiles()[3]
+        };
+        let ty = Type::Vector(Lane::F16);
+        for (action, mnemonic, inputs, expected, regs) in [
+            (
+                Action::Binary(Binary::Add),
+                Mnemonic::Vaddph,
+                [0x03ffu16, 1, 0],
+                0x0400u16,
+                &[1, 2, 3][..],
+            ),
+            (
+                Action::Binary(Binary::Mul),
+                Mnemonic::Vmulph,
+                [0x0400, 0x3800, 0],
+                0x0200,
+                &[1, 2, 3][..],
+            ),
+            (
+                Action::Ternary(Ternary::MulAdd),
+                Mnemonic::Vfmadd213ph,
+                [0x0400, 0x3801, 1],
+                0x0202,
+                &[1, 2, 3, 1][..],
+            ),
+        ] {
+            assert!(Native::select(action, ty, ty, Features { fp16: false, ..cpu }).is_none());
+            let native = Native::select(action, ty, ty, cpu).unwrap();
+            let (code, len) = body(native, regs);
+            let mut host_ok = bytes <= Features::host().bytes;
+            let mut selected = false;
+            for inst in Decoder::new(64, &code[..len], DecoderOptions::NONE) {
+                assert!(!inst.is_invalid());
+                if inst.mnemonic() == mnemonic {
+                    selected = true;
+                    assert_eq!(inst.op0_register().size(), bytes);
+                }
+                for &feature in inst.cpuid_features() {
+                    assert!(supports(cpu, feature));
+                    host_ok &= host_supports(feature);
+                }
+            }
+            assert!(selected);
+            if host_ok {
+                let mut slots = [[0; 64]; 4];
+                for (slot, bits) in slots.iter_mut().zip(inputs) {
+                    for lane in slot[..bytes].chunks_exact_mut(2) {
+                        lane.copy_from_slice(&bits.to_le_bytes());
+                    }
+                }
+                let code = executable(&code, bytes, regs);
+                // SAFETY: the verified wrapper accesses only the four slots
+                // and the host supports each decoded instruction.
+                unsafe { packed_test::with_kernel(&code, |call| call(&mut slots)) };
+                assert!(
+                    slots[regs.len() - 1][..bytes]
+                        .chunks_exact(2)
+                        .all(|lane| lane == expected.to_le_bytes())
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn live_predicates_spill_safely_across_an_outlined_call() {
+    use std::sync::Arc;
+    let mut child = Function::scalar(1);
+    let b = child.entry();
+    let x = child.params(b)[0];
+    let i = child.append(b, Op::Simd(Simd::Iota(Lane::I32))).unwrap();
+    let limit = child.append(b, Op::Simd(Simd::Splat(x))).unwrap();
+    let cmp = child
+        .append(b, Op::Simd(Simd::Bin(Binary::Lt, i, limit)))
+        .unwrap();
+    let status = child.append(b, Op::Simd(Simd::AnyTrue(cmp))).unwrap();
+    child.set_terminator(b, Terminator::Return(status));
+
+    let mut f = Function::scalar(9);
+    let b = f.entry();
+    let args = f.params(b).to_vec();
+    let i = f.append(b, Op::Simd(Simd::Iota(Lane::I32))).unwrap();
+    let masks: Vec<_> = args[..8]
+        .iter()
+        .map(|&x| {
+            let limit = f.append(b, Op::Simd(Simd::Splat(x))).unwrap();
+            f.append(b, Op::Simd(Simd::Bin(Binary::Lt, i, limit)))
+                .unwrap()
+        })
+        .collect();
+    let call = f.add_call(Arc::new(child), &args[8..]);
+    let mut bits = f.append(b, Op::Call(call)).unwrap();
+    for (i, mask) in masks.into_iter().enumerate() {
+        let any = f.append(b, Op::Simd(Simd::AnyTrue(mask))).unwrap();
+        let weight = f.append(b, Op::Const(1 << i)).unwrap();
+        let bit = f.append(b, Op::Bin(Binary::And, any, weight)).unwrap();
+        bits = f.append(b, Op::Bin(Binary::Or, bits, bit)).unwrap();
+    }
+    f.set_terminator(b, Terminator::Return(bits));
+    let k = ScalarKernel::compile_with_inlining(&f, crate::Inlining::Never).unwrap();
+    assert_eq!(k.call(&[0, 2, 0, 4, 5, 0, 0, 8, 0]).unwrap(), 0b1001_1010);
+    assert_eq!(k.call(&[3, 0, 6, 0, 0, 9, 1, 0, 0]).unwrap(), 0b0110_0101);
+    if Features::host().bytes == 64 {
+        let ops = decoded(&f);
+        assert!(ops.iter().any(
+            |i| matches!(i.mnemonic(), Mnemonic::Kmovw | Mnemonic::Kmovq)
+                && (i.op0_kind() == iced_x86::OpKind::Memory
+                    || i.op1_kind() == iced_x86::OpKind::Memory)
+        ));
+    }
 }
 
 #[cfg(feature = "experimental-simd")]
@@ -746,9 +974,17 @@ fn selected_rearrangements_respect_feature_subsets_and_smaller_register_widths()
         vbmi: true,
         ..vbmi2_only
     };
+    let avx10 = [16, 32].map(|bytes| Features {
+        bytes,
+        avx10: 1,
+        ..vbmi
+    });
     for cpu in [
         sse2, ssse3, sse41, avx, avx2, foundation, extended, vbmi2_only, vbmi,
-    ] {
+    ]
+    .into_iter()
+    .chain(avx10)
+    {
         for (small, wide) in [
             (Lane::I8, Lane::I16),
             (Lane::U8, Lane::U16),
@@ -769,6 +1005,7 @@ fn selected_rearrangements_respect_feature_subsets_and_smaller_register_widths()
                 (s, small.scalar(), Action::Reduce(Binary::Xor), &[1, 0]),
             ] {
                 let Some(native) = Native::select(action, input, output, cpu) else {
+                    assert!(!(cpu.avx10 != 0 && matches!(action, Action::Shuffle)));
                     continue;
                 };
                 let (mut bytes, text_len) = body(native, regs);
@@ -785,6 +1022,12 @@ fn selected_rearrangements_respect_feature_subsets_and_smaller_register_widths()
                             inst.code()
                         );
                         host_ok &= host_supports(feature);
+                    }
+                    if cpu.avx10 != 0 {
+                        for i in 0..inst.op_count() {
+                            let reg = inst.op_register(i);
+                            assert!(!reg.is_vector_register() || reg.size() <= cpu.bytes);
+                        }
                     }
                 }
                 if host_ok {

@@ -484,7 +484,7 @@ fn parameter<'a>(arg: &'a FnArg, types: &[&Ident]) -> Result<(&'a Ident, &'a Typ
             let writable = slice_type(&arg.ty, types).ok_or_else(|| {
                 Error::new_spanned(
                     &arg.ty,
-                    "runtime parameters must be i32 or a slice of u16, i32, i64, f32, or f64",
+                    "runtime parameters must be i32 or a slice of u16, u32, i32, i64, f32, or f64",
                 )
             })?;
             if mutable {

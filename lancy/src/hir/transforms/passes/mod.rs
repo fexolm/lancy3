@@ -6,6 +6,7 @@ mod inline;
 mod local_cfg;
 mod loops;
 mod memory;
+mod packet_checks;
 mod prune;
 mod sccp;
 mod simplify;

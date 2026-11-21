@@ -14,9 +14,21 @@ impl Schedulable for Inst {
                 indices,
                 ..
             } => Ordered(if indices.is_some() { 9 } else { 5 }),
-            Self::CheckBounds(..) | Self::CheckMask(..) | Self::Store(..) | Self::Masked { .. } => {
-                Ordered(1)
-            }
+            Self::CheckBounds(..)
+            | Self::CheckMask(..)
+            | Self::Store(..)
+            | Self::Masked { .. }
+            | Self::CompactStore { .. } => Ordered(1),
+            Self::DwordLane { checked: true, .. } => Ordered(4),
+            Self::DwordLane { .. } | Self::CompactLookup(..) => Compute(5),
+            Self::MaskCompare(..)
+            | Self::MaskCompact(..)
+            | Self::PairedShuffle(..)
+            | Self::MaskPrefix(..)
+            | Self::MaskCount(..)
+            | Self::AnyMask(..)
+            | Self::AllMask(..)
+            | Self::SelectMask { .. } => Compute(3),
             Self::Alu(Alu::Mul, ..) => Compute(3),
             Self::Native(native, ..) => match native.action {
                 Action::Binary(Binary::Div) if native.input.lane().is_some_and(Lane::float) => {
@@ -37,6 +49,9 @@ impl Schedulable for Inst {
             | Self::Shift { .. }
             | Self::ShiftDwords(..)
             | Self::VectorShiftImm(..)
+            | Self::MaskLogic(..)
+            | Self::MaskNot(..)
+            | Self::MaskImmediate(..)
             | Self::Movsxd(..)
             | Self::Lea(..) => Compute(1),
             _ => Barrier,

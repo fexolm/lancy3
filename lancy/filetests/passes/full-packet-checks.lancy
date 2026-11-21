@@ -1,0 +1,50 @@
+# The full-packet edge proves the last-lane check; the other edge still traps.
+fn main len:i32 offset:i32 use_guard:i32 -> i32
+  width = simd.lanes i32
+  remaining = sub len offset
+  full = ge remaining width
+  one = const 1
+  last = sub width one
+  br full packet | tail
+block packet
+  same_width = simd.lanes i32
+  same_remaining = sub len offset
+  same_last = sub same_width one
+  bounds offset len
+  bounds same_last same_remaining
+  ret one
+block tail
+  br use_guard checked | done
+block checked
+  bounds last remaining
+  ret one
+block done
+  ret offset
+@opt check: br
+@opt check: bounds
+@opt not: bounds
+@opt check: ret
+@opt check: bounds
+@run 64 0 1 -> 1
+@run 64 -1 1 -> !bounds
+@run 2 1 1 -> !bounds
+@run 2 1 0 -> 1
+@run 2147483647 -1 0 -> -1
+---
+# A guard on the source cannot prove the destination has a full packet.
+fn main src:i32 dst:i32 offset:i32 -> i32
+  n = simd.lanes i32
+  one = const 1
+  remaining = sub src offset
+  full = ge remaining n
+  br full store | done
+block store
+  bounds offset dst
+  avail = sub dst offset
+  last = sub n one
+  bounds last avail
+  ret one
+block done
+  ret offset
+@run 64 2 1 -> !bounds
+@run 64 64 1 -> 1

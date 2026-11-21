@@ -7,10 +7,12 @@ use crate::hir::{Binary, Lane, Scale, Type};
 use crate::{lir::TargetInst, module::FunctionId};
 use regalloc2::{MachineEnv, Operand, PReg, PRegSet, RegClass, VReg};
 use simd::Native;
+use simd::packed::rearrange::PairedShuffle;
 
 #[derive(Clone, Copy, Debug)]
 pub(super) enum VectorMask<R> {
     Lanes(R),
+    Register(Lane, R),
     Compare {
         lhs: R,
         rhs: R,
@@ -24,6 +26,7 @@ impl<R> VectorMask<R> {
     pub(super) fn map<T>(self, mut reg: impl FnMut(R) -> T) -> VectorMask<T> {
         match self {
             Self::Lanes(v) => VectorMask::Lanes(reg(v)),
+            Self::Register(lane, v) => VectorMask::Register(lane, reg(v)),
             Self::Compare {
                 lhs,
                 rhs,
@@ -44,7 +47,7 @@ impl<R> VectorMask<R> {
 impl VectorMask<VReg> {
     fn operands(self, out: &mut Vec<Operand>) {
         match self {
-            Self::Lanes(v) => out.push(Operand::reg_use(v)),
+            Self::Lanes(v) | Self::Register(_, v) => out.push(Operand::reg_use(v)),
             Self::Compare {
                 lhs, rhs, active, ..
             } => {
@@ -124,13 +127,23 @@ const SIMD: PRegSet = {
     }
     set
 };
+// K0 cannot predicate EVEX, and K1 is reserved for destructive masks and moves.
+const MASKS: PRegSet = {
+    let mut regs = PRegSet::empty();
+    let mut i = 2;
+    while i <= 7 {
+        regs.add(PReg::new(i, RegClass::Float));
+        i += 1;
+    }
+    regs
+};
 
 static ENV: MachineEnv = MachineEnv {
-    preferred_regs_by_class: [VOLATILE, PRegSet::empty(), SIMD],
+    preferred_regs_by_class: [VOLATILE, MASKS, SIMD],
     non_preferred_regs_by_class: [SAVED_GPRS, PRegSet::empty(), SAVED_SIMD],
     scratch_by_class: [
         Some(gpr(10)),
-        None,
+        Some(PReg::new(1, RegClass::Float)),
         Some(PReg::new(SCRATCH, RegClass::Vector)),
     ],
     fixed_stack_slots: Vec::new(),
@@ -273,13 +286,29 @@ pub(super) enum Inst {
     CheckMask(VectorMask<VReg>),
     BranchAny(VectorMask<VReg>),
     BranchAll(Lane, VReg),
-    AnyComparison(VReg, VectorMask<VReg>),
-    SelectComparison {
+    AllMask(Lane, VReg, VReg),
+    AnyMask(VReg, VectorMask<VReg>),
+    SelectMask {
         lane: Lane,
         mask: VectorMask<VReg>,
         yes: VReg,
         no: VReg,
         dst: VReg,
+    },
+    MaskCompare(Lane, i32, VReg, VReg, VReg),
+    MaskLogic(Lane, Binary, VReg, VReg, VReg),
+    MaskNot(Lane, VReg, VReg),
+    MaskImmediate(VReg, u64),
+    MaskPrefix(VReg, VReg),
+    MaskCount(VReg, VReg),
+    MaskCompact(Lane, bool, VReg, VReg, VReg),
+    CompactLookup(bool, VReg, VReg, VReg, VReg),
+    CompactStore {
+        base: VReg,
+        data: VReg,
+        original: VReg,
+        enabled: VReg,
+        temp: VReg,
     },
     Movsxd(VReg, VReg),
     Lea(VReg, Address),
@@ -289,6 +318,16 @@ pub(super) enum Inst {
     BroadcastLane(VReg, VReg, u8),
     ExtractLane(Lane, VReg, VReg, u8),
     ShiftDwords(VReg, VReg, u8),
+    PairedShuffle(PairedShuffle, VReg, VReg, VReg),
+    DwordLane {
+        lane: Lane,
+        checked: bool,
+        dst: VReg,
+        value: VReg,
+        index: VReg,
+        replacement: Option<VReg>,
+        temp: Option<VReg>,
+    },
     VectorShiftImm(Binary, Lane, VReg, VReg, u8),
     Masked {
         ty: Type,
@@ -296,7 +335,7 @@ pub(super) enum Inst {
         indices: Option<VReg>,
         temp: Option<VReg>,
         mask: VectorMask<VReg>,
-        value: VReg,
+        value: Option<VReg>,
         dst: Option<VReg>,
     },
     Store(Type, Address, VReg),
@@ -422,16 +461,65 @@ impl TargetInst for Inst {
             | Self::ExtractLane(_, d, src, _)
             | Self::VectorShiftImm(_, _, d, src, _)
             | Self::ShiftDwords(d, src, _) => out.extend([O::reg_use(src), O::reg_def(d)]),
-            Self::AnyComparison(d, mask) => {
+            Self::AnyMask(d, mask) => {
                 mask.operands(out);
                 out.push(O::reg_def(d));
             }
-            Self::SelectComparison {
+            Self::SelectMask {
                 mask, yes, no, dst, ..
             } => {
                 mask.operands(out);
                 out.extend([O::reg_use(yes), O::reg_use(no), O::reg_def(dst)]);
             }
+            Self::MaskCompare(_, _, d, x, y)
+            | Self::MaskLogic(_, _, d, x, y)
+            | Self::PairedShuffle(_, d, x, y)
+            | Self::MaskCompact(_, _, d, x, y) => {
+                out.extend([O::reg_use(x), O::reg_use(y), O::reg_def(d)]);
+            }
+            Self::MaskNot(_, d, x)
+            | Self::AllMask(_, d, x)
+            | Self::MaskPrefix(d, x)
+            | Self::MaskCount(d, x) => {
+                out.extend([O::reg_use(x), O::reg_def(d)]);
+            }
+            Self::MaskImmediate(d, _) => out.push(O::reg_def(d)),
+            Self::DwordLane {
+                dst,
+                value,
+                index,
+                replacement,
+                temp,
+                ..
+            } => {
+                out.extend([O::reg_use(value), O::reg_use(index)]);
+                out.extend(replacement.map(O::reg_use));
+                out.push(O::reg_def(dst));
+                out.extend(temp.map(O::reg_temp));
+            }
+            Self::CompactLookup(_, d, x, m, index) => {
+                let cpu = super::Features::host();
+                let dst = if cpu.bytes == 16 && !cpu.ssse3 {
+                    // The SSE2 sequence reads the source after writing the result.
+                    O::reg_def_at_start(d)
+                } else {
+                    O::reg_def(d)
+                };
+                out.extend([O::reg_use(x), O::reg_use(m), dst, O::reg_temp(index)]);
+            }
+            Self::CompactStore {
+                base,
+                data,
+                original,
+                enabled,
+                temp,
+            } => out.extend([
+                O::reg_use(base),
+                O::reg_use(data),
+                O::reg_use(original),
+                O::reg_use(enabled),
+                O::reg_temp(temp),
+            ]),
             Self::Masked {
                 base,
                 indices,
@@ -444,7 +532,7 @@ impl TargetInst for Inst {
                 out.push(O::reg_use(base));
                 out.extend(indices.map(O::reg_use));
                 mask.operands(out);
-                out.push(O::reg_use(value));
+                out.extend(value.map(O::reg_use));
                 out.extend(dst.map(O::reg_def));
                 out.extend(temp.map(O::reg_temp));
             }
@@ -472,7 +560,7 @@ impl TargetInst for Inst {
                 // math call may also overwrite the upper halves of Windows YMM/ZMM6..15.
                 let mut set = if lanes::calls_library(*action, *input) {
                     let wide = super::Features::host().bytes > 16;
-                    VOLATILE | SIMD | if wide { SAVED_SIMD } else { PRegSet::empty() }
+                    VOLATILE | MASKS | SIMD | if wide { SAVED_SIMD } else { PRegSet::empty() }
                 } else {
                     gprs(&[0, 1, 2, 8, 9]) | vectors(0, 3)
                 };

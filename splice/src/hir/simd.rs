@@ -40,6 +40,12 @@ pub enum SimdOp {
     Sub,
     Mul,
     Div,
+    Sqrt,
+    MulAdd,
+    Cast(Element),
+    Widen { to: Element, high: bool },
+    Narrow(Element),
+    ReduceSum,
     Min,
     Max,
     And,
@@ -71,7 +77,7 @@ impl Simd {
     pub fn output(self) -> Option<ValueType> {
         use SimdOp::*;
         Some(match self.op {
-            Lanes | AlignmentPrefix(_) | Any | All | Last | ExtractWrapping | Count => {
+            Lanes | AlignmentPrefix(_) | Any | All | Last | ExtractWrapping | Count | ReduceSum => {
                 ValueType::Scalar
             }
             FirstN | Eq | Ne | Lt | Le | Gt | Ge | MaskAnd | MaskOr | MaskXor | MaskNot => {
@@ -80,6 +86,7 @@ impl Simd {
             CompressStore(_) | Store(_) | StoreSelect(_) | Scatter(_) | ScatterSelect(_) => {
                 return None;
             }
+            Cast(to) | Widen { to, .. } | Narrow(to) => ValueType::Vector(to),
             _ => ValueType::Vector(self.element),
         })
     }
@@ -108,7 +115,9 @@ impl Simd {
             Count | CompressStore(_) => {
                 return Err("mask count and compact store require i32 lanes".into());
             }
-            Shr(_) | RotateLeft(_) | PrefixSum | Last if self.element == Element::I32 => &[v],
+            Shr(_) | RotateLeft(_) if matches!(self.element, Element::I32 | Element::U32) => &[v],
+            PrefixSum | Last | ReduceSum if self.element == Element::I32 => &[v],
+            ReduceSum => return Err("SIMD reduce_sum requires i32 lanes".into()),
             Shr(_) | RotateLeft(_) | PrefixSum | Last => {
                 return Err("shift, rotate, prefix_sum and last require i32 lanes".into());
             }
@@ -116,8 +125,27 @@ impl Simd {
             SplatScalar => return Err("runtime splat expects an i32 element".into()),
             Div if self.element.is_float() => &[v, v],
             Div => return Err("SIMD division requires floating point elements".into()),
-            Min | Max if self.element == Element::I32 => &[v, v],
-            Min | Max => return Err("SIMD min and max require i32 lanes".into()),
+            Min | Max if matches!(self.element, Element::I32 | Element::U32) => &[v, v],
+            Min | Max => return Err("SIMD min and max require i32 or u32 lanes".into()),
+            Sqrt if self.element.is_float() => &[v],
+            MulAdd if self.element.is_float() => &[v, v, v],
+            Sqrt | MulAdd => {
+                return Err("SIMD sqrt and mul_add require floating point lanes".into());
+            }
+            Cast(to) if self.element.bytes() == to.bytes() => &[v],
+            Widen { to, .. }
+                if self.element.bytes() * 2 == to.bytes()
+                    && self.element.is_float() == to.is_float() =>
+            {
+                &[v]
+            }
+            Narrow(to)
+                if self.element.bytes() == to.bytes() * 2
+                    && self.element.is_float() == to.is_float() =>
+            {
+                &[v, v]
+            }
+            Cast(_) | Widen { .. } | Narrow(_) => return Err("invalid SIMD lane conversion".into()),
             FirstN | Load(_) => &[s],
             Store(_) => &[s, v],
             LoadSelect(_) | StoreSelect(_) => &[s, m, v],

@@ -127,6 +127,6 @@ pub(super) fn written_regs(f: &lir::Function<Inst>, allocation: &Output) -> (PRe
     // the internal ABI and cannot hold a caller value across a call.
     let regs = &Inst::machine_env().preferred_regs_by_class;
     written.union_from(defined);
-    written.intersect_from(regs[0] | regs[2] | nonvolatile());
+    written.intersect_from(regs[0] | regs[1] | regs[2] | nonvolatile());
     (written, defined)
 }

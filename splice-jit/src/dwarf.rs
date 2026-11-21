@@ -55,7 +55,7 @@ fn element(unit: &mut Unit, elem: Element) -> UnitEntryId {
     let encoding = match elem {
         Element::F32 | Element::F64 => dw::DW_ATE_float,
         Element::I32 | Element::I64 => dw::DW_ATE_signed,
-        Element::U16 => dw::DW_ATE_unsigned,
+        Element::U16 | Element::U32 => dw::DW_ATE_unsigned,
     };
     base(unit, elem.name(), elem.bytes(), encoding)
 }

@@ -75,7 +75,7 @@ fn exercise(
         base: 8,
         index,
         mask: super::super::inst::VectorMask::Lanes(mask),
-        value,
+        value: Some(value),
         dst,
         temp: (!evex && cpu.avx2 && gather).then_some(4),
     }

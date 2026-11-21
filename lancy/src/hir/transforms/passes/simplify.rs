@@ -248,8 +248,7 @@ fn simplify_with_cfg(f: &mut Function, cfg: &ControlFlowGraph) -> Result<(), IrE
         local_cfg::forward_params(f, cfg);
         (cfg, &dom)
     };
-    #[cfg(feature = "experimental-simd")]
-    experimental::remove_full_packet_checks(f, cfg, dom);
+    super::packet_checks::remove_full_packet_checks(f, cfg, dom);
     remove_redundant_checks(f, dom);
     memory::optimize(f, cfg, dom);
     remove_dead_computations(f, cfg);

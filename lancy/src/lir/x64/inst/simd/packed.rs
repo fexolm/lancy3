@@ -2,6 +2,7 @@
 //! explicit regalloc temporaries. Constants in installed kernels are RIP-relative.
 use super::*;
 use crate::lir::x64::isel::packed_half;
+pub(in crate::lir::x64) mod compact;
 pub(in crate::lir::x64) mod float;
 pub(in crate::lir::x64) mod integer;
 pub(in crate::lir::x64) mod rearrange;

@@ -93,6 +93,154 @@ macro_rules! compile_all {
 }
 
 #[kernel]
+fn typed_float_lanes(
+    input: &[f32],
+    fused: &mut [f32],
+    widened: &mut [f64],
+    round_trip: &mut [f32],
+    integers: &mut [u32],
+) -> i32 {
+    let x = Lane::<f32>::load(input, 0);
+    x.mul_add(Lane::<f32>::splat(0.999_999_9), Lane::<f32>::splat(-1.0))
+        .store(fused, 0);
+    let lo = x.widen_low::<f64>();
+    let hi = x.widen_high::<f64>();
+    lo.store(widened, 0);
+    hi.store(widened, Lane::<f64>::lanes());
+    lo.narrow::<f32>(hi).store(round_trip, 0);
+    x.sqrt().cast::<u32>().store(integers, 0);
+    x.cast::<i32>().reduce_sum()
+}
+
+#[test]
+fn typed_simd_conversions_and_fused_arithmetic_match_rust() {
+    let n = Lane::<f32>::lanes();
+    let input: Vec<_> = [
+        1.000_000_1f32,
+        -0.0,
+        9.0,
+        -4.0,
+        f32::INFINITY,
+        f32::NAN,
+        123.75,
+        -123.75,
+    ]
+    .into_iter()
+    .cycle()
+    .take(n)
+    .collect();
+    for kernel in compile_all!(typed_float_lanes) {
+        let mut fused = vec![0.0f32; n];
+        let mut widened = vec![0.0f64; n];
+        let mut round_trip = vec![0.0f32; n];
+        let mut integers = vec![0u32; n];
+        let expected = input
+            .iter()
+            .fold(0i32, |sum, &x| sum.wrapping_add(x as i32));
+        let result = kernel.call(
+            &[],
+            &mut [
+                BufferArg::from(input.as_slice()),
+                BufferArg::from(fused.as_mut_slice()),
+                BufferArg::from(widened.as_mut_slice()),
+                BufferArg::from(round_trip.as_mut_slice()),
+                BufferArg::from(integers.as_mut_slice()),
+            ],
+        );
+        assert_eq!(result, Ok(expected));
+        for i in 0..n {
+            let x = input[i];
+            if x.is_nan() {
+                assert!(round_trip[i].is_nan() && widened[i].is_nan() && fused[i].is_nan());
+            } else {
+                assert_eq!(round_trip[i].to_bits(), x.to_bits());
+                assert_eq!(widened[i].to_bits(), f64::from(x).to_bits());
+                assert_eq!(fused[i].to_bits(), x.mul_add(0.999_999_9, -1.0).to_bits());
+            }
+            assert_eq!(integers[i], x.sqrt() as u32);
+        }
+        assert_ne!(fused[0], 0.0);
+    }
+}
+
+#[kernel]
+fn unsigned_words(input: &[u32], out: &mut [u32], narrow: &mut [u16]) -> i32 {
+    let words = Lane::<u32>::load(input, 0);
+    let high = words.simd_ge(Lane::<u32>::splat(0x80000000));
+    high.select(words >> 1, words).store(out, 0);
+    words.narrow::<u16>(words).store(narrow, 0);
+    0
+}
+
+#[test]
+fn unsigned_lanes_compare_shift_and_narrow_across_backends() {
+    let n = Lane::<u32>::lanes();
+    let input: Vec<_> = [0, 0x7fffffff, 0x80000000, 0xd13e_beef, u32::MAX]
+        .into_iter()
+        .cycle()
+        .take(n)
+        .collect();
+    for kernel in compile_all!(unsigned_words) {
+        let mut out = vec![21u32; n + 1];
+        let mut narrow = vec![43u16; n * 2 + 1];
+        assert_eq!(
+            kernel.call(
+                &[],
+                &mut [
+                    BufferArg::from(input.as_slice()),
+                    BufferArg::from(out.as_mut_slice()),
+                    BufferArg::from(narrow.as_mut_slice()),
+                ]
+            ),
+            Ok(0)
+        );
+        for (i, &x) in input.iter().enumerate() {
+            assert_eq!(out[i], if x >= 0x80000000 { x >> 1 } else { x });
+            assert_eq!(narrow[i], x as u16);
+            assert_eq!(narrow[n + i], x as u16);
+        }
+        assert_eq!(out[n], 21);
+        assert_eq!(narrow[2 * n], 43);
+    }
+}
+
+#[kernel]
+fn unsigned_indexed_load(input: &[u32], index: &[u32], out: &mut [u32], count: i32) -> i32 {
+    let active = Lane::<u32>::first_n(count as usize);
+    Lane::gather_select(input, active, Lane::load(index, 0), Lane::<u32>::splat(9)).store(out, 0);
+    0
+}
+
+#[test]
+fn unsigned_indices_above_i32_max_fault_only_when_active() {
+    let n = Lane::<u32>::lanes();
+    let mut ids = vec![u32::MAX; n];
+    ids[0] = 0;
+    for kernel in compile_all!(unsigned_indexed_load) {
+        let mut out = vec![21u32; n];
+        for count in [1, 2] {
+            out.fill(21);
+            let actual = kernel.call(
+                &[count],
+                &mut [
+                    BufferArg::from(&[17u32][..]),
+                    BufferArg::from(ids.as_slice()),
+                    BufferArg::from(out.as_mut_slice()),
+                ],
+            );
+            if count == 1 {
+                assert_eq!(actual, Ok(0));
+                assert_eq!(out[0], 17);
+                assert!(out[1..].iter().all(|&x| x == 9));
+            } else {
+                assert_eq!(actual, Err("kernel slice index out of bounds".into()));
+                assert!(out.iter().all(|&x| x == 21));
+            }
+        }
+    }
+}
+
+#[kernel]
 fn signed_bounds(lhs: &[i32], rhs: &[i32], mins: &mut [i32], maxs: &mut [i32]) -> i32 {
     let a = Lane::load(lhs, 0);
     let b = Lane::load(rhs, 0);

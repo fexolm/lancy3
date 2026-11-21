@@ -17,7 +17,7 @@ use crate::{
 use iced_x86::{BlockEncoderOptions, IcedError, code_asm::*};
 use regalloc2::RegClass;
 use regalloc2::{Allocation, Edit, Function as _, InstOrEdit, VReg};
-use simd::{XMM, YMM, ZMM};
+use simd::{K, XMM, YMM, ZMM, opmask};
 
 pub(super) type Constants = Vec<(CodeLabel, [u8; 64], usize)>;
 type AsmResult = Result<(), IcedError>;
@@ -74,6 +74,27 @@ impl Frame {
             }
             (None, Some(d)) if d.class() == RegClass::Vector => {
                 simd::load(a, d.hw_enc(), self.spill(from), Features::host().bytes)
+            }
+            (Some(s), Some(d)) if s.class() == RegClass::Float => {
+                if Features::host().bw {
+                    a.kmovq(K[d.hw_enc()], K[s.hw_enc()])
+                } else {
+                    a.kmovw(K[d.hw_enc()], K[s.hw_enc()])
+                }
+            }
+            (Some(s), None) if s.class() == RegClass::Float => {
+                if Features::host().bw {
+                    a.kmovq(self.spill(to), K[s.hw_enc()])
+                } else {
+                    a.kmovw(word_ptr(self.spill(to)), K[s.hw_enc()])
+                }
+            }
+            (None, Some(d)) if d.class() == RegClass::Float => {
+                if Features::host().bw {
+                    a.kmovq(K[d.hw_enc()], self.spill(from))
+                } else {
+                    a.kmovw(K[d.hw_enc()], word_ptr(self.spill(from)))
+                }
             }
             (Some(s), Some(d)) => a.mov(R64[d.hw_enc()], R64[s.hw_enc()]),
             (Some(s), None) => a.mov(self.spill(to), R64[s.hw_enc()]),
@@ -320,13 +341,13 @@ impl Emitter<'_> {
                                         allocate_mask(mask, allocs).0,
                                     )?;
                                     Cond::Ne
-                                } else if let Inst::BranchAll(lane, _) = inst {
-                                    simd::test_all(
-                                        self.a,
-                                        super::Features::host(),
-                                        lane,
-                                        gpr(allocs[0]),
-                                    )?;
+                                } else if let Inst::BranchAll(lane, mask) = inst {
+                                    let cpu = Features::host();
+                                    if mask.class() == RegClass::Float {
+                                        opmask::test_all(self.a, cpu, lane, gpr(allocs[0]))?;
+                                    } else {
+                                        simd::test_all(self.a, cpu, lane, gpr(allocs[0]))?;
+                                    }
                                     Cond::Eq
                                 } else if let Inst::BrCmp(cc, _, rhs) = inst {
                                     cmp(self.a, &self.machine.frame, allocs, rhs)?;
@@ -475,6 +496,40 @@ impl Emitter<'_> {
                 reg(0),
                 count,
             ),
+            Inst::PairedShuffle(form, ..) => form.emit(
+                a,
+                self.constants,
+                Features::host().bytes,
+                [reg(2), reg(0), reg(1)],
+            ),
+            Inst::DwordLane {
+                lane,
+                checked,
+                replacement,
+                temp,
+                ..
+            } => {
+                let width = Features::host().bytes;
+                if checked {
+                    let fail = *self.failures[0].get_or_insert_with(|| a.create_label());
+                    a.cmp(r(1), (width / 4) as i32)?;
+                    a.jae(fail)?;
+                }
+                let registers = [reg(2 + usize::from(replacement.is_some())), reg(0), reg(1)];
+                if replacement.is_some() {
+                    simd::packed::rearrange::insert_dword(
+                        a,
+                        self.constants,
+                        width,
+                        lane,
+                        registers,
+                        reg(2),
+                        temp.map(|_| reg(4)),
+                    )
+                } else {
+                    simd::packed::rearrange::extract_dword(a, width, lane, registers)
+                }
+            }
             Inst::VectorShiftImm(kind, lane, _, _, count) => {
                 simd::packed::integer::shift_dword_bits(
                     a,
@@ -687,14 +742,20 @@ impl Emitter<'_> {
                 simd::test_vector_mask(a, Features::host(), allocate_mask(mask, allocs).0)?;
                 a.jne(fail)
             }
-            Inst::AnyComparison(_, mask) => {
+            Inst::AnyMask(_, mask) => {
                 let (mask, dst) = allocate_mask(mask, allocs);
                 simd::test_vector_mask(a, Features::host(), mask)?;
                 a.mov(r(dst), 0)?;
                 a.setne(R8[reg(dst)])?;
                 a.neg(r(dst))
             }
-            Inst::SelectComparison { lane, mask, .. } => {
+            Inst::AllMask(lane, ..) => {
+                opmask::test_all(a, Features::host(), lane, reg(0))?;
+                a.mov(r(1), 0)?;
+                a.sete(R8[reg(1)])?;
+                a.neg(r(1))
+            }
+            Inst::SelectMask { lane, mask, .. } => {
                 let (mask, first) = allocate_mask(mask, allocs);
                 simd::blend_comparison(
                     a,
@@ -705,6 +766,61 @@ impl Emitter<'_> {
                     reg(first),
                     reg(first + 1),
                 )
+            }
+            Inst::MaskCompare(lane, cc, ..) => simd::compare_mask(
+                a,
+                Features::host().bytes,
+                K[reg(2)],
+                lane,
+                reg(0),
+                reg(1),
+                cc,
+            ),
+            Inst::MaskLogic(lane, kind, ..) => opmask::logic(
+                a,
+                Features::host().bytes / lane.bytes(),
+                kind,
+                reg(2),
+                reg(0),
+                reg(1),
+            ),
+            Inst::MaskNot(lane, ..) => opmask::not(a, Features::host(), lane, reg(1), reg(0)),
+            Inst::MaskImmediate(_, bits) => opmask::immediate(a, reg(0), bits),
+            Inst::MaskPrefix(..) => {
+                a.mov(r10d, -1)?;
+                a.bzhi(r10d, r10d, r(0))?;
+                a.kmovw(K[reg(1)], r10d)
+            }
+            Inst::MaskCount(..) => {
+                a.kmovw(r(1), K[reg(0)])?;
+                a.popcnt(r(1), r(1))
+            }
+            Inst::MaskCompact(lane, expand, ..) => simd::compact(
+                a,
+                Features::host().bytes,
+                lane,
+                expand,
+                reg(2),
+                reg(0),
+                reg(1),
+            ),
+            Inst::CompactLookup(expand, ..) => simd::packed::compact::emit(
+                a,
+                Features::host(),
+                expand,
+                [reg(2), reg(0), reg(1), reg(3)],
+            ),
+            Inst::CompactStore { .. } => {
+                a.kmovw(r(4), K[reg(2)])?;
+                a.kmovw(r10d, K[reg(3)])?;
+                a.pdep(r10d, r10d, r(4))?;
+                a.kmovw(k1, r10d)?;
+                let address = ptr(q(0)).k1();
+                match Features::host().bytes {
+                    16 => a.vpcompressd(address, XMM[reg(1)]),
+                    32 => a.vpcompressd(address, YMM[reg(1)]),
+                    _ => a.vpcompressd(address, ZMM[reg(1)]),
+                }
             }
             Inst::CheckBounds(..) => {
                 let fail = *self.failures[0].get_or_insert_with(|| a.create_label());
@@ -719,18 +835,19 @@ impl Emitter<'_> {
                 dst,
                 temp,
                 mask,
+                value,
                 ..
             } => {
                 let i = 1 + usize::from(indices.is_some());
                 let (mask, operands) = allocate_mask(mask, &allocs[i..]);
-                let value = i + operands;
+                let first = i + operands;
                 simd::MaskedMemory {
                     ty,
                     base: reg(0),
                     index: indices.map(|_| reg(1)),
                     mask,
-                    value: reg(value),
-                    dst: dst.map(|_| reg(value + 1)),
+                    value: value.map(|_| reg(first)),
+                    dst: dst.map(|_| reg(first + usize::from(value.is_some()))),
                     temp: temp.map(|_| reg(allocs.len() - 1)),
                 }
                 .emit(a, super::Features::host())

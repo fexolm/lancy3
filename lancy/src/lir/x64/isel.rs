@@ -1,3 +1,4 @@
+mod masks;
 mod rules;
 
 pub(super) use rules::packed_half;
@@ -21,12 +22,13 @@ pub(super) fn select(
     callee_info: impl Fn(&Function) -> (FunctionId, PRegSet),
 ) -> Result<lir::Function<Inst>, CompileError> {
     let _span = tracing::debug_span!(target: "splice::compile", "select_instructions").entered();
-    let reg = |v| rules::reg(f, v);
     let cpu = Features::host();
+    let masks = masks::Masks::analyze(f, cfg, cpu);
+    let reg = |v| masks.reg(f, v);
     let edges = Edges::new(f, cfg);
     let mut body = edges.function()?;
     let mut blocks = isel::select(f, cfg, |ctx, root, out| {
-        rules::select(ctx, f, &mut body, out, cpu, root, &callee_info)
+        rules::select(ctx, f, &mut body, out, (cpu, &masks), root, &callee_info)
     })?;
     for &b in cfg.reverse_postorder() {
         let entry = b == f.entry();

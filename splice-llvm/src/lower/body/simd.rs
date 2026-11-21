@@ -15,7 +15,7 @@ use splice::{
 fn element_type(ctx: &Context, e: Element) -> BasicTypeEnum<'_> {
     match e {
         Element::U16 => ctx.i16_type().into(),
-        Element::I32 => ctx.i32_type().into(),
+        Element::I32 | Element::U32 => ctx.i32_type().into(),
         Element::I64 => ctx.i64_type().into(),
         Element::F32 => ctx.f32_type().into(),
         Element::F64 => ctx.f64_type().into(),
@@ -23,9 +23,13 @@ fn element_type(ctx: &Context, e: Element) -> BasicTypeEnum<'_> {
 }
 
 fn vector_type(ctx: &Context, e: Element) -> VectorType<'_> {
+    vector_type_with_lanes(ctx, e, e.lanes() as u32)
+}
+
+fn vector_type_with_lanes(ctx: &Context, e: Element, lanes: u32) -> VectorType<'_> {
     match element_type(ctx, e) {
-        BasicTypeEnum::IntType(t) => t.vec_type(e.lanes() as u32),
-        BasicTypeEnum::FloatType(t) => t.vec_type(e.lanes() as u32),
+        BasicTypeEnum::IntType(t) => t.vec_type(lanes),
+        BasicTypeEnum::FloatType(t) => t.vec_type(lanes),
         _ => unreachable!(),
     }
 }
@@ -39,6 +43,41 @@ pub(super) fn llvm_type(ctx: &Context, ty: ValueType) -> BasicTypeEnum<'_> {
 }
 
 impl<'ctx> Body<'_, 'ctx> {
+    fn convert_lanes(
+        &self,
+        x: VectorValue<'ctx>,
+        from: Element,
+        to: Element,
+    ) -> Built<VectorValue<'ctx>> {
+        let ir = self.builder;
+        let ty = vector_type_with_lanes(self.ctx, to, x.get_type().get_size());
+        Ok(match (from.is_float(), to.is_float()) {
+            (true, true) if from == to => x,
+            (true, true) => ir.build_float_cast(x, ty, "")?,
+            (false, false) if from.bytes() == to.bytes() => x,
+            (false, false) if from.bytes() > to.bytes() => ir.build_int_truncate(x, ty, "")?,
+            (false, false) if from.is_unsigned() => ir.build_int_z_extend(x, ty, "")?,
+            (false, false) => ir.build_int_s_extend(x, ty, "")?,
+            (false, true) if from.is_unsigned() => ir.build_unsigned_int_to_float(x, ty, "")?,
+            (false, true) => ir.build_signed_int_to_float(x, ty, "")?,
+            (true, false) => {
+                let name = if to.is_unsigned() {
+                    "llvm.fptoui.sat"
+                } else {
+                    "llvm.fptosi.sat"
+                };
+                let function = inkwell::intrinsics::Intrinsic::find(name)
+                    .unwrap()
+                    .get_declaration(self.module, &[ty.into(), x.get_type().into()])
+                    .unwrap();
+                ir.build_call(function, &[x.into()], "")?
+                    .try_as_basic_value()
+                    .unwrap_basic()
+                    .into_vector_value()
+            }
+        })
+    }
+
     fn vector(&self, reg: Reg) -> Built<VectorValue<'ctx>> {
         let (ty, ptr) = self.registers[reg.0 as usize];
         Ok(self
@@ -209,11 +248,48 @@ impl<'ctx> Body<'_, 'ctx> {
                 .build_right_shift(
                     arg(0)?,
                     self.splat(self.int((n & 31) as i32), e.lanes() as u32)?,
-                    true,
+                    !e.is_unsigned(),
                     "",
                 )?
                 .into(),
             Count => self.mask_count(arg(0)?)?.into(),
+            Sqrt | MulAdd | ReduceSum => {
+                let x = arg(0)?;
+                let name = match inst.op {
+                    Sqrt => "llvm.sqrt",
+                    MulAdd => "llvm.fma",
+                    _ => "llvm.vector.reduce.add",
+                };
+                let function = inkwell::intrinsics::Intrinsic::find(name)
+                    .unwrap()
+                    .get_declaration(self.module, &[x.get_type().into()])
+                    .unwrap();
+                let operands = if inst.op == MulAdd {
+                    vec![x.into(), arg(1)?.into(), arg(2)?.into()]
+                } else {
+                    vec![x.into()]
+                };
+                ir.build_call(function, &operands, "")?
+                    .try_as_basic_value()
+                    .unwrap_basic()
+            }
+            Cast(to) => self.convert_lanes(arg(0)?, e, to)?.into(),
+            Widen { to, high } => {
+                let x = arg(0)?;
+                let start = usize::from(high) * to.lanes();
+                let mask: Vec<_> = (start..start + to.lanes())
+                    .map(|i| self.int(i as i32))
+                    .collect();
+                let half = ir.build_shuffle_vector(x, x, VectorType::const_vector(&mask), "")?;
+                self.convert_lanes(half, e, to)?.into()
+            }
+            Narrow(to) => {
+                let a = self.convert_lanes(arg(0)?, e, to)?;
+                let b = self.convert_lanes(arg(1)?, e, to)?;
+                let mask: Vec<_> = (0..to.lanes()).map(|i| self.int(i as i32)).collect();
+                ir.build_shuffle_vector(a, b, VectorType::const_vector(&mask), "")?
+                    .into()
+            }
             RotateLeft(n) => {
                 let value = arg(0)?;
                 let count = self.splat(self.int((n & 31) as i32), e.lanes() as u32)?;
@@ -241,10 +317,11 @@ impl<'ctx> Body<'_, 'ctx> {
             }
             Min | Max => {
                 let (a, b) = (arg(0)?, arg(1)?);
-                let name = if inst.op == Min {
-                    "llvm.smin"
-                } else {
-                    "llvm.smax"
+                let name = match (inst.op, e.is_unsigned()) {
+                    (Min, true) => "llvm.umin",
+                    (Max, true) => "llvm.umax",
+                    (Min, false) => "llvm.smin",
+                    _ => "llvm.smax",
                 };
                 let intrinsic = inkwell::intrinsics::Intrinsic::find(name)
                     .unwrap()
@@ -268,7 +345,7 @@ impl<'ctx> Body<'_, 'ctx> {
                     };
                     ir.build_float_compare(pred, a, b, "")?.into()
                 } else {
-                    let unsigned = e == Element::U16;
+                    let unsigned = e.is_unsigned();
                     let pred = match inst.op {
                         Eq => IntPredicate::EQ,
                         Ne => IntPredicate::NE,

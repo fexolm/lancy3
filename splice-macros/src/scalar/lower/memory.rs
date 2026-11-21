@@ -18,7 +18,10 @@ impl Lower<'_> {
                 .as_ref()
                 .and_then(|args| super::simd::element_argument(args, self.types))
             else {
-                return err(m, "as_slice::<T>() requires u16, i32, i64, f32, or f64");
+                return err(
+                    m,
+                    "as_slice::<T>() requires u16, u32, i32, i64, f32, or f64",
+                );
             };
             let slot = self.host(self.expr(&index.index)?, &index.index)?;
             let root = self.root;

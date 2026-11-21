@@ -20,7 +20,7 @@ const CHUNK_BYTES: usize = 16;
 fn chunk_type(element: Element) -> Type {
     match element {
         Element::U16 => I16X8,
-        Element::I32 => I32X4,
+        Element::I32 | Element::U32 => I32X4,
         Element::I64 => I64X2,
         Element::F32 => F32X4,
         Element::F64 => F64X2,
@@ -173,6 +173,23 @@ pub(super) fn emit(
                 total = b.ins().iadd(total, count);
             }
             vec![total]
+        }
+        ReduceSum => {
+            let mut total = b.ins().iconst(I32, 0);
+            for &chunk in &inputs[0] {
+                for i in 0..4 {
+                    let lane = b.ins().extractlane(chunk, i);
+                    total = b.ins().iadd(total, lane);
+                }
+            }
+            vec![total]
+        }
+        Widen { to, high } => {
+            convert_width(b, element, to, &inputs[0], usize::from(high) * to.lanes())
+        }
+        Narrow(to) => {
+            let sources: Vec<_> = inputs.iter().flatten().copied().collect();
+            convert_width(b, element, to, &sources, 0)
         }
         Lanes => vec![b.ins().iconst(I32, element.lanes() as i64)],
         FirstN => {
@@ -473,6 +490,7 @@ fn packed(b: &mut FunctionBuilder, inst: Simd, inputs: &[Vec<Value>], part: usiz
             Element::F64 => (i as f64).to_bits(),
             _ => i as u64,
         }),
+        Shr(n) if inst.element.is_unsigned() => b.ins().ushr_imm(arg(0), i64::from(n & 31)),
         Shr(n) => b.ins().sshr_imm(arg(0), i64::from(n & 31)),
         RotateLeft(n) => {
             let count = n & 31;
@@ -488,9 +506,14 @@ fn packed(b: &mut FunctionBuilder, inst: Simd, inputs: &[Vec<Value>], part: usiz
         Sub if float => b.ins().fsub(arg(0), arg(1)),
         Mul if float => b.ins().fmul(arg(0), arg(1)),
         Div => b.ins().fdiv(arg(0), arg(1)),
+        Sqrt => b.ins().sqrt(arg(0)),
+        MulAdd => b.ins().fma(arg(0), arg(1), arg(2)),
+        Cast(to) => convert(b, inst.element, to, chunk_type(to), arg(0)),
         Add => b.ins().iadd(arg(0), arg(1)),
         Sub => b.ins().isub(arg(0), arg(1)),
         Mul => b.ins().imul(arg(0), arg(1)),
+        Min if inst.element.is_unsigned() => b.ins().umin(arg(0), arg(1)),
+        Max if inst.element.is_unsigned() => b.ins().umax(arg(0), arg(1)),
         Min => b.ins().smin(arg(0), arg(1)),
         Max => b.ins().smax(arg(0), arg(1)),
         And | MaskAnd => b.ins().band(arg(0), arg(1)),
@@ -510,7 +533,7 @@ fn packed(b: &mut FunctionBuilder, inst: Simd, inputs: &[Vec<Value>], part: usiz
             b.ins().fcmp(cc, arg(0), arg(1))
         }
         Eq | Ne | Lt | Le | Gt | Ge => {
-            let unsigned = inst.element == Element::U16;
+            let unsigned = inst.element.is_unsigned();
             let cc = match op {
                 Eq => IntCC::Equal,
                 Ne => IntCC::NotEqual,
@@ -536,6 +559,50 @@ fn packed(b: &mut FunctionBuilder, inst: Simd, inputs: &[Vec<Value>], part: usiz
         }
         _ => unreachable!("memory and scalar results are emitted for the whole vector"),
     }
+}
+
+fn convert(b: &mut FunctionBuilder, from: Element, to: Element, ty: Type, x: Value) -> Value {
+    if b.func.dfg.value_type(x) == ty {
+        return x;
+    }
+    match (from.is_float(), to.is_float()) {
+        (true, true) if from.bytes() < to.bytes() => b.ins().fpromote(ty, x),
+        (true, true) => b.ins().fdemote(ty, x),
+        (false, true) if from.is_unsigned() => b.ins().fcvt_from_uint(ty, x),
+        (false, true) => b.ins().fcvt_from_sint(ty, x),
+        (true, false) if to.is_unsigned() => b.ins().fcvt_to_uint_sat(ty, x),
+        (true, false) => b.ins().fcvt_to_sint_sat(ty, x),
+        (false, false) if from.bytes() > to.bytes() => b.ins().ireduce(ty, x),
+        (false, false) if from.is_unsigned() => b.ins().uextend(ty, x),
+        (false, false) => b.ins().sextend(ty, x),
+    }
+}
+
+fn convert_width(
+    b: &mut FunctionBuilder,
+    from: Element,
+    to: Element,
+    sources: &[Value],
+    start: usize,
+) -> Vec<Value> {
+    let out = chunk_type(to);
+    let n = CHUNK_BYTES / from.bytes();
+    let m = CHUNK_BYTES / to.bytes();
+    (0..to.lanes() / m)
+        .map(|part| {
+            let mut lane = |i| {
+                let source = start + part * m + i;
+                let x = b.ins().extractlane(sources[source / n], (source % n) as u8);
+                convert(b, from, to, out.lane_type(), x)
+            };
+            let lanes: Vec<_> = (0..m).map(&mut lane).collect();
+            let mut result = b.ins().splat(out, lanes[0]);
+            for (i, &value) in lanes.iter().enumerate().skip(1) {
+                result = b.ins().insertlane(result, value, i as u8);
+            }
+            result
+        })
+        .collect()
 }
 
 enum Address<'a> {

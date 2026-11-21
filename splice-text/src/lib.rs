@@ -157,6 +157,13 @@ fn render(root: &Function, out: &mut String) -> fmt::Result {
                         Sub => ("sub", None),
                         Mul => ("mul", None),
                         Div => ("div", None),
+                        Sqrt => ("sqrt", None),
+                        MulAdd => ("mul_add", None),
+                        ReduceSum => ("reduce_sum", None),
+                        Cast(_) => ("cast", None),
+                        Widen { high: false, .. } => ("widen_low", None),
+                        Widen { high: true, .. } => ("widen_high", None),
+                        Narrow(_) => ("narrow", None),
                         Min => ("min", None),
                         Max => ("max", None),
                         And => ("and", None),
@@ -178,6 +185,9 @@ fn render(root: &Function, out: &mut String) -> fmt::Result {
                         Select => ("select", None),
                     };
                     write!(out, "simd.{op}.{}", inst.element.name())?;
+                    if let Cast(to) | Narrow(to) | Widen { to, .. } = inst.op {
+                        write!(out, " -> {}", to.name())?;
+                    }
                     if let Some(b) = buffer {
                         write!(out, " {}", buf(b))?;
                     }
