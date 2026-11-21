@@ -1,0 +1,85 @@
+fn main c:i32 a:i32 b:i32 bias:i32 -> i32
+  br c merge a bias | relay b bias
+block relay y:i32 k:i32
+  jump second k
+block second m:i32
+  jump merge y m
+block merge value:i32 offset:i32
+  total = add value offset
+  ret total
+@source check: br
+@opt not: br
+@opt check: Select
+@opt not: br
+@opt check: ret
+@run 0 7 11 4 -> 15
+@run 1 7 11 4 -> 11
+@run -4 7 11 4 -> 11
+
+---
+
+fn main c:i32 a:i32 b:i32 -> i32
+  pa = simd.splat a
+  pb = simd.splat b
+  br c merge pa | relay pb
+block relay xs:vec.i32
+  jump second xs
+block second ys:vec.i32
+  jump merge ys
+block merge vs:vec.i32
+  zero = const 0
+  out = simd.extract vs zero
+  ret out
+@opt not: br
+@opt check: Ne
+@opt check: Select
+@run 0 7 11 -> 11
+@run 1 7 11 -> 7
+@run -1 7 11 -> 7
+
+---
+
+fn main p:ptr c:i32 n:i32 x:i32 y:i32 -> i32
+  zero = const 0
+  br c merge x | relay y
+block relay f:i32
+  jump guarded f
+block guarded v:i32
+  store p v
+  bounds zero n
+  jump merge v
+block merge answer:i32
+  ret answer
+@opt check: br
+@opt check: store
+@opt nextln: bounds
+@run 1 0 7 11 -> 7 | aa aa aa aa | aa aa aa aa
+@run 0 0 7 11 -> !bounds | aa aa aa aa | 0b 00 00 00
+@run 0 1 7 11 -> 11 | aa aa aa aa | 0b 00 00 00
+
+---
+
+fn main c:i32 x:i32 -> i32
+  br c done x | spin x
+block spin carry:i32
+  jump back carry
+block back value:i32
+  jump spin value
+block done result:i32
+  ret result
+@opt check: br
+@run 1 9 -> 9
+
+---
+
+# Parallel edges agree only on the last column.
+fn main choose:i32 a:i32 b:i32 bias:i32 -> i32
+  br choose merge a b bias | merge b a bias
+block merge left:i32 right:i32 shared:i32
+  diff = sub left right
+  out = add diff shared
+  ret out
+@opt check: b1(v4:I32 v5:I32)
+@run 0 7 11 4 -> 8
+@run 1 7 11 4 -> 0
+@run -1 7 11 4 -> 0

@@ -2,6 +2,28 @@ use super::{ControlFlowGraph, DomTree};
 use crate::hir::ssa::{Block, Function, Terminator};
 
 #[test]
+fn both_branch_arms_can_reference_one_edge() {
+    let mut f = Function::scalar(1);
+    let entry = f.entry();
+    let input = f.params(entry)[0];
+    let join = f.create_block();
+    let result = f.append_param(join);
+    let edge = f.add_edge(join, &[input]);
+    f.set_terminator(
+        entry,
+        Terminator::Branch {
+            cond: input,
+            yes: edge,
+            no: edge,
+        },
+    );
+    f.set_terminator(join, Terminator::Return(result));
+
+    let cfg = ControlFlowGraph::compute(&f).unwrap();
+    assert!(cfg.incoming_edges(join).eq([(entry, edge), (entry, edge)]));
+}
+
+#[test]
 fn loop_with_two_arms_has_one_header_dominating_the_exit() {
     let mut f = Function::scalar(1);
     let entry = f.entry();

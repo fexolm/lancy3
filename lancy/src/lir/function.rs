@@ -8,6 +8,7 @@ struct BlockData {
     insts: InstRange,
     params: Range<usize>,
     edges: Range<usize>,
+    loop_depth: usize,
 }
 
 pub(super) struct Function<I> {
@@ -16,6 +17,7 @@ pub(super) struct Function<I> {
     predecessors: Vec<Vec<Block>>,
     successors: Vec<Block>,
     edge_args: Vec<Range<usize>>,
+    backedges: Vec<bool>,
     // Block parameters and edge arguments share one dense pool.
     block_values: Vec<VReg>,
     operands: Vec<Operand>,
@@ -38,6 +40,7 @@ impl<I: TargetInst> Function<I> {
             predecessors: vec![Vec::new(); blocks],
             successors: Vec::new(),
             edge_args: Vec::new(),
+            backedges: Vec::new(),
             block_values: Vec::new(),
             operands: Vec::new(),
             operand_ends: vec![0],
@@ -61,7 +64,13 @@ impl<I: TargetInst> Function<I> {
         self.insts.push(inst);
     }
 
-    pub(super) fn reorder(&mut self, start: usize, order: &[usize], scratch: &mut Vec<I>) {
+    pub(super) fn reorder(
+        &mut self,
+        start: usize,
+        order: &[usize],
+        scratch: &mut Vec<I>,
+        operands: &mut Vec<Operand>,
+    ) {
         let end = start + order.len();
         scratch.clear();
         scratch.extend(order.iter().map(|&i| self.insts[start + i]));
@@ -69,27 +78,37 @@ impl<I: TargetInst> Function<I> {
 
         // A permutation leaves the total operand count and other blocks' offsets intact.
         let mut at = self.operand_ends[start];
-        let mut operands = Vec::new();
         for i in start..end {
             operands.clear();
-            self.insts[i].operands(&mut operands);
-            self.operands[at..at + operands.len()].copy_from_slice(&operands);
+            self.insts[i].operands(operands);
+            self.operands[at..at + operands.len()].copy_from_slice(operands);
             at += operands.len();
             self.operand_ends[i + 1] = at;
         }
     }
 
-    pub fn edge(&mut self, target: Block, args: impl IntoIterator<Item = VReg>) {
+    pub fn loop_depth(&self, block: Block) -> usize {
+        self.blocks[block.index()].loop_depth
+    }
+
+    /// True for a backedge or the branch arm leading to its copy block.
+    pub fn leads_to_backedge(&self, block: Block, edge: usize) -> bool {
+        self.backedges[self.blocks[block.index()].edges.start + edge]
+    }
+
+    pub fn edge(&mut self, target: Block, args: impl IntoIterator<Item = VReg>, backedge: bool) {
         self.predecessors[target.index()].push(Block::new(self.blocks.len()));
         self.successors.push(target);
         let start = self.block_values.len();
         self.block_values.extend(args);
         self.edge_args.push(start..self.block_values.len());
+        self.backedges.push(backedge);
     }
 
     pub fn end_block(
         &mut self,
         params: impl IntoIterator<Item = VReg>,
+        loop_depth: usize,
     ) -> Result<(), CompileError> {
         // regalloc2 packs a before/after bit into its 32-bit program points.
         if self.insts.len() > i32::MAX as usize || self.operands.len() > u32::MAX as usize {
@@ -106,6 +125,7 @@ impl<I: TargetInst> Function<I> {
             insts: InstRange::new(first, Inst::new(self.insts.len())),
             params: start..self.block_values.len(),
             edges: edge_start..self.successors.len(),
+            loop_depth,
         });
         Ok(())
     }

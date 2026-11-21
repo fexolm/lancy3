@@ -1,0 +1,63 @@
+fn main p:ptr outer:i32 inner:i32 stop:i32 -> i32
+  zero = const 0
+  one = const 1
+  jump outer_head zero
+block outer_head i:i32
+  more = lt i outer
+  br more inner_head zero | done i
+block inner_head j:i32
+  active = lt j inner
+  br active body | latch
+block body
+  next = add j one
+  store p next
+  early = eq j stop
+  br early latch | inner_head next
+block latch
+  step = add i one
+  jump outer_head step
+block done answer:i32
+  ret answer
+@layout check: b0 depth=0
+@layout nextln: b1 depth=1
+@layout nextln: b2 depth=1
+@layout nextln: b4 depth=2
+@layout nextln: b6 depth=2
+@layout nextln: b8 depth=2
+@layout check: b5 depth=1
+@layout check: b7 depth=1
+@asm check: jge
+@asm check: jge
+@asm check: je
+@run 0 3 -1 -> 0 | aa aa aa aa | aa aa aa aa
+@run 2 0 -1 -> 2 | aa aa aa aa | aa aa aa aa
+@run 2 3 -1 -> 2 | aa aa aa aa | 03 00 00 00
+@run 2 3 0 -> 2 | aa aa aa aa | 01 00 00 00
+
+---
+
+# Neither branch of this cycle dominates the other one.
+fn main p:ptr start:i32 rounds:i32 -> i32
+  zero = const 0
+  one = const 1
+  two = const 2
+  br start left rounds | right rounds
+block left a:i32
+  store p one
+  keep = gt a zero
+  next = sub a one
+  br keep right next | exit a
+block right b:i32
+  store p two
+  again = gt b zero
+  later = sub b one
+  br again left later | exit b
+block exit n:i32
+  ret n
+@layout not: depth=1
+@layout check: b0 depth=0
+@layout not: depth=1
+@run 1 2 -> 0 | aa aa aa aa | 01 00 00 00
+@run 0 2 -> 0 | aa aa aa aa | 02 00 00 00
+@run 1 1 -> 0 | aa aa aa aa | 02 00 00 00
+@run 0 1 -> 0 | aa aa aa aa | 01 00 00 00

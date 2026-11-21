@@ -1,60 +1,151 @@
 use crate::hir::transforms::ControlFlowGraph;
-use crate::hir::{Binary, Function, Op, Simd, Terminator, Ternary, Type, Value, ssa::Edge};
+use crate::hir::{Binary, Block, Edge, Function, Op, Simd, Terminator, Ternary, Type, Value};
 use crate::support::slotmap::DenseMap;
+use std::collections::HashMap;
 
-/// Turn a single numeric merge into a select when neither arm computes anything.
-/// Bypassing a forwarding arm is legal even if other branches still use it.
-pub(super) fn convert_branches(f: &mut Function, cfg: &ControlFlowGraph) -> bool {
-    fn endpoint(f: &Function, edge: Edge, bypass: bool) -> (Edge, &[Value], &[Value]) {
-        let (block, args) = f.edge(edge);
-        if bypass
-            && f.instructions(block).next().is_none()
-            && let Terminator::Jump(next) = *f.terminator(block)
-        {
-            return (next, f.params(block), args);
+#[derive(Clone, Copy)]
+enum Path {
+    New,
+    Visiting,
+    Cycle,
+    End { block: Block, distance: usize },
+}
+
+struct ForwardingPaths {
+    next: DenseMap<Block, Option<Edge>>,
+    paths: DenseMap<Block, Path>,
+}
+
+impl ForwardingPaths {
+    fn new(f: &Function, cfg: &ControlFlowGraph) -> Self {
+        let mut next = DenseMap::filled(f.block_capacity(), None);
+        let mut paths = DenseMap::filled(f.block_capacity(), Path::New);
+        for &block in cfg.reverse_postorder() {
+            if f.instructions(block).next().is_none()
+                && let Terminator::Jump(edge) = *f.terminator(block)
+            {
+                next[block] = Some(edge);
+            }
         }
-        (edge, &[], &[])
+        let mut stack = Vec::new();
+        for &start in cfg.reverse_postorder() {
+            let mut block = start;
+            let mut path = loop {
+                match paths[block] {
+                    Path::New => {
+                        let Some(edge) = next[block] else {
+                            paths[block] = Path::End { block, distance: 0 };
+                            break paths[block];
+                        };
+                        paths[block] = Path::Visiting;
+                        stack.push(block);
+                        block = f.edge(edge).0;
+                    }
+                    Path::Visiting => break Path::Cycle,
+                    known => break known,
+                }
+            };
+            while let Some(block) = stack.pop() {
+                if let Path::End { distance, .. } = &mut path {
+                    *distance += 1;
+                }
+                paths[block] = path;
+            }
+        }
+        Self { next, paths }
     }
 
-    fn arguments<'a>(
-        args: &'a [Value],
-        params: &'a [Value],
-        incoming: &'a [Value],
-    ) -> impl Iterator<Item = Value> + 'a {
-        // Parameters are appended in value-ID order.
-        args.iter().map(|&arg| match params.binary_search(&arg) {
-            Ok(i) => incoming[i],
-            Err(_) => arg,
-        })
+    fn merge(&self, f: &Function, mut a: Block, mut b: Block) -> Option<Block> {
+        if a == b {
+            return Some(a);
+        }
+        let (
+            Path::End {
+                block: end_a,
+                distance: mut da,
+            },
+            Path::End {
+                block: end_b,
+                distance: mut db,
+            },
+        ) = (self.paths[a], self.paths[b])
+        else {
+            return None;
+        };
+        if end_a != end_b {
+            return None;
+        }
+        while a != b {
+            if da >= db {
+                a = f.edge(self.next[a].unwrap()).0;
+                da -= 1;
+            } else {
+                b = f.edge(self.next[b].unwrap()).0;
+                db -= 1;
+            }
+        }
+        Some(a)
     }
 
+    fn arguments(&self, f: &Function, mut edge: Edge, merge: Block) -> Vec<Value> {
+        let mut bindings = HashMap::new();
+        let mut args = Vec::new();
+        loop {
+            let (block, values) = f.edge(edge);
+            args.clear();
+            args.extend(
+                values
+                    .iter()
+                    .map(|v| bindings.get(v).copied().unwrap_or(*v)),
+            );
+            if block == merge {
+                return args;
+            }
+            // Downstream jumps can use any parameter defined along the path.
+            bindings.extend(f.params(block).iter().copied().zip(args.iter().copied()));
+            edge = self.next[block].unwrap();
+        }
+    }
+}
+
+/// Replace a branch joining through empty jump blocks with a numeric select.
+/// Other predecessors of a forwarding block can keep using that block.
+pub(super) fn convert_branches(f: &mut Function, cfg: &ControlFlowGraph) -> bool {
+    if !cfg
+        .reverse_postorder()
+        .iter()
+        .any(|&b| matches!(f.terminator(b), Terminator::Branch { .. }))
+    {
+        return false;
+    }
+    let paths = ForwardingPaths::new(f, cfg);
     let mut changed = false;
     for &block in cfg.reverse_postorder() {
         let Terminator::Branch { cond, yes, no } = *f.terminator(block) else {
             continue;
         };
-        let bypass = f.edge(yes).0 != f.edge(no).0;
-        let (left, lp, la) = endpoint(f, yes, bypass);
-        let (right, rp, ra) = endpoint(f, no, bypass);
-        let (target, a) = f.edge(left);
-        let (other, b) = f.edge(right);
-        if target != other || target == block {
+        let yes_target = f.edge(yes).0;
+        let Some(target) = paths.merge(f, yes_target, f.edge(no).0) else {
+            continue;
+        };
+        if target == block {
             continue;
         }
-        let left_args = || arguments(a, lp, la);
-        let right_args = arguments(b, rp, ra);
+        let mut args = paths.arguments(f, yes, target);
+        let right_args = paths.arguments(f, no, target);
         let (first, second) = {
-            let mut differing = left_args()
+            let mut differing = args
+                .iter()
+                .copied()
                 .zip(right_args)
                 .enumerate()
                 .filter(|(_, (x, y))| x != y);
             (differing.next(), differing.next())
         };
         let Some((index, (x, y))) = first else {
-            if lp.is_empty() {
-                f.set_terminator(block, Terminator::Jump(left));
+            if yes_target == target {
+                f.set_terminator(block, Terminator::Jump(yes));
             } else {
-                let args: Vec<_> = left_args().collect();
                 f.jump(block, target, &args);
             }
             changed = true;
@@ -64,7 +155,6 @@ pub(super) fn convert_branches(f: &mut Function, cfg: &ControlFlowGraph) -> bool
         if ty == Type::Ptr || second.is_some() {
             continue;
         }
-        let mut args: Vec<_> = left_args().collect();
         let select = if matches!(ty, Type::Vector(_)) {
             // Branches test nonzero; SIMD selects test the sign bit per lane.
             let zero = f.append(block, Op::Const(0)).unwrap();
@@ -85,54 +175,4 @@ pub(super) fn convert_branches(f: &mut Function, cfg: &ControlFlowGraph) -> bool
         changed = true;
     }
     changed
-}
-
-pub(super) fn forward_params(f: &mut Function, cfg: &ControlFlowGraph) {
-    let mut inputs: Option<DenseMap<Value, Option<Value>>> = None;
-    for &block in cfg.reverse_postorder() {
-        for edge in f.terminator(block).edges() {
-            let (target, args) = f.edge(edge);
-            if args.is_empty() {
-                continue;
-            }
-            let inputs = inputs.get_or_insert_with(|| DenseMap::filled(f.value_count(), None));
-            for (&param, &arg) in f.params(target).iter().zip(args) {
-                if arg != param {
-                    let prior = inputs[param].get_or_insert(arg);
-                    if *prior != arg {
-                        *prior = Value::INVALID;
-                    }
-                }
-            }
-        }
-    }
-    let Some(inputs) = inputs else {
-        return;
-    };
-    let mut aliases = DenseMap::from_fn(f.value_count(), |v| v);
-    let mut changed = false;
-    for &block in &cfg.reverse_postorder()[1..] {
-        for &p in f.params(block) {
-            if let Some(v) = inputs[p].filter(|&v| v != Value::INVALID) {
-                aliases[p] = v;
-                changed = true;
-            }
-        }
-    }
-    if changed {
-        // An incoming value common to all non-self edges is available on
-        // entry to the block. Compress chains using path halving.
-        for v in aliases.keys() {
-            let mut root = v;
-            while aliases[root] != root {
-                let parent = aliases[root];
-                let grandparent = aliases[parent];
-                aliases[root] = grandparent;
-                root = grandparent;
-            }
-            aliases[v] = root;
-        }
-        f.remove_aliased_params(&aliases);
-        f.substitute_values(&aliases);
-    }
 }

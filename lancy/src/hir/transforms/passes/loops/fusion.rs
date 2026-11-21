@@ -1,7 +1,8 @@
 //! Fuse adjacent counted loops with equal iteration spaces.
-use super::{Count, CountedLoop, Facts, NaturalLoops, memory::Bounds};
+use super::super::facts::flatten;
+use super::{Bounds, Count, CountedLoop, Facts, NaturalLoops};
 use crate::hir::{
-    Binary, Block, Function, Op, Scale, Simd, Terminator, Type, Value, VectorAddress,
+    Block, Function, Op, Scale, Simd, Terminator, Type, Unary, Value, VectorAddress,
     ssa::Edge,
     transforms::{ControlFlowGraph, DomTree},
 };
@@ -89,13 +90,7 @@ impl Body {
                         value,
                         ..
                     }) => (base, f.value_type(value), true),
-                    Op::Bin(Binary::Div | Binary::Rem, _, b)
-                    | Op::Simd(Simd::Bin(Binary::Div | Binary::Rem, _, b))
-                        if facts.nontrapping_divisor(f, b) =>
-                    {
-                        continue;
-                    }
-                    _ if op.pure(f.result(inst).map(|value| f.value_type(value))) => continue,
+                    _ if facts.is_total(f, inst) => continue,
                     _ => return None,
                 };
                 let Some(Op::PtrOffset(base, index, scale)) = facts.op(f, address) else {
@@ -206,7 +201,6 @@ impl Pair {
             || !same_value(f, facts, left.bound, right.bound)
             || left.step != right.step
             || left.packet_size() != right.packet_size()
-            || body_on_true(f, left) != body_on_true(f, right)
         {
             return None;
         }
@@ -230,7 +224,7 @@ impl Pair {
             })
             || !f
                 .instructions(left.header)
-                .all(|inst| f.op(inst).pure(f.result(inst).map(|v| f.value_type(v))))
+                .all(|inst| facts.is_total(f, inst))
         {
             return None;
         }
@@ -264,7 +258,7 @@ impl Pair {
             return None;
         }
 
-        let mut aliases = vec![(right.iv, left.iv), (right.guard, left.guard)];
+        let mut aliases = vec![(right.iv, left.iv)];
         if let (Some((_, left_remaining)), Some((_, right_remaining))) = (left.packet, right.packet)
         {
             aliases.push((right_remaining, left_remaining));
@@ -306,10 +300,19 @@ impl Pair {
         })
     }
 
-    fn apply(self, f: &mut Function) {
+    fn apply(self, f: &mut Function, replacements: &mut Vec<(Value, Value)>) {
         let mut initial = f.edge(self.left_initial).1.to_vec();
         let mut updates = f.edge(self.left_body.backedge).1.to_vec();
         let mut aliases = self.aliases;
+        let guard = if body_on_true(f, self.left) == body_on_true(f, self.right) {
+            self.left.guard
+        } else {
+            // Both comparisons produce canonical i32 masks. The second
+            // loop's body and live-outs still see its original polarity.
+            f.append(self.left.header, Op::Unary(Unary::Not, self.left.guard))
+                .unwrap()
+        };
+        aliases.push((self.right.guard, guard));
         for (param, init, update) in self.carries {
             let replacement = f.append_typed_param(self.left.header, f.value_type(param));
             aliases.push((param, replacement));
@@ -334,13 +337,7 @@ impl Pair {
         };
         f.set_terminator(self.left.header, Terminator::Branch { cond, yes, no });
 
-        let mut map = DenseMap::from_fn(f.value_count(), |value| value);
-        for (old, new) in aliases {
-            map[old] = new;
-        }
-        // The right entry/header are now unreachable and are removed by
-        // the caller. Their old edge records do not participate in the CFG.
-        f.substitute_values(&map);
+        replacements.extend(aliases);
     }
 }
 
@@ -353,24 +350,40 @@ pub(super) fn fuse(
     counted: &DenseMap<Block, Option<CountedLoop>>,
     bounds: &Bounds,
 ) -> bool {
+    let analysis = Analysis {
+        f,
+        cfg,
+        dom,
+        loops,
+        facts,
+        bounds,
+    };
+    let mut pairs = Vec::new();
+    let mut used = DenseMap::filled(f.block_capacity(), false);
     for &header in cfg.reverse_postorder() {
-        if let Some(left) = counted[header]
-            && let Some(pair) = Pair::find(
-                &Analysis {
-                    f,
-                    cfg,
-                    dom,
-                    loops,
-                    facts,
-                    bounds,
-                },
-                counted,
-                left,
-            )
+        if !used[header]
+            && let Some(left) = counted[header]
+            && let Some(pair) = Pair::find(&analysis, counted, left)
+            && !used[pair.right.header]
         {
-            pair.apply(f);
-            return true;
+            used[header] = true;
+            used[pair.right.header] = true;
+            pairs.push(pair);
         }
     }
-    false
+    if pairs.is_empty() {
+        return false;
+    }
+    let mut replacements = Vec::new();
+    for pair in pairs {
+        pair.apply(f, &mut replacements);
+    }
+    let mut aliases = DenseMap::from_fn(f.value_count(), |value| value);
+    for (old, new) in replacements {
+        aliases[old] = new;
+    }
+    // A later pair can use the final value carried out of an earlier pair.
+    flatten(&mut aliases);
+    f.substitute_values(&aliases);
+    true
 }

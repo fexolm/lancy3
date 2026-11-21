@@ -113,3 +113,46 @@ block done result:i32
 @opt check: br
 @opt check: store
 @run 2 11 -> 22 | aa aa aa aa aa aa aa aa | 0b 00 00 00 16 00 00 00
+
+---
+
+# Reversing the operands and taking the false edge gives the same strict loop.
+fn main start:i32 limit:i32 seed:i32 -> i32
+  one = const 1
+  jump head start seed
+block head i:i32 sum:i32
+  done = le limit i
+  br done exit sum | inc
+block inc
+  next = add i one
+  total = add sum i
+  jump head next total
+block exit out:i32
+  ret out
+@source check: Le
+@opt not: br
+@opt check: ret
+@run 1 4 10 -> 16
+@run 4 1 10 -> 10
+@run -3 2 0 -> -5
+@run 2147483646 2147483647 2 -> -2147483648
+
+---
+
+# The false edge here includes equality and must run one additional iteration.
+fn main start:i32 limit:i32 -> i32
+  one = const 1
+  jump head start
+block head i:i32
+  done = lt limit i
+  br done exit | inc
+block inc
+  next = add i one
+  jump head next
+block exit
+  ret i
+@opt check: br
+@run 2 2 -> 3
+@run 0 3 -> 4
+@run 5 -2 -> 5
+@run 2147483646 2147483646 -> 2147483647

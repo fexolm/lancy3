@@ -5,6 +5,7 @@ use crate::hir::transforms::ControlFlowGraph;
 use crate::hir::{Block, Edge, Function, Op, Terminator, Value, ssa::VerifiedBody};
 use crate::module::{FunctionId, FunctionIds, Module};
 use crate::support::slotmap::DenseMap;
+use std::sync::Arc;
 
 struct Template {
     body: Function,
@@ -16,7 +17,7 @@ pub(crate) fn inline_all(
     module: &Module<VerifiedBody<'_>>,
     ids: &FunctionIds<Function>,
 ) -> Result<Function, CompileError> {
-    check_expansion(module)?;
+    check_expansion(module, ids)?;
     let mut uses = DenseMap::filled(module.functions.len(), 0usize);
     for id in module.functions.keys() {
         for &child in module.call_graph.callees(id) {
@@ -64,7 +65,7 @@ pub(crate) fn inline_all(
 
 /// Account for the emitted entities at every call site before copying a shared
 /// DAG. A diamond of small functions can exceed a 32-bit index in a few levels.
-#[derive(Default)]
+#[derive(Clone, Copy, Default)]
 struct Size {
     insts: u64,
     blocks: u64,
@@ -74,44 +75,114 @@ struct Size {
     returns: u64,
 }
 
-fn check_expansion(module: &Module<VerifiedBody<'_>>) -> Result<(), CompileError> {
+impl Size {
+    fn block(&mut self, params: usize) {
+        self.blocks += 1;
+        self.values += params as u64;
+    }
+
+    fn inst(&mut self, has_result: bool) {
+        self.insts += 1;
+        self.values += u64::from(has_result);
+    }
+
+    fn terminator(&mut self, f: &Function, term: Terminator) {
+        self.returns += u64::from(matches!(term, Terminator::Return(_)));
+        for edge in term.edges() {
+            self.edges += 1;
+            self.args += f.edge(edge).1.len() as u64;
+        }
+    }
+
+    fn call(&mut self, callee: Self, arity: usize, join: bool) {
+        let join = u64::from(join);
+        self.insts += callee.insts;
+        self.blocks += callee.blocks - 1 + join;
+        self.values += callee.values - arity as u64 + join;
+        self.edges += callee.edges + join * callee.returns;
+        self.args += callee.args + join * callee.returns;
+    }
+
+    fn check(self) -> Result<(), CompileError> {
+        if self.insts + self.blocks > i32::MAX as u64
+            || self.values > regalloc2::VReg::MAX as u64
+            || self.edges > u32::MAX as u64
+            || self.args > u32::MAX as u64
+        {
+            Err(CompileError::FunctionTooLarge)
+        } else {
+            Ok(())
+        }
+    }
+}
+
+fn check_expansion(
+    module: &Module<VerifiedBody<'_>>,
+    ids: &FunctionIds<Function>,
+) -> Result<(), CompileError> {
     let mut sizes: DenseMap<FunctionId, Size> = DenseMap::new();
     for (id, src) in module.functions.iter() {
         let f = src.function;
-        let mut size = Size::default();
+        let callee = |site| {
+            let (target, _) = f.call(site);
+            (sizes[ids[&Arc::as_ptr(target)]], target.arity())
+        };
+        // The copier allocates even dead continuations in this body. Its
+        // callers only copy the blocks reachable after pruning.
+        let prunes = module
+            .call_graph
+            .callees(id)
+            .iter()
+            .any(|&c| sizes[c].returns == 0);
+        let reachable = prunes.then(|| {
+            let mut reachable = DenseMap::filled(f.block_capacity(), false);
+            let mut pending = vec![f.entry()];
+            while let Some(block) = pending.pop() {
+                if std::mem::replace(&mut reachable[block], true) {
+                    continue;
+                }
+                if !f.instructions(block).any(
+                    |inst| matches!(*f.op(inst), Op::Call(site) if callee(site).0.returns == 0),
+                ) {
+                    pending.extend(src.cfg.successors(block));
+                }
+            }
+            reachable
+        });
+        let mut emitted = Size::default();
+        let mut retained = Size::default();
         for &b in src.cfg.reverse_postorder() {
-            size.blocks += 1;
-            size.values += f.params(b).len() as u64;
+            let mut live = reachable.as_ref().is_some_and(|reachable| reachable[b]);
+            let params = f.params(b).len();
+            emitted.block(params);
+            if live {
+                retained.block(params);
+            }
             for i in f.instructions(b) {
-                if !matches!(f.op(i), Op::Call(_)) {
-                    size.insts += 1;
-                    size.values += u64::from(f.result(i).is_some());
+                if let Op::Call(site) = *f.op(i) {
+                    let (callee, arity) = callee(site);
+                    emitted.call(callee, arity, callee.returns != 1);
+                    emitted.check()?;
+                    if live {
+                        retained.call(callee, arity, callee.returns > 1);
+                        live = callee.returns != 0;
+                    }
+                } else {
+                    let has_result = f.result(i).is_some();
+                    emitted.inst(has_result);
+                    if live {
+                        retained.inst(has_result);
+                    }
                 }
             }
             let term = *f.terminator(b);
-            size.returns += u64::from(matches!(term, Terminator::Return(_)));
-            for e in term.edges() {
-                size.edges += 1;
-                size.args += f.edge(e).1.len() as u64;
+            emitted.terminator(f, term);
+            if live {
+                retained.terminator(f, term);
             }
         }
-        for &child in module.call_graph.callees(id) {
-            let c = &sizes[child];
-            let join = u64::from(c.returns != 1);
-            size.insts += c.insts;
-            size.blocks += c.blocks - 1 + join;
-            size.values += c.values - module.functions[child].function.arity() as u64 + join;
-            size.edges += c.edges + join * c.returns;
-            size.args += c.args + join * c.returns;
-        }
-        if size.insts + size.blocks > i32::MAX as u64
-            || size.values > regalloc2::VReg::MAX as u64
-            || size.edges > u32::MAX as u64
-            || size.args > u32::MAX as u64
-        {
-            return Err(CompileError::FunctionTooLarge);
-        }
-        sizes.insert(size);
+        emitted.check()?;
+        sizes.insert(if prunes { retained } else { emitted });
     }
     Ok(())
 }

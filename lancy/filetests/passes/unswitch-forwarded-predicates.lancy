@@ -1,0 +1,110 @@
+fn main p:ptr n:i32 choose:i32 -> i32
+  zero = const 0
+  one = const 1
+  two = const 2
+  jump head zero choose zero
+block head i:i32 flag:i32 sum:i32
+  more = lt i n
+  br more decide flag | done
+block decide mode:i32
+  br mode left | right
+block left
+  inc = add sum one
+  store p inc
+  jump latch inc
+block right
+  twice = add sum two
+  store p twice
+  jump latch twice
+block latch tally:i32
+  next = add i one
+  jump head next flag tally
+block done
+  ret sum
+@opt check: b0(v0:Ptr v1:I32 v2:I32)
+@opt not: jump
+@opt check: br v2
+@opt check: ret
+@run 0 -2 -> 0 | aa aa aa aa | aa aa aa aa
+@run 3 0 -> 6 | aa aa aa aa | 06 00 00 00
+@run 3 -2 -> 3 | aa aa aa aa | 03 00 00 00
+@run 3 2 -> 3 | aa aa aa aa | 03 00 00 00
+
+---
+
+# The predicate changes on the backedge.
+fn main p:ptr n:i32 choose:i32 -> i32
+  zero = const 0
+  one = const 1
+  two = const 2
+  jump head zero choose zero
+block head i:i32 flag:i32 sum:i32
+  more = lt i n
+  br more decide flag | done
+block decide mode:i32
+  br mode left | right
+block left
+  inc = add sum one
+  store p inc
+  jump latch inc
+block right
+  twice = add sum two
+  store p twice
+  jump latch twice
+block latch tally:i32
+  next = add i one
+  flipped = eq flag zero
+  jump head next flipped tally
+block done
+  ret sum
+@opt check: jump b1
+@opt check: br
+@opt check: br
+@run 3 0 -> 5 | aa aa aa aa | 05 00 00 00
+@run 3 -2 -> 4 | aa aa aa aa | 04 00 00 00
+
+---
+
+# Before either loop is cloned, carry is forwarded through the first exit.
+fn main p:ptr n:i32 m:i32 choose:i32 -> i32
+  zero = const 0
+  one = const 1
+  two = const 2
+  jump first zero zero
+block first i:i32 carry:i32
+  more = lt i n
+  br more pick | bridge carry
+block pick
+  br choose enable | disable
+block enable
+  store p one
+  jump first_latch one
+block disable
+  store p zero
+  jump first_latch zero
+block first_latch update:i32
+  i1 = add i one
+  jump first i1 update
+block bridge mode:i32
+  jump second zero mode
+block second j:i32 state:i32
+  again = lt j m
+  br again decide | done
+block decide
+  br state left | right
+block left
+  store p one
+  jump second_latch
+block right
+  store p two
+  jump second_latch
+block second_latch
+  j1 = add j one
+  jump second j1 state
+block done
+  ret j
+@opt check: br v3
+@opt check: br
+@run 0 2 1 -> 2 | aa aa aa aa | 02 00 00 00
+@run 2 2 1 -> 2 | aa aa aa aa | 01 00 00 00
+@run 2 2 0 -> 2 | aa aa aa aa | 02 00 00 00

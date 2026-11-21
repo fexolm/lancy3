@@ -23,6 +23,7 @@ pub(crate) fn check_machine(
     let root = &compiled.functions[compiled.call_graph.root()];
     case.check("aarch64-isel", || selected(root))?;
     case.check("aarch64-alloc", || allocated(root))?;
+    case.check("layout", || crate::lir::layout::listing(&root.body))?;
     if !case.encodings.is_empty() {
         let code = super::emit_compiled(&compiled, simd, false).map_err(|e| e.to_string())?;
         for &(line, assertion) in &case.encodings {

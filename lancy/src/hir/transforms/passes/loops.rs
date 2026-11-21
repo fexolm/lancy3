@@ -1,84 +1,71 @@
+use super::bounds::{Bounds, Count, at_least};
 use super::facts::Facts;
-use crate::hir::transforms::{ControlFlowGraph, DomTree};
-use crate::hir::{Binary, Block, Function, Op, Simd, Terminator, Type, Unary, Value, ssa::Edge};
+use crate::hir::transforms::{ControlFlowGraph, DomTree, NaturalLoops};
+use crate::hir::{
+    Binary, Block, Function, IrError, MAX_VECTOR_BYTES, Op, Simd, Terminator, Type, Unary, Value,
+    ssa::Edge,
+};
 use crate::support::slotmap::DenseMap;
 mod fusion;
 mod memory;
 mod recurrence;
 mod unswitch;
 
-struct NaturalLoops {
-    headers: Vec<Block>,
-    owner: DenseMap<Block, Block>,
-    parent: DenseMap<Block, Block>,
-    preheader: DenseMap<Block, Block>,
+enum Rewrite {
+    None,
+    Reduced,
+    Unswitched,
 }
 
-impl NaturalLoops {
-    fn discover(cfg: &ControlFlowGraph, dom: &DomTree) -> Self {
-        let capacity = cfg.block_capacity();
-        let mut loops = Self {
-            headers: Vec::new(),
-            owner: DenseMap::filled(capacity, Block::INVALID),
-            parent: DenseMap::filled(capacity, Block::INVALID),
-            preheader: DenseMap::filled(capacity, Block::INVALID),
-        };
-        let mut representative = DenseMap::from_fn(capacity, |block| block);
-        let mut pending = Vec::new();
-        // Find natural loops from backedges. Walk innermost headers first and
-        // collapse each discovered region for the enclosing reverse walk.
-        for &header in cfg.reverse_postorder().iter().rev() {
-            let mut entry = None;
-            let mut multiple_entries = false;
-            for &pred in cfg.predecessors(header) {
-                if dom.dominates(header, pred) {
-                    pending.push(pred);
-                } else {
-                    multiple_entries |= entry.replace(pred).is_some();
-                }
-            }
-            if pending.is_empty() {
-                continue;
-            }
-            loops.headers.push(header);
-            loops.owner[header] = header;
-            if let Some(entry) = entry
-                && !multiple_entries
-                && cfg.successors(entry).count() == 1
-                && dom.dominates(entry, header)
-            {
-                loops.preheader[header] = entry;
-            }
-            while let Some(mut root) = pending.pop() {
-                while representative[root] != root {
-                    let parent = representative[root];
-                    representative[root] = representative[parent];
-                    root = representative[root];
-                }
-                if root == header || !dom.dominates(header, root) {
-                    continue;
-                }
-                representative[root] = header;
-                if loops.owner[root] == root {
-                    loops.parent[root] = header;
-                } else {
-                    loops.owner[root] = header;
-                }
-                pending.extend_from_slice(cfg.predecessors(root));
-            }
+#[derive(Default)]
+pub(super) struct LoopResult {
+    pub(super) rebuilt: Option<(ControlFlowGraph, DomTree)>,
+    pub(super) analysis: Option<(Facts, Bounds)>,
+}
+
+pub(super) fn run(
+    f: &mut Function,
+    initial_cfg: &ControlFlowGraph,
+    initial_dom: &DomTree,
+) -> Result<LoopResult, IrError> {
+    let mut result = LoopResult::default();
+    let mut allow_unswitch = true;
+    loop {
+        let (cfg, dom) = result
+            .rebuilt
+            .as_ref()
+            .map_or((initial_cfg, initial_dom), |(cfg, dom)| (cfg, dom));
+        if !cfg.has_cycle() {
+            return Ok(result);
         }
-        loops
+        match simplify_loops(f, cfg, dom, allow_unswitch, &mut result.analysis) {
+            Rewrite::None => return Ok(result),
+            Rewrite::Reduced => {}
+            // One round of specialization avoids cloning the same loop for
+            // every combination of invariant predicates.
+            Rewrite::Unswitched => allow_unswitch = false,
+        }
+        f.prune_unreachable()?;
+        let cfg = ControlFlowGraph::compute(f)?;
+        let dom = DomTree::compute(&cfg);
+        result.rebuilt = Some((cfg, dom));
     }
 }
 
-pub(super) fn simplify_loops(f: &mut Function, cfg: &ControlFlowGraph, dom: &DomTree) -> bool {
+fn simplify_loops(
+    f: &mut Function,
+    cfg: &ControlFlowGraph,
+    dom: &DomTree,
+    allow_unswitch: bool,
+    analysis: &mut Option<(Facts, Bounds)>,
+) -> Rewrite {
     let loops = NaturalLoops::discover(cfg, dom);
     if loops
         .headers
         .iter()
         .all(|&header| loops.preheader[header] == Block::INVALID)
     {
-        return false;
+        return Rewrite::None;
     }
     let mut facts = Facts::new(f, cfg, dom);
     hoist(f, dom, &loops, &mut facts);
@@ -86,18 +73,31 @@ pub(super) fn simplify_loops(f: &mut Function, cfg: &ControlFlowGraph, dom: &Dom
     for &header in &loops.headers {
         counted[header] = counted_loop(f, cfg, dom, &loops, &facts, header);
     }
-    let bounds = memory::Bounds::new(f, cfg, &facts);
-    bounds.optimize(f, cfg, dom, &loops, &mut facts, &counted)
+    let mut loop_bounds: Vec<_> = counted
+        .values()
+        .filter_map(|lp| lp.map(|lp| lp.bound))
+        .collect();
+    loop_bounds.sort_unstable();
+    loop_bounds.dedup();
+    let bounds = Bounds::new(f, cfg, dom, &facts, &loop_bounds);
+    // Each reduction removes a branch or an entire loop. Traversal and
+    // dominance are refreshed before another pass uses the changed graph.
+    if bounds.optimize(f, cfg, dom, &loops, &mut facts, &counted)
         || delete_finite_dead_loops(f, cfg, dom, &loops, &facts, &counted)
         || recurrence::collapse(f, cfg, dom, &loops, &facts, &counted)
         || fusion::fuse(f, cfg, dom, &loops, &facts, &counted, &bounds)
-        || unswitch::run(f, cfg, dom, &loops, &facts.defs)
+    {
+        Rewrite::Reduced
+    } else if allow_unswitch && unswitch::run(f, cfg, dom, &loops, &facts) {
+        Rewrite::Unswitched
+    } else {
+        *analysis = Some((facts, bounds));
+        Rewrite::None
+    }
 }
 
 fn hoist(f: &mut Function, dom: &DomTree, loops: &NaturalLoops, facts: &mut Facts) {
-    // A definition available in the outermost preheader can be placed there
-    // directly. Otherwise try the nearest preheader. Work per instruction
-    // stays bounded even in deep nests.
+    // Keep the outermost preheader as a fast path for fully invariant values.
     let mut outer = DenseMap::filled(f.block_capacity(), Block::INVALID);
     for &header in loops.headers.iter().rev() {
         let parent = loops.parent[header];
@@ -154,9 +154,11 @@ fn hoist(f: &mut Function, dom: &DomTree, loops: &NaturalLoops, facts: &mut Fact
         total_divisions.clear();
         if extended {
             for inst in f.instructions(block) {
-                if let Op::Bin(Binary::Div | Binary::Rem, _, divisor)
-                | Op::Simd(Simd::Bin(Binary::Div | Binary::Rem, _, divisor)) = *f.op(inst)
-                    && facts.nontrapping_divisor(f, divisor)
+                if matches!(
+                    f.op(inst),
+                    Op::Bin(Binary::Div | Binary::Rem, ..)
+                        | Op::Simd(Simd::Bin(Binary::Div | Binary::Rem, ..))
+                ) && facts.is_total(f, inst)
                 {
                     total_divisions.push(f.result(inst).unwrap());
                 }
@@ -201,63 +203,42 @@ fn hoist(f: &mut Function, dom: &DomTree, loops: &NaturalLoops, facts: &mut Fact
             {
                 return None;
             }
-            let target = [if scalar_i32 { outermost } else { nearest }, nearest]
-                .into_iter()
-                .find(|&target| {
-                    if target == Block::INVALID {
-                        return false;
+            let available = |target| {
+                let mut available = true;
+                let mut operands = op;
+                operands.map_operands(|value| {
+                    available &= facts.available(value, target, dom).is_some();
+                    value
+                });
+                available
+            };
+            let target = if scalar_i32 && outermost != Block::INVALID && available(outermost) {
+                outermost
+            } else {
+                let mut target = Block::INVALID;
+                let mut loop_header = header;
+                while loop_header != Block::INVALID {
+                    let preheader = loops.preheader[loop_header];
+                    if preheader != Block::INVALID {
+                        // An enclosing preheader dominates this one. A
+                        // missing operand cannot become available further out.
+                        if !available(preheader) {
+                            break;
+                        }
+                        target = preheader;
                     }
-                    let mut available = true;
-                    let mut operands = op;
-                    operands.map_operands(|value| {
-                        available &= facts.available(value, target, dom).is_some();
-                        value
-                    });
-                    available
-                })?;
+                    if !scalar_i32 {
+                        break;
+                    }
+                    loop_header = loops.parent[loop_header];
+                }
+                (target != Block::INVALID).then_some(target)?
+            };
             let mut op = op;
             op.map_operands(|v| facts.root(v));
             facts.defs[result].block = target;
             Some((target, op))
         });
-    }
-}
-
-/// Positive counts that can be compared without fixing the backend's SIMD width.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-enum Count {
-    Fixed(i32),
-    Lanes(usize),
-}
-
-impl Count {
-    fn of(f: &Function, facts: &Facts, value: Value) -> Option<Self> {
-        match facts.op(f, value)? {
-            Op::Const(n) if n > 0 => Some(Self::Fixed(n)),
-            Op::Simd(Simd::LaneCount(lane)) => Some(Self::Lanes(lane.bytes())),
-            _ => None,
-        }
-    }
-
-    fn access(ty: Type, scale: usize) -> Self {
-        match ty {
-            Type::Vector(_) => Self::Lanes(scale),
-            _ => Self::Fixed(ty.bytes(0).div_ceil(scale) as i32),
-        }
-    }
-
-    fn at_width(self, bytes: usize) -> i32 {
-        match self {
-            Self::Fixed(n) => n,
-            Self::Lanes(element) => bytes.div_ceil(element) as i32,
-        }
-    }
-
-    fn at_most(self, other: Self) -> bool {
-        // Counts are constant or linear in the supported vector widths.
-        [16, 64]
-            .into_iter()
-            .all(|bytes| self.at_width(bytes) <= other.at_width(bytes))
     }
 }
 
@@ -282,17 +263,6 @@ impl CountedLoop {
 
     fn strict_unit_step(self) -> bool {
         self.packet.is_none() && self.step == Count::Fixed(1)
-    }
-}
-
-/// Normalize an edge that guarantees a signed lower bound.
-fn at_least(kind: Binary, a: Value, b: Value) -> Option<(Value, Value, bool)> {
-    match kind {
-        Binary::Ge => Some((a, b, true)),
-        Binary::Le => Some((b, a, true)),
-        Binary::Lt => Some((a, b, false)),
-        Binary::Gt => Some((b, a, false)),
-        _ => None,
     }
 }
 
@@ -323,29 +293,39 @@ fn counted_loop(
     if f.value_type(a) != Type::I32 {
         return None;
     }
-    let (iv, bound, body, exit, packet) =
-        if kind == Binary::Lt && f.params(header).binary_search(&facts.root(a)).is_ok() {
-            (a, b, body, exit, None)
-        } else {
-            let (remaining, amount, yes) = at_least(kind, a, b)?;
-            let Op::Bin(Binary::Sub, bound, iv) = facts.op(f, remaining)? else {
-                return None;
-            };
-            let (body, exit) = if yes { (body, exit) } else { (exit, body) };
-            (
-                iv,
-                bound,
-                body,
-                exit,
-                Some((Count::of(f, facts, amount)?, facts.root(remaining))),
-            )
+    let strict = match kind {
+        Binary::Lt => Some((a, b, true)),
+        Binary::Gt => Some((b, a, true)),
+        Binary::Ge => Some((a, b, false)),
+        Binary::Le => Some((b, a, false)),
+        _ => None,
+    }
+    .filter(|&(i, _, _)| f.params(header).binary_search(&facts.root(i)).is_ok());
+    let (iv, bound, body_on_true, packet) = if let Some((iv, bound, yes)) = strict {
+        (iv, bound, yes, None)
+    } else {
+        let (remaining, amount, yes) = at_least(kind, a, b)?;
+        let Op::Bin(Binary::Sub, bound, iv) = facts.op(f, remaining)? else {
+            return None;
         };
+        (
+            iv,
+            bound,
+            yes,
+            Some((Count::of(f, facts, amount)?, facts.root(remaining))),
+        )
+    };
+    let (body, exit) = if body_on_true {
+        (body, exit)
+    } else {
+        (exit, body)
+    };
     let iv = facts.root(iv);
     let bound = facts.available(bound, preheader, dom)?;
     let index = f.params(header).binary_search(&iv).ok()?;
     if f.value_type(iv) != Type::I32
-        || loops.owner[f.edge(body).0] != header
-        || loops.owner[f.edge(exit).0] == header
+        || !loops.contains(header, f.edge(body).0)
+        || loops.contains(header, f.edge(exit).0)
     {
         return None;
     }
@@ -354,31 +334,25 @@ fn counted_loop(
     };
     let start = facts.root(f.edge(enter).1[index]);
     let mut step = None;
-    for &latch in cfg.predecessors(header) {
+    for (latch, edge) in cfg.incoming_edges(header) {
         if latch == preheader {
             continue;
         }
-        for edge in f
-            .terminator(latch)
-            .edges()
-            .filter(|&e| f.edge(e).0 == header)
-        {
-            let next = f.edge(edge).1[index];
-            let Op::Bin(Binary::Add, a, b) = facts.op(f, next)? else {
-                return None;
-            };
-            let (a, b) = (facts.root(a), facts.root(b));
-            let amount = if a == iv {
-                b
-            } else if b == iv {
-                a
-            } else {
-                return None;
-            };
-            let count = Count::of(f, facts, amount)?;
-            if *step.get_or_insert(count) != count {
-                return None;
-            }
+        let next = f.edge(edge).1[index];
+        let Op::Bin(Binary::Add, a, b) = facts.op(f, next)? else {
+            return None;
+        };
+        let (a, b) = (facts.root(a), facts.root(b));
+        let amount = if a == iv {
+            b
+        } else if b == iv {
+            a
+        } else {
+            return None;
+        };
+        let count = Count::of(f, facts, amount)?;
+        if *step.get_or_insert(count) != count {
+            return None;
         }
     }
     let step = step?;
@@ -394,7 +368,7 @@ fn counted_loop(
     } else if step != Count::Fixed(1)
         && facts
             .constant(f, bound)
-            .is_none_or(|n| n > i32::MAX - (step.at_width(64) - 1))
+            .is_none_or(|n| n > i32::MAX - (step.at_width(MAX_VECTOR_BYTES) - 1))
     {
         return None;
     }
@@ -459,10 +433,7 @@ fn delete_finite_dead_loops(
                     && (loops.owner[target] != owner
                         || (target != owner && rank[target] <= rank[block]))
             });
-        if other_path
-            || f.instructions(block)
-                .any(|inst| !f.op(inst).pure(f.result(inst).map(|v| f.value_type(v))))
-        {
+        if other_path || f.instructions(block).any(|inst| !facts.is_total(f, inst)) {
             exits[owner] = None;
         }
     }

@@ -5,7 +5,7 @@ use crate::CompileError;
 use crate::filetests::{Case, Result};
 use crate::hir::{Function, ssa::VerifiedBody};
 use crate::lir::{
-    regalloc,
+    layout, regalloc,
     x64::{
         compile::{compile, written_regs},
         emit::emit_compiled,
@@ -23,7 +23,10 @@ pub(crate) fn check_machine(
         let text = selected(&module, ids).map_err(|e| format!("isel: {e}"))?;
         case.check("isel", || text)?;
     }
-    if case.checks.contains_key("alloc") || case.checks.contains_key("asm") {
+    if ["alloc", "asm", "layout"]
+        .iter()
+        .any(|stage| case.checks.contains_key(stage))
+    {
         let module = compile(module, ids).map_err(|e| format!("alloc: {e}"))?;
         case.check("alloc", || {
             let mut out = String::new();
@@ -31,6 +34,9 @@ pub(crate) fn check_machine(
                 listing::lir(&mut out, id, &f.body, Some(&f.allocation));
             }
             out
+        })?;
+        case.check("layout", || {
+            layout::listing(&module.functions[module.call_graph.root()].body)
         })?;
         if case.checks.contains_key("asm") {
             let code = emit_compiled(&module).map_err(|e| format!("asm: {e}"))?;
@@ -52,7 +58,7 @@ fn selected(
     let mut ctx = regalloc2::Ctx::default();
     for (id, src) in module.functions.iter() {
         let root = id == module.call_graph.root();
-        let mut f = isel::select(src.function, &src.cfg, root, |callee| {
+        let mut f = isel::select(src, root, |callee| {
             let id = ids[&std::ptr::from_ref(callee)];
             (id, clobbers[id])
         })?;

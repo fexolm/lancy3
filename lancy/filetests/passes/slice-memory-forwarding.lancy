@@ -1,0 +1,96 @@
+fn main a:ptr na:i32 b:ptr nb:i32 i:i32 j:i32 x:i32 y:i32 -> i32
+  slices 0 write4 write4
+  bounds i na
+  bounds j nb
+  ap = offset a i 4
+  bp = offset b j 4
+  store ap x
+  store bp y
+  result = load i32 ap
+  ret result
+@source check: load I32
+@opt not: load
+@opt check: store
+@opt check: store
+@opt not: load
+@opt check: ret
+
+---
+
+# Bounds in the tail of the block do not prove earlier accesses are in range.
+fn main a:ptr na:i32 b:ptr nb:i32 i:i32 j:i32 x:i32 y:i32 -> i32
+  slices 0 write4 write4
+  bounds j nb
+  ap = offset a i 4
+  bp = offset b j 4
+  store ap x
+  store bp y
+  read = load i32 ap
+  store bp read
+  bounds i na
+  ret read
+@opt check: store
+@opt check: load I32
+@opt check: bounds
+
+---
+
+# One checked element does not cover a vector access.
+fn main a:ptr na:i32 b:ptr nb:i32 i:i32 j:i32 y:i32 -> i32
+  slices 0 write4 write4
+  bounds i na
+  bounds j nb
+  ap = offset a i 4
+  bp = offset b j 4
+  before = simd.load i32 ap
+  store bp y
+  after = simd.load i32 ap
+  zero = const 0
+  x = simd.extract before zero
+  z = simd.extract after zero
+  result = add x z
+  ret result
+@opt check: simd.load
+@opt check: store
+@opt check: simd.load
+
+---
+
+# Distinct address expressions can alias without slice proofs.
+fn main p:ptr i:i32 j:i32 x:i32 y:i32 -> i32
+  ap = offset p i 4
+  bp = offset p j 4
+  store ap x
+  store bp y
+  result = load i32 ap
+  ret result
+@opt check: store
+@opt check: store
+@opt check: load I32
+@run 0 0 41 53 -> 53 | 07 00 00 00 | 35 00 00 00
+@run 0 1 41 53 -> 41 | 07 00 00 00 09 00 00 00 | 29 00 00 00 35 00 00 00
+
+---
+
+fn main a:ptr na:i32 b:ptr nb:i32 i:i32 j:i32 x:i32 y:i32 -> i32
+  slices 0 write4 write4
+  one = const 1
+  zero = const 0
+  width = simd.lanes i32
+  last = sub width one
+  remaining = sub na i
+  bounds i na
+  bounds last remaining
+  bounds j nb
+  ap = offset a i 4
+  bp = offset b j 4
+  packet = simd.splat x
+  simd.store ap packet
+  store bp y
+  read = simd.load i32 ap
+  result = simd.extract read zero
+  ret result
+@source check: simd.load
+@opt check: simd.store
+@opt not: simd.load
+@opt check: ret

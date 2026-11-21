@@ -1,0 +1,158 @@
+# Repeated fusion drains a pipeline longer than three edits.
+fn main p:ptr n:i32 seed:i32 -> i32
+  zero = const 0
+  one = const 1
+  jump h1 zero
+block h1 i1:i32
+  more1 = lt i1 n
+  br more1 b1 | gap1
+block b1
+  at1 = offset p i1 4
+  next1 = add i1 one
+  store at1 seed
+  jump h1 next1
+block gap1
+  jump h2 zero
+block h2 i2:i32
+  more2 = lt i2 n
+  br more2 b2 | gap2
+block b2
+  at2 = offset p i2 4
+  next2 = add i2 one
+  old2 = load i32 at2
+  value2 = add old2 one
+  store at2 value2
+  jump h2 next2
+block gap2
+  jump h3 zero
+block h3 i3:i32
+  more3 = lt i3 n
+  br more3 b3 | gap3
+block b3
+  at3 = offset p i3 4
+  next3 = add i3 one
+  old3 = load i32 at3
+  value3 = add old3 one
+  store at3 value3
+  jump h3 next3
+block gap3
+  jump h4 zero
+block h4 i4:i32
+  more4 = lt i4 n
+  br more4 b4 | gap4
+block b4
+  at4 = offset p i4 4
+  next4 = add i4 one
+  old4 = load i32 at4
+  value4 = add old4 one
+  store at4 value4
+  jump h4 next4
+block gap4
+  jump h5 zero
+block h5 i5:i32
+  more5 = lt i5 n
+  br more5 b5 | gap5
+block b5
+  at5 = offset p i5 4
+  next5 = add i5 one
+  old5 = load i32 at5
+  value5 = add old5 one
+  store at5 value5
+  jump h5 next5
+block gap5
+  ret n
+@opt check: br
+@opt not: br
+@opt check: ret
+@run 0 7 -> 0 | aa aa aa aa bb bb bb bb | aa aa aa aa bb bb bb bb
+@run 2 7 -> 2 | aa aa aa aa bb bb bb bb | 0b 00 00 00 0b 00 00 00
+
+---
+
+# The second loop observes the next iteration's write by the first loop.
+fn main p:ptr n:i32 -> i32
+  zero = const 0
+  one = const 1
+  jump left zero
+block left i:i32
+  more = lt i n
+  br more write | bridge
+block write
+  at = offset p i 4
+  store at i
+  next = add i one
+  jump left next
+block bridge
+  jump right zero zero
+block right j:i32 sum:i32
+  again = lt j n
+  br again read | done
+block read
+  later = add j one
+  ahead = offset p later 4
+  x = load i32 ahead
+  accum = add sum x
+  jump right later accum
+block done
+  ret sum
+@opt check: br
+@opt check: br
+@run 2 -> 10 | 2a 00 00 00 11 00 00 00 09 00 00 00 | 00 00 00 00 01 00 00 00 09 00 00 00
+
+---
+
+# Both pairs can fuse together, but the second reads the final carry of the first.
+fn main p:ptr n:i32 -> i32
+  zero = const 0
+  one = const 1
+  jump first zero
+block first i:i32
+  more = lt i n
+  br more one_body | one_exit
+block one_body
+  pi = offset p i 4
+  store pi i
+  i1 = add i one
+  jump first i1
+block one_exit
+  jump second zero zero
+block second j:i32 carry:i32
+  still = lt j n
+  br still two_body | two_exit
+block two_body
+  pj = offset p j 4
+  tally = add carry one
+  store pj tally
+  j1 = add j one
+  jump second j1 tally
+block two_exit
+  jump third zero
+block third k:i32
+  advance = lt k n
+  br advance three_body | three_exit
+block three_body
+  pk = offset p k 4
+  written = add carry k
+  store pk written
+  k1 = add k one
+  jump third k1
+block three_exit
+  jump fourth zero
+block fourth l:i32
+  last = lt l n
+  br last four_body | done
+block four_body
+  pl = offset p l 4
+  old = load i32 pl
+  sum = add old carry
+  store pl sum
+  l1 = add l one
+  jump fourth l1
+block done
+  ret carry
+@opt check: br
+@opt check: br
+@opt not: br
+@opt check: ret
+@run 2 -> 2 | aa aa aa aa aa aa aa aa | 04 00 00 00 05 00 00 00
+@run 0 -> 0 | aa aa aa aa aa aa aa aa | aa aa aa aa aa aa aa aa

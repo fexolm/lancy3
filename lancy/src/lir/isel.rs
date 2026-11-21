@@ -1,7 +1,11 @@
 //! Consumer-first selection over the SSA use-def graph. Rules inspect definitions
 //! without committing to a cover. Only requesting a register makes its producer live.
 use crate::CompileError;
-use crate::hir::{Block, Function, Inst, Op, Terminator, Value, transforms::ControlFlowGraph};
+use crate::hir::{
+    Block, Function, Inst, Op, Terminator, Value,
+    ssa::VerifiedBody,
+    transforms::{ControlFlowGraph, DomTree, NaturalLoops},
+};
 use crate::support::slotmap::DenseMap;
 use regalloc2::{Block as MachineBlock, VReg};
 
@@ -12,15 +16,28 @@ use super::TargetInst;
 pub(super) struct Edges<'a> {
     f: &'a Function,
     cfg: &'a ControlFlowGraph,
+    dom: &'a DomTree,
+    loops: Option<(NaturalLoops, DenseMap<Block, usize>)>,
     mapping: DenseMap<Block, MachineBlock>,
     count: usize,
 }
 
 impl<'a> Edges<'a> {
-    pub fn new(f: &'a Function, cfg: &'a ControlFlowGraph) -> Self {
+    pub fn new(source: &'a VerifiedBody<'_>) -> Self {
+        let VerifiedBody {
+            function: f,
+            cfg,
+            dom,
+        } = source;
         let mut edges = Self {
             f,
             cfg,
+            dom,
+            loops: cfg.has_cycle().then(|| {
+                let loops = NaturalLoops::discover(cfg, dom);
+                let depths = loops.header_depths();
+                (loops, depths)
+            }),
             mapping: DenseMap::filled(f.block_capacity(), MachineBlock::invalid()),
             count: 0,
         };
@@ -51,11 +68,16 @@ impl<'a> Edges<'a> {
         let mut bridge = self.mapping[b].index() + 1;
         for e in term.edges() {
             let (target, args) = self.f.edge(e);
+            let backedge = self.dom.dominates(target, b);
             if self.split(b, target) {
-                body.edge(MachineBlock::new(bridge), []);
+                body.edge(MachineBlock::new(bridge), [], backedge);
                 bridge += 1;
             } else {
-                body.edge(self.mapping[target], args.iter().copied().map(&reg));
+                body.edge(
+                    self.mapping[target],
+                    args.iter().copied().map(&reg),
+                    backedge,
+                );
             }
         }
         let params = if b == self.f.entry() {
@@ -63,13 +85,25 @@ impl<'a> Edges<'a> {
         } else {
             self.f.params(b)
         };
-        body.end_block(params.iter().copied().map(&reg))?;
+        let depth = self.loops.as_ref().map_or(0, |(loops, depths)| {
+            depths.get(loops.owner[b]).copied().unwrap_or(0)
+        });
+        body.end_block(params.iter().copied().map(&reg), depth)?;
         for e in term.edges() {
             let (target, args) = self.f.edge(e);
             if self.split(b, target) {
                 body.push(jump());
-                body.edge(self.mapping[target], args.iter().copied().map(&reg));
-                body.end_block([])?;
+                let backedge = self.dom.dominates(target, b);
+                body.edge(
+                    self.mapping[target],
+                    args.iter().copied().map(&reg),
+                    backedge,
+                );
+                let depth = self
+                    .loops
+                    .as_ref()
+                    .map_or(0, |(loops, depths)| loops.edge_depth(depths, b, target));
+                body.end_block([], depth)?;
             }
         }
         Ok(())

@@ -7,7 +7,7 @@ fn main len:i32 offset:i32 use_guard:i32 -> i32
   last = sub width one
   br full packet | tail
 block packet
-  same_width = simd.lanes i32
+  same_width = simd.lanes f32
   same_remaining = sub len offset
   same_last = sub same_width one
   bounds offset len
@@ -48,3 +48,23 @@ block done
   ret offset
 @run 64 2 1 -> !bounds
 @run 64 64 1 -> 1
+---
+# A full i64 packet contains fewer lanes than a full i32 packet.
+fn main extra:i32 -> i32
+  guarded = simd.lanes i64
+  checked = simd.lanes i32
+  remaining = add guarded extra
+  full = ge remaining guarded
+  br full packet | done
+block packet
+  one = const 1
+  last = sub checked one
+  bounds last remaining
+  ret one
+block done
+  zero = const 0
+  ret zero
+@opt check: bounds
+@run 0 -> !bounds
+@run 64 -> 1
+@run -1 -> 0

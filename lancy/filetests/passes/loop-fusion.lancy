@@ -296,3 +296,34 @@ block done
 @opt check: ret
 @run 2 0 -> 69 | 5a 00 00 00 5b 00 00 00 5c 00 00 00 | 13 00 00 00 13 00 00 00 5c 00 00 00
 @run 2 1 -> 45 | 5a 00 00 00 5b 00 00 00 5c 00 00 00 | 07 00 00 00 07 00 00 00 13 00 00 00
+---
+
+# The second loop uses the complementary mask for the same iteration space.
+fn main p:ptr n:i32 -> i32
+  zero = const 0
+  one = const 1
+  jump first zero
+block first i:i32
+  more = gt n i
+  br more store_it | bridge
+block store_it
+  at = offset p i 4
+  store at i
+  next = add i one
+  jump first next
+block bridge
+  jump second zero
+block second j:i32
+  done = le n j
+  br done exit | step
+block step
+  later = add j one
+  jump second later
+block exit
+  ret done
+@opt check: Not
+@opt check: br
+@opt not: br
+@opt check: ret
+@run 0 -> -1 | ff ff ff ff | ff ff ff ff
+@run 2 -> -1 | ff ff ff ff ff ff ff ff | 00 00 00 00 01 00 00 00

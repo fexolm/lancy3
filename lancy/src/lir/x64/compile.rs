@@ -37,7 +37,7 @@ pub(super) fn compile(
     let arity = arg_words(source.functions[entry].function);
     let mut ctx = Ctx::default();
     let module = source.try_map_functions::<CompiledFunction>(|id, src, calls, compiled| {
-        let mut body = isel::select(src.function, &src.cfg, id == entry, |callee| {
+        let mut body = isel::select(src, id == entry, |callee| {
             let id = ids[&std::ptr::from_ref(callee)];
             (id, compiled[id].written)
         })?;

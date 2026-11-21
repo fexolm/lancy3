@@ -31,3 +31,26 @@ block left
 block right
   ret y
 @reject does not dominate
+
+---
+
+# Pruning retires an incoming edge and keeps both arms of the remaining branch.
+fn main choose:i32 a:i32 b:i32 bias:i32 -> i32
+  one = const 1
+  zero = const 0
+  br one kept | retired
+block retired
+  jump join a a zero
+block kept
+  br choose join a b bias | join b a bias
+block join left:i32 right:i32 shared:i32
+  diff = sub left right
+  result = add diff shared
+  ret result
+@cfg check: b3 preds=[b1 b2 b2] succs=[]
+@opt check: jump b2()
+@opt not: b1()
+@opt check: br v0 b3(v1 v2) | b3(v2 v1)
+@opt nextln: b3(v4:I32 v5:I32)
+@run 0 7 11 4 -> 8
+@run 1 7 11 4 -> 0

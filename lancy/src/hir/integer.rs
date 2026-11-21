@@ -10,6 +10,14 @@ pub(super) fn signed(x: u128, bits: u32) -> i128 {
     ((x << (128 - bits)) as i128) >> (128 - bits)
 }
 
+pub(super) fn extend(lane: Lane, x: u128) -> u128 {
+    if lane.signed() {
+        signed(x, lane.bytes() as u32 * 8) as u128
+    } else {
+        x
+    }
+}
+
 /// Evaluate a verified integer binary operation on lane bit patterns.
 pub(super) fn binary(op: Binary, lane: Lane, x: u128, y: u128) -> Result<u128, CallError> {
     let mask = mask(lane);
@@ -33,6 +41,7 @@ pub(super) fn evaluate(
     let order = if sign { a.cmp(&b) } else { x.cmp(&y) };
     let value = match action {
         Action::Unary(op) => match op {
+            Unary::Not => !x,
             Unary::Neg => x.wrapping_neg(),
             Unary::Abs => {
                 if sign {

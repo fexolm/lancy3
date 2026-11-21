@@ -1,8 +1,6 @@
-use super::NaturalLoops;
-use crate::hir::transforms::passes::facts::Definition;
+use super::{Facts, NaturalLoops};
 use crate::hir::transforms::{ControlFlowGraph, DomTree};
 use crate::hir::{Block, Edge, Function, Op, Terminator, Value};
-use crate::support::slotmap::DenseMap;
 use std::collections::{BTreeSet, HashMap};
 
 const MAX_BLOCKS: usize = 16;
@@ -11,7 +9,7 @@ const MAX_CLONE_COST: usize = 128;
 #[derive(Default)]
 struct Region {
     blocks: Vec<Block>,
-    branch: Option<Block>,
+    branch: Option<(Block, Value)>,
     exit: Option<(Block, Block)>,
     cost: usize,
     unsupported: bool,
@@ -24,7 +22,7 @@ pub(super) fn run(
     cfg: &ControlFlowGraph,
     dom: &DomTree,
     loops: &NaturalLoops,
-    defs: &DenseMap<Value, Definition>,
+    facts: &Facts,
 ) -> bool {
     let mut regions = HashMap::new();
     for &header in &loops.headers {
@@ -81,11 +79,11 @@ pub(super) fn run(
         // iterations. Both branch arms must lead back into the loop region.
         if region.branch.is_none()
             && let Terminator::Branch { cond, yes, no } = term
-            && dom.dominates(defs[cond].block, preheader)
+            && let Some(invariant) = facts.available(cond, preheader, dom)
             && loops.owner[f.edge(yes).0] == header
             && loops.owner[f.edge(no).0] == header
         {
-            region.branch = Some(block);
+            region.branch = Some((block, invariant));
         }
     }
 
@@ -95,11 +93,20 @@ pub(super) fn run(
     if regions.is_empty() {
         return false;
     }
+    for region in regions.values() {
+        let (branch, cond) = region.branch.unwrap();
+        let Terminator::Branch { yes, no, .. } = *f.terminator(branch) else {
+            unreachable!();
+        };
+        // Record direct uses of these roots before cloning any loop. An
+        // earlier loop may need an exit parameter for a later predicate.
+        f.set_terminator(branch, Terminator::Branch { cond, yes, no });
+    }
     // Find direct SSA uses outside each candidate. Arguments on the original
     // exit edge are already in the right form and will be remapped by cloning.
     for &block in order {
         let mut record_use = |v: Value| {
-            let owner = loops.owner[defs[v].block];
+            let owner = loops.owner[facts.defs[v].block];
             if owner != loops.owner[block]
                 && let Some(region) = regions.get_mut(&owner)
             {
@@ -133,7 +140,7 @@ pub(super) fn run(
 
 fn split(f: &mut Function, preheader: Block, region: &Region) {
     let (exiting, exit) = region.exit.unwrap();
-    let branch = region.branch.unwrap();
+    let (branch, _) = region.branch.unwrap();
 
     // The only incoming edge to the exit is from the loop, so the exit
     // dominates all direct external uses of loop-defined values.

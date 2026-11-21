@@ -86,6 +86,30 @@ fn non_returning_callee_removes_only_the_unreachable_continuation() {
 }
 
 #[test]
+fn expansion_counts_only_the_live_parts_of_reused_templates() {
+    let mut forever = Function::scalar(1);
+    let spin = forever.create_block();
+    forever.jump(forever.entry(), spin, &[]);
+    forever.jump(spin, spin, &[]);
+    let mut callee = Arc::new(forever);
+    for _ in 0..32 {
+        let mut caller = Function::scalar(1);
+        let entry = caller.entry();
+        let input = caller.params(entry)[0];
+        let first = caller.add_call(Arc::clone(&callee), &[input]);
+        let value = caller.append(entry, Op::Call(first)).unwrap();
+        let second = caller.add_call(callee, &[value]);
+        let value = caller.append(entry, Op::Call(second)).unwrap();
+        caller.set_terminator(entry, Terminator::Return(value));
+        callee = Arc::new(caller);
+    }
+    let (source, ids) = callee.verified_module().unwrap();
+    let expanded = inline_all(&source, &ids).unwrap();
+    assert_eq!(expanded.blocks().count(), 2);
+    assert_eq!(expanded.verified_module().unwrap().0.functions.len(), 1);
+}
+
+#[test]
 fn remove_dominated_checks_but_keep_sibling_checks_and_unused_trapping_math() {
     let mut f = Function::scalar(3);
     let entry = f.entry();

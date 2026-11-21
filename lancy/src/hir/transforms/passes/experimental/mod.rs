@@ -1,6 +1,6 @@
 //! Opt-in HIR rewrites for explicitly vectorized kernels.
 use super::sccp::Fact;
-use crate::hir::{Function, Op, Simd, Ternary, Type, Value, transforms::ControlFlowGraph};
+use crate::hir::{Op, Simd, Ternary, Type, Value};
 use crate::support::slotmap::DenseMap;
 use std::collections::HashMap;
 
@@ -107,24 +107,4 @@ pub(super) fn simplify_simd(
         }
     }
     Some(op)
-}
-
-pub(super) fn zero_constants(f: &Function, cfg: &ControlFlowGraph) -> DenseMap<Value, bool> {
-    let mut zero = DenseMap::filled(f.value_count(), false);
-    for &b in cfg.reverse_postorder() {
-        for i in f.instructions(b) {
-            if let (Op::Const(0), Some(v)) = (*f.op(i), f.result(i)) {
-                zero[v] = true;
-            }
-        }
-    }
-    zero
-}
-
-pub(super) fn accesses_first_lane(op: Op, zero: &DenseMap<Value, bool>) -> bool {
-    // Every supported vector has a lane zero. Other lane accesses can trap.
-    match op {
-        Op::Simd(Simd::ExtractLane(_, i) | Simd::InsertLane(_, i, _)) => zero[i],
-        _ => false,
-    }
 }

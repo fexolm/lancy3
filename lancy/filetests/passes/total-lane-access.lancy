@@ -1,0 +1,46 @@
+fn main out:ptr x:i32 -> i32
+  v = simd.splat x
+  last = const 3
+  store out x
+  unused_read = simd.extract v last
+  unused_update = simd.insert v last x
+  ret x
+@source check: simd.Extract
+@source check: simd.Insert
+@opt not: simd.Extract
+@opt not: simd.Insert
+@opt check: store
+@opt not: simd.Extract
+@opt not: simd.Insert
+@opt check: ret
+@run 7 -> 7 | aa aa aa aa | 07 00 00 00
+
+---
+
+fn main out:ptr x:i32 y:i32 -> i32
+  word = cast u64 x
+  v = simd.splat word
+  index = const 8
+  store out x
+  unused_update = simd.insert v index word
+  store out y
+  ret y
+@opt check: store
+@opt nextln: simd.Insert
+@opt nextln: store
+@run 7 9 -> !bounds | aa aa aa aa | 07 00 00 00
+
+---
+
+# On a 16-byte target this index can trap.
+fn main out:ptr x:i32 y:i32 -> i32
+  word = cast u64 x
+  v = simd.splat word
+  index = const 2
+  store out x
+  unused_update = simd.insert v index word
+  store out y
+  ret y
+@opt check: store
+@opt nextln: simd.Insert
+@opt nextln: store

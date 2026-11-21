@@ -106,6 +106,45 @@ fn loop_memory_optimizations_preserve_partial_writes() {
 }
 
 #[kernel]
+fn independent_stores(i: i32, j: i32, x: i32, y: i32, a: &mut [i32], b: &mut [i32]) -> i32 {
+    a[i as usize] = x;
+    b[j as usize] = y;
+    a[i as usize]
+}
+
+#[test]
+fn forwarding_between_independent_slices_preserves_each_write() {
+    fn check<B: Codegen<Output: Executable>>() {
+        let ir = independent_stores::ir().unwrap();
+        for code in [
+            independent_stores::build::<B>().unwrap(),
+            B::compile(&ir).unwrap(),
+        ] {
+            for (i, j, result, expected_a, expected_b) in [
+                (1, 0, Some(41), [7, 41], [53, 10]),
+                (2, 0, None, [7, 8], [9, 10]),
+                (1, 2, None, [7, 41], [9, 10]),
+            ] {
+                let mut a = [7, 8];
+                let mut b = [9, 10];
+                assert_eq!(
+                    code.call(
+                        &[i, j, 41, 53],
+                        &mut [BufferArg::Write(&mut a), BufferArg::Write(&mut b)],
+                    )
+                    .ok(),
+                    result
+                );
+                assert_eq!((a, b), (expected_a, expected_b));
+            }
+        }
+    }
+
+    check::<Lancy>();
+    check::<LlvmManualSimd>();
+}
+
+#[kernel]
 fn vector_store_reload(src: &[u16], dst: &mut [u16]) -> i32 {
     let stored = Lane::<u16>::load(src, 0);
     stored.store(dst, 0);

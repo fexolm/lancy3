@@ -9,7 +9,7 @@ use crate::module::{FunctionIds, Module};
 use crate::support::slotmap::DenseMap;
 use std::{collections::HashMap, sync::Arc};
 
-use super::{local_cfg, loops, memory, sccp};
+use super::{dead, facts::Facts, local_cfg, loops, memory, sccp};
 
 fn entry_literal(
     f: &mut Function,
@@ -36,10 +36,14 @@ fn constant_op(ty: Type, bits: u128, literals: &HashMap<(Lane, u128), Value>) ->
 /// memory operations and checks remain ordered on every executable path.
 pub(crate) fn simplify(f: &mut Function) -> Result<(), IrError> {
     let cfg = ControlFlowGraph::compute(f)?;
-    simplify_with_cfg(f, &cfg)
+    simplify_with_cfg(f, &cfg, None)
 }
 
-fn simplify_with_cfg(f: &mut Function, cfg: &ControlFlowGraph) -> Result<(), IrError> {
+fn simplify_with_cfg(
+    f: &mut Function,
+    cfg: &ControlFlowGraph,
+    verified_dom: Option<&DomTree>,
+) -> Result<(), IrError> {
     let facts = sccp::analyze(f, cfg);
     let known = |value| facts.get(value).and_then(|fact| fact.bits());
     let mut replacements = Vec::new();
@@ -86,6 +90,7 @@ fn simplify_with_cfg(f: &mut Function, cfg: &ControlFlowGraph) -> Result<(), IrE
     #[cfg(feature = "experimental-simd")]
     let mut definitions = HashMap::new();
     let mut changed_cfg = false;
+    let mut changed_aliases = !replacements.is_empty();
     for &b in cfg.reverse_postorder() {
         #[cfg(feature = "experimental-simd")]
         let mut vector_constants = HashMap::new();
@@ -132,6 +137,7 @@ fn simplify_with_cfg(f: &mut Function, cfg: &ControlFlowGraph) -> Result<(), IrE
             if let Some(dst) = result {
                 if let Op::Copy(v) = op {
                     aliases[dst] = aliases[v];
+                    changed_aliases = true;
                     return None;
                 }
                 if let Some(bits) = known(dst)
@@ -180,12 +186,11 @@ fn simplify_with_cfg(f: &mut Function, cfg: &ControlFlowGraph) -> Result<(), IrE
                             Some(yes)
                         } else {
                             known(c).map(|bits| {
-                                let cond = if matches!(op, Op::Simd(_)) {
-                                    bits >> (types[c].lane().unwrap().bytes() * 8 - 1) != 0
+                                if sccp::select_truth(types[c], bits) {
+                                    yes
                                 } else {
-                                    bits != 0
-                                };
-                                if cond { yes } else { no }
+                                    no
+                                }
                             })
                         }
                     }
@@ -193,6 +198,7 @@ fn simplify_with_cfg(f: &mut Function, cfg: &ControlFlowGraph) -> Result<(), IrE
                 };
                 if let Some(v) = copy {
                     aliases[dst] = aliases[v];
+                    changed_aliases = true;
                     return None;
                 }
             }
@@ -206,52 +212,39 @@ fn simplify_with_cfg(f: &mut Function, cfg: &ControlFlowGraph) -> Result<(), IrE
         }
     }
     if !replacements.is_empty() {
-        f.remove_aliased_params(&aliases);
+        f.retain_block_params(|p| aliases[p] == p);
     }
-    f.substitute_values(&aliases);
+    if changed_aliases {
+        f.substitute_values(&aliases);
+    }
     changed_cfg |= local_cfg::convert_branches(f, cfg);
-    let rebuilt;
-    let cfg = if changed_cfg {
+    let rebuilt = if changed_cfg {
         f.prune_unreachable()?;
-        rebuilt = ControlFlowGraph::compute(f)?;
-        &rebuilt
+        Some(ControlFlowGraph::compute(f)?)
     } else {
-        cfg
+        None
     };
-    let dom = DomTree::compute(cfg);
-    let (updated_cfg, updated_dom);
-    let (cfg, dom) = if cfg.has_cycle() {
-        // Mechanical forwarding across loop edges can lengthen hot live ranges
-        // and prevent the allocator from splitting them at block boundaries.
-        if loops::simplify_loops(f, cfg, &dom) {
-            f.prune_unreachable()?;
-            let mut current_cfg = ControlFlowGraph::compute(f)?;
-            let mut current_dom = DomTree::compute(&current_cfg);
-            // Refresh loop proofs only after productive CFG edits. Two
-            // more rounds cover short pipelines without unbounded work.
-            for _ in 0..2 {
-                if !current_cfg.has_cycle() || !loops::simplify_loops(f, &current_cfg, &current_dom)
-                {
-                    break;
-                }
-                f.prune_unreachable()?;
-                current_cfg = ControlFlowGraph::compute(f)?;
-                current_dom = DomTree::compute(&current_cfg);
-            }
-            updated_cfg = current_cfg;
-            updated_dom = current_dom;
-            (&updated_cfg, &updated_dom)
-        } else {
-            (cfg, &dom)
-        }
-    } else {
-        local_cfg::forward_params(f, cfg);
-        (cfg, &dom)
-    };
-    super::packet_checks::remove_full_packet_checks(f, cfg, dom);
+    let cfg = rebuilt.as_ref().unwrap_or(cfg);
+    let verified_dom = verified_dom.filter(|_| rebuilt.is_none());
+    let computed_dom = verified_dom.is_none().then(|| DomTree::compute(cfg));
+    let dom = verified_dom.or(computed_dom.as_ref()).unwrap();
+    let updated = loops::run(f, cfg, dom)?;
+    let (cfg, dom) = updated
+        .rebuilt
+        .as_ref()
+        .map_or((cfg, dom), |(cfg, dom)| (cfg, dom));
+    let (mut facts, mut bounds) = updated.analysis.map_or_else(
+        || (Facts::new(f, cfg, dom), None),
+        |(facts, bounds)| (facts, Some(bounds)),
+    );
+    // Physical forwarding across loop edges can lengthen hot live ranges.
+    if !cfg.has_cycle() {
+        facts.forward_acyclic_params(f, cfg);
+    }
+    super::bounds::remove_full_packet_checks(f, cfg, dom, &facts, &mut bounds);
     remove_redundant_checks(f, dom);
-    memory::optimize(f, cfg, dom);
-    remove_dead_computations(f, cfg);
+    memory::optimize(f, cfg, dom, &mut facts, bounds.as_ref());
+    dead::eliminate(f, cfg, &facts);
     Ok(())
 }
 
@@ -271,44 +264,6 @@ fn remove_redundant_checks(f: &mut Function, dom: &DomTree) {
     }
 }
 
-fn remove_dead_computations(f: &mut Function, cfg: &ControlFlowGraph) {
-    let mut live = DenseMap::filled(f.value_count(), false);
-    #[cfg(feature = "experimental-simd")]
-    let zero = experimental::zero_constants(f, cfg);
-    for &b in cfg.reverse_postorder() {
-        let term = *f.terminator(b);
-        if let Terminator::Branch { cond: v, .. } | Terminator::Return(v) = term {
-            live[v] = true;
-        }
-        for e in term.edges() {
-            for &v in f.edge(e).1 {
-                live[v] = true;
-            }
-        }
-    }
-    let mut instructions = Vec::new();
-    for &b in cfg.reverse_postorder().iter().rev() {
-        instructions.extend(f.instructions(b));
-        for i in instructions.drain(..).rev() {
-            let op = *f.op(i);
-            if let Some(result) = f.result(i) {
-                #[cfg(feature = "experimental-simd")]
-                let first_lane = experimental::accesses_first_lane(op, &zero);
-                #[cfg(not(feature = "experimental-simd"))]
-                let first_lane = false;
-                if !live[result] && (first_lane || op.pure(Some(f.value_type(result)))) {
-                    continue;
-                }
-                live[result] = true;
-            }
-            f.visit_operands(i, |v| live[v] = true);
-        }
-        f.rewrite_instructions(b, |op, result, _| {
-            result.is_none_or(|v| live[v]).then_some(op)
-        });
-    }
-}
-
 /// Rebind calls to optimized callees when the caller explicitly keeps them out of line.
 pub(crate) fn simplify_bodies(
     module: &Module<VerifiedBody<'_>>,
@@ -317,7 +272,7 @@ pub(crate) fn simplify_bodies(
     let mut bodies = DenseMap::with_capacity(module.functions.len());
     for (id, source) in module.functions.iter() {
         let mut body = source.function.clone();
-        simplify_with_cfg(&mut body, &source.cfg)?;
+        simplify_with_cfg(&mut body, &source.cfg, Some(&source.dom))?;
         for target in body.callees_mut() {
             if let Some(&child) = ids.get(&Arc::as_ptr(target))
                 && let Some(callee) = bodies.get(child)

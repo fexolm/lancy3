@@ -1,0 +1,83 @@
+fn main n:i32 -> i32
+  zero = const 0
+  one = const 1
+  high = literal i8 0x80
+  jump head zero high
+block head i:i32 signed:i8
+  go = lt i n
+  br go body | done signed
+block body
+  next = add i one
+  jump head next signed
+block done final:i8
+  wide = cast i32 final
+  inv = not wide
+  result = popcnt inv
+  ret result
+@opt not: Cast
+@opt not: Not
+@opt not: Popcnt
+@opt check: const 7
+@opt check: ret
+@run 0 -> 7
+@run 3 -> 7
+
+---
+
+fn main n:i32 -> i32
+  zero = const 0
+  one = const 1
+  high = literal i8 0x80
+  changed = literal i8 0x7f
+  jump head zero high
+block head i:i32 signed:i8
+  go = lt i n
+  br go body | done signed
+block body
+  next = add i one
+  jump head next changed
+block done final:i8
+  wide = cast i32 final
+  inv = not wide
+  result = popcnt inv
+  ret result
+@opt check: Cast I32
+@opt check: Popcnt
+@run 0 -> 7
+@run 1 -> 25
+@run 3 -> 25
+
+---
+
+fn main -> i32
+  minus = literal f32 0x80000000
+  v = simd.splat minus
+  bits = simd.bitcast i32 v
+  s = const 31
+  counts = simd.splat s
+  signs = simd.shr bits counts
+  z = const 0
+  answer = simd.extract signs z
+  ret answer
+@opt not: Bitcast
+@opt not: Shr
+@opt check: ret
+@run -> -1
+
+---
+
+# A bitcast can change lane widths. Its result need not be uniform.
+fn main -> i32
+  word = const 0x01000203
+  words = simd.splat word
+  bytes = simd.bitcast u8 words
+  zero = const 0
+  two = const 2
+  first = simd.extract bytes zero
+  third = simd.extract bytes two
+  a = cast i32 first
+  b = cast i32 third
+  result = sub a b
+  ret result
+@opt check: Bitcast
+@run -> 3

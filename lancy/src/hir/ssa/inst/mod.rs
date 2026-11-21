@@ -184,6 +184,13 @@ pub enum Terminator {
 }
 
 impl Terminator {
+    pub(crate) fn operand(self) -> Option<Value> {
+        match self {
+            Self::Branch { cond, .. } | Self::Return(cond) => Some(cond),
+            Self::Jump(_) => None,
+        }
+    }
+
     pub fn edges(self) -> impl Iterator<Item = Edge> {
         let empty = Edge::INVALID;
         let (edges, count) = match self {

@@ -1,11 +1,12 @@
 use crate::hir::transforms::ControlFlowGraph;
 use crate::hir::{
-    Binary, Block, Function, Lane, Op, Simd, Terminator, Ternary, Type, Value,
+    Binary, Block, Function, Lane, Op, Simd, Terminator, Ternary, Type, Unary, Value,
+    operation::Action,
     ssa::{Edge, Inst},
 };
 use crate::support::slotmap::DenseMap;
 
-use crate::hir::integer::{binary as integer_binary, mask as lane_mask};
+use crate::hir::integer::{self, binary as integer_binary, mask as lane_mask};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Fact {
@@ -29,6 +30,13 @@ impl Fact {
             _ => Self::Varying,
         }
     }
+
+    fn map(self, f: impl FnOnce(u128) -> u128) -> Self {
+        match self {
+            Self::Constant(bits) => Self::Constant(f(bits)),
+            other => other,
+        }
+    }
 }
 
 pub(super) fn literal(lane: Lane, bits: u128) -> Op {
@@ -44,8 +52,8 @@ pub(super) enum Reduced {
     Copy(Value),
 }
 
-fn integer(ty: Type) -> bool {
-    ty.lane().is_some_and(|lane| !lane.float())
+fn integer_lane(ty: Type) -> Option<Lane> {
+    ty.lane().filter(|lane| !lane.float())
 }
 
 /// Exact integer constants and total arithmetic identities for one scalar
@@ -60,7 +68,7 @@ pub(super) fn reduce(
 ) -> Option<Reduced> {
     use Binary::*;
     use Reduced::*;
-    let lane = ty.lane().filter(|lane| !lane.float())?;
+    let lane = integer_lane(ty)?;
     let filled = lane_mask(lane);
     if let (Some(a), Some(b)) = (a, b) {
         let bits = integer_binary(kind, lane, a, b).ok()?;
@@ -93,41 +101,104 @@ pub(super) fn reduce(
     }
 }
 
-fn evaluate(f: &Function, facts: &DenseMap<Value, Fact>, op: Op) -> Fact {
-    use Fact::*;
-    match op {
-        Op::Const(n) => Constant(u128::from(n as u32)),
-        Op::Literal(lane, bits) => Constant(bits & lane_mask(lane)),
-        Op::Copy(v) | Op::Simd(Simd::Splat(v)) => facts[v],
-        Op::Bin(kind, a, b) | Op::Simd(Simd::Bin(kind, a, b)) if integer(f.value_type(a)) => {
-            let (x, y) = (facts[a], facts[b]);
-            match reduce(kind, f.value_type(a), a, b, x.bits(), y.bits()) {
-                Some(Reduced::Constant(bits)) => Constant(bits),
-                Some(Reduced::Copy(v)) => facts[v],
-                _ if x == Unknown || y == Unknown => Unknown,
-                _ => Varying,
+pub(super) fn select_truth(ty: Type, bits: u128) -> bool {
+    match ty {
+        Type::Vector(lane) => bits & (1 << (lane.bytes() * 8 - 1)) != 0,
+        _ => bits != 0,
+    }
+}
+
+/// The operations with a constant transfer function and their SSA inputs.
+enum Transfer {
+    Constant(u128),
+    Forward(Value),
+    Unary(Unary, Lane, Value),
+    Binary(Binary, Type, Value, Value),
+    IntCast(Lane, Lane, Value),
+    Select(Type, Value, Value, Value),
+    Varying,
+}
+
+impl Transfer {
+    fn of(f: &Function, op: Op) -> Self {
+        let integer = |v| integer_lane(f.value_type(v));
+        let cast = |to, v| match (integer(v), integer_lane(to)) {
+            (Some(from), Some(to)) => Self::IntCast(from, to, v),
+            _ => Self::Varying,
+        };
+        let bitcast = |to: Option<Lane>, v| match (f.value_type(v).lane(), to) {
+            (Some(from), Some(to)) if from.bytes() == to.bytes() => Self::Forward(v),
+            _ => Self::Varying,
+        };
+        match op {
+            Op::Const(n) => Self::Constant(u128::from(n as u32)),
+            Op::Literal(lane, bits) => Self::Constant(bits & lane_mask(lane)),
+            Op::Copy(v) | Op::Simd(Simd::Splat(v)) => Self::Forward(v),
+            Op::Unary(kind, v) | Op::Simd(Simd::Unary(kind, v)) => {
+                integer(v).map_or(Self::Varying, |lane| Self::Unary(kind, lane, v))
+            }
+            Op::Bin(kind, a, b) | Op::Simd(Simd::Bin(kind, a, b)) if integer(a).is_some() => {
+                Self::Binary(kind, f.value_type(a), a, b)
+            }
+            Op::Cast(to, v) => cast(to, v),
+            Op::Simd(Simd::Cast(to, v)) => cast(Type::Vector(to), v),
+            Op::Bitcast(to, v) => bitcast(to.lane(), v),
+            Op::Simd(Simd::Bitcast(to, v)) => bitcast(Some(to), v),
+            Op::Ternary(Ternary::Select, c, yes, no)
+            | Op::Simd(Simd::Ternary(Ternary::Select, c, yes, no)) => {
+                Self::Select(f.value_type(c), c, yes, no)
+            }
+            _ => Self::Varying,
+        }
+    }
+
+    fn visit_inputs(self, mut visit: impl FnMut(Value)) {
+        match self {
+            Self::Constant(_) | Self::Varying => {}
+            Self::Forward(v) | Self::Unary(_, _, v) | Self::IntCast(_, _, v) => visit(v),
+            Self::Binary(_, _, a, b) => {
+                visit(a);
+                if a != b {
+                    visit(b);
+                }
+            }
+            Self::Select(_, c, yes, no) => {
+                visit(c);
+                visit(yes);
+                visit(no);
             }
         }
-        Op::Ternary(Ternary::Select, c, yes, no)
-        | Op::Simd(Simd::Ternary(Ternary::Select, c, yes, no)) => {
-            if yes == no {
-                return facts[yes];
+    }
+
+    fn evaluate(self, facts: &DenseMap<Value, Fact>) -> Fact {
+        use Fact::*;
+        match self {
+            Self::Constant(bits) => Constant(bits),
+            Self::Varying => Varying,
+            Self::Forward(v) => facts[v],
+            Self::Unary(kind, lane, v) => facts[v].map(|bits| {
+                let mask = lane_mask(lane);
+                integer::evaluate(Action::Unary(kind), lane, bits, 0, mask).unwrap() & mask
+            }),
+            Self::IntCast(from, to, v) => {
+                facts[v].map(|bits| integer::extend(from, bits) & lane_mask(to))
             }
-            let vector = matches!(op, Op::Simd(_));
-            match facts[c] {
-                Constant(bits) => {
-                    let cond = if vector {
-                        bits >> (f.value_type(c).lane().unwrap().bytes() * 8 - 1) != 0
-                    } else {
-                        bits != 0
-                    };
-                    facts[if cond { yes } else { no }]
+            Self::Binary(kind, ty, a, b) => {
+                let (x, y) = (facts[a], facts[b]);
+                match reduce(kind, ty, a, b, x.bits(), y.bits()) {
+                    Some(Reduced::Constant(bits)) => Constant(bits),
+                    Some(Reduced::Copy(v)) => facts[v],
+                    _ if x == Unknown || y == Unknown => Unknown,
+                    _ => Varying,
                 }
+            }
+            Self::Select(_, _, yes, no) if yes == no => facts[yes],
+            Self::Select(ty, c, yes, no) => match facts[c] {
+                Constant(bits) => facts[if select_truth(ty, bits) { yes } else { no }],
                 Varying => facts[yes].meet(facts[no]),
                 Unknown => Unknown,
-            }
+            },
         }
-        _ => Varying,
     }
 }
 
@@ -177,24 +248,7 @@ impl Solver<'_> {
         for block in self.f.blocks() {
             for inst in self.f.instructions(block) {
                 let user = User::Inst(block, inst);
-                match *self.f.op(inst) {
-                    Op::Copy(v) | Op::Simd(Simd::Splat(v)) => self.add_use(v, user),
-                    Op::Bin(_, a, b) | Op::Simd(Simd::Bin(_, a, b))
-                        if integer(self.f.value_type(a)) =>
-                    {
-                        self.add_use(a, user);
-                        if a != b {
-                            self.add_use(b, user);
-                        }
-                    }
-                    Op::Ternary(Ternary::Select, c, a, b)
-                    | Op::Simd(Simd::Ternary(Ternary::Select, c, a, b)) => {
-                        self.add_use(c, user);
-                        self.add_use(a, user);
-                        self.add_use(b, user);
-                    }
-                    _ => {}
-                }
+                Transfer::of(self.f, *self.f.op(inst)).visit_inputs(|v| self.add_use(v, user));
             }
             let term = *self.f.terminator(block);
             if let Terminator::Branch { cond, .. } = term {
@@ -240,7 +294,10 @@ impl Solver<'_> {
         if let Some(result) = self.f.result(inst)
             && self.facts[result] != Fact::Varying
         {
-            self.update(result, evaluate(self.f, &self.facts, *self.f.op(inst)));
+            self.update(
+                result,
+                Transfer::of(self.f, *self.f.op(inst)).evaluate(&self.facts),
+            );
         }
     }
 
@@ -302,7 +359,7 @@ pub(super) fn analyze(f: &Function, cfg: &ControlFlowGraph) -> DenseMap<Value, F
             }
             for inst in f.instructions(block) {
                 if let Some(result) = f.result(inst) {
-                    facts[result] = evaluate(f, &facts, *f.op(inst));
+                    facts[result] = Transfer::of(f, *f.op(inst)).evaluate(&facts);
                 }
             }
             for edge in successors(*f.terminator(block), &facts)

@@ -1,7 +1,10 @@
 //! Reuse available memory values and remove fully overwritten stores.
-use super::facts::Facts;
+use super::{
+    bounds::{Bounds, BoundsPoint, Count, Index, LocalChecks},
+    facts::Facts,
+};
 use crate::hir::{
-    Binary, Block, Function, Op, Scale, Simd, Type, Value,
+    Block, Function, MAX_VECTOR_BYTES, MIN_VECTOR_BYTES, Op, Scale, Simd, Type, Value,
     transforms::{ControlFlowGraph, DomTree},
 };
 use crate::support::slotmap::DenseMap;
@@ -76,8 +79,8 @@ impl Location {
         self.address
             .distance_to(other.address)
             .is_none_or(|offset| {
-                offset < self.ty.bytes(64) as u64
-                    || offset.wrapping_neg() < other.ty.bytes(64) as u64
+                offset < self.ty.bytes(MAX_VECTOR_BYTES) as u64
+                    || offset.wrapping_neg() < other.ty.bytes(MAX_VECTOR_BYTES) as u64
             })
     }
 
@@ -93,14 +96,73 @@ impl Location {
             .distance_to(previous.address)
             .is_some_and(|offset| {
                 // Every vector occupies the same number of bytes for a given target.
-                if offset == 0 && self.ty.bytes(64) == previous.ty.bytes(64) {
+                if offset == 0
+                    && self.ty.bytes(MAX_VECTOR_BYTES) == previous.ty.bytes(MAX_VECTOR_BYTES)
+                {
                     return true;
                 }
                 offset
-                    .checked_add(previous.ty.bytes(64) as u64)
-                    .is_some_and(|end| end <= self.ty.bytes(16) as u64)
+                    .checked_add(previous.ty.bytes(MAX_VECTOR_BYTES) as u64)
+                    .is_some_and(|end| end <= self.ty.bytes(MIN_VECTOR_BYTES) as u64)
             })
     }
+}
+
+#[derive(Clone, Copy)]
+struct AccessRange {
+    location: Location,
+    in_slice: bool,
+}
+
+impl AccessRange {
+    fn may_overlap(self, other: Self, f: &Function) -> bool {
+        !(self.in_slice
+            && other.in_slice
+            && f.disjoint_buffer_params(self.location.address.base, other.location.address.base))
+            && self.location.may_overlap(other.location)
+    }
+}
+
+fn in_slice(
+    f: &Function,
+    location: Location,
+    bounds: &Bounds,
+    dom: &DomTree,
+    at: BoundsPoint<'_>,
+) -> Option<()> {
+    if location.indexed() {
+        return None;
+    }
+    let address = location.address;
+    let (len, element, _) = f.slice_param(address.base)?;
+    let element = u64::from(element);
+    let byte_width = location.ty.bytes(MAX_VECTOR_BYTES) as u64;
+    let (index, count) = if let Some((index, scale)) = address.index {
+        let stride = 1u64 << scale as u8;
+        if stride > element {
+            return None;
+        }
+        let count = if address.displacement == 0 {
+            Count::access(location.ty, stride as usize)
+        } else {
+            let end = address.displacement.checked_add(byte_width)?;
+            Count::Fixed(i32::try_from(end.div_ceil(stride)).ok()?)
+        };
+        (Index::Ssa(index), count)
+    } else {
+        let (i, offset) = (
+            address.displacement / element,
+            address.displacement % element,
+        );
+        let index = Index::Constant(i32::try_from(i).ok()?);
+        let count = if offset == 0 {
+            Count::access(location.ty, element as usize)
+        } else {
+            Count::Fixed((offset + byte_width).div_ceil(element) as i32)
+        };
+        (index, count)
+    };
+    bounds.covers(dom, index, len, count, at).then_some(())
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -111,7 +173,7 @@ struct Read {
 
 #[derive(Clone, Copy)]
 struct Known {
-    location: Location,
+    range: AccessRange,
     read: Option<Read>,
     removable_store: Option<(Block, usize)>,
 }
@@ -140,10 +202,15 @@ fn incoming(cfg: &ControlFlowGraph, exits: &mut DenseMap<Block, Exit>, block: Bl
             Exit::Traps => {}
             Exit::Known(known) => {
                 if let Some(merged) = &mut merged {
-                    merged.retain(|entry| {
-                        known.iter().any(|other| {
-                            entry.location == other.location && entry.read == other.read
-                        })
+                    merged.retain_mut(|entry| {
+                        if let Some(other) = known.iter().find(|other| {
+                            entry.range.location == other.range.location && entry.read == other.read
+                        }) {
+                            entry.range.in_slice &= other.range.in_slice;
+                            true
+                        } else {
+                            false
+                        }
                     });
                 } else {
                     merged = Some(
@@ -216,7 +283,13 @@ fn access(
     ))
 }
 
-pub(super) fn optimize(f: &mut Function, cfg: &ControlFlowGraph, dom: &DomTree) {
+pub(super) fn optimize(
+    f: &mut Function,
+    cfg: &ControlFlowGraph,
+    dom: &DomTree,
+    facts: &mut Facts,
+    bounds: Option<&Bounds>,
+) {
     let accesses = f
         .blocks()
         .flat_map(|block| f.instructions(block))
@@ -239,12 +312,23 @@ pub(super) fn optimize(f: &mut Function, cfg: &ControlFlowGraph, dom: &DomTree) 
         return;
     }
 
-    let facts = Facts::new(f, cfg, dom);
+    let built_bounds;
+    let bounds = if f.has_disjoint_slice_params() {
+        built_bounds = bounds
+            .is_none()
+            .then(|| Bounds::new(f, cfg, dom, facts, &[]));
+        bounds.or(built_bounds.as_ref())
+    } else {
+        None
+    };
+    let mut checks = LocalChecks::default();
     let mut aliases = DenseMap::from_fn(f.value_count(), |value| value);
     let mut addresses = DenseMap::filled(f.value_count(), None);
     let mut exits = DenseMap::from_fn(f.block_capacity(), |_| Exit::Unseen);
     let mut removed = Vec::new();
+    let mut forwarded = false;
     for &block in cfg.reverse_postorder() {
+        checks.clear();
         let mut known = incoming(cfg, &mut exits, block);
         let mut traps = false;
         for (position, inst) in f.instructions(block).enumerate() {
@@ -272,11 +356,16 @@ pub(super) fn optimize(f: &mut Function, cfg: &ControlFlowGraph, dom: &DomTree) 
                         traps = true;
                         break;
                     }
+                    Op::BoundsCheck(i, n) => {
+                        if bounds.is_some() {
+                            checks.record(f, facts, root(i), root(n));
+                        }
+                        for entry in &mut known {
+                            entry.removable_store = None;
+                        }
+                    }
                     Op::Call(_) => known.clear(),
-                    Op::Bin(Binary::Div | Binary::Rem, _, divisor)
-                    | Op::Simd(Simd::Bin(Binary::Div | Binary::Rem, _, divisor))
-                        if facts.nontrapping_divisor(f, root(divisor)) => {}
-                    _ if !op.pure(result.map(|value| f.value_type(value))) => {
+                    _ if !facts.is_total(f, inst) => {
                         // A check or arithmetic trap may expose completed stores.
                         for entry in &mut known {
                             entry.removable_store = None;
@@ -288,37 +377,54 @@ pub(super) fn optimize(f: &mut Function, cfg: &ControlFlowGraph, dom: &DomTree) 
             };
 
             let site = (block, position);
+            if let Access::Read(passthrough) = kind
+                && let Some(read) = known.iter().find_map(|entry| {
+                    entry.read.filter(|read| {
+                        entry.range.location == location
+                            && read.passthrough == passthrough
+                            && dom.dominates(facts.defs[read.value].block, block)
+                    })
+                })
+            {
+                debug_assert_eq!(root(read.value), read.value);
+                aliases[result.unwrap()] = read.value;
+                removed.push(site);
+                forwarded = true;
+                continue;
+            }
+            let range = AccessRange {
+                location,
+                in_slice: bounds.is_some_and(|bounds| {
+                    in_slice(
+                        f,
+                        location,
+                        bounds,
+                        dom,
+                        BoundsPoint::InBlock(block, &checks),
+                    )
+                    .is_some()
+                }),
+            };
             let entry = match kind {
                 Access::Read(passthrough) => {
                     let value = result.unwrap();
-                    if let Some(read) = known.iter().find_map(|entry| {
-                        entry.read.filter(|read| {
-                            entry.location == location
-                                && read.passthrough == passthrough
-                                && dom.dominates(facts.defs[read.value].block, block)
-                        })
-                    }) {
-                        aliases[value] = read.value;
-                        removed.push(site);
-                        continue;
-                    }
                     for entry in &mut known {
-                        if location.may_overlap(entry.location) {
+                        if entry.removable_store.is_some() && range.may_overlap(entry.range, f) {
                             entry.removable_store = None;
                         }
                     }
                     Known {
-                        location,
+                        range,
                         read: Some(Read { value, passthrough }),
                         removable_store: None,
                     }
                 }
                 Access::Write(value) => {
                     known.retain(|entry| {
-                        if location.overwrites(entry.location) {
+                        if location.overwrites(entry.range.location) {
                             removed.extend(entry.removable_store);
                         }
-                        !location.may_overlap(entry.location)
+                        !range.may_overlap(entry.range, f)
                     });
                     // A scatter may overwrite an earlier lane at the same index.
                     // Only full stores supply a ready-to-use value for a load.
@@ -327,7 +433,7 @@ pub(super) fn optimize(f: &mut Function, cfg: &ControlFlowGraph, dom: &DomTree) 
                         passthrough: None,
                     });
                     Known {
-                        location,
+                        range,
                         read,
                         removable_store: Some(site),
                     }
@@ -348,7 +454,9 @@ pub(super) fn optimize(f: &mut Function, cfg: &ControlFlowGraph, dom: &DomTree) 
     if removed.is_empty() {
         return;
     }
-    f.substitute_values(&aliases);
+    if forwarded {
+        facts.forward_loads(f, cfg, dom, &aliases);
+    }
     removed.sort_unstable();
     for group in removed.chunk_by(|a, b| a.0 == b.0) {
         let mut positions = group.iter().map(|&(_, position)| position).peekable();

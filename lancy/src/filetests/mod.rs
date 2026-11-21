@@ -22,7 +22,7 @@ pub(crate) fn integer(s: &str) -> Result<i32> {
     .map_err(|_| format!("expected i32, got {s}"))
 }
 
-const COMMON_STAGES: [&str; 4] = ["source", "cfg", "inline", "opt"];
+const COMMON_STAGES: [&str; 5] = ["source", "cfg", "inline", "opt", "layout"];
 const X64_STAGES: [&str; 3] = ["isel", "alloc", "asm"];
 const ARM_STAGES: [&str; 2] = ["aarch64-isel", "aarch64-alloc"];
 

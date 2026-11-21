@@ -40,7 +40,7 @@ pub(super) fn compile(
     let root = source.call_graph.root();
     let mut ctx = Ctx::default();
     source.try_map_functions::<Compiled>(|id, source, calls, compiled| {
-        let mut body = isel::select(source.function, &source.cfg, config, id == root, |func| {
+        let mut body = isel::select(source, config, id == root, |func| {
             let id = ids[&std::ptr::from_ref(func)];
             (id, compiled[id].written)
         })?;

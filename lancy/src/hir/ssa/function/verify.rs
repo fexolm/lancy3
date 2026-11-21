@@ -10,6 +10,7 @@ use crate::support::slotmap::DenseMap;
 pub(crate) struct VerifiedBody<'a> {
     pub function: &'a Function,
     pub cfg: ControlFlowGraph,
+    pub dom: DomTree,
 }
 
 impl Function {
@@ -43,10 +44,10 @@ impl Function {
     /// Verify this body. Callee signatures participate in the check; code
     /// generation verifies every distinct callee body in the reachable graph.
     pub fn verify(&self) -> Result<(), IrError> {
-        self.verified_cfg().map(drop)
+        self.verified_body().map(drop)
     }
 
-    fn verified_cfg(&self) -> Result<ControlFlowGraph, IrError> {
+    fn verified_body(&self) -> Result<VerifiedBody<'_>, IrError> {
         if self.params(self.entry()).len() != self.arity {
             return Err(IrError::EntryArity {
                 expected: self.arity,
@@ -259,7 +260,11 @@ impl Function {
                 }
             }
         }
-        Ok(cfg)
+        Ok(VerifiedBody {
+            function: self,
+            cfg,
+            dom,
+        })
     }
 }
 
@@ -269,13 +274,13 @@ impl Function {
     ) -> Result<(Module<VerifiedBody<'_>>, FunctionIds<Self>), CompileError> {
         let _span = tracing::debug_span!(target: "splice::compile", "verify_lancy_hir").entered();
         Module::discover(self, |function, callees| {
-            let cfg = function.verified_cfg()?;
+            let body = function.verified_body()?;
             for inst in function.insts.values() {
                 if let Op::Call(site) = inst.op {
                     callees.push(function.calls[site].callee.as_ref());
                 }
             }
-            Ok(VerifiedBody { function, cfg })
+            Ok(body)
         })
     }
 }

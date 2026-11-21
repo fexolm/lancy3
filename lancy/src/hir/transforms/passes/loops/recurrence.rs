@@ -1,4 +1,5 @@
 //! Close small additive recurrences over the i32 wrapping ring.
+use super::super::facts::flatten;
 use super::{CountedLoop, Facts, NaturalLoops};
 use crate::hir::transforms::{ControlFlowGraph, DomTree};
 use crate::hir::{Binary, Block, Function, Op, Terminator, Type, Value, ssa::Edge};
@@ -384,8 +385,7 @@ pub(super) fn collapse(
                 loops.owner[target] == header
                     && (e == candidate.backedge && target == header || rank[target] > rank[block])
             })
-            && f.instructions(block)
-                .all(|i| f.op(i).pure(f.result(i).map(|v| f.value_type(v))));
+            && f.instructions(block).all(|i| facts.is_total(f, i));
     }
     if candidates.iter().all(|candidate| !candidate.valid) {
         return false;
@@ -449,11 +449,7 @@ pub(super) fn collapse(
     for (original, replacement) in replacements {
         aliases[original] = replacement;
     }
-    for value in aliases.keys() {
-        while aliases[value] != aliases[aliases[value]] {
-            aliases[value] = aliases[aliases[value]];
-        }
-    }
+    flatten(&mut aliases);
     f.substitute_values(&aliases);
     true
 }

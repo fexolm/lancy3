@@ -1,7 +1,10 @@
 //! Bounded pre-allocation list scheduling on the selected SSA instructions.
 use super::{Function, TargetInst};
-use regalloc2::{Block, Function as _, Inst, OperandConstraint, OperandKind, OperandPos};
+use regalloc2::{Block, Function as _, Inst, Operand, OperandConstraint, OperandKind, OperandPos};
 use std::{cmp::Reverse, ops::Range};
+
+mod liveness;
+use liveness::Liveness;
 
 const WINDOW: usize = 64;
 const MIN_REGION: usize = 8;
@@ -29,44 +32,6 @@ fn members(mut mask: u64) -> impl Iterator<Item = usize> {
         mask &= mask - 1;
         Some(i)
     })
-}
-
-#[derive(Clone, Copy)]
-struct UseRange {
-    first: usize,
-    last: usize,
-}
-
-fn use_ranges<I: TargetInst>(f: &Function<I>) -> Vec<UseRange> {
-    let mut uses = vec![
-        UseRange {
-            first: usize::MAX,
-            last: 0
-        };
-        f.num_vregs()
-    ];
-    let mut record = |v: regalloc2::VReg, i: Inst| {
-        let range = &mut uses[v.vreg()];
-        range.first = range.first.min(i.index());
-        range.last = range.last.max(i.index());
-    };
-    for b in (0..f.num_blocks()).map(Block::new) {
-        let instructions = f.block_insns(b);
-        for i in instructions.iter() {
-            for op in f.inst_operands(i) {
-                if op.kind() == OperandKind::Use {
-                    record(op.vreg(), i);
-                }
-            }
-        }
-        let end = instructions.last();
-        for (edge, _) in f.block_succs(b).iter().enumerate() {
-            for &v in f.branch_blockparams(b, end, edge) {
-                record(v, end);
-            }
-        }
-    }
-    uses
 }
 
 #[derive(Clone, Copy, Default)]
@@ -268,7 +233,7 @@ struct Workspace {
     registers: Vec<regalloc2::VReg>,
     nodes: [Node; WINDOW],
     order: Vec<usize>,
-    uses: Vec<UseRange>,
+    liveness: Option<Liveness>,
     limit: Pressure,
 }
 
@@ -277,7 +242,7 @@ impl Workspace {
         &mut self,
         f: &Function<I>,
         range: Range<usize>,
-        block_start: usize,
+        block: Block,
     ) -> bool {
         let nodes = &mut self.nodes[..range.len()];
         nodes.fill(Node::default());
@@ -302,10 +267,8 @@ impl Workspace {
                 let reg = op.vreg();
                 let value = &mut self.values[reg.vreg()];
                 if value.generation != generation {
-                    let uses = self.uses[reg.vreg()];
                     *value = Value {
                         generation,
-                        live_out: uses.first < block_start || uses.last >= range.end,
                         ..Value::default()
                     };
                     self.registers.push(reg);
@@ -326,6 +289,9 @@ impl Workspace {
         {
             return false;
         }
+        // A region with a fixed dependency order does not need pressure
+        // estimates. Build live-out information for the first movable region.
+        let liveness = self.liveness.get_or_insert_with(|| Liveness::new(f));
         for n in (0..nodes.len()).rev() {
             nodes[n].height = nodes[n].latency
                 + members(nodes[n].successors)
@@ -335,7 +301,10 @@ impl Workspace {
         }
         let mut live_in = [0; 3];
         for &reg in &self.registers {
-            if self.values[reg.vreg()].def == 0 {
+            let uses = liveness.range(f, block, reg);
+            let value = &mut self.values[reg.vreg()];
+            value.live_out = uses.live_out || uses.last.is_some_and(|i| i.index() >= range.end);
+            if value.def == 0 {
                 live_in[reg.class() as usize] += 1;
             }
         }
@@ -357,6 +326,7 @@ pub(super) fn run<I: TargetInst + Schedulable>(f: &mut Function<I>) {
     });
     let mut workspace = None;
     let mut scratch = Vec::new();
+    let mut operands: Vec<Operand> = Vec::new();
     for b in (0..f.num_blocks()).map(Block::new) {
         let insts = f.block_insns(b);
         let first = insts.first().index();
@@ -379,11 +349,11 @@ pub(super) fn run<I: TargetInst + Schedulable>(f: &mut Function<I>) {
                         registers: Vec::new(),
                         nodes: [Node::default(); WINDOW],
                         order: Vec::new(),
-                        uses: use_ranges(f),
+                        liveness: None,
                         limit,
                     });
-                    if workspace.reorder(f, start..i, first) {
-                        f.reorder(start, &workspace.order, &mut scratch);
+                    if workspace.reorder(f, start..i, b) {
+                        f.reorder(start, &workspace.order, &mut scratch, &mut operands);
                     }
                 }
                 start = i + usize::from(matches!(kind, Scheduling::Barrier));

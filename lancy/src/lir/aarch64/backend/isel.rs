@@ -2,7 +2,7 @@ mod rules;
 
 use super::{Result, inst::Inst};
 use crate::{
-    hir::{Function, transforms::ControlFlowGraph},
+    hir::{Function, ssa::VerifiedBody},
     lir::{
         self,
         isel::{self, Edges},
@@ -13,15 +13,15 @@ use regalloc2::PRegSet;
 use splice_target::Simd as Config;
 
 pub(super) fn select(
-    f: &Function,
-    cfg: &ControlFlowGraph,
+    source: &VerifiedBody<'_>,
     config: Config,
     entry: bool,
     callee: impl Fn(&Function) -> (FunctionId, PRegSet),
 ) -> Result<lir::Function<Inst>> {
     let _span = tracing::debug_span!(target: "splice::compile", "select_instructions").entered();
+    let (f, cfg) = (source.function, &source.cfg);
     let reg = |v| rules::reg(f, v);
-    let edges = Edges::new(f, cfg);
+    let edges = Edges::new(source);
     let mut selected = isel::select(f, cfg, |ctx, root, out| {
         rules::select(ctx, f, root, out, config, entry, &callee);
         Ok(())

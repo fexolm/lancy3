@@ -1,6 +1,4 @@
-use crate::hir::{
-    self, Function, Op, Simd, Terminator, Value, ssa::VerifiedBody, transforms::DomTree,
-};
+use crate::hir::{self, Function, Op, Simd, Terminator, Value, ssa::VerifiedBody};
 use crate::module::{FunctionIds, Module};
 use std::fmt::{Display, Write};
 
@@ -121,7 +119,7 @@ pub(super) fn cfg(module: &Module<VerifiedBody>) -> String {
     let mut out = String::new();
     for (id, src) in module.functions.iter() {
         let cfg = &src.cfg;
-        let dom = DomTree::compute(cfg);
+        let dom = &src.dom;
         let block = |b: hir::Block| format!("b{}", b.index());
         writeln!(out, "fn f{}", id.index()).unwrap();
         for &b in cfg.reverse_postorder() {

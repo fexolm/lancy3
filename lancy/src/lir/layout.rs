@@ -10,60 +10,26 @@ struct Edge {
     unconditional: bool,
 }
 
-fn loop_depths<I: TargetInst>(f: &Function<I>) -> Vec<u8> {
-    let size = f.num_blocks();
-    let mut depths = vec![0u8; size];
-    let mut seen = vec![Block::invalid(); size];
-    let mut stack = Vec::new();
-    // In RPO a natural loop's backward edge points to its header. The
-    // predecessor walk excludes exits and stops at the header. Irreducible
-    // regions can give an approximation, so use this only for edge weights.
-    let mut budget = size.saturating_mul(8);
-    for header in (0..size).rev().map(Block::new) {
-        stack.extend(
-            f.block_preds(header)
-                .iter()
-                .copied()
-                .filter(|&b| b >= header),
-        );
-        while let Some(block) = stack.pop() {
-            if seen[block.index()] == header {
-                continue;
-            }
-            if budget == 0 {
-                return depths;
-            }
-            budget -= 1;
-            seen[block.index()] = header;
-            depths[block.index()] = (depths[block.index()] + 1).min(6);
-            if block != header {
-                stack.extend(
-                    f.block_preds(block)
-                        .iter()
-                        .copied()
-                        .filter(|&b| b >= header),
-                );
-            }
-        }
-    }
-    depths
-}
-
-fn edges<I: TargetInst>(f: &Function<I>, depth: &[u8]) -> Vec<Edge> {
+fn edges<I: TargetInst>(f: &Function<I>) -> Vec<Edge> {
     const MAX_WEIGHT: u64 = 1 << 40;
     let mut counts = vec![0u64; f.num_blocks()];
-    counts[0] = 1024u64 << (3 * depth[0]);
+    counts[f.entry_block().index()] = 1024;
     let mut edges = Vec::new();
     for from in (0..f.num_blocks()).map(Block::new) {
         let count = counts[from.index()].max(1);
-        let current_depth = depth[from.index()];
+        let current_depth = f.loop_depth(from);
         let targets = f.block_succs(from);
-        let benefit = |to: Block| (depth[to.index()] >= current_depth, to <= from);
+        let benefit = |index: usize| {
+            (
+                f.loop_depth(targets[index]) >= current_depth,
+                f.leads_to_backedge(from, index),
+            )
+        };
         for (i, &to) in targets.iter().enumerate() {
             let eighths = if targets.len() == 1 {
                 8
             } else {
-                match benefit(to).cmp(&benefit(targets[1 - i])) {
+                match benefit(i).cmp(&benefit(1 - i)) {
                     std::cmp::Ordering::Greater => 7,
                     std::cmp::Ordering::Less => 1,
                     std::cmp::Ordering::Equal => 4,
@@ -71,7 +37,7 @@ fn edges<I: TargetInst>(f: &Function<I>, depth: &[u8]) -> Vec<Edge> {
             };
             let weight = (count * eighths / 8).max(1);
             if to > from {
-                let entering = depth[to.index()].saturating_sub(current_depth);
+                let entering = f.loop_depth(to).saturating_sub(current_depth).min(6);
                 let target = &mut counts[to.index()];
                 *target = (*target + (weight << (3 * entering))).min(MAX_WEIGHT);
             }
@@ -121,7 +87,7 @@ pub(super) fn place<I: TargetInst>(f: &Function<I>) -> Vec<Block> {
     if original.len() < 3 {
         return original;
     }
-    let mut edges = edges(f, &loop_depths(f));
+    let mut edges = edges(f);
     // Prefer already-adjacent edges on ties. Link only chain tails to chain
     // heads. Forward links keep entry first and preserve loop headers.
     edges.sort_unstable_by_key(|e| {
@@ -156,4 +122,14 @@ pub(super) fn place<I: TargetInst>(f: &Function<I>) -> Vec<Block> {
     } else {
         original
     }
+}
+
+#[cfg(test)]
+pub(super) fn listing<I: TargetInst>(f: &Function<I>) -> String {
+    use std::fmt::Write;
+    let mut text = String::new();
+    for b in place(f) {
+        writeln!(text, "b{} depth={}", b.index(), f.loop_depth(b)).unwrap();
+    }
+    text
 }

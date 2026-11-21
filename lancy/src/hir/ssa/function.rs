@@ -167,6 +167,10 @@ impl Function {
         !self.slices.is_empty()
     }
 
+    pub(in crate::hir) fn has_disjoint_slice_params(&self) -> bool {
+        self.slices.len() > 1 && self.slices.iter().any(|&(_, writable)| writable)
+    }
+
     pub(in crate::hir) fn is_slice_length(&self, value: Value) -> bool {
         value
             .index()
@@ -246,11 +250,15 @@ impl Function {
         self.edges.len()
     }
 
-    /// Remove parameters whose uses are replaced by a dominating value.
-    pub(in crate::hir) fn remove_aliased_params(&mut self, aliases: &DenseMap<Value, Value>) {
+    /// Filter non-entry parameters and the corresponding column of every edge.
+    pub(in crate::hir) fn retain_block_params(&mut self, keep: impl Fn(Value) -> bool) {
         // Include retired edges only when their spans still describe current parameters.
         // An edge can be referenced by multiple terminators, so compact each record once.
+        let entry = self.entry();
         for (target, span) in self.edges.values_mut() {
+            if *target == entry {
+                continue;
+            }
             let Some(block) = self.blocks.get(*target) else {
                 continue;
             };
@@ -260,15 +268,15 @@ impl Function {
             let args = &mut self.operands[span.range()];
             let mut kept = 0;
             for (i, &param) in block.params.iter().enumerate() {
-                if aliases[param] == param {
+                if keep(param) {
                     args[kept] = args[i];
                     kept += 1;
                 }
             }
             span.len = kept as u32;
         }
-        for block in self.blocks.values_mut() {
-            block.params.retain(|&p| aliases[p] == p);
+        for block in self.blocks.values_mut().skip(1) {
+            block.params.retain(|&p| keep(p));
         }
     }
     pub fn call(&self, call: Call) -> (&Arc<Function>, &[Value]) {

@@ -42,6 +42,10 @@ impl DomTree {
         &self.preorder
     }
 
+    pub(crate) fn scope(&self, block: Block) -> Range<usize> {
+        self.intervals[block].clone()
+    }
+
     /// Whether every path from the entry to `block` passes through `dominator`.
     /// Returns false for IDs outside the captured graph or retired before capture.
     pub fn dominates(&self, dominator: Block, block: Block) -> bool {

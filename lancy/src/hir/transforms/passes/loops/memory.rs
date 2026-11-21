@@ -1,141 +1,14 @@
-use super::{Count, CountedLoop, Facts, NaturalLoops, at_least};
+//! Bounds-check elimination and invariant loads in natural loops.
+use super::super::bounds::{
+    Bounds, BoundsPoint, Count, Index, at_least, index, last_lane, remaining,
+};
+use super::{CountedLoop, Facts, NaturalLoops};
 use crate::hir::transforms::{ControlFlowGraph, DomTree};
-use crate::hir::{Binary, Block, Function, Op, Simd, Terminator, Type, Value};
+use crate::hir::{Block, Function, Op, Simd, Terminator, Type, Value};
 use crate::support::slotmap::DenseMap;
 use std::collections::HashMap;
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
-enum Index {
-    Constant(i32),
-    Ssa(Value),
-}
-
-fn index(f: &Function, facts: &Facts, value: Value) -> Index {
-    facts
-        .constant(f, value)
-        .map_or(Index::Ssa(facts.root(value)), Index::Constant)
-}
-
-fn remaining(f: &Function, facts: &Facts, value: Value) -> (Value, Index) {
-    match facts.op(f, value) {
-        Some(Op::Bin(Binary::Sub, len, i)) => (facts.root(len), index(f, facts, i)),
-        _ => (facts.root(value), Index::Constant(0)),
-    }
-}
-
-fn last_lane(f: &Function, facts: &Facts, value: Value) -> Option<Count> {
-    match facts.op(f, value)? {
-        Op::Bin(Binary::Sub, count, one) if facts.constant(f, one) == Some(1) => {
-            Count::of(f, facts, count)
-        }
-        Op::Const(n) if n >= 0 => Some(Count::Fixed(n.checked_add(1)?)),
-        _ => None,
-    }
-}
-
-/// Each query only needs a small number of dominating witnesses.
-fn record<K: Eq + std::hash::Hash, V>(table: &mut HashMap<K, Vec<V>>, key: K, witness: V) {
-    let witnesses = table.entry(key).or_default();
-    if witnesses.len() < 4 {
-        witnesses.push(witness);
-    }
-}
-
-fn unsigned_slice_length(f: &Function, facts: &Facts, value: Value) -> Option<Value> {
-    let Op::Bin(Binary::Xor, a, b) = facts.op(f, value)? else {
-        return None;
-    };
-    [(a, b), (b, a)].into_iter().find_map(|(len, bias)| {
-        let len = facts.root(len);
-        (facts.constant(f, bias) == Some(i32::MIN) && f.is_slice_length(len)).then_some(len)
-    })
-}
-
-#[derive(Default)]
-pub(super) struct Bounds {
-    before: HashMap<(Value, Value), Vec<Block>>,
-    checked: HashMap<(Index, Value), Vec<Block>>,
-    minimum_lengths: HashMap<Value, Vec<(i32, Block)>>,
-    packets: HashMap<(Value, Index), Vec<(Count, Block)>>,
-    checked_packets: HashMap<(Value, Index), Vec<(Count, Block)>>,
-}
-
 impl Bounds {
-    pub(super) fn new(f: &Function, cfg: &ControlFlowGraph, facts: &Facts) -> Self {
-        let mut bounds = Self::default();
-        let declared = f.has_slice_params();
-        for &block in cfg.reverse_postorder() {
-            if declared {
-                for inst in f.instructions(block) {
-                    if let Op::BoundsCheck(i, len) = *f.op(inst) {
-                        record(
-                            &mut bounds.checked,
-                            (index(f, facts, i), facts.root(len)),
-                            block,
-                        );
-                        if let Some(count) = last_lane(f, facts, i) {
-                            record(
-                                &mut bounds.checked_packets,
-                                remaining(f, facts, len),
-                                (count, block),
-                            );
-                        }
-                    }
-                }
-            }
-            let Terminator::Branch { cond, yes, no } = *f.terminator(block) else {
-                continue;
-            };
-            let yes = f.edge(yes).0;
-            let no = f.edge(no).0;
-            if yes == no {
-                continue;
-            }
-            let Some(Op::Bin(kind, a, b)) = facts.op(f, cond) else {
-                continue;
-            };
-            let a = facts.root(a);
-            let b = facts.root(b);
-            if f.value_type(a) != Type::I32 {
-                continue;
-            }
-            let Some((high, low, on_yes)) = at_least(kind, a, b) else {
-                continue;
-            };
-            let (enough, short) = if on_yes { (yes, no) } else { (no, yes) };
-            // An edge is a witness only when its destination has no other
-            // predecessor. The other outcome also implies high <= low.
-            for (lower, upper, scope) in [(low, high, enough), (high, low, short)] {
-                if cfg.predecessors(scope) != [block] {
-                    continue;
-                }
-                record(&mut bounds.before, (lower, upper), scope);
-                if declared && let Some(minimum) = facts.constant(f, lower) {
-                    let (length, minimum) = if minimum < 0 {
-                        let Some(length) = unsigned_slice_length(f, facts, upper) else {
-                            continue;
-                        };
-                        (length, minimum ^ i32::MIN)
-                    } else {
-                        (upper, minimum)
-                    };
-                    record(&mut bounds.minimum_lengths, length, (minimum, scope));
-                }
-            }
-            if declared
-                && cfg.predecessors(enough) == [block]
-                && let Some(count) = Count::of(f, facts, low)
-            {
-                record(
-                    &mut bounds.packets,
-                    remaining(f, facts, high),
-                    (count, enough),
-                );
-            }
-        }
-        bounds
-    }
-
     pub(super) fn loop_covers(
         &self,
         f: &Function,
@@ -147,55 +20,7 @@ impl Bounds {
     ) -> bool {
         facts.constant(f, lp.start).is_some_and(|n| n >= 0)
             && count.at_most(lp.packet_size().unwrap_or(Count::Fixed(1)))
-            && (lp.bound == len
-                || self.before.get(&(lp.bound, len)).is_some_and(|blocks| {
-                    blocks
-                        .iter()
-                        .any(|&block| dom.dominates(block, lp.preheader))
-                }))
-    }
-
-    // Only declared slice lengths are used here. They are nonnegative, so
-    // len - i cannot wrap if i is nonnegative. The unsigned last-lane check
-    // also needs a separate proof that the starting index fits.
-    fn invariant_covers(
-        &self,
-        dom: &DomTree,
-        i: Index,
-        len: Value,
-        count: Count,
-        at: Block,
-    ) -> bool {
-        let dominates = |block| dom.dominates(block, at);
-        if let Index::Constant(n) = i
-            && n >= 0
-            && self.minimum_lengths.get(&len).is_some_and(|bounds| {
-                bounds.iter().any(|&(min, block)| {
-                    i64::from(n) + i64::from(count.at_width(64)) <= i64::from(min)
-                        && dominates(block)
-                })
-            })
-        {
-            return true;
-        }
-        let first = self
-            .checked
-            .get(&(i, len))
-            .is_some_and(|blocks| blocks.iter().any(|&block| dominates(block)))
-            || matches!(i, Index::Constant(n) if n >= 0 &&
-            self.minimum_lengths.get(&len).is_some_and(|bounds| {
-                bounds.iter().any(|&(min, block)| n < min && dominates(block))
-            }));
-        let applies = |witnesses: Option<&Vec<(Count, Block)>>| {
-            witnesses.is_some_and(|entries| {
-                entries
-                    .iter()
-                    .any(|&(width, block)| count.at_most(width) && dominates(block))
-            })
-        };
-        (first && (count == Count::Fixed(1) || applies(self.checked_packets.get(&(len, i)))))
-            || ((first || matches!(i, Index::Constant(n) if n >= 0))
-                && applies(self.packets.get(&(len, i))))
+            && (lp.bound == len || self.before(dom, lp.bound, len, lp.preheader))
     }
 
     pub(super) fn optimize(
@@ -230,7 +55,7 @@ impl Bounds {
                     i == Index::Ssa(lp.iv) && self.loop_covers(f, facts, dom, lp, len, count)
                 }) || (declared
                     && f.is_slice_length(len)
-                    && self.invariant_covers(dom, i, len, count, preheader))
+                    && self.covers(dom, i, len, count, BoundsPoint::End(preheader)))
             };
             redundant.clear();
             for inst in f.instructions(block) {
@@ -262,7 +87,13 @@ impl Bounds {
                 let stride = 1 << scale as u8;
                 let i = index(f, facts, i);
                 if stride == usize::from(element)
-                    && self.invariant_covers(dom, i, len, Count::access(ty, stride), preheader)
+                    && self.covers(
+                        dom,
+                        i,
+                        len,
+                        Count::access(ty, stride),
+                        BoundsPoint::End(preheader),
+                    )
                     && (matches!(i, Index::Constant(_))
                         || matches!(i, Index::Ssa(v) if facts.available(v, preheader, dom).is_some()))
                 {

@@ -1,6 +1,6 @@
 //! Portable numeric semantics used by the SSA reference and AArch64 libcalls.
 use super::{
-    integer::{evaluate as integer, mask, signed},
+    integer::{evaluate as integer, extend, mask, signed},
     operation::Action,
 };
 use crate::support::float16::Format;
@@ -379,7 +379,7 @@ fn cast(from: Lane, to: Lane, x: u128) -> u128 {
         return f.to_bits() as u128;
     }
     if !from.float() {
-        return if from.signed() { a as u128 } else { x };
+        return extend(from, x);
     }
     let bits = to.bytes() as u32 * 8;
     if to.signed() {

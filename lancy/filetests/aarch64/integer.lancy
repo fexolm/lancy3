@@ -108,8 +108,8 @@ fn main x:i32 -> i32
   v = simd.splat a
   shift = simd.splat count
   result = simd.shr v shift
-  zero = const 0
-  n = simd.extract result zero
+  one = const 1
+  n = simd.extract result one
   r = cast i32 n
   ret r
 @aarch64-isel check: Splat(
