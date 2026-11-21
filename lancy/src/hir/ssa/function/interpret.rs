@@ -211,6 +211,7 @@ pub(super) unsafe fn run(
                 }
                 continue;
             }
+            Op::DebugStore(..) | Op::DebugPoint(_) => continue,
             Op::Call(call) => {
                 let (callee, args) = graph.call(call);
                 let child = Frame::new(

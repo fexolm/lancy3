@@ -108,6 +108,7 @@ pub(super) fn expand(root: Path, mut native: ItemFn) -> Result<TokenStream> {
     let factory = emit!(dyn #root::frontend::KernelBuilder);
     let support = emit!(#root::frontend::scalar);
     let mut bindings = HashMap::new();
+    let mut debug_names = std::collections::BTreeMap::new();
     let mut formals = Vec::new();
     let mut host_types = Vec::new();
     let mut host_names = Vec::new();
@@ -195,6 +196,7 @@ pub(super) fn expand(root: Path, mut native: ItemFn) -> Result<TokenStream> {
         };
         call_decls.push(decl);
         bindings.insert(id.to_string(), formal);
+        debug_names.insert(id.to_string(), id.clone());
         formals.push(formal);
     }
     let arity = reg_names.len();
@@ -208,6 +210,7 @@ pub(super) fn expand(root: Path, mut native: ItemFn) -> Result<TokenStream> {
         result_type,
         formals: &formals,
         bindings,
+        debug_names,
         flow: &flow,
         fish: emit!(#fish),
         loop_kind: None,
@@ -215,6 +218,7 @@ pub(super) fn expand(root: Path, mut native: ItemFn) -> Result<TokenStream> {
         source_fault: None,
     };
     let code = lower.kernel_body(&native.block)?;
+    let debug_arguments = host_names.iter().map(|id| lower.capture_constant(id));
     let source_support = emit!(#root::frontend::source);
     let source_body = match lower.source_body(&native.block) {
         Ok(body) => emit!(let __splice_printed = #body;),
@@ -310,10 +314,18 @@ pub(super) fn expand(root: Path, mut native: ItemFn) -> Result<TokenStream> {
     };
     let standalone = emit! {
             #vis fn build #compile_generics (#host_decls) -> #root::Result<<#backend as #root::Codegen>::Output> #where_ {
-                <#backend as #root::Codegen>::build(#arity, #kinds, #callback)
+                Self::build_with_options::<#backend #(, #args)*>(
+                    #root::BuildOptions::for_profile(cfg!(debug_assertions)), #(#host_names,)*
+                )
+            }
+            #vis fn build_with_options #compile_generics (__splice_options: #root::BuildOptions, #host_decls) -> #root::Result<<#backend as #root::Codegen>::Output> #where_ {
+                <#backend as #root::Codegen>::build_with_options(#arity, #kinds, #callback, __splice_options)
             }
             #vis fn ir #generic (#host_decls) -> #root::Result<#hir::Function> #where_ {
-                #root::frontend::materialize(#arity, #kinds, #callback)
+                Self::ir_with_options #fish (#root::BuildOptions::for_profile(cfg!(debug_assertions)), #(#host_names,)*)
+            }
+            #vis fn ir_with_options #generic (__splice_options: #root::BuildOptions, #host_decls) -> #root::Result<#hir::Function> #where_ {
+                #root::frontend::materialize_with_options(#arity, #kinds, #callback, __splice_options)
             }
             fn __stage_body #generic (#host_decls __splice_builder: &mut #factory) -> #root::Result<()> #where_ {
                 #source
@@ -360,12 +372,20 @@ pub(super) fn expand(root: Path, mut native: ItemFn) -> Result<TokenStream> {
         };
         emit! {
             #vis fn build #compile_generics (#host_decls) -> #root::Result<<#backend as #root::Codegen>::Output> #where_ {
+                Self::build_with_options::<#backend #(, #args)*>(
+                    #root::BuildOptions::for_profile(cfg!(debug_assertions)), #(#host_names,)*
+                )
+            }
+            #vis fn build_with_options #compile_generics (__splice_options: #root::BuildOptions, #host_decls) -> #root::Result<<#backend as #root::Codegen>::Output> #where_ {
                 #setup
-                <#backend as #root::Codegen>::build(#arity, &__splice_kinds, __splice_body)
+                <#backend as #root::Codegen>::build_with_options(#arity, &__splice_kinds, __splice_body, __splice_options)
             }
             #vis fn ir #generic (#host_decls) -> #root::Result<#hir::Function> #where_ {
+                Self::ir_with_options #fish (#root::BuildOptions::for_profile(cfg!(debug_assertions)), #(#host_names,)*)
+            }
+            #vis fn ir_with_options #generic (__splice_options: #root::BuildOptions, #host_decls) -> #root::Result<#hir::Function> #where_ {
                 #setup
-                #root::frontend::materialize(#arity, &__splice_kinds, __splice_body)
+                #root::frontend::materialize_with_options(#arity, &__splice_kinds, __splice_body, __splice_options)
             }
         }
     } else if typed_helper {
@@ -394,8 +414,10 @@ pub(super) fn expand(root: Path, mut native: ItemFn) -> Result<TokenStream> {
             fn __splice_inline #generic (#(#call_decls,)* __splice_builder:&mut #factory)
                 -> #root::Result<#hir::Reg> #where_ {
                 let __splice_guard = #support::enter_expansion()?;
+                let __splice_wants_debug = __splice_builder.debug_enabled();
                 #unpack
                 #(#copy_mutable)*
+                #(#debug_arguments)*
                 let __splice_result = __splice_builder.typed_local(#result_value_type);
                 let __splice_return_label = __splice_builder.label();
                 #code
@@ -501,14 +523,20 @@ pub(super) fn compound_op(op: &syn::BinOp) -> Option<&'static str> {
 }
 
 fn bind_pattern<T: Copy>(names: &mut HashMap<String, T>, pat: &Pat, binding: T) {
-    struct Bind<'a, T>(&'a mut HashMap<String, T>, T);
-    impl<'ast, T: Copy> Visit<'ast> for Bind<'_, T> {
+    visit_bindings(pat, &mut |pat| {
+        names.insert(pat.ident.to_string(), binding);
+    });
+}
+
+fn visit_bindings(pat: &Pat, visit: &mut impl FnMut(&syn::PatIdent)) {
+    struct Bind<'a, F>(&'a mut F);
+    impl<'ast, F: FnMut(&syn::PatIdent)> Visit<'ast> for Bind<'_, F> {
         fn visit_pat_ident(&mut self, pat: &'ast syn::PatIdent) {
-            self.0.insert(pat.ident.to_string(), self.1);
+            self.0(pat);
             syn::visit::visit_pat_ident(self, pat);
         }
     }
-    Bind(names, binding).visit_pat(pat);
+    Bind(visit).visit_pat(pat);
 }
 
 fn named(pat: &Pat) -> Result<&syn::PatIdent> {

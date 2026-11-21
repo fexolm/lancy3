@@ -5,6 +5,29 @@ pub(crate) mod packed_test;
 
 pub use kernel::ScalarKernel;
 
+/// Machine offsets associated with debug points in a single compiled body.
+#[derive(Debug)]
+pub struct DebugFunction {
+    pub start: u64,
+    pub end: u64,
+    pub workspace_offset: usize,
+    pub points: Vec<(u32, u64)>,
+    /// The active frame, after the prologue and before the epilogue.
+    pub frame: DebugFrame,
+}
+
+/// Stack-based unwind rules for the active portion of a compiled body.
+#[derive(Debug)]
+pub struct DebugFrame {
+    pub start: u64,
+    pub end: u64,
+    pub cfa_from_sp: i32,
+    /// (DWARF register, byte offset relative to the CFA).
+    pub saved: Vec<(u16, i32)>,
+    /// (DWARF register, byte offset relative to the workspace register).
+    pub workspace_saved: Vec<(u16, i64)>,
+}
+
 #[cfg(test)]
 mod tests;
 

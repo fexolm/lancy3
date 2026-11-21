@@ -297,6 +297,34 @@ tracing_subscriber::fmt()
 нескольких функций или повторяется при компиляции, он появится в выводе несколько
 раз. Спаны работают без зависимости от Tokio.
 
+## Отладка JIT-ядер
+
+`kernel::build::<B>()` и `kernel::ir()` выбирают режим по `debug_assertions` вызывающего крейта. В обычной debug-сборке Lancy, Cranelift, LLVM и LLVM Manual SIMD сохраняют исходные строки, значения переменных на этих строках и отдельные кадры скалярных вызовов. В release-сборке действуют оптимизации бэкенда. Режим можно явно задать первым аргументом `build_with_options::<B>(BuildOptions::Debug, ...)` или `ir_with_options(BuildOptions::Debug, ...)`. При компиляции переносимого IR бэкенд по умолчанию использует записанный в нём режим. `B::compile_with_options(&ir, BuildOptions::Release)` позволяет отдельно запустить оптимизированную компиляцию.
+
+В GDB или IDE с отладчиком, поддерживающим GDB JIT Interface, можно остановиться по имени `splice_jit::<имя>`, пройти по строкам исходного Rust и посмотреть значения через `info locals`. Для точки останова в файле символы появляются после сборки ядра. Срезы показывают указатель и длину, векторы показывают полосы, а маски используют целочисленное представление полос. В отладочной информации также доступны неизменяемые примитивные значения специализации. Сложные значения `#[comptime]` и другие данные, существующие только на хосте, можно посмотреть в кадре специализации. SIMD-помощники, которые фронтенд разворачивает в вызывающую функцию, используют её машинный кадр.
+
+```sh
+cargo build -p splice --example debug_kernel
+gdb --args target/debug/examples/debug_kernel lancy
+```
+
+```gdb
+set breakpoint pending on
+break splice_jit::child
+run
+next
+info locals
+backtrace
+```
+
+Пример также принимает `cranelift`, `llvm` и `llvm_manual_simd`. Для профилирования Linux используйте `SPLICE_PERF_MAP=1`. Все нативные бэкенды записывают имена и диапазоны в `/tmp/perf-PID.map`, в том числе при release-сборке. Формат perf-map привязывает имя к адресу. При многократной пересборке и освобождении ядер повторно использованный адрес может объединить сэмплы разных ядер.
+
+```sh
+cargo build -p splice --example debug_kernel --release
+SPLICE_PERF_MAP=1 perf record -- target/release/examples/debug_kernel lancy 1000000
+perf report --stdio
+```
+
 ## Сборка
 
 Нужен Rust 1.94+. На Windows x86-64, Linux x86-64 и Linux AArch64 доступны Lancy, Cranelift и LLVM. Бэкенды Lancy и Cranelift собираются отдельно от LLVM. Для приложения с Cranelift достаточно зависимостей `splice` и `splice-cranelift`.

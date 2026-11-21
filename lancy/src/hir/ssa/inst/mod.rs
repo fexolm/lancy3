@@ -37,6 +37,10 @@ pub enum Op {
     Load(Type, Value),
     /// Write the value to an address using the value's width.
     Store(Value, Value),
+    /// Save a value in this invocation's debugger workspace at a byte offset.
+    DebugStore(u32, Value),
+    /// Associate the current machine-code position with an embedder's source point.
+    DebugPoint(u32),
     Call(Call),
 }
 
@@ -126,7 +130,12 @@ impl Op {
                 | Simd::ExtractLane(..)
                 | Simd::InsertLane(..),
             ) => false,
-            Self::Load(..) | Self::Store(..) | Self::BoundsCheck(..) | Self::Call(_) => false,
+            Self::Load(..)
+            | Self::Store(..)
+            | Self::BoundsCheck(..)
+            | Self::Call(_)
+            | Self::DebugStore(..)
+            | Self::DebugPoint(_) => false,
             _ => true,
         }
     }
@@ -136,6 +145,8 @@ impl Op {
             Self::Store(..)
                 | Self::Simd(Simd::MaskedStore { .. } | Simd::Store(..))
                 | Self::BoundsCheck(..)
+                | Self::DebugStore(..)
+                | Self::DebugPoint(_)
         )
     }
 
@@ -143,6 +154,7 @@ impl Op {
         match self {
             Self::Simd(op) => op.map_operands(map),
             Self::Copy(v)
+            | Self::DebugStore(_, v)
             | Self::Load(_, v)
             | Self::Unary(_, v)
             | Self::Cast(_, v)
@@ -159,7 +171,7 @@ impl Op {
                 *a = map(*a);
                 *b = map(*b);
             }
-            Self::Const(_) | Self::Literal(..) | Self::Call(_) => {}
+            Self::Const(_) | Self::Literal(..) | Self::Call(_) | Self::DebugPoint(_) => {}
         }
     }
 }

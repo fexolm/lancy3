@@ -9,6 +9,7 @@ description = "Cranelift JIT code generator for Splice kernels"
 tracing.workspace = true
 splice = { path = "../splice" }
 splice-target = { path = "../splice-target" }
+splice-jit = { path = "../splice-jit" }
 cranelift-codegen = "0.132"
 cranelift-frontend = "0.132"
 cranelift-module = "0.132"

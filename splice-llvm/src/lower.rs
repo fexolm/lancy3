@@ -21,13 +21,38 @@ pub(crate) fn populate<'ctx>(
     module: &Module<'ctx>,
     root: &Function,
 ) -> Result<(), String> {
+    populate_mode(ctx, module, root, false)
+}
+
+pub(crate) fn populate_mode<'ctx>(
+    ctx: &'ctx Context,
+    module: &Module<'ctx>,
+    root: &Function,
+    debug: bool,
+) -> Result<(), String> {
     let (functions, ids) = root.reachable_functions();
+    if debug
+        && (u32::try_from(functions.len()).is_err()
+            || functions
+                .iter()
+                .any(|f| u32::try_from(f.instructions().len()).is_err()))
+    {
+        return Err("too many LLVM source points".into());
+    }
 
     let mut declarations = Vec::with_capacity(functions.len());
     for (id, f) in functions.iter().enumerate() {
-        declarations.push(declare(ctx, module, f.arity(), f.buffer_kinds(), id)?);
+        let function = declare(ctx, module, f.arity(), f.buffer_kinds(), id)?;
+        if debug {
+            function.set_linkage(Linkage::External);
+        }
+        declarations.push(function);
     }
     let builder = ctx.create_builder();
+    let callees = body::Callees {
+        ids: &ids,
+        declarations: &declarations,
+    };
     emit_entry(
         ctx,
         module,
@@ -44,10 +69,21 @@ pub(crate) fn populate<'ctx>(
             module,
             f,
             declarations[id],
-            &ids,
-            &declarations,
+            &callees,
+            debug.then_some(id),
         )
         .map_err(|e| e.to_string())?;
+    }
+    if debug {
+        let preserve_frame = ctx.create_string_attribute("frame-pointer", "all");
+        for f in module.get_functions() {
+            f.add_attribute(AttributeLoc::Function, preserve_frame);
+            #[cfg(target_os = "linux")]
+            f.add_attribute(
+                AttributeLoc::Function,
+                ctx.create_enum_attribute(Attribute::get_named_enum_kind_id("uwtable"), 2),
+            );
+        }
     }
     Ok(())
 }

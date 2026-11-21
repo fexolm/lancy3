@@ -9,10 +9,11 @@ use crate::hir::operation::Action;
 use crate::{
     CompileError,
     hir::{Binary, Function, Type, ssa::VerifiedBody},
+    jit::{DebugFrame, DebugFunction},
     module::{FunctionId, FunctionIds, Module},
     support::slotmap::DenseMap,
 };
-use iced_x86::{IcedError, code_asm::*};
+use iced_x86::{BlockEncoderOptions, IcedError, code_asm::*};
 use regalloc2::RegClass;
 use regalloc2::{Allocation, Block, Edit, Function as _, InstOrEdit};
 use simd::{XMM, YMM, ZMM};
@@ -83,17 +84,36 @@ pub(crate) struct Code {
     #[cfg(test)]
     pub text_len: usize,
     pub words: usize,
+    pub debug: Vec<DebugFunction>,
 }
 
 pub(crate) fn emit(
     source: Module<VerifiedBody<'_>>,
     ids: &FunctionIds<Function>,
 ) -> Result<Code, CompileError> {
-    let module = compile(source, ids)?;
-    emit_compiled(&module)
+    emit_mode(&compile(source, ids)?, false)
 }
 
+pub(crate) fn emit_debug(
+    source: Module<VerifiedBody<'_>>,
+    ids: &FunctionIds<Function>,
+) -> Result<Code, CompileError> {
+    emit_mode(&compile(source, ids)?, true)
+}
+
+#[cfg(test)]
 pub(super) fn emit_compiled(module: &Module<CompiledFunction>) -> Result<Code, CompileError> {
+    emit_mode(module, false)
+}
+
+// The encoder translates these instruction indices after shortening branches.
+fn position(a: &mut CodeAssembler) -> Result<u64, IcedError> {
+    let index = a.instructions().len() as u64;
+    a.zero_bytes()?;
+    Ok(index)
+}
+
+fn emit_mode(module: &Module<CompiledFunction>, debug: bool) -> Result<Code, CompileError> {
     let _span = tracing::debug_span!(target: "splice::compile", "emit_machine_code").entered();
     let entry = module.call_graph.root();
     let mut a = CodeAssembler::new(64)?;
@@ -122,37 +142,107 @@ pub(super) fn emit_compiled(module: &Module<CompiledFunction>) -> Result<Code, C
             a.mov(mem, R64[reg.hw_enc()])?;
         }
     }
+    let restore = |a: &mut CodeAssembler| {
+        bind(a, epilogue)?;
+        for (mem, reg) in saves() {
+            if reg.class() == RegClass::Vector {
+                simd::load(a, reg.hw_enc(), mem, 16)?;
+            } else {
+                a.mov(R64[reg.hw_enc()], mem)?;
+            }
+        }
+        a.ret()
+    };
     let mut constants = Vec::new();
+    let mut debug_functions = Vec::new();
     // The root (last in postorder) follows the native entry prologue.
     for (id, machine) in module.functions.iter().rev() {
         bind(&mut a, entries[id])?;
+        let is_root = id == entry;
+        let start = if debug { position(&mut a)? } else { 0 };
+        let mut points = Vec::new();
         Emitter {
             a: &mut a,
             machine,
             constants: &mut constants,
-            root: id == entry,
+            root: is_root,
             entries: &entries,
             epilogue,
             failures: [None; 3],
+            debug,
+            points: &mut points,
         }
         .function()?;
-    }
-    bind(&mut a, epilogue)?;
-    for (mem, reg) in saves() {
-        if reg.class() == RegClass::Vector {
-            simd::load(&mut a, reg.hw_enc(), mem, 16)?;
-        } else {
-            a.mov(R64[reg.hw_enc()], mem)?;
+        if debug {
+            let frame_end = position(&mut a)?;
+            if is_root {
+                restore(&mut a)?;
+            }
+            let end = position(&mut a)?;
+            let (cfa, saved, workspace_saved) = if is_root {
+                let mut offset = (root.frame.slots - words) * 8;
+                let workspace_saved = saved
+                    .into_iter()
+                    .map(|reg| {
+                        const GPRS: [u16; 16] =
+                            [0, 2, 1, 3, 7, 6, 4, 5, 8, 9, 10, 11, 12, 13, 14, 15];
+                        let dwarf = if reg.class() == RegClass::Vector {
+                            17 + reg.hw_enc() as u16
+                        } else {
+                            GPRS[reg.hw_enc()]
+                        };
+                        let at = offset as i64;
+                        offset += super::frame::save_words(reg) * 8;
+                        (dwarf, at)
+                    })
+                    .collect();
+                (8, vec![(16, -8)], workspace_saved)
+            } else {
+                (16, vec![(16, -16), (11, -8)], Vec::new())
+            };
+            debug_functions.push(DebugFunction {
+                start,
+                end,
+                workspace_offset: machine.frame.debug_base * 8,
+                points,
+                frame: DebugFrame {
+                    start,
+                    end: frame_end,
+                    cfa_from_sp: cfa,
+                    saved,
+                    workspace_saved,
+                },
+            });
         }
     }
-    a.ret()?;
+    if !debug {
+        restore(&mut a)?;
+    }
     #[cfg(test)]
     let pool_bytes: usize = constants.iter().map(|(_, _, size)| size).sum();
     for (label, bits, size) in constants {
         bind(&mut a, label)?;
         a.db(&bits[..size])?;
     }
-    let bytes = a.assemble(0)?;
+    let options = if debug {
+        BlockEncoderOptions::RETURN_NEW_INSTRUCTION_OFFSETS
+    } else {
+        0
+    };
+    let assembly = a.assemble_options(0, options)?.inner;
+    if debug {
+        let offset = |index: u64| u64::from(assembly.new_instruction_offsets[index as usize]);
+        for (i, f) in debug_functions.iter_mut().enumerate() {
+            f.start = if i == 0 { 0 } else { offset(f.start) };
+            f.end = offset(f.end);
+            f.frame.start = offset(f.frame.start);
+            f.frame.end = offset(f.frame.end);
+            for (_, at) in &mut f.points {
+                *at = offset(*at);
+            }
+        }
+    }
+    let bytes = assembly.code_buffer;
     // Executable::new may install at any address. All label references must
     // fit RIP-relative addressing, including the LEA for each continuation.
     if bytes.len() > i32::MAX as usize {
@@ -166,6 +256,7 @@ pub(super) fn emit_compiled(module: &Module<CompiledFunction>) -> Result<Code, C
         text_len: bytes.len() - pool_bytes,
         bytes,
         words: root.workspace,
+        debug: debug_functions,
     })
 }
 
@@ -177,6 +268,8 @@ struct Emitter<'a> {
     entries: &'a DenseMap<FunctionId, CodeLabel>,
     epilogue: CodeLabel,
     failures: [Option<CodeLabel>; 3],
+    debug: bool,
+    points: &'a mut Vec<(u32, u64)>,
 }
 
 impl Emitter<'_> {
@@ -253,6 +346,14 @@ impl Emitter<'_> {
                 // root workspace, report through the live status pointer
                 // supplied by ScalarKernel::invoke, and restore the host ABI.
                 if !self.root {
+                    if self.debug {
+                        self.a.mov(r10, slot(1))?;
+                        self.a.mov(r10, qword_ptr(r10))?;
+                        self.a.mov(dword_ptr(r10), (i + 1) as i32)?;
+                        self.a.xor(eax, eax)?;
+                        self.a.ret()?;
+                        continue;
+                    }
                     self.a.mov(r11, slot(1))?;
                 }
                 self.a.mov(r10, slot(0))?;
@@ -656,6 +757,18 @@ impl Emitter<'_> {
                 }
             }
             Inst::Store(ty, addr, _) => store(a, ty, memory(addr, allocs), reg(allocs.len() - 1)),
+            Inst::DebugStore(ty, offset, _) => store(
+                a,
+                ty,
+                ptr(r11 + (disp(frame.debug_base) + offset as i32)),
+                reg(0),
+            ),
+            Inst::DebugPoint(id) => {
+                if self.debug {
+                    self.points.push((id, position(a)?));
+                }
+                a.nop()
+            }
             Inst::StoreArg(i, ty, _) => store(a, ty, slot(frame.slots + CHILD_ARGS + i), reg(0)),
             Inst::Call { target, .. } => {
                 if self.root {
@@ -663,6 +776,26 @@ impl Emitter<'_> {
                 } else {
                     a.mov(r10, slot(1))?;
                     a.mov(slot(frame.slots + 1), r10)?;
+                }
+                if self.debug {
+                    // Leave an actual return address and caller workspace on
+                    // the stack, with the same alignment at child entry.
+                    a.push(r11)?;
+                    a.add(r11, disp(frame.slots))?;
+                    a.call(self.entries[target])?;
+                    a.pop(r11)?;
+                    if self.root {
+                        a.mov(r10, slot(0))?;
+                        a.cmp(dword_ptr(r10), 0)?;
+                        return a.jne(self.epilogue);
+                    }
+                    let ok = a.create_label();
+                    a.mov(r10, slot(1))?;
+                    a.mov(r10, qword_ptr(r10))?;
+                    a.cmp(dword_ptr(r10), 0)?;
+                    a.je(ok)?;
+                    a.ret()?;
+                    return bind(a, ok);
                 }
                 let resume = a.create_label();
                 a.add(r11, disp(frame.slots))?;
@@ -683,6 +816,7 @@ impl Emitter<'_> {
                 }
                 a.jmp(self.epilogue)
             }
+            Inst::Ret(_) if self.debug => a.ret(),
             Inst::Ret(_) => a.jmp(slot(0)),
             Inst::Jump
             | Inst::Branch(_)

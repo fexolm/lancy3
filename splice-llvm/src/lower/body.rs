@@ -1,3 +1,4 @@
+mod debug;
 mod simd;
 
 use super::call;
@@ -13,6 +14,11 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 type Built<T> = Result<T, BuilderError>;
+
+pub(super) struct Callees<'a, 'ctx> {
+    pub ids: &'a HashMap<*const Function, usize>,
+    pub declarations: &'a [FunctionValue<'ctx>],
+}
 
 #[derive(Clone, Copy)]
 struct Slice<'ctx> {
@@ -87,8 +93,8 @@ impl<'a, 'ctx> Body<'a, 'ctx> {
         module: &'a Module<'ctx>,
         f: &Function,
         function: FunctionValue<'ctx>,
-        ids: &HashMap<*const Function, usize>,
-        declarations: &[FunctionValue<'ctx>],
+        callees: &Callees<'_, 'ctx>,
+        debug_id: Option<usize>,
     ) -> Built<()> {
         let mut body = Self::start(
             ctx,
@@ -107,7 +113,8 @@ impl<'a, 'ctx> Body<'a, 'ctx> {
             }
         }
         let mut open = true;
-        for inst in f.instructions() {
+        let snapshot = debug_id.map(|_| body.debug_frame(f)).transpose()?;
+        for (index, inst) in f.instructions().iter().enumerate() {
             if let Instr::Label(l) = inst {
                 let block = body.block(*l);
                 if open {
@@ -115,8 +122,12 @@ impl<'a, 'ctx> Body<'a, 'ctx> {
                 }
                 builder.position_at_end(block);
                 open = true;
+            } else if open && let Instr::Debug(point) = inst {
+                if let (Some(id), Some(snapshot)) = (debug_id, snapshot) {
+                    body.debug_point(f, point, snapshot, id, index)?;
+                }
             } else if open {
-                body.instruction(inst, ids, declarations)?;
+                body.instruction(inst, callees)?;
                 open = !matches!(
                     inst,
                     Instr::Return(_) | Instr::Jump(_) | Instr::Branch { .. }
@@ -387,13 +398,9 @@ impl<'a, 'ctx> Body<'a, 'ctx> {
         self.store(dst, result)
     }
 
-    fn instruction(
-        &mut self,
-        inst: &Instr,
-        ids: &HashMap<*const Function, usize>,
-        declarations: &[FunctionValue<'ctx>],
-    ) -> Built<()> {
+    fn instruction(&mut self, inst: &Instr, callees: &Callees<'_, 'ctx>) -> Built<()> {
         match *inst {
+            Instr::Debug(_) => unreachable!("debug metadata is lowered at source points"),
             Instr::Simd {
                 dst,
                 inst,
@@ -419,7 +426,7 @@ impl<'a, 'ctx> Body<'a, 'ctx> {
                 ref buffers,
             } => self.call_function(
                 dst,
-                declarations[ids[&Arc::as_ptr(function)]],
+                callees.declarations[callees.ids[&Arc::as_ptr(function)]],
                 function.needs_status(),
                 args,
                 buffers,

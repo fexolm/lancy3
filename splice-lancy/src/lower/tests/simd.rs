@@ -86,7 +86,7 @@ fn packed_load_and_store_have_an_ordered_short_store_exit() {
             ops.iter()
                 .any(|op| matches!(op, Op::Simd(V::MaskedStore { .. })))
         );
-        let kernel = crate::LancyKernel::new(graph, 1, &kinds).unwrap();
+        let kernel = crate::LancyKernel::new(graph, 1, &kinds, None).unwrap();
         let lanes = Element::U16.lanes();
         assert_eq!(lanes * 2, lancy::ScalarKernel::vector_bytes());
         let mut src: Vec<_> = (0..lanes as u16).collect();
@@ -124,7 +124,7 @@ fn scatter_addresses_unsigned_u16_and_stops_at_the_first_active_error() {
         b.ret(zero);
         Ok(())
     }) {
-        let kernel = crate::LancyKernel::new(graph, 0, &kinds).unwrap();
+        let kernel = crate::LancyKernel::new(graph, 0, &kinds, None).unwrap();
         let mut indices = vec![0; Element::U16.lanes()];
         indices[..4].copy_from_slice(&[32768, 32768, 65535, 1]);
         for n in [65535, 65536] {
@@ -162,7 +162,7 @@ fn masked_contiguous_store_never_wraps_an_invalid_offset_to_zero() {
         b.ret(b.arg(0));
         Ok(())
     }) {
-        let kernel = crate::LancyKernel::new(graph, 1, &kinds).unwrap();
+        let kernel = crate::LancyKernel::new(graph, 1, &kinds, None).unwrap();
         let mut dst = [8, 9];
         let result = kernel.call(&[-1], &mut [BufferArg::WriteU16(&mut dst)]);
         assert_eq!(result.unwrap_err(), "kernel slice index out of bounds");
@@ -203,7 +203,7 @@ fn vectors_and_masks_keep_their_element_type_across_a_join() {
             .collect();
         assert!(params.contains(&hir::Type::Vector(hir::Lane::F64)));
         assert!(params.contains(&hir::Type::Vector(hir::Lane::I64)));
-        let kernel = crate::LancyKernel::new(graph, 1, &kinds).unwrap();
+        let kernel = crate::LancyKernel::new(graph, 1, &kinds, None).unwrap();
         for (input, expected) in [(1, 1.25), (0, 3.0)] {
             let mut dst = vec![3.0; Element::F64.lanes()];
             assert_eq!(

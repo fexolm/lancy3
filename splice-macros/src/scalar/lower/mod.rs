@@ -8,6 +8,7 @@ pub(super) use simd::{BufferType, Elem};
 use proc_macro2::{Ident, TokenStream};
 use quote::ToTokens;
 use std::collections::HashMap;
+use syn::spanned::Spanned;
 use syn::visit::Visit;
 use syn::visit_mut::VisitMut;
 use syn::{BinOp, Block, Error, Expr, Lit, Pat, Path, Result, Stmt, UnOp};
@@ -114,6 +115,7 @@ pub(super) struct Lower<'a> {
     pub(super) result_type: Scalar,
     pub(super) formals: &'a [Binding],
     pub(super) bindings: HashMap<String, Binding>,
+    pub(super) debug_names: std::collections::BTreeMap<String, Ident>,
     pub(super) fish: TokenStream,
     pub(super) loop_kind: Option<LoopKind>,
     pub(super) region_depth: usize,
@@ -375,7 +377,34 @@ impl Lower<'_> {
     fn with_pattern(&self, pat: &Pat) -> Self {
         let mut scope = self.clone();
         super::bind_pattern(&mut scope.bindings, pat, Binding::Host(self.region_depth));
+        super::visit_bindings(pat, &mut |pat| {
+            scope.debug_names.remove(&pat.ident.to_string());
+        });
         scope
+    }
+
+    fn with_debug_pattern(&self, pat: &Pat) -> (Self, TokenStream) {
+        let mut scope = self.with_pattern(pat);
+        let captures = scope.capture_pattern(pat);
+        (scope, captures)
+    }
+
+    fn capture_pattern(&mut self, pat: &Pat) -> TokenStream {
+        let mut captures = TokenStream::new();
+        if self.source_fault.is_none() {
+            super::visit_bindings(pat, &mut |pat| {
+                let name = pat.ident.to_string();
+                // A bare identifier can name a constant or a variant.
+                // A ref binding or an @ binding is explicit.
+                if pat.mutability.is_some() || (pat.by_ref.is_none() && pat.subpat.is_none()) {
+                    self.debug_names.remove(&name);
+                } else {
+                    captures.extend(self.capture_constant(&pat.ident));
+                    self.debug_names.insert(name, pat.ident.clone());
+                }
+            });
+        }
+        captures
     }
 
     fn binding(&self, p: &syn::ExprPath) -> Option<Binding> {
@@ -415,6 +444,79 @@ impl Lower<'_> {
     fn block(&self, block: &Block) -> Result<Value> {
         self.block_with_hint(block, None)
     }
+
+    fn constant_name(ident: &Ident) -> Ident {
+        quote::format_ident!(
+            "__splice_debug_{}",
+            ident.to_string().trim_start_matches("r#"),
+            span = proc_macro2::Span::mixed_site()
+        )
+    }
+
+    pub(super) fn capture_constant(&self, ident: &Ident) -> TokenStream {
+        self.capture_value(ident, emit!(#ident))
+    }
+
+    fn capture_value(&self, ident: &Ident, value: TokenStream) -> TokenStream {
+        let variable = Self::constant_name(ident);
+        let root = self.root;
+        emit! {
+            let #variable = if __splice_wants_debug {
+                #[allow(unused_imports)]
+                use #root::debug::SnapshotConstant as _;
+                (&#root::debug::ConstantArgument(&#value)).snapshot()
+            } else { None };
+        }
+    }
+    fn debug_point(&self, span: proc_macro2::Span) -> TokenStream {
+        if self.source_fault.is_some() {
+            return TokenStream::new();
+        }
+        let root = self.root;
+        let (file, line, column) = if proc_macro::is_available() {
+            let source = span.unwrap();
+            (source.file(), source.line() as u32, source.column() as u32)
+        } else {
+            // The macro's token-level unit tests run outside rustc's expansion context.
+            (String::new(), 0, 0)
+        };
+        let location = emit!(
+            #root::debug::Location {
+                file: #file,
+                directory: ::core::env!("CARGO_MANIFEST_DIR"),
+                line: #line,
+                column: #column,
+            }
+        );
+        let variables = self.debug_names.iter().filter_map(|(name, ident)| {
+            let name = name.trim_start_matches("r#");
+            let binding = self.bindings.get(&ident.to_string())?;
+            let mut ident = ident.clone();
+            ident.set_span(ident.span().located_at(proc_macro2::Span::mixed_site()));
+            let value = match binding {
+                Binding::Reg(kind, _) => {
+                    let ty = match kind {
+                        Scalar::Bool => emit!(Bool),
+                        Scalar::Index | Scalar::Length => emit!(Index),
+                        _ => emit!(I32),
+                    };
+                    emit!(#root::debug::Value::Register(#ident, #root::debug::Scalar::#ty))
+                }
+                Binding::Buffer(_) => emit!(#root::debug::Value::Slice(#ident)),
+                Binding::Host(_) => {
+                    let constant = Self::constant_name(&ident);
+                    emit!(#root::debug::Value::Constant(#constant))
+                }
+                Binding::Columns => return None,
+            };
+            Some(emit!(#root::debug::Variable { name: #name, value: #value }))
+        });
+        emit! {
+            if __splice_wants_debug {
+                __splice_builder.debug_point(#location, &[#(#variables),*]);
+            }
+        }
+    }
     fn block_with_hint(&self, block: &Block, hint: Option<Scalar>) -> Result<Value> {
         let mut scope = self.clone();
         let mut prefix = TokenStream::new();
@@ -428,8 +530,12 @@ impl Lower<'_> {
         for (i, s) in block.stmts.iter().enumerate() {
             match s {
                 Stmt::Item(syn::Item::Use(_)) => {}
-                Stmt::Local(local) => prefix.extend(scope.local(local)?),
+                Stmt::Local(local) => {
+                    prefix.extend(scope.debug_point(local.span()));
+                    prefix.extend(scope.local(local)?);
+                }
                 Stmt::Expr(e, semi) => {
+                    prefix.extend(scope.debug_point(e.span()));
                     let last = i + 1 == block.stmts.len() && semi.is_none();
                     let v = scope.expr_with_hint(e, if last { hint } else { None })?;
                     if v.stage == Stage::Never || last {
@@ -459,7 +565,31 @@ impl Lower<'_> {
         let pat = &local.pat;
         if value.stage.is_host() && !self.flow.locals.contains(&super::flow::key(local)) {
             super::bind_pattern(&mut self.bindings, pat, Binding::Host(self.region_depth));
-            return Ok(emit!(let #pat = #value;));
+            let (binding, ty) = match pat {
+                Pat::Type(t) => (&*t.pat, Some(&*t.ty)),
+                p => (p, None),
+            };
+            if self.source_fault.is_none()
+                && let Pat::Ident(name) = binding
+                && name.mutability.is_none()
+                && name.by_ref.is_none()
+                && name.subpat.is_none()
+            {
+                // Capture the initializer. An irrefutable pattern can also
+                // name a unit variant, so evaluating its identifier as an
+                // expression could lose the original type context.
+                let id = &name.ident;
+                self.debug_names.insert(id.to_string(), id.clone());
+                let ty = ty.map(|ty| emit!(: #ty));
+                let capture = self.capture_value(id, emit!(__splice_host_value));
+                return Ok(emit! {
+                    let __splice_host_value #ty = #value;
+                    #capture
+                    let #pat = __splice_host_value;
+                });
+            }
+            let constants = self.capture_pattern(pat);
+            return Ok(emit!(let #pat = #value; #constants));
         }
 
         let (pat, ty) = match pat {
@@ -506,6 +636,7 @@ impl Lower<'_> {
             )
         };
         self.bindings.insert(id.to_string(), binding);
+        self.debug_names.insert(id.to_string(), id.clone());
         Ok(emit!(let #id = #rhs;))
     }
 

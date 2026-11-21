@@ -29,11 +29,11 @@ fn caller(child: Function, times: usize) -> Function {
 
 fn emitted_graph(f: &Function, unique_bodies: usize) -> HashMap<FuncId, Vec<FuncId>> {
     let mut jit = JITModule::new(JITBuilder::new(default_libcall_names()).unwrap());
-    let kernel = KernelModule::lower(&mut jit, f).unwrap();
+    let kernel = KernelModule::lower(&mut jit, f, false).unwrap();
     assert_eq!(kernel.bodies.len(), unique_bodies);
     let mut graph = HashMap::new();
     kernel
-        .emit(&mut jit.make_context(), |id, ctx| {
+        .emit(&mut jit.make_context(), false, |id, ctx| {
             ctx.verify(jit.isa()).unwrap();
             let calls = local_callees(&ctx.func).collect();
             assert!(graph.insert(id, calls).is_none());
@@ -70,7 +70,7 @@ fn branches_use_comparison_bits_and_preserve_comparison_masks() {
         let f = f.finish().unwrap();
 
         let mut jit = JITModule::new(JITBuilder::new(default_libcall_names()).unwrap());
-        let module = KernelModule::lower(&mut jit, &f).unwrap();
+        let module = KernelModule::lower(&mut jit, &f, false).unwrap();
         let body = &module.bodies[&module.entry];
         let branch = body
             .layout
@@ -121,7 +121,7 @@ fn branches_use_vector_reduction_bits_and_preserve_scalar_masks() {
     let f = f.finish().unwrap();
 
     let mut jit = JITModule::new(JITBuilder::new(default_libcall_names()).unwrap());
-    let module = KernelModule::lower(&mut jit, &f).unwrap();
+    let module = KernelModule::lower(&mut jit, &f, false).unwrap();
     let body = &module.bodies[&module.entry];
     let branch = body
         .layout
@@ -190,7 +190,7 @@ fn packed_chunks_cover_the_vector_and_a_short_store_keeps_its_prefix() {
     let f = f.finish().unwrap();
 
     let mut jit = JITModule::new(JITBuilder::new(default_libcall_names()).unwrap());
-    let module = KernelModule::lower(&mut jit, &f).unwrap();
+    let module = KernelModule::lower(&mut jit, &f, false).unwrap();
     let body = &module.bodies[&module.entry];
     let chunks = e.lanes() / 8;
     assert_eq!(instructions_of_type(body, Opcode::Load, I16X8), chunks);
@@ -258,7 +258,7 @@ fn masked_contiguous_access_selects_packed_and_ordered_paths() {
     let f = f.finish().unwrap();
 
     let mut jit = JITModule::new(JITBuilder::new(default_libcall_names()).unwrap());
-    let module = KernelModule::lower(&mut jit, &f).unwrap();
+    let module = KernelModule::lower(&mut jit, &f, false).unwrap();
     let body = &module.bodies[&module.entry];
     assert!(instructions_of_type(body, Opcode::Load, I16X8) > 0);
     assert!(instructions_of_type(body, Opcode::Store, I16X8) > 0);
@@ -304,7 +304,8 @@ fn a_full_gather_has_one_bounds_branch_for_all_lanes() {
         Lane::<i32>::gather(data, Lane::<i32>::iota()).last()
     }
     let mut jit = JITModule::new(JITBuilder::new(default_libcall_names()).unwrap());
-    let module = KernelModule::lower(&mut jit, &first_block::ir().unwrap()).unwrap();
+    let ir = first_block::ir().unwrap();
+    let module = KernelModule::lower(&mut jit, &ir, false).unwrap();
     let entry = &module.bodies[&module.entry];
     let branches = entry
         .layout

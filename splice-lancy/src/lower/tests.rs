@@ -165,7 +165,8 @@ fn checked_nested_call_preserves_writes_before_failure() {
     )
     .unwrap();
     use splice::Executable;
-    let f = crate::LancyKernel::new(graph, 1, &[BufferKind::Read, BufferKind::Write]).unwrap();
+    let f =
+        crate::LancyKernel::new(graph, 1, &[BufferKind::Read, BufferKind::Write], None).unwrap();
     let mut out = [0];
     let error = f
         .call(
@@ -236,6 +237,7 @@ fn lowered_call_graphs_retain_slice_contracts_for_out_of_line_calls() {
             assert_eq!(function.slice_param(ptr), Some((len, 4, writable)));
         }
         crate::LancyKernel {
+            _debug: None,
             code: ScalarKernel::compile_with_inlining(&root, Inlining::Never).unwrap(),
             arity: ir.arity(),
             slices: ir.buffer_kinds().into(),

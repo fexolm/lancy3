@@ -30,6 +30,17 @@ pub struct Text;
 impl Codegen for Text {
     type Output = String;
 
+    fn build_with_options(
+        arity: usize,
+        kinds: &[splice::BufferKind],
+        body: splice::frontend::Body<'_>,
+        options: splice::BuildOptions,
+    ) -> splice::Result<Self::Output> {
+        Self::compile(&splice::frontend::materialize_with_options(
+            arity, kinds, body, options,
+        )?)
+    }
+
     fn compile(root: &Function) -> splice::Result<String> {
         let _span = tracing::debug_span!(target: "splice::compile", "render_text_ir").entered();
         let mut output = String::new();
@@ -101,6 +112,7 @@ fn render(root: &Function, out: &mut String) -> fmt::Result {
         writeln!(out, ") -> i32 {{")?;
         for instruction in f.instructions() {
             match instruction {
+                Instr::Debug(_) => {}
                 Instr::Simd { dst, inst, args } => {
                     use splice::hir::SimdOp::*;
                     write!(out, "    ")?;

@@ -11,9 +11,9 @@ use function::Function;
 use inst::TargetInst;
 
 #[cfg(target_arch = "aarch64")]
-pub(crate) use aarch64::emit;
+pub(crate) use aarch64::{emit, emit_debug};
 #[cfg(target_arch = "x86_64")]
-pub(crate) use x64::emit;
+pub(crate) use x64::{emit, emit_debug};
 
 #[cfg(all(test, target_arch = "aarch64"))]
 pub(crate) use aarch64::check_machine;

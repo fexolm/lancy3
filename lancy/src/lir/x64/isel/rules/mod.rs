@@ -109,6 +109,10 @@ impl Rules<'_> {
             Op::Load(ty, ptr) => self.load(ty, ptr)?,
             Op::Simd(Simd::Load(lane, ptr)) => self.load(Type::Vector(lane), ptr)?,
             Op::Store(ptr, value) | Op::Simd(Simd::Store(ptr, value)) => self.store(ptr, value)?,
+            Op::DebugStore(offset, value) => {
+                Inst::DebugStore(self.ty(value), offset, self.input(value))
+            }
+            Op::DebugPoint(id) => Inst::DebugPoint(id),
             Op::Simd(Simd::MaskedLoad {
                 address,
                 mask,

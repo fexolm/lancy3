@@ -7,6 +7,6 @@ mod isel;
 #[cfg(test)]
 mod tests;
 
-pub(crate) use emit::emit;
+pub(crate) use emit::{emit, emit_debug};
 #[cfg(test)]
 pub(crate) use tests::filetests::check_machine;

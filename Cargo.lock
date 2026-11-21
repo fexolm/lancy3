@@ -937,7 +937,17 @@ dependencies = [
  "cranelift-module",
  "cranelift-native",
  "splice",
+ "splice-jit",
  "splice-target",
+ "tracing",
+]
+
+[[package]]
+name = "splice-jit"
+version = "0.1.0"
+dependencies = [
+ "gimli",
+ "splice",
  "tracing",
 ]
 
@@ -947,6 +957,7 @@ version = "0.1.0"
 dependencies = [
  "lancy",
  "splice",
+ "splice-jit",
  "splice-target",
  "tracing",
 ]
@@ -960,6 +971,7 @@ dependencies = [
  "libc",
  "llvm-sys 191.1.1",
  "splice",
+ "splice-jit",
  "splice-target",
  "tracing",
 ]

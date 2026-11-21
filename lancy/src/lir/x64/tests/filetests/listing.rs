@@ -64,6 +64,8 @@ fn opcode(inst: Inst) -> String {
         Inst::BroadcastMemory(lane, _, a) => format!("broadcast.{lane:?}.mem {}", addr(a)),
         Inst::BroadcastLane(_, _, lane) => format!("broadcast.lane {lane}"),
         Inst::Store(t, a, _) => format!("store.{t:?} {}", addr(a)),
+        Inst::DebugStore(t, offset, _) => format!("debug_store.{t:?} {offset}"),
+        Inst::DebugPoint(id) => format!("debug_point {id}"),
         Inst::StoreArg(i, ..) => format!("store_arg {i}"),
         Inst::Call {
             target, clobbers, ..

@@ -201,6 +201,10 @@ impl Rules<'_> {
             Op::Store(ptr, v) | Op::Simd(Simd::Store(ptr, v)) => {
                 return Inst::Store(self.ty(v), self.input(ptr), self.input(v));
             }
+            Op::DebugStore(offset, value) => {
+                return Inst::DebugStore(self.ty(value), offset, self.input(value));
+            }
+            Op::DebugPoint(id) => return Inst::DebugPoint(id),
             Op::Simd(Simd::MaskedLoad {
                 address,
                 mask,

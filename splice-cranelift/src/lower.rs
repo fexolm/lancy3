@@ -1,8 +1,9 @@
 use crate::{BOUNDS, DIV_ZERO, Descriptor, OVERFLOW};
 use cranelift_codegen::ir::{
-    FuncRef, InstBuilder, MemFlags, Opcode, TrapCode, Value,
+    DebugTag, FuncRef, InstBuilder, MemFlags, Opcode, StackSlotData, StackSlotKind, TrapCode,
+    Value,
     condcodes::IntCC,
-    types::{I32, I64},
+    types::{I8, I32, I64},
 };
 use cranelift_frontend::FunctionBuilder;
 use splice::Function;
@@ -51,6 +52,7 @@ pub(super) fn emit(
     f: &Function,
     is_entry: bool,
     imports: &HashMap<*const Function, FuncRef>,
+    debug_bytes: Option<u32>,
 ) {
     let params = parameters(&mut b, f, is_entry);
     let (scalars, pairs) = params.split_at(f.arity());
@@ -61,8 +63,11 @@ pub(super) fn emit(
         b.def_var(var(Reg(index as u32)), value);
     }
     let labels: Vec<_> = (0..f.label_count()).map(|_| b.create_block()).collect();
+    let snapshots = debug_bytes.map(|bytes| {
+        b.create_sized_stack_slot(StackSlotData::new(StackSlotKind::ExplicitSlot, bytes, 3))
+    });
     let mut open = true;
-    for op in f.instructions() {
+    for (index, op) in f.instructions().iter().enumerate() {
         match *op {
             Instr::Label(label) => {
                 let block = labels[label.0 as usize];
@@ -73,6 +78,49 @@ pub(super) fn emit(
                 open = true;
             }
             _ if !open => continue,
+            Instr::Debug(ref point) => {
+                let Some(slot) = snapshots else {
+                    continue;
+                };
+                use splice::debug::Value as DebugValue;
+                let mut slots = point.slots(f).peekable();
+                if slots.peek().is_none() {
+                    // Sequence points themselves occupy no bytes in Cranelift.
+                    // Give consecutive empty statements distinct addresses.
+                    let zero = b.ins().iconst(I8, 0);
+                    b.ins().stack_store(zero, slot, 0);
+                }
+                for (var, ty, offset) in slots {
+                    let offset = offset as i32;
+                    match var.value {
+                        DebugValue::Register(reg, _) => {
+                            for (part, &variable) in vars.get(reg).iter().enumerate() {
+                                let mut value = b.use_var(variable);
+                                if matches!(
+                                    ty,
+                                    splice::debug::Type::Scalar(splice::debug::Scalar::Index)
+                                ) {
+                                    value = b.ins().sextend(I64, value);
+                                }
+                                b.ins()
+                                    .stack_store(value, slot, offset + (part * 16) as i32);
+                            }
+                        }
+                        DebugValue::Slice(buffer) => {
+                            let [data, len] = buffers[buffer.index()];
+                            b.ins().stack_store(data, slot, offset);
+                            let len = b.ins().uextend(I64, len);
+                            b.ins().stack_store(len, slot, offset + 8);
+                        }
+                        DebugValue::Constant(_) => unreachable!("only runtime values have slots"),
+                    }
+                }
+                let at = b.ins().sequence_point();
+                b.func.debug_tags.set(
+                    at,
+                    [DebugTag::User(index as u32), DebugTag::StackSlot(slot)],
+                );
+            }
             Instr::Const(dst, n) => {
                 let value = b.ins().iconst(I32, i64::from(n));
                 b.def_var(var(dst), value);

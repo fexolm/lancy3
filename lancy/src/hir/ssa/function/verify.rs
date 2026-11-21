@@ -188,6 +188,11 @@ impl Function {
                         }
                         continue;
                     }
+                    Op::DebugStore(_, value) => {
+                        operand(value)?;
+                        continue;
+                    }
+                    Op::DebugPoint(_) => continue,
                     Op::Call(id) => {
                         let site = self
                             .calls

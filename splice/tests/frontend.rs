@@ -73,7 +73,8 @@ fn only_the_scalar_result_of_host_collection_operations_reaches_codegen() -> spl
     );
     assert!(ir.instructions().iter().all(|i| matches!(
         i,
-        Instr::Const(..)
+        Instr::Debug(_)
+            | Instr::Const(..)
             | Instr::Bin(_, Binary::Add, ..)
             | Instr::Copy(..)
             | Instr::Label(_)

@@ -15,10 +15,18 @@ impl FunctionBuilder {
         Self::with_buffers(arity, Vec::new())
     }
     pub fn with_buffers(arity: usize, kinds: Vec<BufferKind>) -> Self {
+        Self::with_options(arity, kinds, crate::BuildOptions::default())
+    }
+    pub fn with_options(
+        arity: usize,
+        kinds: Vec<BufferKind>,
+        options: crate::BuildOptions,
+    ) -> Self {
         Self {
             callees: HashMap::new(),
             function: Function {
                 source: None,
+                options,
                 needs_status: false,
                 arity,
                 buffer_kinds: kinds,
@@ -94,7 +102,13 @@ impl FunctionBuilder {
     /// no label can transfer control between that definition and this use.
     #[doc(hidden)]
     pub fn immediate_condition(&self, reg: Reg) -> Option<bool> {
-        match self.function.code.last()? {
+        match self
+            .function
+            .code
+            .iter()
+            .rev()
+            .find(|op| !matches!(op, Instr::Debug(_)))?
+        {
             Instr::Const(dst, value) if *dst == reg => Some(*value != 0),
             _ => None,
         }
@@ -170,7 +184,7 @@ impl FunctionBuilder {
         if let Some(callee) = key.as_ref().and_then(|k| self.callees.get(k)).cloned() {
             return Ok(self.emit_call(callee, args, buffers));
         }
-        let mut child = Self::with_buffers(arity, kinds.to_vec());
+        let mut child = Self::with_options(arity, kinds.to_vec(), self.function.options);
         std::mem::swap(&mut self.callees, &mut child.callees);
         let staged = body(&mut child);
         std::mem::swap(&mut self.callees, &mut child.callees);
@@ -196,6 +210,21 @@ macro_rules! forward_mut {
 }
 
 impl KernelBuilder for FunctionBuilder {
+    fn debug_enabled(&self) -> bool {
+        self.function.options == crate::BuildOptions::Debug
+    }
+    fn debug_point(
+        &mut self,
+        location: crate::debug::Location,
+        variables: &[crate::debug::Variable],
+    ) {
+        if self.debug_enabled() {
+            self.function.code.push(Instr::Debug(crate::debug::Point {
+                location,
+                variables: variables.into(),
+            }));
+        }
+    }
     fn reg_type(&self, r: Reg) -> Option<ValueType> {
         self.function.checked_reg_type(r)
     }

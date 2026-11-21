@@ -3,6 +3,7 @@ use super::{Binding, LoopKind, Lower, Scalar, Stage, Value, err};
 use crate::scalar::Native;
 use proc_macro2::TokenStream;
 use quote::ToTokens;
+use syn::spanned::Spanned;
 use syn::visit::Visit;
 use syn::visit_mut::VisitMut;
 use syn::{Block, Error, Expr, Lit, Pat, Result};
@@ -156,7 +157,8 @@ impl Lower<'_> {
         scope.loop_kind = Some(LoopKind::Runtime);
         let test = if let Some(e) = cond {
             let reg = scope.operand(e, Scalar::Bool)?;
-            emit!({let __splice_cond = #reg; __splice_builder.branch_if_false(__splice_cond, __splice_loop_end);})
+            let point = scope.debug_point(e.span());
+            emit!({#point let __splice_cond = #reg; __splice_builder.branch_if_false(__splice_cond, __splice_loop_end);})
         } else {
             emit!()
         };
@@ -214,6 +216,8 @@ impl Lower<'_> {
         scope
             .bindings
             .insert(id.to_string(), Binding::Reg(kind, false));
+        scope.debug_names.insert(id.to_string(), id.clone());
+        let point = scope.debug_point(f.for_token.span);
         let body = scope.block(&f.body)?.code;
         let root = self.root;
         let contents = scope.delimit(emit!(#body; __splice_builder.jump(__splice_loop_next);));
@@ -224,6 +228,7 @@ impl Lower<'_> {
                 (__splice_builder.label(), __splice_builder.label(), __splice_builder.label(), __splice_builder.label());
             __splice_builder.jump(__splice_for_head);
             __splice_builder.mark(__splice_for_head);
+            #point
             let __splice_cond = __splice_builder.binary(#root::hir::Binary::Lt, #id, __splice_limit);
             __splice_builder.branch(__splice_cond, __splice_for_body, __splice_loop_end);
             __splice_builder.mark(__splice_for_body);
@@ -242,12 +247,14 @@ impl Lower<'_> {
         let iterable = self.host_raw(&f.expr)?;
         let pat = &f.pat;
 
-        let bindings = self.with_pattern(pat);
+        let (bindings, captures) = self.with_debug_pattern(pat);
         if !contains_transfer(&f.body) {
             // A straight-line plan needs no iteration labels or induction
             // variable. Only the operations in its selected steps reach IR.
             let body = bindings.block(&f.body)?;
-            return Ok(Value::unit(emit!({for #pat in #iterable { #body; }})));
+            return Ok(Value::unit(
+                emit!({for #pat in #iterable { #captures #body; }}),
+            ));
         }
         let mut scope = bindings.nested_region();
         scope.loop_kind = Some(LoopKind::Unrolled);
@@ -263,6 +270,7 @@ impl Lower<'_> {
             for #pat in #iterable {
                 let __splice_loop_next = __splice_builder.label();
                 __splice_reaches_next = false;
+                #captures
                 #iteration
                 __splice_builder.mark(__splice_loop_next);
                 if !__splice_reaches_next { break; }
@@ -281,9 +289,14 @@ impl Lower<'_> {
         };
         let mut arms = Vec::new();
         for arm in &m.arms {
-            let pattern_scope = host.then(|| self.with_pattern(&arm.pat));
-            let scope = pattern_scope.as_ref().unwrap_or(&scope);
+            let pattern = host.then(|| self.with_debug_pattern(&arm.pat));
+            let scope = pattern.as_ref().map_or(&scope, |(scope, _)| scope);
             let value = scope.expr_with_hint(&arm.body, hint)?;
+            let point = if matches!(&*arm.body, Expr::Block(_)) {
+                emit!()
+            } else {
+                scope.debug_point(arm.body.span())
+            };
             let guard = match &arm.guard {
                 Some((_, g)) if host => {
                     let test = scope.host_raw(g)?;
@@ -291,20 +304,22 @@ impl Lower<'_> {
                 }
                 Some((_, g)) => {
                     let test = scope.operand(g, Scalar::Bool)?;
-                    emit!({let passed = #test; __splice_builder.branch_if_false(passed, __splice_next_arm);})
+                    let point = scope.debug_point(g.span());
+                    emit!({#point let passed = #test; __splice_builder.branch_if_false(passed, __splice_next_arm);})
                 }
                 None => emit!(),
             };
-            arms.push((arm, guard, value));
+            let captures = pattern.map(|(_, captures)| captures);
+            arms.push((arm, guard, point, captures, value));
         }
-        let stage = self.join(arms.iter().map(|(_, _, v)| v), !host, &m)?;
+        let stage = self.join(arms.iter().map(|(_, _, _, _, v)| v), !host, &m)?;
         if host {
             let mut cases = TokenStream::new();
-            for (arm, guard, value) in arms {
+            for (arm, guard, point, captures, value) in arms {
                 let attrs = &arm.attrs;
                 let pat = &arm.pat;
                 let body = self.host_arm(value, stage, &arm.body)?;
-                cases.extend(emit!(#(#attrs)* #pat #guard => {#body},));
+                cases.extend(emit!(#(#attrs)* #pat #guard => {#captures #point #body},));
             }
             return Ok(Value::new(stage, emit!(match #test {#cases})));
         }
@@ -319,7 +334,7 @@ impl Lower<'_> {
             return err(m, "a runtime match requires a final unguarded _ arm");
         }
         let mut body = TokenStream::new();
-        for (arm, guard, value) in arms {
+        for (arm, guard, point, _, value) in arms {
             if !arm.attrs.is_empty() {
                 return err(arm, "attributes on runtime arms are unsupported");
             }
@@ -330,7 +345,7 @@ impl Lower<'_> {
                 let pred = self.pattern(&arm.pat, t)?;
                 emit!({let matched = #pred; __splice_builder.branch_if_false(matched, __splice_next_arm);})
             };
-            let contents = scope.delimit(emit!(#guard #write;));
+            let contents = scope.delimit(emit!(#guard #point #write;));
             body.extend(emit!({
                 let __splice_next_arm = __splice_builder.label();
                 #pattern #contents

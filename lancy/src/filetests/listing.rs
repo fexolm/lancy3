@@ -37,6 +37,8 @@ pub(super) fn hir(module: &Module<VerifiedBody>, ids: &FunctionIds<Function>) ->
                     write!(out, "{} = ", v(x)).unwrap();
                 }
                 let op = match *f.op(i) {
+                    Op::DebugStore(offset, v) => format!("debug_store {offset}, {v:?}"),
+                    Op::DebugPoint(id) => format!("debug_point {id}"),
                     Op::Const(n) => format!("const {n}"),
                     Op::Copy(x) => format!("copy {}", v(x)),
                     Op::Bin(op, x, y) => format!("{op:?} {} {}", v(x), v(y)),

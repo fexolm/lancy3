@@ -253,6 +253,8 @@ pub(super) enum Inst {
         dst: Option<VReg>,
     },
     Store(Type, Address, VReg),
+    DebugStore(Type, u32, VReg),
+    DebugPoint(u32),
     StoreArg(usize, Type, VReg),
     Call {
         target: FunctionId,
@@ -399,10 +401,11 @@ impl TargetInst for Inst {
             | Self::BranchAny(v)
             | Self::BranchAll(_, v)
             | Self::StoreArg(_, _, v)
+            | Self::DebugStore(_, _, v)
             | Self::Branch(v) => out.push(O::reg_use(v)),
             Self::Call { dst, .. } => out.push(O::reg_fixed_def(dst, return_reg(dst))),
             Self::Ret(v) => out.push(O::reg_fixed_use(v, return_reg(v))),
-            Self::Jump => {}
+            Self::Jump | Self::DebugPoint(_) => {}
         }
     }
     fn clobbers(&self) -> PRegSet {

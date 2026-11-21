@@ -29,6 +29,7 @@ use super::{
 use crate::{
     CompileError,
     hir::{Function, Type, ssa::VerifiedBody},
+    jit::{DebugFrame, DebugFunction},
     module::{FunctionId, FunctionIds, Module},
     support::slotmap::DenseMap,
 };
@@ -51,6 +52,7 @@ pub(crate) struct Code {
     pub bytes: Vec<u8>,
     pub words: usize,
     pub sites: Box<[Site]>,
+    pub debug: Vec<DebugFunction>,
 }
 
 type Result<T = ()> = std::result::Result<T, CompileError>;
@@ -538,6 +540,13 @@ impl Emitter<'_> {
             ),
             Inst::Load(ty, ..) => self.value_access(true, ty, n(1), (g(0), 0)),
             Inst::Store(ty, ..) => self.value_access(false, ty, n(1), (g(0), 0)),
+            Inst::DebugStore(ty, offset, _) => self.value_access(
+                false,
+                ty,
+                n(0),
+                (R::X19, self.frame.debug_base + offset as usize),
+            ),
+            Inst::DebugPoint(_) => self.a.put(C::Nop_HI_hints, &[]),
             Inst::Masked {
                 kind,
                 ty,
@@ -631,31 +640,54 @@ fn invert(c: Cond) -> Cond {
 }
 
 pub(crate) fn emit(source: Module<VerifiedBody<'_>>, ids: &FunctionIds<Function>) -> Result<Code> {
-    let config = splice_target::simd().map_err(CompileError::SimdProfile)?;
-    let module = compile(source, ids, config)?;
-    emit_compiled(&module, config)
+    emit_mode(source, ids, false)
 }
 
-fn emit_compiled(module: &Module<Compiled>, config: Simd) -> Result<Code> {
+pub(crate) fn emit_debug(
+    source: Module<VerifiedBody<'_>>,
+    ids: &FunctionIds<Function>,
+) -> Result<Code> {
+    emit_mode(source, ids, true)
+}
+
+fn emit_mode(
+    source: Module<VerifiedBody<'_>>,
+    ids: &FunctionIds<Function>,
+    debug: bool,
+) -> Result<Code> {
+    let config = splice_target::simd().map_err(CompileError::SimdProfile)?;
+    let module = compile(source, ids, config)?;
+    emit_compiled(&module, config, debug)
+}
+
+fn emit_compiled(module: &Module<Compiled>, config: Simd, debug: bool) -> Result<Code> {
     let _span = tracing::debug_span!(target: "splice::compile", "emit_machine_code").entered();
     let root = module.call_graph.root();
     let mut a = Assembler::default();
     let mut sites = Vec::new();
+    let mut debug_functions = Vec::new();
     let entries = DenseMap::from_fn(module.functions.len(), |_| a.label());
     for (id, machine) in module.functions.iter().rev() {
         let epilogue = a.label();
         let labels: Vec<_> = (0..machine.body.num_blocks()).map(|_| a.label()).collect();
         a.bind(entries[id]);
+        let start = a.words.len() as u64 * 4;
 
         let entry = id == root;
-        let (saved, save_base) = if entry {
+        let host_stack = entry || debug;
+        let saved = if entry {
+            &ROOT_SAVES[..]
+        } else {
+            &CHILD_SAVES[..]
+        };
+        let save_base = if host_stack {
             a.put(
                 C::Sub_64_addsub_imm,
                 &[O::reg(R::SP), O::reg(R::SP), O::imm(HOST_STACK_BYTES)],
             )?;
-            (&ROOT_SAVES[..], R::SP)
+            R::SP
         } else {
-            (&CHILD_SAVES[..], R::X1)
+            R::X1
         };
         for (i, &reg) in saved.iter().enumerate() {
             a.access(false, 8, reg, (save_base, i * 8))?;
@@ -675,6 +707,8 @@ fn emit_compiled(module: &Module<Compiled>, config: Simd) -> Result<Code> {
             a.addr(R::X19, R::X1, 0)?;
         }
         a.addr(R::X22, R::X0, 0)?;
+        let body_start = a.words.len() as u64 * 4;
+        let mut points = Vec::new();
 
         let mut out = Emitter {
             a: &mut a,
@@ -698,19 +732,19 @@ fn emit_compiled(module: &Module<Compiled>, config: Simd) -> Result<Code> {
                 match item {
                     InstOrEdit::Edit(&Edit::Move { from, to }) => out.edit(from, to)?,
                     InstOrEdit::Inst(i) => {
-                        out.inst(
-                            machine.body.insts()[i.index()],
-                            machine.allocation.inst_allocs(i),
-                            succs,
-                            &labels,
-                        )?;
+                        let inst = machine.body.insts()[i.index()];
+                        if debug && let Inst::DebugPoint(id) = inst {
+                            points.push((id, out.a.words.len() as u64 * 4));
+                        }
+                        out.inst(inst, machine.allocation.inst_allocs(i), succs, &labels)?;
                     }
                 }
             }
         }
         out.traps()?;
         a.bind(epilogue);
-        let restore_base = if entry {
+        let frame_end = a.words.len() as u64 * 4;
+        if entry {
             for (i, reg) in machine.written.into_iter().enumerate() {
                 a.access(
                     true,
@@ -719,18 +753,45 @@ fn emit_compiled(module: &Module<Compiled>, config: Simd) -> Result<Code> {
                     (R::X19, machine.frame.saves + i * 8),
                 )?;
             }
-            R::SP
-        } else {
-            R::X19
-        };
+        }
+        let restore_base = if host_stack { R::SP } else { R::X19 };
         // Restore X19 last because it addresses the private frame on outlined calls.
         for (i, &reg) in saved.iter().enumerate().rev() {
             a.access(true, 8, reg, (restore_base, i * 8))?;
         }
-        if entry {
+        if host_stack {
             a.addr(R::SP, R::SP, HOST_STACK_BYTES as usize)?;
         }
         a.put(C::Ret_64r_branch_reg, &[O::reg(R::X30)])?;
+        if debug {
+            let workspace_saved = if entry {
+                machine
+                    .written
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, reg)| (reg.hw_enc() as u16, (machine.frame.saves + i * 8) as i64))
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            debug_functions.push(DebugFunction {
+                start,
+                end: a.words.len() as u64 * 4,
+                workspace_offset: machine.frame.debug_base,
+                points,
+                frame: DebugFrame {
+                    start: body_start,
+                    end: frame_end,
+                    cfa_from_sp: HOST_STACK_BYTES as i32,
+                    saved: saved
+                        .iter()
+                        .enumerate()
+                        .map(|(i, &reg)| (u16::from(reg), i as i32 * 8 - HOST_STACK_BYTES as i32))
+                        .collect(),
+                    workspace_saved,
+                },
+            });
+        }
     }
     let bytes = ROOT_BYTES
         .checked_add(module.functions[root].peak)
@@ -739,5 +800,6 @@ fn emit_compiled(module: &Module<Compiled>, config: Simd) -> Result<Code> {
         bytes: a.finish()?,
         words: bytes / 8,
         sites: sites.into_boxed_slice(),
+        debug: debug_functions,
     })
 }

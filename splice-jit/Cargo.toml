@@ -1,0 +1,11 @@
+[package]
+name = "splice-jit"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.94"
+description = "Native debug symbol registration for the Splice JIT backends"
+
+[dependencies]
+gimli = { version = "0.33", default-features = false, features = ["write", "std"] }
+splice = { path = "../splice" }
+tracing.workspace = true

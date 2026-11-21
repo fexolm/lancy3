@@ -6,6 +6,7 @@ pub(super) const CHILD_ARGS: usize = 2;
 pub(super) struct Frame {
     pub spill_base: usize,
     pub slots: usize,
+    pub debug_base: usize,
 }
 
 impl Frame {
@@ -14,6 +15,7 @@ impl Frame {
         Self {
             spill_base,
             slots: spill_base + spills,
+            debug_base: 0,
         }
     }
 }

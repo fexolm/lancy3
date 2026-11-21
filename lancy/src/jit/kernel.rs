@@ -19,6 +19,7 @@ pub struct ScalarKernel {
     arg_words: usize,
     result_words: usize,
     pointer_signature: bool,
+    debug: Vec<super::DebugFunction>,
     #[cfg(target_arch = "aarch64")]
     sites: Box<[crate::aarch64::Site]>,
 }
@@ -34,12 +35,29 @@ impl ScalarKernel {
         function: &Function,
         inlining: Inlining,
     ) -> Result<Self, CompileError> {
+        Self::compile_mode(function, inlining, false)
+    }
+
+    /// Compile with source points, outlined calls and debugger frame layouts.
+    pub fn compile_debug(function: &Function) -> Result<Self, CompileError> {
+        Self::compile_mode(function, Inlining::Never, true)
+    }
+
+    fn compile_mode(
+        function: &Function,
+        inlining: Inlining,
+        debug: bool,
+    ) -> Result<Self, CompileError> {
         let _span =
             tracing::debug_span!(target: "splice::compile", "lancy_jit", inlining = ?inlining)
                 .entered();
         splice_target::simd().map_err(CompileError::SimdProfile)?;
         let (source, ids) = function.verified_module()?;
-        let code = super::optimize_and_lower(&source, &ids, inlining, crate::lir::emit)?;
+        let code = if debug {
+            crate::lir::emit_debug(source, &ids)?
+        } else {
+            super::optimize_and_lower(&source, &ids, inlining, crate::lir::emit)?
+        };
         let memory = tracing::debug_span!(target: "splice::compile", "install_code")
             .in_scope(|| Executable::new(&code.bytes))?;
         // SAFETY: the host emitter implements Entry and memory owns the sealed code.
@@ -63,6 +81,7 @@ impl ScalarKernel {
                 .div_ceil(8),
             pointer_signature: function.param_types().contains(&Type::Ptr)
                 || function.return_type() == Type::Ptr,
+            debug: code.debug,
             #[cfg(target_arch = "aarch64")]
             sites: code.sites,
         })
@@ -74,6 +93,15 @@ impl ScalarKernel {
 
     pub fn code_size(&self) -> usize {
         self.memory.len
+    }
+
+    /// Address of the installed code, valid while this kernel is alive.
+    pub fn code_address(&self) -> usize {
+        self.memory.address.as_ptr() as usize
+    }
+
+    pub fn debug_functions(&self) -> &[super::DebugFunction] {
+        &self.debug
     }
     /// Workspace size in 32-bit words.
     pub fn workspace_words(&self) -> usize {

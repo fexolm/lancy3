@@ -1,4 +1,4 @@
-use crate::target::host_machine;
+use crate::target::host_machine_with_debug;
 use crate::{Entry, build_module};
 use inkwell::attributes::{Attribute, AttributeLoc};
 use inkwell::context::Context;
@@ -42,23 +42,52 @@ impl Drop for Jit {
 impl Jit {
     pub fn compile(
         auto_vectorize: bool,
-        populate: impl for<'ctx> FnOnce(&'ctx Context, &Module<'ctx>) -> Result<(), String>,
-    ) -> Result<(Self, Entry), String> {
+        source: Option<&splice::Function>,
+        options: splice::BuildOptions,
+        populate: impl for<'ctx> FnOnce(
+            &'ctx Context,
+            &Module<'ctx>,
+        ) -> Result<
+            Option<&'static splice::frontend::KernelSource>,
+            String,
+        >,
+    ) -> Result<(Self, Entry, Option<splice_jit::Registration>), String> {
+        let debug = options == splice::BuildOptions::Debug;
         let target = tracing::debug_span!(target: "splice::compile", "llvm_target")
-            .in_scope(host_machine)?;
+            .in_scope(|| host_machine_with_debug(debug))?;
         let context = Context::create();
-        let module = build_module(&context, &target, populate)?;
-        optimize(&module, &target, auto_vectorize)?;
+        let mut kernel_source = None;
+        let module = build_module(&context, &target, |context, module| {
+            kernel_source = populate(context, module)?;
+            Ok(())
+        })?;
+        if !debug {
+            optimize(&module, &target, auto_vectorize)?;
+        }
         let object = tracing::debug_span!(target: "splice::compile", "emit_llvm_object")
             .in_scope(|| target.write_to_memory_buffer(&module, FileType::Object))
             .map_err(|error| error.to_string())?;
-        tracing::debug_span!(target: "splice::compile", "link_llvm_object")
-            .in_scope(|| Self::link(object))
+        let info = if debug || splice_jit::perf_enabled() {
+            Some(crate::debug_info::ObjectSymbols::read(&object, debug)?)
+        } else {
+            None
+        };
+        let jit = tracing::debug_span!(target: "splice::compile", "link_llvm_object")
+            .in_scope(|| Self::link(object))?;
+        let address = jit.lookup(c"splice_entry")?;
+        let registration = info
+            .map(|info| info.publish(&jit, source, kernel_source, debug))
+            .transpose()?
+            .flatten();
+        // SAFETY: The lowerer declares the entry with the host C ABI. It
+        // receives the checked argument arrays and ORC retains the code.
+        let entry = unsafe { std::mem::transmute::<usize, Entry>(address as usize) };
+        Ok((jit, entry, registration))
     }
 
     /// Inkwell owns the module, optimizer and object generation. Its llvm-sys
     /// bindings expose the ORC object linker and executable mapping lifetime.
-    fn link(object: MemoryBuffer<'static>) -> Result<(Self, Entry), String> {
+    fn link(object: MemoryBuffer<'static>) -> Result<Self, String> {
         unsafe {
             let mut raw = null_mut();
             check(LLVMOrcCreateLLJIT(&mut raw, null_mut()))?;
@@ -76,20 +105,24 @@ impl Jit {
             // ORC consumes the memory buffer on success and failure.
             let object = ManuallyDrop::new(object);
             check(LLVMOrcLLJITAddObjectFile(raw, dylib, object.as_mut_ptr()))?;
-            let mut address = 0;
-            check(LLVMOrcLLJITLookup(
-                raw,
-                &mut address,
-                c"splice_entry".as_ptr(),
-            ))?;
-            if address == 0 {
-                return Err("LLVM returned a null kernel entry".into());
-            }
-            // The lowerer declares the entry with this C ABI. ORC owns its
-            // machine code until all outstanding borrows of Jit end.
-            let entry = std::mem::transmute::<usize, Entry>(address as usize);
-            Ok((jit, entry))
+            Ok(jit)
         }
+    }
+
+    pub(super) fn lookup(&self, symbol: &CStr) -> Result<u64, String> {
+        let mut address = 0;
+        // SAFETY: self owns the live ORC session and address points to a u64
+        // that LLVM fills synchronously.
+        unsafe {
+            check(LLVMOrcLLJITLookup(self.0, &mut address, symbol.as_ptr()))?;
+        }
+        if address == 0 {
+            return Err(format!(
+                "LLVM returned a null address for {}",
+                symbol.to_string_lossy()
+            ));
+        }
+        Ok(address)
     }
 }
 

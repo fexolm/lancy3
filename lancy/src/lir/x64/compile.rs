@@ -58,6 +58,18 @@ pub(super) fn compile(
             frame.spill_base += words;
             frame.slots += words;
         }
+        frame.debug_base = frame.slots;
+        frame.slots += body
+            .insts()
+            .iter()
+            .filter_map(|inst| match *inst {
+                Inst::DebugStore(ty, offset, _) => {
+                    Some((offset as usize + ty.bytes(width)).div_ceil(8))
+                }
+                _ => None,
+            })
+            .max()
+            .unwrap_or(0);
         if id == entry {
             // Save the host's nonvolatile registers once, including those
             // written by descendants. Normal and trapping exits restore them.

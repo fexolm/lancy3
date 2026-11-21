@@ -193,6 +193,8 @@ pub(super) enum Inst {
     Offset(Scale, VReg, VReg, VReg),
     Load(Type, VReg, VReg),
     Store(Type, VReg, VReg),
+    DebugStore(Type, u32, VReg),
+    DebugPoint(u32),
     Masked {
         kind: Masked,
         ty: Type,
@@ -401,7 +403,10 @@ impl TargetInst for Inst {
                     out.extend(dst.map(Operand::reg_def_at_start));
                 }
             }
-            Self::StoreArg(_, _, v) | Self::LibArg(_, _, v) | Self::Branch(v) => out.push(input(v)),
+            Self::StoreArg(_, _, v)
+            | Self::DebugStore(_, _, v)
+            | Self::LibArg(_, _, v)
+            | Self::Branch(v) => out.push(input(v)),
             Self::Return(ty, v, root) => {
                 out.push(if !root || class(ty) == RegClass::Int {
                     Operand::reg_fixed_use(v, return_reg(ty))
@@ -409,7 +414,7 @@ impl TargetInst for Inst {
                     input(v)
                 });
             }
-            Self::Libcall(..) | Self::Jump => {}
+            Self::Libcall(..) | Self::Jump | Self::DebugPoint(_) => {}
         }
     }
 

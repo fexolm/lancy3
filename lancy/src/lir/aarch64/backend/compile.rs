@@ -21,6 +21,7 @@ pub(super) struct Frame {
     pub temporary: usize,
     pub saves: usize,
     pub bytes: usize,
+    pub debug_base: usize,
 }
 
 pub(super) struct Compiled {
@@ -77,12 +78,24 @@ pub(super) fn compile(
         let saves = temporary
             .checked_add(if needs_temp { TEMP_BYTES } else { 0 })
             .ok_or(CompileError::FrameOverflow)?;
-        let bytes = saves
+        let debug_base = saves
             .checked_add(if id == root {
                 written.into_iter().count() * 8
             } else {
                 0
             })
+            .ok_or(CompileError::FrameOverflow)?;
+        let debug_size = body
+            .insts()
+            .iter()
+            .filter_map(|inst| match *inst {
+                Inst::DebugStore(ty, offset, _) => Some(offset as usize + ty.bytes(config.bytes)),
+                _ => None,
+            })
+            .max()
+            .unwrap_or(0);
+        let bytes = debug_base
+            .checked_add(debug_size.next_multiple_of(8))
             .ok_or(CompileError::FrameOverflow)?;
         let peak = bytes
             .checked_add(child_peak)
@@ -96,6 +109,7 @@ pub(super) fn compile(
                 temporary,
                 saves,
                 bytes,
+                debug_base,
             },
             written,
             peak,

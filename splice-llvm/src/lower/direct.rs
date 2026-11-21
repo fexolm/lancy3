@@ -12,7 +12,7 @@ use inkwell::{
 };
 use splice::{
     BufferKind,
-    frontend::{Body as StagedBody, KernelBuilder, Specialization},
+    frontend::{Body as StagedBody, KernelBuilder, KernelSource, Specialization},
     hir::{Binary, Buffer, Label, Reg, Simd, ValueType, check_call},
     simd::Element,
 };
@@ -25,6 +25,7 @@ struct Graph<'a, 'ctx> {
     ctx: &'ctx Context,
     module: &'a Module<'ctx>,
     count: Cell<usize>,
+    source: Cell<Option<&'static KernelSource>>,
     callees: RefCell<HashMap<Specialization, (FunctionValue<'ctx>, bool)>>,
 }
 
@@ -83,6 +84,7 @@ impl<'ctx> Graph<'_, 'ctx> {
         let mut direct = Direct {
             native,
             graph: self,
+            root: function.get_name().to_bytes() == b"kernel0",
             allocas: self.ctx.create_builder(),
             arity,
             kinds,
@@ -109,20 +111,23 @@ pub(crate) fn populate_direct<'ctx>(
     arity: usize,
     kinds: &[BufferKind],
     stage: StagedBody<'_>,
-) -> Result<(), String> {
+) -> Result<Option<&'static KernelSource>, String> {
     let graph = Graph {
         ctx,
         module,
         count: Cell::new(0),
+        source: Cell::new(None),
         callees: RefCell::default(),
     };
     let (root, _) = graph.function(arity, kinds, None, stage)?;
     emit_entry(ctx, module, &ctx.create_builder(), arity, kinds.len(), root)
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+    Ok(graph.source.get())
 }
 
 struct Direct<'a, 'ctx> {
     graph: &'a Graph<'a, 'ctx>,
+    root: bool,
     native: Body<'a, 'ctx>,
     allocas: Builder<'ctx>,
     arity: usize,
@@ -220,6 +225,11 @@ impl<'a, 'ctx> Direct<'a, 'ctx> {
 }
 
 impl KernelBuilder for Direct<'_, '_> {
+    fn set_source(&mut self, source: &'static KernelSource) {
+        if self.root {
+            self.graph.source.set(Some(source));
+        }
+    }
     fn reg_type(&self, r: Reg) -> Option<ValueType> {
         self.native.reg_type(r)
     }

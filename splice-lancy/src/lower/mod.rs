@@ -4,6 +4,7 @@ mod portable;
 mod seal;
 mod simd;
 pub use portable::lower;
+pub(super) use portable::{DebugSources, lower_debug};
 #[cfg(test)]
 mod tests;
 
@@ -11,7 +12,7 @@ use lancy::hir::{self, Block, Function, Op, Value};
 use lancy::support::slotmap::DenseMap;
 use splice::{
     BufferKind,
-    frontend::{Body, KernelBuilder, Specialization},
+    frontend::{Body, KernelBuilder, KernelSource, Specialization},
     hir::{Binary, Buffer, Label, Reg, Simd, ValueType},
     simd::Element,
 };
@@ -41,15 +42,25 @@ fn binary(op: Binary) -> hir::Binary {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn build(
     arity: usize,
     kinds: &[BufferKind],
     body: Body<'_>,
 ) -> Result<Function, String> {
+    build_with_source(arity, kinds, body).map(|(function, _)| function)
+}
+
+pub(crate) fn build_with_source(
+    arity: usize,
+    kinds: &[BufferKind],
+    body: Body<'_>,
+) -> Result<(Function, Option<&'static KernelSource>), String> {
     splice_target::simd()?;
     let mut builder = Builder::new(arity, kinds)?;
     body(&mut builder)?;
-    builder.seal()
+    let source = builder.source;
+    Ok((builder.seal()?, source))
 }
 
 impl<'a> Builder<'a> {
@@ -87,6 +98,7 @@ impl<'a> Builder<'a> {
         debug_assert_eq!(state, entry);
         Ok(Self {
             graph,
+            source: None,
             callees: HashMap::new(),
             arity,
             kinds,
@@ -135,6 +147,7 @@ struct Destination {
 
 struct Builder<'a> {
     graph: Function,
+    source: Option<&'static KernelSource>,
     callees: HashMap<Specialization, Arc<Function>>,
     arity: usize,
     kinds: &'a [BufferKind],
@@ -347,6 +360,9 @@ impl Builder<'_> {
 }
 
 impl KernelBuilder for Builder<'_> {
+    fn set_source(&mut self, source: &'static KernelSource) {
+        self.source = Some(source);
+    }
     fn reg_type(&self, r: Reg) -> Option<ValueType> {
         self.types.get(r.0 as usize).copied()
     }

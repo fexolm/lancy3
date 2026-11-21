@@ -10,7 +10,7 @@ use cranelift_codegen::{
 };
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
 use cranelift_jit::JITModule;
-use cranelift_module::{FuncId, Module};
+use cranelift_module::{FuncId, Linkage, Module};
 use splice::{Function, hir::Instr};
 use std::{
     borrow::Cow,
@@ -23,7 +23,12 @@ mod tests;
 
 // Only the public entry reads the argument arrays. Helpers use the host
 // calling convention with scalar values and (data, length) pairs.
-fn declare(module: &mut JITModule, f: &Function, entry: bool) -> splice::Result<FuncId> {
+fn declare(
+    module: &mut JITModule,
+    f: &Function,
+    entry: bool,
+    profile_id: Option<usize>,
+) -> splice::Result<FuncId> {
     let mut sig = module.make_signature();
     if entry {
         sig.params.extend([AbiParam::new(I64); 2]);
@@ -38,25 +43,36 @@ fn declare(module: &mut JITModule, f: &Function, entry: bool) -> splice::Result<
         }
     }
     sig.returns.push(AbiParam::new(I64));
-    module
-        .declare_anonymous_function(&sig)
-        .map_err(|e| e.to_string())
+    let id = if let Some(id) = profile_id {
+        let label = f.source().map_or("kernel", |source| source.name);
+        module.declare_function(&format!("splice_jit::{label}#{id}"), Linkage::Local, &sig)
+    } else {
+        module.declare_anonymous_function(&sig)
+    };
+    id.map_err(|e| e.to_string())
 }
 
-pub(super) struct KernelModule {
+pub(super) struct KernelModule<'a> {
     pub entry: FuncId,
     bodies: HashMap<FuncId, ir::Function>,
+    pub functions: HashMap<FuncId, &'a Function>,
 }
 
-impl KernelModule {
-    pub fn lower(module: &mut JITModule, root: &Function) -> splice::Result<Self> {
+impl<'a> KernelModule<'a> {
+    pub fn lower(module: &mut JITModule, root: &'a Function, debug: bool) -> splice::Result<Self> {
         let _span = tracing::debug_span!(target: "splice::compile", "lower_cranelift_ir").entered();
-        let entry = declare(module, root, true)?;
+        let profile = splice_jit::perf_enabled();
+        let entry = declare(module, root, true, profile.then_some(0))?;
         let mut pending = vec![(root, entry)];
         let mut ids = HashMap::from([(std::ptr::from_ref(root), entry)]);
         let mut bodies = HashMap::new();
+        let mut functions = HashMap::new();
+        let track_sources = debug || profile;
         let mut builder_ctx = FunctionBuilderContext::new();
         while let Some((f, id)) = pending.pop() {
+            if track_sources {
+                functions.insert(id, f);
+            }
             let mut ctx = module.make_context();
             ctx.func.name = UserFuncName::user(0, id.as_u32());
             ctx.func.signature = module
@@ -68,10 +84,11 @@ impl KernelModule {
             for inst in f.instructions() {
                 if let Instr::Call { function, .. } = inst {
                     let key = Arc::as_ptr(function);
+                    let profile_id = profile.then_some(ids.len());
                     let callee = match ids.entry(key) {
                         Entry::Occupied(slot) => *slot.get(),
                         Entry::Vacant(slot) => {
-                            let callee = declare(module, function, false)?;
+                            let callee = declare(module, function, false, profile_id)?;
                             pending.push((function, callee));
                             *slot.insert(callee)
                         }
@@ -84,25 +101,54 @@ impl KernelModule {
                     });
                 }
             }
+            let debug_bytes = if debug {
+                f.instructions()
+                    .iter()
+                    .filter_map(|inst| match inst {
+                        Instr::Debug(point) => Some(point.storage_bytes(f).max(1)),
+                        _ => None,
+                    })
+                    .max()
+                    .map(i32::try_from)
+                    .transpose()
+                    .map_err(|_| "debug frame exceeds Cranelift's stack slot limit")?
+                    .map(|size| size as u32)
+            } else {
+                None
+            };
             lower::emit(
                 FunctionBuilder::new(&mut ctx.func, &mut builder_ctx),
                 f,
                 id == entry,
                 &imports,
+                debug_bytes,
             );
             // Context::inline requires legalized and valid callee bodies.
             ctx.legalize(module.isa()).map_err(|e| e.to_string())?;
             ctx.verify(module.isa()).map_err(|e| e.to_string())?;
             bodies.insert(id, ctx.func);
         }
-        Ok(Self { entry, bodies })
+        Ok(Self {
+            entry,
+            bodies,
+            functions,
+        })
     }
 
     pub fn emit(
         self,
         ctx: &mut Context,
+        debug: bool,
         mut define: impl FnMut(FuncId, &mut Context) -> splice::Result<()>,
     ) -> splice::Result<()> {
+        if debug {
+            for (id, body) in self.bodies {
+                ctx.func = body;
+                define(id, ctx)?;
+                ctx.clear();
+            }
+            return Ok(());
+        }
         // The first inline copy can replace its standalone definition. Allow
         // one module's worth of additional copies across all shared callees.
         let remaining = self.bodies.values().map(|f| f.dfg.num_insts()).sum();

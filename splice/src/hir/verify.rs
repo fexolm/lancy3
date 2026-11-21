@@ -59,6 +59,23 @@ impl Function {
                 return Err(format!("invalid register at instruction {i}"));
             }
             match op {
+                Instr::Debug(point) => {
+                    let location = point.location;
+                    if location.file.is_empty()
+                        || location.directory.is_empty()
+                        || location.file.contains('\0')
+                        || location.directory.contains('\0')
+                        || location.line == 0
+                    {
+                        return Err(format!("invalid debug source location at instruction {i}"));
+                    }
+                    if point.variables.iter().any(|var| {
+                        matches!(var.value, crate::debug::Value::Slice(buffer)
+                            if buffer.index() >= self.buffer_kinds.len())
+                    }) {
+                        return Err(format!("invalid debug buffer at instruction {i}"));
+                    }
+                }
                 Instr::Simd { dst, inst, args } => {
                     let types: Vec<_> = args.iter().map(|&r| self.reg_type(r)).collect();
                     inst.validate(&types, &self.buffer_kinds)?;

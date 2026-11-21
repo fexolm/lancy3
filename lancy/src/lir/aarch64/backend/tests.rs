@@ -24,7 +24,7 @@ pub(crate) fn check_machine(
     case.check("aarch64-isel", || selected(root))?;
     case.check("aarch64-alloc", || allocated(root))?;
     if !case.encodings.is_empty() {
-        let code = super::emit_compiled(&compiled, simd).map_err(|e| e.to_string())?;
+        let code = super::emit_compiled(&compiled, simd, false).map_err(|e| e.to_string())?;
         for &(line, assertion) in &case.encodings {
             let parts: Vec<_> = assertion.split_whitespace().collect();
             let [profile, presence, mask, opcode] = parts.as_slice() else {

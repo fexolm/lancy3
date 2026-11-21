@@ -26,6 +26,15 @@ pub struct KernelSource {
 /// A nested body receives a fresh builder for its own function and arguments.
 pub trait KernelBuilder {
     fn set_source(&mut self, _source: &'static KernelSource) {}
+    fn debug_enabled(&self) -> bool {
+        false
+    }
+    fn debug_point(
+        &mut self,
+        _location: crate::debug::Location,
+        _variables: &[crate::debug::Variable],
+    ) {
+    }
     fn arg(&self, index: usize) -> Reg;
     fn local(&mut self) -> Reg;
     /// Scalar-only builders use the default type for every register.
@@ -95,8 +104,17 @@ impl dyn KernelBuilder + '_ {
 
 /// Explicitly materialize a verified portable IR for inspection or reuse.
 pub fn materialize(arity: usize, kinds: &[BufferKind], body: Body<'_>) -> Result<Function, String> {
+    materialize_with_options(arity, kinds, body, crate::BuildOptions::default())
+}
+
+pub fn materialize_with_options(
+    arity: usize,
+    kinds: &[BufferKind],
+    body: Body<'_>,
+    options: crate::BuildOptions,
+) -> Result<Function, String> {
     let _span = tracing::debug_span!(target: "splice::compile", "materialize_ir").entered();
-    let mut builder = FunctionBuilder::with_buffers(arity, kinds.to_vec());
+    let mut builder = FunctionBuilder::with_options(arity, kinds.to_vec(), options);
     body(&mut builder)?;
     builder.finish()
 }

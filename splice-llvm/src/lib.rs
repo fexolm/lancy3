@@ -8,6 +8,7 @@
 )))]
 compile_error!("splice-llvm supports x86-64 Windows and Linux, and AArch64 Linux");
 
+mod debug_info;
 mod jit;
 mod lower;
 mod target;
@@ -16,7 +17,7 @@ mod target;
 mod aarch64_tests;
 
 use inkwell::{context::Context, module::Module, targets::TargetMachine};
-use splice::{BufferArg, BufferKind, Codegen, Executable, Function};
+use splice::{BufferArg, BufferKind, BuildOptions, Codegen, Executable, Function};
 
 /// In-process LLVM code generator.
 pub struct Llvm;
@@ -102,6 +103,7 @@ type Entry = unsafe extern "C" fn(*const i32, *const Descriptor, *mut i32) -> i3
 
 /// Owns the LLVM session and the executable kernel it compiled.
 pub struct LlvmKernel {
+    _debug: Option<splice_jit::Registration>,
     _owner: jit::Jit,
     entry: Entry,
     arity: usize,
@@ -112,10 +114,14 @@ impl Codegen for Llvm {
     type Output = LlvmKernel;
 
     fn compile(function: &Function) -> splice::Result<Self::Output> {
-        let _span = tracing::debug_span!(target: "splice::compile", "compile", backend = "llvm", input = "portable").entered();
-        LlvmKernel::compile(function.arity(), function.buffer_kinds(), true, |ctx, m| {
-            lower::populate(ctx, m, function)
-        })
+        Self::compile_with_options(function, function.options())
+    }
+
+    fn compile_with_options(
+        function: &Function,
+        options: BuildOptions,
+    ) -> splice::Result<Self::Output> {
+        LlvmKernel::from_ir(function, options, true)
     }
 
     fn build(
@@ -123,10 +129,16 @@ impl Codegen for Llvm {
         buffers: &[BufferKind],
         body: splice::frontend::Body<'_>,
     ) -> splice::Result<Self::Output> {
-        let _span = tracing::debug_span!(target: "splice::compile", "compile", backend = "llvm", input = "staged").entered();
-        LlvmKernel::compile(arity, buffers, true, |ctx, m| {
-            lower::populate_direct(ctx, m, arity, buffers, body)
-        })
+        Self::build_with_options(arity, buffers, body, BuildOptions::default())
+    }
+
+    fn build_with_options(
+        arity: usize,
+        buffers: &[BufferKind],
+        body: splice::frontend::Body<'_>,
+        options: BuildOptions,
+    ) -> splice::Result<Self::Output> {
+        LlvmKernel::from_body(arity, buffers, body, options, true)
     }
 }
 
@@ -134,13 +146,14 @@ impl Codegen for LlvmManualSimd {
     type Output = LlvmKernel;
 
     fn compile(function: &Function) -> splice::Result<Self::Output> {
-        let _span = tracing::debug_span!(target: "splice::compile", "compile", backend = "llvm", input = "portable").entered();
-        LlvmKernel::compile(
-            function.arity(),
-            function.buffer_kinds(),
-            false,
-            |ctx, m| lower::populate(ctx, m, function),
-        )
+        Self::compile_with_options(function, function.options())
+    }
+
+    fn compile_with_options(
+        function: &Function,
+        options: BuildOptions,
+    ) -> splice::Result<Self::Output> {
+        LlvmKernel::from_ir(function, options, false)
     }
 
     fn build(
@@ -148,23 +161,75 @@ impl Codegen for LlvmManualSimd {
         buffers: &[BufferKind],
         body: splice::frontend::Body<'_>,
     ) -> splice::Result<Self::Output> {
-        let _span = tracing::debug_span!(target: "splice::compile", "compile", backend = "llvm", input = "staged").entered();
-        LlvmKernel::compile(arity, buffers, false, |ctx, m| {
-            lower::populate_direct(ctx, m, arity, buffers, body)
-        })
+        Self::build_with_options(arity, buffers, body, BuildOptions::default())
+    }
+
+    fn build_with_options(
+        arity: usize,
+        buffers: &[BufferKind],
+        body: splice::frontend::Body<'_>,
+        options: BuildOptions,
+    ) -> splice::Result<Self::Output> {
+        LlvmKernel::from_body(arity, buffers, body, options, false)
     }
 }
 
 impl LlvmKernel {
+    fn from_ir(
+        function: &Function,
+        options: BuildOptions,
+        auto_vectorize: bool,
+    ) -> splice::Result<Self> {
+        let _span = tracing::debug_span!(target: "splice::compile", "compile", backend = "llvm", input = "portable").entered();
+        Self::compile(
+            function.arity(),
+            function.buffer_kinds(),
+            auto_vectorize,
+            Some(function),
+            options,
+            |ctx, m| {
+                lower::populate_mode(ctx, m, function, options == BuildOptions::Debug)?;
+                Ok(function.source())
+            },
+        )
+    }
+
+    fn from_body(
+        arity: usize,
+        buffers: &[BufferKind],
+        body: splice::frontend::Body<'_>,
+        options: BuildOptions,
+        auto_vectorize: bool,
+    ) -> splice::Result<Self> {
+        if options == BuildOptions::Debug {
+            let f = splice::frontend::materialize_with_options(arity, buffers, body, options)?;
+            return Self::from_ir(&f, options, auto_vectorize);
+        }
+        let _span = tracing::debug_span!(target: "splice::compile", "compile", backend = "llvm", input = "staged").entered();
+        Self::compile(arity, buffers, auto_vectorize, None, options, |ctx, m| {
+            lower::populate_direct(ctx, m, arity, buffers, body)
+        })
+    }
+
     fn compile(
         arity: usize,
         buffers: &[BufferKind],
         auto_vectorize: bool,
-        populate: impl for<'ctx> FnOnce(&'ctx Context, &Module<'ctx>) -> Result<(), String>,
+        source: Option<&Function>,
+        options: BuildOptions,
+        populate: impl for<'ctx> FnOnce(
+            &'ctx Context,
+            &Module<'ctx>,
+        ) -> Result<
+            Option<&'static splice::frontend::KernelSource>,
+            String,
+        >,
     ) -> splice::Result<Self> {
         Llvm::version()?;
-        let (owner, entry) = jit::Jit::compile(auto_vectorize, populate)?;
+        let (owner, entry, registration) =
+            jit::Jit::compile(auto_vectorize, source, options, populate)?;
         Ok(Self {
+            _debug: registration,
             _owner: owner,
             entry,
             arity,
@@ -247,7 +312,7 @@ mod tests {
         for direct in [false, true] {
             let m = build_module(&ctx, &target, |ctx, m| {
                 if direct {
-                    lower::populate_direct(ctx, m, 1, &[], Box::new(staged))
+                    lower::populate_direct(ctx, m, 1, &[], Box::new(staged)).map(drop)
                 } else {
                     lower::populate(ctx, m, &ir)
                 }
@@ -363,7 +428,7 @@ mod tests {
         for direct in [true, false] {
             let m = build_module(&ctx, &target, |ctx, m| {
                 if direct {
-                    lower::populate_direct(ctx, m, 1, &kinds, Box::new(stage))
+                    lower::populate_direct(ctx, m, 1, &kinds, Box::new(stage)).map(drop)
                 } else {
                     lower::populate(ctx, m, &ir)
                 }
@@ -488,7 +553,7 @@ mod tests {
         for direct in [false, true] {
             let m = build_module(&ctx, &target, |ctx, m| {
                 if direct {
-                    lower::populate_direct(ctx, m, 1, &kinds, Box::new(stage))
+                    lower::populate_direct(ctx, m, 1, &kinds, Box::new(stage)).map(drop)
                 } else {
                     lower::populate(ctx, m, &ir)
                 }

@@ -8,5 +8,6 @@ description = "Lancy native code generation for Splice kernels"
 [dependencies]
 tracing.workspace = true
 splice = { path = "../splice" }
+splice-jit = { path = "../splice-jit" }
 splice-target = { path = "../splice-target" }
 lancy = { path = "../lancy" }

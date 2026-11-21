@@ -24,7 +24,7 @@ mod operand;
 #[cfg(all(test, target_arch = "aarch64"))]
 pub(crate) use backend::check_machine;
 #[cfg(target_arch = "aarch64")]
-pub(crate) use backend::{SITE_POINTER, Site, emit};
+pub(crate) use backend::{SITE_POINTER, Site, emit, emit_debug};
 
 pub use instruction::{Code, EncodeError, Feature, FeatureSet, Instruction};
 pub use operand::{Arrangement, ConditionCode, Operand, PredQual, Register, ShiftKind};

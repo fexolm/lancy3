@@ -7,25 +7,30 @@
 )))]
 compile_error!("splice-cranelift supports x86-64 Windows and Linux, and AArch64 Linux");
 
+mod debug_info;
 mod lower;
 mod module;
 
 use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{Module, default_libcall_names};
-use splice::{BufferArg, BufferKind, Codegen, Executable, Function, Result};
+use splice::{BufferArg, BufferKind, BuildOptions, Codegen, Executable, Function, Result};
 use std::sync::Mutex;
 
 /// Compile a specialized kernel or a portable Splice function with Cranelift.
 pub struct Cranelift;
 
-fn builder() -> Result<JITBuilder> {
+fn builder(debug: bool) -> Result<JITBuilder> {
     use cranelift_codegen::settings::{self, Configurable};
     use splice_target::Profile;
 
     let simd = splice_target::simd()?;
     let mut flags = settings::builder();
     for (name, value) in [
-        ("opt_level", "speed"),
+        ("opt_level", if debug { "none" } else { "speed" }),
+        (
+            "preserve_frame_pointers",
+            if debug { "true" } else { "false" },
+        ),
         ("enable_probestack", "true"),
         ("probestack_strategy", "inline"),
         // Definitions may be farther apart than a direct AArch64 call.
@@ -95,6 +100,7 @@ impl Drop for CodeMemory {
 
 /// Owns the executable code of the entry point and all its callees.
 pub struct CraneliftKernel {
+    _debug: Option<splice_jit::Registration>,
     // The module is Send. Only its owner needs exclusive access on drop.
     // Concurrent calls use the immutable machine code without taking a lock.
     _memory: Mutex<CodeMemory>,
@@ -107,22 +113,47 @@ impl Codegen for Cranelift {
     type Output = CraneliftKernel;
 
     fn compile(function: &Function) -> Result<CraneliftKernel> {
+        Self::compile_with_options(function, function.options())
+    }
+
+    fn build_with_options(
+        arity: usize,
+        kinds: &[BufferKind],
+        body: splice::frontend::Body<'_>,
+        options: BuildOptions,
+    ) -> Result<CraneliftKernel> {
+        Self::compile(&splice::frontend::materialize_with_options(
+            arity, kinds, body, options,
+        )?)
+    }
+
+    fn compile_with_options(function: &Function, options: BuildOptions) -> Result<CraneliftKernel> {
         let _span = tracing::debug_span!(target: "splice::compile", "compile", backend = "cranelift", input = "portable").entered();
-        let mut memory = CodeMemory(Some(JITModule::new(builder()?)));
+        let debug = options == BuildOptions::Debug;
+        splice_jit::prepare_perf_map();
+        let mut memory = CodeMemory(Some(JITModule::new(builder(debug)?)));
         let module = memory.0.as_mut().unwrap();
-        let kernel = module::KernelModule::lower(module, function)?;
+        let mut kernel = module::KernelModule::lower(module, function, debug)?;
         let id = kernel.entry;
-        kernel.emit(&mut module.make_context(), |id, ctx| {
+        let sources = std::mem::take(&mut kernel.functions);
+        let mut symbols = Vec::new();
+        kernel.emit(&mut module.make_context(), debug, |id, ctx| {
             tracing::debug_span!(target: "splice::compile", "emit_cranelift_code")
-                .in_scope(|| module.define_function(id, ctx).map_err(|e| e.to_string()))
+                .in_scope(|| module.define_function(id, ctx).map_err(|e| e.to_string()))?;
+            if let Some(source) = sources.get(&id) {
+                symbols.push((id, debug_info::Pending::new(module, ctx, source, debug)?));
+            }
+            Ok(())
         })?;
         tracing::debug_span!(target: "splice::compile", "finalize_cranelift_code")
             .in_scope(|| module.finalize_definitions().map_err(|e| e.to_string()))?;
         let address = module.get_finalized_function(id);
+        let registration = debug_info::publish(module, symbols, debug)?;
         // SAFETY: KernelModule declares the entry with the host C calling convention,
         // two pointer parameters and an i64 return. The kernel owns its module.
         let entry = unsafe { std::mem::transmute::<*const u8, Entry>(address) };
         Ok(CraneliftKernel {
+            _debug: registration,
             _memory: Mutex::new(memory),
             entry,
             arity: function.arity(),

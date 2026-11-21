@@ -5,6 +5,10 @@ use splice_target::Profile;
 use std::sync::Once;
 
 pub(crate) fn host_machine() -> Result<TargetMachine, String> {
+    host_machine_with_debug(false)
+}
+
+pub(crate) fn host_machine_with_debug(debug: bool) -> Result<TargetMachine, String> {
     static INIT: Once = Once::new();
     INIT.call_once(|| {
         let config = InitializationConfig {
@@ -59,7 +63,11 @@ pub(crate) fn host_machine() -> Result<TargetMachine, String> {
             &triple,
             &cpu,
             &features,
-            OptimizationLevel::Aggressive,
+            if debug {
+                OptimizationLevel::None
+            } else {
+                OptimizationLevel::Aggressive
+            },
             RelocMode::PIC,
             CodeModel::JITDefault,
         )

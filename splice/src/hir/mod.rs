@@ -73,6 +73,7 @@ impl Binary {
 
 #[derive(Clone, Debug)]
 pub enum Instr {
+    Debug(crate::debug::Point),
     Simd {
         dst: Option<Reg>,
         inst: Simd,
@@ -136,7 +137,14 @@ impl Instr {
             Self::Call { args, .. } | Self::Simd { args, .. } => (None, args),
             _ => (None, &[]),
         };
-        first.into_iter().chain(rest.iter().copied())
+        let variables = match self {
+            Self::Debug(point) => point.variables.as_ref(),
+            _ => &[],
+        };
+        first
+            .into_iter()
+            .chain(rest.iter().copied())
+            .chain(variables.iter().filter_map(|var| var.value.register()))
     }
 
     fn written(&self) -> Option<Reg> {
@@ -156,6 +164,7 @@ impl Instr {
 #[derive(Debug, Clone)]
 pub struct Function {
     source: Option<&'static crate::frontend::KernelSource>,
+    options: crate::BuildOptions,
     arity: usize,
     buffer_kinds: Vec<BufferKind>,
     needs_status: bool,
@@ -189,6 +198,10 @@ pub fn check_call(
 }
 
 impl Function {
+    pub fn options(&self) -> crate::BuildOptions {
+        self.options
+    }
+
     pub fn source(&self) -> Option<&'static crate::frontend::KernelSource> {
         self.source
     }
