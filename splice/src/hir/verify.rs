@@ -12,6 +12,7 @@ impl Function {
         if self.buffer_kinds.len() > u32::MAX as usize {
             return Err("too many buffer parameters".into());
         }
+        super::check_context_layout(&self.buffer_kinds)?;
         if self.code.is_empty() {
             return Err("empty scalar function".into());
         }
@@ -22,7 +23,7 @@ impl Function {
             if new_block || matches!(op, Instr::Label(_)) {
                 starts.push(i);
             }
-            new_block = matches!(op, Instr::Return(_) | Instr::Branch { .. } | Instr::Jump(_));
+            new_block = op.terminates();
             if let Instr::Label(l) = op {
                 let slot = targets.get_mut(l.0 as usize).ok_or("invalid label index")?;
                 if slot.replace(starts.len() - 1).is_some() {
@@ -59,6 +60,37 @@ impl Function {
                 return Err(format!("invalid register at instruction {i}"));
             }
             match op {
+                Instr::RustContextCall {
+                    dst,
+                    target,
+                    args,
+                    slices,
+                } => {
+                    super::check_rust_context_call(
+                        &self.buffer_kinds,
+                        *target,
+                        args.iter().map(|&r| self.checked_reg_type(r)),
+                        slices,
+                    )?;
+                    if self.reg_type(*dst) != ValueType::Scalar {
+                        return Err("invalid Rust context operation result type".into());
+                    }
+                }
+                Instr::RustCall { dst, import, args } => {
+                    import.validate(args.iter().map(|&reg| self.checked_reg_type(reg)))?;
+                    if self.reg_type(*dst) != ValueType::Scalar {
+                        return Err("invalid Rust import result type".into());
+                    }
+                }
+                Instr::RustPacketCall { dst, import, args } => {
+                    super::check_rust_packet_call(
+                        import,
+                        args.iter().map(|&reg| self.checked_reg_type(reg)),
+                    )?;
+                    if self.reg_type(*dst) != ValueType::Scalar {
+                        return Err("invalid Rust import result type".into());
+                    }
+                }
                 Instr::Debug(point) => {
                     let location = point.location;
                     if location.file.is_empty()
@@ -71,7 +103,7 @@ impl Function {
                     }
                     if point.variables.iter().any(|var| {
                         matches!(var.value, crate::debug::Value::Slice(buffer)
-                            if buffer.index() >= self.buffer_kinds.len())
+                            if self.buffer_kinds.get(buffer.index()).is_none_or(|kind| kind.context_signature().is_some()))
                     }) {
                         return Err(format!("invalid debug buffer at instruction {i}"));
                     }
@@ -104,6 +136,9 @@ impl Function {
                     .buffer_kinds
                     .get(buffer.index())
                     .ok_or_else(|| format!("invalid buffer at instruction {i}"))?;
+                if kind.context_signature().is_some() {
+                    return Err("slice memory operation cannot use Rust context".into());
+                }
                 if !matches!(op, Instr::BufferLen { .. }) && kind.element() != Element::I32 {
                     return Err("scalar element access requires an i32 buffer".into());
                 }
@@ -135,10 +170,10 @@ fn check_initialization(
     };
     // Resolve every edge, including jumps in unreachable blocks. Fallthrough
     // past the last block is an error only if execution can reach it.
-    let mut edges = Vec::new();
+    let mut edges = Vec::with_capacity(starts.len() - 1);
     for (block, &end) in starts.iter().skip(1).enumerate() {
         edges.push(match f.code[end - 1] {
-            Instr::Return(_) => [None, None],
+            Instr::Return(_) | Instr::TrapBounds => [None, None],
             Instr::Branch { yes, no, .. } => [Some(target(yes)?), Some(target(no)?)],
             Instr::Jump(l) => [Some(target(l)?), None],
             _ => [Some(block + 1), None],
@@ -151,8 +186,9 @@ fn check_initialization(
     let mut states = vec![None; edges.len()];
     states[0] = Some(entry);
     let mut queue = VecDeque::from([0]);
+    let mut bits = Vec::new();
     while let Some(block) = queue.pop_front() {
-        let mut bits = states[block].as_ref().unwrap().clone();
+        bits.clone_from(states[block].as_ref().unwrap());
         for pc in starts[block]..starts[block + 1] {
             let op = &f.code[pc];
             if let Some(r) = op

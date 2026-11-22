@@ -69,6 +69,8 @@ pub enum IrError {
     InvalidNumeric { inst: Inst, ty: Type },
     #[error("unknown SSA call {call:?} in {inst:?}")]
     UnknownCall { inst: Inst, call: Call },
+    #[error("invalid Rust import packet in {inst:?}")]
+    InvalidRustPacket { inst: Inst },
     #[error("wrong scalar arity at SSA call {call:?}: expected {expected}, got {actual}")]
     CallArity {
         call: Call,

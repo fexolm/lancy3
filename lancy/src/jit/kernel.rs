@@ -53,6 +53,9 @@ impl ScalarKernel {
                 .entered();
         splice_target::simd().map_err(CompileError::SimdProfile)?;
         let (source, ids) = function.verified_module()?;
+        // Scratch can materialize a pointer even for a numeric signature.
+        // Its raw caller must ensure initialization and bound every access.
+        let has_scratch = source.functions.values().any(|body| body.has_call_scratch);
         let code = if debug {
             crate::lir::emit_debug(source, &ids)?
         } else {
@@ -67,7 +70,8 @@ impl ScalarKernel {
             memory,
             entry,
             arity: function.arity(),
-            scalar_signature: function.return_type() == Type::I32
+            scalar_signature: !has_scratch
+                && function.return_type() == Type::I32
                 && function.param_types().iter().all(|&ty| ty == Type::I32),
             words: code.words,
             arg_words: function
@@ -79,7 +83,8 @@ impl ScalarKernel {
                 .return_type()
                 .bytes(Self::vector_bytes())
                 .div_ceil(8),
-            pointer_signature: function.param_types().contains(&Type::Ptr)
+            pointer_signature: has_scratch
+                || function.param_types().contains(&Type::Ptr)
                 || function.return_type() == Type::Ptr,
             debug: code.debug,
             #[cfg(target_arch = "aarch64")]
@@ -108,6 +113,11 @@ impl ScalarKernel {
         self.words * 2
     }
 
+    /// Whether external pointers or native call scratch require the raw ABI.
+    pub fn requires_raw_call(&self) -> bool {
+        self.pointer_signature
+    }
+
     pub fn call(&self, args: &[i32]) -> Result<i32, CallError> {
         if !self.scalar_signature {
             return Err(CallError::PointerSignature);
@@ -132,6 +142,8 @@ impl ScalarKernel {
     /// For declared slice parameters the length must be nonnegative and the
     /// entire slice must be valid and initialized, even for a zero-trip loop.
     /// Writable slices must be exclusive and shared slices remain immutable.
+    /// A Rust context dispatcher must receive a live, exclusive context token
+    /// of the exact type expected by that dispatcher.
     pub unsafe fn call_raw(&self, args: &[u64]) -> Result<u64, CallError> {
         if self.result_words != 1 || self.arity != self.arg_words {
             return Err(CallError::WideSignature);
@@ -145,7 +157,7 @@ impl ScalarKernel {
     /// Invoke a numeric signature. Values occupy consecutive little-endian words,
     /// each starting at a word boundary. Narrow scalars use the low bits.
     pub fn call_words(&self, args: &[u64], result: &mut [u64]) -> Result<(), CallError> {
-        if self.pointer_signature {
+        if self.requires_raw_call() {
             return Err(CallError::PointerSignature);
         }
         // SAFETY: verification prevents constructing pointers from numeric values.
@@ -217,6 +229,8 @@ impl ScalarKernel {
             1 => Err(CallError::OutOfBounds),
             2 => Err(CallError::DivisionByZero),
             3 => Err(CallError::DivisionOverflow),
+            4 => Err(CallError::IntegerOverflow),
+            5 => Err(CallError::RustPanic),
             _ => unreachable!("unknown native kernel status {status}"),
         }
     }

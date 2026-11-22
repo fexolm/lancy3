@@ -1,4 +1,7 @@
-use super::{Binary, Buffer, BufferKind, Function, Instr, Label, Reg, Simd, ValueType};
+use super::{
+    Binary, Buffer, BufferKind, ContextSlice, Function, Instr, Label, Reg, RustContextTarget, Simd,
+    ValueType,
+};
 use crate::frontend::{Body, KernelBuilder, KernelSource, Specialization};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -77,6 +80,26 @@ impl FunctionBuilder {
         self.function.code.push(instruction(dst));
         dst
     }
+
+    fn emit_context_call(
+        &mut self,
+        target: RustContextTarget,
+        args: &[Reg],
+        slices: &[ContextSlice],
+    ) -> crate::Result<Reg> {
+        super::check_rust_context_call(
+            &self.function.buffer_kinds,
+            target,
+            args.iter().map(|&r| self.reg_type(r)),
+            slices,
+        )?;
+        Ok(self.emit_value(|dst| Instr::RustContextCall {
+            dst,
+            target,
+            args: args.to_vec(),
+            slices: slices.to_vec(),
+        }))
+    }
     pub fn constant(&mut self, value: i32) -> Reg {
         self.emit_value(|dst| Instr::Const(dst, value))
     }
@@ -135,6 +158,14 @@ impl FunctionBuilder {
     }
     pub fn ret(&mut self, value: Reg) {
         self.function.code.push(Instr::Return(value));
+    }
+    pub fn rust_call(&mut self, import: super::RustCall, args: &[Reg]) -> crate::Result<Reg> {
+        import.validate(args.iter().map(|&r| self.function.checked_reg_type(r)))?;
+        Ok(self.emit_value(|dst| Instr::RustCall {
+            dst,
+            import,
+            args: args.to_vec(),
+        }))
     }
     pub fn call(&mut self, callee: Function, args: &[Reg]) -> Reg {
         self.call_shared(Arc::new(callee), args)
@@ -210,6 +241,21 @@ macro_rules! forward_mut {
 }
 
 impl KernelBuilder for FunctionBuilder {
+    fn rust_packet_call(
+        &mut self,
+        import: &'static super::RustPacketSymbol,
+        args: &[Reg],
+    ) -> crate::Result<Reg> {
+        super::check_rust_packet_call(import, args.iter().map(|&arg| self.reg_type(arg)))?;
+        Ok(self.emit_value(|dst| Instr::RustPacketCall {
+            dst,
+            import,
+            args: args.to_vec(),
+        }))
+    }
+    fn rust_call(&mut self, import: super::RustCall, args: &[Reg]) -> crate::Result<Reg> {
+        FunctionBuilder::rust_call(self, import, args)
+    }
     fn debug_enabled(&self) -> bool {
         self.function.options == crate::BuildOptions::Debug
     }
@@ -252,6 +298,31 @@ impl KernelBuilder for FunctionBuilder {
     }
     fn immediate_condition(&self, reg: Reg) -> Option<bool> {
         self.immediate_condition(reg)
+    }
+    fn trap_bounds(&mut self) -> crate::Result<()> {
+        self.function.code.push(Instr::TrapBounds);
+        Ok(())
+    }
+    fn rust_context_call_with_slices(
+        &mut self,
+        context: Buffer,
+        operation: u32,
+        args: &[Reg],
+        slices: &[ContextSlice],
+    ) -> crate::Result<Reg> {
+        self.emit_context_call(
+            RustContextTarget::Borrowed { context, operation },
+            args,
+            slices,
+        )
+    }
+    fn rust_static_call(
+        &mut self,
+        symbol: &'static crate::StaticRustSymbol,
+        args: &[Reg],
+        slices: &[ContextSlice],
+    ) -> crate::Result<Reg> {
+        self.emit_context_call(RustContextTarget::Static(symbol), args, slices)
     }
     fn call_kernel(
         &mut self,

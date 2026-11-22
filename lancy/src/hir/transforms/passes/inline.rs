@@ -269,7 +269,14 @@ impl<'a> Copier<'a> {
                     let result = self.src.result(i).unwrap();
                     (at, self.values[result]) = call(out, at, callee, &self.arguments(args));
                 } else {
-                    op.map_operands(|v| self.values[v]);
+                    if let Op::RustPacketCall(site) = op {
+                        let (import, operands) = self.src.packet_call(site);
+                        op = Op::RustPacketCall(
+                            out.add_packet_call(import, &self.arguments(operands)),
+                        );
+                    } else {
+                        op.map_operands(|v| self.values[v]);
+                    }
                     if let Some(result) = out.append(at, op) {
                         self.values[self.src.result(i).unwrap()] = result;
                     }

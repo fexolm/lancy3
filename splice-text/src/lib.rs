@@ -11,7 +11,7 @@
 //!     if double { value.wrapping_mul(2) } else { value.wrapping_add(5) }
 //! }
 //!
-//! let text: String = adjust::build::<Text>(true)?;
+//! let text = adjust::build::<Text>(adjust::BuildArgs { double: true })?;
 //! assert!(text.starts_with("fn adjust(value: i32)"));
 //! assert!(text.contains("value * "));
 //! assert!(!text.contains(" + "));
@@ -41,7 +41,7 @@ impl Codegen for Text {
         )?)
     }
 
-    fn compile(root: &Function) -> splice::Result<String> {
+    fn compile_raw(root: &Function) -> splice::Result<String> {
         let _span = tracing::debug_span!(target: "splice::compile", "render_text_ir").entered();
         let mut output = String::new();
         render(root, &mut output).map_err(|error| error.to_string())?;
@@ -100,6 +100,10 @@ fn render(root: &Function, out: &mut String) -> fmt::Result {
         for (i, kind) in f.buffer_kinds().iter().enumerate() {
             if i != 0 || f.arity() != 0 {
                 out.push_str(", ");
+            }
+            if kind.context_signature().is_some() {
+                write!(out, "{}: rust_context", buf(Buffer(i as u32)))?;
+                continue;
             }
             let access = if kind.writable() { "&mut " } else { "&" };
             write!(
@@ -235,6 +239,60 @@ fn render(root: &Function, out: &mut String) -> fmt::Result {
                     writeln!(out, "    if {} goto L{} else L{}", reg(*cond), yes.0, no.0)?
                 }
                 Instr::Return(value) => writeln!(out, "    return {}", reg(*value))?,
+                Instr::TrapBounds => writeln!(out, "    trap bounds")?,
+                Instr::RustContextCall {
+                    dst,
+                    target,
+                    args,
+                    slices,
+                } => {
+                    write!(out, "    {} = rust ", reg(*dst))?;
+                    match target {
+                        splice::hir::RustContextTarget::Borrowed { context, operation } => {
+                            write!(out, "context {}.{}(", context.0, operation)?;
+                        }
+                        splice::hir::RustContextTarget::Static(import) => {
+                            write!(out, "{}(", import.name())?;
+                        }
+                    }
+                    for (i, &r) in args.iter().enumerate() {
+                        if i != 0 {
+                            out.push_str(", ");
+                        }
+                        write!(out, "{}", reg(r))?;
+                    }
+                    out.push(')');
+                    for (index, slice) in slices.iter().enumerate() {
+                        if index == 0 {
+                            out.push_str(" borrows ");
+                        } else {
+                            out.push_str(", ");
+                        }
+                        let access = if slice.writable { "mut " } else { "" };
+                        write!(out, "{access}buffer {}", slice.buffer.0)?;
+                    }
+                    out.push('\n');
+                }
+                Instr::RustCall { dst, import, args } => {
+                    write!(out, "    {} = rust {}(", reg(*dst), import.symbol.name)?;
+                    for (i, &r) in args.iter().enumerate() {
+                        if i != 0 {
+                            out.push_str(", ");
+                        }
+                        write!(out, "{}", reg(r))?;
+                    }
+                    writeln!(out, ")")?;
+                }
+                Instr::RustPacketCall { dst, import, args } => {
+                    write!(out, "    {} = rust {}(", reg(*dst), import.name)?;
+                    for (index, &word) in args.iter().enumerate() {
+                        if index != 0 {
+                            out.push_str(", ");
+                        }
+                        write!(out, "{}", reg(word))?;
+                    }
+                    writeln!(out, ")")?;
+                }
                 Instr::Call {
                     dst,
                     function,
@@ -286,6 +344,11 @@ impl fmt::Display for BinaryExpr {
             Binary::Ge => ">=",
             Binary::Shl => "<<",
             Binary::Shr => ">>",
+            Binary::CheckedAdd => return write!(f, "checked_add({a}, {b})"),
+            Binary::CheckedSub => return write!(f, "checked_sub({a}, {b})"),
+            Binary::CheckedMul => return write!(f, "checked_mul({a}, {b})"),
+            Binary::CheckedShl => return write!(f, "checked_shl({a}, {b})"),
+            Binary::CheckedShr => return write!(f, "checked_shr({a}, {b})"),
             Binary::Min => return write!(f, "min({a}, {b})"),
             Binary::Max => return write!(f, "max({a}, {b})"),
         };

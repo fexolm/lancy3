@@ -1,5 +1,5 @@
 use splice::hir::{Binary, Function, Instr};
-use splice::{Executable, kernel};
+use splice::kernel;
 use splice_lancy::Lancy;
 
 #[derive(Clone, Copy, Debug)]
@@ -9,18 +9,13 @@ enum Curve {
     Forbidden,
 }
 
-// This is an ordinary Rust function without a kernel entry point.
+#[kernel]
 const fn next_coefficient(value: i32, step: i32) -> i32 {
     value * 3 - step
 }
 
 fn forbidden_coefficient() -> i32 {
     panic!("evaluated an unselected compile-time arm")
-}
-
-fn nonzero_offset(key: i32) -> i32 {
-    assert_ne!(key, 0, "evaluated host code after a selected early return");
-    42 / key
 }
 
 #[kernel]
@@ -37,7 +32,7 @@ fn offset(#[comptime] enabled: bool, #[comptime] curve: Curve, input: i32) -> i3
                 value
             }
             Curve::Fixed(value) => next_coefficient(value, 1),
-            Curve::Forbidden => forbidden_coefficient(),
+            Curve::Forbidden => comptime!(forbidden_coefficient()),
         }
     } else {
         1
@@ -75,11 +70,14 @@ fn host_control_and_helpers_fold_during_expansion() {
     ] {
         let raw = offset::ir(enabled, curve).unwrap();
         check_function(&raw, expected_offset);
-        let native = offset::build::<Lancy>(enabled, curve).unwrap();
+        let native = offset::build::<Lancy>(offset::BuildArgs { enabled, curve }).unwrap();
         for x in [-11, 0, 24] {
             let ordinary = offset(enabled, curve, x);
             assert_eq!(ordinary, x + expected_offset);
-            assert_eq!(native.call(&[x], &mut []).unwrap(), ordinary);
+            assert_eq!(
+                native.call(offset::CallArgs { input: x }).unwrap(),
+                ordinary
+            );
         }
     }
 }
@@ -114,13 +112,16 @@ fn runtime_control_survives_and_promotes_literal_initialized_locals() {
             .iter()
             .any(|i| matches!(i, Instr::Call { .. }))
     );
-    let native = accumulate::build::<Lancy>(23).unwrap();
+    let native = accumulate::build::<Lancy>(accumulate::BuildArgs { bias: 23 }).unwrap();
     for enabled in [-1, 0, 1] {
         for size in [-2, 0, 1, 6] {
             let ordinary = accumulate(23, enabled, size);
             let expected = (if enabled > 0 { 23 } else { 7 }) + (0..size).sum::<i32>();
             assert_eq!(ordinary, expected);
-            assert_eq!(native.call(&[enabled, size], &mut []).unwrap(), expected);
+            assert_eq!(
+                native.call(accumulate::CallArgs { enabled, size }).unwrap(),
+                expected
+            );
         }
     }
 }
@@ -133,7 +134,7 @@ fn early(#[comptime] key: i32, x: i32) -> i32 {
     if key == 0 {
         return x;
     }
-    x + nonzero_offset(key)
+    x + 42 / key
 }
 
 #[kernel]
@@ -163,7 +164,7 @@ fn evaluate_both(#[comptime] known: i32, x: i32) -> i32 {
 }
 
 #[test]
-fn same_const_kernel_runs_as_rust_at_build_time_and_as_a_native_callee_at_runtime() {
+fn a_const_kernel_can_be_evaluated_and_called_in_the_same_specialization() {
     let stage = evaluate_both::ir(4).unwrap();
     let calls = stage
         .instructions()
@@ -186,9 +187,12 @@ fn same_const_kernel_runs_as_rust_at_build_time_and_as_a_native_callee_at_runtim
             .iter()
             .any(|i| matches!(i, Instr::Bin(_, Binary::Mul, ..)))
     );
-    let native = evaluate_both::build::<Lancy>(4).unwrap();
+    let native = evaluate_both::build::<Lancy>(evaluate_both::BuildArgs { known: 4 }).unwrap();
     for x in [-7, 0, 11] {
-        assert_eq!(native.call(&[x], &mut []).unwrap(), evaluate_both(4, x));
+        assert_eq!(
+            native.call(evaluate_both::CallArgs { x }).unwrap(),
+            evaluate_both(4, x)
+        );
     }
 }
 
@@ -203,17 +207,23 @@ fn early_host_exit_skips_the_dead_suffix_but_preserves_sibling_runtime_paths() {
                     .any(|i| matches!(i, Instr::Bin(_, Binary::Add, ..)))
             );
         }
-        let native = early::build::<Lancy>(key).unwrap();
+        let native = early::build::<Lancy>(early::BuildArgs { key }).unwrap();
         for x in [-6, 0, 11] {
-            assert_eq!(native.call(&[x], &mut []).unwrap(), early(key, x));
+            assert_eq!(native.call(early::CallArgs { x }).unwrap(), early(key, x));
         }
     }
 
     for bypass in [false, true] {
-        let native = early_inside_runtime_arm::build::<Lancy>(bypass).unwrap();
+        let native =
+            early_inside_runtime_arm::build::<Lancy>(early_inside_runtime_arm::BuildArgs {
+                bypass,
+            })
+            .unwrap();
         for x in [-4, 0, 20] {
             assert_eq!(
-                native.call(&[x], &mut []).unwrap(),
+                native
+                    .call(early_inside_runtime_arm::CallArgs { x })
+                    .unwrap(),
                 early_inside_runtime_arm(bypass, x)
             );
         }
@@ -226,6 +236,7 @@ fn affine(#[comptime] subtract: bool, x: i32, bias: i32) -> i32 {
 }
 
 // A user-defined Rust helper can use this name like any other identifier.
+#[kernel]
 const fn runtime(x: i32) -> i32 {
     x * 3
 }
@@ -254,9 +265,12 @@ fn a_known_i32_is_a_plain_constant_argument_of_a_runtime_call() {
             .any(|op| matches!(op, Instr::Const(r, 13) if *r == args[1]))
     );
     assert!(!code.iter().any(|op| matches!(op, Instr::Bin(..))));
-    let jit = apply_affine::build::<Lancy>(4).unwrap();
+    let jit = apply_affine::build::<Lancy>(apply_affine::BuildArgs { base: 4 }).unwrap();
     for x in [-7, 0, 5] {
-        assert_eq!(jit.call(&[x], &mut []).unwrap(), apply_affine(4, x));
+        assert_eq!(
+            jit.call(apply_affine::CallArgs { x }).unwrap(),
+            apply_affine(4, x)
+        );
     }
 }
 
@@ -277,19 +291,18 @@ fn visit(#[comptime] plan: &Chain<'_>, x: i32, bias: i32) -> i32 {
 #[test]
 fn recursive_specialization_accepts_a_constant_in_an_ordinary_slot() {
     let plan = Chain::Reset(7, &Chain::Leaf);
-    let jit = visit::build::<Lancy>(&plan).unwrap();
+    let jit = visit::build::<Lancy>(visit::BuildArgs { plan: &plan }).unwrap();
     for x in [-8, 0, 9] {
-        assert_eq!(jit.call(&[x, 900], &mut []).unwrap(), visit(&plan, x, 900));
+        assert_eq!(
+            jit.call(visit::CallArgs { x, bias: 900 }).unwrap(),
+            visit(&plan, x, 900)
+        );
     }
 }
 
 #[kernel]
 fn gated_offset(#[comptime] key: i32, x: i32) -> i32 {
-    if key != 0 && x > 0 {
-        x + nonzero_offset(key)
-    } else {
-        x
-    }
+    if key != 0 && x > 0 { x + 42 / key } else { x }
 }
 
 #[test]
@@ -302,9 +315,12 @@ fn known_false_short_circuit_skips_expansion_of_the_outer_body() {
             .any(|op| matches!(op, Instr::Branch { .. }))
     );
     for key in [0, 3] {
-        let native = gated_offset::build::<Lancy>(key).unwrap();
+        let native = gated_offset::build::<Lancy>(gated_offset::BuildArgs { key }).unwrap();
         for x in [-2, 7] {
-            assert_eq!(native.call(&[x], &mut []).unwrap(), gated_offset(key, x));
+            assert_eq!(
+                native.call(gated_offset::CallArgs { x }).unwrap(),
+                gated_offset(key, x)
+            );
         }
     }
 }

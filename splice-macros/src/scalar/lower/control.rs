@@ -1,11 +1,9 @@
 //! Lower staged branches, matches, and loops into scalar control flow.
 use super::{Binding, LoopKind, Lower, Scalar, Stage, Value, err};
-use crate::scalar::Native;
 use proc_macro2::TokenStream;
 use quote::ToTokens;
 use syn::spanned::Spanned;
 use syn::visit::Visit;
-use syn::visit_mut::VisitMut;
 use syn::{Block, Error, Expr, Lit, Pat, Result};
 
 impl Lower<'_> {
@@ -24,9 +22,7 @@ impl Lower<'_> {
         if self.flow.loops.contains(&crate::scalar::flow::key(body)) {
             return Ok(None);
         }
-        let mut node = expr.clone();
-        Native.visit_expr_mut(&mut node);
-        self.host_raw(&node).map(Some)
+        self.host_code(expr, true).map(Some)
     }
     // Join two generated Rust arms of a host conditional. A terminating arm
     // can hand back an unreachable register for the surrounding build code.
@@ -44,19 +40,37 @@ impl Lower<'_> {
         }
         match to {
             Stage::Reg(t) => self.reg(v, t, at),
+            Stage::Word(_) => self.word(v, at),
             _ => Ok(v.code),
         }
     }
-    pub(super) fn if_expr(&self, i: &syn::ExprIf, hint: Option<Scalar>) -> Result<Value> {
-        let cond = self.expr(&i.cond)?;
-        let scope = if matches!(cond.stage, Stage::Reg(_)) {
-            self.nested_region()
-        } else {
+    pub(super) fn condition(&self, expr: &Expr) -> Result<(Value, Self)> {
+        if let Expr::Let(binding) = expr {
+            let value = self.host(self.expr(&binding.expr)?, &binding.expr)?;
+            let pattern = &binding.pat;
+            return Ok((
+                Value::new(Stage::Host, emit!(let #pattern = #value)),
+                self.with_pattern(pattern),
+            ));
+        }
+        let value = self.expr(expr)?;
+        let then_scope = if value.stage.is_host() {
             self.clone()
+        } else {
+            self.nested_region()
         };
-        let yes = scope.block_with_hint(&i.then_branch, hint)?;
+        Ok((value, then_scope))
+    }
+
+    pub(super) fn if_expr(&self, i: &syn::ExprIf, hint: Option<Scalar>) -> Result<Value> {
+        let (cond, then_scope) = self.condition(&i.cond)?;
+        let yes = then_scope.block_with_hint(&i.then_branch, hint)?;
         let no = if let Some((_, no)) = &i.else_branch {
-            scope.expr_with_hint(no, hint)?
+            if cond.stage.is_host() {
+                self.expr_with_hint(no, hint)?
+            } else {
+                then_scope.expr_with_hint(no, hint)?
+            }
         } else {
             Value::unit(emit!({}))
         };
@@ -181,7 +195,26 @@ impl Lower<'_> {
     }
     pub(super) fn for_expr(&self, f: &syn::ExprForLoop) -> Result<Value> {
         let Expr::Range(range) = &*f.expr else {
-            return self.unroll(f);
+            let Some(slice) = self.iterated_buffer(&f.expr) else {
+                return self.unroll(f);
+            };
+            let Pat::Reference(pattern) = &*f.pat else {
+                return err(
+                    &f.pat,
+                    "use a by-value reference pattern to read a scalar slice element",
+                );
+            };
+            let binding = crate::scalar::named(&pattern.pat)?;
+            let id = &binding.ident;
+            let index = quote::format_ident!(
+                "__splice_element_index",
+                span = proc_macro2::Span::mixed_site()
+            );
+            let setup = emit!(let buffer = #slice;
+                let __splice_start = __splice_builder.constant(0);
+                let __splice_limit = __splice_builder.buffer_len(buffer););
+            let read = emit!(let #id = __splice_builder.load(buffer, #index););
+            return self.counted_loop(f, binding, Scalar::Int, &index, setup, read);
         };
         let (Some(start), Some(stop)) = (&range.start, &range.end) else {
             return err(range, "expected start..end");
@@ -210,6 +243,33 @@ impl Lower<'_> {
         };
         let initial = self.operand(start, kind)?;
         let bound = self.reg(stop_value, kind, stop)?;
+        let setup = emit!(let (__splice_start, __splice_limit) = (#initial, #bound););
+        self.counted_loop(f, pat, kind, &pat.ident, setup, TokenStream::new())
+    }
+
+    pub(super) fn iterated_buffer<'a>(&self, iterable: &'a Expr) -> Option<&'a syn::ExprPath> {
+        let operand = match iterable {
+            Expr::MethodCall(call) if call.method == "iter" && call.args.is_empty() => {
+                &*call.receiver
+            }
+            other => other,
+        };
+        let Expr::Path(path) = operand else {
+            return None;
+        };
+        matches!(self.binding(path), Some(Binding::Buffer(ty)) if ty.elem == super::Elem::I32)
+            .then_some(path)
+    }
+
+    fn counted_loop(
+        &self,
+        f: &syn::ExprForLoop,
+        pat: &syn::PatIdent,
+        kind: Scalar,
+        index: &proc_macro2::Ident,
+        setup: TokenStream,
+        read: TokenStream,
+    ) -> Result<Value> {
         let mut scope = self.nested_region();
         scope.loop_kind = Some(LoopKind::Runtime);
         let id = &pat.ident;
@@ -222,21 +282,22 @@ impl Lower<'_> {
         let root = self.root;
         let contents = scope.delimit(emit!(#body; __splice_builder.jump(__splice_loop_next);));
         Ok(Value::unit(emit!({
-            let (__splice_start, __splice_limit) = (#initial, #bound);
-            let #id = __splice_builder.copy(__splice_start);
+            #setup
+            let #index = __splice_builder.copy(__splice_start);
             let (__splice_for_head, __splice_for_body, __splice_loop_next, __splice_loop_end) =
                 (__splice_builder.label(), __splice_builder.label(), __splice_builder.label(), __splice_builder.label());
             __splice_builder.jump(__splice_for_head);
             __splice_builder.mark(__splice_for_head);
-            #point
-            let __splice_cond = __splice_builder.binary(#root::hir::Binary::Lt, #id, __splice_limit);
+            let __splice_cond = __splice_builder.binary(#root::hir::Binary::Lt, #index, __splice_limit);
             __splice_builder.branch(__splice_cond, __splice_for_body, __splice_loop_end);
             __splice_builder.mark(__splice_for_body);
+            #read
+            #point
             #contents
             __splice_builder.mark(__splice_loop_next);
             let __splice_one = __splice_builder.constant(1);
-            let __splice_next = __splice_builder.binary(#root::hir::Binary::Add, #id, __splice_one);
-            __splice_builder.assign(#id, __splice_next);
+            let __splice_next = __splice_builder.binary(#root::hir::Binary::Add, #index, __splice_one);
+            __splice_builder.assign(#index, __splice_next);
             __splice_builder.jump(__splice_for_head);
             __splice_builder.mark(__splice_loop_end);
         })))
@@ -244,8 +305,10 @@ impl Lower<'_> {
     fn unroll(&self, f: &syn::ExprForLoop) -> Result<Value> {
         // The Rust iterator is evaluated once. The pattern (including references
         // and destructuring) exists only while staging this iteration.
-        let iterable = self.host_raw(&f.expr)?;
+        let iterable = self.plan_iterable(&f.expr)?;
         let pat = &f.pat;
+        let root = self.root;
+        let step = emit!(#root::frontend::scalar::specialization_step()?;);
 
         let (bindings, captures) = self.with_debug_pattern(pat);
         if !contains_transfer(&f.body) {
@@ -253,7 +316,7 @@ impl Lower<'_> {
             // variable. Only the operations in its selected steps reach IR.
             let body = bindings.block(&f.body)?;
             return Ok(Value::unit(
-                emit!({for #pat in #iterable { #captures #body; }}),
+                emit!({for #pat in #iterable { #step #captures #body; }}),
             ));
         }
         let mut scope = bindings.nested_region();
@@ -268,6 +331,7 @@ impl Lower<'_> {
             let mut __splice_reaches_end = false;
             let mut __splice_reaches_next = true;
             for #pat in #iterable {
+                #step
                 let __splice_loop_next = __splice_builder.label();
                 __splice_reaches_next = false;
                 #captures

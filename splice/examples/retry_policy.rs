@@ -1,4 +1,4 @@
-use splice::{Executable, kernel};
+use splice::kernel;
 use splice_lancy::Lancy;
 
 #[derive(splice::ComptimeKey)]
@@ -63,7 +63,7 @@ fn main() -> Result<(), String> {
         max_ms: 2_000,
         max_attempts: 8,
     };
-    let decide = retry_delay::build::<Lancy>(&policy)?;
+    let decide = retry_delay::build::<Lancy>(retry_delay::BuildArgs { policy: &policy })?;
 
     // A single native scalar call handles one failed delivery.
     for (status, attempt, retry_after_ms, expected) in [
@@ -75,7 +75,11 @@ fn main() -> Result<(), String> {
         (429, 8, 50, -1),
         (404, 0, 0, -1),
     ] {
-        let delay = decide.call(&[status, attempt, retry_after_ms], &mut [])?;
+        let delay = decide.call(retry_delay::CallArgs {
+            status,
+            attempt,
+            retry_after_ms,
+        })?;
         assert_eq!(delay, expected);
         println!("status {status}, attempt {attempt}, Retry-After {retry_after_ms} ms => {delay}");
     }

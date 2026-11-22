@@ -76,6 +76,27 @@ pub fn literal<T: std::fmt::Debug>(value: T) -> String {
     }
 }
 
+#[doc(hidden)]
+pub struct Literal<'a, T>(pub &'a T);
+
+/// Report opaque captures when a caller actually requests source output.
+#[doc(hidden)]
+pub trait TryLiteral {
+    fn try_literal(self) -> crate::Result<String>;
+}
+
+impl<T: std::fmt::Debug> TryLiteral for &Literal<'_, T> {
+    fn try_literal(self) -> crate::Result<String> {
+        Ok(literal(self.0))
+    }
+}
+
+impl<T> TryLiteral for &&Literal<'_, T> {
+    fn try_literal(self) -> crate::Result<String> {
+        Err("the specialized Rust value has no printable representation".into())
+    }
+}
+
 pub fn division_fault(divisor: i32) -> String {
     if divisor == 0 {
         r#"panic!("kernel integer division by zero")"#.to_owned()

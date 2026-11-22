@@ -1,6 +1,6 @@
 use super::{Builders, Workload};
 use criterion::Criterion;
-use splice::{BufferArg, Executable, Function, kernel};
+use splice::{BufferArg, Executable, kernel};
 use splice_cranelift::Cranelift;
 use splice_lancy::Lancy;
 use splice_llvm::LlvmManualSimd;
@@ -55,13 +55,13 @@ fn optional_checksum(
     n
 }
 
-fn compare_kernel(
+fn compare_kernel<S>(
     c: &mut Criterion,
     name: &'static str,
     inputs: [&[i32]; 3],
     expected: &[i32],
-    stage: impl Fn() -> splice::Result<Function>,
-    builds: Builders<'_>,
+    stage: impl Fn() -> Result<splice::TypedIr<S>, splice::BuildError>,
+    builds: Builders<'_, S>,
 ) {
     Workload {
         name,
@@ -118,9 +118,9 @@ pub(super) fn compare(c: &mut Criterion) {
         &expected,
         conditional_scale::ir,
         Builders {
-            lancy: &conditional_scale::build::<Lancy>,
-            cranelift: &conditional_scale::build::<Cranelift>,
-            llvm: &conditional_scale::build::<LlvmManualSimd>,
+            lancy: &|| conditional_scale::build::<Lancy>(conditional_scale::BuildArgs {}),
+            cranelift: &|| conditional_scale::build::<Cranelift>(conditional_scale::BuildArgs {}),
+            llvm: &|| conditional_scale::build::<LlvmManualSimd>(conditional_scale::BuildArgs {}),
         },
     );
     compare_kernel(
@@ -130,9 +130,21 @@ pub(super) fn compare(c: &mut Criterion) {
         &src,
         || optional_checksum::ir(black_box(false)),
         Builders {
-            lancy: &|| optional_checksum::build::<Lancy>(black_box(false)),
-            cranelift: &|| optional_checksum::build::<Cranelift>(black_box(false)),
-            llvm: &|| optional_checksum::build::<LlvmManualSimd>(black_box(false)),
+            lancy: &|| {
+                optional_checksum::build::<Lancy>(optional_checksum::BuildArgs {
+                    include_checksum: black_box(false),
+                })
+            },
+            cranelift: &|| {
+                optional_checksum::build::<Cranelift>(optional_checksum::BuildArgs {
+                    include_checksum: black_box(false),
+                })
+            },
+            llvm: &|| {
+                optional_checksum::build::<LlvmManualSimd>(optional_checksum::BuildArgs {
+                    include_checksum: black_box(false),
+                })
+            },
         },
     );
 }

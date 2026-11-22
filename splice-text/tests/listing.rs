@@ -100,7 +100,9 @@ fn identifier_in_path(x: i32) -> i32 {
 fn printer_and_builder_specialize_host_iterations() -> splice::Result<()> {
     assert_eq!(host_iterations(3, 5), 12);
     assert!(host_iterations::print(3)?.contains("x + 7"));
-    assert!(host_iterations::build::<Text>(3)?.contains(" = 7\n"));
+    assert!(
+        host_iterations::build::<Text>(host_iterations::BuildArgs { n: 3 })?.contains(" = 7\n")
+    );
     Ok(())
 }
 
@@ -110,19 +112,24 @@ fn division_under_runtime_control_faults_only_in_the_selected_arm() -> splice::R
     let text = print_division::print(0)?;
     assert!(text.contains("if x > 0"));
     assert!(text.contains("panic!") && text.contains("else") && text.contains('9'));
-    assert!(print_division::build::<Text>(0)?.contains(" / "));
+    assert!(print_division::build::<Text>(print_division::BuildArgs { d: 0 })?.contains(" / "));
     assert!(print_division::print(4)?.contains("x + 25"));
     let remainder = print_remainder::print(i32::MIN, -1)?;
     let (prefix, _) = remainder.split_once("signed division overflow").unwrap();
     assert!(prefix.contains("marks [0] = x"));
-    assert!(print_remainder::build::<Text>(i32::MIN, -1)?.contains(" % "));
+    assert!(
+        print_remainder::build::<Text>(print_remainder::BuildArgs { a: i32::MIN, d: -1 })?
+            .contains(" % ")
+    );
     Ok(())
 }
 
 #[test]
 fn source_substitutions_leave_other_identifiers_intact() -> splice::Result<()> {
     assert!(identifier_in_path::print()?.contains("__splice_source_child_0"));
-    assert!(identifier_in_path::build::<Text>()?.contains("return"));
+    assert!(
+        identifier_in_path::build::<Text>(identifier_in_path::BuildArgs {})?.contains("return")
+    );
     Ok(())
 }
 
@@ -155,14 +162,16 @@ fn adjust(#[comptime] steps: &[Step], data: &mut [i32]) -> i32 {
 #[test]
 fn only_the_chosen_comptime_arm_is_printed() -> splice::Result<()> {
     fn specialize<B: Codegen>(step: &Step) -> splice::Result<B::Output> {
-        apply::build::<B>(step)
+        Ok(apply::build::<B>(apply::BuildArgs { step })?.into_inner())
     }
     let scale: String = specialize::<Text>(&Step::Scale(13))?;
     assert_eq!(
         scale,
         "fn apply(x: i32) -> i32 {\n    %r2 = 13\n    %r3 = x * %r2\n    %r1 = %r3\n    goto L0\nL0:\n    return %r1\n}\n"
     );
-    let offset: String = apply::build::<Text>(&Step::Offset(-9))?;
+    let offset = apply::build::<Text>(apply::BuildArgs {
+        step: &Step::Offset(-9),
+    })?;
     assert!(offset.contains(" = -9\n"));
     assert!(offset.contains(" + "));
     assert!(!offset.contains(" * "));
@@ -172,8 +181,11 @@ fn only_the_chosen_comptime_arm_is_printed() -> splice::Result<()> {
 #[test]
 fn unrolled_calls_reuse_equal_steps_and_keep_the_runtime_loop() -> splice::Result<()> {
     let steps = [Step::Scale(3), Step::Offset(7), Step::Scale(3)];
-    let listing: String = adjust::build::<Text>(&steps)?;
-    assert_eq!(listing, Text::compile(&adjust::ir(&steps)?)?);
+    let listing = adjust::build::<Text>(adjust::BuildArgs { steps: &steps })?;
+    assert_eq!(
+        listing.as_inner(),
+        Text::compile(&adjust::ir(&steps)?)?.as_inner()
+    );
     assert!(listing.starts_with("fn adjust(data: &mut [i32]) -> i32"));
     assert!(listing.contains("if %r"));
     assert!(listing.contains("data[%r"));

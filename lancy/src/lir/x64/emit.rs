@@ -200,7 +200,7 @@ fn emit_mode(module: &Module<CompiledFunction>, debug: bool) -> Result<Code, Com
             root: is_root,
             entries: &entries,
             epilogue,
-            failures: [None; 3],
+            failures: [None; 5],
             debug,
             points: &mut points,
         }
@@ -299,7 +299,7 @@ struct Emitter<'a> {
     root: bool,
     entries: &'a DenseMap<FunctionId, CodeLabel>,
     epilogue: CodeLabel,
-    failures: [Option<CodeLabel>; 3],
+    failures: [Option<CodeLabel>; 5],
     debug: bool,
     points: &'a mut Vec<(u32, u64)>,
 }
@@ -827,6 +827,11 @@ impl Emitter<'_> {
                 rm32!(cmp, r(0), 1)?;
                 a.jae(fail)
             }
+            Inst::CheckOverflow(..) => {
+                let fail = *self.failures[3].get_or_insert_with(|| a.create_label());
+                a.test(r(0), r(0))?;
+                a.jne(fail)
+            }
             Inst::Movsxd(..) => a.movsxd(q(1), r(0)),
             Inst::Lea(_, addr) => a.lea(q(allocs.len() - 1), memory(addr, allocs)),
             Inst::Masked {
@@ -932,6 +937,45 @@ impl Emitter<'_> {
                 a.nop()
             }
             Inst::StoreArg(i, ty, _) => store(a, ty, slot(frame.slots + CHILD_ARGS + i), reg(0)),
+            Inst::CallScratch(..) => a.lea(q(0), slot(frame.scratch_base)),
+            Inst::StorePacketWord(offset, _) => store(
+                a,
+                Type::I32,
+                ptr(r11 + (disp(frame.scratch_base) + offset as i32)),
+                reg(0),
+            ),
+            Inst::RustCall(..) | Inst::RustPacketCall(..) | Inst::RustContextCall(..) => {
+                let entry = match inst {
+                    Inst::RustCall(import, ..) => (import.resolve)() as usize,
+                    Inst::RustPacketCall(import, _) => {
+                        let (symbol, words, count) = if cfg!(windows) {
+                            (rcx, rdx, r8)
+                        } else {
+                            (rdi, rsi, rdx)
+                        };
+                        a.mov(symbol, std::ptr::from_ref(import) as u64)?;
+                        a.lea(words, slot(frame.scratch_base))?;
+                        a.mov(count, u64::from(import.arity))?;
+                        splice_target::abi::invoke_packet_import as *const () as usize
+                    }
+                    Inst::RustContextCall(import, ..) => import.address(),
+                    _ => unreachable!(),
+                };
+                // Every generated frame enters with RSP 8 mod 16. Leave the
+                // Win64 shadow space intact and save the volatile workspace
+                // outside it. SysV requires no shadow space.
+                let shadow = if cfg!(windows) { 32 } else { 0 };
+                a.sub(rsp, shadow + 8)?;
+                a.mov(qword_ptr(rsp + shadow), r11)?;
+                a.mov(r10, entry as u64)?;
+                a.call(r10)?;
+                a.mov(r11, qword_ptr(rsp + shadow))?;
+                a.add(rsp, shadow + 8)?;
+                let fail = *self.failures[4].get_or_insert_with(|| a.create_label());
+                a.mov(r10, rax)?;
+                a.shr(r10, 32)?;
+                a.jne(fail)
+            }
             Inst::Call { target, .. } => {
                 if self.root {
                     a.mov(slot(frame.slots + 1), r11)?;

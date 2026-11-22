@@ -19,6 +19,17 @@ impl Lower<'_> {
             let rendered = match stmt {
                 Stmt::Local(local) => {
                     let init = local.init.as_ref().expect("validated local");
+                    if let Expr::Struct(literal) = &*init.expr {
+                        let value = scope.source_syntax(&init.expr)?;
+                        let pat = &local.pat;
+                        let binding = scope.aggregate_local(pat, literal)?;
+                        statements.push(binding);
+                        let line = emit!(format!("let {} = {};", stringify!(#pat), #value));
+                        statements.push(
+                            emit!({ __splice_text.push_str(&#line); __splice_text.push('\n'); }),
+                        );
+                        continue;
+                    }
                     let hint = match &local.pat {
                         syn::Pat::Type(p) => Scalar::from_type(&p.ty, scope.types),
                         _ => None,
@@ -43,12 +54,14 @@ impl Lower<'_> {
                             expr,
                             Expr::MethodCall(_) | Expr::Call(_) | Expr::Assign(_) | Expr::Binary(_)
                         )
-                        && let Ok(code) = scope.host_raw(expr)
-                        && matches!(scope.expr(expr)?.stage, Stage::Host | Stage::Unit)
+                        && scope.host_only(expr)
                     {
-                        // Execute discarded host operations while specializing the listing.
-                        statements.push(emit!(#code;));
-                        continue;
+                        let value = scope.expr(expr)?;
+                        if matches!(value.stage, Stage::Host | Stage::Unit) {
+                            // Use the same checked host operation as the executable factory.
+                            statements.push(emit!(#value;));
+                            continue;
+                        }
                     }
                     let rendered = scope.source_expr(expr, last.then_some(result_type))?;
                     if last {
@@ -93,19 +106,14 @@ impl Lower<'_> {
         match e {
             Expr::Block(b) => return Ok(braces(self.source_body(&b.block)?)),
             Expr::If(i) => {
-                let cond = self.expr(&i.cond)?;
-                let scope = if cond.stage.is_host() {
-                    self.clone()
-                } else {
-                    self.nested_region()
-                };
+                let (cond, scope) = self.condition(&i.cond)?;
                 let yes = braces(scope.source_body(&i.then_branch)?);
                 let no = i
                     .else_branch
                     .as_ref()
                     .map(|(_, e)| {
                         if cond.stage.is_host() {
-                            scope.source_expr(e, hint)
+                            self.source_expr(e, hint)
                         } else {
                             let no = scope.isolated_expr(e, hint)?;
                             Ok(if matches!(&**e, Expr::If(_)) {
@@ -168,13 +176,14 @@ impl Lower<'_> {
             }
             Expr::ForLoop(f) => {
                 let pat = &f.pat;
-                if !matches!(&*f.expr, Expr::Range(_)) {
-                    let iter = self.host_raw(&f.expr)?;
+                if !matches!(&*f.expr, Expr::Range(_)) && self.iterated_buffer(&f.expr).is_none() {
+                    let iter = self.plan_iterable(&f.expr)?;
                     let mut scope = self.with_pattern(pat);
                     scope.loop_kind = Some(LoopKind::Unrolled);
                     let body = scope.source_body(&f.body)?;
                     return Ok(emit!({ let mut text = String::new();
                         for #pat in #iter {
+                            #root::frontend::scalar::specialization_step()?;
                             let body = #body;
                             let block = #support::block(&body);
                             if body.contains("break '__splice_iteration") { text.push_str("'__splice_iteration: "); }
@@ -240,6 +249,9 @@ impl Lower<'_> {
                 let Expr::Path(p) = &*call.func else {
                     return self.source_syntax(e);
                 };
+                if crate::scalar::methods::method_path(p) {
+                    return self.source_syntax(e);
+                }
                 if super::simd::constructor_arity(&p.path).is_some() {
                     return self.source_syntax(e);
                 }
@@ -263,9 +275,13 @@ impl Lower<'_> {
                             }
                         })
                         .collect::<Result<Vec<_>>>()?;
-                    return Ok(
-                        emit!(#path::__splice_source_call #fish (#(#args,)* __splice_source)?),
-                    );
+                    let kernel =
+                        emit!(#path::__splice_source_call #fish (#(#args,)* __splice_source)?);
+                    return if p.qself.is_none() && !p.path.is_ident(self.name) {
+                        Ok(self.dispatch_call(p, kernel, self.source_syntax(e)?))
+                    } else {
+                        Ok(kernel)
+                    };
                 }
             }
             Expr::Return(_) | Expr::Break(_) | Expr::Continue(_) => {
@@ -312,7 +328,11 @@ impl Lower<'_> {
             code,
         }) = self.expr_with_hint(e, hint)
         {
-            return Ok(emit!(#support::literal(#code)));
+            return Ok(emit!({
+                use #support::TryLiteral as _;
+                let value = &(#code);
+                (&#support::Literal(value)).try_literal()?
+            }));
         }
         self.source_syntax(e)
     }
@@ -361,6 +381,10 @@ impl Lower<'_> {
         }
         struct Mark(Ident);
         impl VisitMut for Mark {
+            fn visit_field_value_mut(&mut self, field: &mut syn::FieldValue) {
+                field.colon_token = Some(Default::default());
+                self.visit_expr_mut(&mut field.expr);
+            }
             fn visit_expr_mut(&mut self, expr: &mut Expr) {
                 let id = &self.0;
                 *expr = syn::parse_quote!(#id);

@@ -1,5 +1,5 @@
 use splice::simd::Lane;
-use splice::{BufferArg, Codegen, Executable, kernel};
+use splice::{Codegen, Executable, kernel};
 use splice_cranelift::Cranelift;
 use splice_lancy::Lancy;
 use splice_llvm::{Llvm, LlvmManualSimd};
@@ -31,19 +31,16 @@ fn checked_passes(src: &[i32], first: &mut [i32], second: &mut [i32]) -> i32 {
 fn check<B: Codegen<Output: Executable>>() {
     let src = [i32::MAX, 3, -2];
     for kernel in [
-        apply_coefficients::build::<B>().unwrap(),
+        apply_coefficients::build::<B>(apply_coefficients::BuildArgs {}).unwrap(),
         B::compile(&apply_coefficients::ir().unwrap()).unwrap(),
     ] {
         let mut dst = [0; 3];
         assert_eq!(
-            kernel.call(
-                &[],
-                &mut [
-                    BufferArg::Read(&src),
-                    BufferArg::Read(&[2, 7]),
-                    BufferArg::Write(&mut dst),
-                ]
-            ),
+            kernel.call(apply_coefficients::CallArgs {
+                src: &src,
+                coefficients: &[2, 7],
+                dst: &mut dst,
+            }),
             Ok(3)
         );
         assert_eq!(dst, [5, 13, 3]);
@@ -51,47 +48,38 @@ fn check<B: Codegen<Output: Executable>>() {
         let mut short = [99];
         assert!(
             kernel
-                .call(
-                    &[],
-                    &mut [
-                        BufferArg::Read(&src),
-                        BufferArg::Read(&[2, 7]),
-                        BufferArg::Write(&mut short),
-                    ]
-                )
+                .call(apply_coefficients::CallArgs {
+                    src: &src,
+                    coefficients: &[2, 7],
+                    dst: &mut short,
+                })
                 .is_err()
         );
         assert_eq!(short, [5]);
 
         assert_eq!(
-            kernel.call(
-                &[],
-                &mut [
-                    BufferArg::Read(&[]),
-                    BufferArg::Read(&[]),
-                    BufferArg::Write(&mut []),
-                ]
-            ),
+            kernel.call(apply_coefficients::CallArgs {
+                src: &[],
+                coefficients: &[],
+                dst: &mut [],
+            }),
             Ok(-1)
         );
     }
 
     for kernel in [
-        checked_passes::build::<B>().unwrap(),
+        checked_passes::build::<B>(checked_passes::BuildArgs {}).unwrap(),
         B::compile(&checked_passes::ir().unwrap()).unwrap(),
     ] {
         let mut first = [99; 3];
         let mut second = [99];
         assert!(
             kernel
-                .call(
-                    &[],
-                    &mut [
-                        BufferArg::Read(&src),
-                        BufferArg::Write(&mut first),
-                        BufferArg::Write(&mut second),
-                    ]
-                )
+                .call(checked_passes::CallArgs {
+                    src: &src,
+                    first: &mut first,
+                    second: &mut second
+                })
                 .is_err()
         );
         assert_eq!(first, [i32::MIN, 4, -1]);
@@ -117,7 +105,7 @@ fn forwarding_between_independent_slices_preserves_each_write() {
     fn check<B: Codegen<Output: Executable>>() {
         let ir = independent_stores::ir().unwrap();
         for code in [
-            independent_stores::build::<B>().unwrap(),
+            independent_stores::build::<B>(independent_stores::BuildArgs {}).unwrap(),
             B::compile(&ir).unwrap(),
         ] {
             for (i, j, result, expected_a, expected_b) in [
@@ -128,10 +116,14 @@ fn forwarding_between_independent_slices_preserves_each_write() {
                 let mut a = [7, 8];
                 let mut b = [9, 10];
                 assert_eq!(
-                    code.call(
-                        &[i, j, 41, 53],
-                        &mut [BufferArg::Write(&mut a), BufferArg::Write(&mut b)],
-                    )
+                    code.call(independent_stores::CallArgs {
+                        i,
+                        j,
+                        x: 41,
+                        y: 53,
+                        a: &mut a,
+                        b: &mut b
+                    })
                     .ok(),
                     result
                 );
@@ -158,18 +150,15 @@ fn vector_store_reload_preserves_the_short_store_prefix() {
         let lanes = Lane::<u16>::lanes();
         let src: Vec<_> = (0..lanes).map(|i| 65534 - i as u16).collect();
         for code in [
-            vector_store_reload::build::<B>().unwrap(),
+            vector_store_reload::build::<B>(vector_store_reload::BuildArgs {}).unwrap(),
             B::compile(&vector_store_reload::ir().unwrap()).unwrap(),
         ] {
             for len in [0, lanes - 1, lanes, lanes + 1] {
                 let mut out = vec![17; lanes + 1];
-                let result = code.call(
-                    &[],
-                    &mut [
-                        BufferArg::ReadU16(&src),
-                        BufferArg::WriteU16(&mut out[..len]),
-                    ],
-                );
+                let result = code.call(vector_store_reload::CallArgs {
+                    src: &src,
+                    dst: &mut out[..len],
+                });
                 if len >= lanes {
                     assert_eq!(result, Ok(1));
                 } else {
@@ -229,15 +218,20 @@ fn packet_loops_preserve_tail_and_partial_store_semantics() {
         for guarded in [true, false] {
             let ir = packet_passes::ir(guarded).unwrap();
             for code in [
-                packet_passes::build::<B>(guarded).unwrap(),
+                packet_passes::build::<B>(packet_passes::BuildArgs {
+                    validate_lengths: guarded,
+                })
+                .unwrap(),
                 B::compile(&ir).unwrap(),
             ] {
                 for (len, adjust) in [(n, 0), (n, 2), (n, i32::MIN), (lanes + 2, 1)] {
                     let mut out = vec![257; len];
-                    let result = code.call(
-                        &[n as i32, adjust],
-                        &mut [BufferArg::ReadU16(&src), BufferArg::WriteU16(&mut out)],
-                    );
+                    let result = code.call(packet_passes::CallArgs {
+                        n: n as i32,
+                        adjust,
+                        src: &src,
+                        dst: &mut out,
+                    });
                     let mut expected = vec![257; len];
                     let first = u16::from(adjust != 0);
                     if len == n {
@@ -284,13 +278,20 @@ fn invariant_loop_branch(n: i32, mode: i32, out: &mut [i32]) -> i32 {
 #[test]
 fn invariant_loop_branch_matches_rust_on_both_build_paths() {
     const SENTINEL: i32 = -123_456_789;
-    let check = |name: &str, kernel: &dyn Executable| {
+    fn check<E: Executable>(
+        name: &str,
+        kernel: splice::TypedKernel<invariant_loop_branch::Signature, E>,
+    ) {
         for (n, mode) in [(0, 0), (0, 1), (4, 0), (4, -1)] {
             let mut expected = [SENTINEL; 5];
             let sum = invariant_loop_branch(n, mode, &mut expected);
             let mut out = [SENTINEL; 5];
             let actual = kernel
-                .call(&[n, mode], &mut [BufferArg::Write(&mut out)])
+                .call(invariant_loop_branch::CallArgs {
+                    n,
+                    mode,
+                    out: &mut out,
+                })
                 .unwrap();
             assert_eq!((actual, out), (sum, expected), "{name}, n={n}, mode={mode}");
         }
@@ -300,23 +301,27 @@ fn invariant_loop_branch_matches_rust_on_both_build_paths() {
             let mut out = [SENTINEL; 5];
             assert!(
                 kernel
-                    .call(&[6, mode], &mut [BufferArg::Write(&mut out)])
+                    .call(invariant_loop_branch::CallArgs {
+                        n: 6,
+                        mode,
+                        out: &mut out
+                    })
                     .is_err(),
                 "{name}, mode={mode}"
             );
             assert_eq!(out, expected, "{name}, mode={mode}");
         }
-    };
+    }
     let ir = invariant_loop_branch::ir().unwrap();
-    check("Lancy", &Lancy::compile(&ir).unwrap());
-    check("Cranelift", &Cranelift::compile(&ir).unwrap());
-    check("LLVM", &Llvm::compile(&ir).unwrap());
+    check("Lancy", Lancy::compile(&ir).unwrap());
+    check("Cranelift", Cranelift::compile(&ir).unwrap());
+    check("LLVM", Llvm::compile(&ir).unwrap());
     check(
         "direct Lancy",
-        &invariant_loop_branch::build::<Lancy>().unwrap(),
+        invariant_loop_branch::build::<Lancy>(invariant_loop_branch::BuildArgs {}).unwrap(),
     );
     check(
         "direct LLVM",
-        &invariant_loop_branch::build::<Llvm>().unwrap(),
+        invariant_loop_branch::build::<Llvm>(invariant_loop_branch::BuildArgs {}).unwrap(),
     );
 }

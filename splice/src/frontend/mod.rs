@@ -2,13 +2,19 @@
 //! may select its native IR or materialize the portable Splice function.
 pub use crate::hir::FunctionBuilder;
 #[doc(hidden)]
+pub mod evaluation;
+#[doc(hidden)]
+pub mod native;
+#[doc(hidden)]
 pub mod scalar;
 #[doc(hidden)]
 pub mod source;
 mod specialization;
+#[doc(hidden)]
+pub mod trait_methods;
 pub use specialization::{ComptimeKey, KeyArgument, MaybeKey, Specialization};
 
-use crate::hir::{Binary, Buffer, BufferKind, Function, Label, Reg, Simd, ValueType};
+use crate::hir::{Binary, Buffer, BufferKind, ContextSlice, Function, Label, Reg, Simd, ValueType};
 
 /// A function body is staged once against the builder selected by its backend.
 /// Borrowed comptime parameters may live only for the duration of the build.
@@ -60,6 +66,54 @@ pub trait KernelBuilder {
     fn jump(&mut self, label: Label);
     fn branch(&mut self, cond: Reg, yes: Label, no: Label);
     fn ret(&mut self, value: Reg);
+    fn trap_bounds(&mut self) -> crate::Result<()> {
+        Err("this builder does not support an explicit bounds trap".into())
+    }
+    fn rust_context_call(
+        &mut self,
+        context: Buffer,
+        operation: u32,
+        args: &[Reg],
+    ) -> crate::Result<Reg> {
+        self.rust_context_call_with_slices(context, operation, args, &[])
+    }
+    #[doc(hidden)]
+    fn rust_context_call_with_slices(
+        &mut self,
+        _context: Buffer,
+        _operation: u32,
+        _args: &[Reg],
+        _slices: &[ContextSlice],
+    ) -> crate::Result<Reg> {
+        Err("this builder does not support Rust context operations".into())
+    }
+    #[doc(hidden)]
+    fn rust_static_call(
+        &mut self,
+        symbol: &'static crate::StaticRustSymbol,
+        _args: &[Reg],
+        _slices: &[ContextSlice],
+    ) -> crate::Result<Reg> {
+        Err(format!(
+            "backend cannot link Rust operation {}",
+            symbol.name()
+        ))
+    }
+    /// Emit a typed, effectful Rust operation at this point in the function.
+    fn rust_call(&mut self, import: crate::hir::RustCall, _args: &[Reg]) -> crate::Result<Reg> {
+        Err(format!(
+            "backend cannot link Rust import {}",
+            import.symbol.name
+        ))
+    }
+    #[doc(hidden)]
+    fn rust_packet_call(
+        &mut self,
+        import: &'static crate::hir::RustPacketSymbol,
+        _args: &[Reg],
+    ) -> crate::Result<Reg> {
+        Err(format!("backend cannot link Rust import {}", import.name))
+    }
     /// Reject mismatched call arguments before staging the callee body.
     fn call_kernel(
         &mut self,

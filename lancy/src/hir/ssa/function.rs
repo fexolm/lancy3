@@ -7,7 +7,7 @@ mod verify;
 
 pub(crate) use verify::VerifiedBody;
 
-use super::{Op, Terminator, Type, Value};
+use super::{Op, RustPacketImport, Terminator, Type, Value};
 use crate::hir::IrError;
 use crate::support::slotmap::{DenseMap, SlotMap};
 use std::{ops::Range, sync::Arc};
@@ -64,6 +64,7 @@ impl Span {
 }
 
 crate::slot_key!(pub Call);
+crate::slot_key!(pub PacketCall);
 
 #[derive(Clone, Debug)]
 struct CallData {
@@ -81,6 +82,7 @@ pub struct Function {
     insts: SlotMap<Inst, InstData>,
     edges: DenseMap<Edge, (Block, Span)>,
     calls: DenseMap<Call, CallData>,
+    packets: DenseMap<PacketCall, (&'static RustPacketImport, Span)>,
     operands: Vec<Value>,
     types: DenseMap<Value, Type>,
     slice_base: usize,
@@ -106,6 +108,7 @@ impl Function {
             insts: SlotMap::new(),
             edges: DenseMap::new(),
             calls: DenseMap::new(),
+            packets: DenseMap::new(),
             operands: Vec::new(),
             types: DenseMap::with_capacity(arity),
             slice_base: arity,
@@ -226,13 +229,13 @@ impl Function {
     }
     pub(crate) fn visit_operands(&self, i: Inst, mut visit: impl FnMut(Value)) {
         let mut op = *self.op(i);
-        if let Op::Call(site) = op {
-            self.call(site).1.iter().copied().for_each(visit);
-        } else {
-            op.map_operands(|v| {
+        match op {
+            Op::Call(site) => self.call(site).1.iter().copied().for_each(visit),
+            Op::RustPacketCall(site) => self.packet_call(site).1.iter().copied().for_each(visit),
+            _ => op.map_operands(|v| {
                 visit(v);
                 v
-            });
+            }),
         }
     }
     pub fn terminator(&self, b: Block) -> &Terminator {
@@ -282,6 +285,11 @@ impl Function {
     pub fn call(&self, call: Call) -> (&Arc<Function>, &[Value]) {
         let data = &self.calls[call];
         (&data.callee, &self.operands[data.args.range()])
+    }
+
+    pub fn packet_call(&self, call: PacketCall) -> (&'static RustPacketImport, &[Value]) {
+        let (import, args) = self.packets[call];
+        (import, &self.operands[args.range()])
     }
 
     pub fn create_block(&mut self) -> Block {
@@ -335,7 +343,7 @@ impl Function {
                 Op::Bin(op, v, _) => {
                     op.result_type(self.types.get(v).copied().unwrap_or(Type::I32))
                 }
-                Op::PtrOffset(..) => Type::Ptr,
+                Op::PtrOffset(..) | Op::CallScratch(_) => Type::Ptr,
                 Op::Load(ty, _) => ty,
                 Op::Copy(v) => self.types.get(v).copied().unwrap_or(Type::I32),
                 Op::Call(c) => self
@@ -361,6 +369,15 @@ impl Function {
     pub fn add_call(&mut self, callee: Arc<Function>, args: &[Value]) -> Call {
         let args = Span::append(&mut self.operands, args);
         self.calls.insert(CallData { callee, args })
+    }
+
+    pub fn add_packet_call(
+        &mut self,
+        import: &'static RustPacketImport,
+        args: &[Value],
+    ) -> PacketCall {
+        let args = Span::append(&mut self.operands, args);
+        self.packets.insert((import, args))
     }
     pub fn add_edge(&mut self, target: Block, args: &[Value]) -> Edge {
         let args = Span::append(&mut self.operands, args);

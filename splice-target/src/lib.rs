@@ -1,4 +1,5 @@
 //! SIMD profiles and native vector widths shared by the frontend and JITs.
+pub mod abi;
 mod profile;
 
 pub use profile::{Profile, Simd, simd};

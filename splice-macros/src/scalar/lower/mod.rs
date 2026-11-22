@@ -1,16 +1,27 @@
 //! Lower expressions, calls and bindings while tracking their stage and scalar type.
+mod aggregate;
+mod calls;
+mod comptime;
+mod context;
 mod control;
+pub(crate) use calls::select_free;
+pub(super) use comptime::can_fold;
+pub(crate) use comptime::uses_stage_requirements;
+pub(super) use context::{Context, context_argument};
+mod host;
+use host::guarded_negation;
 mod memory;
+mod owned;
 pub(super) mod simd;
 mod source;
-pub(super) use simd::{BufferType, Elem};
+mod word;
+pub(super) use simd::BufferType;
+pub(crate) use simd::Elem;
 
 use proc_macro2::{Ident, TokenStream};
 use quote::ToTokens;
 use std::collections::HashMap;
 use syn::spanned::Spanned;
-use syn::visit::Visit;
-use syn::visit_mut::VisitMut;
 use syn::{BinOp, Block, Error, Expr, Lit, Pat, Path, Result, Stmt, UnOp};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -55,6 +66,7 @@ impl Scalar {
 enum Stage {
     Host,
     Literal(Scalar),
+    Word(Scalar),
     Reg(Scalar),
     Buffer(BufferType),
     Unit,
@@ -67,7 +79,7 @@ impl Stage {
 
     fn materialized(self) -> Self {
         match self {
-            Self::Literal(t) => Self::Reg(t),
+            Self::Literal(t) | Self::Word(t) => Self::Reg(t),
             Self::Host => Self::Reg(Scalar::Inferred),
             stage => stage,
         }
@@ -75,6 +87,9 @@ impl Stage {
 }
 #[derive(Clone, Copy)]
 pub(super) enum Binding {
+    Aggregate(usize),
+    Context,
+    Word(Scalar),
     Host(usize), // Region in which the Rust binding was introduced.
     Columns,
     Reg(Scalar, bool),
@@ -112,19 +127,35 @@ pub(super) struct Lower<'a> {
     pub(super) root: &'a Path,
     pub(super) types: &'a [&'a Ident],
     pub(super) name: &'a Ident,
+    pub(super) generics: &'a syn::Generics,
     pub(super) result_type: Scalar,
+    pub(super) unit_result: bool,
     pub(super) formals: &'a [Binding],
     pub(super) bindings: HashMap<String, Binding>,
+    pub(super) aggregates: &'a std::cell::RefCell<Vec<aggregate::Layout>>,
     pub(super) debug_names: std::collections::BTreeMap<String, Ident>,
     pub(super) fish: TokenStream,
     pub(super) loop_kind: Option<LoopKind>,
     pub(super) region_depth: usize,
     pub(super) source_fault: Option<syn::Lifetime>,
+    pub(super) evaluator_return: Option<syn::Lifetime>,
     pub(super) flow: &'a super::flow::Flow,
+    pub(super) context: Option<&'a Context>,
 }
 
 fn err<T>(at: impl ToTokens, msg: &str) -> Result<T> {
     Err(Error::new_spanned(at, msg))
+}
+
+fn checked_operator(op: &str) -> Option<&'static str> {
+    Some(match op {
+        "Add" => "CheckedAdd",
+        "Sub" => "CheckedSub",
+        "Mul" => "CheckedMul",
+        "Shl" => "CheckedShl",
+        "Shr" => "CheckedShr",
+        _ => return None,
+    })
 }
 
 fn vec_macro(path: &Path) -> bool {
@@ -134,84 +165,6 @@ fn vec_macro(path: &Path) -> bool {
             && path.segments[1].ident == "vec")
 }
 
-struct HostCheck<'a> {
-    names: &'a HashMap<String, Binding>,
-    region: usize,
-    outer: Vec<Ident>,
-    error: Option<Error>,
-    division: bool,
-}
-impl<'ast> Visit<'ast> for HostCheck<'_> {
-    fn visit_expr_binary(&mut self, binary: &'ast syn::ExprBinary) {
-        self.division |= matches!(binary.op, BinOp::Div(_) | BinOp::Rem(_));
-        syn::visit::visit_expr_binary(self, binary);
-    }
-    fn visit_expr_path(&mut self, p: &'ast syn::ExprPath) {
-        if let Some(id) = p.path.get_ident() {
-            match self.names.get(&id.to_string()) {
-                Some(Binding::Host(depth)) if *depth < self.region && !self.outer.contains(id) => {
-                    self.outer.push(id.clone());
-                }
-                Some(Binding::Reg(..) | Binding::Buffer(_) | Binding::Columns) => {
-                    self.error = Some(Error::new_spanned(
-                        id,
-                        "runtime value used in a comptime expression",
-                    ));
-                }
-                _ => {}
-            }
-        }
-        syn::visit::visit_expr_path(self, p);
-    }
-    fn visit_macro(&mut self, m: &'ast syn::Macro) {
-        if vec_macro(&m.path) {
-            let tokens = &m.tokens;
-            match syn::parse2::<Expr>(emit!([#tokens])) {
-                Ok(elements) => self.visit_expr(&elements),
-                Err(error) => self.error = Some(error),
-            }
-            return;
-        }
-        self.error = Some(Error::new_spanned(
-            m,
-            "put nested Rust macros in a host helper outside the kernel",
-        ));
-    }
-}
-
-struct GuardHostDivision<'a, 'ast>(&'a Lower<'ast>);
-impl VisitMut for GuardHostDivision<'_, '_> {
-    fn visit_macro_mut(&mut self, m: &mut syn::Macro) {
-        if vec_macro(&m.path) {
-            let tokens = &m.tokens;
-            let mut elements: Expr = syn::parse_quote!([#tokens]);
-            self.visit_expr_mut(&mut elements);
-            m.tokens = match elements {
-                Expr::Array(a) => a.elems.into_token_stream(),
-                Expr::Repeat(a) => {
-                    let (value, len) = (a.expr, a.len);
-                    emit!(#value; #len)
-                }
-                _ => unreachable!("validated vec! arguments"),
-            };
-        }
-    }
-    fn visit_expr_mut(&mut self, expr: &mut Expr) {
-        // These Rust bodies have their own execution context. A branch in the
-        // surrounding JIT function cannot terminate inside one of them.
-        if matches!(expr, Expr::Async(_) | Expr::Const(_) | Expr::Closure(_)) {
-            return;
-        }
-        syn::visit_mut::visit_expr_mut(self, expr);
-        if let Expr::Binary(binary) = expr
-            && matches!(binary.op, BinOp::Div(_) | BinOp::Rem(_))
-        {
-            let code = self.0.host_binary(&binary.left, &binary.op, &binary.right);
-            *expr = syn::parse_quote!(#code);
-        }
-    }
-    fn visit_item_mut(&mut self, _: &mut syn::Item) {}
-}
 impl Lower<'_> {
     // Each runtime arm builds independently. A host-selected return, break
     // or continue can skip the rest of that arm without skipping its siblings.
@@ -230,38 +183,6 @@ impl Lower<'_> {
         let label = self.region();
         emit!(#[allow(unused_labels)] #label: { #code; })
     }
-    fn host_raw(&self, e: &Expr) -> Result<TokenStream> {
-        let mut check = HostCheck {
-            names: &self.bindings,
-            region: self.region_depth,
-            outer: Vec::new(),
-            error: None,
-            division: false,
-        };
-        check.visit_expr(e);
-        if let Some(error) = check.error {
-            return Err(error);
-        }
-        let code = if self.region_depth > 0 && check.division {
-            let mut expr = e.clone();
-            GuardHostDivision(self).visit_expr_mut(&mut expr);
-            emit!(#expr)
-        } else {
-            emit!(#e)
-        };
-        let outer = check.outer;
-        if outer.is_empty() {
-            return Ok(code);
-        }
-        // The generator visits both runtime arms. A method call in one arm
-        // must not mutate a captured host collection that the other arm sees.
-        Ok(emit!({
-            let __splice_borrowed = (#(&#outer,)*);
-            let __splice_value = #code;
-            let _ = &__splice_borrowed;
-            __splice_value
-        }))
-    }
     fn host(&self, v: Value, at: impl ToTokens) -> Result<TokenStream> {
         match v.stage {
             Stage::Host | Stage::Literal(_) => Ok(v.code),
@@ -272,6 +193,9 @@ impl Lower<'_> {
         let root = self.root;
         let want = want.base();
         let bits = match (v.stage, want) {
+            (Stage::Word(_), _) => {
+                return Ok(emit!(#root::frontend::scalar::RunArg::reg(#v,__splice_builder)));
+            }
             (Stage::Reg(t), _)
                 if t.base() == want
                     || (!matches!(
@@ -356,11 +280,35 @@ impl Lower<'_> {
         let op = Ident::new(op, proc_macro2::Span::call_site());
         emit!({let (a,z)=(#x,#y); __splice_builder.binary(#root::hir::Binary::#op,a,z)})
     }
+    fn operator_bin(&self, op: &str, x: TokenStream, y: TokenStream) -> TokenStream {
+        let Some(checked) = checked_operator(op) else {
+            return self.bin(op, x, y);
+        };
+        match crate::overflow::explicit_mode() {
+            Some(mode) => self.bin(if mode { checked } else { op }, x, y),
+            None => {
+                let root = self.root;
+                let op = Ident::new(op, proc_macro2::Span::call_site());
+                let checked = Ident::new(checked, proc_macro2::Span::call_site());
+                emit!({
+                    let (a, b) = (#x, #y);
+                    let op = if cfg!(debug_assertions) {
+                        #root::hir::Binary::#checked
+                    } else {
+                        #root::hir::Binary::#op
+                    };
+                    __splice_builder.binary(op, a, b)
+                })
+            }
+        }
+    }
     fn stage_join(&self, a: Stage, z: Stage, at: impl ToTokens) -> Result<Stage> {
         use Stage::*;
         match (a, z) {
             (Never, other) | (other, Never) => Ok(other),
             (a, z) if a == z => Ok(a),
+            (Word(t), Host | Literal(_)) | (Host | Literal(_), Word(t)) => Ok(Word(t)),
+            (Word(t), Reg(_)) | (Reg(_), Word(t)) => Ok(Reg(t)),
             (Reg(a), Reg(b)) if a.base() == b.base() => Ok(Reg(a.base())),
             (Buffer(a), Buffer(b)) if a.elem == b.elem => Ok(Buffer(BufferType {
                 write: a.write && b.write,
@@ -410,6 +358,7 @@ impl Lower<'_> {
     fn binding(&self, p: &syn::ExprPath) -> Option<Binding> {
         self.bindings.get(&p.path.get_ident()?.to_string()).copied()
     }
+
     fn path(&self, p: &syn::ExprPath) -> Value {
         match self.binding(p) {
             Some(Binding::Reg(t, true)) => {
@@ -418,7 +367,17 @@ impl Lower<'_> {
                 Value::new(Stage::Reg(t), emit!(__splice_builder.copy(#p)))
             }
             Some(Binding::Reg(t, false)) => Value::new(Stage::Reg(t), p),
+            Some(Binding::Word(t)) => Value::new(Stage::Word(t), p),
             Some(Binding::Buffer(writable)) => Value::new(Stage::Buffer(writable), p),
+            Some(Binding::Context | Binding::Aggregate(_)) => {
+                let root = self.root;
+                Value::new(
+                    Stage::Reg(Scalar::Inferred),
+                    emit! {
+                        Err::<#root::hir::Reg, String>("a runtime Rust object cannot be used as a scalar operand".into())?
+                    },
+                )
+            }
             _ => Value::new(Stage::Host, p),
         }
     }
@@ -433,7 +392,11 @@ impl Lower<'_> {
     }
 
     fn return_value(&self, value: Value, at: impl ToTokens) -> Result<TokenStream> {
-        let value = self.reg(value, self.result_type, at)?;
+        let value = if self.unit_result && value.stage == Stage::Unit {
+            emit!({#value; __splice_builder.constant(0)})
+        } else {
+            self.reg(value, self.result_type, at)?
+        };
         Ok(emit!({
             let __splice_value = #value;
             __splice_builder.assign(__splice_result, __splice_value);
@@ -494,6 +457,7 @@ impl Lower<'_> {
             let mut ident = ident.clone();
             ident.set_span(ident.span().located_at(proc_macro2::Span::mixed_site()));
             let value = match binding {
+                Binding::Word(_) => return None,
                 Binding::Reg(kind, _) => {
                     let ty = match kind {
                         Scalar::Bool => emit!(Bool),
@@ -507,7 +471,7 @@ impl Lower<'_> {
                     let constant = Self::constant_name(&ident);
                     emit!(#root::debug::Value::Constant(#constant))
                 }
-                Binding::Columns => return None,
+                Binding::Columns | Binding::Context | Binding::Aggregate(_) => return None,
             };
             Some(emit!(#root::debug::Variable { name: #name, value: #value }))
         });
@@ -556,6 +520,9 @@ impl Lower<'_> {
         if init.diverge.is_some() || !local.attrs.is_empty() {
             return err(local, "expected a kernel let binding");
         }
+        if let Expr::Struct(literal) = &*init.expr {
+            return self.aggregate_local(&local.pat, literal);
+        }
         let hint = if let Pat::Type(t) = &local.pat {
             Scalar::from_type(&t.ty, self.types)
         } else {
@@ -563,6 +530,9 @@ impl Lower<'_> {
         };
         let value = self.expr_with_hint(&init.expr, hint)?;
         let pat = &local.pat;
+        if matches!(pat, Pat::Wild(_)) {
+            return Ok(emit!(let _ = #value;));
+        }
         if value.stage.is_host() && !self.flow.locals.contains(&super::flow::key(local)) {
             super::bind_pattern(&mut self.bindings, pat, Binding::Host(self.region_depth));
             let (binding, ty) = match pat {
@@ -599,7 +569,11 @@ impl Lower<'_> {
         let name = super::named(pat)?;
         let id = &name.ident;
         let mutable = name.mutability.is_some();
-        let (binding, rhs) = if let Stage::Buffer(writable) = value.stage {
+        let (binding, rhs) = if let Stage::Word(t) = value.stage
+            && !mutable
+        {
+            (Binding::Word(t), value.code)
+        } else if let Stage::Buffer(writable) = value.stage {
             if mutable {
                 return err(pat, "a runtime slice binding must be a fixed reference");
             }
@@ -613,7 +587,7 @@ impl Lower<'_> {
         } else {
             let annotation = ty.and_then(|ty| Scalar::from_type(ty, self.types));
             let scalar = match value.stage {
-                Stage::Reg(t) | Stage::Literal(t) => t,
+                Stage::Reg(t) | Stage::Word(t) | Stage::Literal(t) => t,
                 Stage::Host => match annotation {
                     Some(t @ (Scalar::Int | Scalar::Bool)) => t,
                     _ => Scalar::Inferred,
@@ -645,13 +619,17 @@ impl Lower<'_> {
     }
 
     fn expr_with_hint(&self, e: &Expr, hint: Option<Scalar>) -> Result<Value> {
+        if self.source_fault.is_none()
+            && let Some(context) = self.context
+            && let Some(value) = context.lower(self, e, hint)?
+        {
+            return Ok(value);
+        }
         if let Some(v) = self.simd_constructor(e, hint)? {
             return Ok(v);
         }
-        if matches!(
-            e,
-            Expr::Index(_) | Expr::Cast(_) | Expr::MethodCall(_) | Expr::Reference(_)
-        ) && !simd::uses_lane(e)
+        if matches!(e, Expr::Reference(_))
+            && !simd::uses_lane(e)
             && let Ok(code) = self.host_raw(e)
         {
             return Ok(Value::new(Stage::Host, code));
@@ -687,11 +665,12 @@ impl Lower<'_> {
             Expr::Continue(x) if x.label.is_none() => self.loop_jump(e, true),
             Expr::Break(x) if x.label.is_none() && x.expr.is_none() => self.loop_jump(e, false),
             Expr::Return(x) => {
-                let Some(arg) = &x.expr else {
-                    return err(e, "a kernel return requires a value");
+                let value = match &x.expr {
+                    Some(arg) => self.expr_with_hint(arg, Some(self.result_type))?,
+                    None if self.unit_result => Value::unit(emit!(())),
+                    None => return err(e, "a kernel return requires a value"),
                 };
-                let ret =
-                    self.return_value(self.expr_with_hint(arg, Some(self.result_type))?, arg)?;
+                let ret = self.return_value(value, e)?;
                 // A host-known return transfers control in the generator too.
                 // The common exit remains the target of earlier runtime returns.
                 let region = self.region();
@@ -713,7 +692,16 @@ impl Lower<'_> {
                         } else {
                             v.stage
                         };
-                        return Ok(Value::new(stage, emit!(#op (#v))));
+                        let code = if matches!(op, UnOp::Deref(_)) {
+                            self.known_deref(v)
+                        } else if matches!(op, UnOp::Not(_)) {
+                            self.host_not(v)
+                        } else if guarded_negation(x) {
+                            self.host_negation(v)
+                        } else {
+                            emit!(#op (#v))
+                        };
+                        return Ok(Value::new(stage, code));
                     }
                     _ => return err(x, "expected an operand"),
                 };
@@ -722,7 +710,7 @@ impl Lower<'_> {
                 }
                 let code = match op {
                     UnOp::Neg(_) if t != Scalar::Bool => {
-                        self.bin("Sub", emit!(__splice_builder.constant(0)), v.code)
+                        self.operator_bin("Sub", emit!(__splice_builder.constant(0)), v.code)
                     }
                     UnOp::Not(_) => self.bin("Xor", v.code, emit!(__splice_builder.constant(-1))),
                     _ => return err(x, "unsupported runtime unary operator"),
@@ -739,9 +727,13 @@ impl Lower<'_> {
             }
             Expr::Macro(m) if m.mac.path.is_ident("comptime") => {
                 let expr = m.mac.parse_body::<Expr>()?;
-                Ok(Value::new(Stage::Host, self.host_raw(&expr)?))
+                Ok(Value::new(Stage::Host, self.required(&expr, hint)?))
             }
-            Expr::Field(_) | Expr::Tuple(_) => Ok(Value::new(Stage::Host, self.host_raw(e)?)),
+            Expr::Field(field) => match self.aggregate_field(field) {
+                Some((value, kind, _)) => Ok(Value::new(Stage::Word(kind), value)),
+                None => Ok(Value::new(Stage::Host, self.host_raw(e)?)),
+            },
+            Expr::Tuple(_) => Ok(Value::new(Stage::Host, self.host_raw(e)?)),
             _ => err(
                 e,
                 "unsupported scalar kernel expression; use comptime!(...) for host calculations",
@@ -769,8 +761,8 @@ impl Lower<'_> {
         let binding = self.binding(p);
         if matches!(binding, Some(Binding::Host(_))) {
             let rhs = self.host(self.expr(right)?, right)?;
-            let code = if let Some((_, op)) = op {
-                emit!(#left #op #rhs)
+            let code = if let Some((kind, op)) = op {
+                self.host_compound(left, rhs, op, kind)
             } else {
                 emit!(#left = #rhs)
             };
@@ -786,7 +778,7 @@ impl Lower<'_> {
                 self.simd_operator(t, op, vec![emit!(#left), rhs], left)?
                     .code
             } else {
-                self.bin(op, emit!(#left), rhs)
+                self.operator_bin(op, emit!(#left), rhs)
             }
         } else {
             rhs
@@ -809,6 +801,9 @@ impl Lower<'_> {
         } else {
             self.paired_operands(&x.left, &x.right, hint, None)?
         };
+        if matches!(left.stage, Stage::Word(_)) || matches!(right.stage, Stage::Word(_)) {
+            return self.word_binary(x, left, right);
+        }
         let t = match (left.stage, right.stage) {
             (Stage::Reg(t), _) | (_, Stage::Reg(t)) => t,
             (Stage::Host | Stage::Literal(_), Stage::Literal(_) | Stage::Host) => {
@@ -863,127 +858,7 @@ impl Lower<'_> {
         }
         Ok(Value::new(
             Stage::Reg(output),
-            self.bin(operation, lhs, rhs),
-        ))
-    }
-    fn host_binary(&self, lhs: impl ToTokens, op: &BinOp, rhs: impl ToTokens) -> TokenStream {
-        let operation = match op {
-            BinOp::Div(_) if self.region_depth > 0 => emit!(Div),
-            BinOp::Rem(_) if self.region_depth > 0 => emit!(Rem),
-            _ => return emit!((#lhs) #op (#rhs)),
-        };
-        let (root, region) = (self.root, self.region());
-        let fault = if let Some(label) = &self.source_fault {
-            emit! {
-                __splice_source.transfer = Some(#root::frontend::source::Transfer::Return);
-                break #label (#root::frontend::source::division_fault(z));
-            }
-        } else {
-            emit! {
-                let (a, z) = (__splice_builder.constant(a), __splice_builder.constant(z));
-                let fault = __splice_builder.binary(#root::hir::Binary::#operation, a, z);
-                __splice_builder.ret(fault);
-                break #region;
-            }
-        };
-        emit!({
-            use #root::frontend::scalar::DivisionGuard as _;
-            let operands = (#lhs, #rhs);
-            if let Some((a, z)) = (&operands).faulting_i32_division() {
-                #fault
-            }
-            operands.0 #op operands.1
-        })
-    }
-    fn call(&self, c: &syn::ExprCall, hint: Option<Scalar>) -> Result<Value> {
-        let Expr::Path(p) = &*c.func else {
-            return err(&c.func, "expected a kernel function path");
-        };
-        let root = self.root;
-        let support = emit!(#root::frontend::scalar);
-        let values = c
-            .args
-            .iter()
-            .map(|a| self.expr(a))
-            .collect::<Result<Vec<_>>>()?;
-        if values.iter().all(|v| v.stage.is_host()) {
-            return Ok(Value::new(Stage::Host, emit!(#p(#(#values),*))));
-        }
-        if p.path
-            .segments
-            .first()
-            .is_some_and(|s| s.ident == "std" || s.ident == "alloc" || s.ident == "core")
-        {
-            return err(c, "standard library calls require comptime arguments");
-        }
-        let recursive = p.path.is_ident(self.name);
-        if recursive && self.formals.iter().any(|p| matches!(p, Binding::Columns)) {
-            return err(c, "a column-table entry point cannot call itself");
-        }
-        let output = if recursive {
-            self.result_type
-        } else {
-            hint.filter(|t| matches!(t, Scalar::Vector(_) | Scalar::Mask(_)))
-                .unwrap_or(Scalar::Int)
-        };
-        let mut check = TokenStream::new();
-        let target = if recursive {
-            if !self.formals.iter().any(|p| matches!(p, Binding::Host(_))) {
-                return err(
-                    c,
-                    "runtime recursion is unsupported; recursive expansion needs a terminating #[comptime] plan",
-                );
-            }
-            if values.len() != self.formals.len() {
-                return err(c, "wrong number of recursive arguments");
-            }
-            let fish = &self.fish;
-            emit!(Self::__splice_inline #fish)
-        } else {
-            let mut path = p.path.clone();
-            let fish = std::mem::take(&mut path.segments.last_mut().unwrap().arguments);
-            let expected = output.value_type(root, self.types);
-            check = emit!(const {assert!(matches!(#path::__SPLICE_RETURN,#expected),"annotate the kernel helper result with its Lane<T> or Mask<T> type")};);
-            emit!(#path::__splice_call #fish)
-        };
-        let mut args = Vec::new();
-        for (i, (expr, value)) in c.args.iter().zip(values).enumerate() {
-            let formal = recursive.then(|| self.formals[i]);
-            args.push(match (formal, value.stage) {
-                (Some(Binding::Reg(t, _)), _) => self.reg(value, t, expr)?,
-                (Some(Binding::Buffer(write)), Stage::Buffer(actual))
-                    if write.elem == actual.elem && (!write.write || actual.write) =>
-                {
-                    value.code
-                }
-                (Some(Binding::Buffer(_)), _) => {
-                    return err(expr, "expected a runtime slice of the required mutability");
-                }
-                (_, stage) if stage.is_host() => emit!(#support::Host(#value)),
-                (Some(Binding::Host(_)), _) => {
-                    return err(
-                        expr,
-                        "expected a comptime value; found a runtime expression",
-                    );
-                }
-                (
-                    None,
-                    Stage::Reg(
-                        Scalar::Int | Scalar::Inferred | Scalar::Vector(_) | Scalar::Mask(_),
-                    )
-                    | Stage::Buffer(_),
-                ) => value.code,
-                _ => {
-                    return err(
-                        expr,
-                        "expected a comptime value, a runtime i32, or a runtime slice",
-                    );
-                }
-            });
-        }
-        Ok(Value::new(
-            Stage::Reg(output),
-            emit!({#check #target(#(#args,)* __splice_builder)?}),
+            self.operator_bin(operation, lhs, rhs),
         ))
     }
 }

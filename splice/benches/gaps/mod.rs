@@ -174,13 +174,13 @@ fn envelope(src: &[i32], out: &mut [i32]) -> i32 {
     n
 }
 
-fn run_unary(
+fn run_unary<S>(
     name: &'static str,
     input: &[i32],
     expected: &[i32],
     c: &mut Criterion,
-    stage: impl Fn() -> splice::Result<splice::Function>,
-    builds: Builders<'_>,
+    stage: impl Fn() -> Result<splice::TypedIr<S>, splice::BuildError>,
+    builds: Builders<'_, S>,
 ) {
     Workload {
         name,
@@ -224,9 +224,21 @@ pub(super) fn compare(c: &mut Criterion) {
             c,
             || tone_curve::ir(black_box(fused)),
             Builders {
-                lancy: &|| tone_curve::build::<Lancy>(black_box(fused)),
-                cranelift: &|| tone_curve::build::<Cranelift>(black_box(fused)),
-                llvm: &|| tone_curve::build::<LlvmManualSimd>(black_box(fused)),
+                lancy: &|| {
+                    tone_curve::build::<Lancy>(tone_curve::BuildArgs {
+                        fused: black_box(fused),
+                    })
+                },
+                cranelift: &|| {
+                    tone_curve::build::<Cranelift>(tone_curve::BuildArgs {
+                        fused: black_box(fused),
+                    })
+                },
+                llvm: &|| {
+                    tone_curve::build::<LlvmManualSimd>(tone_curve::BuildArgs {
+                        fused: black_box(fused),
+                    })
+                },
             },
         );
     }
@@ -246,9 +258,9 @@ pub(super) fn compare(c: &mut Criterion) {
         c,
         local_energy::ir,
         Builders {
-            lancy: &local_energy::build::<Lancy>,
-            cranelift: &local_energy::build::<Cranelift>,
-            llvm: &local_energy::build::<LlvmManualSimd>,
+            lancy: &|| local_energy::build::<Lancy>(local_energy::BuildArgs {}),
+            cranelift: &|| local_energy::build::<Cranelift>(local_energy::BuildArgs {}),
+            llvm: &|| local_energy::build::<LlvmManualSimd>(local_energy::BuildArgs {}),
         },
     );
 
@@ -267,9 +279,9 @@ pub(super) fn compare(c: &mut Criterion) {
         c,
         feature_score::ir,
         Builders {
-            lancy: &feature_score::build::<Lancy>,
-            cranelift: &feature_score::build::<Cranelift>,
-            llvm: &feature_score::build::<LlvmManualSimd>,
+            lancy: &|| feature_score::build::<Lancy>(feature_score::BuildArgs {}),
+            cranelift: &|| feature_score::build::<Cranelift>(feature_score::BuildArgs {}),
+            llvm: &|| feature_score::build::<LlvmManualSimd>(feature_score::BuildArgs {}),
         },
     );
 
@@ -301,9 +313,21 @@ pub(super) fn compare(c: &mut Criterion) {
             c,
             || calibrate::ir(black_box(hoist)),
             Builders {
-                lancy: &|| calibrate::build::<Lancy>(black_box(hoist)),
-                cranelift: &|| calibrate::build::<Cranelift>(black_box(hoist)),
-                llvm: &|| calibrate::build::<LlvmManualSimd>(black_box(hoist)),
+                lancy: &|| {
+                    calibrate::build::<Lancy>(calibrate::BuildArgs {
+                        hoist: black_box(hoist),
+                    })
+                },
+                cranelift: &|| {
+                    calibrate::build::<Cranelift>(calibrate::BuildArgs {
+                        hoist: black_box(hoist),
+                    })
+                },
+                llvm: &|| {
+                    calibrate::build::<LlvmManualSimd>(calibrate::BuildArgs {
+                        hoist: black_box(hoist),
+                    })
+                },
             },
         );
     }
@@ -328,9 +352,9 @@ pub(super) fn compare(c: &mut Criterion) {
         c,
         ramp_integral::ir,
         Builders {
-            lancy: &ramp_integral::build::<Lancy>,
-            cranelift: &ramp_integral::build::<Cranelift>,
-            llvm: &ramp_integral::build::<LlvmManualSimd>,
+            lancy: &|| ramp_integral::build::<Lancy>(ramp_integral::BuildArgs {}),
+            cranelift: &|| ramp_integral::build::<Cranelift>(ramp_integral::BuildArgs {}),
+            llvm: &|| ramp_integral::build::<LlvmManualSimd>(ramp_integral::BuildArgs {}),
         },
     );
 
@@ -358,9 +382,9 @@ pub(super) fn compare(c: &mut Criterion) {
         c,
         envelope::ir,
         Builders {
-            lancy: &envelope::build::<Lancy>,
-            cranelift: &envelope::build::<Cranelift>,
-            llvm: &envelope::build::<LlvmManualSimd>,
+            lancy: &|| envelope::build::<Lancy>(envelope::BuildArgs {}),
+            cranelift: &|| envelope::build::<Cranelift>(envelope::BuildArgs {}),
+            llvm: &|| envelope::build::<LlvmManualSimd>(envelope::BuildArgs {}),
         },
     );
 

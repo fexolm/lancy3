@@ -87,9 +87,9 @@ fn parquet_delta(c: &mut Criterion) {
         c,
         decode::ir,
         Builders {
-            lancy: &decode::build::<Lancy>,
-            cranelift: &decode::build::<Cranelift>,
-            llvm: &decode::build::<LlvmManualSimd>,
+            lancy: &|| decode::build::<Lancy>(decode::BuildArgs {}),
+            cranelift: &|| decode::build::<Cranelift>(decode::BuildArgs {}),
+            llvm: &|| decode::build::<LlvmManualSimd>(decode::BuildArgs {}),
         },
     );
 }
@@ -133,9 +133,9 @@ fn decimal_csv(c: &mut Criterion) {
         c,
         export::ir,
         Builders {
-            lancy: &export::build::<Lancy>,
-            cranelift: &export::build::<Cranelift>,
-            llvm: &export::build::<LlvmManualSimd>,
+            lancy: &|| export::build::<Lancy>(export::BuildArgs {}),
+            cranelift: &|| export::build::<Cranelift>(export::BuildArgs {}),
+            llvm: &|| export::build::<LlvmManualSimd>(export::BuildArgs {}),
         },
     );
 }
@@ -189,9 +189,21 @@ fn per_channel_requantize(c: &mut Criterion) {
         c,
         || requantize::ir(black_box(&channels)),
         Builders {
-            lancy: &|| requantize::build::<Lancy>(black_box(&channels)),
-            cranelift: &|| requantize::build::<Cranelift>(black_box(&channels)),
-            llvm: &|| requantize::build::<LlvmManualSimd>(black_box(&channels)),
+            lancy: &|| {
+                requantize::build::<Lancy>(requantize::BuildArgs {
+                    channels: black_box(&channels),
+                })
+            },
+            cranelift: &|| {
+                requantize::build::<Cranelift>(requantize::BuildArgs {
+                    channels: black_box(&channels),
+                })
+            },
+            llvm: &|| {
+                requantize::build::<LlvmManualSimd>(requantize::BuildArgs {
+                    channels: black_box(&channels),
+                })
+            },
         },
     );
 }
@@ -265,9 +277,21 @@ fn audio_low_pass(c: &mut Criterion) {
         c,
         || low_pass::ir(black_box(&sections)),
         Builders {
-            lancy: &|| low_pass::build::<Lancy>(black_box(&sections)),
-            cranelift: &|| low_pass::build::<Cranelift>(black_box(&sections)),
-            llvm: &|| low_pass::build::<LlvmManualSimd>(black_box(&sections)),
+            lancy: &|| {
+                low_pass::build::<Lancy>(low_pass::BuildArgs {
+                    sections: black_box(&sections),
+                })
+            },
+            cranelift: &|| {
+                low_pass::build::<Cranelift>(low_pass::BuildArgs {
+                    sections: black_box(&sections),
+                })
+            },
+            llvm: &|| {
+                low_pass::build::<LlvmManualSimd>(low_pass::BuildArgs {
+                    sections: black_box(&sections),
+                })
+            },
         },
     );
 }

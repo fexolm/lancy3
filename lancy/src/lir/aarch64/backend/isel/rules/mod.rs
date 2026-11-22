@@ -176,6 +176,7 @@ impl Rules<'_> {
     fn instruction(&mut self, op: Op, callee: impl Fn(&Function) -> (FunctionId, PRegSet)) -> Inst {
         let native = match op {
             Op::Const(n) => return Inst::Literal(Type::I32, n as u32 as u128, self.dst()),
+            Op::CallScratch(bytes) => return Inst::CallScratch(bytes, self.dst()),
             Op::Literal(lane, bits) => return Inst::Literal(lane.scalar(), bits, self.dst()),
             Op::Simd(Simd::LaneCount(lane)) => {
                 return Inst::Literal(
@@ -191,6 +192,7 @@ impl Rules<'_> {
             Op::BoundsCheck(index, length) => {
                 return Inst::Check(self.input(index), self.input(length));
             }
+            Op::CheckOverflow(cond) => return Inst::CheckOverflow(self.input(cond)),
             Op::PtrOffset(base, index, scale) => {
                 return Inst::Offset(scale, self.dst(), self.input(base), self.input(index));
             }
@@ -220,6 +222,20 @@ impl Rules<'_> {
                 return self.masked_memory(address, mask, value);
             }
             Op::Call(site) => return self.call(site, callee),
+            Op::RustCall(import, a, b) => {
+                return Inst::RustCall(import, self.input(a), self.input(b), self.dst());
+            }
+            Op::RustPacketCall(site) => {
+                let (import, args) = self.f.packet_call(site);
+                for (index, &word) in args.iter().enumerate() {
+                    let word = self.input(word);
+                    self.out.push(Inst::StorePacketWord(index as u32 * 4, word));
+                }
+                return Inst::RustPacketCall(import, self.dst());
+            }
+            Op::RustContextCall(import, args) => {
+                return Inst::RustContextCall(import, args.map(|arg| self.input(arg)), self.dst());
+            }
             Op::Bin(kind, a, b) => self.scalar_binary(kind, a, b),
             Op::Simd(Simd::Bin(kind, a, b)) => self.vector_binary(kind, a, b),
             Op::Unary(kind, v) | Op::Simd(Simd::Unary(kind, v)) => self.unary(kind, v),

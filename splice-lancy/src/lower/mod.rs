@@ -11,9 +11,12 @@ mod tests;
 use lancy::hir::{self, Block, Function, Op, Value};
 use lancy::support::slotmap::DenseMap;
 use splice::{
-    BufferKind,
+    BufferKind, ContextArguments, StaticRustSymbol,
     frontend::{Body, KernelBuilder, KernelSource, Specialization},
-    hir::{Binary, Buffer, Label, Reg, Simd, ValueType},
+    hir::{
+        Binary, Buffer, ContextSlice, Label, Reg, RustCall, RustContextTarget, RustPacketSymbol,
+        Simd, ValueType,
+    },
     simd::Element,
 };
 use std::{collections::HashMap, sync::Arc};
@@ -21,9 +24,9 @@ use std::{collections::HashMap, sync::Arc};
 fn binary(op: Binary) -> hir::Binary {
     use hir::Binary as H;
     match op {
-        Binary::Add => H::Add,
-        Binary::Sub => H::Sub,
-        Binary::Mul => H::Mul,
+        Binary::Add | Binary::CheckedAdd => H::Add,
+        Binary::Sub | Binary::CheckedSub => H::Sub,
+        Binary::Mul | Binary::CheckedMul => H::Mul,
         Binary::Div => H::Div,
         Binary::Rem => H::Rem,
         Binary::And => H::And,
@@ -35,8 +38,8 @@ fn binary(op: Binary) -> hir::Binary {
         Binary::Le => H::Le,
         Binary::Gt => H::Gt,
         Binary::Ge => H::Ge,
-        Binary::Shl => H::Shl,
-        Binary::Shr => H::Shr,
+        Binary::Shl | Binary::CheckedShl => H::Shl,
+        Binary::Shr | Binary::CheckedShr => H::Shr,
         Binary::Min => H::Min,
         Binary::Max => H::Max,
     }
@@ -65,6 +68,7 @@ pub(crate) fn build_with_source(
 
 impl<'a> Builder<'a> {
     fn new(arity: usize, kinds: &'a [BufferKind]) -> Result<Self, String> {
+        splice::hir::check_context_layout(kinds)?;
         let count = u32::try_from(arity).map_err(|_| "too many kernel parameters")?;
         if count == u32::MAX {
             return Err("too many kernel parameters".into());
@@ -208,7 +212,7 @@ impl Builder<'_> {
         if self
             .kinds
             .get(buffer.index())
-            .is_some_and(|k| k.element() != Element::I32)
+            .is_some_and(|k| k.context_signature().is_some() || k.element() != Element::I32)
         {
             self.error
                 .get_or_insert_with(|| "scalar memory access requires an i32 buffer".into());
@@ -256,6 +260,36 @@ impl Builder<'_> {
         self.define(r, op);
         r
     }
+
+    fn arithmetic(&mut self, dst: Reg, op: Binary, lhs: Reg, rhs: Reg) {
+        self.immediate = None;
+        let (a, b) = (self.scalar(lhs), self.scalar(rhs));
+        let Some(block) = self.current else {
+            return;
+        };
+        let kind = binary(op);
+        let mut value = |op| self.graph.append(block, op).unwrap();
+        match op {
+            Binary::CheckedAdd | Binary::CheckedSub | Binary::CheckedMul => {
+                let a = value(Op::Cast(hir::Type::I64, a));
+                let b = value(Op::Cast(hir::Type::I64, b));
+                let wide = value(Op::Bin(kind, a, b));
+                let narrow = value(Op::Cast(hir::Type::I32, wide));
+                let sign_extended = value(Op::Cast(hir::Type::I64, narrow));
+                let overflow = value(Op::Bin(hir::Binary::Ne, wide, sign_extended));
+                let overflow = value(Op::Cast(hir::Type::I32, overflow));
+                self.graph.append(block, Op::CheckOverflow(overflow));
+                self.blocks[block].defs.insert(dst, narrow);
+            }
+            Binary::CheckedShl | Binary::CheckedShr => {
+                let high_mask = value(Op::Const(!31));
+                let overflow = value(Op::Bin(hir::Binary::And, b, high_mask));
+                self.graph.append(block, Op::CheckOverflow(overflow));
+                self.define(dst, Op::Bin(kind, a, b));
+            }
+            _ => self.define(dst, Op::Bin(kind, a, b)),
+        }
+    }
     fn define(&mut self, r: Reg, op: Op) {
         if let Some(b) = self.current {
             let v = self.graph.append(b, op).expect("operation defines a value");
@@ -302,6 +336,129 @@ impl Builder<'_> {
             values.extend([ptr, len]);
         }
         Op::Call(self.graph.add_call(callee, &values))
+    }
+    fn define_rust_call(&mut self, dst: Reg, import: RustCall, args: &[Reg]) -> splice::Result<()> {
+        import.validate(args.iter().map(|&arg| self.reg_type(arg)))?;
+        let [a, b] = self.rust_operands(args);
+        self.define(dst, Op::RustCall(import.symbol, a, b));
+        Ok(())
+    }
+
+    fn define_packet_call(
+        &mut self,
+        dst: Reg,
+        import: &'static RustPacketSymbol,
+        args: &[Reg],
+    ) -> splice::Result<()> {
+        splice::hir::check_rust_packet_call(import, args.iter().map(|&arg| self.reg_type(arg)))?;
+        self.immediate = None;
+        self.shared_loads.clear();
+        if self.current.is_some() {
+            let args: Vec<_> = args.iter().map(|&arg| self.scalar(arg)).collect();
+            let call = self.graph.add_packet_call(import, &args);
+            self.define(dst, Op::RustPacketCall(call));
+        }
+        Ok(())
+    }
+
+    fn define_context_call(
+        &mut self,
+        dst: Reg,
+        target: RustContextTarget,
+        args: &[Reg],
+        slices: &[ContextSlice],
+    ) -> splice::Result<()> {
+        splice::hir::check_rust_context_call(
+            self.kinds,
+            target,
+            args.iter().map(|&arg| self.reg_type(arg)),
+            slices,
+        )?;
+        let Some(block) = self.current else {
+            return Ok(());
+        };
+        let (context, operation) = match target {
+            RustContextTarget::Borrowed { context, operation } => {
+                (Some(self.slice(context, false).0), operation)
+            }
+            RustContextTarget::Static(_) => (None, 0),
+        };
+        let operation = self.constant(operation as i32);
+        let operation = self.scalar(operation);
+        let (import, args) = if let Some(context) = context
+            && slices.is_empty()
+            && args.len() <= 2
+        {
+            let [a, b] = self.rust_operands(args);
+            (
+                hir::RustContextImport::Scalars(splice::invoke_runtime_context),
+                [context, operation, a, b],
+            )
+        } else {
+            self.immediate = None;
+            self.shared_loads.clear();
+            let layout = ContextArguments::packet_layout(args.len() as u32, slices.len() as u32)
+                .expect("validated packet size");
+            let packet = self
+                .graph
+                .append(block, Op::CallScratch(layout.bytes.max(8)))
+                .unwrap();
+            let store = |graph: &mut Function, offset, value| {
+                let offset = graph.append(block, Op::Const(offset as i32)).unwrap();
+                let ptr = graph
+                    .append(block, Op::PtrOffset(packet, offset, hir::Scale::One))
+                    .unwrap();
+                graph.append(block, Op::Store(ptr, value));
+            };
+            for (index, &reg) in args.iter().enumerate() {
+                let value = self.scalar(reg);
+                store(&mut self.graph, index as u32 * 4, value);
+            }
+            for (index, &ContextSlice { buffer, writable }) in slices.iter().enumerate() {
+                let (ptr, len) = self.slice(buffer, writable);
+                let tag = ContextArguments::view_tag(self.kinds[buffer.index()].element(), writable)
+                    as i32;
+                let tag = self.graph.append(block, Op::Const(tag)).unwrap();
+                let offset = layout.slices_at + index as u32 * ContextArguments::SLICE_BYTES;
+                store(&mut self.graph, offset, ptr);
+                store(
+                    &mut self.graph,
+                    offset + ContextArguments::LENGTH_OFFSET,
+                    len,
+                );
+                store(
+                    &mut self.graph,
+                    offset + ContextArguments::ELEMENT_OFFSET,
+                    tag,
+                );
+            }
+            let zero = self.graph.append(block, Op::Const(0)).unwrap();
+            let entry = match target {
+                RustContextTarget::Borrowed { .. } => splice::invoke_packet_runtime_context,
+                RustContextTarget::Static(symbol) => symbol.entry(),
+            };
+            // The static entry reads only the packet (arg 2). Reuse its live
+            // pointer for the unused context slot in the native ABI.
+            (
+                hir::RustContextImport::Packet(entry),
+                [context.unwrap_or(packet), operation, packet, zero],
+            )
+        };
+        self.define(dst, Op::RustContextCall(import, args));
+        Ok(())
+    }
+
+    fn rust_operands(&mut self, args: &[Reg]) -> [Value; 2] {
+        let [a, b] = match args {
+            [a, b] => [*a, *b],
+            [a] => [*a, self.constant(0)],
+            [] => [self.constant(0); 2],
+            _ => unreachable!("validated Rust import arity"),
+        };
+        let (a, b) = (self.scalar(a), self.scalar(b));
+        self.immediate = None;
+        self.shared_loads.clear();
+        [a, b]
     }
     fn staged_call(
         &mut self,
@@ -393,6 +550,14 @@ impl KernelBuilder for Builder<'_> {
         r
     }
     fn buffer_len(&mut self, buffer: Buffer) -> Reg {
+        if self
+            .kinds
+            .get(buffer.index())
+            .is_some_and(|kind| kind.context_signature().is_some())
+        {
+            self.error
+                .get_or_insert_with(|| "slice length cannot use Rust context".into());
+        }
         let (_, len) = self.slice(buffer, false);
         self.result(Op::Copy(len))
     }
@@ -415,8 +580,9 @@ impl KernelBuilder for Builder<'_> {
         self.immediate.filter(|(r, _)| *r == reg).map(|(_, v)| v)
     }
     fn binary(&mut self, op: Binary, a: Reg, b: Reg) -> Reg {
-        let (a, b) = (self.scalar(a), self.scalar(b));
-        self.result(Op::Bin(binary(op), a, b))
+        let dst = self.local();
+        self.arithmetic(dst, op, a, b);
+        dst
     }
     fn assign(&mut self, dst: Reg, src: Reg) {
         self.valid(dst);
@@ -459,6 +625,54 @@ impl KernelBuilder for Builder<'_> {
     fn ret(&mut self, value: Reg) {
         let v = self.scalar(value);
         self.end(Exit::Return(v));
+    }
+    fn trap_bounds(&mut self) -> splice::Result<()> {
+        if let Some(block) = self.current {
+            let zero = self.graph.append(block, Op::Const(0)).unwrap();
+            self.graph.append(block, Op::BoundsCheck(zero, zero));
+            self.end(Exit::Return(zero));
+        }
+        Ok(())
+    }
+    fn rust_call(&mut self, import: RustCall, args: &[Reg]) -> splice::Result<Reg> {
+        let dst = self.local();
+        self.define_rust_call(dst, import, args)?;
+        Ok(dst)
+    }
+    fn rust_packet_call(
+        &mut self,
+        import: &'static RustPacketSymbol,
+        args: &[Reg],
+    ) -> splice::Result<Reg> {
+        let dst = self.local();
+        self.define_packet_call(dst, import, args)?;
+        Ok(dst)
+    }
+    fn rust_context_call_with_slices(
+        &mut self,
+        context: Buffer,
+        operation: u32,
+        args: &[Reg],
+        slices: &[ContextSlice],
+    ) -> splice::Result<Reg> {
+        let dst = self.local();
+        self.define_context_call(
+            dst,
+            RustContextTarget::Borrowed { context, operation },
+            args,
+            slices,
+        )?;
+        Ok(dst)
+    }
+    fn rust_static_call(
+        &mut self,
+        symbol: &'static StaticRustSymbol,
+        args: &[Reg],
+        slices: &[ContextSlice],
+    ) -> splice::Result<Reg> {
+        let dst = self.local();
+        self.define_context_call(dst, RustContextTarget::Static(symbol), args, slices)?;
+        Ok(dst)
     }
     fn call_kernel(
         &mut self,

@@ -15,17 +15,17 @@ mod requantize;
 #[path = "../benches/large/vector/yuv.rs"]
 mod yuv;
 
-use splice::{BufferArg, Codegen, Executable, Function};
+use splice::{BufferArg, Codegen, Executable, TypedIr};
 use splice_cranelift::Cranelift;
 use splice_lancy::Lancy;
 use splice_llvm::Llvm;
 
 const SENTINEL: i32 = -123_456_789;
 
-fn check_backends(ir: Function, check: impl Fn(&str, &dyn Executable)) {
-    check("Lancy", &Lancy::compile(&ir).unwrap());
-    check("Cranelift", &Cranelift::compile(&ir).unwrap());
-    check("LLVM", &Llvm::compile(&ir).unwrap());
+fn check_backends<S>(ir: TypedIr<S>, check: impl Fn(&str, &dyn Executable)) {
+    check("Lancy", Lancy::compile(&ir).unwrap().as_inner());
+    check("Cranelift", Cranelift::compile(&ir).unwrap().as_inner());
+    check("LLVM", Llvm::compile(&ir).unwrap().as_inner());
 }
 
 #[test]
@@ -226,8 +226,18 @@ fn yuv_converts_known_colors_across_packets_and_tail() {
         }
     };
     check_backends(yuv::yuv_to_rgba::ir().unwrap(), check);
-    check("direct Lancy", &yuv::yuv_to_rgba::build::<Lancy>().unwrap());
-    check("direct LLVM", &yuv::yuv_to_rgba::build::<Llvm>().unwrap());
+    check(
+        "direct Lancy",
+        yuv::yuv_to_rgba::build::<Lancy>(yuv::yuv_to_rgba::BuildArgs {})
+            .unwrap()
+            .as_inner(),
+    );
+    check(
+        "direct LLVM",
+        yuv::yuv_to_rgba::build::<Llvm>(yuv::yuv_to_rgba::BuildArgs {})
+            .unwrap()
+            .as_inner(),
+    );
 }
 
 #[test]
@@ -340,7 +350,14 @@ fn rgb16_remap_supports_unsigned_indices_and_stops_on_an_invalid_plane() {
     check_backends(remap::remap_rgb16::ir().unwrap(), check);
     check(
         "direct Lancy",
-        &remap::remap_rgb16::build::<Lancy>().unwrap(),
+        remap::remap_rgb16::build::<Lancy>(remap::remap_rgb16::BuildArgs {})
+            .unwrap()
+            .as_inner(),
     );
-    check("direct LLVM", &remap::remap_rgb16::build::<Llvm>().unwrap());
+    check(
+        "direct LLVM",
+        remap::remap_rgb16::build::<Llvm>(remap::remap_rgb16::BuildArgs {})
+            .unwrap()
+            .as_inner(),
+    );
 }

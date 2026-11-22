@@ -182,7 +182,7 @@ impl Simd {
             _ => return Ok(()),
         };
         let kind = buffers.get(buffer.index()).ok_or("invalid SIMD buffer")?;
-        if kind.element() != self.element {
+        if kind.context_signature().is_some() || kind.element() != self.element {
             return Err("SIMD buffer element type mismatch".into());
         }
         if write && !kind.writable() {

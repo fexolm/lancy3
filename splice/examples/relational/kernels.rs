@@ -1,5 +1,5 @@
 use super::pipeline::{Program, Step, Task};
-use super::{Combine, Expr, Plan, Predicate};
+use super::{Combine, Expr, Predicate};
 use splice::{
     kernel,
     simd::{Lane, Mask},
@@ -119,14 +119,13 @@ fn read_indices(arena: &[i32], indices: Lane<i32>, count: i32) -> Lane<i32> {
 
 #[kernel]
 pub fn query(
-    #[comptime] plan: &Plan,
+    #[comptime] program: &Program<'_>,
     offsets: &[i32],
     data: &[i32],
     arena: &mut [i32],
     state: &mut [i32],
 ) -> i32 {
-    let program = comptime!(Program::new(plan));
-    let required = program.state_words();
+    let required = program.state_words;
     if state.len() < required {
         return -1;
     }
@@ -137,9 +136,12 @@ pub fn query(
     for word in 0..counts as i32 {
         state[word as usize] = 0;
     }
-    let lanes = comptime!(Lane::<i32>::lanes());
+    let lanes = program.lanes;
     let width = Lane::<i32>::lanes() as i32;
     let zero = Lane::<i32>::splat(0);
+    if width > lanes as i32 {
+        return -1;
+    }
     let mut low = 0;
     let mut high = arena.len() as i32;
     for task in &program.tasks {
@@ -148,7 +150,8 @@ pub fn query(
                 state[*id] = if *high_side { low } else { high };
             }
             Task::Run(pipe) => {
-                let last = pipe.steps.len();
+                let steps: &[Step] = &pipe.steps;
+                let last = steps.len();
                 // Boundary queues and retry queues reuse the same scratch between pipes.
                 let keys = counts + last + 1;
                 let vals = keys + (last + 1) * lanes;
@@ -164,9 +167,14 @@ pub fn query(
                 let start = if pipe.high { high } else { low };
                 let first = offsets[pipe.table];
                 let mut rows = (offsets[pipe.table.saturating_add(1)] - first) >> 1;
-                for id in pipe.dependencies() {
-                    if state[sizes + id] == 0 {
-                        rows = 0;
+                for step in steps {
+                    match step {
+                        Step::Find(id) => {
+                            if state[sizes + *id] == 0 {
+                                rows = 0;
+                            }
+                        }
+                        Step::Filter(_) | Step::Project(..) | Step::Values(..) => {}
                     }
                 }
                 let mut limit = Lane::<i32>::alignment_prefix(data, first as usize) as i32;
@@ -196,7 +204,7 @@ pub fn query(
                     // An empty queue may still receive input. Only propagate EOF
                     // past a stage after both its input and its retry prefix drain.
                     let mut drained = row == rows;
-                    for (i, step) in pipe.steps.iter().enumerate() {
+                    for (i, step) in steps.iter().enumerate() {
                         let j = i + 1;
                         let n = state[counts + i];
                         if state[counts + j] == 0 {
@@ -256,7 +264,7 @@ pub fn query(
                                             Lane::<i32>::load(state, vals + i * lanes)
                                                 .swizzle(shift)
                                                 .store(state, vals + i * lanes);
-                                            if comptime!(step.carries_heads()) {
+                                            if let Step::Values(..) = step {
                                                 Lane::<i32>::load(state, heads + i * lanes)
                                                     .swizzle(shift)
                                                     .store(state, heads + i * lanes);

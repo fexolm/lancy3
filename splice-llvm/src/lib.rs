@@ -113,11 +113,11 @@ pub struct LlvmKernel {
 impl Codegen for Llvm {
     type Output = LlvmKernel;
 
-    fn compile(function: &Function) -> splice::Result<Self::Output> {
+    fn compile_raw(function: &Function) -> splice::Result<Self::Output> {
         Self::compile_with_options(function, function.options())
     }
 
-    fn compile_with_options(
+    fn compile_raw_with_options(
         function: &Function,
         options: BuildOptions,
     ) -> splice::Result<Self::Output> {
@@ -145,11 +145,11 @@ impl Codegen for Llvm {
 impl Codegen for LlvmManualSimd {
     type Output = LlvmKernel;
 
-    fn compile(function: &Function) -> splice::Result<Self::Output> {
+    fn compile_raw(function: &Function) -> splice::Result<Self::Output> {
         Self::compile_with_options(function, function.options())
     }
 
-    fn compile_with_options(
+    fn compile_raw_with_options(
         function: &Function,
         options: BuildOptions,
     ) -> splice::Result<Self::Output> {
@@ -260,13 +260,16 @@ impl Executable for LlvmKernel {
         let mut status = 0;
         // SAFETY: the target emits the host C ABI (Windows x64, SysV x64 or
         // AAPCS64). ORC owns the code for this borrow. Descriptors refer to
-        // live slices, permissions were checked, and the kernel checks indices.
+        // live slices or exclusively borrowed Rust contexts. Lowering checks
+        // permissions, element indices, and context descriptor kinds.
         let result = unsafe { (self.entry)(args.as_ptr(), descriptors.as_ptr(), &mut status) };
         match status {
+            5 => Err("Rust import panicked".into()),
             0 => Ok(result),
             1 => Err("kernel slice index out of bounds".into()),
             2 => Err("kernel integer division by zero".into()),
             3 => Err("kernel signed division overflow".into()),
+            4 => Err("kernel integer arithmetic overflow".into()),
             code => Err(format!("unexpected LLVM kernel status {code}")),
         }
     }
@@ -639,22 +642,23 @@ mod tests {
 
     #[test]
     fn concurrent_compilation_and_calls_have_independent_symbol_ownership() {
-        let base = update::build::<Llvm>(1).unwrap();
+        let base = update::build::<Llvm>(update::BuildArgs { amount: 1 }).unwrap();
         std::thread::scope(|scope| {
             for delta in [7, 11, 13] {
                 let base = &base;
                 scope.spawn(move || {
                     let mut value = [0];
-                    let specialized = update::build::<Llvm>(delta).unwrap();
+                    let specialized =
+                        update::build::<Llvm>(update::BuildArgs { amount: delta }).unwrap();
                     assert_eq!(
                         specialized
-                            .call(&[], &mut [BufferArg::Write(&mut value)])
+                            .call(update::CallArgs { data: &mut value })
                             .unwrap(),
                         delta
                     );
                     drop(specialized);
                     assert_eq!(
-                        base.call(&[], &mut [BufferArg::Write(&mut value)]).unwrap(),
+                        base.call(update::CallArgs { data: &mut value }).unwrap(),
                         delta + 1
                     );
                 });

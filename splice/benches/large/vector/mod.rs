@@ -53,9 +53,9 @@ fn yuv_to_rgba(c: &mut Criterion) {
         c,
         yuv_to_rgba::ir,
         Builders {
-            lancy: &yuv_to_rgba::build::<Lancy>,
-            cranelift: &yuv_to_rgba::build::<Cranelift>,
-            llvm: &yuv_to_rgba::build::<LlvmManualSimd>,
+            lancy: &|| yuv_to_rgba::build::<Lancy>(yuv_to_rgba::BuildArgs {}),
+            cranelift: &|| yuv_to_rgba::build::<Cranelift>(yuv_to_rgba::BuildArgs {}),
+            llvm: &|| yuv_to_rgba::build::<LlvmManualSimd>(yuv_to_rgba::BuildArgs {}),
         },
     );
 }
@@ -102,9 +102,9 @@ fn integral_moments(c: &mut Criterion) {
         c,
         integral_moments::ir,
         Builders {
-            lancy: &integral_moments::build::<Lancy>,
-            cranelift: &integral_moments::build::<Cranelift>,
-            llvm: &integral_moments::build::<LlvmManualSimd>,
+            lancy: &|| integral_moments::build::<Lancy>(integral_moments::BuildArgs {}),
+            cranelift: &|| integral_moments::build::<Cranelift>(integral_moments::BuildArgs {}),
+            llvm: &|| integral_moments::build::<LlvmManualSimd>(integral_moments::BuildArgs {}),
         },
     );
 }
@@ -152,9 +152,9 @@ fn hash_keys(c: &mut Criterion) {
         c,
         hash_keys::ir,
         Builders {
-            lancy: &hash_keys::build::<Lancy>,
-            cranelift: &hash_keys::build::<Cranelift>,
-            llvm: &hash_keys::build::<LlvmManualSimd>,
+            lancy: &|| hash_keys::build::<Lancy>(hash_keys::BuildArgs {}),
+            cranelift: &|| hash_keys::build::<Cranelift>(hash_keys::BuildArgs {}),
+            llvm: &|| hash_keys::build::<LlvmManualSimd>(hash_keys::BuildArgs {}),
         },
     );
 }
@@ -204,9 +204,9 @@ fn remap_rgb16(c: &mut Criterion) {
         c,
         remap_rgb16::ir,
         Builders {
-            lancy: &remap_rgb16::build::<Lancy>,
-            cranelift: &remap_rgb16::build::<Cranelift>,
-            llvm: &remap_rgb16::build::<LlvmManualSimd>,
+            lancy: &|| remap_rgb16::build::<Lancy>(remap_rgb16::BuildArgs {}),
+            cranelift: &|| remap_rgb16::build::<Cranelift>(remap_rgb16::BuildArgs {}),
+            llvm: &|| remap_rgb16::build::<LlvmManualSimd>(remap_rgb16::BuildArgs {}),
         },
     );
 }

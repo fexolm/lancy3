@@ -1,6 +1,6 @@
 use super::{Llvm, build_module, jit, lower, target};
 use inkwell::{context::Context, targets::FileType};
-use splice::{Codegen, Executable, kernel, simd::Lane};
+use splice::{Codegen, kernel, simd::Lane};
 use splice_target::{Profile, simd};
 
 #[kernel]
@@ -52,20 +52,17 @@ fn emits_aarch64_simd_and_preserves_the_logical_width() {
         expected[i] = a[i] ^ b[i] ^ c[i];
     }
     for kernel in [
-        xor_three::build::<Llvm>().unwrap(),
+        xor_three::build::<Llvm>(xor_three::BuildArgs {}).unwrap(),
         Llvm::compile(&ir).unwrap(),
     ] {
         let mut out = vec![77; a.len()];
         assert_eq!(
-            kernel.call(
-                &[],
-                &mut [
-                    a.as_slice().into(),
-                    b.as_slice().into(),
-                    c.as_slice().into(),
-                    out.as_mut_slice().into(),
-                ]
-            ),
+            kernel.call(xor_three::CallArgs {
+                a: &a,
+                b: &b,
+                c: &c,
+                out: &mut out
+            }),
             Ok(n as i32)
         );
         assert_eq!(out, expected);
@@ -78,7 +75,7 @@ fn rejects_a_shorter_sve_thread_before_writing() {
     if !matches!(config.profile, Profile::Sve | Profile::Sve2) || config.bytes == 16 {
         return;
     }
-    let kernel = xor_three::build::<Llvm>().unwrap();
+    let kernel = xor_three::build::<Llvm>(xor_three::BuildArgs {}).unwrap();
     std::thread::spawn(move || {
         // Linux uapi/linux/prctl.h.
         const PR_SVE_SET_VL: libc::c_int = 50;
@@ -89,16 +86,18 @@ fn rejects_a_shorter_sve_thread_before_writing() {
         let n = config.bytes / 4;
         let input = vec![10; n];
         let mut out = vec![77; n];
-        let result = kernel.call(
-            &[],
-            &mut [
-                input.as_slice().into(),
-                input.as_slice().into(),
-                input.as_slice().into(),
-                out.as_mut_slice().into(),
-            ],
+        let result = kernel.call(xor_three::CallArgs {
+            a: &input,
+            b: &input,
+            c: &input,
+            out: &mut out,
+        });
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("SVE vector length")
         );
-        assert!(result.unwrap_err().contains("SVE vector length"));
         assert_eq!(out, vec![77; n]);
     })
     .join()

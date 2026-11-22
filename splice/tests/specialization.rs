@@ -3,17 +3,6 @@ use splice_cranelift::Cranelift;
 use splice_lancy::Lancy;
 use splice_llvm::Llvm;
 use splice_text::Text;
-use std::cell::Cell;
-
-thread_local! {
-    static PLAIN: Cell<usize> = const { Cell::new(0) };
-    static SPECIALIZED: Cell<usize> = const { Cell::new(0) };
-}
-
-fn one() -> i32 {
-    PLAIN.set(PLAIN.get() + 1);
-    1
-}
 
 #[derive(ComptimeKey)]
 enum Mode<'a> {
@@ -21,24 +10,22 @@ enum Mode<'a> {
     Sub(&'a [i32]),
 }
 
-impl Mode<'_> {
-    fn bias(&self) -> i32 {
-        SPECIALIZED.set(SPECIALIZED.get() + 1);
-        match self {
-            Self::Add(values) => values.iter().sum(),
-            Self::Sub(values) => -values.iter().sum::<i32>(),
-        }
-    }
-}
-
 #[kernel]
 fn increment(x: i32) -> i32 {
-    x + one()
+    x + 1
 }
 
 #[kernel]
 fn apply(#[comptime] mode: &Mode<'_>, #[comptime] scale: i32, x: i32) -> i32 {
-    increment(x) + mode.bias() * scale
+    let (values, sign) = match mode {
+        Mode::Add(values) => (*values, 1),
+        Mode::Sub(values) => (*values, -1),
+    };
+    let mut bias = 0;
+    for &value in values {
+        bias += value * sign;
+    }
+    increment(x) + bias * scale
 }
 
 #[kernel]
@@ -53,11 +40,8 @@ fn check_direct<B: Codegen>(modes: &[Mode<'_>], expected: i32)
 where
     B::Output: Executable,
 {
-    PLAIN.set(0);
-    SPECIALIZED.set(0);
-    let code = chain::build::<B>(modes).unwrap();
-    assert_eq!((PLAIN.get(), SPECIALIZED.get()), (1, 4));
-    assert_eq!(code.call(&[12], &mut []), Ok(expected));
+    let code = chain::build::<B>(chain::BuildArgs { modes }).unwrap();
+    assert_eq!(code.call(chain::CallArgs { x: 12 }), Ok(expected));
 }
 
 #[test]
@@ -72,46 +56,41 @@ fn repeated_values_skip_staging_across_parents_and_keep_all_calls() {
     check_direct::<Llvm>(&modes, expected);
     check_direct::<Cranelift>(&modes, expected);
 
-    PLAIN.set(0);
-    SPECIALIZED.set(0);
     let ir = chain::ir(&modes).unwrap();
-    assert_eq!((PLAIN.get(), SPECIALIZED.get()), (1, 4));
     let listing = Text::compile(&ir).unwrap();
     assert_eq!(listing.matches("fn apply.").count(), 4);
     assert_eq!(listing.matches(" = apply.").count(), 5);
     assert_eq!(listing.matches("fn increment.").count(), 1);
     assert_eq!(listing.matches(" = increment.").count(), 5);
-    assert_eq!(chain::build::<Text>(&modes).unwrap(), listing);
-    for code in [
-        Box::new(Lancy::compile(&ir).unwrap()) as Box<dyn Executable>,
-        Box::new(Llvm::compile(&ir).unwrap()),
-        Box::new(Cranelift::compile(&ir).unwrap()),
-    ] {
-        assert_eq!(code.call(&[12], &mut []), Ok(expected));
-    }
+    assert_eq!(
+        chain::build::<Text>(chain::BuildArgs { modes: &modes })
+            .unwrap()
+            .as_inner(),
+        listing.as_inner()
+    );
+    let args = || chain::CallArgs { x: 12 };
+    assert_eq!(Lancy::compile(&ir).unwrap().call(args()), Ok(expected));
+    assert_eq!(Llvm::compile(&ir).unwrap().call(args()), Ok(expected));
+    assert_eq!(Cranelift::compile(&ir).unwrap().call(args()), Ok(expected));
 }
 
 trait Flavor: ComptimeKey {
-    fn value() -> i32;
+    const VALUE: i32;
 }
 #[derive(ComptimeKey)]
 struct First;
 #[derive(ComptimeKey)]
 struct Second;
 impl Flavor for First {
-    fn value() -> i32 {
-        2
-    }
+    const VALUE: i32 = 2;
 }
 impl Flavor for Second {
-    fn value() -> i32 {
-        7
-    }
+    const VALUE: i32 = 7;
 }
 
 #[kernel]
 fn affine<T: Flavor, const N: i32>(x: i32) -> i32 {
-    x * T::value() + N
+    x * T::VALUE + N
 }
 #[kernel]
 fn instances(x: i32) -> i32 {
@@ -122,16 +101,20 @@ fn instances(x: i32) -> i32 {
 }
 #[test]
 fn type_and_const_arguments_distinguish_monomorphizations() {
-    let listing = instances::build::<Text>().unwrap();
+    let listing = instances::build::<Text>(instances::BuildArgs {}).unwrap();
     assert_eq!(listing.matches("fn affine.").count(), 3);
     assert_eq!(listing.matches(" = affine.").count(), 4);
     let expected = instances(3);
     assert_eq!(
-        instances::build::<Lancy>().unwrap().call(&[3], &mut []),
+        instances::build::<Lancy>(instances::BuildArgs {})
+            .unwrap()
+            .call(instances::CallArgs { x: 3 }),
         Ok(expected)
     );
     assert_eq!(
-        instances::build::<Llvm>().unwrap().call(&[3], &mut []),
+        instances::build::<Llvm>(instances::BuildArgs {})
+            .unwrap()
+            .call(instances::CallArgs { x: 3 }),
         Ok(expected)
     );
 }
@@ -279,29 +262,39 @@ fn two_buffers(left: &mut [i32], right: &mut [i32], d: i32) -> i32 {
 }
 #[test]
 fn shared_fallible_body_observes_each_calls_buffers_and_arguments() -> splice::Result<()> {
-    use splice::BufferArg::Write;
     let ir = two_buffers::ir()?;
     assert_eq!(Text::compile(&ir)?.matches("fn store_ratio.").count(), 1);
-    let kernels: Vec<Box<dyn Executable>> = vec![
-        Box::new(two_buffers::build::<Lancy>()?),
-        Box::new(Lancy::compile(&ir)?),
-        Box::new(two_buffers::build::<Llvm>()?),
-        Box::new(Llvm::compile(&ir)?),
-        Box::new(two_buffers::build::<Cranelift>()?),
-        Box::new(Cranelift::compile(&ir)?),
-    ];
-    for code in kernels {
-        let (mut left, mut right) = ([0], [0]);
-        assert_eq!(
-            code.call(&[2], &mut [Write(&mut left), Write(&mut right)])?,
-            3
-        );
-        assert_eq!((left, right), ([6], [3]));
-        assert!(
-            code.call(&[0], &mut [Write(&mut left), Write(&mut right)])
+    fn check<B: Codegen<Output: Executable>>(
+        ir: &splice::TypedIr<two_buffers::Signature>,
+    ) -> splice::Result<()> {
+        for code in [
+            two_buffers::build::<B>(two_buffers::BuildArgs {})?,
+            B::compile(ir)?,
+        ] {
+            let (mut left, mut right) = ([0], [0]);
+            assert_eq!(
+                code.call(two_buffers::CallArgs {
+                    left: &mut left,
+                    right: &mut right,
+                    d: 2
+                })?,
+                3
+            );
+            assert_eq!((left, right), ([6], [3]));
+            assert!(
+                code.call(two_buffers::CallArgs {
+                    left: &mut left,
+                    right: &mut right,
+                    d: 0
+                })
                 .is_err()
-        );
-        assert_eq!((left, right), ([6], [6]));
+            );
+            assert_eq!((left, right), ([6], [6]));
+        }
+        Ok(())
     }
-    Ok(())
+
+    check::<Lancy>(&ir)?;
+    check::<Llvm>(&ir)?;
+    check::<Cranelift>(&ir)
 }

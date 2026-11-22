@@ -109,7 +109,13 @@ fn compare(plan: &Plan, tables: &[&[Row]], kernels: &[&dyn Executable]) {
     }
     scratch.fill(-8);
     assert_eq!(
-        query(plan, cat.offsets(), cat.data(), &mut scratch, &mut state) as usize,
+        query(
+            &plan.prepare(),
+            cat.offsets(),
+            cat.data(),
+            &mut scratch,
+            &mut state
+        ) as usize,
         expected.len()
     );
     assert_rows(plan, &scratch[..2 * expected.len()], &expected);
@@ -122,8 +128,15 @@ fn check_workspace_boundary(plan: &Plan, tables: &[&[Row]], kernels: &[&dyn Exec
     let mut enough = 8 * (tables.iter().map(|t| t.len()).sum::<usize>() + 2 * want.len()) + 256;
     let mut storage = vec![sentinel; enough + 2];
     let mut state = vec![-1; plan.state_words()];
-    let mut run =
-        |words: &mut [i32]| query(plan, catalog.offsets(), catalog.data(), words, &mut state);
+    let mut run = |words: &mut [i32]| {
+        query(
+            &plan.prepare(),
+            catalog.offsets(),
+            catalog.data(),
+            words,
+            &mut state,
+        )
+    };
     assert_eq!(run(&mut storage[1..=enough]) as usize, want.len());
     let mut short = 0;
     while enough - short > 1 {
@@ -162,13 +175,25 @@ fn check_workspace_boundary(plan: &Plan, tables: &[&[Row]], kernels: &[&dyn Exec
 }
 
 fn with_kernels(plan: &Plan, test: impl FnOnce(&[&dyn Executable])) {
-    let f = query::ir(plan).unwrap();
-    let lancy = Lancy::compile(&f).unwrap();
-    let llvm = Llvm::compile(&f).unwrap();
-    let direct_lancy = query::build::<Lancy>(plan).unwrap();
-    let direct_llvm = query::build::<Llvm>(plan).unwrap();
-    let cranelift = Cranelift::compile(&f).unwrap();
-    let direct_cranelift = query::build::<Cranelift>(plan).unwrap();
+    let f = query::ir(&plan.prepare()).unwrap();
+    let lancy = Lancy::compile(&f).unwrap().into_inner();
+    let llvm = Llvm::compile(&f).unwrap().into_inner();
+    let direct_lancy = query::build::<Lancy>(query::BuildArgs {
+        program: &plan.prepare(),
+    })
+    .unwrap()
+    .into_inner();
+    let direct_llvm = query::build::<Llvm>(query::BuildArgs {
+        program: &plan.prepare(),
+    })
+    .unwrap()
+    .into_inner();
+    let cranelift = Cranelift::compile(&f).unwrap().into_inner();
+    let direct_cranelift = query::build::<Cranelift>(query::BuildArgs {
+        program: &plan.prepare(),
+    })
+    .unwrap()
+    .into_inner();
     test(&[
         &lancy,
         &llvm,
@@ -305,7 +330,7 @@ fn fused_scan_filter_project_needs_only_two_words_for_one_survivor() {
             let mut guarded = [-9; 4];
             assert_eq!(
                 query(
-                    &plan,
+                    &plan.prepare(),
                     catalog.offsets(),
                     catalog.data(),
                     &mut guarded[1..3],
@@ -366,7 +391,7 @@ fn fused_join_streams_all_hits_and_stays_successful_as_workspace_grows() {
         for capacity in 0..=96 {
             storage.fill(-971);
             let n = query(
-                &plan,
+                &plan.prepare(),
                 catalog.offsets(),
                 catalog.data(),
                 &mut storage[1..1 + capacity],
@@ -576,9 +601,9 @@ fn self_join_after_rekey_handles_collisions_and_duplicate_rows() {
         )),
         Combine::Multiply,
     );
-    let f = query::ir(&plan).unwrap();
-    let lancy = Lancy::compile(&f).unwrap();
-    let llvm = Llvm::compile(&f).unwrap();
+    let f = query::ir(&plan.prepare()).unwrap();
+    let lancy = Lancy::compile(&f).unwrap().into_inner();
+    let llvm = Llvm::compile(&f).unwrap().into_inner();
     let duplicate = [(3, 3); 13];
     compare(&plan, &[&duplicate], &[&lancy, &llvm]);
     let mixed = [
@@ -628,10 +653,14 @@ fn different_plan_shapes_match_a_nested_loop_oracle() {
     let mut seed = 3561;
     for _ in 0..24 {
         let plan = tree(&mut seed, 4);
-        let f = query::ir(&plan).unwrap();
-        let direct = query::build::<Lancy>(&plan).unwrap();
-        let from_ir = Lancy::compile(&f).unwrap();
-        let llvm = Llvm::compile(&f).unwrap();
+        let f = query::ir(&plan.prepare()).unwrap();
+        let direct = query::build::<Lancy>(query::BuildArgs {
+            program: &plan.prepare(),
+        })
+        .unwrap()
+        .into_inner();
+        let from_ir = Lancy::compile(&f).unwrap().into_inner();
+        let llvm = Llvm::compile(&f).unwrap().into_inner();
         compare(
             &plan,
             &[
@@ -655,9 +684,9 @@ fn balanced_tree_with_32_scans_runs_through_one_entry_point() {
         }
     }
     let plan = subtree(5);
-    let ir = query::ir(&plan).unwrap();
-    let lancy = Lancy::compile(&ir).unwrap();
-    let llvm = Llvm::compile(&ir).unwrap();
+    let ir = query::ir(&plan.prepare()).unwrap();
+    let lancy = Lancy::compile(&ir).unwrap().into_inner();
+    let llvm = Llvm::compile(&ir).unwrap().into_inner();
     let cat = Catalog::new(&[&[(12, 2), (7, 3)]]).unwrap();
     for code in [&lancy as &dyn Executable, &llvm] {
         assert_rows(
@@ -683,26 +712,35 @@ fn simd_ops(f: &Function) -> Vec<SimdOp> {
 
 #[test]
 fn plan_shape_selects_the_reachable_operator_kernels_at_build_time() {
-    let scan = query::ir(&Plan::Scan(0)).unwrap();
-    let filter = query::ir(&Plan::Filter(
-        Box::new(Plan::Scan(0)),
-        Predicate::And(
-            Box::new(Predicate::AtLeast(Expr::Value, Expr::Literal(2))),
-            Box::new(Predicate::Equal(Expr::Key, Expr::Literal(7))),
-        ),
-    ))
+    let scan = query::ir(&Plan::Scan(0).prepare()).unwrap();
+    let filter = query::ir(
+        &Plan::Filter(
+            Box::new(Plan::Scan(0)),
+            Predicate::And(
+                Box::new(Predicate::AtLeast(Expr::Value, Expr::Literal(2))),
+                Box::new(Predicate::Equal(Expr::Key, Expr::Literal(7))),
+            ),
+        )
+        .prepare(),
+    )
     .unwrap();
-    let project = query::ir(&Plan::Project(
-        Box::new(Plan::Scan(0)),
-        Expr::Add(Box::new(Expr::Key), Box::new(Expr::Value)),
-        Expr::Mul(Box::new(Expr::Key), Box::new(Expr::Value)),
-    ))
+    let project = query::ir(
+        &Plan::Project(
+            Box::new(Plan::Scan(0)),
+            Expr::Add(Box::new(Expr::Key), Box::new(Expr::Value)),
+            Expr::Mul(Box::new(Expr::Key), Box::new(Expr::Value)),
+        )
+        .prepare(),
+    )
     .unwrap();
-    let join = query::ir(&Plan::Join(
-        Box::new(Plan::Scan(0)),
-        Box::new(Plan::Scan(1)),
-        Combine::Add,
-    ))
+    let join = query::ir(
+        &Plan::Join(
+            Box::new(Plan::Scan(0)),
+            Box::new(Plan::Scan(1)),
+            Combine::Add,
+        )
+        .prepare(),
+    )
     .unwrap();
     for f in [&scan, &filter, &project, &join] {
         assert_eq!(f.arity(), 0);
@@ -742,14 +780,14 @@ fn plan_shape_selects_the_reachable_operator_kernels_at_build_time() {
     assert!(join_ops.iter().any(|op| matches!(op, SimdOp::Gather(_))));
     assert!(join_ops.contains(&SimdOp::Eq));
     assert!(join_ops.contains(&SimdOp::Compress));
-    let full_plan_ops = simd_ops(&query::ir(&pricing_plan()).unwrap());
+    let full_plan_ops = simd_ops(&query::ir(&pricing_plan().prepare()).unwrap());
     assert!(full_plan_ops.contains(&SimdOp::Compress));
     assert!(!full_plan_ops.iter().any(|op| matches!(
         op,
         SimdOp::GatherSelect(_) | SimdOp::Scatter(_) | SimdOp::ScatterSelect(_)
     )));
     // The executable outlives the temporary plan passed to build().
-    let code = Lancy::compile(&scan).unwrap();
+    let code = Lancy::compile(&scan).unwrap().into_inner();
     assert_eq!(
         Catalog::new(&[&[(4, 5)]])
             .unwrap()
@@ -776,7 +814,8 @@ fn workspace_exhaustion_has_an_explicit_result_and_caller_can_retry() {
     });
     let cat = Catalog::new(tables).unwrap();
     for id in [2, usize::MAX] {
-        let unknown_table = Lancy::compile(&query::ir(&Plan::Scan(id)).unwrap()).unwrap();
+        let unknown_table =
+            Lancy::compile(&query::ir(&Plan::Scan(id).prepare()).unwrap().into_inner()).unwrap();
         assert!(
             cat.run(
                 &unknown_table,

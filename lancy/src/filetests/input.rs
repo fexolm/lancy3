@@ -272,6 +272,37 @@ fn instruction<'a>(
         ["bitselect", x, y, z] => Op::Ternary(Ternary::BitSelect, v(x)?, v(y)?, v(z)?),
         ["copy", x] => Op::Copy(v(x)?),
         ["bounds", i, n] => Op::BoundsCheck(v(i)?, v(n)?),
+        ["check_overflow", cond] => Op::CheckOverflow(v(cond)?),
+        ["rust_call", "identity_or_error", value, fail] => Op::RustCall(
+            &crate::hir::RustImport {
+                name: "identity_or_error",
+                resolve: || identity_or_error,
+            },
+            v(value)?,
+            v(fail)?,
+        ),
+        ["rust_call", "double", value, unused] => Op::RustCall(
+            &crate::hir::RustImport {
+                name: "double",
+                resolve: || double,
+            },
+            v(value)?,
+            v(unused)?,
+        ),
+        ["rust_packet_call", "sum4", args @ ..] => {
+            fn sum(words: &[i32]) -> i32 {
+                words.iter().copied().fold(0, i32::wrapping_add)
+            }
+            let args = args.iter().map(|arg| v(arg)).collect::<Result<Vec<_>>>()?;
+            Op::RustPacketCall(f.add_packet_call(
+                &crate::hir::RustPacketImport {
+                    name: "sum4",
+                    arity: 4,
+                    resolve: || sum,
+                },
+                &args,
+            ))
+        }
         ["offset", p, i, stride] => Op::PtrOffset(
             v(p)?,
             v(i)?,
@@ -302,6 +333,18 @@ fn instruction<'a>(
         _ => return Err("result binding does not match the instruction".into()),
     }
     Ok(false)
+}
+
+extern "C" fn identity_or_error(value: i32, fail: i32) -> i64 {
+    if fail == 0 {
+        i64::from(value as u32)
+    } else {
+        5_i64 << 32
+    }
+}
+
+extern "C" fn double(value: i32, _: i32) -> i64 {
+    i64::from(value.wrapping_mul(2) as u32)
 }
 
 fn body<'a>(

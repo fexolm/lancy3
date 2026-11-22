@@ -3,7 +3,7 @@
 pub(super) mod lanes;
 pub(super) mod simd;
 use crate::hir::operation::Action;
-use crate::hir::{Binary, Lane, Scale, Type};
+use crate::hir::{Binary, Lane, RustContextImport, RustImport, RustPacketImport, Scale, Type};
 use crate::{lir::TargetInst, module::FunctionId};
 use regalloc2::{MachineEnv, Operand, PReg, PRegSet, RegClass, VReg};
 use simd::Native;
@@ -65,6 +65,11 @@ const AX: PReg = gpr(0);
 const CX: PReg = gpr(1);
 const DX: PReg = gpr(2);
 const ARGV: PReg = if cfg!(windows) { CX } else { gpr(7) };
+const RUST_ARGS: [PReg; 4] = if cfg!(windows) {
+    [CX, DX, gpr(8), gpr(9)]
+} else {
+    [gpr(7), gpr(6), DX, CX]
+};
 
 const fn gprs(encodings: &[usize]) -> PRegSet {
     let mut set = PRegSet::empty();
@@ -283,6 +288,7 @@ pub(super) enum Inst {
         quotient: Quotient,
     },
     CheckBounds(VReg, VReg),
+    CheckOverflow(VReg),
     CheckMask(VectorMask<VReg>),
     BranchAny(VectorMask<VReg>),
     BranchAll(Lane, VReg),
@@ -347,6 +353,11 @@ pub(super) enum Inst {
         dst: VReg,
         clobbers: PRegSet,
     },
+    RustCall(&'static RustImport, VReg, VReg, VReg),
+    RustPacketCall(&'static RustPacketImport, VReg),
+    StorePacketWord(u32, VReg),
+    RustContextCall(RustContextImport, [VReg; 4], VReg),
+    CallScratch(u32, VReg),
     Jump,
     Branch(VReg),
     Ret(VReg),
@@ -448,6 +459,7 @@ impl TargetInst for Inst {
                 out.extend([O::reg_use(value), O::reg_def_at_start(dst)])
             }
             Self::CheckBounds(i, n) => out.extend([O::reg_use(i), O::any_use(n)]),
+            Self::CheckOverflow(v) => out.push(O::reg_use(v)),
             Self::Movsxd(d, a) => out.extend([O::reg_use(a), O::reg_def(d)]),
             Self::Lea(d, addr) | Self::Load(_, d, addr) | Self::BroadcastMemory(_, d, addr) => {
                 addr.operands(out);
@@ -544,8 +556,24 @@ impl TargetInst for Inst {
             Self::BranchAll(_, v)
             | Self::StoreArg(_, _, v)
             | Self::DebugStore(_, _, v)
+            | Self::StorePacketWord(_, v)
             | Self::Branch(v) => out.push(O::reg_use(v)),
             Self::Call { dst, .. } => out.push(O::reg_fixed_def(dst, return_reg(dst))),
+            Self::RustCall(_, a, b, dst) => out.extend([
+                O::reg_fixed_use(a, RUST_ARGS[0]),
+                O::reg_fixed_use(b, RUST_ARGS[1]),
+                O::reg_fixed_def(dst, AX),
+            ]),
+            Self::RustPacketCall(_, dst) => out.push(O::reg_fixed_def(dst, AX)),
+            Self::RustContextCall(_, args, dst) => {
+                out.extend(
+                    args.into_iter()
+                        .zip(RUST_ARGS)
+                        .map(|(arg, reg)| O::reg_fixed_use(arg, reg)),
+                );
+                out.push(O::reg_fixed_def(dst, AX));
+            }
+            Self::CallScratch(_, dst) => out.push(O::reg_def(dst)),
             Self::Ret(v) => out.push(O::reg_fixed_use(v, return_reg(v))),
             Self::Jump | Self::DebugPoint(_) => {}
         }
@@ -553,6 +581,16 @@ impl TargetInst for Inst {
     fn clobbers(&self) -> PRegSet {
         match self {
             Self::Call { clobbers, .. } => *clobbers,
+            Self::RustCall(..) | Self::RustPacketCall(..) | Self::RustContextCall(..) => {
+                let wide = super::Features::host().bytes > 16;
+                let mut regs = VOLATILE | MASKS | SIMD;
+                if wide {
+                    // Win64 preserves XMM6..15, but not their upper lanes.
+                    regs.union_from(SAVED_SIMD);
+                }
+                regs.remove(AX);
+                regs
+            }
             Self::Lanes {
                 action, input, dst, ..
             } => {

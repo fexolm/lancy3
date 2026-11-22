@@ -15,6 +15,7 @@ impl Schedulable for Inst {
                 ..
             } => Ordered(if indices.is_some() { 9 } else { 5 }),
             Self::CheckBounds(..)
+            | Self::CheckOverflow(..)
             | Self::CheckMask(..)
             | Self::Store(..)
             | Self::Masked { .. }

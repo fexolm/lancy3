@@ -9,9 +9,13 @@ use splice_llvm::Llvm;
 
 fn main() -> Result<(), String> {
     let kernel: Box<dyn Executable> = match std::env::args().nth(1).as_deref() {
-        Some("llvm") => Box::new(lookup::build::<Llvm>()?),
-        Some("cranelift") => Box::new(lookup::build::<Cranelift>()?),
-        None | Some("lancy") => Box::new(lookup::build::<Lancy>()?),
+        Some("llvm") => Box::new(lookup::build::<Llvm>(lookup::BuildArgs {})?.into_inner()),
+        Some("cranelift") => {
+            Box::new(lookup::build::<Cranelift>(lookup::BuildArgs {})?.into_inner())
+        }
+        None | Some("lancy") => {
+            Box::new(lookup::build::<Lancy>(lookup::BuildArgs {})?.into_inner())
+        }
         Some(name) => return Err(format!("unknown backend {name}")),
     };
     let (table, queries) = fixture(16, 12, 9);
@@ -77,12 +81,24 @@ mod tests {
     fn independent_probes_stop_on_matches_empty_slots_and_full_laps() {
         let ir = lookup::ir().unwrap();
         let kernels: [Box<dyn Executable>; 6] = [
-            Box::new(lookup::build::<Lancy>().unwrap()),
-            Box::new(Lancy::compile(&ir).unwrap()),
-            Box::new(lookup::build::<Cranelift>().unwrap()),
-            Box::new(Cranelift::compile(&ir).unwrap()),
-            Box::new(lookup::build::<Llvm>().unwrap()),
-            Box::new(Llvm::compile(&ir).unwrap()),
+            Box::new(
+                lookup::build::<Lancy>(lookup::BuildArgs {})
+                    .unwrap()
+                    .into_inner(),
+            ),
+            Box::new(Lancy::compile(&ir).unwrap().into_inner()),
+            Box::new(
+                lookup::build::<Cranelift>(lookup::BuildArgs {})
+                    .unwrap()
+                    .into_inner(),
+            ),
+            Box::new(Cranelift::compile(&ir).unwrap().into_inner()),
+            Box::new(
+                lookup::build::<Llvm>(lookup::BuildArgs {})
+                    .unwrap()
+                    .into_inner(),
+            ),
+            Box::new(Llvm::compile(&ir).unwrap().into_inner()),
         ];
         let w = Lane::<i32>::lanes();
         // The multiplier is 1 modulo 8. Keys 7, 15, -1 and 31 all start at 7.
@@ -118,8 +134,11 @@ mod tests {
 
     #[test]
     fn lookup_ir_uses_masked_gather_and_pack_arithmetic() {
-        let listing = lookup::build::<Text>().unwrap();
-        assert_eq!(listing, Text::compile(&lookup::ir().unwrap()).unwrap());
+        let listing = lookup::build::<Text>(lookup::BuildArgs {}).unwrap();
+        assert_eq!(
+            listing.as_inner(),
+            Text::compile(&lookup::ir().unwrap()).unwrap().as_inner()
+        );
         for op in [
             "simd.load_select.i32",
             "simd.mul.i32",

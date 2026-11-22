@@ -22,6 +22,7 @@ pub(super) struct Frame {
     pub saves: usize,
     pub bytes: usize,
     pub debug_base: usize,
+    pub scratch_base: usize,
 }
 
 pub(super) struct Compiled {
@@ -52,6 +53,7 @@ pub(super) fn compile(
             child_peak = child_peak.max(compiled[child].peak);
         }
         let mut arg_bytes = 0;
+        let mut scratch_bytes = 0;
         let mut needs_temp = false;
         for inst in body.insts() {
             match *inst {
@@ -59,6 +61,11 @@ pub(super) fn compile(
                     arg_bytes = arg_bytes.max(off + ty.bytes(config.bytes).next_multiple_of(8));
                 }
                 Inst::Libcall(..) | Inst::LaneAccess { .. } => needs_temp = true,
+                Inst::CallScratch(bytes, _) => scratch_bytes = scratch_bytes.max(bytes as usize),
+                Inst::RustPacketCall(import, _) => {
+                    let bytes = import.packet_bytes().expect("verified Rust packet");
+                    scratch_bytes = scratch_bytes.max(bytes as usize);
+                }
                 _ => {}
             }
         }
@@ -94,8 +101,11 @@ pub(super) fn compile(
             })
             .max()
             .unwrap_or(0);
-        let bytes = debug_base
+        let scratch_base = debug_base
             .checked_add(debug_size.next_multiple_of(8))
+            .ok_or(CompileError::FrameOverflow)?;
+        let bytes = scratch_base
+            .checked_add(scratch_bytes.next_multiple_of(8))
             .ok_or(CompileError::FrameOverflow)?;
         let peak = bytes
             .checked_add(child_peak)
@@ -110,6 +120,7 @@ pub(super) fn compile(
                 saves,
                 bytes,
                 debug_base,
+                scratch_base,
             },
             written,
             peak,

@@ -7,6 +7,7 @@ pub(super) struct Frame {
     pub spill_base: usize,
     pub slots: usize,
     pub debug_base: usize,
+    pub scratch_base: usize,
 }
 
 impl Frame {
@@ -16,6 +17,7 @@ impl Frame {
             spill_base,
             slots: spill_base + spills,
             debug_base: 0,
+            scratch_base: 0,
         }
     }
 }

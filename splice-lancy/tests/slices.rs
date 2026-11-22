@@ -29,7 +29,7 @@ fn constant(out: &mut [i32]) -> i32 {
 
 #[test]
 fn partial_columns_have_the_same_store_order_through_both_splice_entry_points() {
-    let direct = project::build::<Lancy>(3).unwrap();
+    let direct = project::build::<Lancy>(project::BuildArgs { gain: 3 }).unwrap();
     let imported = Lancy::compile(&project::ir(3).unwrap()).unwrap();
     let values: Vec<i32> = (-7..20).collect();
     for (n, short) in [(9, 9), (9, 5), (16, 0), (0, 4), (17, 27)] {
@@ -37,7 +37,7 @@ fn partial_columns_have_the_same_store_order_through_both_splice_entry_points() 
             let mut out = vec![71; n];
             // A writable input can be borrowed read-only by the kernel.
             let mut unused = vec![0; short];
-            let result = code.call(
+            let result = code.as_inner().call(
                 &[],
                 &mut [
                     BufferArg::Read(&values),
@@ -66,7 +66,9 @@ fn partial_columns_have_the_same_store_order_through_both_splice_entry_points() 
 
 #[test]
 fn checks_the_full_signature_before_the_first_store() {
-    let code = project::build::<Lancy>(2).unwrap();
+    let code = project::build::<Lancy>(project::BuildArgs { gain: 2 })
+        .unwrap()
+        .into_inner();
     let value = [4; 8];
     let mut out = [17; 8];
     assert!(code.call(&[], &mut [BufferArg::Write(&mut out)]).is_err());
@@ -97,14 +99,15 @@ fn checks_the_full_signature_before_the_first_store() {
 
 #[test]
 fn fallible_row_uses_the_scalar_loop_and_retains_store_order() {
-    let code = reciprocal::build::<Lancy>().unwrap();
+    let code = reciprocal::build::<Lancy>(reciprocal::BuildArgs {}).unwrap();
     let mut out = [55; 4];
     assert!(
-        code.call(
-            &[],
-            &mut [BufferArg::Read(&[8, -4, 0]), BufferArg::Write(&mut out),]
-        )
+        code.call(reciprocal::CallArgs {
+            values: &[8, -4, 0],
+            out: &mut out
+        })
         .unwrap_err()
+        .to_string()
         .contains("division")
     );
     assert_eq!(out, [8, -16, 55, 55]);
@@ -112,11 +115,8 @@ fn fallible_row_uses_the_scalar_loop_and_retains_store_order() {
 
 #[test]
 fn kernel_with_no_inputs_fills_the_output() {
-    let code = constant::build::<Lancy>().unwrap();
+    let code = constant::build::<Lancy>(constant::BuildArgs {}).unwrap();
     let mut out = [0; 7];
-    assert_eq!(
-        code.call(&[], &mut [BufferArg::Write(&mut out)]).unwrap(),
-        7
-    );
+    assert_eq!(code.call(constant::CallArgs { out: &mut out }).unwrap(), 7);
     assert_eq!(out, [9; 7]);
 }

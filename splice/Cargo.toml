@@ -6,6 +6,7 @@ rust-version = "1.94"
 description = "A staged Rust kernel language with a portable code generation interface"
 
 [dependencies]
+typeid = "1"
 tracing.workspace = true
 splice-target = { path = "../splice-target" }
 splice-macros = { path = "../splice-macros" }
@@ -16,6 +17,7 @@ criterion = { version = "0.8", features = ["html_reports"] }
 splice-cranelift = { path = "../splice-cranelift" }
 splice-lancy = { path = "../splice-lancy" }
 splice-llvm = { path = "../splice-llvm" }
+splice-test-traits = { path = "../tests/fixtures/trait-provider" }
 splice-text = { path = "../splice-text" }
 
 [[bench]]

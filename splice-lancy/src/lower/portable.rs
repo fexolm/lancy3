@@ -1,4 +1,4 @@
-use super::{Builder, Destination, KernelBuilder, binary};
+use super::{Builder, Destination, KernelBuilder};
 use lancy::hir::{self, Op};
 use splice::{Function, hir::Instr};
 use std::{collections::HashMap, sync::Arc};
@@ -114,8 +114,7 @@ fn lower_body<'a>(
                 b.bind_simd(*dst, v);
             }
             Instr::Bin(dst, op, lhs, rhs) => {
-                let op = Op::Bin(binary(*op), b.read(*lhs), b.read(*rhs));
-                b.define(*dst, op);
+                b.arithmetic(*dst, *op, *lhs, *rhs);
             }
             Instr::BufferLen { dst, buffer } => {
                 let (_, len) = b.slice(*buffer, false);
@@ -134,6 +133,18 @@ fn lower_body<'a>(
                 let op = b.call_op(callees[&Arc::as_ptr(function)].clone(), args, buffers);
                 b.define(*dst, op);
             }
+            Instr::RustCall { dst, import, args } => b.define_rust_call(*dst, *import, args)?,
+            Instr::RustPacketCall { dst, import, args } => {
+                b.define_packet_call(*dst, import, args)?
+            }
+            Instr::RustContextCall {
+                dst,
+                target,
+                args,
+                slices,
+            } => {
+                b.define_context_call(*dst, *target, args, slices)?;
+            }
             Instr::Copy(dst, src) => b.assign(*dst, *src),
             Instr::Store {
                 buffer,
@@ -144,6 +155,7 @@ fn lower_body<'a>(
             Instr::Jump(label) => b.jump(*label),
             Instr::Branch { cond, yes, no } => b.branch(*cond, *yes, *no),
             Instr::Return(value) => b.ret(*value),
+            Instr::TrapBounds => b.trap_bounds()?,
         }
     }
     b.seal()

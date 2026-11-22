@@ -1,29 +1,54 @@
 //! The Splice frontend stages a kernel directly into its chosen backend.
 //! A portable function can also be materialized for inspection and reuse.
 //!
-//! A runtime branch cannot mutate a collection captured from specialization.
-//! Pass a writable slice for runtime state.
-//! ```compile_fail,E0502
-//! use splice::kernel;
+//! Kernels have distinct call argument types, even when their fields match.
+//! ```compile_fail,E0271
+//! use splice::{Executable, TypedKernel, kernel};
 //! #[kernel]
-//! fn conditional_push(x: i32) -> i32 {
-//!     let mut values = vec![0];
-//!     if x > 0 { values.push(1); }
-//!     values.len() as i32
+//! fn first(x: i32) -> i32 { x }
+//! #[kernel]
+//! fn second(x: i32) -> i32 { x }
+//! fn call<K: Executable>(code: TypedKernel<first::Signature, K>) {
+//!     let _ = code.call(second::CallArgs { x: 1 });
 //! }
 //! ```
-#![forbid(unsafe_code)]
+#![deny(unsafe_code)]
 
 extern crate self as splice;
 
 pub mod debug;
 pub mod frontend;
 pub mod hir;
+mod imports;
 pub mod simd;
+pub use imports::{ImportArgs, ImportTarget, LinkedImport, RustImport};
+#[allow(unsafe_code)]
+mod runtime_context;
+#[doc(hidden)]
+pub use runtime_context::{
+    ContextArguments, ContextFrame, ContextOperation, ContextPacketLayout, ContextSignature,
+    RuntimeContext, StaticRustCall, StaticRustSymbol, invoke_packet_runtime_context,
+    invoke_runtime_context,
+};
+
+/// Description of an actual Rust struct field for this monomorphization.
+pub struct KernelField {
+    pub name: &'static str,
+    pub offset: usize,
+    pub type_name: fn() -> &'static str,
+}
+pub trait KernelType {
+    const FIELDS: &'static [KernelField];
+}
+
+mod typed;
+pub use typed::{BuildError, CallArgs, CallError, CompileInput, TypedIr, TypedKernel};
+#[doc(hidden)]
+pub use typed::{build_boundary, call_boundary};
 
 pub use frontend::ComptimeKey;
 pub use hir::{BufferArg, BufferElement, BufferKind, Function, validate_buffers};
-pub use splice_macros::{ComptimeKey, kernel};
+pub use splice_macros::{ComptimeKey, KernelType, kernel};
 
 /// Result of a Splice operation, with the staging or backend error message.
 pub type Result<T> = std::result::Result<T, String>;
@@ -55,14 +80,26 @@ impl Default for BuildOptions {
 }
 
 /// Generate a backend-specific output from a specialized kernel.
-pub trait Codegen {
+pub trait Codegen: Sized {
     /// The value produced by a successful build.
     type Output;
-    fn compile(function: &Function) -> Result<Self::Output>;
+    fn compile_raw(function: &Function) -> Result<Self::Output>;
+    fn compile<I: CompileInput<Self>>(input: &I) -> std::result::Result<I::Output, I::Error> {
+        input.compile_with(None)
+    }
     /// Override the code generation mode. Source points are available when
     /// the portable IR was staged in debug mode.
-    fn compile_with_options(function: &Function, _options: BuildOptions) -> Result<Self::Output> {
-        Self::compile(function)
+    fn compile_with_options<I: CompileInput<Self>>(
+        input: &I,
+        options: BuildOptions,
+    ) -> std::result::Result<I::Output, I::Error> {
+        input.compile_with(Some(options))
+    }
+    fn compile_raw_with_options(
+        function: &Function,
+        _options: BuildOptions,
+    ) -> Result<Self::Output> {
+        Self::compile_raw(function)
     }
     /// By default, verify a portable function and pass it to the backend.
     /// Native backends may consume the operation stream directly.

@@ -8,9 +8,13 @@ use splice_llvm::Llvm;
 
 fn main() -> splice::Result<()> {
     let kernel: Box<dyn Executable> = match std::env::args().nth(1).as_deref() {
-        None | Some("lancy") => Box::new(matmul::build::<Lancy>()?),
-        Some("cranelift") => Box::new(matmul::build::<Cranelift>()?),
-        Some("llvm") => Box::new(matmul::build::<Llvm>()?),
+        None | Some("lancy") => {
+            Box::new(matmul::build::<Lancy>(matmul::BuildArgs {})?.into_inner())
+        }
+        Some("cranelift") => {
+            Box::new(matmul::build::<Cranelift>(matmul::BuildArgs {})?.into_inner())
+        }
+        Some("llvm") => Box::new(matmul::build::<Llvm>(matmul::BuildArgs {})?.into_inner()),
         Some(other) => {
             return Err(format!(
                 "unknown backend {other}, choose lancy, cranelift or llvm"
@@ -45,15 +49,42 @@ mod tests {
     fn kernels() -> Vec<(&'static str, Box<dyn Executable>)> {
         let ir = matmul::ir().unwrap();
         vec![
-            ("Lancy/direct", Box::new(matmul::build::<Lancy>().unwrap())),
-            ("Lancy/ir", Box::new(Lancy::compile(&ir).unwrap())),
+            (
+                "Lancy/direct",
+                Box::new(
+                    matmul::build::<Lancy>(matmul::BuildArgs {})
+                        .unwrap()
+                        .into_inner(),
+                ),
+            ),
+            (
+                "Lancy/ir",
+                Box::new(Lancy::compile(&ir).unwrap().into_inner()),
+            ),
             (
                 "Cranelift/direct",
-                Box::new(matmul::build::<Cranelift>().unwrap()),
+                Box::new(
+                    matmul::build::<Cranelift>(matmul::BuildArgs {})
+                        .unwrap()
+                        .into_inner(),
+                ),
             ),
-            ("Cranelift/ir", Box::new(Cranelift::compile(&ir).unwrap())),
-            ("LLVM/direct", Box::new(matmul::build::<Llvm>().unwrap())),
-            ("LLVM/ir", Box::new(Llvm::compile(&ir).unwrap())),
+            (
+                "Cranelift/ir",
+                Box::new(Cranelift::compile(&ir).unwrap().into_inner()),
+            ),
+            (
+                "LLVM/direct",
+                Box::new(
+                    matmul::build::<Llvm>(matmul::BuildArgs {})
+                        .unwrap()
+                        .into_inner(),
+                ),
+            ),
+            (
+                "LLVM/ir",
+                Box::new(Llvm::compile(&ir).unwrap().into_inner()),
+            ),
         ]
     }
 

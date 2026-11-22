@@ -227,7 +227,7 @@ struct Emitter<'a> {
     config: Simd,
     epilogue: Label,
     byte_predicate: bool,
-    failures: [Option<Label>; 3],
+    failures: [Option<Label>; 5],
 }
 
 impl Emitter<'_> {
@@ -532,6 +532,43 @@ impl Emitter<'_> {
                 )?;
                 self.trap_if(Cond::Cs, 1)
             }
+            Inst::CheckOverflow(..) => {
+                self.a
+                    .put(C::Subs_32_addsub_shift, &[r(R::WZR), r(word(0)), r(R::WZR)])?;
+                self.trap_if(Cond::Ne, 4)
+            }
+            Inst::CallScratch(..) => self.a.addr(g(0), R::X19, self.frame.scratch_base),
+            Inst::StorePacketWord(offset, _) => self.value_access(
+                false,
+                Type::I32,
+                n(0),
+                (R::X19, self.frame.scratch_base + offset as usize),
+            ),
+            Inst::RustCall(..) | Inst::RustPacketCall(..) | Inst::RustContextCall(..) => {
+                let entry = match op {
+                    Inst::RustCall(import, ..) => (import.resolve)() as usize,
+                    Inst::RustPacketCall(import, _) => {
+                        self.a.imm(R::X0, std::ptr::from_ref(import) as u64)?;
+                        self.a.addr(R::X1, R::X19, self.frame.scratch_base)?;
+                        self.a.imm(R::X2, u64::from(import.arity))?;
+                        splice_target::abi::invoke_packet_import as *const () as usize
+                    }
+                    Inst::RustContextCall(import, ..) => import.address(),
+                    _ => unreachable!(),
+                };
+                // The frame has already saved LR and keeps the workspace in
+                // callee-saved registers across this AAPCS64 call.
+                self.a.imm(R::X16, entry as u64)?;
+                self.a.put(C::Blr_64_branch_reg, &[r(R::X16)])?;
+                self.byte_predicate = false;
+                self.a.put(
+                    C::Ubfm_64m_bitfield,
+                    &[r(R::X16), r(R::X0), O::imm(32), O::imm(63)],
+                )?;
+                self.a
+                    .put(C::Subs_32_addsub_imm, &[r(R::WZR), r(R::W16), O::imm(0)])?;
+                self.trap_if(Cond::Ne, 5)
+            }
             Inst::Offset(scale, ..) => self.a.put(
                 C::Add_64_addsub_sxtw,
                 &[
@@ -728,7 +765,7 @@ fn emit_compiled(module: &Module<Compiled>, config: Simd, debug: bool) -> Result
             config,
             epilogue,
             byte_predicate: false,
-            failures: [None; 3],
+            failures: [None; 5],
         };
         let order = layout::place(&machine.body);
         for (index, &block) in order.iter().enumerate() {

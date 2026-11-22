@@ -1,18 +1,51 @@
-use crate::{BOUNDS, DIV_ZERO, Descriptor, OVERFLOW};
+use crate::{BOUNDS, DIV_ZERO, Descriptor, INTEGER_OVERFLOW, OVERFLOW};
 use cranelift_codegen::ir::{
-    DebugTag, FuncRef, InstBuilder, MemFlags, Opcode, StackSlotData, StackSlotKind, TrapCode,
-    Value,
+    DebugTag, FuncRef, InstBuilder, MemFlags, Opcode, StackSlot, StackSlotData, StackSlotKind,
+    TrapCode, Value,
     condcodes::IntCC,
     types::{I8, I32, I64},
 };
-use cranelift_frontend::FunctionBuilder;
-use splice::Function;
-use splice::hir::{Binary, Instr, Reg};
+use cranelift_frontend::{FunctionBuilder, Variable};
+use splice::hir::{Binary, ContextSlice, Instr, Reg, RustContextTarget};
+use splice::{ContextArguments, Function};
 use std::collections::HashMap;
 use std::mem::{offset_of, size_of};
 use std::sync::Arc;
 
 mod simd;
+
+fn packet_stack(
+    builder: &mut FunctionBuilder,
+    scratch: &mut Option<StackSlot>,
+    bytes: u32,
+) -> StackSlot {
+    let slot = *scratch.get_or_insert_with(|| {
+        builder.create_sized_stack_slot(StackSlotData::new(StackSlotKind::ExplicitSlot, bytes, 3))
+    });
+    let slot_data = &mut builder.func.sized_stack_slots[slot];
+    slot_data.size = slot_data.size.max(bytes);
+    slot
+}
+
+fn packet_words(
+    builder: &mut FunctionBuilder,
+    scratch: StackSlot,
+    args: impl Iterator<Item = Variable>,
+) {
+    for (index, arg) in args.enumerate() {
+        let word = builder.use_var(arg);
+        builder.ins().stack_store(word, scratch, index as i32 * 4);
+    }
+}
+
+fn import_result(builder: &mut FunctionBuilder, packed: Value) -> Value {
+    let failed = builder
+        .ins()
+        .icmp_imm(IntCC::UnsignedGreaterThan, packed, i64::from(u32::MAX));
+    let panic = builder.ins().iconst(I64, crate::RUST_PANIC);
+    return_if(builder, failed, panic);
+    builder.ins().ireduce(I32, packed)
+}
 
 fn parameters(b: &mut FunctionBuilder, f: &Function, is_entry: bool) -> Vec<Value> {
     let entry = b.create_block();
@@ -66,6 +99,7 @@ pub(super) fn emit(
     let snapshots = debug_bytes.map(|bytes| {
         b.create_sized_stack_slot(StackSlotData::new(StackSlotKind::ExplicitSlot, bytes, 3))
     });
+    let mut rust_scratch = None;
     let mut open = true;
     for (index, op) in f.instructions().iter().enumerate() {
         match *op {
@@ -161,6 +195,140 @@ pub(super) fn emit(
                 let addr = element(&mut b, buffers[buffer.index()], index);
                 b.ins().store(MemFlags::new(), value, addr, 0);
             }
+            Instr::RustCall {
+                dst,
+                import,
+                ref args,
+            } => {
+                use cranelift_codegen::ir::{AbiParam, Signature};
+                // KernelModule uses the target ISA's system calling convention.
+                // The signature here matches ScalarEntry on Windows and Unix.
+                let mut signature = Signature::new(b.func.signature.call_conv);
+                signature.params.extend([AbiParam::new(I32); 2]);
+                signature.returns.push(AbiParam::new(I64));
+                let sig = b.import_signature(signature);
+                let zero = b.ins().iconst(I32, 0);
+                let mut words = [zero; 2];
+                for (out, &arg) in words.iter_mut().zip(args) {
+                    *out = b.use_var(var(arg));
+                }
+                let address = b
+                    .ins()
+                    .iconst(I64, (import.symbol.resolve)() as usize as i64);
+                let call = b.ins().call_indirect(sig, address, &words);
+                let packed = b.inst_results(call)[0];
+                let value = import_result(&mut b, packed);
+                b.def_var(var(dst), value);
+            }
+            Instr::RustPacketCall {
+                dst,
+                import,
+                ref args,
+            } => {
+                use cranelift_codegen::ir::{AbiParam, Signature};
+                let mut signature = Signature::new(b.func.signature.call_conv);
+                signature.params.extend([
+                    AbiParam::new(I64),
+                    AbiParam::new(I64),
+                    AbiParam::new(I32),
+                ]);
+                signature.returns.push(AbiParam::new(I64));
+                let sig = b.import_signature(signature);
+                let scratch = packet_stack(
+                    &mut b,
+                    &mut rust_scratch,
+                    import.packet_bytes().expect("verified Rust packet"),
+                );
+                packet_words(&mut b, scratch, args.iter().copied().map(var));
+                let symbol = b.ins().iconst(I64, std::ptr::from_ref(import) as i64);
+                let words = b.ins().stack_addr(I64, scratch, 0);
+                let count = b.ins().iconst(I32, i64::from(import.arity));
+                let address = b.ins().iconst(
+                    I64,
+                    splice_target::abi::invoke_packet_import as *const () as usize as i64,
+                );
+                let call = b.ins().call_indirect(sig, address, &[symbol, words, count]);
+                let packed = b.inst_results(call)[0];
+                let value = import_result(&mut b, packed);
+                b.def_var(var(dst), value);
+            }
+            Instr::RustContextCall {
+                dst,
+                target,
+                ref args,
+                ref slices,
+            } => {
+                use cranelift_codegen::ir::{AbiParam, Signature};
+                let (data, operation) = match target {
+                    RustContextTarget::Borrowed { context, operation } => {
+                        (Some(buffers[context.index()][0]), operation)
+                    }
+                    RustContextTarget::Static(_) => (None, 0),
+                };
+                let ptr = I64;
+                let mut signature = Signature::new(b.func.signature.call_conv);
+                signature
+                    .params
+                    .extend([AbiParam::new(ptr), AbiParam::new(I32)]);
+                let zero = b.ins().iconst(I32, 0);
+                let operation = b.ins().iconst(I32, i64::from(operation));
+                let (entry, words) = if let Some(data) = data
+                    && args.len() <= 2
+                    && slices.is_empty()
+                {
+                    let mut words = [data, operation, zero, zero];
+                    for (out, &arg) in words[2..].iter_mut().zip(args) {
+                        *out = b.use_var(var(arg));
+                    }
+                    signature.params.extend([AbiParam::new(I32); 2]);
+                    (splice::invoke_runtime_context as *const (), words)
+                } else {
+                    signature
+                        .params
+                        .extend([AbiParam::new(ptr), AbiParam::new(I32)]);
+                    let layout =
+                        ContextArguments::packet_layout(args.len() as u32, slices.len() as u32)
+                            .expect("validated packet size");
+                    let scratch = packet_stack(&mut b, &mut rust_scratch, layout.bytes.max(8));
+                    packet_words(&mut b, scratch, args.iter().copied().map(var));
+                    for (i, &ContextSlice { buffer, writable }) in slices.iter().enumerate() {
+                        let offset =
+                            (layout.slices_at + i as u32 * ContextArguments::SLICE_BYTES) as i32;
+                        let [data, len] = buffers[buffer.index()];
+                        let element = f.buffer_kinds()[buffer.index()].element();
+                        let tag = b.ins().iconst(
+                            I32,
+                            i64::from(ContextArguments::view_tag(element, writable)),
+                        );
+                        b.ins().stack_store(data, scratch, offset);
+                        b.ins().stack_store(
+                            len,
+                            scratch,
+                            offset + ContextArguments::LENGTH_OFFSET as i32,
+                        );
+                        b.ins().stack_store(
+                            tag,
+                            scratch,
+                            offset + ContextArguments::ELEMENT_OFFSET as i32,
+                        );
+                    }
+                    let packet = b.ins().stack_addr(ptr, scratch, 0);
+                    let entry = match target {
+                        RustContextTarget::Borrowed { .. } => {
+                            splice::invoke_packet_runtime_context as *const ()
+                        }
+                        RustContextTarget::Static(symbol) => symbol.entry() as *const (),
+                    };
+                    (entry, [data.unwrap_or(packet), operation, packet, zero])
+                };
+                signature.returns.push(AbiParam::new(I64));
+                let sig = b.import_signature(signature);
+                let address = b.ins().iconst(ptr, entry as usize as i64);
+                let call = b.ins().call_indirect(sig, address, &words);
+                let packed = b.inst_results(call)[0];
+                let value = import_result(&mut b, packed);
+                b.def_var(var(dst), value);
+            }
             Instr::Call {
                 dst,
                 ref function,
@@ -200,6 +368,11 @@ pub(super) fn emit(
                 let value = b.use_var(var(r));
                 let result = b.ins().uextend(I64, value);
                 b.ins().return_(&[result]);
+                open = false;
+            }
+            Instr::TrapBounds => {
+                let fault = b.ins().iconst(I64, BOUNDS);
+                b.ins().return_(&[fault]);
                 open = false;
             }
         }
@@ -253,11 +426,32 @@ fn binary(b: &mut FunctionBuilder, op: Binary, lhs: Value, rhs: Value) -> Value 
         Add => return b.ins().iadd(lhs, rhs),
         Sub => return b.ins().isub(lhs, rhs),
         Mul => return b.ins().imul(lhs, rhs),
+        CheckedAdd | CheckedSub | CheckedMul => {
+            let (result, overflow) = match op {
+                CheckedAdd => b.ins().sadd_overflow(lhs, rhs),
+                CheckedSub => b.ins().ssub_overflow(lhs, rhs),
+                CheckedMul => b.ins().smul_overflow(lhs, rhs),
+                _ => unreachable!(),
+            };
+            let fault = b.ins().iconst(I64, INTEGER_OVERFLOW);
+            return_if(b, overflow, fault);
+            return result;
+        }
         And => return b.ins().band(lhs, rhs),
         Or => return b.ins().bor(lhs, rhs),
         Xor => return b.ins().bxor(lhs, rhs),
         Shl => return b.ins().ishl(lhs, rhs),
         Shr => return b.ins().sshr(lhs, rhs),
+        CheckedShl | CheckedShr => {
+            let invalid = b.ins().icmp_imm(IntCC::UnsignedGreaterThanOrEqual, rhs, 32);
+            let fault = b.ins().iconst(I64, INTEGER_OVERFLOW);
+            return_if(b, invalid, fault);
+            return if op == CheckedShl {
+                b.ins().ishl(lhs, rhs)
+            } else {
+                b.ins().sshr(lhs, rhs)
+            };
+        }
         Min => return b.ins().smin(lhs, rhs),
         Max => return b.ins().smax(lhs, rhs),
         Div | Rem => {

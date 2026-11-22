@@ -14,7 +14,7 @@ use criterion::{
     measurement::WallTime,
 };
 use relational::{Catalog, pricing_plan, query};
-use splice::{BufferArg, Codegen, Executable, Function, kernel};
+use splice::{BufferArg, BuildError, Codegen, Executable, TypedIr, TypedKernel, kernel};
 use splice_cranelift::{Cranelift, CraneliftKernel};
 use splice_lancy::{Lancy, LancyKernel};
 use splice_llvm::{LlvmKernel, LlvmManualSimd};
@@ -42,10 +42,10 @@ fn line_totals(
     out.len() as i32
 }
 
-struct Builders<'a> {
-    lancy: &'a dyn Fn() -> splice::Result<LancyKernel>,
-    llvm: &'a dyn Fn() -> splice::Result<LlvmKernel>,
-    cranelift: &'a dyn Fn() -> splice::Result<CraneliftKernel>,
+struct Builders<'a, S> {
+    lancy: &'a dyn Fn() -> Result<TypedKernel<S, LancyKernel>, BuildError>,
+    llvm: &'a dyn Fn() -> Result<TypedKernel<S, LlvmKernel>, BuildError>,
+    cranelift: &'a dyn Fn() -> Result<TypedKernel<S, CraneliftKernel>, BuildError>,
 }
 
 struct Workload<'a, Run, T> {
@@ -57,10 +57,10 @@ struct Workload<'a, Run, T> {
     run: Run,
 }
 
-fn bench_compile<K>(
+fn bench_compile<K, E: std::fmt::Debug>(
     group: &mut BenchmarkGroup<'_, WallTime>,
     backend: &str,
-    build: impl Fn() -> splice::Result<K>,
+    build: impl Fn() -> Result<K, E>,
 ) {
     group.bench_function(backend, |b| {
         // Keep installation in the sample. Release the executable mapping
@@ -97,16 +97,16 @@ where
         );
     }
 
-    fn bench_execute<K: Executable>(
+    fn bench_execute<S, K: Executable>(
         &self,
         group: &mut BenchmarkGroup<'_, WallTime>,
         backend: &str,
-        build: impl Fn() -> splice::Result<K>,
+        build: impl Fn() -> Result<TypedKernel<S, K>, BuildError>,
     ) {
         let mut state = None;
         group.bench_function(BenchmarkId::new(backend, self.elements), |b| {
             let (kernel, workspace) = state.get_or_insert_with(|| {
-                let kernel = build().expect("compile execution benchmark");
+                let kernel = build().expect("compile execution benchmark").into_inner();
                 let mut workspace = vec![!T::default(); self.workspace_words];
                 self.verify(&kernel, &mut workspace, backend);
                 (kernel, workspace)
@@ -121,7 +121,7 @@ where
         }
     }
 
-    fn bench_route(&self, c: &mut Criterion, route: &str, builds: Builders<'_>) {
+    fn bench_route<S>(&self, c: &mut Criterion, route: &str, builds: Builders<'_, S>) {
         let mut compile = c.benchmark_group(format!("{}/compile/{route}", self.name));
         bench_compile(&mut compile, "lancy", builds.lancy);
         bench_compile(&mut compile, "cranelift", builds.cranelift);
@@ -136,11 +136,11 @@ where
         execute.finish();
     }
 
-    fn compare(
+    fn compare<S>(
         &self,
         c: &mut Criterion,
-        stage: impl Fn() -> splice::Result<Function>,
-        builds: Builders<'_>,
+        stage: impl Fn() -> Result<TypedIr<S>, BuildError>,
+        builds: Builders<'_, S>,
     ) {
         c.bench_function(&format!("{}/stage_ir", self.name), |b| {
             b.iter_batched(
@@ -193,9 +193,21 @@ fn projection(c: &mut Criterion) {
         c,
         || line_totals::ir(black_box(2)),
         Builders {
-            lancy: &|| line_totals::build::<Lancy>(black_box(2)),
-            cranelift: &|| line_totals::build::<Cranelift>(black_box(2)),
-            llvm: &|| line_totals::build::<LlvmManualSimd>(black_box(2)),
+            lancy: &|| {
+                line_totals::build::<Lancy>(line_totals::BuildArgs {
+                    minimum: black_box(2),
+                })
+            },
+            cranelift: &|| {
+                line_totals::build::<Cranelift>(line_totals::BuildArgs {
+                    minimum: black_box(2),
+                })
+            },
+            llvm: &|| {
+                line_totals::build::<LlvmManualSimd>(line_totals::BuildArgs {
+                    minimum: black_box(2),
+                })
+            },
         },
     );
 }
@@ -264,11 +276,23 @@ fn sql_plan(c: &mut Criterion) {
     };
     workload.compare(
         c,
-        || query::ir(black_box(&plan)),
+        || query::ir(&plan.prepare()),
         Builders {
-            lancy: &|| query::build::<Lancy>(black_box(&plan)),
-            cranelift: &|| query::build::<Cranelift>(black_box(&plan)),
-            llvm: &|| query::build::<LlvmManualSimd>(black_box(&plan)),
+            lancy: &|| {
+                query::build::<Lancy>(query::BuildArgs {
+                    program: &plan.prepare(),
+                })
+            },
+            cranelift: &|| {
+                query::build::<Cranelift>(query::BuildArgs {
+                    program: &plan.prepare(),
+                })
+            },
+            llvm: &|| {
+                query::build::<LlvmManualSimd>(query::BuildArgs {
+                    program: &plan.prepare(),
+                })
+            },
         },
     );
 }
@@ -303,9 +327,9 @@ fn simd_matmul(c: &mut Criterion) {
         c,
         multiply::ir,
         Builders {
-            lancy: &multiply::build::<Lancy>,
-            cranelift: &multiply::build::<Cranelift>,
-            llvm: &multiply::build::<LlvmManualSimd>,
+            lancy: &|| multiply::build::<Lancy>(multiply::BuildArgs {}),
+            cranelift: &|| multiply::build::<Cranelift>(multiply::BuildArgs {}),
+            llvm: &|| multiply::build::<LlvmManualSimd>(multiply::BuildArgs {}),
         },
     );
 }
@@ -336,9 +360,9 @@ fn simd_hash_lookup(c: &mut Criterion) {
         c,
         lookup::ir,
         Builders {
-            lancy: &lookup::build::<Lancy>,
-            cranelift: &lookup::build::<Cranelift>,
-            llvm: &lookup::build::<LlvmManualSimd>,
+            lancy: &|| lookup::build::<Lancy>(lookup::BuildArgs {}),
+            cranelift: &|| lookup::build::<Cranelift>(lookup::BuildArgs {}),
+            llvm: &|| lookup::build::<LlvmManualSimd>(lookup::BuildArgs {}),
         },
     );
 }

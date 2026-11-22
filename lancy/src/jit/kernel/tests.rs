@@ -3,6 +3,36 @@ use crate::hir::{Binary, Function, Op, Terminator};
 use iced_x86::{IcedError, code_asm::*};
 use std::sync::Arc;
 
+#[test]
+fn scratch_pointers_require_the_raw_call_contract_transitively() {
+    let mut callee = Function::scalar(0);
+    let block = callee.entry();
+    let address = callee.append(block, Op::CallScratch(8)).unwrap();
+    let value = callee.append(block, Op::Const(19)).unwrap();
+    callee.append(block, Op::Store(address, value));
+    let read = callee
+        .append(block, Op::Load(crate::hir::Type::I32, address))
+        .unwrap();
+    callee.set_terminator(block, Terminator::Return(read));
+    let mut caller = Function::scalar(0);
+    let block = caller.entry();
+    let call = caller.add_call(Arc::new(callee), &[]);
+    let returned = caller.append(block, Op::Call(call)).unwrap();
+    caller.set_terminator(block, Terminator::Return(returned));
+
+    for policy in [crate::Inlining::Always, crate::Inlining::Never] {
+        let kernel = ScalarKernel::compile_with_inlining(&caller, policy).unwrap();
+        assert_eq!(kernel.call(&[]), Err(crate::CallError::PointerSignature));
+        assert_eq!(
+            kernel.call_words(&[], &mut [0]),
+            Err(crate::CallError::PointerSignature)
+        );
+        // SAFETY: the only access is the initialized first word of this
+        // live frame's aligned scratch area. No pointers cross the ABI.
+        assert_eq!(unsafe { kernel.call_raw(&[]) }, Ok(19));
+    }
+}
+
 /// Call the real JIT entry with host register canaries. Return one if any
 /// nonvolatile GPR changed, after restoring the test caller's own registers.
 fn abi_probe(entry: Entry) -> Result<Vec<u8>, IcedError> {

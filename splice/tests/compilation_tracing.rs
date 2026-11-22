@@ -1,4 +1,4 @@
-use splice::{BuildOptions, Codegen, Executable, kernel};
+use splice::{BuildOptions, Codegen, kernel};
 use splice_cranelift::Cranelift;
 use splice_lancy::Lancy;
 use splice_llvm::Llvm;
@@ -40,19 +40,20 @@ fn staged_and_portable_compilation_report_stage_durations() {
         let options = BuildOptions::Release;
         let ir = increment::ir_with_options(options).unwrap();
         for kernel in [
-            increment::build_with_options::<Lancy>(options).unwrap(),
+            increment::build_with_options::<Lancy>(options, increment::BuildArgs {}).unwrap(),
             Lancy::compile(&ir).unwrap(),
         ] {
-            assert_eq!(kernel.call(&[41], &mut []), Ok(42));
+            assert_eq!(kernel.call(increment::CallArgs { value: 41 }), Ok(42));
         }
         for kernel in [
-            increment::build_with_options::<Llvm>(options).unwrap(),
+            increment::build_with_options::<Llvm>(options, increment::BuildArgs {}).unwrap(),
             Llvm::compile(&ir).unwrap(),
         ] {
-            assert_eq!(kernel.call(&[41], &mut []), Ok(42));
+            assert_eq!(kernel.call(increment::CallArgs { value: 41 }), Ok(42));
         }
-        let kernel = increment::build_with_options::<Cranelift>(options).unwrap();
-        assert_eq!(kernel.call(&[41], &mut []), Ok(42));
+        let kernel =
+            increment::build_with_options::<Cranelift>(options, increment::BuildArgs {}).unwrap();
+        assert_eq!(kernel.call(increment::CallArgs { value: 41 }), Ok(42));
         assert!(Text::compile(&ir).unwrap().starts_with("fn increment("));
     });
     let bytes = output.lock().unwrap();

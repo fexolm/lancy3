@@ -45,6 +45,28 @@ pub(super) fn hir(module: &Module<VerifiedBody>, ids: &FunctionIds<Function>) ->
                     Op::Simd(Simd::Store(p, x)) => format!("simd.store {} {}", v(p), v(x)),
                     Op::PtrOffset(p, i, s) => format!("offset {} {} {}", v(p), v(i), 1 << s as u8),
                     Op::BoundsCheck(i, n) => format!("bounds {} {}", v(i), v(n)),
+                    Op::CheckOverflow(cond) => format!("check_overflow {}", v(cond)),
+                    Op::RustCall(import, a, b) => {
+                        format!("rust_call {} {} {}", import.name, v(a), v(b))
+                    }
+                    Op::RustPacketCall(site) => {
+                        let (import, args) = f.packet_call(site);
+                        format!(
+                            "rust_packet_call {} {}",
+                            import.name,
+                            list(args.iter().copied().map(v))
+                        )
+                    }
+                    Op::RustContextCall(_, [context, operation, a, b]) => {
+                        format!(
+                            "rust_context_call {} {} {} {}",
+                            v(context),
+                            v(operation),
+                            v(a),
+                            v(b)
+                        )
+                    }
+                    Op::CallScratch(bytes) => format!("call_scratch {bytes}"),
                     Op::Simd(Simd::MaskedLoad {
                         address,
                         mask,

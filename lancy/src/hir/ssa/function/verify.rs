@@ -11,6 +11,7 @@ pub(crate) struct VerifiedBody<'a> {
     pub function: &'a Function,
     pub cfg: ControlFlowGraph,
     pub dom: DomTree,
+    pub has_call_scratch: bool,
 }
 
 impl Function {
@@ -56,6 +57,7 @@ impl Function {
         }
         let cfg = ControlFlowGraph::compute(self)?;
         let dom = DomTree::compute(&cfg);
+        let mut has_call_scratch = false;
         let mut defs = DenseMap::filled(self.value_count(), None);
         for block in self.blocks() {
             for &param in self.params(block) {
@@ -169,6 +171,45 @@ impl Function {
                         expect(len, Type::I32)?;
                         continue;
                     }
+                    Op::CheckOverflow(cond) => {
+                        expect(cond, Type::I32)?;
+                        continue;
+                    }
+                    Op::RustCall(_, a, b) => {
+                        expect(a, Type::I32)?;
+                        expect(b, Type::I32)?;
+                        Type::I32
+                    }
+                    Op::RustPacketCall(site) => {
+                        let &(import, args) = self
+                            .packets
+                            .get(site)
+                            .ok_or(IrError::InvalidRustPacket { inst })?;
+                        if import.packet_bytes().is_none() || args.len != import.arity {
+                            return Err(IrError::InvalidRustPacket { inst });
+                        }
+                        for &word in &self.operands[args.range()] {
+                            expect(word, Type::I32)?;
+                        }
+                        Type::I32
+                    }
+                    Op::RustContextCall(import, [context, operation, a, b]) => {
+                        expect(context, Type::Ptr)?;
+                        expect(operation, Type::I32)?;
+                        expect(
+                            a,
+                            match import {
+                                super::super::RustContextImport::Scalars(_) => Type::I32,
+                                super::super::RustContextImport::Packet(_) => Type::Ptr,
+                            },
+                        )?;
+                        expect(b, Type::I32)?;
+                        Type::I32
+                    }
+                    Op::CallScratch(_) => {
+                        has_call_scratch = true;
+                        Type::Ptr
+                    }
                     Op::PtrOffset(base, index, _) => {
                         expect(base, Type::Ptr)?;
                         expect(index, Type::I32)?;
@@ -264,6 +305,7 @@ impl Function {
             function: self,
             cfg,
             dom,
+            has_call_scratch,
         })
     }
 }

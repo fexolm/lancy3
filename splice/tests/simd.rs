@@ -1,5 +1,5 @@
 use splice::{
-    BufferArg, Codegen, Executable, Function, kernel,
+    BufferArg, BuildError, Codegen, Executable, TypedKernel, kernel,
     simd::{Lane, Mask},
 };
 use splice_cranelift::Cranelift;
@@ -73,21 +73,33 @@ fn float_width(a: &[f32], b: &mut [f32], c: &[f64], d: &mut [f64], flag: i32) ->
     Lane::<f32>::lanes() as i32 - Lane::<f64>::lanes() as i32
 }
 
-fn kernels<E: Executable + 'static>(
+fn kernels<S, E: Executable + 'static>(
     out: &mut Vec<Box<dyn Executable>>,
-    direct: splice::Result<E>,
-    portable: splice::Result<E>,
+    direct: Result<TypedKernel<S, E>, BuildError>,
+    portable: Result<TypedKernel<S, E>, BuildError>,
 ) {
-    out.push(Box::new(direct.unwrap()));
-    out.push(Box::new(portable.unwrap()));
+    out.push(Box::new(direct.unwrap().into_inner()));
+    out.push(Box::new(portable.unwrap().into_inner()));
 }
 macro_rules! compile_all {
     ($name:ident) => {{
-        let ir: Function = $name::ir().unwrap();
+        let ir = $name::ir().unwrap();
         let mut v = Vec::new();
-        kernels(&mut v, $name::build::<Lancy>(), Lancy::compile(&ir));
-        kernels(&mut v, $name::build::<Llvm>(), Llvm::compile(&ir));
-        kernels(&mut v, $name::build::<Cranelift>(), Cranelift::compile(&ir));
+        kernels(
+            &mut v,
+            $name::build::<Lancy>($name::BuildArgs {}),
+            Lancy::compile(&ir),
+        );
+        kernels(
+            &mut v,
+            $name::build::<Llvm>($name::BuildArgs {}),
+            Llvm::compile(&ir),
+        );
+        kernels(
+            &mut v,
+            $name::build::<Cranelift>($name::BuildArgs {}),
+            Cranelift::compile(&ir),
+        );
         v
     }};
 }
@@ -339,17 +351,17 @@ fn vector_rotate_wraps_the_count_and_rotates_signed_lane_bits() {
         let mut backends = Vec::new();
         kernels(
             &mut backends,
-            rotate_words::build::<Lancy>(count),
+            rotate_words::build::<Lancy>(rotate_words::BuildArgs { count }),
             Lancy::compile(&ir),
         );
         kernels(
             &mut backends,
-            rotate_words::build::<Cranelift>(count),
+            rotate_words::build::<Cranelift>(rotate_words::BuildArgs { count }),
             Cranelift::compile(&ir),
         );
         kernels(
             &mut backends,
-            rotate_words::build::<Llvm>(count),
+            rotate_words::build::<Llvm>(rotate_words::BuildArgs { count }),
             Llvm::compile(&ir),
         );
         let expected: Vec<_> = source.iter().map(|v| v.rotate_left(count)).collect();
@@ -709,7 +721,12 @@ fn scalable_add_wraps_at_u16_and_preserves_prefix_on_short_store() {
     assert_eq!(native, expected);
     let ir = add_block::ir().unwrap();
     let text = Text::compile(&ir).unwrap();
-    assert_eq!(text, add_block::build::<Text>().unwrap());
+    assert_eq!(
+        text.as_inner(),
+        add_block::build::<Text>(add_block::BuildArgs {})
+            .unwrap()
+            .as_inner()
+    );
     for part in [
         "lhs: &[u16]",
         "dst: &mut [u16]",
@@ -1524,7 +1541,7 @@ fn register_refill_and_wrapping_lane_index_match_across_backends() {
             }
         }
     }
-    let listing = refill_lanes::build::<Text>().unwrap();
+    let listing = refill_lanes::build::<Text>(refill_lanes::BuildArgs {}).unwrap();
     for op in ["expand", "extract_wrapping", "replace_wrapping"] {
         assert!(listing.contains(op));
     }
@@ -1541,24 +1558,30 @@ fn scratch_slots(#[comptime] slot: usize, input: i32, words: &mut [i32]) -> i32 
 
 #[test]
 fn host_scratch_slots_retain_independent_runtime_values() {
-    for slot in [0, 1] {
+    fn check<B: Codegen<Output: Executable>>(slot: usize, want: i32, expected: [i32; 2]) {
         let ir = scratch_slots::ir(slot).unwrap();
-        let want = if slot == 0 { 29 } else { 22 };
-        let mut expected = [0; 2];
-        assert_eq!(scratch_slots(slot, 5, &mut expected), want);
         for kernel in [
-            &Lancy::compile(&ir).unwrap() as &dyn Executable,
-            &scratch_slots::build::<Lancy>(slot).unwrap(),
-            &Llvm::compile(&ir).unwrap(),
-            &scratch_slots::build::<Llvm>(slot).unwrap(),
+            B::compile(&ir).unwrap(),
+            scratch_slots::build::<B>(scratch_slots::BuildArgs { slot }).unwrap(),
         ] {
             let mut words = [-1; 2];
             assert_eq!(
-                kernel.call(&[5], &mut [words.as_mut_slice().into()]),
+                kernel.call(scratch_slots::CallArgs {
+                    input: 5,
+                    words: &mut words
+                }),
                 Ok(want)
             );
             assert_eq!(words, expected);
         }
+    }
+
+    for slot in [0, 1] {
+        let want = if slot == 0 { 29 } else { 22 };
+        let mut expected = [0; 2];
+        assert_eq!(scratch_slots(slot, 5, &mut expected), want);
+        check::<Lancy>(slot, want, expected);
+        check::<Llvm>(slot, want, expected);
     }
 }
 #[kernel]

@@ -1,4 +1,4 @@
-use splice::{BufferArg, BuildOptions, Codegen, Executable, debug, hir::Instr, kernel, simd::Lane};
+use splice::{BuildOptions, Codegen, Executable, debug, hir::Instr, kernel, simd::Lane};
 
 #[kernel]
 fn update(dst: &mut [i32], index: i32, value: i32) -> i32 {
@@ -44,20 +44,29 @@ fn exercise<B: Codegen<Output: Executable>>() {
     let debug = BuildOptions::Debug;
     let ir = test_kernel::ir_with_options(debug).unwrap();
     for kernel in [
-        test_kernel::build_with_options::<B>(debug).unwrap(),
+        test_kernel::build_with_options::<B>(debug, test_kernel::BuildArgs {}).unwrap(),
         B::compile(&ir).unwrap(),
         B::compile_with_options(&ir, BuildOptions::Release).unwrap(),
     ] {
         let mut buf = [0, 0];
         assert_eq!(
-            kernel.call(&[12], &mut [BufferArg::Write(&mut buf)]),
+            kernel.call(test_kernel::CallArgs {
+                bias: 12,
+                dst: &mut buf
+            }),
             Ok(test_kernel(&mut [0, 0], 12))
         );
         assert_eq!(buf, [13, 14]);
         let mut short = [0];
         assert_eq!(
-            kernel.call(&[12], &mut [BufferArg::Write(&mut short)]),
-            Err("kernel slice index out of bounds".into()),
+            kernel
+                .call(test_kernel::CallArgs {
+                    bias: 12,
+                    dst: &mut short
+                })
+                .unwrap_err()
+                .to_string(),
+            "kernel slice index out of bounds",
         );
         assert_eq!(short, [13]);
     }

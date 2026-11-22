@@ -1,6 +1,6 @@
 mod numeric;
 mod simd;
-use super::{Call, Edge};
+use super::{Call, Edge, PacketCall};
 pub use numeric::{Lane, Ternary, Type, Unary};
 pub use simd::{Simd, VectorAddress};
 
@@ -15,6 +15,37 @@ pub enum Scale {
     Four = 2,
     Eight = 3,
 }
+
+pub use splice_target::abi::{RustPacketSymbol as RustPacketImport, RustSymbol as RustImport};
+
+/// Checked-context dispatcher. Raw callers must supply the context token
+/// expected by the dispatcher as its first argument.
+#[derive(Clone, Copy, Debug)]
+pub enum RustContextImport {
+    Scalars(unsafe extern "C" fn(*mut u8, u32, i32, i32) -> i64),
+    Packet(unsafe extern "C" fn(*mut u8, u32, *const u8, i32) -> i64),
+}
+
+impl RustContextImport {
+    pub(crate) fn address(self) -> usize {
+        match self {
+            Self::Scalars(entry) => entry as usize,
+            Self::Packet(entry) => entry as usize,
+        }
+    }
+}
+
+impl PartialEq for RustContextImport {
+    fn eq(&self, other: &Self) -> bool {
+        match (*self, *other) {
+            (Self::Scalars(a), Self::Scalars(b)) => std::ptr::fn_addr_eq(a, b),
+            (Self::Packet(a), Self::Packet(b)) => std::ptr::fn_addr_eq(a, b),
+            _ => false,
+        }
+    }
+}
+
+impl Eq for RustContextImport {}
 
 /// Variable-sized operands live in side tables, keeping common operations inline.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -31,8 +62,13 @@ pub enum Op {
     Bin(Binary, Value, Value),
     /// Trap if the unsigned index is at least the unsigned length.
     BoundsCheck(Value, Value),
+    /// Trap with integer overflow if the i32 condition is nonzero.
+    CheckOverflow(Value),
     /// Base plus a signed i32 index times the byte stride, at pointer width.
     PtrOffset(Value, Value, Scale),
+    /// Address of this frame's aligned scratch memory, sized for its largest
+    /// request. The memory is reused between calls and starts uninitialized.
+    CallScratch(u32),
     /// Read a value of the given type from an address, allowing unaligned access.
     Load(Type, Value),
     /// Write the value to an address using the value's width.
@@ -42,6 +78,9 @@ pub enum Op {
     /// Associate the current machine-code position with an embedder's source point.
     DebugPoint(u32),
     Call(Call),
+    RustCall(&'static RustImport, Value, Value),
+    RustPacketCall(PacketCall),
+    RustContextCall(RustContextImport, [Value; 4]),
 }
 
 /// The operation performed by an `Op::Bin` instruction.
@@ -133,7 +172,11 @@ impl Op {
             Self::Load(..)
             | Self::Store(..)
             | Self::BoundsCheck(..)
+            | Self::CheckOverflow(..)
             | Self::Call(_)
+            | Self::RustCall(..)
+            | Self::RustPacketCall(_)
+            | Self::RustContextCall(..)
             | Self::DebugStore(..)
             | Self::DebugPoint(_) => false,
             _ => true,
@@ -145,6 +188,7 @@ impl Op {
             Self::Store(..)
                 | Self::Simd(Simd::MaskedStore { .. } | Simd::Store(..))
                 | Self::BoundsCheck(..)
+                | Self::CheckOverflow(..)
                 | Self::DebugStore(..)
                 | Self::DebugPoint(_)
         )
@@ -154,6 +198,7 @@ impl Op {
         match self {
             Self::Simd(op) => op.map_operands(map),
             Self::Copy(v)
+            | Self::CheckOverflow(v)
             | Self::DebugStore(_, v)
             | Self::Load(_, v)
             | Self::Unary(_, v)
@@ -164,14 +209,25 @@ impl Op {
                 *b = map(*b);
                 *c = map(*c);
             }
+            Self::RustContextCall(_, args) => {
+                for arg in args {
+                    *arg = map(*arg);
+                }
+            }
             Self::Bin(_, a, b)
+            | Self::RustCall(_, a, b)
             | Self::PtrOffset(a, b, _)
             | Self::Store(a, b)
             | Self::BoundsCheck(a, b) => {
                 *a = map(*a);
                 *b = map(*b);
             }
-            Self::Const(_) | Self::Literal(..) | Self::Call(_) | Self::DebugPoint(_) => {}
+            Self::Const(_)
+            | Self::Literal(..)
+            | Self::Call(_)
+            | Self::RustPacketCall(_)
+            | Self::DebugPoint(_)
+            | Self::CallScratch(_) => {}
         }
     }
 }

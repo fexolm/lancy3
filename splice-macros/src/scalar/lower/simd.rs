@@ -61,7 +61,7 @@ impl Elem {
             }
         }
     }
-    pub(super) fn ty(self, root: &Path, types: &[&Ident]) -> TokenStream {
+    pub(in crate::scalar) fn ty(self, root: &Path, types: &[&Ident]) -> TokenStream {
         match self {
             Self::Param(i) => types[i].to_token_stream(),
             Self::Index(i) => {

@@ -2,7 +2,7 @@
 //! insertion point and shares the enclosing kernel's module and target.
 mod flow;
 
-use super::{body::Body, declare, emit_entry};
+use super::{body::Body, declare, emit_entry, permit_buffer_capture};
 use flow::{Exit, Flow};
 use inkwell::{
     builder::{Builder, BuilderError},
@@ -13,7 +13,9 @@ use inkwell::{
 use splice::{
     BufferKind,
     frontend::{Body as StagedBody, KernelBuilder, KernelSource, Specialization},
-    hir::{Binary, Buffer, Label, Reg, Simd, ValueType, check_call},
+    hir::{
+        Binary, Buffer, ContextSlice, Label, Reg, RustContextTarget, Simd, ValueType, check_call,
+    },
     simd::Element,
 };
 use std::{
@@ -26,6 +28,7 @@ struct Graph<'a, 'ctx> {
     module: &'a Module<'ctx>,
     count: Cell<usize>,
     source: Cell<Option<&'static KernelSource>>,
+    static_rust_slice_operands: Cell<bool>,
     callees: RefCell<HashMap<Specialization, (FunctionValue<'ctx>, bool)>>,
 }
 
@@ -37,6 +40,7 @@ impl<'ctx> Graph<'_, 'ctx> {
         key: Option<Specialization>,
         stage: StagedBody<'_>,
     ) -> Result<(FunctionValue<'ctx>, bool), String> {
+        splice::hir::check_context_layout(kinds)?;
         if let Some(hit) = key
             .as_ref()
             .and_then(|k| self.callees.borrow().get(k).copied())
@@ -78,7 +82,7 @@ impl<'ctx> Graph<'_, 'ctx> {
             function,
             arity,
             std::iter::repeat_n(ValueType::Scalar, arity),
-            kinds.len(),
+            kinds,
         )
         .map_err(|e| e.to_string())?;
         let mut direct = Direct {
@@ -101,6 +105,9 @@ impl<'ctx> Graph<'_, 'ctx> {
             // The verifier only permits fallthrough in a disconnected dead block.
             direct.native.unreachable().map_err(|e| e.to_string())?;
         }
+        if direct.native.static_rust_slice_operands() {
+            self.static_rust_slice_operands.set(true);
+        }
         Ok(direct.native.needs_status())
     }
 }
@@ -117,11 +124,15 @@ pub(crate) fn populate_direct<'ctx>(
         module,
         count: Cell::new(0),
         source: Cell::new(None),
+        static_rust_slice_operands: Cell::new(false),
         callees: RefCell::default(),
     };
     let (root, _) = graph.function(arity, kinds, None, stage)?;
     emit_entry(ctx, module, &ctx.create_builder(), arity, kinds.len(), root)
         .map_err(|e| e.to_string())?;
+    if graph.static_rust_slice_operands.get() {
+        permit_buffer_capture(module);
+    }
     Ok(graph.source.get())
 }
 
@@ -196,6 +207,10 @@ impl<'a, 'ctx> Direct<'a, 'ctx> {
             None => {
                 self.error
                     .get_or_insert_with(|| "invalid LLVM buffer".into());
+            }
+            Some(kind) if kind.context_signature().is_some() => {
+                self.error
+                    .get_or_insert_with(|| "slice memory operation cannot use Rust context".into());
             }
             Some(kind) if write && !kind.writable() => {
                 self.error
@@ -336,6 +351,44 @@ impl KernelBuilder for Direct<'_, '_> {
         self.emit(&[r], None, |ir| ir.ret(r));
         self.flow.close(Exit::Return);
     }
+    fn trap_bounds(&mut self) -> splice::Result<()> {
+        self.emit(&[], None, |ir| ir.trap_bounds());
+        self.flow.close(Exit::Return);
+        Ok(())
+    }
+    fn rust_call(&mut self, import: splice::hir::RustCall, args: &[Reg]) -> splice::Result<Reg> {
+        import.validate(args.iter().map(|&r| self.reg_type(r)))?;
+        Ok(self.result(args, |ir, dst| ir.rust_call(dst, import, args)))
+    }
+    fn rust_packet_call(
+        &mut self,
+        import: &'static splice::hir::RustPacketSymbol,
+        args: &[Reg],
+    ) -> splice::Result<Reg> {
+        splice::hir::check_rust_packet_call(import, args.iter().map(|&arg| self.reg_type(arg)))?;
+        Ok(self.result(args, |ir, dst| ir.rust_packet_call(dst, import, args)))
+    }
+    fn rust_context_call_with_slices(
+        &mut self,
+        context: Buffer,
+        operation: u32,
+        args: &[Reg],
+        slices: &[ContextSlice],
+    ) -> splice::Result<Reg> {
+        self.emit_rust_context_call(
+            RustContextTarget::Borrowed { context, operation },
+            args,
+            slices,
+        )
+    }
+    fn rust_static_call(
+        &mut self,
+        symbol: &'static splice::StaticRustSymbol,
+        args: &[Reg],
+        slices: &[ContextSlice],
+    ) -> splice::Result<Reg> {
+        self.emit_rust_context_call(RustContextTarget::Static(symbol), args, slices)
+    }
     fn call_kernel(
         &mut self,
         arity: usize,
@@ -359,6 +412,23 @@ impl KernelBuilder for Direct<'_, '_> {
 }
 
 impl Direct<'_, '_> {
+    fn emit_rust_context_call(
+        &mut self,
+        target: RustContextTarget,
+        args: &[Reg],
+        slices: &[ContextSlice],
+    ) -> splice::Result<Reg> {
+        splice::hir::check_rust_context_call(
+            self.kinds,
+            target,
+            args.iter().map(|&r| self.reg_type(r)),
+            slices,
+        )?;
+        Ok(self.result(args, |ir, dst| {
+            ir.rust_context_call(dst, target, args, slices)
+        }))
+    }
+
     fn staged_call(
         &mut self,
         arity: usize,

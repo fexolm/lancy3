@@ -14,15 +14,38 @@ mod tests;
 fn main() -> Result<(), String> {
     let plan = pricing_plan();
     match std::env::args().nth(1).as_deref() {
-        None | Some("lancy") => run(&plan, query::build::<Lancy>(&plan)?),
-        Some("cranelift") => run(&plan, query::build::<Cranelift>(&plan)?),
-        Some("llvm") => run(&plan, query::build::<Llvm>(&plan)?),
+        None | Some("lancy") => run(
+            &plan,
+            query::build::<Lancy>(query::BuildArgs {
+                program: &plan.prepare(),
+            })?
+            .into_inner(),
+        ),
+        Some("cranelift") => run(
+            &plan,
+            query::build::<Cranelift>(query::BuildArgs {
+                program: &plan.prepare(),
+            })?
+            .into_inner(),
+        ),
+        Some("llvm") => run(
+            &plan,
+            query::build::<Llvm>(query::BuildArgs {
+                program: &plan.prepare(),
+            })?
+            .into_inner(),
+        ),
         Some("text") => {
-            print!("{}", query::build::<Text>(&plan)?);
+            print!(
+                "{}",
+                query::build::<Text>(query::BuildArgs {
+                    program: &plan.prepare()
+                })?
+            );
             Ok(())
         }
         Some("rust") => {
-            print!("{}", query::print(&plan)?);
+            print!("{}", query::print(&plan.prepare())?);
             Ok(())
         }
         Some(other) => Err(format!(

@@ -59,17 +59,29 @@ pub(super) fn compile(
             frame.slots += words;
         }
         frame.debug_base = frame.slots;
-        frame.slots += body
-            .insts()
-            .iter()
-            .filter_map(|inst| match *inst {
+        let mut debug_words = 0;
+        let mut scratch_words = 0;
+        for inst in body.insts() {
+            match *inst {
                 Inst::DebugStore(ty, offset, _) => {
-                    Some((offset as usize + ty.bytes(width)).div_ceil(8))
+                    debug_words = debug_words.max((offset as usize + ty.bytes(width)).div_ceil(8));
                 }
-                _ => None,
-            })
-            .max()
-            .unwrap_or(0);
+                Inst::CallScratch(bytes, _) => {
+                    scratch_words = scratch_words.max((bytes as usize).div_ceil(8))
+                }
+                Inst::RustPacketCall(import, _) => {
+                    let bytes = import.packet_bytes().expect("verified Rust packet");
+                    scratch_words = scratch_words.max((bytes as usize).div_ceil(8));
+                }
+                _ => {}
+            }
+        }
+        frame.slots += debug_words;
+        frame.scratch_base = frame.slots;
+        frame.slots = frame
+            .slots
+            .checked_add(scratch_words)
+            .ok_or(CompileError::FrameOverflow)?;
         if id == entry {
             // Save the host's nonvolatile registers once, including those
             // written by descendants. Normal and trapping exits restore them.

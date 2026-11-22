@@ -28,6 +28,7 @@ impl<'a> Edges<'a> {
             function: f,
             cfg,
             dom,
+            ..
         } = source;
         let mut edges = Self {
             f,

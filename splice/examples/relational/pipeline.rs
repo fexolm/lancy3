@@ -7,15 +7,10 @@ pub(super) enum Step<'a> {
     Values(usize, Combine),
 }
 
-impl Step<'_> {
-    pub fn carries_heads(&self) -> bool {
-        matches!(self, Self::Values(..))
-    }
-}
-
+#[derive(splice::KernelType)]
 pub(super) struct Pipe<'a> {
     pub table: usize,
-    pub steps: Vec<Step<'a>>,
+    pub steps: Box<[Step<'a>]>,
     pub index: Option<usize>,
     pub high: bool,
 }
@@ -25,13 +20,6 @@ impl Pipe<'_> {
         // Each boundary and each retry queue has a count and three packets.
         (2 * self.steps.len() + 1) * (1 + 3 * lanes)
     }
-
-    pub fn dependencies(&self) -> impl Iterator<Item = usize> + '_ {
-        self.steps.iter().filter_map(|step| match step {
-            Step::Find(id) => Some(*id),
-            _ => None,
-        })
-    }
 }
 
 pub(super) enum Task<'a> {
@@ -39,20 +27,27 @@ pub(super) enum Task<'a> {
     Run(Pipe<'a>),
 }
 
-pub(super) struct Program<'a> {
-    pub tasks: Vec<Task<'a>>,
-    pub indices: usize,
+#[derive(splice::KernelType)]
+pub struct Program<'a> {
+    pub(super) tasks: Vec<Task<'a>>,
+    pub(super) indices: usize,
+    pub(super) lanes: usize,
+    pub(super) state_words: usize,
 }
 
 impl Plan {
+    pub fn prepare(&self) -> Program<'_> {
+        Program::new(self)
+    }
+
     pub fn state_words(&self) -> usize {
-        Program::new(self).state_words()
+        self.prepare().state_words
     }
 }
 
 impl<'a> Program<'a> {
-    pub fn state_words(&self) -> usize {
-        let lanes = splice::simd::Lane::<i32>::lanes();
+    fn required_words(&self) -> usize {
+        let lanes = self.lanes;
         let largest_pipe = self
             .tasks
             .iter()
@@ -69,8 +64,11 @@ impl<'a> Program<'a> {
         let mut program = Self {
             tasks: Vec::new(),
             indices: 0,
+            lanes: splice::simd::Lane::<i32>::lanes(),
+            state_words: 0,
         };
         program.pipe(plan, None, false);
+        program.state_words = program.required_words();
         program
     }
 
@@ -82,7 +80,7 @@ impl<'a> Program<'a> {
         let table = self.walk(plan, &mut steps, high);
         self.tasks.push(Task::Run(Pipe {
             table,
-            steps,
+            steps: steps.into_boxed_slice(),
             index,
             high,
         }));

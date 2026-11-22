@@ -96,3 +96,36 @@ fn pointers_keep_their_type_across_edits_edges_and_returns() {
         })
     );
 }
+#[test]
+fn rust_packet_calls_verify_word_types_and_arity() {
+    fn sum(args: &[i32]) -> i32 {
+        args.iter().copied().fold(0, i32::wrapping_add)
+    }
+    static IMPORT: crate::hir::RustPacketImport = crate::hir::RustPacketImport {
+        name: "sum4",
+        arity: 4,
+        resolve: || sum,
+    };
+    for (types, valid) in [
+        (&[Type::I32; 4][..], true),
+        (&[Type::I32; 3][..], false),
+        (&[Type::I32, Type::I64, Type::I32, Type::I32][..], false),
+    ] {
+        let mut function = Function::new(types, Type::I32);
+        let entry = function.entry();
+        let args = function.params(entry).to_vec();
+        let site = function.add_packet_call(&IMPORT, &args);
+        let result = function.append(entry, Op::RustPacketCall(site)).unwrap();
+        function.set_terminator(entry, Terminator::Return(result));
+        assert_eq!(function.verify().is_ok(), valid);
+        if valid {
+            assert_eq!(function.interpret(&[1, 2, 3, 4]), Ok(10));
+            assert_eq!(
+                crate::ScalarKernel::compile(&function)
+                    .unwrap()
+                    .call(&[1, 2, 3, 4]),
+                Ok(10)
+            );
+        }
+    }
+}

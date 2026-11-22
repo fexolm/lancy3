@@ -1,4 +1,4 @@
-use splice::{Executable, kernel};
+use splice::kernel;
 use splice_lancy::Lancy;
 
 #[derive(splice::ComptimeKey)]
@@ -48,12 +48,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ),
     ];
     for (sql, expr, expected) in expressions {
-        let single = project::build::<Lancy>(&expr)?;
+        let single = project::build::<Lancy>(project::BuildArgs { expr: &expr })?;
         let prices = [10, 20, 30];
         let quantities = [2, 3, 4];
         for i in 0..expected.len() {
             let args = [prices[i], quantities[i]];
-            assert_eq!(single.call(&args, &mut [])?, expected[i]);
+            assert_eq!(
+                single.call(project::CallArgs {
+                    price: args[0],
+                    quantity: args[1]
+                })?,
+                expected[i]
+            );
             assert_eq!(project(&expr, args[0], args[1]), expected[i]);
         }
         println!("{sql} => {expected:?}");

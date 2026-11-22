@@ -922,9 +922,11 @@ dependencies = [
  "splice-llvm",
  "splice-macros",
  "splice-target",
+ "splice-test-traits",
  "splice-text",
  "tracing",
  "tracing-subscriber",
+ "typeid",
 ]
 
 [[package]]
@@ -988,6 +990,13 @@ dependencies = [
 [[package]]
 name = "splice-target"
 version = "0.1.0"
+
+[[package]]
+name = "splice-test-traits"
+version = "0.0.0"
+dependencies = [
+ "splice",
+]
 
 [[package]]
 name = "splice-text"
@@ -1119,6 +1128,12 @@ dependencies = [
  "thread_local",
  "tracing-core",
 ]
+
+[[package]]
+name = "typeid"
+version = "1.0.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bc7d623258602320d5c55d1bc22793b57daff0ec7efc270ea7d55ce1d5f5471c"
 
 [[package]]
 name = "unicode-ident"

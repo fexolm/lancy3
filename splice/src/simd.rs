@@ -68,10 +68,13 @@ impl Element {
 mod sealed {
     pub trait Sealed {}
 }
-pub trait LaneElement: sealed::Sealed + Copy + Default + PartialOrd + std::fmt::Debug {
+pub trait LaneElement:
+    sealed::Sealed + Copy + Default + PartialOrd + std::fmt::Debug + 'static
+{
     type Storage: Copy + AsRef<[Self]> + AsMut<[Self]>;
     type Index: LaneIndex;
     const ELEMENT: Element;
+    const ZERO: Self;
     fn fill(v: Self) -> Self::Storage;
     fn number(n: usize) -> Self;
     fn bits(self) -> u64;
@@ -89,6 +92,7 @@ macro_rules! element {
             type Storage = [$ty; 64 / size_of::<$ty>()];
             type Index = $idx;
             const ELEMENT: Element = Element::$kind;
+            const ZERO: Self = 0 as $ty;
             fn fill(v: Self) -> Self::Storage {
                 [v; 64 / size_of::<$ty>()]
             }

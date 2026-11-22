@@ -23,7 +23,7 @@ fn batch(values: &[i32], out: &mut [i32], divisor: i32, #[comptime] bias: i32) -
 #[test]
 fn staged_and_portable_calls_keep_writes_up_to_the_first_fault() {
     for code in [
-        batch::build::<Cranelift>(42).unwrap(),
+        batch::build::<Cranelift>(batch::BuildArgs { bias: 42 }).unwrap(),
         Cranelift::compile(&batch::ir(42).unwrap()).unwrap(),
     ] {
         let values = [9, i32::MIN, 15];
@@ -32,10 +32,11 @@ fn staged_and_portable_calls_keep_writes_up_to_the_first_fault() {
             let result = batch(&values, &mut expected, divisor, 42);
             let mut out = [0; 3];
             assert_eq!(
-                code.call(
-                    &[divisor],
-                    &mut [BufferArg::Read(&values), BufferArg::Write(&mut out)]
-                ),
+                code.call(batch::CallArgs {
+                    values: &values,
+                    out: &mut out,
+                    divisor
+                }),
                 Ok(result)
             );
             assert_eq!(out, expected);
@@ -62,19 +63,26 @@ fn staged_and_portable_calls_keep_writes_up_to_the_first_fault() {
         ] {
             let mut out = [0; 3];
             assert_eq!(
-                code.call(
-                    &[divisor],
-                    &mut [BufferArg::Read(input), BufferArg::Write(&mut out)]
-                )
-                .unwrap_err(),
+                code.call(batch::CallArgs {
+                    values: input,
+                    out: &mut out,
+                    divisor
+                })
+                .unwrap_err()
+                .to_string(),
                 message
             );
             assert_eq!(out, expected);
         }
         assert_eq!(
-            code.call(&[0], &mut [BufferArg::Read(&[]), BufferArg::Write(&mut [])]),
+            code.call(batch::CallArgs {
+                values: &[],
+                out: &mut [],
+                divisor: 0
+            }),
             Ok(42)
         );
+        let code = code.as_inner();
         let mut out = [17];
         assert!(
             code.call(
@@ -117,15 +125,18 @@ fn every_binary_operation_matches_splice_on_signed_boundaries() {
 
 #[test]
 fn negative_and_past_end_indices_stop_before_the_first_store() {
-    let code = update::build::<Cranelift>(42).unwrap();
+    let code = update::build::<Cranelift>(update::BuildArgs { bias: 42 }).unwrap();
     for row in [i32::MIN, -1, 1, i32::MAX] {
         let mut out = [17];
         assert_eq!(
-            code.call(
-                &[row, 1],
-                &mut [BufferArg::Write(&mut out), BufferArg::Read(&[5])]
-            )
-            .unwrap_err(),
+            code.call(update::CallArgs {
+                out: &mut out,
+                row,
+                values: &[5],
+                divisor: 1
+            })
+            .unwrap_err()
+            .to_string(),
             "kernel slice index out of bounds"
         );
         assert_eq!(out, [17]);

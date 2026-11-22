@@ -120,6 +120,12 @@ pub(super) unsafe fn run(
                 }
                 continue;
             }
+            Op::CheckOverflow(cond) => {
+                if f.read(cond) as u32 != 0 {
+                    return Err(crate::CallError::IntegerOverflow.to_string());
+                }
+                continue;
+            }
             Op::PtrOffset(base, index, scale) => word(
                 f.read(base)
                     .wrapping_add((f.read(index) as i32 as i64 as u64) << scale as u8),
@@ -212,6 +218,24 @@ pub(super) unsafe fn run(
                 continue;
             }
             Op::DebugStore(..) | Op::DebugPoint(_) => continue,
+            Op::RustCall(import, a, b) => {
+                let result = ((import.resolve)())(f.read(a) as i32, f.read(b) as i32);
+                if result >> 32 != 0 {
+                    return Err(crate::CallError::RustPanic.to_string());
+                }
+                word(u64::from(result as u32))
+            }
+            Op::RustPacketCall(site) => {
+                let (import, words) = graph.packet_call(site);
+                let arguments: Vec<_> = words.iter().map(|&value| f.read(value) as i32).collect();
+                let result = import.invoke(&arguments);
+                if result >> 32 != 0 {
+                    return Err(crate::CallError::RustPanic.to_string());
+                }
+                word(u64::from(result as u32))
+            }
+            Op::RustContextCall(..) => return Err("interpreter has no Rust context".into()),
+            Op::CallScratch(_) => return Err("interpreter has no native call workspace".into()),
             Op::Call(call) => {
                 let (callee, args) = graph.call(call);
                 let child = Frame::new(

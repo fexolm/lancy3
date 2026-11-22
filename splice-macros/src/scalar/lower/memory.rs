@@ -4,6 +4,26 @@ use super::{Lower, Scalar, Stage, Value, err};
 use proc_macro2::TokenStream;
 use syn::{BinOp, Expr, ExprCast, ExprIndex, ExprMethodCall, ExprReference, Result, UnOp};
 
+pub(super) fn primitive_method(name: &str) -> bool {
+    matches!(
+        name,
+        "wrapping_add"
+            | "wrapping_sub"
+            | "wrapping_mul"
+            | "wrapping_neg"
+            | "checked_add"
+            | "checked_sub"
+            | "checked_mul"
+            | "checked_div"
+            | "checked_rem"
+            | "saturating_add"
+            | "saturating_sub"
+            | "saturating_mul"
+            | "min"
+            | "max"
+    )
+}
+
 impl Lower<'_> {
     pub(super) fn method(&self, m: &ExprMethodCall, hint: Option<Scalar>) -> Result<Value> {
         if let Expr::Index(index) = &*m.receiver
@@ -60,6 +80,67 @@ impl Lower<'_> {
                 )
             });
         }
+        if receiver.stage.is_host() {
+            let args = m
+                .args
+                .iter()
+                .map(|arg| self.expr(arg))
+                .collect::<Result<Vec<_>>>()?;
+            if args.iter().all(|arg| arg.stage.is_host()) {
+                let root = self.root;
+                let name = &m.method;
+                let raw_name = name.to_string();
+                if matches!(raw_name.as_str(), "len" | "is_empty") && args.is_empty() {
+                    let empty = (name == "is_empty").then(|| emit!(== 0));
+                    return Ok(Value::new(
+                        Stage::Host,
+                        emit!({
+                            use #root::frontend::evaluation::{ReadLength as _, Operand};
+                            let receiver = &(#receiver);
+                            (&Operand::of(receiver)).length(receiver)? #empty
+                        }),
+                    ));
+                }
+                if primitive_method(&raw_name) {
+                    return Ok(Value::new(
+                        Stage::Host,
+                        emit!({
+                            use #root::frontend::evaluation::{CheckPrimitive as _, Operand};
+                            let value = #receiver;
+                            (&Operand::of(&value)).check()?;
+                            value.#name(#({let arg = #args; (&Operand::of(&arg)).check()?; arg}),*)
+                        }),
+                    ));
+                }
+                let expression = Expr::MethodCall(m.clone());
+                return Ok(Value::new(Stage::Host, self.required(&expression, hint)?));
+            }
+        }
+        if matches!(
+            receiver.stage,
+            Stage::Reg(Scalar::Int) | Stage::Word(Scalar::Int)
+        ) {
+            let method = &m.method;
+            if method == "wrapping_neg" && m.args.is_empty() {
+                let value = self.reg(receiver, Scalar::Int, &m.receiver)?;
+                return Ok(Value::new(
+                    Stage::Reg(Scalar::Int),
+                    self.bin("Sub", emit!(__splice_builder.constant(0)), value),
+                ));
+            }
+            if matches!(
+                method.to_string().as_str(),
+                "saturating_add" | "saturating_sub" | "saturating_mul"
+            ) && let Some(right) = m.args.first()
+                && m.args.len() == 1
+            {
+                let left = self.reg(receiver, Scalar::Int, &m.receiver)?;
+                let right = self.operand(right, Scalar::Int)?;
+                let item = syn::parse_quote!(::core::primitive::i32::#method);
+                let operation = self.import_call(&item, &[left, right]);
+                return Ok(Value::new(Stage::Reg(Scalar::Int), operation));
+            }
+        }
         let binary = match m.method.to_string().as_str() {
             "min" => Some("Min"),
             "max" => Some("Max"),
@@ -89,7 +170,18 @@ impl Lower<'_> {
     }
 
     pub(super) fn cast(&self, cast: &ExprCast) -> Result<Value> {
-        let value = self.expr(&cast.expr)?;
+        let value = self.expr(&cast.expr).or_else(|error| {
+            if super::simd::uses_lane(&cast.expr) {
+                return Err(error);
+            }
+            self.host_raw(&cast.expr)
+                .map(|code| Value::new(Stage::Host, code))
+                .map_err(|_| error)
+        })?;
+        if value.stage.is_host() {
+            let ty = &cast.ty;
+            return Ok(Value::new(Stage::Host, emit!((#value) as #ty)));
+        }
         let Some(kind @ (Scalar::Int | Scalar::Index)) = Scalar::from_type(&cast.ty, self.types)
         else {
             return err(
@@ -98,9 +190,13 @@ impl Lower<'_> {
             );
         };
         let code = match value.stage {
-            Stage::Reg(Scalar::Index | Scalar::Length | Scalar::Int) => value.code,
-            Stage::Reg(Scalar::Bool) => {
-                self.bin("And", value.code, emit!(__splice_builder.constant(1)))
+            Stage::Reg(scalar @ (Scalar::Index | Scalar::Length | Scalar::Int))
+            | Stage::Word(scalar @ (Scalar::Index | Scalar::Length | Scalar::Int)) => {
+                self.reg(value, scalar, cast)?
+            }
+            Stage::Reg(Scalar::Bool) | Stage::Word(Scalar::Bool) => {
+                let bits = self.reg(value, Scalar::Bool, cast)?;
+                self.bin("And", bits, emit!(__splice_builder.constant(1)))
             }
             _ => return err(cast, "expected an integer or boolean to cast"),
         };
@@ -150,6 +246,28 @@ impl Lower<'_> {
     }
 
     pub(super) fn index(&self, index: &ExprIndex) -> Result<Value> {
+        let receiver = self.expr(&index.expr)?;
+        if receiver.stage.is_host() {
+            let offset = self.expr(&index.index)?;
+            if !offset.stage.is_host() {
+                let root = self.root;
+                return Ok(Value::new(
+                    Stage::Reg(Scalar::Int),
+                    emit!(
+                        Err::<#root::hir::Reg, String>("runtime index requires a runtime slice".into())?
+                    ),
+                ));
+            }
+            let read = self.known_index(receiver.code, offset.code);
+            let fail = self.bounds_failure();
+            return Ok(Value::new(
+                Stage::Host,
+                emit!({
+                    let Some(value) = (#read) else { #fail };
+                    value
+                }),
+            ));
+        }
         let (_, slice, offset) = self.index_operands(index)?;
 
         Ok(Value::new(
@@ -159,6 +277,38 @@ impl Lower<'_> {
                 __splice_builder.load(buffer, __splice_index)
             }),
         ))
+    }
+
+    pub(super) fn bounds_failure(&self) -> TokenStream {
+        if let Some(label) = &self.source_fault {
+            let root = self.root;
+            emit! {
+                __splice_source.transfer = Some(#root::frontend::source::Transfer::Return);
+                break #label r#"panic!("kernel slice index out of bounds")"#.to_owned();
+            }
+        } else {
+            let region = self.region();
+            emit! { __splice_builder.trap_bounds()?; break #region; }
+        }
+    }
+
+    pub(super) fn known_index(&self, receiver: TokenStream, offset: TokenStream) -> TokenStream {
+        let read = self.known_index_reference(receiver, offset);
+        emit!((#read)?.copied())
+    }
+
+    pub(super) fn known_index_reference(
+        &self,
+        receiver: TokenStream,
+        offset: TokenStream,
+    ) -> TokenStream {
+        let root = self.root;
+        emit!({
+            use #root::frontend::evaluation::{Operand, ReadIndex as _};
+            let receiver = &(#receiver);
+            let index = #offset;
+            (&Operand::of(receiver)).read_index(receiver, index, |values, index| &values[index])
+        })
     }
 
     pub(super) fn store(
@@ -174,7 +324,7 @@ impl Lower<'_> {
         let value = self.operand(rhs, Scalar::Int)?;
 
         let combine = op.map(|(op, _)| {
-            let combined = self.bin(
+            let combined = self.operator_bin(
                 op,
                 emit!(__splice_builder.load(buffer, __splice_index)),
                 emit!(__splice_value),

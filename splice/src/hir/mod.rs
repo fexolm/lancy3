@@ -23,6 +23,18 @@ pub struct Reg(pub u32);
 pub struct Label(pub u32);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ContextSlice {
+    pub buffer: Buffer,
+    pub writable: bool,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum RustContextTarget {
+    Borrowed { context: Buffer, operation: u32 },
+    Static(&'static crate::StaticRustSymbol),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Binary {
     Add,
     Sub,
@@ -40,13 +52,31 @@ pub enum Binary {
     Ge,
     Shl,
     Shr,
+    CheckedAdd,
+    CheckedSub,
+    CheckedMul,
+    CheckedShl,
+    CheckedShr,
     Min,
     Max,
 }
 
 impl Binary {
+    pub fn may_trap(self) -> bool {
+        matches!(
+            self,
+            Self::Div
+                | Self::Rem
+                | Self::CheckedAdd
+                | Self::CheckedSub
+                | Self::CheckedMul
+                | Self::CheckedShl
+                | Self::CheckedShr
+        )
+    }
+
     /// Scalar semantics shared by code generators. True comparisons produce
-    /// all bits set. Invalid signed division and remainder return `None`.
+    /// all bits set. Trapping arithmetic with invalid operands returns `None`.
     pub fn checked_eval(self, a: i32, b: i32) -> Option<i32> {
         Some(match self {
             Self::Add => a.wrapping_add(b),
@@ -65,10 +95,142 @@ impl Binary {
             Self::Ge => -i32::from(a >= b),
             Self::Shl => a.wrapping_shl(b as u32),
             Self::Shr => a.wrapping_shr(b as u32),
+            Self::CheckedAdd => a.checked_add(b)?,
+            Self::CheckedSub => a.checked_sub(b)?,
+            Self::CheckedMul => a.checked_mul(b)?,
+            Self::CheckedShl => a.checked_shl(b as u32)?,
+            Self::CheckedShr => a.checked_shr(b as u32)?,
             Self::Min => a.min(b),
             Self::Max => a.max(b),
         })
     }
+}
+
+pub use splice_target::abi::{RustPacketSymbol, RustSymbol};
+
+/// A scalar symbol and the number of its ABI words in use.
+#[derive(Clone, Copy, Debug)]
+pub struct RustCall {
+    pub symbol: &'static RustSymbol,
+    pub arity: u8,
+}
+impl RustCall {
+    pub fn validate(
+        &self,
+        args: impl ExactSizeIterator<Item = Option<ValueType>>,
+    ) -> crate::Result<()> {
+        if self.arity > 2 || args.len() != usize::from(self.arity) {
+            return Err(format!(
+                "incompatible arity for Rust import {}",
+                self.symbol.name
+            ));
+        }
+        if args.into_iter().any(|ty| ty != Some(ValueType::Scalar)) {
+            return Err(format!(
+                "expected scalar operands for Rust import {}",
+                self.symbol.name
+            ));
+        }
+        Ok(())
+    }
+}
+
+pub fn check_rust_packet_call(
+    symbol: &RustPacketSymbol,
+    args: impl ExactSizeIterator<Item = Option<ValueType>>,
+) -> crate::Result<()> {
+    if symbol.packet_bytes().is_none() || args.len() != symbol.arity as usize {
+        return Err(format!(
+            "incompatible arity for Rust import {}",
+            symbol.name
+        ));
+    }
+    if args.into_iter().any(|ty| ty != Some(ValueType::Scalar)) {
+        return Err(format!(
+            "expected scalar operands for Rust import {}",
+            symbol.name
+        ));
+    }
+    Ok(())
+}
+
+/// Reject invalid context metadata in the ABI before generating native code.
+pub fn check_context_layout(kinds: &[BufferKind]) -> crate::Result<()> {
+    for signature in kinds.iter().filter_map(|kind| kind.context_signature()) {
+        signature.validate()?;
+    }
+    Ok(())
+}
+
+/// Validate the descriptor and words of a borrowed Rust context call.
+pub fn check_context_call(
+    kinds: &[BufferKind],
+    context: Buffer,
+    operation: u32,
+    args: impl ExactSizeIterator<Item = Option<ValueType>>,
+    slices: &[ContextSlice],
+) -> crate::Result<()> {
+    check_rust_context_call(
+        kinds,
+        RustContextTarget::Borrowed { context, operation },
+        args,
+        slices,
+    )
+}
+
+#[doc(hidden)]
+pub fn check_rust_context_call(
+    kinds: &[BufferKind],
+    target: RustContextTarget,
+    args: impl ExactSizeIterator<Item = Option<ValueType>>,
+    slices: &[ContextSlice],
+) -> crate::Result<()> {
+    let (arity, borrows) = match target {
+        RustContextTarget::Borrowed { context, operation } => {
+            let signature = kinds
+                .get(context.index())
+                .and_then(|kind| kind.context_signature())
+                .ok_or("expected a Rust context descriptor")?;
+            signature.validate()?;
+            signature
+                .shape(operation)
+                .ok_or("unknown Rust context operation")?
+        }
+        RustContextTarget::Static(symbol) => {
+            let (words, borrows) = symbol.shape();
+            if crate::ContextArguments::packet_layout(words, borrows).is_none() {
+                return Err("invalid static Rust operation packet layout".into());
+            }
+            (words as usize, borrows)
+        }
+    };
+    if args.len() != arity {
+        return Err("incompatible Rust context operation arity".into());
+    }
+    if args.into_iter().any(|ty| ty != Some(ValueType::Scalar)) {
+        return Err("expected scalar operands for Rust context operation".into());
+    }
+    if slices.len() != borrows as usize {
+        return Err("incompatible Rust context operation slice arity".into());
+    }
+    let mut seen = HashMap::new();
+    for &ContextSlice { buffer, writable } in slices {
+        let kind = kinds
+            .get(buffer.index())
+            .filter(|kind| kind.context_signature().is_none())
+            .ok_or("expected slice operands for Rust context operation")?;
+        if writable && !kind.writable() {
+            return Err("Rust context operation requires a writable slice".into());
+        }
+        if slices.len() > 1
+            && seen
+                .insert(buffer, writable)
+                .is_some_and(|prior| prior || writable)
+        {
+            return Err("writable Rust slice operand aliases another operand".into());
+        }
+    }
+    Ok(())
 }
 
 #[derive(Clone, Debug)]
@@ -104,6 +266,23 @@ pub enum Instr {
         no: Label,
     },
     Return(Reg),
+    TrapBounds,
+    RustCall {
+        dst: Reg,
+        import: RustCall,
+        args: Vec<Reg>,
+    },
+    RustPacketCall {
+        dst: Reg,
+        import: &'static RustPacketSymbol,
+        args: Vec<Reg>,
+    },
+    RustContextCall {
+        dst: Reg,
+        target: RustContextTarget,
+        args: Vec<Reg>,
+        slices: Vec<ContextSlice>,
+    },
     Call {
         dst: Reg,
         function: Arc<Function>,
@@ -113,11 +292,22 @@ pub enum Instr {
 }
 
 impl Instr {
+    pub fn terminates(&self) -> bool {
+        matches!(
+            self,
+            Self::Return(_) | Self::TrapBounds | Self::Jump(_) | Self::Branch { .. }
+        )
+    }
+
     fn may_trap(&self) -> bool {
         match self {
-            Self::Bin(_, Binary::Div | Binary::Rem, ..)
-            | Self::Load { .. }
-            | Self::Store { .. } => true,
+            Self::Bin(_, op, ..) => op.may_trap(),
+            Self::Load { .. }
+            | Self::Store { .. }
+            | Self::RustCall { .. }
+            | Self::RustPacketCall { .. }
+            | Self::RustContextCall { .. }
+            | Self::TrapBounds => true,
             Self::Call { function, .. } => function.needs_status(),
             _ => false,
         }
@@ -134,7 +324,11 @@ impl Instr {
             | Self::Store {
                 index: a, value: b, ..
             } => (Some(*a), from_ref(b)),
-            Self::Call { args, .. } | Self::Simd { args, .. } => (None, args),
+            Self::Call { args, .. }
+            | Self::RustCall { args, .. }
+            | Self::RustPacketCall { args, .. }
+            | Self::RustContextCall { args, .. }
+            | Self::Simd { args, .. } => (None, args),
             _ => (None, &[]),
         };
         let variables = match self {
@@ -155,7 +349,10 @@ impl Instr {
             | Self::Bin(dst, ..)
             | Self::BufferLen { dst, .. }
             | Self::Load { dst, .. }
-            | Self::Call { dst, .. } => Some(*dst),
+            | Self::Call { dst, .. }
+            | Self::RustCall { dst, .. }
+            | Self::RustPacketCall { dst, .. }
+            | Self::RustContextCall { dst, .. } => Some(*dst),
             _ => None,
         }
     }

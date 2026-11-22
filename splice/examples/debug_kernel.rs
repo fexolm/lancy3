@@ -1,4 +1,4 @@
-use splice::{BufferArg, Codegen, Executable, kernel};
+use splice::{Codegen, Executable, kernel};
 
 #[kernel]
 fn child(base: i32) -> i32 {
@@ -19,14 +19,15 @@ fn accumulate(input: &[i32], output: &mut [i32], bias: i32) -> i32 {
 }
 
 fn run<B: Codegen<Output: Executable>>(repetitions: usize) -> splice::Result<()> {
-    let kernel = accumulate::build::<B>()?;
+    let kernel = accumulate::build::<B>(accumulate::BuildArgs {})?;
     let input = [4, 8];
     let mut output = [0, 0];
     for _ in 0..repetitions {
-        let sum = kernel.call(
-            &[1],
-            &mut [BufferArg::Read(&input), BufferArg::Write(&mut output)],
-        )?;
+        let sum = kernel.call(accumulate::CallArgs {
+            input: &input,
+            output: &mut output,
+            bias: 1,
+        })?;
         assert_eq!((sum, output), (40, [16, 24]));
     }
     Ok(())

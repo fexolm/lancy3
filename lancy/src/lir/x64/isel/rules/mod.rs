@@ -76,6 +76,7 @@ impl Rules<'_> {
     ) -> Result<Inst, CompileError> {
         Ok(match op {
             Op::Const(n) => Inst::Imm(self.dst(), n),
+            Op::CallScratch(bytes) => Inst::CallScratch(bytes, self.dst()),
             Op::Literal(lane, bits) => Inst::Literal(lane, bits, self.dst()),
             Op::Simd(Simd::Iota(lane)) => Inst::Iota(lane, self.dst()),
             Op::Simd(Simd::LaneCount(lane)) => {
@@ -105,6 +106,7 @@ impl Rules<'_> {
                 }
             }
             Op::BoundsCheck(index, length) => self.bounds_check(index, length),
+            Op::CheckOverflow(cond) => Inst::CheckOverflow(self.input(cond)),
             Op::PtrOffset(base, index, scale) => self.pointer_offset(base, index, scale)?,
             Op::Load(ty, ptr) => self.load(ty, ptr)?,
             Op::Simd(Simd::Load(lane, ptr)) => self.load(Type::Vector(lane), ptr)?,
@@ -124,6 +126,20 @@ impl Rules<'_> {
                 value,
             }) => self.masked_memory(address, mask, value)?,
             Op::Call(site) => self.call(site, callee),
+            Op::RustCall(import, a, b) => {
+                Inst::RustCall(import, self.input(a), self.input(b), self.dst())
+            }
+            Op::RustPacketCall(site) => {
+                let (import, args) = self.f.packet_call(site);
+                for (index, &word) in args.iter().enumerate() {
+                    let word = self.input(word);
+                    self.out.push(Inst::StorePacketWord(index as u32 * 4, word));
+                }
+                Inst::RustPacketCall(import, self.dst())
+            }
+            Op::RustContextCall(import, args) => {
+                Inst::RustContextCall(import, args.map(|arg| self.input(arg)), self.dst())
+            }
             op => self.numeric(op)?,
         })
     }

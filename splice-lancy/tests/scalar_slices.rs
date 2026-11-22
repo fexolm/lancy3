@@ -25,11 +25,13 @@ fn lookup(input: &[i32], row: i32) -> i32 {
 
 #[test]
 fn negative_indices_compare_as_usize_before_loading() {
-    let jit = lookup::build::<Lancy>().unwrap();
+    let jit = lookup::build::<Lancy>(lookup::BuildArgs {}).unwrap();
     for input in [&[][..], &[7, 8][..]] {
         for row in [-1, i32::MIN, 0, 1, 2] {
-            let mut args = [BufferArg::Read(input)];
-            assert_eq!(jit.call(&[row], &mut args).unwrap(), lookup(input, row));
+            assert_eq!(
+                jit.call(lookup::CallArgs { input, row }).unwrap(),
+                lookup(input, row)
+            );
         }
     }
 }
@@ -53,16 +55,24 @@ fn slice_calls_remap_arguments_and_keep_row_updates() {
     assert!(f.instructions().iter().any(|i| matches!(i,
         Instr::Call { buffers, .. } if buffers == &[Buffer(1), Buffer(0)]
     )));
-    let k = score_column::build::<Lancy>(2).unwrap();
+    let k = score_column::build::<Lancy>(score_column::BuildArgs { factor: 2 }).unwrap();
     let mut out = [2; 5];
-    let mut args = [BufferArg::Read(&values), BufferArg::Write(&mut out)];
-    assert_eq!(k.call(&[], &mut args).unwrap(), expected_count);
+    assert_eq!(
+        k.call(score_column::CallArgs {
+            values: &values,
+            out: &mut out
+        })
+        .unwrap(),
+        expected_count
+    );
     assert_eq!(out, expected);
 }
 
 #[test]
 fn entry_points_check_buffer_signatures_before_executing() {
-    let kernel = score_column::build::<Lancy>(3).unwrap();
+    let kernel = score_column::build::<Lancy>(score_column::BuildArgs { factor: 3 })
+        .unwrap()
+        .into_inner();
     assert!(kernel.call(&[], &mut []).is_err());
     let mut out = [8];
     assert!(
@@ -100,13 +110,19 @@ fn assign_in_order(buffer: &mut [i32], value: i32) -> i32 {
 
 #[test]
 fn indexed_assignments_evaluate_rhs_before_place() {
-    let f = assign_in_order::build::<Lancy>().unwrap();
+    let f = assign_in_order::build::<Lancy>(assign_in_order::BuildArgs {}).unwrap();
     let mut expected = [0; 3];
     assert_eq!(assign_in_order(&mut expected, 2), 4);
     assert_eq!(expected, [4, 4, 5]);
     let mut out = [0; 3];
-    let mut buffers = [BufferArg::Write(&mut out)];
-    assert_eq!(f.call(&[2], &mut buffers).unwrap(), 4);
+    assert_eq!(
+        f.call(assign_in_order::CallArgs {
+            buffer: &mut out,
+            value: 2
+        })
+        .unwrap(),
+        4
+    );
     assert_eq!(out, expected);
 }
 
@@ -117,9 +133,11 @@ fn read_at(#[comptime] index: usize, input: &[i32]) -> i32 {
 
 #[test]
 fn host_indices_outside_register_width_stay_out_of_bounds() {
-    let f = read_at::build::<Lancy>(1usize << 32).unwrap();
-    let mut buffers = [BufferArg::Read(&[12])];
-    assert!(f.call(&[], &mut buffers).is_err());
+    let f = read_at::build::<Lancy>(read_at::BuildArgs {
+        index: 1usize << 32,
+    })
+    .unwrap();
+    assert!(f.call(read_at::CallArgs { input: &[12] }).is_err());
 }
 
 #[kernel]
@@ -141,20 +159,40 @@ fn divide(mode: i32, mut value: i32, divisor: i32) -> i32 {
 
 #[test]
 fn division_errors_follow_runtime_control_flow() {
-    let jit = divide::build::<Lancy>().unwrap();
+    let jit = divide::build::<Lancy>(divide::BuildArgs {}).unwrap();
     for mode in 0..4 {
         for (n, d) in [(-17, 5), (17, -5), (-3, -7), (i32::MIN, 3)] {
             assert_eq!(
-                jit.call(&[mode, n, d], &mut []).unwrap(),
+                jit.call(divide::CallArgs {
+                    mode,
+                    value: n,
+                    divisor: d
+                })
+                .unwrap(),
                 divide(mode, n, d),
                 "mode={mode} n={n} d={d}"
             );
         }
         for (n, d) in [(23, 0), (i32::MIN, -1)] {
-            assert!(jit.call(&[mode, n, d], &mut []).is_err());
+            assert!(
+                jit.call(divide::CallArgs {
+                    mode,
+                    value: n,
+                    divisor: d
+                })
+                .is_err()
+            );
         }
     }
-    assert_eq!(jit.call(&[4, 2, 0], &mut []).unwrap(), 19);
+    assert_eq!(
+        jit.call(divide::CallArgs {
+            mode: 4,
+            value: 2,
+            divisor: 0
+        })
+        .unwrap(),
+        19
+    );
 }
 
 #[kernel]
@@ -182,18 +220,24 @@ fn staged_usize(#[comptime] offset: usize, input: &[i32], row: i32) -> i32 {
 #[test]
 fn failing_comptime_i32_arithmetic_in_a_runtime_arm_faults_only_when_selected() {
     for (a, n) in [(17, 0), (i32::MIN, -1), (17, 4)] {
-        let jit = staged_divide::build::<Lancy>(a, n).unwrap();
+        let jit = staged_divide::build::<Lancy>(staged_divide::BuildArgs { a, n }).unwrap();
         for row in [0, 1, 2] {
             let expected = match row {
                 0 => Some(0),
                 1 => a.checked_div(n),
                 _ => a.checked_rem(n),
             };
-            assert_eq!(jit.call(&[row], &mut []).ok(), expected);
+            assert_eq!(jit.call(staged_divide::CallArgs { row }).ok(), expected);
         }
     }
-    let f = staged_usize::build::<Lancy>(4).unwrap();
+    let f = staged_usize::build::<Lancy>(staged_usize::BuildArgs { offset: 4 }).unwrap();
     let input = [10, 11, 12];
-    let mut args = [BufferArg::Read(&input)];
-    assert_eq!(f.call(&[1], &mut args).unwrap(), 12);
+    assert_eq!(
+        f.call(staged_usize::CallArgs {
+            input: &input,
+            row: 1
+        })
+        .unwrap(),
+        12
+    );
 }

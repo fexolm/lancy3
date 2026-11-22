@@ -38,6 +38,8 @@ impl Run {
             "!bounds" => Err(CallError::OutOfBounds),
             "!zero" => Err(CallError::DivisionByZero),
             "!overflow" => Err(CallError::DivisionOverflow),
+            "!arithmetic_overflow" => Err(CallError::IntegerOverflow),
+            "!rust_panic" => Err(CallError::RustPanic),
             n => Ok(integer(n)?),
         };
         Ok(Self {
@@ -71,6 +73,8 @@ impl Run {
             match e {
                 CallError::DivisionByZero => "integer division by zero",
                 CallError::DivisionOverflow => "signed division overflow",
+                CallError::IntegerOverflow => "kernel integer arithmetic overflow",
+                CallError::RustPanic => "kernel Rust import panicked",
                 CallError::OutOfBounds => "kernel slice index out of bounds",
                 _ => unreachable!(),
             }

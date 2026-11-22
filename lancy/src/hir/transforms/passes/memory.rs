@@ -364,7 +364,10 @@ pub(super) fn optimize(
                             entry.removable_store = None;
                         }
                     }
-                    Op::Call(_) => known.clear(),
+                    Op::Call(_)
+                    | Op::RustCall(..)
+                    | Op::RustPacketCall(_)
+                    | Op::RustContextCall(..) => known.clear(),
                     _ if !facts.is_total(f, inst) => {
                         // A check or arithmetic trap may expose completed stores.
                         for entry in &mut known {

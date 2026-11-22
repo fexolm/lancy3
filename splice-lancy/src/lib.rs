@@ -37,11 +37,11 @@ impl Codegen for Lancy {
         LancyKernel::new(hir, arity, kinds, source).map_err(|e| e.to_string())
     }
 
-    fn compile(function: &Function) -> splice::Result<Self::Output> {
+    fn compile_raw(function: &Function) -> splice::Result<Self::Output> {
         Self::compile_with_options(function, function.options())
     }
 
-    fn compile_with_options(
+    fn compile_raw_with_options(
         function: &Function,
         options: BuildOptions,
     ) -> splice::Result<Self::Output> {
@@ -112,7 +112,7 @@ impl Executable for LancyKernel {
             ));
         }
         splice::hir::validate_buffers(&self.slices, buffers)?;
-        if self.slices.is_empty() {
+        if self.slices.is_empty() && !self.code.requires_raw_call() {
             return self.code.call(args).map_err(|e| e.to_string());
         }
         let mut words = Vec::with_capacity(self.arity + 2 * buffers.len());
@@ -120,9 +120,9 @@ impl Executable for LancyKernel {
         for slice in buffers {
             words.extend([slice.data() as u64, slice.len() as u64]);
         }
-        // SAFETY: BufferArg supplies initialized slices of the validated lengths
-        // for this call. Its Rust borrows ensure exclusive writable bytes and
-        // immutable shared bytes. Both lowering paths check store permissions.
+        // SAFETY: The validated descriptors supply live slices and exclusive
+        // Rust contexts. Both Splice lowering paths check permissions and use
+        // native call scratch only for initialized, shape-checked packets.
         unsafe { self.code.call_raw(&words) }
             .map(|v| v as i32)
             .map_err(|e| e.to_string())

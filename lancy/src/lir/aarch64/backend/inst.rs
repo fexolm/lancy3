@@ -6,7 +6,7 @@ use super::width::{Narrow, Widen};
 use super::{A, C, Cond};
 use crate::{
     hir::operation::Action,
-    hir::{Lane, Scale, Type, Unary},
+    hir::{Lane, RustContextImport, RustImport, RustPacketImport, Scale, Type, Unary},
     lir::{
         TargetInst,
         schedule::{Schedulable, Scheduling},
@@ -193,6 +193,7 @@ pub(super) enum Inst {
     Packed(Packed, VReg, VReg, VReg),
     PackedShiftImm(C, A, u8, VReg, VReg),
     Check(VReg, VReg),
+    CheckOverflow(VReg),
     Offset(Scale, VReg, VReg, VReg),
     Load(Type, VReg, VReg),
     Store(Type, VReg, VReg),
@@ -211,6 +212,11 @@ pub(super) enum Inst {
     Call(FunctionId, PRegSet, Type, VReg),
     LibArg(Type, usize, VReg),
     Libcall(Action, Type, Type, [usize; 3]),
+    RustCall(&'static RustImport, VReg, VReg, VReg),
+    RustPacketCall(&'static RustPacketImport, VReg),
+    StorePacketWord(u32, VReg),
+    RustContextCall(RustContextImport, [VReg; 4], VReg),
+    CallScratch(u32, VReg),
     LibResult(Type, VReg),
     Jump,
     Branch(VReg),
@@ -275,6 +281,7 @@ impl TargetInst for Inst {
                 out.extend([input(a), input(b), output(d)]);
             }
             Self::Check(a, b) | Self::Store(_, a, b) => out.extend([input(a), input(b)]),
+            Self::CheckOverflow(cond) => out.push(input(cond)),
             Self::Select(_, d, m, a, b) => out.extend([input(m), input(a), input(b), output(d)]),
             Self::Fma(_, _, d, args) | Self::Shuffle(Shuffle::Sve(_), d, args) => {
                 out.extend(args.map(input).into_iter().chain([output(d)]));
@@ -408,6 +415,7 @@ impl TargetInst for Inst {
             }
             Self::StoreArg(_, _, v)
             | Self::DebugStore(_, _, v)
+            | Self::StorePacketWord(_, v)
             | Self::LibArg(_, _, v)
             | Self::Branch(v) => out.push(input(v)),
             Self::Return(ty, v, root) => {
@@ -417,6 +425,23 @@ impl TargetInst for Inst {
                     input(v)
                 });
             }
+            Self::RustCall(_, a, b, dst) => out.extend([
+                Operand::reg_fixed_use(a, PReg::new(0, RegClass::Int)),
+                Operand::reg_fixed_use(b, PReg::new(1, RegClass::Int)),
+                Operand::reg_fixed_def(dst, return_reg(Type::I32)),
+            ]),
+            Self::RustPacketCall(_, dst) => {
+                out.push(Operand::reg_fixed_def(dst, return_reg(Type::I32)))
+            }
+            Self::RustContextCall(_, args, dst) => {
+                out.extend(
+                    args.into_iter().enumerate().map(|(reg, arg)| {
+                        Operand::reg_fixed_use(arg, PReg::new(reg, RegClass::Int))
+                    }),
+                );
+                out.push(Operand::reg_fixed_def(dst, return_reg(Type::I32)));
+            }
+            Self::CallScratch(_, dst) => out.push(Operand::reg_def(dst)),
             Self::Libcall(..) | Self::Jump | Self::DebugPoint(_) => {}
         }
     }
@@ -429,6 +454,11 @@ impl TargetInst for Inst {
                 regs
             }
             Self::Libcall(..) => call_clobbers(),
+            Self::RustCall(..) | Self::RustPacketCall(..) | Self::RustContextCall(..) => {
+                let mut regs = call_clobbers();
+                regs.remove(return_reg(Type::I32));
+                regs
+            }
             Self::Half(form, ..) if matches!(form.action, super::half::Action::MulAdd) => {
                 registers(RegClass::Vector, 17..=19)
             }
@@ -520,7 +550,9 @@ impl Schedulable for Inst {
                 indices,
                 ..
             } => Ordered(if indices.is_some() { 9 } else { 5 }),
-            Self::Check(..) | Self::Store(..) | Self::Masked { .. } => Ordered(1),
+            Self::Check(..) | Self::CheckOverflow(..) | Self::Store(..) | Self::Masked { .. } => {
+                Ordered(1)
+            }
             Self::Int(
                 IntBinary {
                     op: IntOp::Divide { .. },

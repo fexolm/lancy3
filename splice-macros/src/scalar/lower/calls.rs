@@ -1,0 +1,315 @@
+//! Resolve scalar calls against the published kernel or the Rust function.
+use super::{Binding, Lower, Scalar, Stage, Value, err};
+use proc_macro2::TokenStream;
+use syn::{Expr, Result};
+
+impl Lower<'_> {
+    pub(super) fn call(&self, c: &syn::ExprCall, hint: Option<Scalar>) -> Result<Value> {
+        let Expr::Path(p) = &*c.func else {
+            return err(&c.func, "expected a kernel function path");
+        };
+        let root = self.root;
+        let support = emit!(#root::frontend::scalar);
+        let values = c
+            .args
+            .iter()
+            .map(|a| self.expr(a))
+            .collect::<Result<Vec<_>>>()?;
+        let trait_owner = crate::scalar::methods::trait_path(p);
+        let method = trait_owner.is_none() && crate::scalar::methods::method_path(p);
+        // A free item can be imported by path in both the value namespace
+        // (Rust function) and the type namespace (published kernel module).
+        let named = p.qself.is_none()
+            && !crate::scalar::methods::method_path(p)
+            && !p.path.is_ident(self.name);
+        let recursive = p.path.is_ident(self.name);
+        if recursive && self.formals.iter().any(|p| matches!(p, Binding::Columns)) {
+            return err(c, "a column-table entry point cannot call itself");
+        }
+        let output = if recursive {
+            self.result_type
+        } else {
+            hint.filter(|t| matches!(t, Scalar::Bool | Scalar::Vector(_) | Scalar::Mask(_)))
+                .unwrap_or(Scalar::Int)
+        };
+        let mut check = TokenStream::new();
+        let target = if recursive {
+            if !self.formals.iter().any(|p| matches!(p, Binding::Host(_))) {
+                return err(
+                    c,
+                    "runtime recursion is unsupported; recursive expansion needs a terminating #[comptime] plan",
+                );
+            }
+            if values.len() != self.formals.len() {
+                return err(c, "wrong number of recursive arguments");
+            }
+            let fish = &self.fish;
+            emit!(Self::__splice_inline #fish)
+        } else if trait_owner.is_some() {
+            let stage = crate::scalar::methods::rename_path(p, "stage_method");
+            emit!(#stage)
+        } else if method {
+            let stage = crate::scalar::methods::rename_path(p, "stage_inherent");
+            let name = &stage.path.segments.last().unwrap().ident;
+            let published = crate::scalar::methods::entry_name(
+                "published",
+                &p.path.segments.last().unwrap().ident,
+            );
+            let parameters = (0..values.len())
+                .map(|i| quote::format_ident!("__SpliceArg{i}"))
+                .collect::<Vec<_>>();
+            check = emit! {
+                trait __SpliceOpaqueMethod {
+                    fn #published() -> bool { false }
+                    fn #name<#(#parameters),*>(#(_: #parameters,)* _: &mut dyn #root::frontend::KernelBuilder)
+                        -> #root::Result<#root::hir::Reg>
+                    {
+                        Err("method does not have a scalar Splice implementation".into())
+                    }
+                }
+                impl<T: ?Sized> __SpliceOpaqueMethod for T {}
+            };
+            emit!(#stage)
+        } else {
+            let mut path = p.path.clone();
+            let fish = std::mem::take(&mut path.segments.last_mut().unwrap().arguments);
+            let expected = output.value_type(root, self.types);
+            check = emit!(const {assert!(matches!(#path::__SPLICE_RETURN,#expected),"annotate the kernel helper result with its Lane<T> or Mask<T> type")};);
+            emit!(#path::__splice_call #fish)
+        };
+        let all_known = named && values.iter().all(|v| v.stage.is_host());
+        let original_args = values.iter().map(|v| v.code.clone()).collect::<Vec<_>>();
+        let mut args = Vec::new();
+        for (i, (expr, value)) in c.args.iter().zip(values).enumerate() {
+            let formal = recursive.then(|| self.formals[i]);
+            args.push(match (formal, value.stage) {
+                (Some(Binding::Reg(t, _)), _) => self.reg(value, t, expr)?,
+                (Some(Binding::Buffer(write)), Stage::Buffer(actual))
+                    if write.elem == actual.elem && (!write.write || actual.write) =>
+                {
+                    value.code
+                }
+                (Some(Binding::Buffer(_)), _) => {
+                    return err(expr, "expected a runtime slice of the required mutability");
+                }
+                (Some(Binding::Host(_)), Stage::Word(_)) => {
+                    emit!(#support::Host(#support::KnownArg::require(#value)?))
+                }
+                (_, Stage::Word(_)) => value.code,
+                (_, stage) if stage.is_host() => emit!(#support::Host(#value)),
+                (Some(Binding::Host(_)), _) => emit!({
+                    return Err("runtime value passed to a comptime parameter".into());
+                }),
+                (
+                    None,
+                    Stage::Reg(
+                        Scalar::Int
+                        | Scalar::Bool
+                        | Scalar::Inferred
+                        | Scalar::Vector(_)
+                        | Scalar::Mask(_),
+                    )
+                    | Stage::Buffer(_),
+                ) => value.code,
+                _ => {
+                    return err(
+                        expr,
+                        "expected a comptime value, a runtime i32, or a runtime slice",
+                    );
+                }
+            });
+        }
+        if all_known {
+            let params = (0..args.len())
+                .map(|i| quote::format_ident!("__splice_param_{i}"))
+                .collect::<Vec<_>>();
+            let bound = params
+                .iter()
+                .map(|name| emit!(#support::Host(#name)))
+                .collect::<Vec<_>>();
+            let mut item = p.path.clone();
+            let generics = std::mem::take(&mut item.segments.last_mut().unwrap().arguments);
+            let kernel = emit!({
+                let (#(#params,)*)=(#(#original_args,)*);
+                let mut runtime=||{Ok::<_,String>(#support::Word::Runtime(#target(#(#bound,)* __splice_builder)?))};
+                #item::__splice_fold!(
+                    match #root::build_boundary(|| #item::__SpliceDefinition::__splice_eval #generics ((#(Some(#params),)*))) {
+                        Ok(value)=>#support::Word::Known(#support::ImportWord::encode(value)),
+                        Err(_)=>runtime()?,
+                    },
+                    runtime()?
+                )
+            });
+            let native = self.import_call(p, &args);
+            let code = self.dispatch_call(p, kernel, emit!(#support::Word::Runtime(#native)));
+            return Ok(Value::new(Stage::Word(output), code));
+        }
+        let kernel = emit!({#check #target(#(#args,)* __splice_builder)?});
+        let code = if let Some(owner) = trait_owner {
+            let native = self.import_call(p, &args);
+            let fallback = crate::declaration::trait_dispatch(root, &owner, kernel, native);
+            crate::scalar::methods::isolated_trait_call(
+                root,
+                self.generics,
+                p,
+                &args,
+                fallback,
+                false,
+            )
+        } else if method {
+            let mut published = crate::scalar::methods::rename_path(p, "published");
+            published.path.segments.last_mut().unwrap().arguments = syn::PathArguments::None;
+            let native = self.import_call(p, &args);
+            emit!({ #check if #published() { #target(#(#args,)* __splice_builder)? } else { #native } })
+        } else if named {
+            let native = self.import_call(p, &args);
+            self.dispatch_call(p, kernel, native)
+        } else {
+            kernel
+        };
+        Ok(Value::new(Stage::Reg(output), code))
+    }
+}
+
+impl Lower<'_> {
+    pub(super) fn dispatch_call(
+        &self,
+        path: &syn::ExprPath,
+        kernel: TokenStream,
+        rust: TokenStream,
+    ) -> TokenStream {
+        dispatch_free(self.root, path, kernel, rust)
+    }
+    pub(super) fn import_call(&self, path: &syn::ExprPath, args: &[TokenStream]) -> TokenStream {
+        let root = self.root;
+        let arity = args.len();
+        let slots: Vec<_> = (0..arity)
+            .map(|index| quote::format_ident!("__SpliceOperand{index}"))
+            .collect();
+        let candidate = emit!(__splice_candidate(#path));
+        let prepare = emit! {
+            fn __splice_candidate<#(#slots,)* __SpliceResult>(entry: fn(#(#slots),*) -> __SpliceResult)
+                -> #root::frontend::native::Candidate<fn(#(#slots),*) -> __SpliceResult>
+            {
+                #root::frontend::native::Candidate(entry)
+            }
+        };
+        let (generics, _, where_clause) = self.generics.split_for_impl();
+        let type_args = self
+            .generics
+            .params
+            .iter()
+            .filter_map(|p| match p {
+                syn::GenericParam::Type(t) => Some(&t.ident),
+                syn::GenericParam::Const(c) => Some(&c.ident),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let fish = (!type_args.is_empty()).then(|| emit!(::<#(#type_args),*>));
+        // Nested Rust items cannot reference an outer impl's Self. Published
+        // methods with that spelling still take the native staging branch.
+        use syn::visit::Visit;
+        let mut uses_self = crate::declaration::UsesSelf::default();
+        uses_self.visit_expr_path(path);
+        uses_self.visit_generics(self.generics);
+        if uses_self.0 {
+            return emit!(Err::<#root::hir::Reg,String>("unpublished Self method requires its owning Rust context".into())?);
+        }
+        let (adapter, call) = if arity <= 2 {
+            (
+                emit! {
+                    use #root::frontend::native::ScalarAdapter as _;
+                    extern "C" fn adapter #generics (a:i32,b:i32)->i64 #where_clause {
+                        use #root::frontend::native::ScalarAdapter as _;
+                        (&#candidate).invoke(a,b)
+                    }
+                },
+                emit! {
+                    __splice_builder.rust_call(#root::hir::RustCall {
+                        symbol: &#root::hir::RustSymbol {name:stringify!(#path), resolve: || adapter #fish}, arity:#arity as u8,
+                    },&operands)?
+                },
+            )
+        } else {
+            let indices = 0..arity;
+            let native = emit!(#root::frontend::native);
+            let word = emit!(#root::frontend::scalar::ImportWord);
+            (
+                emit! {
+                    trait __SplicePacketAdapter {
+                        fn supported(self) -> bool;
+                        fn invoke(self, words: &[i32]) -> i32;
+                    }
+                    impl<#(#slots: #word,)* R: #word> __SplicePacketAdapter for &#native::Candidate<fn(#(#slots),*) -> R> {
+                        fn supported(self) -> bool { true }
+                        fn invoke(self, words: &[i32]) -> i32 {
+                            #word::encode((self.0)(#(<#slots as #word>::decode(words[#indices])),*))
+                        }
+                    }
+                    impl<F> __SplicePacketAdapter for &&#native::Candidate<F> {
+                        fn supported(self) -> bool { false }
+                        fn invoke(self, _: &[i32]) -> i32 { unreachable!("verified scalar packet adapter") }
+                    }
+                    fn adapter #generics (words: &[i32]) -> i32 #where_clause {
+                        (&#candidate).invoke(words)
+                    }
+                },
+                emit! {
+                    __splice_builder.rust_packet_call(&#root::hir::RustPacketSymbol {
+                        name: stringify!(#path), arity: #arity as u32, resolve: || adapter #fish,
+                    }, &operands)?
+                },
+            )
+        };
+        emit!({
+            #prepare
+            #adapter
+            use #root::frontend::native::{Materialize as _, Operand};
+            if !(&#candidate).supported() {
+                return Err("Rust import requires a non-scalar argument or result".into());
+            }
+            let operands=[#((&Operand(#args)).materialize(__splice_builder)?),*];
+            #call
+        })
+    }
+}
+
+pub(super) fn dispatch_free(
+    root: &syn::Path,
+    path: &syn::ExprPath,
+    kernel: TokenStream,
+    rust: TokenStream,
+) -> TokenStream {
+    select_free(
+        root,
+        path,
+        &quote::format_ident!("__splice_dispatch"),
+        kernel,
+        rust,
+    )
+}
+
+pub(crate) fn select_free(
+    root: &syn::Path,
+    path: &syn::ExprPath,
+    selector: &proc_macro2::Ident,
+    kernel: TokenStream,
+    rust: TokenStream,
+) -> TokenStream {
+    let span = path.path.segments.last().unwrap().ident.span();
+    let alias = crate::declaration::selector_alias("callee", span);
+    let mut item = path.path.clone();
+    item.segments.last_mut().unwrap().arguments = syn::PathArguments::None;
+    emit!({
+        mod __splice_default {
+            pub mod #alias {
+                pub use #root::__splice_choose_rust as #selector;
+            }
+        }
+        #[allow(unused_imports)] use __splice_default::*;
+        {
+            #[allow(unused_imports)] use #item as #alias;
+            #alias::#selector!(#kernel, #rust)
+        }
+    })
+}

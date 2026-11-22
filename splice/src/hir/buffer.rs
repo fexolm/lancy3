@@ -1,4 +1,5 @@
 use crate::simd::{Element, LaneElement};
+use crate::{ContextSignature, RuntimeContext};
 use std::collections::HashMap;
 
 /// A buffer parameter in a function's separate buffer argument list.
@@ -15,6 +16,7 @@ impl Buffer {
 pub struct BufferKind {
     element: Element,
     writable: bool,
+    context: Option<&'static ContextSignature>,
 }
 
 impl BufferKind {
@@ -23,7 +25,23 @@ impl BufferKind {
     #[allow(non_upper_case_globals)]
     pub const Write: Self = Self::new(Element::I32, true);
     pub const fn new(element: Element, writable: bool) -> Self {
-        Self { element, writable }
+        Self {
+            element,
+            writable,
+            context: None,
+        }
+    }
+    #[doc(hidden)]
+    pub const fn context(signature: &'static ContextSignature) -> Self {
+        Self {
+            element: Element::I32,
+            writable: true,
+            context: Some(signature),
+        }
+    }
+    #[doc(hidden)]
+    pub const fn context_signature(self) -> Option<&'static ContextSignature> {
+        self.context
     }
     pub const fn element(self) -> Element {
         self.element
@@ -37,13 +55,18 @@ impl BufferKind {
         !self.writable() && !other.writable()
     }
     fn accepts(self, actual: Self) -> bool {
-        self.element == actual.element && (!self.writable || actual.writable)
+        self.same_type(actual) && (!self.writable || actual.writable)
+    }
+    fn same_type(self, actual: Self) -> bool {
+        self.element == actual.element && self.context == actual.context
     }
 }
 
 /// A borrowed typed slice. Writable slices also support loads.
 #[derive(Debug)]
 pub enum BufferArg<'a> {
+    #[doc(hidden)]
+    Context(&'a mut RuntimeContext<'a>),
     Read(&'a [i32]),
     Write(&'a mut [i32]),
     ReadU16(&'a [u16]),
@@ -60,6 +83,8 @@ pub enum BufferArg<'a> {
 
 /// An element type that can be borrowed from a [`BufferArg`].
 pub trait BufferElement: LaneElement {
+    fn read_arg(slice: &[Self]) -> BufferArg<'_>;
+    fn write_arg(slice: &mut [Self]) -> BufferArg<'_>;
     #[doc(hidden)]
     fn borrow<'a>(buffer: &'a BufferArg<'_>) -> Option<&'a [Self]>;
 }
@@ -67,6 +92,12 @@ pub trait BufferElement: LaneElement {
 macro_rules! buffer_from {
     ($ty:ty,$read:ident,$write:ident) => {
         impl BufferElement for $ty {
+            fn read_arg(slice: &[Self]) -> BufferArg<'_> {
+                BufferArg::$read(slice)
+            }
+            fn write_arg(slice: &mut [Self]) -> BufferArg<'_> {
+                BufferArg::$write(slice)
+            }
             fn borrow<'a>(buffer: &'a BufferArg<'_>) -> Option<&'a [Self]> {
                 match buffer {
                     BufferArg::$read(slice) => Some(slice),
@@ -95,8 +126,28 @@ buffer_from!(f32, ReadF32, WriteF32);
 buffer_from!(f64, ReadF64, WriteF64);
 
 impl BufferArg<'_> {
+    /// Reborrow a dynamic column through a shared reference.
+    pub fn as_read_only(&self) -> BufferArg<'_> {
+        match self {
+            Self::Context(_) => panic!("a Rust context cannot be a read-only slice"),
+            Self::Read(s) => BufferArg::Read(s),
+            Self::Write(s) => BufferArg::Read(s),
+            Self::ReadU16(s) => BufferArg::ReadU16(s),
+            Self::WriteU16(s) => BufferArg::ReadU16(s),
+            Self::ReadU32(s) => BufferArg::ReadU32(s),
+            Self::WriteU32(s) => BufferArg::ReadU32(s),
+            Self::ReadI64(s) => BufferArg::ReadI64(s),
+            Self::WriteI64(s) => BufferArg::ReadI64(s),
+            Self::ReadF32(s) => BufferArg::ReadF32(s),
+            Self::WriteF32(s) => BufferArg::ReadF32(s),
+            Self::ReadF64(s) => BufferArg::ReadF64(s),
+            Self::WriteF64(s) => BufferArg::ReadF64(s),
+        }
+    }
+
     pub fn kind(&self) -> BufferKind {
         match self {
+            Self::Context(context) => BufferKind::context(context.signature()),
             Self::Read(_) => BufferKind::new(Element::I32, false),
             Self::Write(_) => BufferKind::new(Element::I32, true),
             Self::ReadU16(_) => BufferKind::new(Element::U16, false),
@@ -113,6 +164,7 @@ impl BufferArg<'_> {
     }
     pub fn len(&self) -> usize {
         match self {
+            Self::Context(_) => 0,
             Self::Read(s) => s.len(),
             Self::Write(s) => s.len(),
             Self::ReadU16(s) => s.len(),
@@ -133,6 +185,7 @@ impl BufferArg<'_> {
     /// Raw slice address for validated native backends. Only writable arguments permit writes.
     pub fn data(&mut self) -> *mut u8 {
         match self {
+            Self::Context(context) => std::ptr::from_mut(&mut **context).cast(),
             Self::Read(s) => s.as_ptr().cast_mut().cast(),
             Self::Write(s) => s.as_mut_ptr().cast(),
             Self::ReadU16(s) => s.as_ptr().cast_mut().cast(),
@@ -163,7 +216,13 @@ pub fn validate_buffers(kinds: &[BufferKind], args: &[BufferArg<'_>]) -> Result<
         ));
     }
     for (i, (&kind, arg)) in kinds.iter().zip(args).enumerate() {
-        if kind.element() != arg.kind().element() {
+        if let Some(signature) = kind.context_signature() {
+            signature.validate()?;
+        }
+        if !kind.same_type(arg.kind()) {
+            if kind.context_signature().is_some() {
+                return Err(format!("buffer {i} has the wrong Rust context signature"));
+            }
             return Err(format!(
                 "buffer {i} expects {} elements",
                 kind.element().name()
@@ -201,7 +260,7 @@ pub fn check_forwarding(
         let kind = caller
             .get(buffer.index())
             .ok_or_else(|| format!("unknown buffer {}", buffer.0))?;
-        if required.element() != kind.element() {
+        if !required.same_type(*kind) {
             return Err(format!("buffer {} has wrong element type", buffer.0));
         }
         if !required.accepts(*kind) {

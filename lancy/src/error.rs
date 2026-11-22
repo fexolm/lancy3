@@ -55,4 +55,8 @@ pub enum CallError {
     DivisionByZero,
     #[error("kernel signed division overflow")]
     DivisionOverflow,
+    #[error("kernel integer arithmetic overflow")]
+    IntegerOverflow,
+    #[error("kernel Rust import panicked")]
+    RustPanic,
 }

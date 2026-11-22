@@ -30,18 +30,23 @@ struct Projection {
     bit: i32,
 }
 
-struct Schema([BufferKind; 6]);
+#[derive(splice::KernelType)]
+struct Schema {
+    layout: [BufferKind; 6],
+    elements: [Element; 6],
+}
 
 impl Schema {
     fn from_batch(columns: &[BufferArg<'_>; 6]) -> Self {
-        Self(std::array::from_fn(|i| columns[i].kind()))
-    }
-
-    fn element(&self, slot: usize) -> Option<Element> {
-        self.0.get(slot).map(|column| column.element())
+        let layout = std::array::from_fn(|i| columns[i].kind());
+        Self {
+            elements: layout.map(BufferKind::element),
+            layout,
+        }
     }
 }
 
+#[derive(splice::KernelType)]
 struct Plan {
     predicates: Vec<Expr>,
     left_key: usize,
@@ -58,7 +63,7 @@ fn filter<T: LaneElement>(
     keep: &mut [i32],
 ) -> i32 {
     let active = Lane::<T>::first_n(1);
-    let zero = Lane::<T>::splat(T::default());
+    let zero = Lane::<T>::splat(T::ZERO);
     let threshold = Lane::<T>::splat(val);
     for row in 0..keep.len() as i32 {
         let value = Lane::<T>::load_select(col, row as usize, active, zero);
@@ -79,7 +84,7 @@ fn join<T: LaneElement>(
     right_rows: &mut [i32],
 ) -> i32 {
     let active = Lane::<T>::first_n(1);
-    let zero = Lane::<T>::splat(T::default());
+    let zero = Lane::<T>::splat(T::ZERO);
     let mut count = 0;
     for left in 0..keep.len() as i32 {
         if keep[left as usize] != 0 {
@@ -107,7 +112,7 @@ fn project<T: LaneElement>(
     out: &mut [i32],
 ) -> i32 {
     let active = Lane::<T>::first_n(1);
-    let zero = Lane::<T>::splat(T::default());
+    let zero = Lane::<T>::splat(T::ZERO);
     let threshold = Lane::<T>::splat(val);
     for i in 0..count {
         let row = right_rows[i as usize];
@@ -130,27 +135,30 @@ fn query(
     keep: &mut [i32],
     right_rows: &mut [i32],
     out: &mut [i32],
-    #[columns(&schema.0)] columns: &[BufferArg<'_>],
+    #[columns(&schema.layout)] columns: &[BufferArg<'_>],
 ) -> i32 {
     for row in 0..keep.len() as i32 {
         keep[row as usize] = 1;
     }
     for expr in &plan.predicates {
         let Expr { col, op, val } = *expr;
-        match (schema.element(col), val) {
-            (Some(Element::U16), Literal::U16(val)) => {
+        if col >= schema.elements.len() {
+            return -1;
+        }
+        match (schema.elements[col], val) {
+            (Element::U16, Literal::U16(val)) => {
                 filter::<u16>(columns[col].as_slice::<u16>(), op, val, keep)
             }
-            (Some(Element::I32), Literal::I32(val)) => {
+            (Element::I32, Literal::I32(val)) => {
                 filter::<i32>(columns[col].as_slice::<i32>(), op, val, keep)
             }
-            (Some(Element::I64), Literal::I64(val)) => {
+            (Element::I64, Literal::I64(val)) => {
                 filter::<i64>(columns[col].as_slice::<i64>(), op, val, keep)
             }
-            (Some(Element::F32), Literal::F32(val)) => {
+            (Element::F32, Literal::F32(val)) => {
                 filter::<f32>(columns[col].as_slice::<f32>(), op, val, keep)
             }
-            (Some(Element::F64), Literal::F64(val)) => {
+            (Element::F64, Literal::F64(val)) => {
                 filter::<f64>(columns[col].as_slice::<f64>(), op, val, keep)
             }
             _ => return -1,
@@ -158,32 +166,35 @@ fn query(
     }
     let left = plan.left_key;
     let right = plan.right_key;
-    let count = match (schema.element(left), schema.element(right)) {
-        (Some(Element::U16), Some(Element::U16)) => join::<u16>(
+    if left >= schema.elements.len() || right >= schema.elements.len() {
+        return -1;
+    }
+    let count = match (schema.elements[left], schema.elements[right]) {
+        (Element::U16, Element::U16) => join::<u16>(
             columns[left].as_slice::<u16>(),
             columns[right].as_slice::<u16>(),
             keep,
             right_rows,
         ),
-        (Some(Element::I32), Some(Element::I32)) => join::<i32>(
+        (Element::I32, Element::I32) => join::<i32>(
             columns[left].as_slice::<i32>(),
             columns[right].as_slice::<i32>(),
             keep,
             right_rows,
         ),
-        (Some(Element::I64), Some(Element::I64)) => join::<i64>(
+        (Element::I64, Element::I64) => join::<i64>(
             columns[left].as_slice::<i64>(),
             columns[right].as_slice::<i64>(),
             keep,
             right_rows,
         ),
-        (Some(Element::F32), Some(Element::F32)) => join::<f32>(
+        (Element::F32, Element::F32) => join::<f32>(
             columns[left].as_slice::<f32>(),
             columns[right].as_slice::<f32>(),
             keep,
             right_rows,
         ),
-        (Some(Element::F64), Some(Element::F64)) => join::<f64>(
+        (Element::F64, Element::F64) => join::<f64>(
             columns[left].as_slice::<f64>(),
             columns[right].as_slice::<f64>(),
             keep,
@@ -199,8 +210,11 @@ fn query(
             expr: Expr { col, op, val },
             bit,
         } = *projection;
-        match (schema.element(col), val) {
-            (Some(Element::U16), Literal::U16(val)) => project::<u16>(
+        if col >= schema.elements.len() {
+            return -1;
+        }
+        match (schema.elements[col], val) {
+            (Element::U16, Literal::U16(val)) => project::<u16>(
                 columns[col].as_slice::<u16>(),
                 right_rows,
                 count,
@@ -209,7 +223,7 @@ fn query(
                 bit,
                 out,
             ),
-            (Some(Element::I32), Literal::I32(val)) => project::<i32>(
+            (Element::I32, Literal::I32(val)) => project::<i32>(
                 columns[col].as_slice::<i32>(),
                 right_rows,
                 count,
@@ -218,7 +232,7 @@ fn query(
                 bit,
                 out,
             ),
-            (Some(Element::I64), Literal::I64(val)) => project::<i64>(
+            (Element::I64, Literal::I64(val)) => project::<i64>(
                 columns[col].as_slice::<i64>(),
                 right_rows,
                 count,
@@ -227,7 +241,7 @@ fn query(
                 bit,
                 out,
             ),
-            (Some(Element::F32), Literal::F32(val)) => project::<f32>(
+            (Element::F32, Literal::F32(val)) => project::<f32>(
                 columns[col].as_slice::<f32>(),
                 right_rows,
                 count,
@@ -236,7 +250,7 @@ fn query(
                 bit,
                 out,
             ),
-            (Some(Element::F64), Literal::F64(val)) => project::<f64>(
+            (Element::F64, Literal::F64(val)) => project::<f64>(
                 columns[col].as_slice::<f64>(),
                 right_rows,
                 count,
@@ -259,7 +273,13 @@ fn main() -> splice::Result<()> {
         Some("rust") => print!("{}", query::print(&schema, &plan)?),
         None | Some("run") => println!(
             "{:?}",
-            run(query::build::<Lancy>(&schema, &plan)?, columns)?
+            run(
+                query::build::<Lancy>(query::BuildArgs {
+                    schema: &schema,
+                    plan: &plan
+                })?,
+                columns
+            )?
         ),
         Some(mode) => return Err(format!("unknown mode {mode}; use run or rust")),
     }
@@ -323,26 +343,20 @@ fn demo_columns() -> [BufferArg<'static>; 6] {
     ]
 }
 
-fn run(code: impl Executable, columns: [BufferArg<'_>; 6]) -> splice::Result<Vec<i32>> {
-    let [order_ids, quantity, discount, product_ids, price, rating] = columns;
-    let capacity = order_ids.len() * product_ids.len();
-    let mut keep = vec![0; order_ids.len()];
+fn run(
+    code: splice::TypedKernel<query::Signature, impl Executable>,
+    columns: [BufferArg<'_>; 6],
+) -> splice::Result<Vec<i32>> {
+    let capacity = columns[0].len() * columns[3].len();
+    let mut keep = vec![0; columns[0].len()];
     let mut right = vec![0; capacity];
     let mut out = vec![0; capacity];
-    let count = code.call(
-        &[],
-        &mut [
-            BufferArg::Write(&mut keep),
-            BufferArg::Write(&mut right),
-            BufferArg::Write(&mut out),
-            order_ids,
-            quantity,
-            discount,
-            product_ids,
-            price,
-            rating,
-        ],
-    )?;
+    let count = code.call(query::CallArgs {
+        keep: &mut keep,
+        right_rows: &mut right,
+        out: &mut out,
+        columns: &columns,
+    })?;
     let count = usize::try_from(count).map_err(|_| "query rejected the schema")?;
     out.truncate(count);
     Ok(out)
@@ -376,17 +390,35 @@ fn mixed_schema_specializes_the_same_operators_for_different_elements() -> splic
     }
     let expected = [3, 0, 2];
     assert_eq!(
-        run(query::build::<Lancy>(&schema, &plan)?, demo_columns())?,
+        run(
+            query::build::<Lancy>(query::BuildArgs {
+                schema: &schema,
+                plan: &plan
+            })?,
+            demo_columns()
+        )?,
         expected
     );
     assert_eq!(run(Lancy::compile(&ir)?, demo_columns())?, expected);
     assert_eq!(
-        run(query::build::<Llvm>(&schema, &plan)?, demo_columns())?,
+        run(
+            query::build::<Llvm>(query::BuildArgs {
+                schema: &schema,
+                plan: &plan
+            })?,
+            demo_columns()
+        )?,
         expected
     );
     assert_eq!(run(Llvm::compile(&ir)?, demo_columns())?, expected);
     assert_eq!(
-        run(query::build::<Cranelift>(&schema, &plan)?, demo_columns())?,
+        run(
+            query::build::<Cranelift>(query::BuildArgs {
+                schema: &schema,
+                plan: &plan
+            })?,
+            demo_columns()
+        )?,
         expected
     );
 
@@ -398,7 +430,13 @@ fn mixed_schema_specializes_the_same_operators_for_different_elements() -> splic
     let rust = query::print(&schema, &plan)?;
     assert!(rust.contains("fn join_4(left_key: &[f64], right_key: &[f64]"));
     assert_eq!(
-        run(query::build::<Lancy>(&schema, &plan)?, columns)?,
+        run(
+            query::build::<Lancy>(query::BuildArgs {
+                schema: &schema,
+                plan: &plan
+            })?,
+            columns
+        )?,
         expected
     );
     Ok(())

@@ -1,5 +1,5 @@
 use splice::hir::{Function, Instr, Label};
-use splice::{Executable, kernel};
+use splice::kernel;
 use splice_lancy::Lancy;
 
 #[kernel]
@@ -55,14 +55,19 @@ fn expected_scan(bias: i32, start: i32, end: i32, stop_at: i32) -> i32 {
 #[test]
 fn nested_calls_keep_separate_loop_state_on_each_invocation() {
     for bias in [2, -17] {
-        let jit = two_scans::build::<Lancy>(bias).unwrap();
+        let jit = two_scans::build::<Lancy>(two_scans::BuildArgs { bias }).unwrap();
         for start in -10..5 {
             for (end, stop) in [(-5, 7), (10, 2), (4, 15), (12, -8)] {
                 let args = [start, end, stop];
                 let expected = expected_scan(bias, start, end, stop)
                     - expected_scan(bias, start + 1, end + 3, stop);
                 assert_eq!(
-                    jit.call(&args, &mut []).unwrap(),
+                    jit.call(two_scans::CallArgs {
+                        start,
+                        end,
+                        stop_at: stop
+                    })
+                    .unwrap(),
                     expected,
                     "args = {args:?}"
                 );
@@ -162,7 +167,7 @@ fn runtime_boolean_operators_skip_the_right_hand_call() {
     for (mode, use_and) in [(Gate::And, true), (Gate::Or, false)] {
         let ir = gated::ir(mode).unwrap();
         assert_short_circuit_cfg(&ir);
-        let compiled = gated::build::<Lancy>(mode).unwrap();
+        let compiled = gated::build::<Lancy>(gated::BuildArgs { mode }).unwrap();
         for enabled in [0, 1] {
             for length in [0, 2, 5] {
                 let enough = length * (length + 1) / 2 > 3;
@@ -172,7 +177,7 @@ fn runtime_boolean_operators_skip_the_right_hand_call() {
                     enabled != 0 || enough
                 };
                 assert_eq!(
-                    compiled.call(&[enabled, length], &mut []).unwrap(),
+                    compiled.call(gated::CallArgs { enabled, length }).unwrap(),
                     if result { 10 } else { 20 }
                 );
             }
@@ -189,6 +194,14 @@ fn comptime_match_removes_whole_call_graph_from_scalar_ir() {
             .iter()
             .any(|i| matches!(i, Instr::Call { .. } | Instr::Branch { .. }))
     );
-    let compiled = gated::build::<Lancy>(Gate::Bypass).unwrap();
-    assert_eq!(compiled.call(&[-21, 5], &mut []).unwrap(), -21);
+    let compiled = gated::build::<Lancy>(gated::BuildArgs { mode: Gate::Bypass }).unwrap();
+    assert_eq!(
+        compiled
+            .call(gated::CallArgs {
+                enabled: -21,
+                length: 5
+            })
+            .unwrap(),
+        -21
+    );
 }

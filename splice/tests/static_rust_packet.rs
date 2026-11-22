@@ -1,0 +1,257 @@
+use splice::frontend::{KernelBuilder, materialize_with_options};
+use splice::hir::{Buffer, ContextSlice, Instr, RustContextTarget};
+use splice::{
+    BufferArg, BufferKind, BuildOptions, Codegen, ContextArguments, Executable, StaticRustCall,
+    StaticRustSymbol,
+};
+use splice_cranelift::Cranelift;
+use splice_lancy::Lancy;
+use splice_llvm::Llvm;
+use splice_text::Text;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+struct Empty;
+
+impl StaticRustCall for Empty {
+    const WORDS: u32 = 0;
+    const SLICES: u32 = 0;
+
+    fn invoke(_: ContextArguments<'_>) -> i32 {
+        19
+    }
+}
+
+static EMPTY: StaticRustSymbol = StaticRustSymbol::of::<Empty>("empty");
+
+#[test]
+fn static_packets_can_have_no_operands() {
+    fn body(builder: &mut dyn KernelBuilder) -> splice::Result<()> {
+        let result = builder.rust_static_call(&EMPTY, &[], &[])?;
+        builder.ret(result);
+        Ok(())
+    }
+
+    fn check<B: Codegen<Output: Executable>>() {
+        let ir = materialize_with_options(0, &[], Box::new(body), BuildOptions::Release).unwrap();
+        for kernel in [
+            B::build_with_options(0, &[], Box::new(body), BuildOptions::Release).unwrap(),
+            B::compile(&ir).unwrap(),
+        ] {
+            assert_eq!(kernel.call(&[], &mut []).unwrap(), 19);
+        }
+    }
+
+    check::<Lancy>();
+    check::<Llvm>();
+    check::<Cranelift>();
+}
+
+struct Modify;
+
+static SEEN_INPUT: AtomicUsize = AtomicUsize::new(0);
+
+impl StaticRustCall for Modify {
+    const WORDS: u32 = 1;
+    const SLICES: u32 = 2;
+
+    fn invoke(mut args: ContextArguments<'_>) -> i32 {
+        let word = args.word(0);
+        let input = args.read::<u16>();
+        SEEN_INPUT.store(input.as_ptr() as usize, Ordering::Relaxed);
+        let output = args.write::<i32>();
+        let value = word.wrapping_add(i32::from(input[0]));
+        output[0] = value;
+        output[1] = word;
+        value
+    }
+}
+
+static MODIFY: StaticRustSymbol = StaticRustSymbol::of::<Modify>("modify");
+const READ_U16: BufferKind = BufferKind::new(splice::simd::Element::U16, false);
+const PARENT_KINDS: [BufferKind; 2] = [BufferKind::Write, READ_U16];
+const CHILD_KINDS: [BufferKind; 2] = [READ_U16, BufferKind::Write];
+const SHARED_INPUT: ContextSlice = view(0, false);
+const MUTABLE_OUTPUT: ContextSlice = view(1, true);
+
+const fn view(buffer: u32, writable: bool) -> ContextSlice {
+    ContextSlice {
+        buffer: Buffer(buffer),
+        writable,
+    }
+}
+
+fn modify_child(builder: &mut dyn KernelBuilder) -> splice::Result<()> {
+    let result =
+        builder.rust_static_call(&MODIFY, &[builder.arg(0)], &[SHARED_INPUT, MUTABLE_OUTPUT])?;
+    builder.ret(result);
+    Ok(())
+}
+
+fn forward_slices(builder: &mut dyn KernelBuilder) -> splice::Result<()> {
+    let first = builder.constant(0);
+    let marker = builder.constant(91);
+    builder.store(Buffer(0), first, marker);
+    let result = builder.call_kernel(
+        1,
+        &CHILD_KINDS,
+        &[builder.arg(0)],
+        &[Buffer(1), Buffer(0)],
+        Box::new(modify_child),
+    )?;
+    let one = builder.constant(1);
+    let next = builder.binary(splice::hir::Binary::Add, result, one);
+    builder.store(Buffer(0), first, next);
+    builder.ret(result);
+    Ok(())
+}
+
+#[test]
+fn static_packets_keep_nested_slice_borrows_and_effect_order() {
+    let ir = materialize_with_options(
+        1,
+        &PARENT_KINDS,
+        Box::new(forward_slices),
+        BuildOptions::Release,
+    )
+    .unwrap();
+    let child = ir
+        .instructions()
+        .iter()
+        .find_map(|op| match op {
+            Instr::Call { function, .. } => Some(function),
+            _ => None,
+        })
+        .unwrap();
+    assert!(child.instructions().iter().any(|op| matches!(op,
+        Instr::RustContextCall { target: RustContextTarget::Static(symbol), slices, .. }
+        if symbol.name() == "modify" && slices == &[SHARED_INPUT, MUTABLE_OUTPUT]
+    )));
+    let text = splice_llvm::to_llvm_ir(&ir).unwrap();
+    assert!(!text.contains("nocapture") && !text.contains("captures(none)"));
+    assert!(text.contains("readonly") && text.contains("noalias"));
+    let text = Text::compile(&ir).unwrap();
+    assert!(
+        text.lines().any(|line| line.contains("rust modify(")
+            && line.ends_with("borrows buffer 0, mut buffer 1"))
+    );
+
+    fn check<B: Codegen<Output: Executable>>(ir: &splice::Function) {
+        for kernel in [
+            B::build_with_options(
+                1,
+                &PARENT_KINDS,
+                Box::new(forward_slices),
+                BuildOptions::Release,
+            )
+            .unwrap(),
+            B::compile(ir).unwrap(),
+        ] {
+            let input = [7_u16];
+            let mut short = [0];
+            assert!(
+                kernel
+                    .call(
+                        &[5],
+                        &mut [BufferArg::Write(&mut short), BufferArg::ReadU16(&input)]
+                    )
+                    .is_err()
+            );
+            assert_eq!(short, [12]);
+            assert_eq!(SEEN_INPUT.load(Ordering::Relaxed), input.as_ptr() as usize);
+
+            let mut output = [0, 0];
+            assert_eq!(
+                kernel
+                    .call(
+                        &[-10],
+                        &mut [BufferArg::Write(&mut output), BufferArg::ReadU16(&input)]
+                    )
+                    .unwrap(),
+                -3
+            );
+            assert_eq!(output, [-2, -10]);
+        }
+    }
+
+    check::<Lancy>(&ir);
+    check::<Llvm>(&ir);
+    check::<Cranelift>(&ir);
+}
+
+#[test]
+fn invalid_static_packet_operands_are_rejected_before_native_codegen() {
+    use splice::hir::Reg;
+    struct Oversize;
+    impl StaticRustCall for Oversize {
+        const WORDS: u32 = u32::MAX;
+        const SLICES: u32 = 0;
+
+        fn invoke(_: ContextArguments<'_>) -> i32 {
+            unreachable!("invalid packet layout must be rejected during the build")
+        }
+    }
+    static OVERSIZE: StaticRustSymbol = StaticRustSymbol::of::<Oversize>("oversize");
+    static EMPTY_CONTEXT: splice::ContextSignature = splice::ContextSignature::new(&[]);
+    let kinds = [
+        CHILD_KINDS[0],
+        CHILD_KINDS[1],
+        BufferKind::context(&EMPTY_CONTEXT),
+    ];
+    type Invalid = fn(&mut dyn KernelBuilder) -> splice::Result<Reg>;
+    let cases: [Invalid; 7] = [
+        |b| b.rust_static_call(&OVERSIZE, &[], &[]),
+        |b| b.rust_static_call(&MODIFY, &[], &[SHARED_INPUT, MUTABLE_OUTPUT]),
+        |b| b.rust_static_call(&MODIFY, &[b.arg(0)], &[MUTABLE_OUTPUT]),
+        |b| b.rust_static_call(&MODIFY, &[b.arg(0)], &[SHARED_INPUT, view(3, true)]),
+        |b| b.rust_static_call(&MODIFY, &[b.arg(0)], &[view(2, false), MUTABLE_OUTPUT]),
+        |b| b.rust_static_call(&MODIFY, &[b.arg(0)], &[SHARED_INPUT, view(0, true)]),
+        |b| b.rust_static_call(&MODIFY, &[b.arg(0)], &[view(1, false), MUTABLE_OUTPUT]),
+    ];
+    for bad in cases {
+        let body = move |builder: &mut dyn KernelBuilder| {
+            let result = bad(builder)?;
+            builder.ret(result);
+            Ok(())
+        };
+        assert!(
+            materialize_with_options(1, &kinds, Box::new(body), BuildOptions::Release).is_err()
+        );
+        assert!(
+            Lancy::build_with_options(1, &kinds, Box::new(body), BuildOptions::Release).is_err()
+        );
+        assert!(
+            Llvm::build_with_options(1, &kinds, Box::new(body), BuildOptions::Release).is_err()
+        );
+    }
+}
+
+#[test]
+fn static_rust_adapters_cannot_reinterpret_a_slice_element_type() {
+    const KINDS: [BufferKind; 2] = [BufferKind::Read, BufferKind::Write];
+    let ir =
+        materialize_with_options(1, &KINDS, Box::new(modify_child), BuildOptions::Release).unwrap();
+
+    fn check<B: Codegen<Output: Executable>>(ir: &splice::Function) {
+        for kernel in [
+            B::build_with_options(1, &KINDS, Box::new(modify_child), BuildOptions::Release)
+                .unwrap(),
+            B::compile(ir).unwrap(),
+        ] {
+            let input = [12_i32];
+            let mut output = [-1, -2];
+            assert!(
+                kernel
+                    .call(
+                        &[3],
+                        &mut [BufferArg::Read(&input), BufferArg::Write(&mut output)]
+                    )
+                    .is_err()
+            );
+            assert_eq!(output, [-1, -2]);
+        }
+    }
+
+    check::<Lancy>(&ir);
+    check::<Llvm>(&ir);
+    check::<Cranelift>(&ir);
+}
