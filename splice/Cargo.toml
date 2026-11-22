@@ -6,7 +6,6 @@ rust-version = "1.94"
 description = "A staged Rust kernel language with a portable code generation interface"
 
 [dependencies]
-typeid = "1"
 tracing.workspace = true
 splice-target = { path = "../splice-target" }
 splice-macros = { path = "../splice-macros" }

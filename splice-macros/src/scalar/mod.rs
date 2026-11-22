@@ -313,7 +313,7 @@ pub(super) fn expand(root: Path, native: &mut ItemFn) -> Result<TokenStream> {
         evaluator_return: None,
         context: context.as_ref(),
     };
-    let evaluator = lower.evaluator(&native.sig, &lowered_block, module_vis)?;
+    let evaluator = lower.evaluator(&native.sig, &lowered_block, module_vis, None)?;
     let code = lower.kernel_body(&lowered_block)?;
     let owned_scope = lower.owned_scope(native);
     let debug_arguments = host_names.iter().map(|id| lower.capture_constant(id));
@@ -874,8 +874,11 @@ mod tests {
                 "expected #[comptime]",
             ),
             (
-                parse_quote!(impl Plan { #[kernel] #[kernel] fn read(&self) {} }),
-                "one #[kernel] marker",
+                parse_quote!(
+                    #[kernel]
+                    fn read() {}
+                ),
+                "duplicate #[kernel]",
             ),
             (
                 parse_quote!(

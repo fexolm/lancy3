@@ -1,10 +1,50 @@
 //! Default trait entries, scalar signatures and compile-time parameter masks.
 use super::{Binding, Scalar, abi, entry_name, normalize, parameter};
-use proc_macro2::{Ident, TokenStream};
-use quote::format_ident;
-use syn::{FnArg, GenericParam, ReturnType, Signature, TraitItem, Type};
+use proc_macro2::TokenStream;
+use syn::{FnArg, GenericParam, ReturnType, Signature, Type};
 
-pub(crate) fn trait_defaults(root: &syn::Path, signature: &Signature) -> Vec<TraitItem> {
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub(crate) enum TraitMethodKind {
+    Word,
+    Bool,
+    EvalOnly,
+    Rust,
+}
+
+impl TraitMethodKind {
+    pub(crate) fn for_result(output: &ReturnType) -> Self {
+        match output {
+            ReturnType::Default => Self::Word,
+            ReturnType::Type(_, ty) => match Scalar::from_type(ty, &[]) {
+                Some(Scalar::Int) => Self::Word,
+                Some(Scalar::Bool) => Self::Bool,
+                _ if matches!(ty.as_ref(), Type::Tuple(tuple) if tuple.elems.is_empty()) => {
+                    Self::Word
+                }
+                _ if primitive_type(ty) => Self::EvalOnly,
+                _ => Self::Rust,
+            },
+        }
+    }
+}
+
+pub(in crate::scalar) fn primitive_type(ty: &Type) -> bool {
+    matches!(ty, Type::Path(path) if path.qself.is_none() && path.path.get_ident().is_some_and(|name| {
+        matches!(name.to_string().as_str(),
+            "bool" | "char" | "i8" | "i16" | "i32" | "i64" | "i128" | "isize"
+            | "u8" | "u16" | "u32" | "u64" | "u128" | "usize" | "f32" | "f64")
+    }))
+}
+
+pub(crate) fn trait_defaults(
+    root: &syn::Path,
+    signature: &Signature,
+    trait_owner: &TokenStream,
+) -> (TraitMethodKind, Vec<TokenStream>) {
+    let kind = TraitMethodKind::for_result(&signature.output);
+    if kind == TraitMethodKind::Rust {
+        return (kind, Vec::new());
+    }
     let mut signature = normalize(signature, None);
     signature
         .generics
@@ -14,17 +54,26 @@ pub(crate) fn trait_defaults(root: &syn::Path, signature: &Signature) -> Vec<Tra
     let types: Vec<_> = signature.generics.type_params().map(|t| &t.ident).collect();
     let result_type = match &signature.output {
         ReturnType::Default => emit!(()),
-        ReturnType::Type(_, ty)
-            if matches!(&**ty, Type::Tuple(tuple) if tuple.elems.is_empty())
-                || matches!(
-                    Scalar::from_type(ty, &types),
-                    Some(Scalar::Int | Scalar::Bool)
-                ) =>
-        {
-            emit!(#ty)
-        }
-        _ => return Vec::new(),
+        ReturnType::Type(_, ty) => emit!(#ty),
     };
+    let name = &signature.ident;
+    let generics = &signature.generics;
+    let where_ = &generics.where_clause;
+    let eval_name = entry_name("eval_method", name);
+    let operand_types = signature.inputs.iter().filter_map(|arg| match arg {
+        FnArg::Typed(arg) => Some(arg.ty.as_ref()),
+        FnArg::Receiver(_) => None,
+    });
+    let evaluator = emit! {
+        #[doc(hidden)]
+        #[allow(clippy::type_complexity)]
+        fn #eval_name #generics (_: (#(Option<#operand_types>,)*)) -> #root::Result<#result_type> #where_ {
+            Err("a trait method without a published implementation is opaque".into())
+        }
+    };
+    if kind == TraitMethodKind::EvalOnly {
+        return (kind, vec![evaluator]);
+    }
     let Ok(params) = signature
         .inputs
         .iter()
@@ -32,7 +81,7 @@ pub(crate) fn trait_defaults(root: &syn::Path, signature: &Signature) -> Vec<Tra
         .map(|(argument, name)| parameter(argument, &types, name))
         .collect::<syn::Result<Vec<_>>>()
     else {
-        return Vec::new();
+        return (TraitMethodKind::Rust, Vec::new());
     };
     let mut declarations = Vec::new();
     let mut args = Vec::new();
@@ -66,16 +115,11 @@ pub(crate) fn trait_defaults(root: &syn::Path, signature: &Signature) -> Vec<Tra
                 materializable = false;
                 emit!(#id: #hir::Buffer)
             }
-            _ => return Vec::new(),
+            _ => return (TraitMethodKind::Rust, Vec::new()),
         });
         args.push(id);
     }
-    let operand_types = params.iter().map(|p| p.ty);
-    let name = &signature.ident;
-    let generics = &signature.generics;
-    let where_ = &generics.where_clause;
     let stage_name = entry_name("stage_method", name);
-    let eval_name = entry_name("eval_method", name);
     let adapter_name = entry_name("trait_adapter", name);
     let mut items = Vec::new();
     let arity = args.len();
@@ -94,7 +138,7 @@ pub(crate) fn trait_defaults(root: &syn::Path, signature: &Signature) -> Vec<Tra
             let args = words
                 .iter()
                 .map(|word| emit!(#support::ImportWord::decode(#word)));
-            emit!(Self::#name #func (#(#args),*))
+            emit!(<Self as #trait_owner>::#name #func (#(#args),*))
         };
         let (adapter, call) = if arity <= 2 {
             let native = native_call(&[emit!(left), emit!(right)][..arity]);
@@ -108,7 +152,7 @@ pub(crate) fn trait_defaults(root: &syn::Path, signature: &Signature) -> Vec<Tra
                 },
                 emit! {
                     __splice_builder.rust_call(#hir::RustCall {
-                        symbol: &#hir::RustSymbol {name: stringify!(#name), resolve: || Self::#adapter_name #func},
+                        symbol: &#hir::RustSymbol {name: stringify!(#name), resolve: || <Self as #trait_owner>::#adapter_name #func},
                         arity: #arity as u8,
                     }, &args)
                 },
@@ -129,12 +173,12 @@ pub(crate) fn trait_defaults(root: &syn::Path, signature: &Signature) -> Vec<Tra
                     __splice_builder.rust_packet_call(&#hir::RustPacketSymbol {
                         name: stringify!(#name),
                         arity: #arity as u32,
-                        resolve: || Self::#adapter_name #func,
+                        resolve: || <Self as #trait_owner>::#adapter_name #func,
                     }, &args)
                 },
             )
         };
-        items.push(syn::parse2(adapter).expect("a generated Rust trait adapter"));
+        items.push(adapter);
         emit! {
             let args = [#(#support::RunArg::reg(#args, __splice_builder)),*];
             #call
@@ -144,7 +188,7 @@ pub(crate) fn trait_defaults(root: &syn::Path, signature: &Signature) -> Vec<Tra
             "trait method requires Rust arguments that cannot cross the scalar ABI".into()
         ))
     };
-    items.push(syn::parse2(emit! {
+    items.push(emit! {
         #[doc(hidden)]
         #[allow(unused_variables, clippy::too_many_arguments)]
         fn #stage_name #generics (#(#declarations,)* __splice_builder: &mut dyn #root::frontend::KernelBuilder)
@@ -153,178 +197,61 @@ pub(crate) fn trait_defaults(root: &syn::Path, signature: &Signature) -> Vec<Tra
             #(#stage_checks)*
             #body
         }
-    }).expect("a generated trait method stage"));
-    items.push(syn::parse_quote! {
-        #[doc(hidden)]
-        #[allow(clippy::type_complexity)]
-        fn #eval_name #generics (_: (#(Option<#operand_types>,)*)) -> #root::Result<#result_type> #where_ {
-            Err("a trait method without a published implementation is opaque".into())
-        }
     });
-    items
+    items.push(evaluator);
+    (kind, items)
 }
 
-/// A fixed signature allows a trait bound to select the companion without
-/// recovering the declaration's argument types at a call site.
-pub(crate) fn word_trait(root: &syn::Path, signature: &Signature) -> Vec<TraitItem> {
-    let Some(kind) = trait_method(signature) else {
-        return Vec::new();
+pub(crate) fn stage_shape(
+    root: &syn::Path,
+    signature: &Signature,
+    body: Option<&syn::Block>,
+    inherent_visibility: Option<&syn::Visibility>,
+) -> [TokenStream; 2] {
+    let (shape_kind, policy_kind, bound) = if inherent_visibility.is_some() {
+        (
+            "inherent_region_stage_shape",
+            "inherent_region_needs_stages",
+            TokenStream::new(),
+        )
+    } else {
+        (
+            "stage_shape",
+            "region_needs_stages",
+            emit!(where Self: Sized),
+        )
     };
-    let word = emit!(#root::frontend::scalar::Word);
-    let encode = emit!(#root::frontend::scalar::ImportWord);
-    let types: Vec<_> = signature
-        .inputs
-        .iter()
-        .filter_map(|arg| match arg {
-            FnArg::Typed(arg)
-                if matches!(
-                    Scalar::from_type(&arg.ty, &[]),
-                    Some(Scalar::Int | Scalar::Bool)
-                ) =>
-            {
-                Some(&arg.ty)
-            }
-            _ => None,
-        })
-        .collect();
-    let mut items = trait_defaults(root, signature);
-    if items.is_empty() {
-        return items;
-    }
-    items.push(syn::parse2(stage_shape(signature)).expect("a generated trait stage shape"));
-    let name = &signature.ident;
-    let marker = kind.marker(name);
-    let stage = entry_name("stage_method", name);
-    let stage_words = entry_name("stage_trait_words", name);
-    let eval = entry_name("eval_method", name);
-    let eval_words = entry_name("eval_trait_words", name);
-    let arguments: Vec<_> = (0..types.len())
-        .map(|n| format_ident!("argument_{n}"))
-        .collect();
-    let decoded = arguments
-        .iter()
-        .zip(types)
-        .map(|(arg, ty)| emit!(#arg.map(<#ty as #encode>::decode)));
-    items.push(
-        syn::parse2(emit! {
-            #[doc(hidden)]
-            fn #marker() -> bool where Self: Sized {
-                true
-            }
-        })
-        .expect("a generated trait publication marker"),
+    let method = entry_name(shape_kind, &signature.ident);
+    let policy = entry_name(policy_kind, &signature.ident);
+    let needs_stages = body.map_or_else(
+        || emit!(false),
+        |body| crate::import::method_policy(root, signature, body),
     );
-    if kind != TraitMethod::Scalar {
-        return items;
-    }
-    items.push(syn::parse2(emit! {
-        #[doc(hidden)]
-        fn #stage_words(__splice_words: &[#word], __splice_builder: &mut dyn #root::frontend::KernelBuilder)
-            -> #root::Result<#root::hir::Reg> where Self: Sized
-        {
-            let [#(#arguments),*] = __splice_words else {
-                return Err("wrong number of arguments for a published trait method".into());
-            };
-            Self::#stage(#(*#arguments,)* __splice_builder)
-        }
-    }).expect("a generated trait word stage"));
-    items.push(
-        syn::parse2(emit! {
-            #[doc(hidden)]
-            fn #eval_words(__splice_words: &[Option<i32>]) -> #root::Result<i32> where Self: Sized {
-                let [#(#arguments),*] = __splice_words else {
-                    return Err("wrong number of arguments for a published trait method".into());
-                };
-                Self::#eval((#(#decoded,)* )).map(#encode::encode)
-            }
-        })
-        .expect("a generated trait word evaluator"),
-    );
-    items
-}
-
-pub(crate) fn individual_trait_supported(signature: &Signature) -> bool {
-    trait_method(signature).is_some()
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(super) enum TraitMethod {
-    Scalar,
-    Borrowed,
-    Owned,
-}
-
-impl TraitMethod {
-    pub(super) fn marker(self, name: &Ident) -> Ident {
-        let kind = match self {
-            Self::Scalar => "word_trait",
-            Self::Borrowed => "borrowed_trait",
-            Self::Owned => "owned_trait",
-        };
-        entry_name(kind, name)
-    }
-}
-
-pub(super) fn trait_method(signature: &Signature) -> Option<TraitMethod> {
-    let (kind, start) = match signature.receiver() {
-        None => (TraitMethod::Scalar, 0),
-        Some(receiver)
-            if receiver.reference.is_some()
-                && receiver.mutability.is_none()
-                && receiver.colon_token.is_none()
-                && receiver
-                    .attrs
-                    .iter()
-                    .any(|attr| attr.path().is_ident("comptime")) =>
-        {
-            (TraitMethod::Borrowed, 1)
-        }
-        Some(receiver)
-            if receiver.reference.is_none()
-                && receiver.colon_token.is_none()
-                && receiver
-                    .attrs
-                    .iter()
-                    .any(|attr| attr.path().is_ident("comptime")) =>
-        {
-            (TraitMethod::Owned, 1)
-        }
-        _ => return None,
-    };
-    (signature.generics.params.is_empty()
-        && signature.inputs.iter().skip(start).all(|arg| {
-            matches!(arg, FnArg::Typed(arg) if matches!(Scalar::from_type(&arg.ty, &[]), Some(Scalar::Int | Scalar::Bool)))
-        })
-        && match &signature.output {
-            ReturnType::Default => true,
-            ReturnType::Type(_, ty) => {
-                matches!(&**ty, Type::Tuple(tuple) if tuple.elems.is_empty())
-                    || matches!(Scalar::from_type(ty, &[]), Some(Scalar::Int | Scalar::Bool))
-            }
-        })
-    .then_some(kind)
-}
-
-pub(crate) fn stage_shape(signature: &Signature) -> TokenStream {
-    let method = entry_name("stage_shape", &signature.ident);
     let stages = parameter_stages(signature);
     let masks = stage_masks(&stages);
-    emit! {
-        #[doc(hidden)]
-        #[allow(clippy::type_complexity)]
-        fn #method() -> (#([(); #stages],)*) where Self: Sized {
-            (#(#masks,)*)
-        }
-    }
+    [
+        emit! {
+            #[doc(hidden)]
+            #[allow(dead_code, clippy::type_complexity)]
+            #inherent_visibility fn #method() -> (#([(); #stages],)*) #bound {
+                (#(#masks,)*)
+            }
+        },
+        emit! {
+            #[doc(hidden)]
+            #[allow(dead_code)]
+            #inherent_visibility fn #policy() -> bool #bound { #needs_stages }
+        },
+    ]
 }
 
-pub(super) fn stage_masks(stages: &[usize]) -> impl Iterator<Item = TokenStream> + '_ {
+fn stage_masks(stages: &[usize]) -> impl Iterator<Item = TokenStream> + '_ {
     stages
         .iter()
         .map(|stage| if *stage == 0 { emit!([]) } else { emit!([()]) })
 }
 
-pub(super) fn parameter_stages(signature: &Signature) -> Vec<usize> {
+fn parameter_stages(signature: &Signature) -> Vec<usize> {
     signature
         .inputs
         .iter()

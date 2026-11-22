@@ -717,7 +717,7 @@ impl Lower<'_> {
                 };
                 Ok(Value::new(Stage::Reg(t.base()), code))
             }
-            Expr::Call(x) => self.call(x, hint),
+            Expr::Call(x) => self.call(x, hint, None),
             Expr::Index(x) => self.index(x),
             Expr::Cast(x) => self.cast(x),
             Expr::MethodCall(x) => self.method(x, hint),

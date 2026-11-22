@@ -4,7 +4,12 @@ use proc_macro2::TokenStream;
 use syn::{Expr, Result};
 
 impl Lower<'_> {
-    pub(super) fn call(&self, c: &syn::ExprCall, hint: Option<Scalar>) -> Result<Value> {
+    pub(super) fn call(
+        &self,
+        c: &syn::ExprCall,
+        hint: Option<Scalar>,
+        cast: Option<&syn::Type>,
+    ) -> Result<Value> {
         let Expr::Path(p) = &*c.func else {
             return err(&c.func, "expected a kernel function path");
         };
@@ -80,9 +85,11 @@ impl Lower<'_> {
         let all_known = named && values.iter().all(|v| v.stage.is_host());
         let original_args = values.iter().map(|v| v.code.clone()).collect::<Vec<_>>();
         let mut args = Vec::new();
+        let mut trait_stages = Vec::new();
         for (i, (expr, value)) in c.args.iter().zip(values).enumerate() {
             let formal = recursive.then(|| self.formals[i]);
-            args.push(match (formal, value.stage) {
+            let stage = value.stage;
+            let argument = match (formal, stage) {
                 (Some(Binding::Reg(t, _)), _) => self.reg(value, t, expr)?,
                 (Some(Binding::Buffer(write)), Stage::Buffer(actual))
                     if write.elem == actual.elem && (!write.write || actual.write) =>
@@ -117,7 +124,11 @@ impl Lower<'_> {
                         "expected a comptime value, a runtime i32, or a runtime slice",
                     );
                 }
-            });
+            };
+            if trait_owner.is_some() {
+                trait_stages.push(stage);
+            }
+            args.push(argument);
         }
         if all_known {
             let params = (0..args.len())
@@ -144,18 +155,49 @@ impl Lower<'_> {
             let code = self.dispatch_call(p, kernel, emit!(#support::Word::Runtime(#native)));
             return Ok(Value::new(Stage::Word(output), code));
         }
-        let kernel = emit!({#check #target(#(#args,)* __splice_builder)?});
+        let staged_call =
+            |args: &[TokenStream]| emit!({#check #target(#(#args,)* __splice_builder)?});
         let code = if let Some(owner) = trait_owner {
-            let native = self.import_call(p, &args);
-            let fallback = crate::declaration::trait_dispatch(root, &owner, kernel, native);
-            crate::scalar::methods::isolated_trait_call(
-                root,
-                self.generics,
-                p,
-                &args,
-                fallback,
-                false,
-            )
+            let method = &p.path.segments.last().unwrap().ident;
+            let names: Vec<_> = (0..args.len())
+                .map(|index| {
+                    quote::format_ident!(
+                        "__splice_call_argument_{index}",
+                        span = proc_macro2::Span::mixed_site()
+                    )
+                })
+                .collect();
+            let bound: Vec<_> = names.iter().map(|name| emit!(#name)).collect();
+            let opaque_args: Vec<_> = bound
+                .iter()
+                .zip(trait_stages)
+                .map(|(argument, stage)| {
+                    if matches!(stage, Stage::Reg(_)) {
+                        // The inlining factory records known formals before
+                        // assigning their registers to the method body.
+                        emit!(#support::Word::input(#argument, __splice_inputs))
+                    } else {
+                        argument.clone()
+                    }
+                })
+                .collect();
+            let mut shape = crate::scalar::methods::rename_path(p, "stage_shape");
+            let mut policy = crate::scalar::methods::rename_path(p, "region_needs_stages");
+            for metadata in [&mut shape, &mut policy] {
+                metadata.path.segments.last_mut().unwrap().arguments = syn::PathArguments::None;
+            }
+            let opaque = self.import_result(p, &opaque_args, cast, Some((&shape, &policy)));
+            let ordinary = self.import_result(p, &bound, cast, None);
+            let kernel = staged_call(&bound);
+            let boolean = if cast.is_some() {
+                self.bin("And", kernel.clone(), emit!(__splice_builder.constant(1)))
+            } else {
+                kernel.clone()
+            };
+            let dispatch = crate::declaration::trait_method_dispatch(
+                root, &owner, method, kernel, boolean, opaque, ordinary,
+            );
+            emit!({ let (#(#names,)*) = (#(#args,)*); #dispatch })
         } else if method {
             let mut published = crate::scalar::methods::rename_path(p, "published");
             published.path.segments.last_mut().unwrap().arguments = syn::PathArguments::None;
@@ -163,9 +205,9 @@ impl Lower<'_> {
             emit!({ #check if #published() { #target(#(#args,)* __splice_builder)? } else { #native } })
         } else if named {
             let native = self.import_call(p, &args);
-            self.dispatch_call(p, kernel, native)
+            self.dispatch_call(p, staged_call(&args), native)
         } else {
-            kernel
+            staged_call(&args)
         };
         Ok(Value::new(Stage::Reg(output), code))
     }
@@ -181,18 +223,44 @@ impl Lower<'_> {
         dispatch_free(self.root, path, kernel, rust)
     }
     pub(super) fn import_call(&self, path: &syn::ExprPath, args: &[TokenStream]) -> TokenStream {
+        self.import_result(path, args, None, None)
+    }
+
+    fn import_result(
+        &self,
+        path: &syn::ExprPath,
+        args: &[TokenStream],
+        cast: Option<&syn::Type>,
+        stage_checks: Option<(&syn::ExprPath, &syn::ExprPath)>,
+    ) -> TokenStream {
         let root = self.root;
+        let native = emit!(#root::frontend::native);
         let arity = args.len();
         let slots: Vec<_> = (0..arity)
             .map(|index| quote::format_ident!("__SpliceOperand{index}"))
             .collect();
-        let candidate = emit!(__splice_candidate(#path));
-        let prepare = emit! {
-            fn __splice_candidate<#(#slots,)* __SpliceResult>(entry: fn(#(#slots),*) -> __SpliceResult)
-                -> #root::frontend::native::Candidate<fn(#(#slots),*) -> __SpliceResult>
-            {
-                #root::frontend::native::Candidate(entry)
-            }
+        let (candidate, prepare) = if let Some(ty) = cast {
+            (
+                emit!(__splice_candidate(#path, |result| result as #ty)),
+                emit! {
+                    fn __splice_candidate<#(#slots,)* R, F: ::core::ops::Fn(R) -> i32>(
+                        entry: fn(#(#slots),*) -> R, project: F,
+                    ) -> #native::Candidate<fn(#(#slots),*) -> R, #native::MapResult<F>> {
+                        #native::Candidate(entry, #native::MapResult(project))
+                    }
+                },
+            )
+        } else {
+            (
+                emit!(__splice_candidate(#path)),
+                emit! {
+                    fn __splice_candidate<#(#slots,)* R>(entry: fn(#(#slots),*) -> R)
+                        -> #native::Candidate<fn(#(#slots),*) -> R, #native::EncodeResult>
+                    {
+                        #native::Candidate(entry, #native::EncodeResult)
+                    }
+                },
+            )
         };
         let (generics, _, where_clause) = self.generics.split_for_impl();
         let type_args = self
@@ -232,7 +300,6 @@ impl Lower<'_> {
             )
         } else {
             let indices = 0..arity;
-            let native = emit!(#root::frontend::native);
             let word = emit!(#root::frontend::scalar::ImportWord);
             (
                 emit! {
@@ -240,13 +307,13 @@ impl Lower<'_> {
                         fn supported(self) -> bool;
                         fn invoke(self, words: &[i32]) -> i32;
                     }
-                    impl<#(#slots: #word,)* R: #word> __SplicePacketAdapter for &#native::Candidate<fn(#(#slots),*) -> R> {
+                    impl<#(#slots: #word,)* R, P: #native::ProjectResult<R>> __SplicePacketAdapter for &#native::Candidate<fn(#(#slots),*) -> R, P> {
                         fn supported(self) -> bool { true }
                         fn invoke(self, words: &[i32]) -> i32 {
-                            #word::encode((self.0)(#(<#slots as #word>::decode(words[#indices])),*))
+                            #native::ProjectResult::project(&self.1, (self.0)(#(<#slots as #word>::decode(words[#indices])),*))
                         }
                     }
-                    impl<F> __SplicePacketAdapter for &&#native::Candidate<F> {
+                    impl<F, P> __SplicePacketAdapter for &&#native::Candidate<F, P> {
                         fn supported(self) -> bool { false }
                         fn invoke(self, _: &[i32]) -> i32 { unreachable!("verified scalar packet adapter") }
                     }
@@ -261,6 +328,24 @@ impl Lower<'_> {
                 },
             )
         };
+        let operands = if let Some((shape, needs_stages)) = stage_checks {
+            let indices: Vec<_> = (0..arity).map(syn::Index::from).collect();
+            emit! {
+                let __splice_import_values = (#(Operand(#args),)*);
+                let __splice_import_stages = #shape();
+                #(if !__splice_import_stages.#indices.is_empty()
+                    && !(&__splice_import_values.#indices).known()
+                {
+                    return Err("runtime value passed to a comptime parameter".into());
+                })*
+                if #needs_stages() {
+                    return Err("a published kernel call cannot be specialized inside this Rust region".into());
+                }
+                let operands = [#((&__splice_import_values.#indices).materialize(__splice_builder)?),*];
+            }
+        } else {
+            emit!(let operands = [#((&Operand(#args)).materialize(__splice_builder)?),*];)
+        };
         emit!({
             #prepare
             #adapter
@@ -268,7 +353,7 @@ impl Lower<'_> {
             if !(&#candidate).supported() {
                 return Err("Rust import requires a non-scalar argument or result".into());
             }
-            let operands=[#((&Operand(#args)).materialize(__splice_builder)?),*];
+            #operands
             #call
         })
     }

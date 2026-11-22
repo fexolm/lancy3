@@ -1,14 +1,16 @@
 use splice::kernel;
 
+#[kernel]
 pub trait Transform {
-    #[kernel]
     fn shift(value: i32, #[comptime] offset: i32) -> i32;
+}
 
+pub trait OrdinaryTransform<Tag = ()> {
     fn ordinary(value: i32) -> i32;
 }
 
 #[kernel]
-pub trait WholeTransform {
+pub trait ReverseTransform: Transform {
     fn shift(value: i32, #[comptime] offset: i32) -> i32;
 }
 
@@ -17,26 +19,24 @@ pub trait IndexedTransform {
     fn adjust(value: i32, #[comptime] offset: usize) -> i32;
 }
 
+#[kernel]
 pub trait PlanTransform {
-    #[kernel]
     fn shift(#[comptime] &self, value: i32) -> i32;
 }
 
+#[kernel]
 pub trait OtherPlanTransform {
-    #[kernel]
     fn shift(#[comptime] &self, value: i32) -> i32;
 }
 
+#[kernel]
 pub trait OwnedPlanTransform {
-    #[kernel]
     fn shift(#[comptime] self, value: i32) -> i32;
 }
 
+#[kernel]
 pub trait ParameterizedTransform<Tag: Copy> {
-    #[kernel]
     fn shift(value: i32, #[comptime] offset: i32) -> i32;
-
-    fn ordinary(value: i32) -> i32;
 }
 
 #[kernel]

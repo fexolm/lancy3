@@ -1,5 +1,5 @@
 //! Typed Rust leaf operations retain their Rust ownership and borrowing rules.
-use crate::scalar::abi::{Elision, parameter_names, used_generics};
+use crate::scalar::abi::{Elision, body_generics, param_name, parameter_names, used_generics};
 use proc_macro2::{Ident, Span, TokenStream};
 use quote::quote;
 use std::collections::HashSet;
@@ -18,7 +18,7 @@ mod opaque;
 mod region;
 use captures::{Usage, pattern_bindings};
 use region::Check;
-pub(crate) use region::publication;
+pub(crate) use region::{method_policy, publication};
 
 pub(crate) fn scope_checks(root: &Path, function: &ItemFn) -> Option<TokenStream> {
     let guards = region::checks(function);
@@ -378,39 +378,56 @@ fn expand(root: &Path, mut function: ItemFn, checks: Vec<Check>) -> Result<Token
     let (_, environment_args, environment_where) = environment_generics.split_for_impl();
     let borrowed_environment = environment_generics.lifetimes().next().is_some();
     let retained_types = environment.iter().filter(|_| !borrowed_environment);
-    let invoke_generics = used_generics(
-        &elision.generics,
-        call.iter()
-            .chain(retained_types.clone())
-            .map(|(_, ty)| ty)
-            .chain(std::iter::once(&output)),
-    );
+    let invoke_types = call
+        .iter()
+        .chain(retained_types)
+        .map(|(_, ty)| ty)
+        .chain(std::iter::once(&output));
+    let invoke_generics = if opaque_result || borrowed_environment {
+        used_generics(&elision.generics, invoke_types)
+    } else {
+        body_generics(&elision.generics, invoke_types, &expr)
+    };
     let (invoke_decls, _, invoke_where) = invoke_generics.split_for_impl();
-    let signature_generics = used_generics(
-        &sig.generics,
-        call.iter()
-            .chain(retained_types)
-            .map(|(_, ty)| ty)
-            .chain(std::iter::once(&output)),
-    );
+    let constrained: HashSet<_> = call_generics
+        .params
+        .iter()
+        .chain(
+            environment_generics
+                .params
+                .iter()
+                .filter(|_| !borrowed_environment),
+        )
+        .map(param_name)
+        .collect();
+    let needs_signature_dispatch = invoke_generics
+        .params
+        .iter()
+        .any(|p| !constrained.contains(&param_name(p)));
     let mut signature_generics = if opaque_result {
         sig.generics.clone()
     } else {
-        signature_generics
+        invoke_generics.clone()
     };
     signature_generics.params = signature_generics
         .params
         .into_iter()
-        .filter(|p| !matches!(p, GenericParam::Lifetime(_)))
+        .filter(|p| {
+            !matches!(p, GenericParam::Lifetime(_))
+                || (!opaque_result && !constrained.contains(&param_name(p)))
+        })
         .map(|mut p| {
-            if let GenericParam::Type(t) = &mut p {
-                t.bounds.clear();
+            match &mut p {
+                GenericParam::Type(t) => t.bounds = syn::parse_quote!(?Sized),
+                GenericParam::Lifetime(l) => l.bounds.clear(),
+                GenericParam::Const(_) => (),
             }
             p
         })
         .collect();
     signature_generics.where_clause = None;
     let (_, signature_args, _) = signature_generics.split_for_impl();
+    let marker_lifetimes = signature_generics.lifetimes().map(|p| &p.lifetime);
     let type_params = signature_generics.type_params().map(|p| &p.ident);
     let marker = emit!(Signature #signature_args);
     let environment_type = if borrowed_environment {
@@ -510,6 +527,17 @@ fn expand(root: &Path, mut function: ItemFn, checks: Vec<Check>) -> Result<Token
             body: &call_body,
         }
         .declarations()
+    } else if needs_signature_dispatch {
+        emit! {
+            impl #invoke_decls #root::ImportInvocation<#environment_type, CallArgs #call_args>
+                for #marker #invoke_where {
+                type Output = #output;
+                fn invoke(__splice_environment: &#environment_type, __splice_arguments: CallArgs #call_args)
+                    -> Self::Output {
+                    #call_body
+                }
+            }
+        }
     } else {
         emit! {
             impl #invoke_decls #root::ImportArgs<#environment_type> for CallArgs #call_args #invoke_where {
@@ -541,7 +569,9 @@ fn expand(root: &Path, mut function: ItemFn, checks: Vec<Check>) -> Result<Token
             #vis struct BuildArgs #host_generics #host_where { #(#vis #host_fields,)* }
             #vis struct CallArgs #call_generics #call_where { #(#vis #call_fields,)* }
             #[doc(hidden)]
-            #vis struct Signature #signature_generics (::core::marker::PhantomData<fn(#(*const #type_params),*)>);
+            #vis struct Signature #signature_generics (
+                ::core::marker::PhantomData<fn(#(*const &#marker_lifetimes (),)* #(*const #type_params),*)>
+            );
             #[doc(hidden)]
             #environment_decl
 

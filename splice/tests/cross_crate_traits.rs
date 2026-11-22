@@ -2,10 +2,11 @@ use splice::{Codegen, Executable, hir::Instr, kernel};
 use splice_lancy::Lancy;
 use splice_llvm::Llvm;
 use splice_test_traits::IndexedTransform as ImportedIndexed;
+use splice_test_traits::ReverseTransform as ImportedReverse;
 use splice_test_traits::Transform as Imported;
-use splice_test_traits::WholeTransform as ImportedWhole;
 use splice_test_traits::{
-    OtherPlanTransform, OwnedPlanTransform, ParameterizedTransform, PlanTransform, WideTransform,
+    OrdinaryTransform, OtherPlanTransform, OwnedPlanTransform, ParameterizedTransform,
+    PlanTransform, WideTransform,
 };
 use std::marker::PhantomData;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -20,20 +21,23 @@ static OTHER_RECEIVER_CALLS: AtomicUsize = AtomicUsize::new(0);
 struct Local<const EXTRA: i32>;
 
 #[derive(splice::KernelType)]
-struct ReceiverPlan<Tag> {
-    base: i32,
+struct ReceiverPlan<'a, Tag> {
+    base: &'a i32,
     tag: PhantomData<Tag>,
 }
 
-impl<Tag> PlanTransform for ReceiverPlan<Tag>
-where
-    Tag: 'static,
-{
-    #[kernel]
-    fn shift(#[comptime] &self, value: i32) -> i32 {
-        self.base.wrapping_add(value)
-    }
+macro_rules! publish_plan_transform {
+    ($plan:ident) => {
+        #[kernel]
+        impl<Tag> PlanTransform for $plan<'_, Tag> {
+            fn shift(#[comptime] &self, value: i32) -> i32 {
+                (*self.base).wrapping_add(value)
+            }
+        }
+    };
 }
+
+publish_plan_transform!(ReceiverPlan);
 
 #[derive(splice::KernelType)]
 struct LifetimedPlan<'p> {
@@ -47,15 +51,15 @@ impl Drop for LifetimedPlan<'_> {
     }
 }
 
+#[kernel]
 impl<'p> PlanTransform for LifetimedPlan<'p> {
-    #[kernel]
     fn shift(#[comptime] &self, value: i32) -> i32 {
         (*self.value).wrapping_add(value)
     }
 }
 
+#[kernel]
 impl<'p> OwnedPlanTransform for LifetimedPlan<'p> {
-    #[kernel]
     fn shift(#[comptime] self, value: i32) -> i32 {
         (*self.value).wrapping_sub(value)
     }
@@ -70,25 +74,21 @@ impl OtherPlanTransform for LifetimedPlan<'_> {
 
 struct Parameterized;
 
+#[kernel]
 impl ParameterizedTransform<i32> for Parameterized {
-    #[kernel]
     fn shift(value: i32, #[comptime] offset: i32) -> i32 {
         value.wrapping_add(offset)
     }
-
-    #[kernel]
-    fn ordinary(value: i32) -> i32 {
-        PARAMETERIZED_CALLS.fetch_add(1, Ordering::Relaxed);
-        value
-    }
 }
 
+#[kernel]
 impl ParameterizedTransform<bool> for Parameterized {
-    #[kernel]
     fn shift(value: i32, #[comptime] offset: i32) -> i32 {
         value.wrapping_sub(offset)
     }
+}
 
+impl<Tag> OrdinaryTransform<Tag> for Parameterized {
     fn ordinary(value: i32) -> i32 {
         PARAMETERIZED_CALLS.fetch_add(1, Ordering::Relaxed);
         value
@@ -106,41 +106,44 @@ impl Drop for OwnedPlan {
     }
 }
 
+#[kernel]
 impl OwnedPlanTransform for OwnedPlan {
-    #[kernel]
     fn shift(#[comptime] self, value: i32) -> i32 {
         self.base.wrapping_add(value)
     }
 }
 
+#[kernel]
 impl<const EXTRA: i32> Imported for Local<EXTRA> {
-    #[kernel]
     fn shift(value: i32, #[comptime] offset: i32) -> i32 {
         value.wrapping_add(offset).wrapping_add(EXTRA)
     }
+}
 
-    #[kernel]
+impl<const EXTRA: i32> OrdinaryTransform for Local<EXTRA> {
     fn ordinary(value: i32) -> i32 {
         ORDINARY_CALLS.fetch_add(1, Ordering::Relaxed);
         value.wrapping_mul(2)
     }
 }
 
-impl<const EXTRA: i32> ImportedWhole for Local<EXTRA> {
-    #[kernel]
+#[kernel]
+impl<const EXTRA: i32> ImportedReverse for Local<EXTRA> {
     fn shift(value: i32, #[comptime] offset: i32) -> i32 {
         value.wrapping_sub(offset).wrapping_add(EXTRA)
     }
 }
 
-struct WholeImplementation;
+struct Subtracting;
 
 #[kernel]
-impl Imported for WholeImplementation {
+impl Imported for Subtracting {
     fn shift(value: i32, #[comptime] offset: i32) -> i32 {
         value.wrapping_sub(offset)
     }
+}
 
+impl OrdinaryTransform for Subtracting {
     fn ordinary(value: i32) -> i32 {
         ORDINARY_CALLS.fetch_add(1, Ordering::Relaxed);
         value.wrapping_mul(2)
@@ -148,7 +151,7 @@ impl Imported for WholeImplementation {
 }
 
 #[kernel]
-impl ImportedIndexed for WholeImplementation {
+impl ImportedIndexed for Subtracting {
     fn adjust(value: i32, #[comptime] offset: usize) -> i32 {
         value.wrapping_add(offset as i32)
     }
@@ -161,7 +164,9 @@ impl Imported for OpaqueImplementation {
         OPAQUE_SHIFT_CALLS.fetch_add(1, Ordering::Relaxed);
         value.wrapping_add(offset)
     }
+}
 
+impl OrdinaryTransform for OpaqueImplementation {
     fn ordinary(value: i32) -> i32 {
         value
     }
@@ -180,29 +185,33 @@ impl WideTransform for OpaqueImplementation {
 }
 
 #[kernel]
-fn route<T: Imported>(#[comptime] offset: i32, value: i32) -> i32 {
+fn route<T: Imported + OrdinaryTransform>(#[comptime] offset: i32, value: i32) -> i32 {
     let folded = comptime!(<T as Imported>::shift(2, offset));
     folded
         .wrapping_add(<T as Imported>::shift(value, offset))
-        .wrapping_add(<T as Imported>::ordinary(value))
+        .wrapping_add(<T as OrdinaryTransform>::ordinary(value))
 }
 
 #[kernel]
 fn require_ordinary(#[comptime] value: i32) -> i32 {
-    comptime!(<Local<0> as Imported>::ordinary(value))
+    comptime!(<Local<0> as OrdinaryTransform>::ordinary(value))
 }
 
 #[kernel]
-fn route_whole<T: ImportedWhole>(#[comptime] offset: i32, value: i32) -> i32 {
-    let folded = comptime!(<T as ImportedWhole>::shift(2, offset));
-    folded.wrapping_add(<T as ImportedWhole>::shift(value, offset))
+fn route_reverse<T: ImportedReverse>(#[comptime] offset: i32, value: i32) -> i32 {
+    let folded = comptime!(<T as ImportedReverse>::shift(2, offset));
+    let base = comptime!(<T as Imported>::shift(2, offset));
+    folded
+        .wrapping_add(<T as ImportedReverse>::shift(value, offset))
+        .wrapping_add(base)
+        .wrapping_add(<T as Imported>::shift(value, offset))
 }
 
 #[kernel]
 fn route_indexed(#[comptime] offset: usize, value: i32) -> i32 {
-    let folded = comptime!(<WholeImplementation as ImportedIndexed>::adjust(2, offset));
-    folded.wrapping_add(<WholeImplementation as ImportedIndexed>::adjust(
-        <WholeImplementation as Imported>::ordinary(value),
+    let folded = comptime!(<Subtracting as ImportedIndexed>::adjust(2, offset));
+    folded.wrapping_add(<Subtracting as ImportedIndexed>::adjust(
+        <Subtracting as OrdinaryTransform>::ordinary(value),
         offset,
     ))
 }
@@ -223,7 +232,7 @@ fn mismatched_stage<T: Imported>(value: i32, offset: i32) -> i32 {
 }
 
 #[kernel]
-fn route_receiver<T: PlanTransform + 'static>(#[comptime] plan: &T, value: i32) -> i32 {
+fn route_receiver<T: PlanTransform>(#[comptime] plan: &T, value: i32) -> i32 {
     let folded = comptime!(<T as PlanTransform>::shift(plan, 2));
     folded.wrapping_add(<T as PlanTransform>::shift(plan, value))
 }
@@ -307,18 +316,18 @@ fn route_concrete_trait_argument(value: i32) -> i32 {
 #[kernel]
 fn route_generic_trait_argument<T, U>(value: i32) -> i32
 where
-    T: ParameterizedTransform<U>,
+    T: ParameterizedTransform<U> + OrdinaryTransform<U>,
     U: Copy,
 {
     let folded = comptime!(<T as ParameterizedTransform<U>>::shift(2, 3));
     folded
         .wrapping_add(<T as ParameterizedTransform<U>>::shift(value, 3))
-        .wrapping_add(<T as ParameterizedTransform<U>>::ordinary(value))
+        .wrapping_add(<T as OrdinaryTransform<U>>::ordinary(value))
 }
 
 #[kernel]
-fn require_generic_ordinary<T: ParameterizedTransform<U>, U: Copy>(#[comptime] value: i32) -> i32 {
-    comptime!(<T as ParameterizedTransform<U>>::ordinary(value))
+fn require_generic_ordinary<T: OrdinaryTransform<U>, U: Copy>(#[comptime] value: i32) -> i32 {
+    comptime!(<T as OrdinaryTransform<U>>::ordinary(value))
 }
 
 #[test]
@@ -428,15 +437,16 @@ fn owned_receiver_drops_once_in_each_build() {
 }
 
 #[test]
-fn borrowed_receiver_is_specialized_without_retaining_the_borrow() {
+fn macro_generated_impl_specializes_a_generic_borrow_without_a_static_bound() {
     fn check<B: Codegen<Output: Executable>>() {
         let (direct, ir) = {
+            let storage = 5;
             let plan = ReceiverPlan::<u8> {
-                base: 5,
+                base: &storage,
                 tag: PhantomData,
             };
             (
-                route_receiver::build::<B, ReceiverPlan<u8>>(route_receiver::BuildArgs {
+                route_receiver::build::<B, ReceiverPlan<'_, u8>>(route_receiver::BuildArgs {
                     plan: &plan,
                 })
                 .unwrap(),
@@ -465,14 +475,14 @@ fn trait_and_impl_publication_follow_an_imported_trait_alias() {
         assert_eq!(ORDINARY_CALLS.load(Ordering::Relaxed), before);
         check_instance::<B, Local<0>>(20);
         check_instance::<B, Local<2>>(24);
-        check_instance::<B, WholeImplementation>(8);
+        check_instance::<B, Subtracting>(8);
 
-        let ir = route_whole::ir::<Local<5>>(3).unwrap();
+        let ir = route_reverse::ir::<Local<5>>(3).unwrap();
         let direct =
-            route_whole::build::<B, Local<5>>(route_whole::BuildArgs { offset: 3 }).unwrap();
+            route_reverse::build::<B, Local<5>>(route_reverse::BuildArgs { offset: 3 }).unwrap();
         let portable = B::compile(&ir).unwrap();
         for code in [direct, portable] {
-            assert_eq!(code.call(route_whole::CallArgs { value: 4 }).unwrap(), 10);
+            assert_eq!(code.call(route_reverse::CallArgs { value: 4 }).unwrap(), 32);
         }
 
         let expected = route_indexed(3, 4);
@@ -540,7 +550,9 @@ fn trait_and_impl_publication_follow_an_imported_trait_alias() {
         assert_eq!(OPAQUE_SHIFT_CALLS.load(Ordering::Relaxed), before + 2);
     }
 
-    fn check_instance<B: Codegen<Output: Executable>, T: Imported>(expected: i32) {
+    fn check_instance<B: Codegen<Output: Executable>, T: Imported + OrdinaryTransform>(
+        expected: i32,
+    ) {
         let before = ORDINARY_CALLS.load(Ordering::Relaxed);
         let ir = route::ir::<T>(3).unwrap();
         let direct = route::build::<B, T>(route::BuildArgs { offset: 3 }).unwrap();

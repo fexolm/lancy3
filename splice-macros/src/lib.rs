@@ -54,7 +54,8 @@ pub fn kernel_type(item: TokenStream) -> TokenStream {
     .into()
 }
 
-/// Define a Splice kernel. `name::build::<Backend>(...)` stages its comptime
+/// Publish a free function or all methods of an `impl` or `trait` block.
+/// For a free function, `name::build::<Backend>(...)` stages its comptime
 /// parameters into the selected backend. `name::ir(...)` builds portable IR.
 /// `name::print(...)` specializes the Rust source without building IR.
 #[proc_macro_attribute]

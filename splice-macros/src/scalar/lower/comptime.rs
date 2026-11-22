@@ -1,7 +1,7 @@
 //! Generate the mandatory build-time evaluation of an expression. Each
 //! operand is checked where Rust would evaluate it, including short circuits.
 use super::{Binding, Lower, Scalar};
-use proc_macro2::TokenStream;
+use proc_macro2::{Ident, TokenStream};
 use std::collections::HashSet;
 use syn::{BinOp, Expr, FnArg, Pat, Result, Stmt};
 
@@ -11,26 +11,12 @@ impl Lower<'_> {
         sig: &syn::Signature,
         block: &syn::Block,
         vis: &syn::Visibility,
+        method: Option<&Ident>,
     ) -> Result<TokenStream> {
-        self.evaluator_for(sig, block, vis, false)
-    }
-
-    pub(in crate::scalar) fn method_evaluator(
-        &self,
-        sig: &syn::Signature,
-        block: &syn::Block,
-        vis: &syn::Visibility,
-    ) -> Result<TokenStream> {
-        self.evaluator_for(sig, block, vis, true)
-    }
-
-    fn evaluator_for(
-        &self,
-        sig: &syn::Signature,
-        block: &syn::Block,
-        vis: &syn::Visibility,
-        structures: bool,
-    ) -> Result<TokenStream> {
+        let name = match method {
+            Some(name) => emit!(#name),
+            None => emit!(__splice_eval),
+        };
         let root = self.root;
         let generics = &sig.generics;
         let where_clause = &generics.where_clause;
@@ -54,8 +40,12 @@ impl Lower<'_> {
             _ => emit!(()),
         };
         let inputs = names.iter().map(ToString::to_string).collect();
+        let wide = method.is_some()
+            && crate::scalar::methods::TraitMethodKind::for_result(&sig.output)
+                == crate::scalar::methods::TraitMethodKind::EvalOnly;
         let body = if block.stmts.iter().all(evaluable_statement)
-            && (structures
+            && (!wide || pure_wide_body(sig, block, &inputs))
+            && (method.is_some()
                 || types.iter().all(|t| {
                     matches!(t, syn::Type::Reference(reference) if reference.mutability.is_none())
                         || matches!(
@@ -79,7 +69,7 @@ impl Lower<'_> {
         Ok(emit! {
             #[doc(hidden)]
             #[allow(unused_variables,unreachable_code,clippy::type_complexity)]
-            #vis fn __splice_eval #generics ((#(#names,)*): (#(Option<#types>,)*))
+            #vis fn #name #generics ((#(#names,)*): (#(Option<#types>,)*))
                 -> #root::Result<#ty> #where_clause {
                 let _depth=#root::frontend::scalar::enter_expansion()?;
                 #(#checks)*
@@ -396,7 +386,8 @@ impl Lower<'_> {
                 let Expr::Path(path) = c.func.as_ref() else {
                     unreachable!()
                 };
-                let evaluator = if crate::scalar::methods::trait_path(path).is_some() {
+                let trait_owner = crate::scalar::methods::trait_path(path);
+                let evaluator = if trait_owner.is_some() {
                     "eval_method"
                 } else {
                     "eval_inherent"
@@ -418,7 +409,11 @@ impl Lower<'_> {
                                 self.binding(path),
                                 Some(Binding::Reg(..) | Binding::Buffer(_) | Binding::Columns)
                             ) {
-                                return Ok(emit!(None::<i32>));
+                                return Ok(if trait_owner.is_some() {
+                                    emit!(None)
+                                } else {
+                                    emit!(None::<i32>)
+                                });
                             }
                         }
                         let arg = visit(arg)?;
@@ -430,20 +425,14 @@ impl Lower<'_> {
                     Some(Scalar::Index | Scalar::Length) => emit!(usize),
                     _ => emit!(i32),
                 };
-                if let Some(owner) = crate::scalar::methods::trait_path(path) {
-                    let fallback = crate::declaration::trait_dispatch(
+                if let Some(owner) = trait_owner {
+                    let method = &path.path.segments.last().unwrap().ident;
+                    crate::declaration::trait_method_eval_dispatch(
                         support,
                         &owner,
+                        method,
                         emit!(#target((#(#args,)*))?),
                         rejected(),
-                    );
-                    crate::scalar::methods::isolated_trait_call(
-                        support,
-                        self.generics,
-                        path,
-                        &args,
-                        fallback,
-                        true,
                     )
                 } else {
                     emit!({
@@ -556,6 +545,90 @@ fn bind_locals(locals: &mut HashSet<String>, pattern: &Pat) {
     crate::scalar::visit_bindings(pattern, &mut |binding| {
         locals.insert(binding.ident.to_string());
     });
+}
+
+fn pure_wide_body(sig: &syn::Signature, block: &syn::Block, inputs: &HashSet<String>) -> bool {
+    use crate::scalar::methods::primitive_type;
+
+    fn pure_block(block: &syn::Block, names: &HashSet<String>) -> bool {
+        let mut names = names.clone();
+        block.stmts.iter().all(|stmt| match stmt {
+            Stmt::Expr(expr, _) => pure_expr(expr, &names),
+            Stmt::Local(local) => {
+                let Some(init) = &local.init else {
+                    return false;
+                };
+                if init.diverge.is_some()
+                    || !local.attrs.is_empty()
+                    || !pure_expr(&init.expr, &names)
+                {
+                    return false;
+                }
+                let pattern = match &local.pat {
+                    Pat::Type(pattern) if primitive_type(&pattern.ty) => pattern.pat.as_ref(),
+                    pat => pat,
+                };
+                match pattern {
+                    Pat::Ident(pattern) if pattern.by_ref.is_none() && pattern.subpat.is_none() => {
+                        names.insert(pattern.ident.to_string());
+                        true
+                    }
+                    Pat::Wild(_) => true,
+                    _ => false,
+                }
+            }
+            _ => false,
+        })
+    }
+
+    fn pure_expr(expr: &Expr, names: &HashSet<String>) -> bool {
+        let pure = |expr: &Expr| pure_expr(expr, names);
+        match expr {
+            Expr::Lit(literal) => matches!(
+                literal.lit,
+                syn::Lit::Bool(_) | syn::Lit::Char(_) | syn::Lit::Int(_) | syn::Lit::Float(_)
+            ),
+            Expr::Path(path) => {
+                path.qself.is_none()
+                    && path
+                        .path
+                        .get_ident()
+                        .is_some_and(|name| names.contains(&name.to_string()))
+            }
+            Expr::Paren(expr) => pure(&expr.expr),
+            Expr::Group(expr) => pure(&expr.expr),
+            Expr::Cast(cast) => primitive_type(&cast.ty) && pure(&cast.expr),
+            Expr::Unary(expr) => {
+                matches!(expr.op, syn::UnOp::Neg(_) | syn::UnOp::Not(_)) && pure(&expr.expr)
+            }
+            Expr::Binary(expr) => {
+                crate::scalar::compound_op(&expr.op).is_none()
+                    && pure(&expr.left)
+                    && pure(&expr.right)
+            }
+            Expr::Block(expr) => pure_block(&expr.block, names),
+            Expr::If(expr) => {
+                pure(&expr.cond)
+                    && pure_block(&expr.then_branch, names)
+                    && expr
+                        .else_branch
+                        .as_ref()
+                        .is_none_or(|(_, alternate)| pure(alternate))
+            }
+            Expr::Return(expr) => expr.expr.as_deref().is_some_and(pure),
+            Expr::Macro(expr) if expr.mac.path.is_ident("comptime") => {
+                expr.mac.parse_body::<Expr>().is_ok_and(|body| pure(&body))
+            }
+            _ => false,
+        }
+    }
+
+    // A wide result stays in Rust during mandatory evaluation. Limit this
+    // path to owned primitives and expressions with no opaque operands or
+    // calls, and use the regular evaluator to check the actual operations.
+    sig.inputs.iter().all(|arg| matches!(arg, FnArg::Typed(arg)
+        if primitive_type(&arg.ty) && matches!(arg.pat.as_ref(), Pat::Ident(pat) if pat.by_ref.is_none() && pat.subpat.is_none())))
+        && pure_block(block, inputs)
 }
 
 fn evaluable_statement(statement: &Stmt) -> bool {

@@ -276,9 +276,33 @@ macro_rules! __splice_choose_kernel {
 #[macro_export]
 #[doc(hidden)]
 macro_rules! __splice_choose_rust {
+    (@implementation $body:expr) => {
+        ::core::compile_error!("a #[kernel] trait impl requires #[kernel] on the trait declaration")
+    };
+    (@expr $name:ident, $pick:ident, $args:tt) => {
+        $pick! { ordinary $args }
+    };
     ($kernel:expr, $rust:expr) => {
         $rust
     };
+}
+
+// The trait chooses the convention. Discard other branches before name
+// resolution: they can reference entries that this declaration does not have.
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __splice_method_case {
+    (word (call $s:expr, $b:expr, $o:expr, $r:expr)) => { $s };
+    (boolean (call $s:expr, $b:expr, $o:expr, $r:expr)) => { $b };
+    (ordinary (call $s:expr, $b:expr, $o:expr, $r:expr)) => { $r };
+    ($kind:ident (call $s:expr, $b:expr, $o:expr, $r:expr)) => { $o };
+    (ordinary (evaluate $e:expr, $o:expr)) => { $o };
+    (opaque (evaluate $e:expr, $o:expr)) => { $o };
+    ($kind:ident (evaluate $e:expr, $o:expr)) => { $e };
+    (word (items stage $($items:item)*)) => { $($items)* };
+    (boolean (items stage $($items:item)*)) => { $($items)* };
+    (eval (items eval $($items:item)*)) => { $($items)* };
+    ($kind:ident (items $provided:ident $($items:item)*)) => {};
 }
 
 pub trait ImportWord: Sized {

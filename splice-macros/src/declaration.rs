@@ -5,150 +5,84 @@ use quote::{ToTokens, quote};
 use syn::visit::Visit;
 use syn::visit_mut::VisitMut;
 use syn::{Attribute, Block, Error, FnArg, Item, Meta, Path, Result, Signature, Visibility};
-
-mod container;
-use container::{Container, method_container};
+mod selector;
+pub(crate) use selector::{trait_method_dispatch, trait_method_eval_dispatch};
 
 pub(crate) fn expand(root: Path, tokens: TokenStream) -> Result<TokenStream> {
+    let method_error = "put #[kernel] on the enclosing impl or trait to publish its methods";
     let item = match syn::parse2::<Item>(tokens.clone()) {
-        Ok(item) => item,
-        Err(item_error) => {
-            let Ok(method) = syn::parse2::<syn::TraitItemFn>(tokens) else {
-                return Err(item_error);
-            };
-            return isolated_trait_item(&root, method);
+        Ok(Item::Verbatim(_)) | Err(_)
+            if syn::parse2::<syn::TraitItemFn>(tokens.clone()).is_ok() =>
+        {
+            return Err(Error::new_spanned(tokens, method_error));
         }
+        item => item?,
     };
     match item {
-        Item::Verbatim(tokens) => {
-            let Ok(method) = syn::parse2::<syn::TraitItemFn>(tokens.clone()) else {
-                return Err(Error::new_spanned(
-                    tokens,
-                    "expected a function, method, impl or trait",
-                ));
-            };
-            isolated_trait_item(&root, method)
-        }
         Item::Fn(mut function) => {
-            let container = if function.sig.receiver().is_some()
-                && !matches!(function.vis, Visibility::Inherited)
-            {
-                // A visible receiver method also proves inherent context
-                // when its tokens originated in another macro.
-                Some(Container::Inherent)
-            } else {
-                method_container(&function.sig)
-            };
-            if matches!(container, Some(Container::Trait)) {
-                return isolated_trait_item(&root, syn::parse2(function.into_token_stream())?);
+            if method_context(&function.attrs, &function.sig) {
+                return Err(Error::new_spanned(&function.sig, method_error));
             }
-            if matches!(
-                container,
-                Some(Container::Inherent | Container::TraitImpl(_) | Container::UnprovenMethod)
-            ) || method_context(&function.attrs, &function.sig)
-            {
-                let companions = if matches!(container, Some(Container::Inherent)) {
-                    crate::scalar::methods::publish(
-                        &root,
-                        &function.sig,
-                        &function.block,
-                        &function.vis,
-                        false,
-                    )
-                } else {
-                    Vec::new()
-                };
-                let gates = configuration(&function.attrs)?;
-                let registration = match &container {
-                    Some(Container::TraitImpl(implementation)) => {
-                        Some(crate::scalar::methods::register_individual_trait(
-                            &root,
-                            &implementation.owner,
-                            &implementation.trait_path,
-                            &implementation.generics,
-                            &function.sig,
-                            &function.block,
-                        ))
-                    }
-                    _ => None,
-                };
-                prepare_method(
-                    &mut function.attrs,
-                    &mut function.sig,
-                    Some(&mut function.block),
-                    false,
-                )?;
-                if let Some(registration) = registration {
-                    function.block.stmts.insert(0, registration);
-                }
-                let companions = companions.iter().map(|item| quote!(#(#[#gates])* #item));
-                Ok(quote!(#function #(#companions)*))
-            } else {
-                signature(&function.sig)?;
-                item_markers(&mut function.attrs, false, false)?;
-                crate::import::expand_function(root, function)
-            }
+            signature(&function.sig)?;
+            item_markers(&mut function.attrs, false)?;
+            crate::import::expand_function(root, function)
         }
         Item::Impl(mut implementation) => {
-            item_markers(&mut implementation.attrs, false, false)?;
+            item_markers(&mut implementation.attrs, false)?;
             let mut specialized = Vec::new();
-            let mut registrations = Vec::new();
-            let trait_path = implementation
-                .trait_
-                .as_ref()
-                .map(|(_, path, _)| path.clone());
+            let trait_path = implementation.trait_.as_ref().map(|(_, path, _)| path);
             for member in &mut implementation.items {
                 if let syn::ImplItem::Fn(method) = member {
                     let gates = configuration(&method.attrs)?;
-                    if let Some(path) = &trait_path {
-                        let shape = crate::scalar::methods::stage_shape(&method.sig);
-                        specialized.push(syn::parse2(quote!(#(#[#gates])* #shape))?);
-                        registrations.push(crate::scalar::methods::register_individual_trait(
-                            &root,
-                            &implementation.self_ty,
-                            path,
-                            &implementation.generics,
-                            &method.sig,
-                            &method.block,
-                        ));
+                    let shape = crate::scalar::methods::stage_shape(
+                        &root,
+                        &method.sig,
+                        Some(&method.block),
+                        trait_path.is_none().then_some(&method.vis),
+                    );
+                    for item in shape {
+                        specialized.push(syn::ImplItem::Verbatim(quote!(#(#[#gates])* #item)));
                     }
-                    for hidden in crate::scalar::methods::publish(
+                    let generated = crate::scalar::methods::publish(
                         &root,
                         &method.sig,
                         &method.block,
                         &method.vis,
                         trait_path.is_some(),
-                    ) {
-                        specialized.push(syn::parse2(quote!(#(#[#gates])* #hidden))?);
+                    );
+                    if let Some(path) = trait_path
+                        && !generated.is_empty()
+                    {
+                        // An impl may spell an associated type as its concrete
+                        // result. Only override entries declared by the trait.
+                        let alias =
+                            selector_alias("trait", path.segments.last().unwrap().ident.span());
+                        let name = &method.sig.ident;
+                        let kind =
+                            crate::scalar::methods::TraitMethodKind::for_result(&method.sig.output);
+                        let provided = if kind == crate::scalar::methods::TraitMethodKind::EvalOnly
+                        {
+                            quote!(eval)
+                        } else {
+                            quote!(stage)
+                        };
+                        specialized.push(syn::ImplItem::Verbatim(quote! {
+                            #(#[#gates])* #alias! { @items #name, __splice_method_case, (items #provided #(#generated)*) }
+                        }));
+                    } else {
+                        for hidden in generated {
+                            specialized
+                                .push(syn::ImplItem::Verbatim(quote!(#(#[#gates])* #hidden)));
+                        }
                     }
-                    prepare_method(
-                        &mut method.attrs,
-                        &mut method.sig,
-                        Some(&mut method.block),
-                        true,
-                    )?;
+                    prepare_method(&mut method.attrs, &mut method.sig, Some(&mut method.block))?;
                 }
             }
             if let Some(path) = trait_path {
                 let gates = configuration(&implementation.attrs)?;
-                let mut published = implementation.clone();
-                published.items.extend(specialized);
-                let methods = implementation
-                    .items
-                    .iter_mut()
-                    .filter_map(|item| match item {
-                        syn::ImplItem::Fn(method) => Some(method),
-                        _ => None,
-                    });
-                for (method, registration) in methods.zip(registrations) {
-                    method.block.stmts.insert(0, registration);
-                }
-                let dispatch = trait_dispatch(
-                    &root,
-                    &path,
-                    quote!({ #published }),
-                    quote!({ #implementation }),
-                );
+                implementation.items.extend(specialized);
+                let dispatch =
+                    select_trait(&root, path, quote!(@implementation { #implementation }));
                 return Ok(quote! {
                     #(#[#gates])*
                     #[allow(non_local_definitions)]
@@ -159,66 +93,42 @@ pub(crate) fn expand(root: Path, tokens: TokenStream) -> Result<TokenStream> {
             Ok(implementation.into_token_stream())
         }
         Item::Trait(mut declaration) => {
-            item_markers(&mut declaration.attrs, false, false)?;
+            item_markers(&mut declaration.attrs, false)?;
+            let name = &declaration.ident;
+            let (_, arguments, _) = declaration.generics.split_for_impl();
+            let trait_owner = quote!(#name #arguments);
             let mut specialized = Vec::new();
+            let mut selectors = Vec::new();
             for member in &mut declaration.items {
                 if let syn::TraitItem::Fn(method) = member {
                     let gates = configuration(&method.attrs)?;
-                    let hidden = if crate::scalar::methods::individual_trait_supported(&method.sig)
+                    let (kind, defaults) =
+                        crate::scalar::methods::trait_defaults(&root, &method.sig, &trait_owner);
+                    selectors.push((method.sig.ident.clone(), kind, gates.clone()));
+                    for hidden in
+                        crate::scalar::methods::stage_shape(&root, &method.sig, None, None)
+                            .into_iter()
+                            .chain(defaults)
                     {
-                        crate::scalar::methods::word_trait(&root, &method.sig)
-                    } else {
-                        let shape = crate::scalar::methods::stage_shape(&method.sig);
-                        specialized.push(syn::parse2(quote!(#(#[#gates])* #shape))?);
-                        crate::scalar::methods::trait_defaults(&root, &method.sig)
-                    };
-                    for hidden in hidden {
-                        specialized.push(syn::parse2(quote!(#(#[#gates])* #hidden))?);
+                        specialized.push(syn::TraitItem::Verbatim(quote!(#(#[#gates])* #hidden)));
                     }
-                    prepare_method(
-                        &mut method.attrs,
-                        &mut method.sig,
-                        method.default.as_mut(),
-                        true,
-                    )?;
+                    prepare_method(&mut method.attrs, &mut method.sig, method.default.as_mut())?;
                 }
             }
             declaration.items.extend(specialized);
             let gates = configuration(&declaration.attrs)?;
-            let name = &declaration.ident;
             let vis = &declaration.vis;
+            let selector = selector::definition(name, vis, &gates, selectors);
             Ok(quote! {
                 #declaration
-
-                #(#[#gates])*
-                #[doc(hidden)]
-                #[allow(unused_imports)]
-                #vis use #root::__splice_choose_kernel as #name;
+                #selector
             })
         }
         other => Err(Error::new_spanned(
             other,
-            "expected a function, method, impl or trait",
+            "expected a free function, impl or trait",
         )),
     }
-}
-
-fn isolated_trait_item(root: &Path, mut method: syn::TraitItemFn) -> Result<TokenStream> {
-    let gates = configuration(&method.attrs)?;
-    let mut companions = crate::scalar::methods::word_trait(root, &method.sig);
-    if companions.is_empty() {
-        companions.push(syn::parse2(crate::scalar::methods::stage_shape(
-            &method.sig,
-        ))?);
-    }
-    prepare_method(
-        &mut method.attrs,
-        &mut method.sig,
-        method.default.as_mut(),
-        false,
-    )?;
-    let companions = companions.iter().map(|item| quote!(#(#[#gates])* #item));
-    Ok(quote!(#method #(#companions)*))
 }
 
 #[cfg(test)]
@@ -226,34 +136,30 @@ mod tests {
     use super::*;
 
     #[test]
-    fn isolated_trait_requirement_preserves_the_native_receiver_signature() {
-        let tokens = super::expand(
-            syn::parse_quote!(::splice),
+    fn methods_must_be_published_by_their_block() {
+        for item in [
             quote!(
-                fn limit(#[comptime] &self, value: i32) -> i32;
+                fn value(&self) -> i32 {
+                    1
+                }
             ),
-        )
-        .unwrap();
-        let declaration: syn::ItemTrait = syn::parse_quote!(trait Test { #tokens });
-        let syn::TraitItem::Fn(method) = &declaration.items[0] else {
-            panic!("the original trait method is the first item");
-        };
-        let receiver = method.sig.receiver().unwrap();
-        assert!(receiver.reference.is_some());
-        assert!(receiver.attrs.is_empty());
-        assert!(method.default.is_none());
-    }
-
-    #[test]
-    fn isolated_trait_requirement_rejects_an_explicit_object_parameter() {
-        let error = super::expand(
-            syn::parse_quote!(::splice),
             quote!(
-                fn limit(&self, value: &dyn AsRef<i32>) -> i32;
+                fn value() -> i32;
             ),
-        )
-        .unwrap_err();
-        assert!(error.to_string().contains("explicit trait object"));
+            quote!(
+                trait Rule {
+                    #[kernel]
+                    fn value() -> i32;
+                }
+            ),
+            quote!(impl Plan { #[kernel] fn value() -> i32 { 1 } }),
+        ] {
+            let error = expand(syn::parse_quote!(::splice), item).unwrap_err();
+            assert!(
+                error.to_string().contains("enclosing impl or trait"),
+                "{error}"
+            );
+        }
     }
 }
 
@@ -272,6 +178,10 @@ pub(crate) fn trait_dispatch(
     published: TokenStream,
     ordinary: TokenStream,
 ) -> TokenStream {
+    select_trait(root, path, quote!(#published, #ordinary))
+}
+
+fn select_trait(root: &Path, path: &Path, input: TokenStream) -> TokenStream {
     let mut path = path.clone();
     for part in &mut path.segments {
         part.arguments = syn::PathArguments::None;
@@ -285,7 +195,8 @@ pub(crate) fn trait_dispatch(
         {
             #[allow(unused_imports)]
             use #path as #alias;
-            #alias!(#published, #ordinary)
+            #[allow(unused_imports)] use #root::__splice_method_case;
+            #alias!(#input)
         }
     })
 }
@@ -322,10 +233,15 @@ fn prepare_method(
     attrs: &mut Vec<Attribute>,
     sig: &mut Signature,
     body: Option<&mut Block>,
-    inside_annotated_item: bool,
 ) -> Result<()> {
     signature(sig)?;
-    item_markers(attrs, inside_annotated_item, body.is_some())?;
+    if let Some(attr) = attrs.iter().find(|attr| marker(attr, "kernel")) {
+        return Err(Error::new_spanned(
+            attr,
+            "put #[kernel] only on the enclosing impl or trait",
+        ));
+    }
+    item_markers(attrs, body.is_some())?;
     for arg in &mut sig.inputs {
         let attrs = match arg {
             FnArg::Typed(arg) => &mut arg.attrs,
@@ -362,22 +278,11 @@ fn marker(attr: &Attribute, name: &str) -> bool {
         .is_some_and(|segment| segment.ident == name)
 }
 
-fn item_markers(
-    attrs: &mut Vec<Attribute>,
-    nested_kernel: bool,
-    intrinsic_body: bool,
-) -> Result<()> {
-    let mut kernel = false;
+fn item_markers(attrs: &mut Vec<Attribute>, intrinsic_body: bool) -> Result<()> {
     let mut intrinsic = false;
     for attr in attrs.iter() {
         if marker(attr, "kernel") {
-            if !nested_kernel || kernel || !matches!(attr.meta, Meta::Path(_)) {
-                return Err(Error::new_spanned(
-                    attr,
-                    "expected one #[kernel] marker without arguments",
-                ));
-            }
-            kernel = true;
+            return Err(Error::new_spanned(attr, "duplicate #[kernel] attribute"));
         } else if marker(attr, "comptime") {
             return Err(Error::new_spanned(
                 attr,
@@ -400,7 +305,7 @@ fn item_markers(
             intrinsic = true;
         }
     }
-    attrs.retain(|attr| !marker(attr, "kernel") && !marker(attr, "intrinsic"));
+    attrs.retain(|attr| !marker(attr, "intrinsic"));
     Ok(())
 }
 

@@ -10,6 +10,20 @@ pub trait ImportArgs<E> {
     fn invoke(self, environment: &E) -> Self::Output;
 }
 
+#[doc(hidden)]
+pub trait ImportInvocation<E, A> {
+    type Output;
+    fn invoke(environment: &E, args: A) -> Self::Output;
+}
+
+impl<S, E, A: ImportArgs<E, Signature = S>> ImportInvocation<E, A> for S {
+    type Output = A::Output;
+
+    fn invoke(environment: &E, args: A) -> Self::Output {
+        args.invoke(environment)
+    }
+}
+
 pub struct RustImport<S, E> {
     name: &'static str,
     environment: Arc<E>,
@@ -33,8 +47,11 @@ pub struct LinkedImport<S, E> {
     signature: PhantomData<fn(S) -> S>,
 }
 impl<S, E> LinkedImport<S, E> {
-    pub fn call<A: ImportArgs<E, Signature = S>>(&self, args: A) -> Result<A::Output, CallError> {
-        self.with_environment(|environment| args.invoke(environment))
+    pub fn call<A>(&self, args: A) -> Result<<S as ImportInvocation<E, A>>::Output, CallError>
+    where
+        S: ImportInvocation<E, A>,
+    {
+        self.with_environment(|environment| S::invoke(environment, args))
     }
 
     #[doc(hidden)]

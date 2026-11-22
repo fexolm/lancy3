@@ -5,15 +5,12 @@ use proc_macro2::{Ident, Span, TokenStream};
 use quote::format_ident;
 use std::collections::HashMap;
 use syn::visit_mut::VisitMut;
-use syn::{Block, FnArg, ImplItem, ReturnType, Signature, Type, Visibility};
+use syn::{Block, FnArg, ReturnType, Signature, Type, Visibility};
 
 mod declaration;
-mod dispatch;
-mod registration;
 
-pub(crate) use declaration::{individual_trait_supported, stage_shape, trait_defaults, word_trait};
-pub(crate) use dispatch::isolated_trait_call;
-pub(crate) use registration::register_individual_trait;
+pub(super) use declaration::primitive_type;
+pub(crate) use declaration::{TraitMethodKind, stage_shape, trait_defaults};
 
 /// Rust permits the same method name on unrelated types. Keep the hidden
 /// entry points associated with the original type instead of exporting names.
@@ -31,7 +28,7 @@ pub(crate) fn publish(
     body: &Block,
     visibility: &Visibility,
     trait_impl: bool,
-) -> Vec<ImplItem> {
+) -> Vec<TokenStream> {
     let runtime_receiver = !trait_impl
         && signature.receiver().is_some_and(|r| {
             r.reference.is_some()
@@ -52,6 +49,8 @@ pub(crate) fn publish(
     }
 
     let name = &signature.ident;
+    let eval_only =
+        trait_impl && TraitMethodKind::for_result(&signature.output) == TraitMethodKind::EvalOnly;
     let types: Vec<_> = signature
         .generics
         .type_params()
@@ -64,18 +63,24 @@ pub(crate) fn publish(
     let result_type = match &signature.output {
         ReturnType::Type(_, ty) if !unit_result => match Scalar::from_type(ty, &types) {
             Some(result @ (Scalar::Int | Scalar::Bool)) => result,
+            _ if eval_only => Scalar::Int,
             _ => return Vec::new(),
         },
         _ => Scalar::Int,
     };
-    let Ok(params) = signature
-        .inputs
-        .iter()
-        .zip(abi::parameter_names(&signature))
-        .map(|(argument, name)| parameter(argument, &types, name))
-        .collect::<syn::Result<Vec<_>>>()
-    else {
-        return Vec::new();
+    let params = if eval_only {
+        Vec::new()
+    } else {
+        let Ok(params) = signature
+            .inputs
+            .iter()
+            .zip(abi::parameter_names(&signature))
+            .map(|(argument, name)| parameter(argument, &types, name))
+            .collect::<syn::Result<Vec<_>>>()
+        else {
+            return Vec::new();
+        };
+        params
     };
 
     let mut formals = Vec::new();
@@ -151,9 +156,6 @@ pub(crate) fn publish(
         evaluator_return: None,
         context: context.as_ref(),
     };
-    let Ok(code) = lower.kernel_body(&body) else {
-        return Vec::new();
-    };
     let eval_name = entry_name(
         if trait_impl {
             "eval_method"
@@ -162,6 +164,15 @@ pub(crate) fn publish(
         },
         name,
     );
+    if eval_only {
+        return lower
+            .evaluator(&signature, &body, visibility, Some(&eval_name))
+            .into_iter()
+            .collect();
+    }
+    let Ok(code) = lower.kernel_body(&body) else {
+        return Vec::new();
+    };
     let stage_name = entry_name(
         if runtime_receiver {
             "stage_context"
@@ -203,39 +214,34 @@ pub(crate) fn publish(
         }
     };
 
-    let mut items = vec![syn::parse2(stage).expect("a generated method stage")];
+    let mut items = vec![stage];
     if let Some(context) = context.as_ref() {
         let marker = entry_name("has_context", name);
-        items.push(syn::parse_quote!(#[doc(hidden)] #visibility fn #marker() -> bool {true}));
+        items.push(emit!(#[doc(hidden)] #visibility fn #marker() -> bool { true }));
         let signature_name = entry_name("context_signature", name);
         let dispatch_name = entry_name("dispatch_context", name);
         let signature = context.signature(root);
         let dispatch = context.dispatcher(root, emit!(Self::#signature_name), &types);
-        items.push(syn::parse_quote!(
+        items.push(emit!(
             #[doc(hidden)] #[allow(non_upper_case_globals)]
             #visibility const #signature_name: &'static #root::ContextSignature = &#signature;
         ));
-        items.push(
-            syn::parse2(emit!(
-                #[doc(hidden)]
-                #visibility fn #dispatch_name #generics (&mut self, __splice_operation:u32,
-                    __splice_arguments:#root::ContextArguments<'_>, _: #witness) -> i32 #where_ {
-                    let __splice_object = self;
-                    #dispatch
-                }
-            ))
-            .expect("generated method dispatcher"),
-        );
+        items.push(emit!(
+            #[doc(hidden)]
+            #visibility fn #dispatch_name #generics (&mut self, __splice_operation:u32,
+                __splice_arguments:#root::ContextArguments<'_>, _: #witness) -> i32 #where_ {
+                let __splice_object = self;
+                #dispatch
+            }
+        ));
         return items;
     }
     if !trait_impl {
         let marker = entry_name("published", name);
-        items.push(syn::parse_quote!(#[doc(hidden)] #visibility fn #marker() -> bool { true }));
+        items.push(emit!(#[doc(hidden)] #visibility fn #marker() -> bool { true }));
     }
-    if let Ok(eval) = lower.method_evaluator(&signature, &body, visibility) {
-        let mut eval: syn::ImplItemFn = syn::parse2(eval).expect("a generated method evaluator");
-        eval.sig.ident = eval_name;
-        items.push(ImplItem::Fn(eval));
+    if let Ok(eval) = lower.evaluator(&signature, &body, visibility, Some(&eval_name)) {
+        items.push(eval);
     }
     items
 }

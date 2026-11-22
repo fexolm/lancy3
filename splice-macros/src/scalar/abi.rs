@@ -266,6 +266,20 @@ pub(super) fn generate(
 
 struct GenericUses(HashSet<String>);
 
+impl GenericUses {
+    fn add_tokens(&mut self, tokens: TokenStream) {
+        for token in tokens {
+            match token {
+                proc_macro2::TokenTree::Ident(ident) => {
+                    self.0.insert(ident.to_string());
+                }
+                proc_macro2::TokenTree::Group(group) => self.add_tokens(group.stream()),
+                _ => (),
+            }
+        }
+    }
+}
+
 impl<'ast> Visit<'ast> for GenericUses {
     fn visit_path(&mut self, path: &'ast Path) {
         if path.leading_colon.is_none()
@@ -279,9 +293,13 @@ impl<'ast> Visit<'ast> for GenericUses {
     fn visit_lifetime(&mut self, lifetime: &'ast Lifetime) {
         self.0.insert(lifetime.to_string());
     }
+
+    fn visit_macro(&mut self, invocation: &'ast syn::Macro) {
+        self.add_tokens(invocation.tokens.clone());
+    }
 }
 
-fn param_name(param: &GenericParam) -> String {
+pub(crate) fn param_name(param: &GenericParam) -> String {
     match param {
         GenericParam::Lifetime(p) => p.lifetime.to_string(),
         GenericParam::Type(p) => p.ident.to_string(),
@@ -297,6 +315,51 @@ pub(crate) fn used_generics<'a>(
     for ty in types {
         used.visit_type(ty);
     }
+    select_generics(generics, used)
+}
+
+pub(crate) fn body_generics<'a>(
+    generics: &Generics,
+    types: impl Iterator<Item = &'a Type>,
+    body: &syn::Expr,
+) -> Generics {
+    let mut used = GenericUses(HashSet::new());
+    for ty in types {
+        used.visit_type(ty);
+    }
+    used.visit_expr(body);
+    loop {
+        let previous = used.0.len();
+        for param in &generics.params {
+            if used.0.contains(&param_name(param)) {
+                used.visit_generic_param(param);
+            }
+        }
+        if let Some(clause) = &generics.where_clause {
+            for predicate in &clause.predicates {
+                let mut subject = GenericUses(HashSet::new());
+                match predicate {
+                    syn::WherePredicate::Type(predicate) => {
+                        subject.visit_type(&predicate.bounded_ty)
+                    }
+                    syn::WherePredicate::Lifetime(predicate) => {
+                        subject.visit_lifetime(&predicate.lifetime);
+                    }
+                    _ => (),
+                }
+                if !subject.0.is_disjoint(&used.0) {
+                    used.visit_where_predicate(predicate);
+                }
+            }
+        }
+        if used.0.len() == previous {
+            break;
+        }
+    }
+    select_generics(generics, used)
+}
+
+fn select_generics(generics: &Generics, used: GenericUses) -> Generics {
     let names: HashSet<_> = generics.params.iter().map(param_name).collect();
     let mut result = generics.clone();
     result.params = result

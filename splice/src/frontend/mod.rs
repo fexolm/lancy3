@@ -10,8 +10,6 @@ pub mod scalar;
 #[doc(hidden)]
 pub mod source;
 mod specialization;
-#[doc(hidden)]
-pub mod trait_methods;
 pub use specialization::{ComptimeKey, KeyArgument, MaybeKey, Specialization};
 
 use crate::hir::{Binary, Buffer, BufferKind, ContextSlice, Function, Label, Reg, Simd, ValueType};

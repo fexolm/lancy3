@@ -170,6 +170,21 @@ impl Lower<'_> {
     }
 
     pub(super) fn cast(&self, cast: &ExprCast) -> Result<Value> {
+        if Scalar::from_type(&cast.ty, self.types) == Some(Scalar::Int) {
+            let mut operand = cast.expr.as_ref();
+            loop {
+                operand = match operand {
+                    Expr::Paren(expr) => &expr.expr,
+                    Expr::Group(expr) => &expr.expr,
+                    _ => break,
+                };
+            }
+            if let Expr::Call(call) = operand
+                && matches!(call.func.as_ref(), Expr::Path(path) if crate::scalar::methods::trait_path(path).is_some())
+            {
+                return self.call(call, Some(Scalar::Int), Some(&cast.ty));
+            }
+        }
         let value = self.expr(&cast.expr).or_else(|error| {
             if super::simd::uses_lane(&cast.expr) {
                 return Err(error);

@@ -12,6 +12,23 @@
 //!     let _ = code.call(second::CallArgs { x: 1 });
 //! }
 //! ```
+//!
+//! Publish associated functions by marking their enclosing block.
+//! ```compile_fail
+//! struct Plan;
+//! impl Plan {
+//!     #[splice::kernel]
+//!     fn zero() -> i32 { 0 }
+//! }
+//! ```
+//!
+//! A published trait implementation requires a published trait declaration,
+//! even when the implementation inherits every method.
+//! ```compile_fail
+//! trait Plan { fn zero() -> i32 { 0 } }
+//! #[splice::kernel]
+//! impl Plan for () {}
+//! ```
 #![deny(unsafe_code)]
 
 extern crate self as splice;
@@ -21,6 +38,8 @@ pub mod frontend;
 pub mod hir;
 mod imports;
 pub mod simd;
+#[doc(hidden)]
+pub use imports::ImportInvocation;
 pub use imports::{ImportArgs, ImportTarget, LinkedImport, RustImport};
 #[allow(unsafe_code)]
 mod runtime_context;

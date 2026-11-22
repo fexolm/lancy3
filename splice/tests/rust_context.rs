@@ -110,10 +110,7 @@ impl Totals {
     fn generic_slice<T: splice::BufferElement>(&mut self, values: &[T]) -> i32 {
         self.record_element_count(values)
     }
-}
 
-impl Totals {
-    #[kernel]
     fn record_len(&mut self, xs: &[i32]) -> i32 {
         let length = xs.len() as i32;
         self.completed += length;
@@ -760,7 +757,7 @@ fn published_free_functions_share_the_enclosing_context() {
 }
 
 #[test]
-fn standalone_mutable_method_calls_preserve_shared_slice_arguments() {
+fn published_and_ordinary_methods_preserve_shared_slice_arguments() {
     let ir = single_published::ir().unwrap();
     let instructions = ir.instructions();
     assert!(

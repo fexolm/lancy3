@@ -1037,17 +1037,16 @@ fn captured_function_pointers_keep_their_identity_and_handle_unwinds() {
 }
 
 #[derive(splice::KernelType)]
-struct StandaloneTotals {
+struct PublishedTotals {
     count: i32,
 }
 
-impl StandaloneTotals {
-    #[kernel]
+#[kernel]
+impl PublishedTotals {
     fn max(a: i32, b: i32) -> i32 {
         if a > b { a } else { b }
     }
 
-    #[kernel]
     fn limit(&self, value: i32) -> i32 {
         if value < self.count {
             self.count
@@ -1058,27 +1057,26 @@ impl StandaloneTotals {
 }
 
 #[kernel]
-fn apply_standalone_limit(#[comptime] plan: &StandaloneTotals, value: i32) -> i32 {
-    let minimum = comptime!(StandaloneTotals::limit(plan, 3));
-    StandaloneTotals::limit(plan, value) + minimum + comptime!(StandaloneTotals::max(3, 7))
+fn apply_published_limit(#[comptime] plan: &PublishedTotals, value: i32) -> i32 {
+    let minimum = comptime!(PublishedTotals::limit(plan, 3));
+    PublishedTotals::limit(plan, value) + minimum + comptime!(PublishedTotals::max(3, 7))
 }
 
 #[test]
-fn an_individually_marked_inherent_method_can_specialize() {
+fn inherent_methods_in_a_marked_impl_can_specialize() {
     fn check<B: Codegen<Output: Executable>>() {
         let (direct, ir) = {
-            let plan = StandaloneTotals { count: 5 };
-            let direct = apply_standalone_limit::build::<B>(apply_standalone_limit::BuildArgs {
-                plan: &plan,
-            })
-            .unwrap();
-            (direct, apply_standalone_limit::ir(&plan).unwrap())
+            let plan = PublishedTotals { count: 5 };
+            let direct =
+                apply_published_limit::build::<B>(apply_published_limit::BuildArgs { plan: &plan })
+                    .unwrap();
+            (direct, apply_published_limit::ir(&plan).unwrap())
         };
         let portable = B::compile(&ir).unwrap();
         for code in [direct, portable] {
             for (value, expected) in [(2, 17), (7, 19)] {
                 assert_eq!(
-                    code.call(apply_standalone_limit::CallArgs { value })
+                    code.call(apply_published_limit::CallArgs { value })
                         .unwrap(),
                     expected,
                 );
@@ -1090,33 +1088,36 @@ fn an_individually_marked_inherent_method_can_specialize() {
     check::<Llvm>();
 }
 
-mod isolated_trait_stage {
+mod trait_stage {
     use super::*;
 
     mod api {
         use splice::kernel;
 
+        #[kernel]
         pub(super) trait Step {
-            #[kernel]
             fn advance(value: i32, #[comptime] offset: i32) -> i32;
+        }
 
+        pub(super) trait Earlier {
             fn previous(value: i32) -> i32;
         }
     }
 
     mod implementation {
-        use super::api::Step as StepAlias;
+        use super::api::{Earlier, Step as StepAlias};
         use splice::kernel;
 
         pub(super) struct Open;
 
+        #[kernel]
         impl StepAlias for Open {
-            #[kernel]
             fn advance(value: i32, #[comptime] offset: i32) -> i32 {
                 value.wrapping_add(offset)
             }
+        }
 
-            #[kernel]
+        impl Earlier for Open {
             fn previous(value: i32) -> i32 {
                 super::ORDINARY_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 value.wrapping_sub(1)
@@ -1124,7 +1125,7 @@ mod isolated_trait_stage {
         }
     }
 
-    use self::api::{Step, Step as StepAlias};
+    use self::api::{Earlier, Step, Step as StepAlias};
     use self::implementation::Open;
 
     struct Late;
@@ -1136,16 +1137,12 @@ mod isolated_trait_stage {
             ORDINARY_CALLS.fetch_add(1, Ordering::Relaxed);
             value.wrapping_mul(offset)
         }
-
-        fn previous(value: i32) -> i32 {
-            value
-        }
     }
 
     #[kernel]
     fn combine<T: StepAlias>(#[comptime] offset: i32, value: i32) -> i32 {
         let initial = comptime!(<Open as StepAlias>::advance(2, offset));
-        initial + <T as StepAlias>::advance(value, offset) + <Open as StepAlias>::previous(value)
+        initial + <T as StepAlias>::advance(value, offset) + <Open as Earlier>::previous(value)
     }
 
     #[kernel]
@@ -1154,7 +1151,7 @@ mod isolated_trait_stage {
     }
 
     #[test]
-    fn publication_is_resolved_individually_for_a_trait_method() {
+    fn a_marked_trait_preserves_stage_rules_for_an_unmarked_impl() {
         fn check<B: Codegen<Output: Executable>>() {
             assert_build_error(takes_runtime_offset::ir());
             let before = ORDINARY_CALLS.load(Ordering::Relaxed);
