@@ -5,4 +5,4 @@ edition = "2024"
 publish = false
 
 [dependencies]
-splice = { path = "../../../splice" }
+splice = { package = "splice-kernel", path = "../../../splice" }

@@ -1,13 +1,24 @@
 # Splice
 
+## Установка и публикация
+
+Пакет `splice-kernel` по умолчанию включает макросы и бэкенд Lancy:
+
+```toml
+[dependencies]
+splice-kernel = "0.1"
+```
+
+В коде используйте `splice::{kernel, Lancy}`. Для других бэкендов включите features `cranelift`, `llvm` или `text`, например `splice-kernel = { version = "0.1", features = ["cranelift"] }`. Чтобы отключить Lancy, укажите `default-features = false`. LLVM требует установленную версию, указанную ниже. Для самостоятельного использования Lancy добавьте `lancy = "0.1"`.
+
+Для первого выпуска публикуйте пакеты по порядку, дожидаясь появления каждого в индексе crates.io: `splice-target`, `splice-macros`, `lancy`, `splice-core`, `splice-jit`, `splice-lancy`, `splice-cranelift`, `splice-llvm`, `splice-text`, затем `splice-kernel`. Перед публикацией каждого пакета выполните `cargo publish -p ИМЯ --dry-run`, затем `cargo publish -p ИМЯ`.
+
+Проект распространяется по выбору пользователя на условиях MIT или Apache-2.0.
+
 Splice — язык для CPU-ядер, которые специализируются по данным приложения после его запуска. Функция с атрибутом `#[kernel]` сохраняет обычный вызов Rust. Макрос также создаёт фабрику JIT-кода. Параметр типа `B` у фабрики выбирает компилятор ядра.
 
 ```rust
-use splice::kernel;
-use splice_cranelift::Cranelift;
-use splice_lancy::Lancy;
-use splice_llvm::Llvm;
-use splice_text::Text;
+use splice::{kernel, Cranelift, Lancy, Llvm, Text};
 
 enum Price { Retail, Wholesale(i32) }
 
@@ -49,13 +60,13 @@ fn main() -> Result<(), String> {
 
 | Крейт | Ответственность |
 | --- | --- |
-| [splice](splice/src/lib.rs) | Общий фронтенд, построение и проверка переносимого IR, трейты `Codegen` и `Executable`. |
+| [splice-core](splice-core/src/lib.rs) | Общий фронтенд, построение и проверка переносимого IR, трейты `Codegen` и `Executable`. |
 | [splice-target](splice-target/src/lib.rs) | Определяет доступные на хосте расширения x64 и общую для Splice и Lancy ширину вектора. |
 | [splice-macros](splice-macros/src/lib.rs) | Макрос `#[kernel]` разбирает Rust-синтаксис и генерирует обращения к фронтенду. |
 | [splice-lancy](splice-lancy/src/lib.rs) | Переводит поток операций Splice или готовую переносимую функцию в SSA HIR и вызывает JIT Lancy. |
 | [splice-cranelift](splice-cranelift/src/lib.rs) | Собирает CLIF всех функций кернела в одном модуле. Инлайнер Cranelift может встроить каждое тело один раз и расходует на дополнительные копии бюджет, равный исходному числу инструкций модуля. JIT компилирует точку входа и оставшиеся вызываемые функции с `opt_level=speed`. |
 | [splice-llvm](splice-llvm/src/lib.rs) | Помещает точку входа и все внутренние функции кернела в один LLVM-модуль через Inkwell. Запускает `default<O3>` для всего модуля и устанавливает машинный код через ORC LLJIT. `to_llvm_ir(&ir)` печатает модуль до оптимизации. |
-| [splice-text](splice-text/src/lib.rs) | Печатает специализированную функцию и её вызываемые функции. Для использования достаточно зависимостей `splice` и `splice-text`. |
+| [splice-text](splice-text/src/lib.rs) | Печатает специализированную функцию и её вызываемые функции. Доступен через feature `text` пакета `splice-kernel`. |
 | [lancy](lancy/README.md) | Самостоятельный x64-бэкенд. Проверяет SSA HIR, строит LIR, распределяет регистры и устанавливает машинный код. |
 
 Скалярные аргументы `i32` и типизированные срезы передаются двумя списками с сохранением порядка внутри каждого списка. Все три компилятора поддерживают вызовы других ядер, циклы, ранний возврат, проверяемые обращения к срезам и целочисленное деление. Обработка колонок выражается обычным циклом над срезами.
@@ -87,8 +98,8 @@ fn query(
 В `schema_plan` схема выбирает конкретные специализации `filter<T>`, `join<T>` и `project<T>`. Фильтр читает `i32`, `f32` и `i64`, соединение сравнивает ключи `i64`, а проекция вычисляет два булевых выражения над `u16` и `f64`. Ядра используют `&[T]` и `Lane<T>` с ограничением `T: LaneElement`. Режим `rust` печатает точку входа и все выбранные специализации. [Код примера](splice/examples/schema_plan.rs)
 
 ```sh
-cargo run -p splice --release --example schema_plan
-cargo run -p splice --release --example schema_plan -- rust
+cargo run -p splice-kernel --release --example schema_plan
+cargo run -p splice-kernel --release --example schema_plan -- rust
 ```
 
 ## Векторный SQL-план
@@ -98,20 +109,20 @@ cargo run -p splice --release --example schema_plan -- rust
 При специализации каждый правый вход `Join` получает свой индекс с открытой адресацией и линейным пробированием. Строки с одинаковым ключом связаны в список значений. Левый вход проходит от скана через предикаты, проекции и соединения в виде SIMD-пачек. `gather` читает слоты полной пачки. Совпадения переходят к чтению значений, продолжающие поиск полосы уплотняются через `compress`, а `expand` заполняет свободные позиции новыми запросами. Чтение значений использует такую же дозагрузку, в том числе при обходе дубликатов. Когда вход исчерпан, оставшиеся полосы дочитываются скалярно. Хост передаёт отдельный срез состояния размером `plan.state_words()` слов для очередей SIMD и параметров индексов. В рабочем буфере размещаются правые хеш-индексы и итоговые пары `(key, value)`. Порядок выдачи после соединения свободный. [Код операторов](splice/examples/relational/kernels.rs) · [Специализация дерева](splice/examples/relational/pipeline.rs) · [План по пяти таблицам](splice/examples/relational/pricing.rs)
 
 ```sh
-cargo run -p splice --release --example sql_plan -- lancy
-cargo run -p splice --release --example sql_plan -- cranelift
-cargo run -p splice --release --example sql_plan -- llvm
-cargo run -p splice --release --example sql_plan -- text
-cargo run -p splice --release --example sql_plan -- rust
-cargo bench -p splice --bench backends -- sql_plan
-cargo test -p splice --release --example sql_plan --test simd
+cargo run -p splice-kernel --release --example sql_plan -- lancy
+cargo run -p splice-kernel --release --example sql_plan -- cranelift
+cargo run -p splice-kernel --release --example sql_plan -- llvm
+cargo run -p splice-kernel --release --example sql_plan -- text
+cargo run -p splice-kernel --release --example sql_plan -- rust
+cargo bench -p splice-kernel --bench backends -- sql_plan
+cargo test -p splice-kernel --release --example sql_plan --test simd
 ```
 
 Стенд Criterion.rs измеряет проекцию по 65 536 строкам и SQL-план с четырьмя хеш-соединениями. В таблице продаж 29 360 128 строк, в каждом из четырёх справочников по 1 835 008 товаров. Один вызов SQL-плана возвращает 11 010 048 строк. Данные фиксированы для всех бэкендов и готовятся до измерения.
 
 Во всех группах стенда LLVM компилирует через `LlvmManualSimd`. На обоих путях сборки включён O3, а loop vectorization и SLP отключены. Явные SIMD-операции используют инструкции выбранного профиля. Исторические замеры SQL-плана ниже относятся к прежней конфигурации с обычным O3.
 
-Для одного SQL-плана выполните `cargo bench -p splice --bench backends -- sql_plan`. Фильтр `sql_plan/execute/build` выбирает вызовы ядер, собранных через `build::<B>`. HTML-отчёт и интервалы оценок доступны в `target/criterion/report/index.html`. [Код стенда](splice/benches/backends.rs) · [Как читать отчёт Criterion](https://criterion-rs.github.io/book/user_guide/command_line_output.html)
+Для одного SQL-плана выполните `cargo bench -p splice-kernel --bench backends -- sql_plan`. Фильтр `sql_plan/execute/build` выбирает вызовы ядер, собранных через `build::<B>`. HTML-отчёт и интервалы оценок доступны в `target/criterion/report/index.html`. [Код стенда](splice/benches/backends.rs) · [Как читать отчёт Criterion](https://criterion-rs.github.io/book/user_guide/command_line_output.html)
 
 Каждый замер `compile/build` включает специализацию и установку нового исполняемого ядра. Для Cranelift этот путь включает построение переносимого IR. Группа `stage_ir` измеряет построение IR отдельно, а `compile/from_ir` передаёт всем трём бэкендам одну готовую функцию. Освобождение JIT-кода происходит после замера сборки. Группы `execute/build` и `execute/from_ir` повторно вызывают готовые ядра на одних входах с заранее выделенным выходным буфером. Для SQL-плана стенд до и после измерений проверяет значения и число вхождений каждой пары по отдельной скалярной формуле для исходных данных.
 
@@ -182,15 +193,15 @@ assert_eq!(dst, vec![0u16; n]);
 [`simd_hash_lookup`](splice/examples/workloads/probe.rs) ищет пачку ключей в таблице с линейным пробированием. Каждая полоса вычисляет начальный слот своего ключа. `gather_select` читает очередной слот для активных полос, найденные позиции сохраняются, а совпадение или пустая ячейка выключает полосу. После полного обхода поиск завершается и в заполненной таблице. Ёмкость таблицы — степень двойки, ноль обозначает пустую ячейку. Результат запроса — номер слота или `-1`.
 
 ```sh
-cargo run -p splice --release --example simd_matmul
-cargo run -p splice --release --example simd_hash_lookup
-cargo test -p splice --release --example simd_matmul --example simd_hash_lookup
-cargo bench -p splice --bench backends -- simd_
+cargo run -p splice-kernel --release --example simd_matmul
+cargo run -p splice-kernel --release --example simd_hash_lookup
+cargo test -p splice-kernel --release --example simd_matmul --example simd_hash_lookup
+cargo bench -p splice-kernel --bench backends -- simd_
 ```
 
 Criterion использует те же функции, что примеры и тесты. Для матриц нагрузка равна 96×128 на 128×128, для поиска — 32 768 запросов к таблице из 16 384 слотов при заполнении 75% и доле попаданий 50%. Наборы данных детерминированы. Перед измерением и после него стенд сверяет весь выход с независимой скалярной реализацией. Группы `compile` и `execute` измеряют сборку и повторный вызов отдельно для каждого из двух путей — `build` и `from_ir`.
 
-AMD Ryzen 7 9800X3D, Windows x64, 16 полос `i32`. Первые четыре измерения относятся к прогону до правок LLVM и Cranelift, по 30 выборок Criterion. Последний столбец содержит время вызова через `build` после правок, по 15 выборок. Для повторения с теми же настройками выполните `cargo bench -p splice --bench backends -- simd_ --warm-up-time 1 --measurement-time 3 --sample-size 30 --noplot`.
+AMD Ryzen 7 9800X3D, Windows x64, 16 полос `i32`. Первые четыре измерения относятся к прогону до правок LLVM и Cranelift, по 30 выборок Criterion. Последний столбец содержит время вызова через `build` после правок, по 15 выборок. Для повторения с теми же настройками выполните `cargo bench -p splice-kernel --bench backends -- simd_ --warm-up-time 1 --measurement-time 3 --sample-size 30 --noplot`.
 
 | Ядро | Бэкенд | Сборка `build` | Вызов после `build` | Сборка из IR | Вызов после сборки из IR | Вызов `build` после правок |
 | --- | --- | ---: | ---: | ---: | ---: | ---: |
@@ -215,7 +226,7 @@ AMD Ryzen 7 9800X3D, Windows x64, 16 полос `i32`. Первые четыре
 | [`large_decimal_csv`](splice/benches/large/csv.rs) | 8 192 строки по четыре знаковых значения с тремя дробными разрядами, упаковка ASCII в `i32` | 362 |
 
 ```sh
-cargo bench -p splice --bench backends -- 'large_(audio|parquet|per_channel|decimal)' --warm-up-time 1 --measurement-time 2 --sample-size 30 --noplot
+cargo bench -p splice-kernel --bench backends -- 'large_(audio|parquet|per_channel|decimal)' --warm-up-time 1 --measurement-time 2 --sample-size 30 --noplot
 ```
 
 AMD Ryzen 7 9800X3D, Windows x64, 30 выборок Criterion. В таблице указано время повторного вызова в мкс на весь набор данных. Каждая ячейка содержит замеры `build / from_ir`.
@@ -241,7 +252,7 @@ AMD Ryzen 7 9800X3D, Windows x64, 30 выборок Criterion. В таблице
 | [`large_simd_remap_rgb16`](splice/benches/large/vector/remap.rs) | Плитка 145×145, три 16-битных канала, перенос пикселей по поканальным картам радиальной коррекции |
 
 ```sh
-cargo bench -p splice --bench backends -- large_simd_ --warm-up-time 0.5 --measurement-time 1 --sample-size 20 --nresamples 10000 --noplot
+cargo bench -p splice-kernel --bench backends -- large_simd_ --warm-up-time 0.5 --measurement-time 1 --sample-size 20 --nresamples 10000 --noplot
 ```
 
 Для сравнения исполнения на другой ширине задайте `SPLICE_SIMD=avx2` или `SPLICE_SIMD=sse` и замените фильтр `large_simd_` на `'large_simd_.*/execute/'`.
@@ -271,7 +282,7 @@ AMD Ryzen 7 9800X3D, Windows x64, 20 выборок Criterion. Время пов
 | `gap_loop_dead_checksum` | Копирование 65 539 отсчётов со специализированным отключением результата контрольной суммы из внутреннего цикла |
 
 ```powershell
-cargo bench -p splice --bench backends -- '^gap_' --warm-up-time 0.3 --measurement-time 0.7 --sample-size 15 --nresamples 10000 --noplot
+cargo bench -p splice-kernel --bench backends -- '^gap_' --warm-up-time 0.3 --measurement-time 0.7 --sample-size 15 --nresamples 10000 --noplot
 ```
 
 На Ryzen 7 9800X3D под Windows x64 сворачивание рекуррентностей сократило время `gap_ramp_integral` после прямого `build` с 1,42 мс до 28,7 мкс. Слияние трёх проходов тональной кривой сократило вызов со 101,6 до 67,1 мкс. Удаление неиспользуемой контрольной суммы сократило вызов с 2,25 мс до 42,2 мкс. Сравнение выполнено на одинаковых кернелах с предыдущим и новым набором проходов Lancy.
@@ -309,7 +320,7 @@ tracing_subscriber::fmt()
 В GDB или IDE с отладчиком, поддерживающим GDB JIT Interface, можно остановиться по имени `splice_jit::<имя>`, пройти по строкам исходного Rust и посмотреть значения через `info locals`. Для точки останова в файле символы появляются после сборки ядра. Срезы показывают указатель и длину, векторы показывают полосы, а маски используют целочисленное представление полос. В отладочной информации также доступны неизменяемые примитивные значения специализации. Сложные значения `#[comptime]` и другие данные, существующие только на хосте, можно посмотреть в кадре специализации. SIMD-помощники, которые фронтенд разворачивает в вызывающую функцию, используют её машинный кадр.
 
 ```sh
-cargo build -p splice --example debug_kernel
+cargo build -p splice-kernel --example debug_kernel
 gdb --args target/debug/examples/debug_kernel lancy
 ```
 
@@ -325,14 +336,14 @@ backtrace
 Пример также принимает `cranelift`, `llvm` и `llvm_manual_simd`. Для профилирования Linux используйте `SPLICE_PERF_MAP=1`. Все нативные бэкенды записывают имена и диапазоны в `/tmp/perf-PID.map`, в том числе при release-сборке. Формат perf-map привязывает имя к адресу. При многократной пересборке и освобождении ядер повторно использованный адрес может объединить сэмплы разных ядер.
 
 ```sh
-cargo build -p splice --example debug_kernel --release
+cargo build -p splice-kernel --example debug_kernel --release
 SPLICE_PERF_MAP=1 perf record -- target/release/examples/debug_kernel lancy 1000000
 perf report --stdio
 ```
 
 ## Сборка
 
-Нужен Rust 1.94+. На Windows x86-64, Linux x86-64 и Linux AArch64 доступны Lancy, Cranelift и LLVM. Бэкенды Lancy и Cranelift собираются отдельно от LLVM. Для приложения с Cranelift достаточно зависимостей `splice` и `splice-cranelift`.
+Нужен Rust 1.94+. На Windows x86-64, Linux x86-64 и Linux AArch64 доступны Lancy, Cranelift и LLVM. Бэкенды Lancy и Cranelift собираются отдельно от LLVM. Для приложения с Cranelift включите feature `cranelift` пакета `splice-kernel`.
 
 * **Windows x64 MSVC.** Для `splice-llvm` выбран LLVM 19.1. Сборка находит LLVM в стандартном каталоге или в компонентах C++ Clang для Visual Studio. Для другой папки установки задайте `LLVM_SYS_191_PREFIX` до сборки. В ней должны быть `lib/LLVM-C.lib` и `bin/LLVM-C.dll`. Cargo подготавливает DLL для `cargo run`, тестов и бенчмарков. Для самостоятельного запуска готового приложения положите соответствующую DLL рядом с исполняемым файлом или добавьте её каталог в `PATH`.
 * **Linux x86-64 и AArch64.** Выбран LLVM 21.1 с динамической линковкой. Нужны инструменты разработки, включая `llvm-config-21`, и разделяемая библиотека LLVM. Для отдельной установки укажите префикс через `LLVM_SYS_211_PREFIX`.
@@ -357,14 +368,14 @@ perf report --stdio
 ```sh
 # На x86-64 с AVX2
 SPLICE_SIMD=avx2 cargo run -p splice-target --example simd_profile
-SPLICE_SIMD=avx2 cargo test -p splice --release --test simd
+SPLICE_SIMD=avx2 cargo test -p splice-kernel --release --test simd
 
 # На Linux AArch64
 SPLICE_SIMD=neon cargo test --workspace --release
 
 # На Linux AArch64 с SVE2
 SPLICE_SIMD=sve2 cargo test -p splice-llvm --release
-SPLICE_SIMD=sve2 cargo test -p splice --release --test simd
+SPLICE_SIMD=sve2 cargo test -p splice-kernel --release --test simd
 
 # На Linux AArch64 с QEMU user-mode
 SPLICE_SIMD=sve2 \

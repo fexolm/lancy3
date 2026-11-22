@@ -1,16 +1,30 @@
 [package]
-name = "splice"
+name = "splice-kernel"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.94"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/fexolm/lancy3"
 description = "A staged Rust kernel language with a portable code generation interface"
 
-[dependencies]
-tracing.workspace = true
-splice-target = { path = "../splice-target" }
-splice-macros = { path = "../splice-macros" }
+[lib]
+name = "splice"
 
+[features]
+default = ["lancy"]
+lancy = ["dep:splice-lancy"]
+cranelift = ["dep:splice-cranelift"]
+llvm = ["dep:splice-llvm"]
+text = ["dep:splice-text"]
+
+[dependencies]
+splice_core = { package = "splice-core", path = "../splice-core", version = "0.1.0" }
+splice-lancy = { path = "../splice-lancy", version = "0.1.0", optional = true }
+splice-cranelift = { path = "../splice-cranelift", version = "0.1.0", optional = true }
+splice-llvm = { path = "../splice-llvm", version = "0.1.0", optional = true }
+splice-text = { path = "../splice-text", version = "0.1.0", optional = true }
 [dev-dependencies]
+tracing.workspace = true
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt"] }
 criterion = { version = "0.8", features = ["html_reports"] }
 splice-cranelift = { path = "../splice-cranelift" }

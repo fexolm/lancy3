@@ -913,19 +913,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3244542535d5de959d90ec55d1b5ff0fd2bb7b1310223907d5f11932847f7b59"
 
 [[package]]
-name = "splice"
+name = "splice-core"
 version = "0.1.0"
 dependencies = [
- "criterion",
- "splice-cranelift",
- "splice-lancy",
- "splice-llvm",
  "splice-macros",
  "splice-target",
- "splice-test-traits",
- "splice-text",
  "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]
@@ -937,7 +930,7 @@ dependencies = [
  "cranelift-jit",
  "cranelift-module",
  "cranelift-native",
- "splice",
+ "splice-core",
  "splice-jit",
  "splice-target",
  "tracing",
@@ -948,8 +941,23 @@ name = "splice-jit"
 version = "0.1.0"
 dependencies = [
  "gimli",
- "splice",
+ "splice-core",
  "tracing",
+]
+
+[[package]]
+name = "splice-kernel"
+version = "0.1.0"
+dependencies = [
+ "criterion",
+ "splice-core",
+ "splice-cranelift",
+ "splice-lancy",
+ "splice-llvm",
+ "splice-test-traits",
+ "splice-text",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -957,7 +965,7 @@ name = "splice-lancy"
 version = "0.1.0"
 dependencies = [
  "lancy",
- "splice",
+ "splice-core",
  "splice-jit",
  "splice-target",
  "tracing",
@@ -971,7 +979,7 @@ dependencies = [
  "inkwell",
  "libc",
  "llvm-sys 191.1.1",
- "splice",
+ "splice-core",
  "splice-jit",
  "splice-target",
  "tracing",
@@ -994,14 +1002,14 @@ version = "0.1.0"
 name = "splice-test-traits"
 version = "0.0.0"
 dependencies = [
- "splice",
+ "splice-kernel",
 ]
 
 [[package]]
 name = "splice-text"
 version = "0.1.0"
 dependencies = [
- "splice",
+ "splice-core",
  "tracing",
 ]
 

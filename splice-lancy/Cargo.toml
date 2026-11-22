@@ -3,11 +3,13 @@ name = "splice-lancy"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.94"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/fexolm/lancy3"
 description = "Lancy native code generation for Splice kernels"
 
 [dependencies]
 tracing.workspace = true
-splice = { path = "../splice" }
-splice-jit = { path = "../splice-jit" }
-splice-target = { path = "../splice-target" }
-lancy = { path = "../lancy" }
+splice = { package = "splice-core", path = "../splice-core", version = "0.1.0" }
+splice-jit = { path = "../splice-jit", version = "0.1.0" }
+splice-target = { path = "../splice-target", version = "0.1.0" }
+lancy = { path = "../lancy", version = "0.1.0" }

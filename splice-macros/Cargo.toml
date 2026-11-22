@@ -3,6 +3,10 @@ name = "splice-macros"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.94"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/fexolm/lancy3"
+
+description = "Procedural macros for the Splice kernel language"
 
 [lib]
 proc-macro = true
