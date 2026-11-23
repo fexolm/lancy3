@@ -233,8 +233,23 @@ macro_rules! float_eval {
                     Mul => a * b,
                     Div => a / b,
                     Rem => a % b,
-                    Min => a.min(b),
-                    Max => a.max(b),
+                    // IEEE 754-2019 minimumNumber/maximumNumber: a NaN
+                    // operand, quiet or signaling, yields the other one, and
+                    // -0 orders below +0. Rust's min/max leave both open.
+                    Min | Max => {
+                        let min = op == Min;
+                        if b.is_nan() {
+                            a
+                        } else if a.is_nan() {
+                            b
+                        } else if a == b {
+                            if a.is_sign_negative() == min { a } else { b }
+                        } else if (a < b) == min {
+                            a
+                        } else {
+                            b
+                        }
+                    }
                     Pow => a.powf(b),
                     CopySign => a.copysign(b),
                     Hypot => a.hypot(b),

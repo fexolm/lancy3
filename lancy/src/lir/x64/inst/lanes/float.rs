@@ -390,13 +390,31 @@ pub(super) fn emit(
             }
         }
         Action::Binary(op @ (B::Min | B::Max)) => {
+            // A NaN operand yields the other one. MINSS/MAXSS return the
+            // second operand for a NaN first operand and for equal operands,
+            // so equal ones (the two zeros) combine their sign bits instead.
             let done = a.create_label();
+            let ordered = a.create_label();
             if single {
                 a.ucomiss(xmm1, xmm1)?;
             } else {
                 a.ucomisd(xmm1, xmm1)?;
             }
             a.jp(done)?;
+            if single {
+                a.ucomiss(xmm0, xmm1)?;
+            } else {
+                a.ucomisd(xmm0, xmm1)?;
+            }
+            a.jp(ordered)?;
+            a.jne(ordered)?;
+            if op == B::Min {
+                a.orps(xmm0, xmm1)?;
+            } else {
+                a.andps(xmm0, xmm1)?;
+            }
+            a.jmp(done)?;
+            bind(a, ordered)?;
             if op == B::Min {
                 fp!(minss, minsd)?;
             } else {

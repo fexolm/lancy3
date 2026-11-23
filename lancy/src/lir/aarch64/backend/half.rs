@@ -81,6 +81,10 @@ impl Emitter<'_> {
             self.decode_half(lane, b, 17)?;
         }
         match form.action {
+            // FMINNM/FMAXNM alone would turn a signaling NaN operand into NaN.
+            Action::Binary(code @ (C::Fminnm_scalar | C::Fmaxnm_scalar)) => {
+                self.ordered_minmax(code == C::Fminnm_scalar, d, rhs)?;
+            }
             Action::Binary(code) => self.a.put(code, &[d, d, rhs])?,
             Action::Compare(cond) => {
                 self.a.put(C::Fcmp_scalar, &[d, rhs])?;
