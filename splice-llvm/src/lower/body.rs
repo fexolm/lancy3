@@ -15,7 +15,30 @@ use splice::{ContextArguments, Function};
 use std::collections::HashMap;
 use std::sync::Arc;
 
-type Built<T> = Result<T, BuilderError>;
+type Built<T> = Result<T, Error>;
+
+/// Failure to emit LLVM IR for a function body.
+#[derive(Debug)]
+pub(super) enum Error {
+    Builder(BuilderError),
+    /// The loaded LLVM does not provide this intrinsic for these types.
+    MissingIntrinsic(&'static str),
+}
+
+impl From<BuilderError> for Error {
+    fn from(error: BuilderError) -> Self {
+        Self::Builder(error)
+    }
+}
+
+impl std::fmt::Display for Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Builder(error) => error.fmt(f),
+            Self::MissingIntrinsic(name) => write!(f, "LLVM does not provide {name}"),
+        }
+    }
+}
 
 pub(super) struct Callees<'a, 'ctx> {
     pub ids: &'a HashMap<*const Function, usize>,
@@ -53,7 +76,26 @@ pub(super) struct Body<'a, 'ctx> {
     exits: [Option<BasicBlock<'ctx>>; 6],
 }
 
+/// Declare intrinsic `name` overloaded on `types`, if the loaded LLVM has it.
+fn intrinsic<'ctx>(
+    module: &Module<'ctx>,
+    name: &'static str,
+    types: &[BasicTypeEnum<'ctx>],
+) -> Built<FunctionValue<'ctx>> {
+    inkwell::intrinsics::Intrinsic::find(name)
+        .and_then(|intrinsic| intrinsic.get_declaration(module, types))
+        .ok_or(Error::MissingIntrinsic(name))
+}
+
 impl<'a, 'ctx> Body<'a, 'ctx> {
+    fn intrinsic(
+        &self,
+        name: &'static str,
+        types: &[BasicTypeEnum<'ctx>],
+    ) -> Built<FunctionValue<'ctx>> {
+        intrinsic(self.module, name, types)
+    }
+
     pub(super) fn start(
         ctx: &'ctx Context,
         builder: &'a Builder<'ctx>,
@@ -191,7 +233,8 @@ impl<'a, 'ctx> Body<'a, 'ctx> {
         self.builder.position_at_end(self.block(label));
     }
     pub(super) fn unreachable(&self) -> Built<()> {
-        self.builder.build_unreachable().map(|_| ())
+        self.builder.build_unreachable()?;
+        Ok(())
     }
     pub(super) fn needs_status(&self) -> bool {
         self.exits.iter().any(Option::is_some)
@@ -266,10 +309,10 @@ impl<'a, 'ctx> Body<'a, 'ctx> {
             .build_int_compare(IntPredicate::UGE, index, slice.len, "")?;
         self.exit_if(invalid, Failure::Bounds)?;
         // SAFETY: Only the edge with index < slice.len reaches this instruction.
-        unsafe {
+        Ok(unsafe {
             self.builder
-                .build_in_bounds_gep(element, slice.data, &[index], "")
-        }
+                .build_in_bounds_gep(element, slice.data, &[index], "")?
+        })
     }
 
     fn binary(
@@ -281,9 +324,9 @@ impl<'a, 'ctx> Body<'a, 'ctx> {
         let ir = self.builder;
         use Binary::*;
         match op {
-            Add => ir.build_int_add(a, b, ""),
-            Sub => ir.build_int_sub(a, b, ""),
-            Mul => ir.build_int_mul(a, b, ""),
+            Add => Ok(ir.build_int_add(a, b, "")?),
+            Sub => Ok(ir.build_int_sub(a, b, "")?),
+            Mul => Ok(ir.build_int_mul(a, b, "")?),
             CheckedAdd | CheckedSub | CheckedMul => {
                 let wide_type = self.ctx.i64_type();
                 let a = ir.build_int_s_extend(a, wide_type, "")?;
@@ -300,9 +343,9 @@ impl<'a, 'ctx> Body<'a, 'ctx> {
                 self.exit_if(invalid, Failure::IntegerOverflow)?;
                 Ok(result)
             }
-            And => ir.build_and(a, b, ""),
-            Or => ir.build_or(a, b, ""),
-            Xor => ir.build_xor(a, b, ""),
+            And => Ok(ir.build_and(a, b, "")?),
+            Or => Ok(ir.build_or(a, b, "")?),
+            Xor => Ok(ir.build_xor(a, b, "")?),
             Div | Rem => {
                 let zero = ir.build_int_compare(IntPredicate::EQ, b, self.int(0), "")?;
                 self.exit_if(zero, Failure::DivideByZero)?;
@@ -310,9 +353,9 @@ impl<'a, 'ctx> Body<'a, 'ctx> {
                 let minus_one = ir.build_int_compare(IntPredicate::EQ, b, self.int(-1), "")?;
                 self.exit_if(ir.build_and(min, minus_one, "")?, Failure::Overflow)?;
                 if op == Div {
-                    ir.build_int_signed_div(a, b, "")
+                    Ok(ir.build_int_signed_div(a, b, "")?)
                 } else {
-                    ir.build_int_signed_rem(a, b, "")
+                    Ok(ir.build_int_signed_rem(a, b, "")?)
                 }
             }
             Shl | Shr | CheckedShl | CheckedShr => {
@@ -324,9 +367,9 @@ impl<'a, 'ctx> Body<'a, 'ctx> {
                     ir.build_and(b, self.int(31), "")?
                 };
                 if matches!(op, Shl | CheckedShl) {
-                    ir.build_left_shift(a, count, "")
+                    Ok(ir.build_left_shift(a, count, "")?)
                 } else {
-                    ir.build_right_shift(a, count, true, "")
+                    Ok(ir.build_right_shift(a, count, true, "")?)
                 }
             }
             Min | Max => {
@@ -349,7 +392,7 @@ impl<'a, 'ctx> Body<'a, 'ctx> {
                     _ => unreachable!(),
                 };
                 let flag = ir.build_int_compare(pred, a, b, "")?;
-                ir.build_int_s_extend(flag, self.ctx.i32_type(), "")
+                Ok(ir.build_int_s_extend(flag, self.ctx.i32_type(), "")?)
             }
         }
     }
@@ -699,5 +742,28 @@ impl<'a, 'ctx> Body<'a, 'ctx> {
             ),
             Instr::Label(_) => unreachable!("handled at block boundary"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Error, intrinsic};
+    use inkwell::context::Context;
+
+    #[test]
+    fn missing_intrinsics_are_build_errors() {
+        let ctx = Context::create();
+        let module = ctx.create_module("intrinsics");
+        let vector = ctx.i32_type().vec_type(4).into();
+        assert!(intrinsic(&module, "llvm.umax", &[vector]).is_ok());
+        let missing = intrinsic(&module, "llvm.splice.missing", &[vector]);
+        assert!(matches!(
+            missing,
+            Err(Error::MissingIntrinsic("llvm.splice.missing"))
+        ));
+        assert_eq!(
+            missing.unwrap_err().to_string(),
+            "LLVM does not provide llvm.splice.missing"
+        );
     }
 }

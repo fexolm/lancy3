@@ -2,14 +2,12 @@
 //! insertion point and shares the enclosing kernel's module and target.
 mod flow;
 
-use super::{body::Body, declare, emit_entry, permit_buffer_capture};
-use flow::{Exit, Flow};
-use inkwell::{
-    builder::{Builder, BuilderError},
-    context::Context,
-    module::Module,
-    values::FunctionValue,
+use super::{
+    body::{self, Body},
+    declare, emit_entry, permit_buffer_capture,
 };
+use flow::{Exit, Flow};
+use inkwell::{builder::Builder, context::Context, module::Module, values::FunctionValue};
 use splice::{
     BufferKind,
     frontend::{Body as StagedBody, KernelBuilder, KernelSource, Specialization},
@@ -38,6 +36,7 @@ impl<'ctx> Graph<'_, 'ctx> {
         arity: usize,
         kinds: &[BufferKind],
         key: Option<Specialization>,
+        root: bool,
         stage: StagedBody<'_>,
     ) -> Result<(FunctionValue<'ctx>, bool), String> {
         splice::hir::check_context_layout(kinds)?;
@@ -50,7 +49,7 @@ impl<'ctx> Graph<'_, 'ctx> {
         let id = self.count.get();
         let function = declare(self.ctx, self.module, arity, kinds, id)?;
         self.count.set(id + 1);
-        match self.body(function, arity, kinds, stage) {
+        match self.body(function, arity, kinds, root, stage) {
             Ok(fallible) => {
                 if let Some(key) = key {
                     self.callees.borrow_mut().insert(key, (function, fallible));
@@ -72,6 +71,7 @@ impl<'ctx> Graph<'_, 'ctx> {
         function: FunctionValue<'ctx>,
         arity: usize,
         kinds: &[BufferKind],
+        root: bool,
         stage: StagedBody<'_>,
     ) -> Result<bool, String> {
         let builder = self.ctx.create_builder();
@@ -88,7 +88,7 @@ impl<'ctx> Graph<'_, 'ctx> {
         let mut direct = Direct {
             native,
             graph: self,
-            root: function.get_name().to_bytes() == b"kernel0",
+            root,
             allocas: self.ctx.create_builder(),
             arity,
             kinds,
@@ -126,7 +126,7 @@ pub(crate) fn populate_direct<'ctx>(
         static_rust_slice_operands: Cell::new(false),
         callees: RefCell::default(),
     };
-    let (root, _) = graph.function(arity, kinds, None, stage)?;
+    let (root, _) = graph.function(arity, kinds, None, true, stage)?;
     emit_entry(ctx, module, &ctx.create_builder(), arity, kinds.len(), root)
         .map_err(|e| e.to_string())?;
     if graph.static_rust_slice_operands.get() {
@@ -152,7 +152,7 @@ impl<'a, 'ctx> Direct<'a, 'ctx> {
         &mut self,
         reads: &[Reg],
         dst: Option<Reg>,
-        generate: impl FnOnce(&mut Body<'a, 'ctx>) -> Result<(), BuilderError>,
+        generate: impl FnOnce(&mut Body<'a, 'ctx>) -> Result<(), body::Error>,
     ) {
         if reads.iter().copied().chain(dst).any(|r| {
             self.native
@@ -169,7 +169,7 @@ impl<'a, 'ctx> Direct<'a, 'ctx> {
         &mut self,
         reads: &[Reg],
         dst: Option<Reg>,
-        generate: impl FnOnce(&mut Body<'a, 'ctx>) -> Result<(), BuilderError>,
+        generate: impl FnOnce(&mut Body<'a, 'ctx>) -> Result<(), body::Error>,
     ) {
         if self.error.is_some() {
             return;
@@ -193,7 +193,7 @@ impl<'a, 'ctx> Direct<'a, 'ctx> {
     fn result(
         &mut self,
         reads: &[Reg],
-        generate: impl FnOnce(&mut Body<'a, 'ctx>, Reg) -> Result<(), BuilderError>,
+        generate: impl FnOnce(&mut Body<'a, 'ctx>, Reg) -> Result<(), body::Error>,
     ) -> Reg {
         let dst = self.local();
         self.emit(reads, Some(dst), |ir| generate(ir, dst));
@@ -436,7 +436,7 @@ impl Direct<'_, '_> {
             self.kinds,
             buffers,
         )?;
-        let (callee, fallible) = self.graph.function(arity, kinds, key, stage)?;
+        let (callee, fallible) = self.graph.function(arity, kinds, key, false, stage)?;
         let dst = self.result(args, |ir, d| {
             ir.call_function(d, callee, fallible, args, buffers)
         });

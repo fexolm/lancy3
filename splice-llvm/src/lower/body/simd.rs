@@ -66,10 +66,7 @@ impl<'ctx> Body<'_, 'ctx> {
                 } else {
                     "llvm.fptosi.sat"
                 };
-                let function = inkwell::intrinsics::Intrinsic::find(name)
-                    .unwrap()
-                    .get_declaration(self.module, &[ty.into(), x.get_type().into()])
-                    .unwrap();
+                let function = self.intrinsic(name, &[ty.into(), x.get_type().into()])?;
                 ir.build_call(function, &[x.into()], "")?
                     .try_as_basic_value()
                     .unwrap_basic()
@@ -170,10 +167,7 @@ impl<'ctx> Body<'_, 'ctx> {
                 } else {
                     ("llvm.x86.avx512.mask.expand", arg(2)?)
                 };
-                let intrinsic = inkwell::intrinsics::Intrinsic::find(name)
-                    .unwrap()
-                    .get_declaration(self.module, &[data.get_type().into()])
-                    .unwrap();
+                let intrinsic = self.intrinsic(name, &[data.get_type().into()])?;
                 ir.build_call(
                     intrinsic,
                     &[data.into(), fallback.into(), arg(1)?.into()],
@@ -185,11 +179,7 @@ impl<'ctx> Body<'_, 'ctx> {
             Compress => {
                 let data = arg(0)?;
                 let ty = data.get_type();
-                let compress =
-                    inkwell::intrinsics::Intrinsic::find("llvm.experimental.vector.compress")
-                        .unwrap()
-                        .get_declaration(self.module, &[ty.into()])
-                        .unwrap();
+                let compress = self.intrinsic("llvm.experimental.vector.compress", &[ty.into()])?;
                 ir.build_call(
                     compress,
                     &[data.into(), arg(1)?.into(), ty.const_zero().into()],
@@ -260,10 +250,7 @@ impl<'ctx> Body<'_, 'ctx> {
                     MulAdd => "llvm.fma",
                     _ => "llvm.vector.reduce.add",
                 };
-                let function = inkwell::intrinsics::Intrinsic::find(name)
-                    .unwrap()
-                    .get_declaration(self.module, &[x.get_type().into()])
-                    .unwrap();
+                let function = self.intrinsic(name, &[x.get_type().into()])?;
                 let operands = if inst.op == MulAdd {
                     vec![x.into(), arg(1)?.into(), arg(2)?.into()]
                 } else {
@@ -293,10 +280,7 @@ impl<'ctx> Body<'_, 'ctx> {
             RotateLeft(n) => {
                 let value = arg(0)?;
                 let count = self.splat(self.int((n & 31) as i32), e.lanes() as u32)?;
-                let intrinsic = inkwell::intrinsics::Intrinsic::find("llvm.fshl")
-                    .unwrap()
-                    .get_declaration(self.module, &[value.get_type().into()])
-                    .unwrap();
+                let intrinsic = self.intrinsic("llvm.fshl", &[value.get_type().into()])?;
                 ir.build_call(intrinsic, &[value.into(), value.into(), count.into()], "")?
                     .try_as_basic_value()
                     .unwrap_basic()
@@ -323,10 +307,7 @@ impl<'ctx> Body<'_, 'ctx> {
                     (Min, false) => "llvm.smin",
                     _ => "llvm.smax",
                 };
-                let intrinsic = inkwell::intrinsics::Intrinsic::find(name)
-                    .unwrap()
-                    .get_declaration(self.module, &[a.get_type().into()])
-                    .unwrap();
+                let intrinsic = self.intrinsic(name, &[a.get_type().into()])?;
                 ir.build_call(intrinsic, &[a.into(), b.into()], "")?
                     .try_as_basic_value()
                     .unwrap_basic()
@@ -443,18 +424,16 @@ impl<'ctx> Body<'_, 'ctx> {
             .custom_width_int_type(mask.get_type().get_size().try_into().unwrap())
             .unwrap();
         let bits = self.builder.build_bit_cast(mask, ty, "mask.bits")?;
-        let pop = inkwell::intrinsics::Intrinsic::find("llvm.ctpop")
-            .unwrap()
-            .get_declaration(self.module, &[ty.into()])
-            .unwrap();
+        let pop = self.intrinsic("llvm.ctpop", &[ty.into()])?;
         let count = self
             .builder
             .build_call(pop, &[bits.into()], "selected")?
             .try_as_basic_value()
             .unwrap_basic()
             .into_int_value();
-        self.builder
-            .build_int_z_extend(count, self.ctx.i32_type(), "")
+        Ok(self
+            .builder
+            .build_int_z_extend(count, self.ctx.i32_type(), "")?)
     }
 
     fn compress_store(
@@ -502,10 +481,7 @@ impl<'ctx> Body<'_, 'ctx> {
         ir.position_at_end(write);
         let enabled = ir.build_phi(mask.get_type(), "enabled")?;
         enabled.add_incoming(&[(&mask, full), (&prefix, partial)]);
-        let store = inkwell::intrinsics::Intrinsic::find("llvm.masked.compressstore")
-            .unwrap()
-            .get_declaration(self.module, &[data.get_type().into()])
-            .unwrap();
+        let store = self.intrinsic("llvm.masked.compressstore", &[data.get_type().into()])?;
         ir.build_call(
             store,
             &[data.into(), ptr.into(), enabled.as_basic_value().into()],
@@ -523,12 +499,12 @@ impl<'ctx> Body<'_, 'ctx> {
         let one = self
             .builder
             .build_insert_element(ty.get_undef(), value, self.int(0), "")?;
-        self.builder.build_shuffle_vector(
+        Ok(self.builder.build_shuffle_vector(
             one,
             ty.get_undef(),
             self.ctx.i32_type().vec_type(lanes).const_zero(),
             "",
-        )
+        )?)
     }
 
     fn vector_memory(
@@ -538,7 +514,7 @@ impl<'ctx> Body<'_, 'ctx> {
         args: &[Reg],
     ) -> Built<Option<VectorValue<'ctx>>> {
         use SimdOp::*;
-        use inkwell::{intrinsics::Intrinsic, values::BasicMetadataValueEnum};
+        use inkwell::values::BasicMetadataValueEnum;
         let e = inst.element;
         let ir = self.builder;
         let el = element_type(self.ctx, e);
@@ -681,10 +657,7 @@ impl<'ctx> Body<'_, 'ctx> {
             (false, true) => "llvm.masked.store",
             (false, false) => "llvm.masked.load",
         };
-        let decl = Intrinsic::find(name)
-            .unwrap()
-            .get_declaration(self.module, &[ty.into(), address.get_type()])
-            .unwrap();
+        let decl = self.intrinsic(name, &[ty.into(), address.get_type()])?;
         let align = BasicMetadataValueEnum::from(self.int(e.bytes() as i32));
         if store {
             ir.build_call(

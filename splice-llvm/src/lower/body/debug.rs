@@ -1,8 +1,5 @@
 use super::{Body, Built, simd};
-use inkwell::{
-    intrinsics::Intrinsic,
-    values::{BasicValueEnum, PointerValue},
-};
+use inkwell::values::{BasicValueEnum, PointerValue};
 use splice::{
     Function, debug,
     hir::{Instr, ValueType},
@@ -21,8 +18,9 @@ impl<'ctx> Body<'_, 'ctx> {
             .unwrap_or(0)
             .max(1);
         let size = self.ctx.i64_type().const_int(size as u64, false);
-        self.builder
-            .build_array_alloca(self.ctx.i8_type(), size, "debug_values")
+        Ok(self
+            .builder
+            .build_array_alloca(self.ctx.i8_type(), size, "debug_values")?)
     }
 
     pub(super) fn debug_point(
@@ -74,10 +72,7 @@ impl<'ctx> Body<'_, 'ctx> {
         }
         // The stack map records a static alloca as a frame register plus
         // displacement and places the source point after the snapshot stores.
-        let intr = Intrinsic::find("llvm.experimental.stackmap")
-            .unwrap()
-            .get_declaration(self.module, &[])
-            .unwrap();
+        let intr = self.intrinsic("llvm.experimental.stackmap", &[])?;
         let id = self
             .ctx
             .i64_type()
