@@ -8,7 +8,7 @@ use super::{
 };
 use flow::{Exit, Flow};
 use inkwell::{builder::Builder, context::Context, module::Module, values::FunctionValue};
-use splice::{
+use splice_core::{
     BufferKind,
     frontend::{Body as StagedBody, KernelBuilder, KernelSource, Specialization},
     hir::{
@@ -39,7 +39,7 @@ impl<'ctx> Graph<'_, 'ctx> {
         root: bool,
         stage: StagedBody<'_>,
     ) -> Result<(FunctionValue<'ctx>, bool), String> {
-        splice::hir::check_context_layout(kinds)?;
+        splice_core::hir::check_context_layout(kinds)?;
         if let Some(hit) = key
             .as_ref()
             .and_then(|k| self.callees.borrow().get(k).copied())
@@ -266,7 +266,7 @@ impl KernelBuilder for Direct<'_, '_> {
             .get_or_insert_with(|| "exhausted LLVM registers".into());
         Reg(u32::MAX)
     }
-    fn simd(&mut self, inst: Simd, args: &[Reg]) -> splice::Result<Option<Reg>> {
+    fn simd(&mut self, inst: Simd, args: &[Reg]) -> splice_core::Result<Option<Reg>> {
         let types = args
             .iter()
             .map(|&r| self.native.reg_type(r).ok_or("invalid LLVM register"))
@@ -342,21 +342,28 @@ impl KernelBuilder for Direct<'_, '_> {
         self.emit(&[r], None, |ir| ir.ret(r));
         self.flow.close(Exit::Return);
     }
-    fn trap_bounds(&mut self) -> splice::Result<()> {
+    fn trap_bounds(&mut self) -> splice_core::Result<()> {
         self.emit(&[], None, |ir| ir.trap_bounds());
         self.flow.close(Exit::Return);
         Ok(())
     }
-    fn rust_call(&mut self, import: splice::hir::RustCall, args: &[Reg]) -> splice::Result<Reg> {
+    fn rust_call(
+        &mut self,
+        import: splice_core::hir::RustCall,
+        args: &[Reg],
+    ) -> splice_core::Result<Reg> {
         import.validate(args.iter().map(|&r| self.reg_type(r)))?;
         Ok(self.result(args, |ir, dst| ir.rust_call(dst, import, args)))
     }
     fn rust_packet_call(
         &mut self,
-        import: &'static splice::hir::RustPacketSymbol,
+        import: &'static splice_core::hir::RustPacketSymbol,
         args: &[Reg],
-    ) -> splice::Result<Reg> {
-        splice::hir::check_rust_packet_call(import, args.iter().map(|&arg| self.reg_type(arg)))?;
+    ) -> splice_core::Result<Reg> {
+        splice_core::hir::check_rust_packet_call(
+            import,
+            args.iter().map(|&arg| self.reg_type(arg)),
+        )?;
         Ok(self.result(args, |ir, dst| ir.rust_packet_call(dst, import, args)))
     }
     fn rust_context_call_with_slices(
@@ -365,7 +372,7 @@ impl KernelBuilder for Direct<'_, '_> {
         operation: u32,
         args: &[Reg],
         slices: &[ContextSlice],
-    ) -> splice::Result<Reg> {
+    ) -> splice_core::Result<Reg> {
         self.emit_rust_context_call(
             RustContextTarget::Borrowed { context, operation },
             args,
@@ -374,10 +381,10 @@ impl KernelBuilder for Direct<'_, '_> {
     }
     fn rust_static_call(
         &mut self,
-        symbol: &'static splice::StaticRustSymbol,
+        symbol: &'static splice_core::StaticRustSymbol,
         args: &[Reg],
         slices: &[ContextSlice],
-    ) -> splice::Result<Reg> {
+    ) -> splice_core::Result<Reg> {
         self.emit_rust_context_call(RustContextTarget::Static(symbol), args, slices)
     }
     fn call_kernel(
@@ -396,7 +403,7 @@ impl KernelBuilder for Direct<'_, '_> {
         args: &[Reg],
         buffers: &[Buffer],
         stage: StagedBody<'_>,
-    ) -> splice::Result<Reg> {
+    ) -> splice_core::Result<Reg> {
         let (arity, kinds) = key.signature();
         self.staged_call(arity, kinds, args, buffers, Some(key), stage)
     }
@@ -408,8 +415,8 @@ impl Direct<'_, '_> {
         target: RustContextTarget,
         args: &[Reg],
         slices: &[ContextSlice],
-    ) -> splice::Result<Reg> {
-        splice::hir::check_rust_context_call(
+    ) -> splice_core::Result<Reg> {
+        splice_core::hir::check_rust_context_call(
             self.kinds,
             target,
             args.iter().map(|&r| self.reg_type(r)),
@@ -428,7 +435,7 @@ impl Direct<'_, '_> {
         buffers: &[Buffer],
         key: Option<Specialization>,
         stage: StagedBody<'_>,
-    ) -> splice::Result<Reg> {
+    ) -> splice_core::Result<Reg> {
         check_call(
             arity,
             kinds,

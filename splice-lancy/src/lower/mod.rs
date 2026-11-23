@@ -10,7 +10,7 @@ mod tests;
 
 use lancy::hir::{self, Block, Function, Op, Value};
 use lancy::support::slotmap::DenseMap;
-use splice::{
+use splice_core::{
     BufferKind, ContextArguments, StaticRustSymbol,
     frontend::{Body, KernelBuilder, KernelSource, Specialization},
     hir::{
@@ -71,7 +71,7 @@ pub(crate) fn build_with_source(
 
 impl<'a> Builder<'a> {
     fn new(arity: usize, kinds: &'a [BufferKind]) -> Result<Self, String> {
-        splice::hir::check_context_layout(kinds)?;
+        splice_core::hir::check_context_layout(kinds)?;
         let count = u32::try_from(arity).map_err(|_| "too many kernel parameters")?;
         if count == u32::MAX {
             return Err("too many kernel parameters".into());
@@ -384,7 +384,12 @@ impl Builder<'_> {
         }
         Op::Call(self.graph.add_call(callee, &values))
     }
-    fn define_rust_call(&mut self, dst: Reg, import: RustCall, args: &[Reg]) -> splice::Result<()> {
+    fn define_rust_call(
+        &mut self,
+        dst: Reg,
+        import: RustCall,
+        args: &[Reg],
+    ) -> splice_core::Result<()> {
         import.validate(args.iter().map(|&arg| self.reg_type(arg)))?;
         let [a, b] = self.rust_operands(args);
         self.define(dst, Op::RustCall(import.symbol, a, b));
@@ -396,8 +401,11 @@ impl Builder<'_> {
         dst: Reg,
         import: &'static RustPacketSymbol,
         args: &[Reg],
-    ) -> splice::Result<()> {
-        splice::hir::check_rust_packet_call(import, args.iter().map(|&arg| self.reg_type(arg)))?;
+    ) -> splice_core::Result<()> {
+        splice_core::hir::check_rust_packet_call(
+            import,
+            args.iter().map(|&arg| self.reg_type(arg)),
+        )?;
         self.shared_loads.clear();
         if self.current.is_some() {
             let args: Vec<_> = args.iter().map(|&arg| self.scalar(arg)).collect();
@@ -413,8 +421,8 @@ impl Builder<'_> {
         target: RustContextTarget,
         args: &[Reg],
         slices: &[ContextSlice],
-    ) -> splice::Result<()> {
-        splice::hir::check_rust_context_call(
+    ) -> splice_core::Result<()> {
+        splice_core::hir::check_rust_context_call(
             self.kinds,
             target,
             args.iter().map(|&arg| self.reg_type(arg)),
@@ -437,7 +445,7 @@ impl Builder<'_> {
         {
             let [a, b] = self.rust_operands(args);
             (
-                hir::RustContextImport::Scalars(splice::invoke_runtime_context),
+                hir::RustContextImport::Scalars(splice_core::invoke_runtime_context),
                 [context, operation, a, b],
             )
         } else {
@@ -485,7 +493,7 @@ impl Builder<'_> {
             }
             let zero = self.graph.append(block, Op::Const(0)).unwrap();
             let entry = match target {
-                RustContextTarget::Borrowed { .. } => splice::invoke_packet_runtime_context,
+                RustContextTarget::Borrowed { .. } => splice_core::invoke_packet_runtime_context,
                 RustContextTarget::Static(symbol) => symbol.entry(),
             };
             // The static entry reads only the packet (arg 2). Reuse its live
@@ -518,8 +526,8 @@ impl Builder<'_> {
         buffers: &[Buffer],
         key: Option<Specialization>,
         body: Body<'_>,
-    ) -> splice::Result<Reg> {
-        splice::hir::check_call(
+    ) -> splice_core::Result<Reg> {
+        splice_core::hir::check_call(
             arity,
             kinds,
             args.iter().map(|&r| self.reg_type(r)),
@@ -587,7 +595,7 @@ impl KernelBuilder for Builder<'_> {
         self.types.push(ty);
         r
     }
-    fn simd(&mut self, inst: Simd, args: &[Reg]) -> splice::Result<Option<Reg>> {
+    fn simd(&mut self, inst: Simd, args: &[Reg]) -> splice_core::Result<Option<Reg>> {
         let value = self.emit_simd(inst, args)?;
         let dst = inst.output().map(|ty| self.typed_local(ty));
         self.bind_simd(dst, value);
@@ -667,7 +675,7 @@ impl KernelBuilder for Builder<'_> {
         let v = self.scalar(value);
         self.end(Exit::Return(v));
     }
-    fn trap_bounds(&mut self) -> splice::Result<()> {
+    fn trap_bounds(&mut self) -> splice_core::Result<()> {
         if let Some(block) = self.current {
             let zero = self.graph.append(block, Op::Const(0)).unwrap();
             self.graph.append(block, Op::BoundsCheck(zero, zero));
@@ -675,7 +683,7 @@ impl KernelBuilder for Builder<'_> {
         }
         Ok(())
     }
-    fn rust_call(&mut self, import: RustCall, args: &[Reg]) -> splice::Result<Reg> {
+    fn rust_call(&mut self, import: RustCall, args: &[Reg]) -> splice_core::Result<Reg> {
         let dst = self.local();
         self.define_rust_call(dst, import, args)?;
         Ok(dst)
@@ -684,7 +692,7 @@ impl KernelBuilder for Builder<'_> {
         &mut self,
         import: &'static RustPacketSymbol,
         args: &[Reg],
-    ) -> splice::Result<Reg> {
+    ) -> splice_core::Result<Reg> {
         let dst = self.local();
         self.define_packet_call(dst, import, args)?;
         Ok(dst)
@@ -695,7 +703,7 @@ impl KernelBuilder for Builder<'_> {
         operation: u32,
         args: &[Reg],
         slices: &[ContextSlice],
-    ) -> splice::Result<Reg> {
+    ) -> splice_core::Result<Reg> {
         let dst = self.local();
         self.define_context_call(
             dst,
@@ -710,7 +718,7 @@ impl KernelBuilder for Builder<'_> {
         symbol: &'static StaticRustSymbol,
         args: &[Reg],
         slices: &[ContextSlice],
-    ) -> splice::Result<Reg> {
+    ) -> splice_core::Result<Reg> {
         let dst = self.local();
         self.define_context_call(dst, RustContextTarget::Static(symbol), args, slices)?;
         Ok(dst)
@@ -731,7 +739,7 @@ impl KernelBuilder for Builder<'_> {
         args: &[Reg],
         buffers: &[Buffer],
         body: Body<'_>,
-    ) -> splice::Result<Reg> {
+    ) -> splice_core::Result<Reg> {
         let (arity, kinds) = key.signature();
         self.staged_call(arity, kinds, args, buffers, Some(key), body)
     }

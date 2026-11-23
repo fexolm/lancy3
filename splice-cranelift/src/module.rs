@@ -11,7 +11,7 @@ use cranelift_codegen::{
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
 use cranelift_jit::JITModule;
 use cranelift_module::{FuncId, Linkage, Module};
-use splice::{Function, hir::Instr};
+use splice_core::{Function, hir::Instr};
 use std::{
     borrow::Cow,
     collections::{HashMap, HashSet, hash_map::Entry},
@@ -28,7 +28,7 @@ fn declare(
     f: &Function,
     entry: bool,
     profile_id: Option<usize>,
-) -> splice::Result<FuncId> {
+) -> splice_core::Result<FuncId> {
     let mut sig = module.make_signature();
     if entry {
         sig.params.extend([AbiParam::new(I64); 2]);
@@ -59,8 +59,13 @@ pub(super) struct KernelModule<'a> {
 }
 
 impl<'a> KernelModule<'a> {
-    pub fn lower(module: &mut JITModule, root: &'a Function, debug: bool) -> splice::Result<Self> {
-        let _span = tracing::debug_span!(target: "splice::compile", "lower_cranelift_ir").entered();
+    pub fn lower(
+        module: &mut JITModule,
+        root: &'a Function,
+        debug: bool,
+    ) -> splice_core::Result<Self> {
+        let _span =
+            tracing::debug_span!(target: "splice_core::compile", "lower_cranelift_ir").entered();
         let profile = splice_jit::perf_enabled();
         let entry = declare(module, root, true, profile.then_some(0))?;
         let mut pending = vec![(root, entry)];
@@ -143,8 +148,8 @@ impl<'a> KernelModule<'a> {
         self,
         ctx: &mut Context,
         debug: bool,
-        mut define: impl FnMut(FuncId, &mut Context) -> splice::Result<()>,
-    ) -> splice::Result<()> {
+        mut define: impl FnMut(FuncId, &mut Context) -> splice_core::Result<()>,
+    ) -> splice_core::Result<()> {
         if debug {
             for (id, body) in self.bodies {
                 ctx.func = body;
@@ -167,7 +172,7 @@ impl<'a> KernelModule<'a> {
         let mut pending = vec![(self.entry, root)];
         while let Some((id, func)) = pending.pop() {
             ctx.func = func;
-            tracing::debug_span!(target: "splice::compile", "inline_cranelift_ir")
+            tracing::debug_span!(target: "splice_core::compile", "inline_cranelift_ir")
                 .in_scope(|| ctx.inline(&mut inliner))
                 .map_err(|e| e.to_string())?;
             for child in local_callees(&ctx.func) {

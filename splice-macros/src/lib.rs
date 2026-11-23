@@ -12,6 +12,7 @@ mod overflow;
 mod scalar;
 
 /// Derive a value key for a struct or enum used as a specialization parameter.
+/// `#[splice(crate = path)]` names the Splice crate when it is not `::splice`.
 #[proc_macro_derive(ComptimeKey, attributes(splice))]
 pub fn comptime_key(item: TokenStream) -> TokenStream {
     comptime_key::expand(parse_macro_input!(item as syn::DeriveInput))
@@ -20,9 +21,14 @@ pub fn comptime_key(item: TokenStream) -> TokenStream {
 }
 
 /// Describe the owned fields of a Rust structure for Splice's typed IR.
-#[proc_macro_derive(KernelType)]
+/// `#[splice(crate = path)]` names the Splice crate when it is not `::splice`.
+#[proc_macro_derive(KernelType, attributes(splice))]
 pub fn kernel_type(item: TokenStream) -> TokenStream {
     let item = parse_macro_input!(item as DeriveInput);
+    let root = match derive_root(&item.attrs) {
+        Ok(root) => root,
+        Err(error) => return error.into_compile_error().into(),
+    };
     let Data::Struct(data) = item.data else {
         return Error::new_spanned(item.ident, "KernelType can only be derived for structs")
             .into_compile_error()
@@ -40,18 +46,33 @@ pub fn kernel_type(item: TokenStream) -> TokenStream {
             Member::Unnamed(index) => index.index.to_string(),
         };
         let ty = &field.ty;
-        quote::quote!(::splice::KernelField {
+        quote::quote!(#root::KernelField {
             name: #label,
             offset: ::core::mem::offset_of!(Self, #member),
             type_name: ::core::any::type_name::<#ty>,
         })
     });
     quote::quote! {
-        impl #params ::splice::KernelType for #name #args #where_ {
-            const FIELDS: &'static [::splice::KernelField] = &[#(#fields),*];
+        impl #params #root::KernelType for #name #args #where_ {
+            const FIELDS: &'static [#root::KernelField] = &[#(#fields),*];
         }
     }
     .into()
+}
+
+/// The Splice crate path a derive names with `#[splice(crate = path)]`.
+fn derive_root(attrs: &[syn::Attribute]) -> syn::Result<Path> {
+    let mut root = None;
+    for attr in attrs.iter().filter(|a| a.path().is_ident("splice")) {
+        attr.parse_nested_meta(|meta| {
+            if !meta.path.is_ident("crate") || root.is_some() {
+                return Err(meta.error("expected `crate = path`, at most once"));
+            }
+            root = Some(meta.value()?.parse()?);
+            Ok(())
+        })?;
+    }
+    Ok(root.unwrap_or_else(|| parse_quote!(::splice)))
 }
 
 /// Publish a free function or all methods of an `impl` or `trait` block.

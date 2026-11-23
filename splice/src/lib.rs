@@ -1,4 +1,49 @@
 //! Splice stages Rust kernels into an enabled code generation backend.
+//!
+//! Kernels have distinct call argument types, even when their fields match.
+//! ```compile_fail,E0271
+//! use splice::{Executable, TypedKernel, kernel};
+//! #[kernel]
+//! fn first(x: i32) -> i32 { x }
+//! #[kernel]
+//! fn second(x: i32) -> i32 { x }
+//! fn call<K: Executable>(code: TypedKernel<first::Signature, K>) {
+//!     let _ = code.call(second::CallArgs { x: 1 });
+//! }
+//! ```
+//!
+//! Publish associated functions by marking their enclosing block.
+//! ```
+//! struct Plan;
+//! #[splice::kernel]
+//! impl Plan {
+//!     fn zero() -> i32 { 0 }
+//! }
+//! ```
+//! Marking only the method is rejected. Stable rustdoc does not check error
+//! codes, so each rejected example differs from the accepted one above it in
+//! the rejected property alone.
+//! ```compile_fail
+//! struct Plan;
+//! impl Plan {
+//!     #[splice::kernel]
+//!     fn zero() -> i32 { 0 }
+//! }
+//! ```
+//!
+//! A published trait implementation requires a published trait declaration,
+//! even when the implementation inherits every method.
+//! ```
+//! #[splice::kernel]
+//! trait Plan { fn zero() -> i32 { 0 } }
+//! #[splice::kernel]
+//! impl Plan for () {}
+//! ```
+//! ```compile_fail
+//! trait Plan { fn zero() -> i32 { 0 } }
+//! #[splice::kernel]
+//! impl Plan for () {}
+//! ```
 
 pub use splice_core::*;
 

@@ -3,10 +3,10 @@
 //! and comparison masks). Labels and mutable registers make control flow explicit.
 //!
 //! ```
-//! use splice::kernel;
+//! use splice_core::kernel;
 //! use splice_text::Text;
 //!
-//! #[kernel]
+//! #[kernel(crate = splice_core)]
 //! fn adjust(#[comptime] double: bool, value: i32) -> i32 {
 //!     if double { value.wrapping_mul(2) } else { value.wrapping_add(5) }
 //! }
@@ -19,8 +19,8 @@
 //! ```
 #![forbid(unsafe_code)]
 
-use splice::hir::{Binary, Buffer, Instr, Reg};
-use splice::{Codegen, Function};
+use splice_core::hir::{Binary, Buffer, Instr, Reg};
+use splice_core::{Codegen, Function};
 use std::fmt::{self, Write};
 use std::sync::Arc;
 
@@ -32,17 +32,18 @@ impl Codegen for Text {
 
     fn build_with_options(
         arity: usize,
-        kinds: &[splice::BufferKind],
-        body: splice::frontend::Body<'_>,
-        options: splice::BuildOptions,
-    ) -> splice::Result<Self::Output> {
-        Self::compile(&splice::frontend::materialize_with_options(
+        kinds: &[splice_core::BufferKind],
+        body: splice_core::frontend::Body<'_>,
+        options: splice_core::BuildOptions,
+    ) -> splice_core::Result<Self::Output> {
+        Self::compile(&splice_core::frontend::materialize_with_options(
             arity, kinds, body, options,
         )?)
     }
 
-    fn compile_raw(root: &Function) -> splice::Result<String> {
-        let _span = tracing::debug_span!(target: "splice::compile", "render_text_ir").entered();
+    fn compile_raw(root: &Function) -> splice_core::Result<String> {
+        let _span =
+            tracing::debug_span!(target: "splice_core::compile", "render_text_ir").entered();
         let mut output = String::new();
         render(root, &mut output).map_err(|error| error.to_string())?;
         Ok(output)
@@ -118,7 +119,7 @@ fn render(root: &Function, out: &mut String) -> fmt::Result {
             match instruction {
                 Instr::Debug(_) => {}
                 Instr::Simd { dst, inst, args } => {
-                    use splice::hir::SimdOp::*;
+                    use splice_core::hir::SimdOp::*;
                     write!(out, "    ")?;
                     if let Some(d) = dst {
                         write!(out, "{} = ", reg(*d))?;
@@ -138,10 +139,10 @@ fn render(root: &Function, out: &mut String) -> fmt::Result {
                         Iota => ("iota", None),
                         Shuffle(order) => (
                             match order {
-                                splice::simd::Shuffle::InterleaveLow => "interleave_low",
-                                splice::simd::Shuffle::InterleaveHigh => "interleave_high",
-                                splice::simd::Shuffle::DeinterleaveEven => "deinterleave_even",
-                                splice::simd::Shuffle::DeinterleaveOdd => "deinterleave_odd",
+                                splice_core::simd::Shuffle::InterleaveLow => "interleave_low",
+                                splice_core::simd::Shuffle::InterleaveHigh => "interleave_high",
+                                splice_core::simd::Shuffle::DeinterleaveEven => "deinterleave_even",
+                                splice_core::simd::Shuffle::DeinterleaveOdd => "deinterleave_odd",
                             },
                             None,
                         ),
@@ -248,10 +249,10 @@ fn render(root: &Function, out: &mut String) -> fmt::Result {
                 } => {
                     write!(out, "    {} = rust ", reg(*dst))?;
                     match target {
-                        splice::hir::RustContextTarget::Borrowed { context, operation } => {
+                        splice_core::hir::RustContextTarget::Borrowed { context, operation } => {
                             write!(out, "context {}.{}(", context.0, operation)?;
                         }
-                        splice::hir::RustContextTarget::Static(import) => {
+                        splice_core::hir::RustContextTarget::Static(import) => {
                             write!(out, "{}(", import.name())?;
                         }
                     }

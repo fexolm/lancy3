@@ -1,6 +1,6 @@
-use splice::frontend::Body;
-use splice::hir::{Binary, Buffer, Label, Reg};
-use splice::{BufferArg, BufferKind, Codegen, Executable};
+use splice_core::frontend::Body;
+use splice_core::hir::{Binary, Buffer, Label, Reg};
+use splice_core::{BufferArg, BufferKind, Codegen, Executable};
 use splice_llvm::Llvm;
 
 #[test]

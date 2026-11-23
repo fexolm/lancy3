@@ -1,8 +1,8 @@
-use splice::{Codegen, hir::FunctionBuilder, kernel};
+use splice_core::{Codegen, hir::FunctionBuilder, kernel};
 use splice_text::Text;
 use std::sync::Arc;
 
-#[kernel]
+#[kernel(crate = splice_core)]
 fn stop_early(#[comptime] bail: bool, x: i32) -> i32 {
     if bail {
         return 17;
@@ -13,7 +13,7 @@ fn stop_early(#[comptime] bail: bool, x: i32) -> i32 {
     x.wrapping_add(42)
 }
 
-#[kernel]
+#[kernel(crate = splice_core)]
 fn unroll_until(#[comptime] steps: &[i32], mut x: i32) -> i32 {
     for step in steps {
         if *step == 0 {
@@ -28,7 +28,7 @@ fn unroll_until(#[comptime] steps: &[i32], mut x: i32) -> i32 {
 }
 
 #[test]
-fn rust_source_prunes_host_transfers_but_keeps_runtime_control() -> splice::Result<()> {
+fn rust_source_prunes_host_transfers_but_keeps_runtime_control() -> splice_core::Result<()> {
     let early = stop_early::print(true)?;
     assert!(early.contains("return 17"));
     assert!(!early.contains("23"));
@@ -46,7 +46,7 @@ fn rust_source_prunes_host_transfers_but_keeps_runtime_control() -> splice::Resu
     Ok(())
 }
 
-#[kernel]
+#[kernel(crate = splice_core)]
 fn host_iterations(#[comptime] n: i32, x: i32) -> i32 {
     let mut k = 0;
     while k < n {
@@ -64,7 +64,7 @@ fn host_iterations(#[comptime] n: i32, x: i32) -> i32 {
     x + k
 }
 
-#[kernel]
+#[kernel(crate = splice_core)]
 fn print_division(#[comptime] d: i32, x: i32) -> i32 {
     if x > 0 {
         let q = 100 / d;
@@ -74,7 +74,7 @@ fn print_division(#[comptime] d: i32, x: i32) -> i32 {
     }
 }
 
-#[kernel]
+#[kernel(crate = splice_core)]
 fn print_remainder(#[comptime] a: i32, #[comptime] d: i32, marks: &mut [i32], x: i32) -> i32 {
     match x {
         0 => 9,
@@ -88,16 +88,16 @@ fn print_remainder(#[comptime] a: i32, #[comptime] d: i32, marks: &mut [i32], x:
 }
 
 mod __splice_source_child_0 {
-    pub use splice::simd::Lane;
+    pub use splice_core::simd::Lane;
 }
 
-#[kernel]
+#[kernel(crate = splice_core)]
 fn identifier_in_path(x: i32) -> i32 {
     __splice_source_child_0::Lane::<i32>::splat(x).last()
 }
 
 #[test]
-fn printer_and_builder_specialize_host_iterations() -> splice::Result<()> {
+fn printer_and_builder_specialize_host_iterations() -> splice_core::Result<()> {
     assert_eq!(host_iterations(3, 5), 12);
     assert!(host_iterations::print(3)?.contains("x + 7"));
     assert!(
@@ -107,7 +107,7 @@ fn printer_and_builder_specialize_host_iterations() -> splice::Result<()> {
 }
 
 #[test]
-fn division_under_runtime_control_faults_only_in_the_selected_arm() -> splice::Result<()> {
+fn division_under_runtime_control_faults_only_in_the_selected_arm() -> splice_core::Result<()> {
     assert_eq!(print_division(0, 0), 9);
     let text = print_division::print(0)?;
     assert!(text.contains("if x > 0"));
@@ -125,7 +125,7 @@ fn division_under_runtime_control_faults_only_in_the_selected_arm() -> splice::R
 }
 
 #[test]
-fn source_substitutions_leave_other_identifiers_intact() -> splice::Result<()> {
+fn source_substitutions_leave_other_identifiers_intact() -> splice_core::Result<()> {
     assert!(identifier_in_path::print()?.contains("__splice_source_child_0"));
     assert!(
         identifier_in_path::build::<Text>(identifier_in_path::BuildArgs {})?.contains("return")
@@ -133,13 +133,14 @@ fn source_substitutions_leave_other_identifiers_intact() -> splice::Result<()> {
     Ok(())
 }
 
-#[derive(splice::ComptimeKey)]
+#[derive(splice_core::ComptimeKey)]
+#[splice(crate = splice_core)]
 enum Step {
     Scale(i32),
     Offset(i32),
 }
 
-#[kernel]
+#[kernel(crate = splice_core)]
 fn apply(#[comptime] step: &Step, x: i32) -> i32 {
     match step {
         Step::Scale(factor) => x.wrapping_mul(*factor),
@@ -147,7 +148,7 @@ fn apply(#[comptime] step: &Step, x: i32) -> i32 {
     }
 }
 
-#[kernel]
+#[kernel(crate = splice_core)]
 fn adjust(#[comptime] steps: &[Step], data: &mut [i32]) -> i32 {
     for i in 0..data.len() as i32 {
         let mut x = data[i as usize];
@@ -160,8 +161,8 @@ fn adjust(#[comptime] steps: &[Step], data: &mut [i32]) -> i32 {
 }
 
 #[test]
-fn only_the_chosen_comptime_arm_is_printed() -> splice::Result<()> {
-    fn specialize<B: Codegen>(step: &Step) -> splice::Result<B::Output> {
+fn only_the_chosen_comptime_arm_is_printed() -> splice_core::Result<()> {
+    fn specialize<B: Codegen>(step: &Step) -> splice_core::Result<B::Output> {
         Ok(apply::build::<B>(apply::BuildArgs { step })?.into_inner())
     }
     let scale: String = specialize::<Text>(&Step::Scale(13))?;
@@ -179,7 +180,7 @@ fn only_the_chosen_comptime_arm_is_printed() -> splice::Result<()> {
 }
 
 #[test]
-fn unrolled_calls_reuse_equal_steps_and_keep_the_runtime_loop() -> splice::Result<()> {
+fn unrolled_calls_reuse_equal_steps_and_keep_the_runtime_loop() -> splice_core::Result<()> {
     let steps = [Step::Scale(3), Step::Offset(7), Step::Scale(3)];
     let listing = adjust::build::<Text>(adjust::BuildArgs { steps: &steps })?;
     assert_eq!(
@@ -205,7 +206,7 @@ fn unrolled_calls_reuse_equal_steps_and_keep_the_runtime_loop() -> splice::Resul
 }
 
 #[test]
-fn shared_callable_has_one_definition_and_two_uses() -> splice::Result<()> {
+fn shared_callable_has_one_definition_and_two_uses() -> splice_core::Result<()> {
     let mut leaf = FunctionBuilder::new(1);
     leaf.ret(leaf.arg(0));
     let leaf = Arc::new(leaf.finish()?);

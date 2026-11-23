@@ -1,7 +1,7 @@
 //! Bounds-checked slice operations over one scalable Lancy vector.
 use super::{Builder, KernelBuilder};
 use lancy::hir::{Binary, Lane, Op, Scale, Simd as V, Ternary, Type, Unary, Value, VectorAddress};
-use splice::{
+use splice_core::{
     hir::{Reg, Simd, SimdOp, ValueType},
     simd::Element,
 };
@@ -34,7 +34,11 @@ fn stride(e: Element) -> Scale {
 }
 
 impl Builder<'_> {
-    pub(super) fn emit_simd(&mut self, inst: Simd, args: &[Reg]) -> splice::Result<Option<Value>> {
+    pub(super) fn emit_simd(
+        &mut self,
+        inst: Simd,
+        args: &[Reg],
+    ) -> splice_core::Result<Option<Value>> {
         use SimdOp::*;
         let types = args
             .iter()
@@ -117,7 +121,7 @@ impl Builder<'_> {
                 return Ok(result);
             }
             Shuffle(order) => {
-                use splice::simd::Shuffle as S;
+                use splice_core::simd::Shuffle as S;
                 let ids = self.vec_op(V::Iota(Lane::I32));
                 let one = self.splat_bits(Lane::I32, 1);
                 let indices = match order {
@@ -170,7 +174,7 @@ impl Builder<'_> {
                 let addr = self.val(Op::Bitcast(Type::U64, ptr));
                 let low = self.val(Op::Cast(Type::I32, addr));
                 let neg = self.val(Op::Unary(Unary::Neg, low));
-                let mask = self.val(Op::Const((splice::simd::vector_bytes() - 1) as i32));
+                let mask = self.val(Op::Const((splice_core::simd::vector_bytes() - 1) as i32));
                 let bytes = self.val(Op::Bin(Binary::And, neg, mask));
                 let two = self.val(Op::Const(2));
                 return Ok(Some(self.val(Op::Bin(Binary::Shr, bytes, two))));

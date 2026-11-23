@@ -1,7 +1,7 @@
 use super::{Builder, Exit};
 use lancy::hir::{Block, Function, Op, Terminator, Value};
 use lancy::support::slotmap::DenseMap;
-use splice::hir::Reg;
+use splice_core::hir::Reg;
 
 impl Builder<'_> {
     /// All predecessors are known now. Walk backwards through single-entry

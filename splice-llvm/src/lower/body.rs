@@ -8,10 +8,10 @@ use inkwell::context::Context;
 use inkwell::types::BasicTypeEnum;
 use inkwell::values::{BasicMetadataValueEnum, BasicValue, FunctionValue, IntValue, PointerValue};
 use inkwell::{IntPredicate, module::Module};
-use splice::hir::{
+use splice_core::hir::{
     Binary, Buffer, BufferKind, ContextSlice, Instr, Label, Reg, RustContextTarget, ValueType,
 };
-use splice::{ContextArguments, Function};
+use splice_core::{ContextArguments, Function};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -49,7 +49,7 @@ pub(super) struct Callees<'a, 'ctx> {
 struct Slice<'ctx> {
     data: PointerValue<'ctx>,
     len: IntValue<'ctx>,
-    element: splice::simd::Element,
+    element: splice_core::simd::Element,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -485,7 +485,7 @@ impl<'a, 'ctx> Body<'a, 'ctx> {
     pub(super) fn rust_call(
         &mut self,
         dst: Reg,
-        import: splice::hir::RustCall,
+        import: splice_core::hir::RustCall,
         args: &[Reg],
     ) -> Built<()> {
         // The typed extern "C" entry remains resident in this process. Its
@@ -533,7 +533,7 @@ impl<'a, 'ctx> Body<'a, 'ctx> {
                 (
                     self.slices[context.index()].data,
                     operation,
-                    splice::invoke_runtime_context as *const (),
+                    splice_core::invoke_runtime_context as *const (),
                     word.into(),
                     words[0].into(),
                     words[1].into(),
@@ -544,7 +544,7 @@ impl<'a, 'ctx> Body<'a, 'ctx> {
                     RustContextTarget::Borrowed { context, operation } => (
                         self.slices[context.index()].data,
                         operation,
-                        splice::invoke_packet_runtime_context as *const (),
+                        splice_core::invoke_packet_runtime_context as *const (),
                     ),
                     RustContextTarget::Static(symbol) => (packet, 0, symbol.entry() as *const ()),
                 };
@@ -579,7 +579,7 @@ impl<'a, 'ctx> Body<'a, 'ctx> {
     pub(super) fn rust_packet_call(
         &mut self,
         dst: Reg,
-        import: &'static splice::hir::RustPacketSymbol,
+        import: &'static splice_core::hir::RustPacketSymbol,
         args: &[Reg],
     ) -> Built<()> {
         let packet = self.context_packet(args, &[])?;

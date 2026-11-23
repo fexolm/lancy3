@@ -11,7 +11,7 @@ pub(super) struct Point {
 
 pub(super) type Points = HashMap<usize, Vec<Point>>;
 
-pub(super) fn read(bytes: &[u8]) -> splice::Result<Points> {
+pub(super) fn read(bytes: &[u8]) -> splice_core::Result<Points> {
     let mut bytes = bytes;
     let header = take::<16>(&mut bytes)?;
     if header[..4] != [3, 0, 0, 0] {
@@ -50,12 +50,12 @@ pub(super) fn read(bytes: &[u8]) -> splice::Result<Points> {
     Ok(points)
 }
 
-fn skip(bytes: &mut &[u8], size: usize) -> splice::Result<()> {
+fn skip(bytes: &mut &[u8], size: usize) -> splice_core::Result<()> {
     *bytes = bytes.get(size..).ok_or("truncated LLVM stack map")?;
     Ok(())
 }
 
-fn take<const N: usize>(bytes: &mut &[u8]) -> splice::Result<[u8; N]> {
+fn take<const N: usize>(bytes: &mut &[u8]) -> splice_core::Result<[u8; N]> {
     let (record, rest) = bytes
         .split_first_chunk::<N>()
         .ok_or("truncated LLVM stack map")?;

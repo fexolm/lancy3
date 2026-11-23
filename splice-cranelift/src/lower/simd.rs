@@ -9,7 +9,7 @@ use cranelift_codegen::ir::{
     types::{F32X4, F64X2, I8X16, I16X8, I32, I32X4, I64, I64X2},
 };
 use cranelift_frontend::{FunctionBuilder, Variable};
-use splice::{
+use splice_core::{
     Function,
     hir::{Reg, Simd, SimdOp, ValueType},
     simd::Element,
@@ -40,10 +40,13 @@ impl Registers {
             starts.push(vars.len());
             let (ty, count) = match f.reg_type(Reg(index as u32)) {
                 ValueType::Scalar => (I32, 1),
-                ValueType::Vector(e) => (chunk_type(e), splice::simd::vector_bytes() / CHUNK_BYTES),
+                ValueType::Vector(e) => (
+                    chunk_type(e),
+                    splice_core::simd::vector_bytes() / CHUNK_BYTES,
+                ),
                 ValueType::Mask(e) => (
                     chunk_type(e.index()),
-                    splice::simd::vector_bytes() / CHUNK_BYTES,
+                    splice_core::simd::vector_bytes() / CHUNK_BYTES,
                 ),
             };
             vars.extend((0..count).map(|_| b.declare_var(ty)));
@@ -132,7 +135,7 @@ pub(super) fn emit(
             let neg = b.ins().ineg(addr);
             let bytes = b
                 .ins()
-                .band_imm(neg, (splice::simd::vector_bytes() - 1) as i64);
+                .band_imm(neg, (splice_core::simd::vector_bytes() - 1) as i64);
             vec![b.ins().ushr_imm(bytes, 2)]
         }
         Swizzle => swizzle_words(b, &inputs[0], &inputs[1], byte_order),
@@ -203,7 +206,7 @@ pub(super) fn emit(
                 _ => count,
             };
             let limit = b.ins().splat(ty, count);
-            (0..splice::simd::vector_bytes() / CHUNK_BYTES)
+            (0..splice_core::simd::vector_bytes() / CHUNK_BYTES)
                 .map(|part| {
                     let indices = lane_constant(b, element.index(), part, |i| i as u64);
                     b.ins().icmp(IntCC::SignedLessThan, indices, limit)
@@ -212,7 +215,7 @@ pub(super) fn emit(
         }
         SplatScalar => {
             let chunk = b.ins().splat(chunk_type(element), inputs[0][0]);
-            vec![chunk; splice::simd::vector_bytes() / CHUNK_BYTES]
+            vec![chunk; splice_core::simd::vector_bytes() / CHUNK_BYTES]
         }
         Shuffle(order) => {
             let n = element.lanes();
@@ -243,7 +246,7 @@ pub(super) fn emit(
         }
         ExtractWrapping | ReplaceWrapping => {
             use cranelift_codegen::ir::{StackSlotData, StackSlotKind};
-            let bytes = splice::simd::vector_bytes();
+            let bytes = splice_core::simd::vector_bytes();
             let slot = b.create_sized_stack_slot(StackSlotData::new(
                 StackSlotKind::ExplicitSlot,
                 bytes as u32,
@@ -313,7 +316,7 @@ pub(super) fn emit(
             }
             vec![b.ins().bmask(I32, combined.unwrap())]
         }
-        _ => (0..splice::simd::vector_bytes() / CHUNK_BYTES)
+        _ => (0..splice_core::simd::vector_bytes() / CHUNK_BYTES)
             .map(|i| packed(b, inst, &inputs, i))
             .collect(),
     };
@@ -691,7 +694,7 @@ impl Memory<'_> {
         self.guard(b, invalid);
         let base = self.pointer(b, start);
         let mut out = Vec::new();
-        for part in 0..splice::simd::vector_bytes() / CHUNK_BYTES {
+        for part in 0..splice_core::simd::vector_bytes() / CHUNK_BYTES {
             let offset = (part * CHUNK_BYTES) as i32;
             if let Some(values) = self.values {
                 b.ins().store(MemFlags::new(), values[part], base, offset);
@@ -870,7 +873,7 @@ impl Memory<'_> {
         })
     }
     fn ordered(&self, b: &mut FunctionBuilder, check_lanes: bool) -> Vec<Value> {
-        (0..splice::simd::vector_bytes() / CHUNK_BYTES)
+        (0..splice_core::simd::vector_bytes() / CHUNK_BYTES)
             .filter_map(|part| {
                 let value = self.initial(b, part);
                 self.ordered_part(b, part, value, check_lanes)

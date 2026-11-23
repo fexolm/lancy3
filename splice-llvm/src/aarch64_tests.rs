@@ -1,9 +1,9 @@
 use super::{Llvm, build_module, jit, lower, target};
 use inkwell::{context::Context, targets::FileType};
-use splice::{Codegen, kernel, simd::Lane};
+use splice_core::{Codegen, kernel, simd::Lane};
 use splice_target::{Profile, simd};
 
-#[kernel]
+#[kernel(crate = splice_core)]
 fn xor_three(a: &[i32], b: &[i32], c: &[i32], out: &mut [i32]) -> i32 {
     let x = Lane::load(a, 0);
     let y = Lane::load(b, 0);
@@ -137,7 +137,7 @@ fn sve_code_is_only_generated_and_run_at_power_of_two_vector_lengths() {
         return;
     };
     let input: Vec<i32> = (0..16).collect();
-    let call = |kernel: &splice::TypedKernel<_, crate::LlvmKernel>, vl| {
+    let call = |kernel: &splice_core::TypedKernel<_, crate::LlvmKernel>, vl| {
         std::thread::scope(|scope| {
             scope
                 .spawn(|| {

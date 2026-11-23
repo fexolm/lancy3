@@ -42,18 +42,18 @@ impl Drop for Jit {
 impl Jit {
     pub fn compile(
         auto_vectorize: bool,
-        source: Option<&splice::Function>,
-        options: splice::BuildOptions,
+        source: Option<&splice_core::Function>,
+        options: splice_core::BuildOptions,
         populate: impl for<'ctx> FnOnce(
             &'ctx Context,
             &Module<'ctx>,
         ) -> Result<
-            Option<&'static splice::frontend::KernelSource>,
+            Option<&'static splice_core::frontend::KernelSource>,
             String,
         >,
     ) -> Result<(Self, Entry, Option<splice_jit::Registration>), String> {
-        let debug = options == splice::BuildOptions::Debug;
-        let target = tracing::debug_span!(target: "splice::compile", "llvm_target")
+        let debug = options == splice_core::BuildOptions::Debug;
+        let target = tracing::debug_span!(target: "splice_core::compile", "llvm_target")
             .in_scope(|| host_machine_with_debug(debug))?;
         let context = Context::create();
         let mut kernel_source = None;
@@ -64,7 +64,7 @@ impl Jit {
         if !debug {
             optimize(&module, &target, auto_vectorize)?;
         }
-        let object = tracing::debug_span!(target: "splice::compile", "emit_llvm_object")
+        let object = tracing::debug_span!(target: "splice_core::compile", "emit_llvm_object")
             .in_scope(|| target.write_to_memory_buffer(&module, FileType::Object))
             .map_err(|error| error.to_string())?;
         let info = if debug || splice_jit::perf_enabled() {
@@ -72,7 +72,7 @@ impl Jit {
         } else {
             None
         };
-        let jit = tracing::debug_span!(target: "splice::compile", "link_llvm_object")
+        let jit = tracing::debug_span!(target: "splice_core::compile", "link_llvm_object")
             .in_scope(|| Self::link(object))?;
         let address = jit.lookup(c"splice_entry")?;
         let registration = info
@@ -137,8 +137,9 @@ pub(crate) fn optimize(
     target: &TargetMachine,
     auto_vectorize: bool,
 ) -> Result<(), String> {
-    let _span = tracing::debug_span!(target: "splice::compile", "optimize_llvm_ir", auto_vectorize)
-        .entered();
+    let _span =
+        tracing::debug_span!(target: "splice_core::compile", "optimize_llvm_ir", auto_vectorize)
+            .entered();
     let run = || {
         module
             .run_passes("default<O3>", target, PassBuilderOptions::create())

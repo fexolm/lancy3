@@ -28,7 +28,7 @@ struct Section {
     entry_size: u64,
 }
 
-fn string(table: &mut Vec<u8>, s: &str) -> splice::Result<u32> {
+fn string(table: &mut Vec<u8>, s: &str) -> splice_core::Result<u32> {
     let index = u32::try_from(table.len()).map_err(|_| "JIT string table is too large")?;
     table.extend_from_slice(s.as_bytes());
     table.push(0);
@@ -52,7 +52,7 @@ fn data(out: &mut Vec<u8>, name: u32, bytes: &[u8], ty: u32, align: u64) -> Sect
 pub(super) fn symbols(
     functions: &[Function],
     debug: &Sections<EndianVec<LittleEndian>>,
-) -> splice::Result<Vec<u8>> {
+) -> splice_core::Result<Vec<u8>> {
     let mut out = vec![0; HEADER_SIZE];
     let mut section_names = vec![0];
     let mut sections = vec![Section::default()];
@@ -75,7 +75,7 @@ pub(super) fn symbols(
         symbols.extend(f.address.to_le_bytes());
         symbols.extend(f.size.to_le_bytes());
     }
-    debug.for_each(|id, section| -> splice::Result<()> {
+    debug.for_each(|id, section| -> splice_core::Result<()> {
         if !section.slice().is_empty() {
             let name = string(&mut section_names, id.name())?;
             sections.push(data(&mut out, name, section.slice(), SHT_PROGBITS, 1));

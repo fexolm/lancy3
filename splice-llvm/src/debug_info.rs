@@ -1,6 +1,6 @@
 use crate::jit::Jit;
 use inkwell::memory_buffer::MemoryBuffer;
-use splice::{Function, hir::Instr};
+use splice_core::{Function, hir::Instr};
 use splice_jit::gimli::write::FrameTable;
 use std::ffi::CString;
 
@@ -20,7 +20,7 @@ pub(super) struct ObjectSymbols {
 }
 
 impl ObjectSymbols {
-    pub fn read(object: &MemoryBuffer<'_>, debug: bool) -> splice::Result<Self> {
+    pub fn read(object: &MemoryBuffer<'_>, debug: bool) -> splice_core::Result<Self> {
         let file = object.create_binary_file(None).map_err(|e| e.to_string())?;
         let mut symbols = file
             .get_symbols()
@@ -90,9 +90,9 @@ impl ObjectSymbols {
         self,
         jit: &Jit,
         source: Option<&Function>,
-        kernel_source: Option<&splice::frontend::KernelSource>,
+        kernel_source: Option<&splice_core::frontend::KernelSource>,
         debug: bool,
-    ) -> splice::Result<Option<splice_jit::Registration>> {
+    ) -> splice_core::Result<Option<splice_jit::Registration>> {
         let sources = source
             .filter(|_| debug)
             .map(|source| source.reachable_functions().0);

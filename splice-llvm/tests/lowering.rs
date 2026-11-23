@@ -1,5 +1,5 @@
-use splice::hir::{Binary, Buffer, BufferKind, FunctionBuilder};
-use splice::{BufferArg, Codegen, Executable};
+use splice_core::hir::{Binary, Buffer, BufferKind, FunctionBuilder};
+use splice_core::{BufferArg, Codegen, Executable};
 use splice_llvm::Llvm;
 use std::sync::Arc;
 
@@ -129,7 +129,7 @@ fn shared_callees_loops_and_unreachable_tails_form_valid_llvm_blocks() {
 
 #[test]
 fn masked_f64_gather_checks_active_indices_at_full_i64_width() {
-    use splice::{
+    use splice_core::{
         frontend::{self, KernelBuilder},
         hir::{Simd, SimdOp},
         simd::Element,
@@ -139,7 +139,7 @@ fn masked_f64_gather_checks_active_indices_at_full_i64_width() {
         BufferKind::new(Element::F64, false),
         BufferKind::new(Element::F64, true),
     ];
-    fn stage(b: &mut dyn KernelBuilder) -> splice::Result<()> {
+    fn stage(b: &mut dyn KernelBuilder) -> splice_core::Result<()> {
         let zero = b.constant(0);
         let i64op = |op| Simd {
             element: Element::I64,
@@ -199,8 +199,8 @@ fn masked_f64_gather_checks_active_indices_at_full_i64_width() {
 
 #[test]
 fn i32_gather_keeps_dword_indices_and_native_compaction() {
-    use splice::{kernel, simd::Lane};
-    #[kernel]
+    use splice_core::{kernel, simd::Lane};
+    #[kernel(crate = splice_core)]
     fn compact(src: &[i32], ids: &[i32], out: &mut [i32]) -> i32 {
         let positions = Lane::<i32>::load(ids, 0);
         let words = Lane::<i32>::gather(src, positions);

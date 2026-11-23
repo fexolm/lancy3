@@ -1,9 +1,9 @@
 //! Operation × element × boundary data on every backend, build route and
 //! build mode, checked against each other and against Rust.
-use splice::frontend::KernelBuilder;
-use splice::hir::{Binary, Buffer, Reg, Simd, SimdOp};
-use splice::simd::Element;
-use splice::{BufferArg, BufferKind};
+use splice_core::frontend::KernelBuilder;
+use splice_core::hir::{Binary, Buffer, Reg, Simd, SimdOp};
+use splice_core::simd::Element;
+use splice_core::{BufferArg, BufferKind};
 use splice_testkit::{Stage, agree};
 use std::rc::Rc;
 

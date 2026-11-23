@@ -9,4 +9,4 @@ description = "Print specialized Splice kernels as readable code"
 
 [dependencies]
 tracing.workspace = true
-splice = { package = "splice-core", path = "../splice-core", version = "0.1.0" }
+splice-core = { path = "../splice-core", version = "0.1.0" }

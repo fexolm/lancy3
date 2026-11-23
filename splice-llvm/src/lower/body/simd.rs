@@ -7,7 +7,7 @@ use inkwell::{
     types::{BasicTypeEnum, VectorType},
     values::{BasicValueEnum, VectorValue},
 };
-use splice::{
+use splice_core::{
     hir::{Reg, Simd, SimdOp, ValueType},
     simd::Element,
 };
@@ -151,7 +151,7 @@ impl<'ctx> Body<'_, 'ctx> {
                 let addr = ir.build_int_add(base, scaled, "")?;
                 let bytes = ir.build_and(
                     ir.build_int_neg(addr, "")?,
-                    self.int((splice::simd::vector_bytes() - 1) as i32),
+                    self.int((splice_core::simd::vector_bytes() - 1) as i32),
                     "",
                 )?;
                 ir.build_right_shift(bytes, self.int(2), false, "prefix")?

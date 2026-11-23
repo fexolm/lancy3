@@ -8,7 +8,7 @@ publish = false
 description = "Backend matrix and differential checks for Splice tests"
 
 [dependencies]
-splice = { package = "splice-core", path = "../splice-core" }
+splice-core = { path = "../splice-core" }
 splice-cranelift = { path = "../splice-cranelift" }
 splice-lancy = { path = "../splice-lancy" }
 splice-llvm = { path = "../splice-llvm" }

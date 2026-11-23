@@ -5,11 +5,11 @@ use cranelift_codegen::{
 };
 use cranelift_jit::JITModule;
 use cranelift_module::{FuncId, Module};
-use splice::hir::Instr;
+use splice_core::hir::Instr;
 use splice_jit::gimli::write::{Address, FrameTable};
 
 pub(super) struct Pending<'a> {
-    source: &'a splice::Function,
+    source: &'a splice_core::Function,
     size: u32,
     points: Vec<(u32, u32, u32)>,
     unwind: Option<systemv::UnwindInfo>,
@@ -19,9 +19,9 @@ impl<'a> Pending<'a> {
     pub fn new(
         module: &JITModule,
         ctx: &Context,
-        source: &'a splice::Function,
+        source: &'a splice_core::Function,
         debug: bool,
-    ) -> splice::Result<Self> {
+    ) -> splice_core::Result<Self> {
         let code = ctx.compiled_code().expect("just defined");
         let mut points = Vec::new();
         for list in code.buffer.debug_tags() {
@@ -57,7 +57,7 @@ pub(super) fn publish(
     module: &JITModule,
     pending: Vec<(FuncId, Pending<'_>)>,
     debug: bool,
-) -> splice::Result<Option<splice_jit::Registration>> {
+) -> splice_core::Result<Option<splice_jit::Registration>> {
     use splice_jit::gimli::{AArch64, X86_64};
     let sp = if cfg!(target_arch = "x86_64") {
         X86_64::RSP

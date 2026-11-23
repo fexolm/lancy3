@@ -126,6 +126,18 @@ enum NotAStruct {
     A,
 }
 
+#[derive(KernelType)]
+#[splice(root = splice)]
+struct UnknownOption {
+    a: i32,
+}
+
+#[derive(ComptimeKey)]
+#[splice(crate = splice, crate = splice)]
+enum RepeatedRoot {
+    A,
+}
+
 #[derive(ComptimeKey)]
 union Bits {
     a: u32,

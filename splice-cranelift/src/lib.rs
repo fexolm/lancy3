@@ -13,7 +13,7 @@ mod module;
 
 use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{Module, default_libcall_names};
-use splice::{BufferArg, BufferKind, BuildOptions, Codegen, Executable, Function, Result};
+use splice_core::{BufferArg, BufferKind, BuildOptions, Codegen, Executable, Function, Result};
 use std::sync::Mutex;
 
 /// Compile a specialized kernel or a portable Splice function with Cranelift.
@@ -121,10 +121,10 @@ impl Codegen for Cranelift {
     fn build_with_options(
         arity: usize,
         kinds: &[BufferKind],
-        body: splice::frontend::Body<'_>,
+        body: splice_core::frontend::Body<'_>,
         options: BuildOptions,
     ) -> Result<CraneliftKernel> {
-        Self::compile(&splice::frontend::materialize_with_options(
+        Self::compile(&splice_core::frontend::materialize_with_options(
             arity, kinds, body, options,
         )?)
     }
@@ -133,7 +133,7 @@ impl Codegen for Cranelift {
         function: &Function,
         options: BuildOptions,
     ) -> Result<CraneliftKernel> {
-        let _span = tracing::debug_span!(target: "splice::compile", "compile", backend = "cranelift", input = "portable").entered();
+        let _span = tracing::debug_span!(target: "splice_core::compile", "compile", backend = "cranelift", input = "portable").entered();
         let debug = options == BuildOptions::Debug;
         splice_jit::prepare_perf_map();
         let mut memory = CodeMemory(Some(JITModule::new(builder(debug)?)));
@@ -143,14 +143,14 @@ impl Codegen for Cranelift {
         let sources = std::mem::take(&mut kernel.functions);
         let mut symbols = Vec::new();
         kernel.emit(&mut module.make_context(), debug, |id, ctx| {
-            tracing::debug_span!(target: "splice::compile", "emit_cranelift_code")
+            tracing::debug_span!(target: "splice_core::compile", "emit_cranelift_code")
                 .in_scope(|| module.define_function(id, ctx).map_err(|e| e.to_string()))?;
             if let Some(source) = sources.get(&id) {
                 symbols.push((id, debug_info::Pending::new(module, ctx, source, debug)?));
             }
             Ok(())
         })?;
-        tracing::debug_span!(target: "splice::compile", "finalize_cranelift_code")
+        tracing::debug_span!(target: "splice_core::compile", "finalize_cranelift_code")
             .in_scope(|| module.finalize_definitions().map_err(|e| e.to_string()))?;
         let address = module.get_finalized_function(id);
         let registration = debug_info::publish(module, symbols, debug)?;
@@ -176,7 +176,7 @@ impl Executable for CraneliftKernel {
                 args.len()
             ));
         }
-        splice::validate_buffers(&self.buffers, buffers)?;
+        splice_core::validate_buffers(&self.buffers, buffers)?;
         let descriptors: Vec<_> = buffers
             .iter_mut()
             .map(|buffer| Descriptor {

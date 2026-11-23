@@ -1,6 +1,6 @@
 //! Per-block definite-initialization summaries for the streaming builder.
 //! No opcodes, instruction lists or values to replay are retained.
-use splice::hir::{Label, Reg};
+use splice_core::hir::{Label, Reg};
 use std::collections::{HashSet, VecDeque};
 
 #[derive(Clone, Copy, Default)]

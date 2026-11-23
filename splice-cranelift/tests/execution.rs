@@ -1,9 +1,9 @@
-use splice::hir::{Binary, FunctionBuilder};
-use splice::{BufferArg, Codegen, Executable, kernel};
+use splice_core::hir::{Binary, FunctionBuilder};
+use splice_core::{BufferArg, Codegen, Executable, kernel};
 use splice_cranelift::Cranelift;
 use std::sync::Arc;
 
-#[kernel]
+#[kernel(crate = splice_core)]
 fn update(out: &mut [i32], row: i32, values: &[i32], divisor: i32, #[comptime] bias: i32) -> i32 {
     out[row as usize] = bias;
     let value = values[row as usize] / divisor;
@@ -11,7 +11,7 @@ fn update(out: &mut [i32], row: i32, values: &[i32], divisor: i32, #[comptime] b
     value
 }
 
-#[kernel]
+#[kernel(crate = splice_core)]
 fn batch(values: &[i32], out: &mut [i32], divisor: i32, #[comptime] bias: i32) -> i32 {
     let mut result = bias;
     for row in 0..out.len() {
@@ -197,7 +197,7 @@ fn shared_callees_stack_arguments_and_backedges_outlive_the_ir() {
 
 #[test]
 fn masked_f64_memory_keeps_global_lane_order_across_chunks() {
-    use splice::{
+    use splice_core::{
         BufferKind,
         hir::{Buffer, Simd, SimdOp},
         simd::Element::{F64, I64},

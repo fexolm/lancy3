@@ -1,6 +1,6 @@
 use super::{Builder, Destination, KernelBuilder};
 use lancy::hir::{self, Op};
-use splice::{Function, hir::Instr};
+use splice_core::{Function, hir::Instr};
 use std::{collections::HashMap, sync::Arc};
 
 /// Lower a verified portable function and its callees using the same SSA
@@ -11,7 +11,7 @@ pub fn lower(root: &Function) -> Result<hir::Function, String> {
     lower_mode(root, None)
 }
 
-pub(crate) type DebugSources<'a> = Vec<(&'a Function, Option<&'a splice::debug::Point>)>;
+pub(crate) type DebugSources<'a> = Vec<(&'a Function, Option<&'a splice_core::debug::Point>)>;
 
 pub(crate) fn lower_debug<'a>(
     root: &'a Function,
@@ -57,7 +57,7 @@ fn lower_body<'a>(
 ) -> Result<hir::Function, String> {
     let mut b = Builder::new(function.arity(), function.buffer_kinds())?;
     b.types = (0..function.register_count())
-        .map(|i| function.reg_type(splice::hir::Reg(i as u32)))
+        .map(|i| function.reg_type(splice_core::hir::Reg(i as u32)))
         .collect();
     b.labels
         .resize_with(function.label_count(), Destination::default);
@@ -75,17 +75,21 @@ fn lower_body<'a>(
                 for (var, ty, offset) in point.slots(function) {
                     let offset = u32::try_from(offset).map_err(|_| "debug frame too large")?;
                     match var.value {
-                        splice::debug::Value::Register(reg, _) => {
+                        splice_core::debug::Value::Register(reg, _) => {
                             let mut value = b.observe(reg);
                             match ty {
-                                splice::debug::Type::Scalar(splice::debug::Scalar::Index) => {
+                                splice_core::debug::Type::Scalar(
+                                    splice_core::debug::Scalar::Index,
+                                ) => {
                                     value = b
                                         .graph
                                         .append(block, Op::Cast(hir::Type::I64, value))
                                         .unwrap();
                                 }
                                 // A DWARF bool is one byte holding 0 or 1.
-                                splice::debug::Type::Scalar(splice::debug::Scalar::Bool) => {
+                                splice_core::debug::Type::Scalar(
+                                    splice_core::debug::Scalar::Bool,
+                                ) => {
                                     let one = b.graph.append(block, Op::Const(1)).unwrap();
                                     value = b
                                         .graph
@@ -96,7 +100,7 @@ fn lower_body<'a>(
                             }
                             b.graph.append(block, Op::DebugStore(offset, value));
                         }
-                        splice::debug::Value::Slice(buffer) => {
+                        splice_core::debug::Value::Slice(buffer) => {
                             let (data, len) = b.slice(buffer, false);
                             let length_offset =
                                 offset.checked_add(8).ok_or("debug frame too large")?;
@@ -107,7 +111,7 @@ fn lower_body<'a>(
                                 .unwrap();
                             b.graph.append(block, Op::DebugStore(length_offset, len));
                         }
-                        splice::debug::Value::Constant(_) => {
+                        splice_core::debug::Value::Constant(_) => {
                             unreachable!("only runtime values have slots")
                         }
                     }

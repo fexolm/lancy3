@@ -104,8 +104,20 @@ error: KernelType can only be derived for structs
 125 | enum NotAStruct {
     |      ^^^^^^^^^^
 
-error: union fields do not have a known active variant
-   --> tests/ui/declarations.rs:130:7
+error: expected `crate = path`, at most once
+   --> tests/ui/declarations.rs:130:10
     |
-130 | union Bits {
+130 | #[splice(root = splice)]
+    |          ^^^^
+
+error: expected `crate = path`, at most once
+   --> tests/ui/declarations.rs:136:26
+    |
+136 | #[splice(crate = splice, crate = splice)]
+    |                          ^^^^^
+
+error: union fields do not have a known active variant
+   --> tests/ui/declarations.rs:142:7
+    |
+142 | union Bits {
     |       ^^^^

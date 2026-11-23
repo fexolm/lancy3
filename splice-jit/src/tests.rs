@@ -2,7 +2,7 @@
 use crate::{Function, Statement, VariableLocation, dwarf, elf};
 use gimli::write::FrameTable;
 use object::{Object, ObjectSection, ObjectSymbol};
-use splice::debug::{Location, Scalar, Type};
+use splice_core::debug::{Location, Scalar, Type};
 
 fn source(line: u32) -> Location {
     Location {

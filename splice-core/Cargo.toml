@@ -7,9 +7,6 @@ license = "MIT OR Apache-2.0"
 repository = "https://github.com/fexolm/lancy3"
 description = "Core types and frontend for the Splice kernel language"
 
-[lib]
-name = "splice"
-
 [dependencies]
 tracing.workspace = true
 splice-target = { path = "../splice-target", version = "0.1.0" }

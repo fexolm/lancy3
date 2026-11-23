@@ -17,7 +17,7 @@ mod target;
 mod aarch64_tests;
 
 use inkwell::{context::Context, module::Module, targets::TargetMachine};
-use splice::{BufferArg, BufferKind, BuildOptions, Codegen, Executable, Function};
+use splice_core::{BufferArg, BufferKind, BuildOptions, Codegen, Executable, Function};
 
 /// In-process LLVM code generator.
 pub struct Llvm;
@@ -48,7 +48,7 @@ fn build_module<'ctx>(
     let module = context.create_module("splice");
     module.set_triple(&target.get_triple());
     module.set_data_layout(&target.get_target_data().get_data_layout());
-    tracing::debug_span!(target: "splice::compile", "populate_llvm_ir")
+    tracing::debug_span!(target: "splice_core::compile", "populate_llvm_ir")
         .in_scope(|| populate(context, &module))?;
     #[cfg(target_arch = "aarch64")]
     {
@@ -67,7 +67,7 @@ fn build_module<'ctx>(
             }
         }
     }
-    tracing::debug_span!(target: "splice::compile", "verify_llvm_ir")
+    tracing::debug_span!(target: "splice_core::compile", "verify_llvm_ir")
         .in_scope(|| module.verify())
         .map_err(|error| error.to_string())?;
     Ok(module)
@@ -113,31 +113,31 @@ pub struct LlvmKernel {
 impl Codegen for Llvm {
     type Output = LlvmKernel;
 
-    fn compile_raw(function: &Function) -> splice::Result<Self::Output> {
+    fn compile_raw(function: &Function) -> splice_core::Result<Self::Output> {
         Self::compile_with_options(function, function.options())
     }
 
     fn compile_raw_with_options(
         function: &Function,
         options: BuildOptions,
-    ) -> splice::Result<Self::Output> {
+    ) -> splice_core::Result<Self::Output> {
         LlvmKernel::from_ir(function, options, true)
     }
 
     fn build(
         arity: usize,
         buffers: &[BufferKind],
-        body: splice::frontend::Body<'_>,
-    ) -> splice::Result<Self::Output> {
+        body: splice_core::frontend::Body<'_>,
+    ) -> splice_core::Result<Self::Output> {
         Self::build_with_options(arity, buffers, body, BuildOptions::default())
     }
 
     fn build_with_options(
         arity: usize,
         buffers: &[BufferKind],
-        body: splice::frontend::Body<'_>,
+        body: splice_core::frontend::Body<'_>,
         options: BuildOptions,
-    ) -> splice::Result<Self::Output> {
+    ) -> splice_core::Result<Self::Output> {
         LlvmKernel::from_body(arity, buffers, body, options, true)
     }
 }
@@ -145,31 +145,31 @@ impl Codegen for Llvm {
 impl Codegen for LlvmManualSimd {
     type Output = LlvmKernel;
 
-    fn compile_raw(function: &Function) -> splice::Result<Self::Output> {
+    fn compile_raw(function: &Function) -> splice_core::Result<Self::Output> {
         Self::compile_with_options(function, function.options())
     }
 
     fn compile_raw_with_options(
         function: &Function,
         options: BuildOptions,
-    ) -> splice::Result<Self::Output> {
+    ) -> splice_core::Result<Self::Output> {
         LlvmKernel::from_ir(function, options, false)
     }
 
     fn build(
         arity: usize,
         buffers: &[BufferKind],
-        body: splice::frontend::Body<'_>,
-    ) -> splice::Result<Self::Output> {
+        body: splice_core::frontend::Body<'_>,
+    ) -> splice_core::Result<Self::Output> {
         Self::build_with_options(arity, buffers, body, BuildOptions::default())
     }
 
     fn build_with_options(
         arity: usize,
         buffers: &[BufferKind],
-        body: splice::frontend::Body<'_>,
+        body: splice_core::frontend::Body<'_>,
         options: BuildOptions,
-    ) -> splice::Result<Self::Output> {
+    ) -> splice_core::Result<Self::Output> {
         LlvmKernel::from_body(arity, buffers, body, options, false)
     }
 }
@@ -179,8 +179,8 @@ impl LlvmKernel {
         function: &Function,
         options: BuildOptions,
         auto_vectorize: bool,
-    ) -> splice::Result<Self> {
-        let _span = tracing::debug_span!(target: "splice::compile", "compile", backend = "llvm", input = "portable").entered();
+    ) -> splice_core::Result<Self> {
+        let _span = tracing::debug_span!(target: "splice_core::compile", "compile", backend = "llvm", input = "portable").entered();
         Self::compile(
             function.arity(),
             function.buffer_kinds(),
@@ -197,15 +197,15 @@ impl LlvmKernel {
     fn from_body(
         arity: usize,
         buffers: &[BufferKind],
-        body: splice::frontend::Body<'_>,
+        body: splice_core::frontend::Body<'_>,
         options: BuildOptions,
         auto_vectorize: bool,
-    ) -> splice::Result<Self> {
+    ) -> splice_core::Result<Self> {
         if options == BuildOptions::Debug {
-            let f = splice::frontend::materialize_with_options(arity, buffers, body, options)?;
+            let f = splice_core::frontend::materialize_with_options(arity, buffers, body, options)?;
             return Self::from_ir(&f, options, auto_vectorize);
         }
-        let _span = tracing::debug_span!(target: "splice::compile", "compile", backend = "llvm", input = "staged").entered();
+        let _span = tracing::debug_span!(target: "splice_core::compile", "compile", backend = "llvm", input = "staged").entered();
         Self::compile(arity, buffers, auto_vectorize, None, options, |ctx, m| {
             lower::populate_direct(ctx, m, arity, buffers, body)
         })
@@ -221,10 +221,10 @@ impl LlvmKernel {
             &'ctx Context,
             &Module<'ctx>,
         ) -> Result<
-            Option<&'static splice::frontend::KernelSource>,
+            Option<&'static splice_core::frontend::KernelSource>,
             String,
         >,
-    ) -> splice::Result<Self> {
+    ) -> splice_core::Result<Self> {
         Llvm::version()?;
         // The target machine makes the same choice on this thread.
         #[cfg(target_arch = "aarch64")]
@@ -260,7 +260,7 @@ impl Executable for LlvmKernel {
                 args.len()
             ));
         }
-        splice::validate_buffers(&self.buffers, buffers)?;
+        splice_core::validate_buffers(&self.buffers, buffers)?;
         let descriptors: Vec<_> = buffers
             .iter_mut()
             .map(|buffer| Descriptor {
@@ -289,12 +289,12 @@ impl Executable for LlvmKernel {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use splice::kernel;
+    use splice_core::kernel;
 
     #[test]
     fn both_lowering_paths_offer_the_entire_kernel_to_o3() {
-        use splice::{frontend::KernelBuilder, hir::Binary};
-        fn staged(b: &mut dyn KernelBuilder) -> splice::Result<()> {
+        use splice_core::{frontend::KernelBuilder, hir::Binary};
+        fn staged(b: &mut dyn KernelBuilder) -> splice_core::Result<()> {
             let value = b.call_kernel(
                 1,
                 &[],
@@ -320,7 +320,7 @@ mod tests {
             b.ret(value);
             Ok(())
         }
-        let ir = splice::frontend::materialize(1, &[], Box::new(staged)).unwrap();
+        let ir = splice_core::frontend::materialize(1, &[], Box::new(staged)).unwrap();
         let target = target::host_machine().unwrap();
         let ctx = Context::create();
         for direct in [false, true] {
@@ -412,7 +412,7 @@ mod tests {
 
     #[test]
     fn full_vector_accesses_use_element_alignment_and_short_stores_preserve_the_prefix() {
-        use splice::{
+        use splice_core::{
             frontend::{self, KernelBuilder},
             hir::{Buffer, Simd, SimdOp},
             simd::Element,
@@ -421,7 +421,7 @@ mod tests {
             BufferKind::new(Element::U16, false),
             BufferKind::new(Element::U16, true),
         ];
-        fn stage(b: &mut dyn KernelBuilder) -> splice::Result<()> {
+        fn stage(b: &mut dyn KernelBuilder) -> splice_core::Result<()> {
             let offset = b.arg(0);
             let op = |op| Simd {
                 element: Element::U16,
@@ -490,7 +490,7 @@ mod tests {
 
     #[test]
     fn masked_memory_emits_intrinsics_and_preserves_ordered_errors() {
-        use splice::{
+        use splice_core::{
             frontend::{self, KernelBuilder},
             hir::{Buffer, Simd, SimdOp},
             simd::Element,
@@ -502,7 +502,7 @@ mod tests {
             BufferKind::Write,
             BufferKind::Write,
         ];
-        fn stage(b: &mut dyn KernelBuilder) -> splice::Result<()> {
+        fn stage(b: &mut dyn KernelBuilder) -> splice_core::Result<()> {
             let op = |op| Simd {
                 element: Element::I32,
                 op,
@@ -645,7 +645,7 @@ mod tests {
         }
     }
 
-    #[kernel]
+    #[kernel(crate = splice_core)]
     fn update(#[comptime] amount: i32, data: &mut [i32]) -> i32 {
         data[0] += amount;
         data[0]

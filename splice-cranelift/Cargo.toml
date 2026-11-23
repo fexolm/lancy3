@@ -9,7 +9,7 @@ description = "Cranelift JIT code generator for Splice kernels"
 
 [dependencies]
 tracing.workspace = true
-splice = { package = "splice-core", path = "../splice-core", version = "0.1.0" }
+splice-core = { path = "../splice-core", version = "0.1.0" }
 splice-target = { path = "../splice-target", version = "0.1.0" }
 splice-jit = { path = "../splice-jit", version = "0.1.0" }
 cranelift-codegen = "0.132"

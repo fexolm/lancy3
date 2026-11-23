@@ -18,7 +18,7 @@ llvm = ["dep:splice-llvm"]
 text = ["dep:splice-text"]
 
 [dependencies]
-splice_core = { package = "splice-core", path = "../splice-core", version = "0.1.0" }
+splice-core = { path = "../splice-core", version = "0.1.0" }
 splice-lancy = { path = "../splice-lancy", version = "0.1.0", optional = true }
 splice-cranelift = { path = "../splice-cranelift", version = "0.1.0", optional = true }
 splice-llvm = { path = "../splice-llvm", version = "0.1.0", optional = true }

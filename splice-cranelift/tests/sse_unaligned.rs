@@ -1,15 +1,15 @@
 //! BE-01: without AVX, Cranelift 0.132 folds an unaligned vector load into a
 //! legacy-SSE `cmpps`/`cmppd` memory operand, which faults unless the address
 //! is 16-byte aligned.
-use splice::frontend::{self, KernelBuilder};
-use splice::hir::{Buffer, Simd, SimdOp};
-use splice::simd::Element;
-use splice::{BufferArg, BufferKind, Codegen, Executable};
+use splice_core::frontend::{self, KernelBuilder};
+use splice_core::hir::{Buffer, Simd, SimdOp};
+use splice_core::simd::Element;
+use splice_core::{BufferArg, BufferKind, Codegen, Executable};
 use splice_cranelift::Cranelift;
 
 /// `count(buf[0..] == buf[1..])`: the second load starts one element past the
 /// slice's base, so it is misaligned for any 16-byte-aligned allocation.
-fn shifted_compare(element: Element) -> impl Fn(&mut dyn KernelBuilder) -> splice::Result<()> {
+fn shifted_compare(element: Element) -> impl Fn(&mut dyn KernelBuilder) -> splice_core::Result<()> {
     move |b| {
         let zero = b.constant(0);
         let one = b.constant(1);

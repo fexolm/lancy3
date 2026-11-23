@@ -1,5 +1,5 @@
-use splice::hir::{Binary, Function, Instr};
-use splice::kernel;
+use splice_core::hir::{Binary, Function, Instr};
+use splice_core::kernel;
 use splice_lancy::Lancy;
 
 #[derive(Clone, Copy, Debug)]
@@ -9,7 +9,7 @@ enum Curve {
     Forbidden,
 }
 
-#[kernel]
+#[kernel(crate = splice_core)]
 const fn next_coefficient(value: i32, step: i32) -> i32 {
     value * 3 - step
 }
@@ -18,7 +18,7 @@ fn forbidden_coefficient() -> i32 {
     panic!("evaluated an unselected compile-time arm")
 }
 
-#[kernel]
+#[kernel(crate = splice_core)]
 fn offset(#[comptime] enabled: bool, #[comptime] curve: Curve, input: i32) -> i32 {
     let coefficient = if enabled {
         match curve {
@@ -82,7 +82,7 @@ fn host_control_and_helpers_fold_during_expansion() {
     }
 }
 
-#[kernel]
+#[kernel(crate = splice_core)]
 fn accumulate(#[comptime] bias: i32, enabled: i32, size: i32) -> i32 {
     let mut score = 7;
     // Both assigned values are host-known. The input decides which wins.
@@ -126,7 +126,7 @@ fn runtime_control_survives_and_promotes_literal_initialized_locals() {
     }
 }
 
-#[kernel]
+#[kernel(crate = splice_core)]
 fn early(#[comptime] key: i32, x: i32) -> i32 {
     if x < 0 {
         return -17;
@@ -137,7 +137,7 @@ fn early(#[comptime] key: i32, x: i32) -> i32 {
     x + 42 / key
 }
 
-#[kernel]
+#[kernel(crate = splice_core)]
 #[allow(
     clippy::collapsible_if,
     reason = "exercise a host return nested under a runtime branch"
@@ -151,14 +151,14 @@ fn early_inside_runtime_arm(#[comptime] bypass: bool, x: i32) -> i32 {
     x + 1
 }
 
-#[kernel]
+#[kernel(crate = splice_core)]
 const fn polynomial(x: i32) -> i32 {
     x * x - 1
 }
 
 const KNOWN_WEIGHT: i32 = polynomial(4);
 
-#[kernel]
+#[kernel(crate = splice_core)]
 fn evaluate_both(#[comptime] known: i32, x: i32) -> i32 {
     polynomial(known) + polynomial(x)
 }
@@ -230,18 +230,18 @@ fn early_host_exit_skips_the_dead_suffix_but_preserves_sibling_runtime_paths() {
     }
 }
 
-#[kernel]
+#[kernel(crate = splice_core)]
 fn affine(#[comptime] subtract: bool, x: i32, bias: i32) -> i32 {
     if subtract { x - bias } else { x + bias }
 }
 
 // A user-defined Rust helper can use this name like any other identifier.
-#[kernel]
+#[kernel(crate = splice_core)]
 const fn runtime(x: i32) -> i32 {
     x * 3
 }
 
-#[kernel]
+#[kernel(crate = splice_core)]
 fn apply_affine(#[comptime] base: i32, x: i32) -> i32 {
     let bias = runtime(base) + 1;
     affine(false, x, bias)
@@ -280,7 +280,7 @@ enum Chain<'a> {
     Reset(i32, &'a Chain<'a>),
 }
 
-#[kernel]
+#[kernel(crate = splice_core)]
 fn visit(#[comptime] plan: &Chain<'_>, x: i32, bias: i32) -> i32 {
     match plan {
         Chain::Reset(value, next) => visit(next, x, *value),
@@ -300,7 +300,7 @@ fn recursive_specialization_accepts_a_constant_in_an_ordinary_slot() {
     }
 }
 
-#[kernel]
+#[kernel(crate = splice_core)]
 fn gated_offset(#[comptime] key: i32, x: i32) -> i32 {
     if key != 0 && x > 0 { x + 42 / key } else { x }
 }
@@ -322,5 +322,36 @@ fn known_false_short_circuit_skips_expansion_of_the_outer_body() {
                 gated_offset(key, x)
             );
         }
+    }
+}
+
+/// A crate that reaches Splice only as `splice_core` names it for both derives.
+#[derive(splice_core::KernelType)]
+#[splice(crate = splice_core)]
+struct Gain {
+    factor: i32,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash, splice_core::ComptimeKey)]
+#[splice(crate = splice_core)]
+enum Sign {
+    Plus,
+    Minus,
+}
+
+#[kernel(crate = splice_core)]
+fn gain(#[comptime] gain: &Gain, #[comptime] sign: Sign, x: i32) -> i32 {
+    match sign {
+        Sign::Plus => comptime!(gain.factor) * x,
+        Sign::Minus => -comptime!(gain.factor) * x,
+    }
+}
+
+#[test]
+fn derives_take_the_crate_path() {
+    let g = Gain { factor: 3 };
+    for sign in [Sign::Plus, Sign::Minus] {
+        let code = gain::build::<Lancy>(gain::BuildArgs { gain: &g, sign }).unwrap();
+        assert_eq!(code.call(gain::CallArgs { x: 5 }), Ok(gain(&g, sign, 5)));
     }
 }

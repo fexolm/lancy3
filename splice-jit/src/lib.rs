@@ -11,7 +11,7 @@ mod tests;
 
 pub use gimli;
 use gimli::write::FrameTable;
-use splice::debug::{Location, Type};
+use splice_core::debug::{Location, Type};
 
 /// A source statement and the machine range with its saved values.
 pub struct Statement {
@@ -37,8 +37,8 @@ pub struct Function {
 impl Function {
     pub fn statement(
         &mut self,
-        function: &splice::Function,
-        point: &splice::debug::Point,
+        function: &splice_core::Function,
+        point: &splice_core::debug::Point,
         address: u64,
         register: u16,
         base: i64,
@@ -53,7 +53,7 @@ impl Function {
                     (var.name, ty, VariableLocation::Memory(base + offset as i64))
                 })
                 .chain(point.variables.iter().filter_map(|var| match var.value {
-                    splice::debug::Value::Constant(Some(value)) => {
+                    splice_core::debug::Value::Constant(Some(value)) => {
                         let (ty, bits) = value.parts();
                         Some((
                             var.name,
@@ -75,10 +75,10 @@ pub struct Registration {
 }
 
 impl Registration {
-    pub fn new(functions: &[Function], frames: &FrameTable) -> splice::Result<Self> {
+    pub fn new(functions: &[Function], frames: &FrameTable) -> splice_core::Result<Self> {
         let sections = dwarf::sections(functions, frames).map_err(|e| e.to_string())?;
         let file = elf::symbols(functions, &sections)?;
-        tracing::debug!(target: "splice::compile", count = functions.len(), "register_jit_symbols");
+        tracing::debug!(target: "splice_core::compile", count = functions.len(), "register_jit_symbols");
         Ok(Self {
             _entry: registry::Registration::new(file),
         })

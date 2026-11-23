@@ -1,6 +1,6 @@
 use super::{Body, Built, simd};
 use inkwell::values::{BasicValueEnum, PointerValue};
-use splice::{
+use splice_core::{
     Function, debug,
     hir::{Instr, ValueType},
 };

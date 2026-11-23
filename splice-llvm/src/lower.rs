@@ -10,8 +10,8 @@ use inkwell::builder::{Builder, BuilderError};
 use inkwell::context::Context;
 use inkwell::module::{Linkage, Module};
 use inkwell::values::{BasicMetadataValueEnum, FunctionValue, IntValue};
-use splice::Function;
-use splice::hir::BufferKind;
+use splice_core::Function;
+use splice_core::hir::BufferKind;
 
 // Only internal kernel functions use the fast calling convention.
 const FAST_CALL: u32 = inkwell::llvm_sys::LLVMCallConv::LLVMFastCallConv as u32;

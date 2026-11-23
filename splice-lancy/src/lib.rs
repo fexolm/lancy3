@@ -4,7 +4,7 @@ mod lower;
 
 use lancy::{CompileError, ScalarKernel};
 pub use lower::lower;
-use splice::{BufferArg, BuildOptions, Codegen, Executable, Function};
+use splice_core::{BufferArg, BuildOptions, Codegen, Executable, Function};
 
 /// Compile Splice kernels through Lancy's SSA HIR and host backend.
 pub struct Lancy;
@@ -14,38 +14,38 @@ impl Codegen for Lancy {
 
     fn build(
         arity: usize,
-        kinds: &[splice::BufferKind],
-        body: splice::frontend::Body<'_>,
-    ) -> splice::Result<Self::Output> {
+        kinds: &[splice_core::BufferKind],
+        body: splice_core::frontend::Body<'_>,
+    ) -> splice_core::Result<Self::Output> {
         Self::build_with_options(arity, kinds, body, BuildOptions::default())
     }
 
     fn build_with_options(
         arity: usize,
-        kinds: &[splice::BufferKind],
-        body: splice::frontend::Body<'_>,
+        kinds: &[splice_core::BufferKind],
+        body: splice_core::frontend::Body<'_>,
         options: BuildOptions,
-    ) -> splice::Result<Self::Output> {
+    ) -> splice_core::Result<Self::Output> {
         if options == BuildOptions::Debug {
-            return Self::compile(&splice::frontend::materialize_with_options(
+            return Self::compile(&splice_core::frontend::materialize_with_options(
                 arity, kinds, body, options,
             )?);
         }
-        let _span = tracing::debug_span!(target: "splice::compile", "compile", backend = "lancy", input = "staged").entered();
-        let (hir, source) = tracing::debug_span!(target: "splice::compile", "stage_lancy_hir")
+        let _span = tracing::debug_span!(target: "splice_core::compile", "compile", backend = "lancy", input = "staged").entered();
+        let (hir, source) = tracing::debug_span!(target: "splice_core::compile", "stage_lancy_hir")
             .in_scope(|| lower::build_with_source(arity, kinds, body))?;
         LancyKernel::new(hir, arity, kinds, source).map_err(|e| e.to_string())
     }
 
-    fn compile_raw(function: &Function) -> splice::Result<Self::Output> {
+    fn compile_raw(function: &Function) -> splice_core::Result<Self::Output> {
         Self::compile_with_options(function, function.options())
     }
 
     fn compile_raw_with_options(
         function: &Function,
         options: BuildOptions,
-    ) -> splice::Result<Self::Output> {
-        let _span = tracing::debug_span!(target: "splice::compile", "compile", backend = "lancy", input = "portable").entered();
+    ) -> splice_core::Result<Self::Output> {
+        let _span = tracing::debug_span!(target: "splice_core::compile", "compile", backend = "lancy", input = "portable").entered();
         if options == BuildOptions::Debug {
             let mut sources = Vec::new();
             let hir = lower::lower_debug(function, &mut sources)?;
@@ -58,7 +58,7 @@ impl Codegen for Lancy {
                 slices: function.buffer_kinds().into(),
             });
         }
-        let hir = tracing::debug_span!(target: "splice::compile", "lower_lancy_hir")
+        let hir = tracing::debug_span!(target: "splice_core::compile", "lower_lancy_hir")
             .in_scope(|| lower(function))?;
         LancyKernel::new(
             hir,
@@ -74,15 +74,15 @@ pub struct LancyKernel {
     _debug: Option<splice_jit::Registration>,
     code: ScalarKernel,
     arity: usize,
-    slices: Box<[splice::BufferKind]>,
+    slices: Box<[splice_core::BufferKind]>,
 }
 
 impl LancyKernel {
     fn new(
         function: lancy::hir::Function,
         arity: usize,
-        kinds: &[splice::BufferKind],
-        source: Option<&splice::frontend::KernelSource>,
+        kinds: &[splice_core::BufferKind],
+        source: Option<&splice_core::frontend::KernelSource>,
     ) -> Result<Self, CompileError> {
         let code = ScalarKernel::compile(&function)?;
         if splice_jit::perf_enabled() {
@@ -111,7 +111,7 @@ impl Executable for LancyKernel {
                 args.len()
             ));
         }
-        splice::hir::validate_buffers(&self.slices, buffers)?;
+        splice_core::hir::validate_buffers(&self.slices, buffers)?;
         if self.slices.is_empty() && !self.code.requires_raw_call() {
             return self.code.call(args).map_err(|e| e.to_string());
         }

@@ -6,7 +6,7 @@ use splice_jit::gimli::write::{
 };
 use splice_jit::gimli::{AArch64, Encoding, Format, X86_64};
 
-pub(super) fn name(source: Option<&splice::frontend::KernelSource>) -> String {
+pub(super) fn name(source: Option<&splice_core::frontend::KernelSource>) -> String {
     let name = source.map_or("kernel", |source| source.name);
     format!("splice_jit::{name}")
 }
@@ -14,7 +14,7 @@ pub(super) fn name(source: Option<&splice::frontend::KernelSource>) -> String {
 pub(super) fn publish(
     code: &ScalarKernel,
     sources: &DebugSources<'_>,
-) -> splice::Result<splice_jit::Registration> {
+) -> splice_core::Result<splice_jit::Registration> {
     let mut frames = FrameTable::default();
     let (sp, ra, workspace) = if cfg!(target_arch = "x86_64") {
         (X86_64::RSP, X86_64::RA, X86_64::R11)

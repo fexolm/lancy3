@@ -33,7 +33,7 @@ pub(super) fn with_file(write: impl FnOnce(&mut File) -> io::Result<()>) {
     if let Err(error) = result
         && !std::mem::replace(&mut output.warned, true)
     {
-        tracing::warn!(target: "splice::compile", %error, "could not write the perf map");
+        tracing::warn!(target: "splice_core::compile", %error, "could not write the perf map");
     }
 }
 

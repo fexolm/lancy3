@@ -4,9 +4,9 @@
 //! The import is scoped to that block in both ordinary and staged code.
 //!
 //! ```compile_fail
-//! #[splice::kernel]
+//! #[splice_core::kernel(crate = splice_core)]
 //! fn outside_scope(src: &[u16]) -> i32 {
-//!     { use splice::simd::Lane; let _inside = Lane::load(src, 0); }
+//!     { use splice_core::simd::Lane; let _inside = Lane::load(src, 0); }
 //!     Lane::<u16>::lanes() as i32
 //! }
 //! ```

@@ -3,26 +3,28 @@ mod simd;
 
 #[test]
 fn context_descriptors_reject_other_signatures_and_slice_operations() {
-    use splice::{BufferArg, Codegen, ContextFrame, ContextSignature, Executable, RuntimeContext};
+    use splice_core::{
+        BufferArg, Codegen, ContextFrame, ContextSignature, Executable, RuntimeContext,
+    };
     static CHILD: ContextSignature = ContextSignature::new(&[1]);
     static FIRST: ContextSignature = ContextSignature::with_children(&[2], &[&CHILD]);
     static SECOND: ContextSignature = ContextSignature::with_children(&[2], &[&CHILD]);
     const KINDS: [BufferKind; 1] = [BufferKind::context(&FIRST)];
 
-    fn good(b: &mut dyn KernelBuilder) -> splice::Result<()> {
+    fn good(b: &mut dyn KernelBuilder) -> splice_core::Result<()> {
         let operation = ContextFrame::root(&FIRST)?.child(0)?.operation(0)?;
         let result = b.rust_context_call(Buffer(0), operation, &[b.arg(0)])?;
         b.ret(result);
         Ok(())
     }
 
-    use splice::hir::check_forwarding;
+    use splice_core::hir::check_forwarding;
     assert!(check_forwarding(&KINDS, &[BufferKind::Read], &[Buffer(0)]).is_err());
     assert!(check_forwarding(&[BufferKind::Write], &KINDS, &[Buffer(0)]).is_err());
     assert!(check_forwarding(&KINDS, &[KINDS[0]; 2], &[Buffer(0); 2]).is_err());
     assert!(check_forwarding(&KINDS, &KINDS, &[Buffer(0)]).is_ok());
 
-    type Invalid = fn(&mut dyn KernelBuilder) -> splice::Result<Reg>;
+    type Invalid = fn(&mut dyn KernelBuilder) -> splice_core::Result<Reg>;
     let invalid: [Invalid; 5] = [
         |b| b.rust_context_call(Buffer(0), 2, &[b.arg(0)]),
         |b| b.rust_context_call(Buffer(0), 0, &[]),
@@ -37,13 +39,17 @@ fn context_descriptors_reject_other_signatures_and_slice_operations() {
             Ok(())
         };
         assert!(build(1, &KINDS, Box::new(body)).is_err());
-        assert!(splice::frontend::materialize(1, &KINDS, Box::new(body)).is_err());
+        assert!(splice_core::frontend::materialize(1, &KINDS, Box::new(body)).is_err());
     }
 
-    let direct =
-        crate::Lancy::build_with_options(1, &KINDS, Box::new(good), splice::BuildOptions::Release)
-            .unwrap();
-    let ir = splice::frontend::materialize(1, &KINDS, Box::new(good)).unwrap();
+    let direct = crate::Lancy::build_with_options(
+        1,
+        &KINDS,
+        Box::new(good),
+        splice_core::BuildOptions::Release,
+    )
+    .unwrap();
+    let ir = splice_core::frontend::materialize(1, &KINDS, Box::new(good)).unwrap();
     let portable = crate::Lancy::compile(&ir).unwrap();
     for kernel in [direct, portable] {
         let mut unreachable = |_, _, _| panic!("wrong context callback was called");
@@ -80,7 +86,7 @@ fn context_descriptors_reject_other_signatures_and_slice_operations() {
 
 #[test]
 fn context_slice_operands_require_valid_nonaliasing_descriptors() {
-    use splice::ContextSignature;
+    use splice_core::ContextSignature;
     static SIGNATURE: ContextSignature = ContextSignature::with_borrows(&[0], &[2], &[]);
     let kinds = [
         BufferKind::context(&SIGNATURE),
@@ -113,7 +119,7 @@ fn context_slice_operands_require_valid_nonaliasing_descriptors() {
             "{slices:?}"
         );
         assert_eq!(
-            splice::frontend::materialize(0, &kinds, Box::new(body)).is_ok(),
+            splice_core::frontend::materialize(0, &kinds, Box::new(body)).is_ok(),
             valid,
             "{slices:?}"
         );
@@ -132,10 +138,10 @@ fn rust_imports_fill_unused_abi_arguments_with_zero_in_both_staging_paths() {
             5_i64 << 32
         }
     }
-    fn body(b: &mut dyn KernelBuilder) -> splice::Result<()> {
+    fn body(b: &mut dyn KernelBuilder) -> splice_core::Result<()> {
         let three = b.rust_call(
             RustCall {
-                symbol: &splice::hir::RustSymbol {
+                symbol: &splice_core::hir::RustSymbol {
                     name: "three",
                     resolve: || three,
                 },
@@ -145,7 +151,7 @@ fn rust_imports_fill_unused_abi_arguments_with_zero_in_both_staging_paths() {
         )?;
         let double = b.rust_call(
             RustCall {
-                symbol: &splice::hir::RustSymbol {
+                symbol: &splice_core::hir::RustSymbol {
                     name: "double",
                     resolve: || double,
                 },
@@ -159,7 +165,7 @@ fn rust_imports_fill_unused_abi_arguments_with_zero_in_both_staging_paths() {
     }
 
     let direct = build(1, &[], Box::new(body)).unwrap();
-    let portable = splice::frontend::materialize(1, &[], Box::new(body)).unwrap();
+    let portable = splice_core::frontend::materialize(1, &[], Box::new(body)).unwrap();
     for graph in [direct, lower(&portable).unwrap()] {
         let kernel = lancy::ScalarKernel::compile(&graph).unwrap();
         assert_eq!(kernel.call(&[5]), Ok(13));
@@ -183,7 +189,7 @@ fn reuses_shared_loads_across_writes_in_both_staging_paths() {
     for input in [BufferKind::Read, BufferKind::Write] {
         let kinds = [input, BufferKind::Write];
         let direct = build(1, &kinds, Box::new(body)).unwrap();
-        let portable = splice::frontend::materialize(1, &kinds, Box::new(body)).unwrap();
+        let portable = splice_core::frontend::materialize(1, &kinds, Box::new(body)).unwrap();
         for graph in [direct, lower(&portable).unwrap()] {
             let count = graph
                 .instructions(graph.entry())
@@ -196,7 +202,7 @@ fn reuses_shared_loads_across_writes_in_both_staging_paths() {
 
 #[test]
 fn portable_calls_share_one_lowered_body_and_preserve_argument_reassignment() {
-    use splice::hir::FunctionBuilder;
+    use splice_core::hir::FunctionBuilder;
 
     let mut leaf = FunctionBuilder::new(1);
     let one = leaf.constant(1);
@@ -330,7 +336,7 @@ fn checked_nested_call_preserves_writes_before_failure() {
         }),
     )
     .unwrap();
-    use splice::Executable;
+    use splice_core::Executable;
     let f =
         crate::LancyKernel::new(graph, 1, &[BufferKind::Read, BufferKind::Write], None).unwrap();
     let mut out = [0];
@@ -338,8 +344,8 @@ fn checked_nested_call_preserves_writes_before_failure() {
         .call(
             &[27],
             &mut [
-                splice::BufferArg::Read(&[]),
-                splice::BufferArg::Write(&mut out),
+                splice_core::BufferArg::Read(&[]),
+                splice_core::BufferArg::Write(&mut out),
             ],
         )
         .unwrap_err();
@@ -350,9 +356,9 @@ fn checked_nested_call_preserves_writes_before_failure() {
 #[test]
 fn lowered_call_graphs_retain_slice_contracts_for_out_of_line_calls() {
     use lancy::{Inlining, ScalarKernel};
-    use splice::{BufferArg, Executable, kernel};
+    use splice_core::{BufferArg, Executable, kernel};
 
-    #[kernel]
+    #[kernel(crate = splice_core)]
     fn read_first(#[comptime] guard: bool, n: i32, xs: &[i32]) -> i32 {
         if guard && xs.is_empty() {
             return -1;
@@ -365,11 +371,11 @@ fn lowered_call_graphs_retain_slice_contracts_for_out_of_line_calls() {
         }
         sum
     }
-    #[kernel]
+    #[kernel(crate = splice_core)]
     fn reader(#[comptime] guard: bool, n: i32, xs: &[i32]) -> i32 {
         read_first(guard, n, xs)
     }
-    #[kernel]
+    #[kernel(crate = splice_core)]
     fn write_first(n: i32, xs: &mut [i32]) -> i32 {
         let mut sum = 0;
         let mut i = 0;
@@ -380,12 +386,12 @@ fn lowered_call_graphs_retain_slice_contracts_for_out_of_line_calls() {
         }
         sum
     }
-    #[kernel]
+    #[kernel(crate = splice_core)]
     fn writer(n: i32, xs: &mut [i32]) -> i32 {
         write_first(n, xs)
     }
 
-    fn out_of_line(ir: splice::Function, writable: bool) -> crate::LancyKernel {
+    fn out_of_line(ir: splice_core::Function, writable: bool) -> crate::LancyKernel {
         let root = crate::lower(&ir).unwrap();
         let child = root
             .blocks()

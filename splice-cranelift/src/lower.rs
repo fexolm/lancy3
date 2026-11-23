@@ -6,8 +6,8 @@ use cranelift_codegen::ir::{
     types::{I8, I32, I64},
 };
 use cranelift_frontend::{FunctionBuilder, Variable};
-use splice::hir::{Binary, ContextSlice, Instr, Reg, RustContextTarget};
-use splice::{ContextArguments, Function};
+use splice_core::hir::{Binary, ContextSlice, Instr, Reg, RustContextTarget};
+use splice_core::{ContextArguments, Function};
 use std::collections::HashMap;
 use std::mem::{offset_of, size_of};
 use std::sync::Arc;
@@ -118,7 +118,7 @@ pub(super) fn emit(
                 let Some(slot) = snapshots else {
                     continue;
                 };
-                use splice::debug::Value as DebugValue;
+                use splice_core::debug::Value as DebugValue;
                 let mut slots = point.slots(f).peekable();
                 if slots.peek().is_none() {
                     // Sequence points themselves occupy no bytes in Cranelift.
@@ -133,11 +133,15 @@ pub(super) fn emit(
                             for (part, &variable) in vars.get(reg).iter().enumerate() {
                                 let mut value = b.use_var(variable);
                                 match ty {
-                                    splice::debug::Type::Scalar(splice::debug::Scalar::Index) => {
+                                    splice_core::debug::Type::Scalar(
+                                        splice_core::debug::Scalar::Index,
+                                    ) => {
                                         value = b.ins().sextend(I64, value);
                                     }
                                     // A DWARF bool is one byte holding 0 or 1.
-                                    splice::debug::Type::Scalar(splice::debug::Scalar::Bool) => {
+                                    splice_core::debug::Type::Scalar(
+                                        splice_core::debug::Scalar::Bool,
+                                    ) => {
                                         value = b.ins().band_imm(value, 1);
                                     }
                                     _ => {}
@@ -287,7 +291,7 @@ pub(super) fn emit(
                         *out = b.use_var(var(arg));
                     }
                     signature.params.extend([AbiParam::new(I32); 2]);
-                    (splice::invoke_runtime_context as *const (), words)
+                    (splice_core::invoke_runtime_context as *const (), words)
                 } else {
                     signature
                         .params
@@ -321,7 +325,7 @@ pub(super) fn emit(
                     let packet = b.ins().stack_addr(ptr, scratch, 0);
                     let entry = match target {
                         RustContextTarget::Borrowed { .. } => {
-                            splice::invoke_packet_runtime_context as *const ()
+                            splice_core::invoke_packet_runtime_context as *const ()
                         }
                         RustContextTarget::Static(symbol) => symbol.entry() as *const (),
                     };

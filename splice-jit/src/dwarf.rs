@@ -4,8 +4,8 @@ use gimli::write::{
     LineString, Range, RangeList, Sections, Unit, UnitEntryId,
 };
 use gimli::{self as dw, Encoding, Format, LineEncoding, LittleEndian, Register};
-use splice::debug::{ConstantType, Location, Scalar, Type};
-use splice::simd::Element;
+use splice_core::debug::{ConstantType, Location, Scalar, Type};
+use splice_core::simd::Element;
 use std::path::{Path, PathBuf};
 
 pub(crate) const ENCODING: Encoding = Encoding {

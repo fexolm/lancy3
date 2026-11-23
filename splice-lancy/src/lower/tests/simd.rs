@@ -1,6 +1,6 @@
 use super::*;
 use lancy::hir::Simd as V;
-use splice::{
+use splice_core::{
     BufferArg, Executable,
     hir::{Simd, SimdOp},
 };
@@ -8,9 +8,9 @@ use splice::{
 fn both(
     arity: usize,
     kinds: &[BufferKind],
-    stage: fn(&mut dyn KernelBuilder) -> splice::Result<()>,
+    stage: fn(&mut dyn KernelBuilder) -> splice_core::Result<()>,
 ) -> [hir::Function; 2] {
-    let ir = splice::frontend::materialize(arity, kinds, Box::new(stage)).unwrap();
+    let ir = splice_core::frontend::materialize(arity, kinds, Box::new(stage)).unwrap();
     [
         build(arity, kinds, Box::new(stage)).unwrap(),
         lower(&ir).unwrap(),

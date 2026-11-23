@@ -3,7 +3,7 @@ use crate::Cranelift;
 use cranelift_codegen::ir::{Opcode, Type};
 use cranelift_jit::JITBuilder;
 use cranelift_module::default_libcall_names;
-use splice::{
+use splice_core::{
     Codegen, Executable,
     hir::{Binary, FunctionBuilder},
 };
@@ -98,7 +98,7 @@ fn branches_use_comparison_bits_and_preserve_comparison_masks() {
 
 #[test]
 fn branches_use_vector_reduction_bits_and_preserve_scalar_masks() {
-    use splice::{
+    use splice_core::{
         hir::{Simd, SimdOp},
         simd::Element,
     };
@@ -171,7 +171,7 @@ fn shared_call_dag_keeps_reachable_out_of_line_definitions() {
 #[test]
 fn packed_chunks_cover_the_vector_and_a_short_store_keeps_its_prefix() {
     use cranelift_codegen::ir::types::I16X8;
-    use splice::{
+    use splice_core::{
         BufferKind,
         hir::{Buffer, Simd, SimdOp},
         simd::Element,
@@ -236,7 +236,7 @@ fn packed_chunks_cover_the_vector_and_a_short_store_keeps_its_prefix() {
 #[test]
 fn masked_contiguous_access_selects_packed_and_ordered_paths() {
     use cranelift_codegen::ir::types::I16X8;
-    use splice::{
+    use splice_core::{
         BufferKind,
         hir::{Buffer, Simd, SimdOp},
         simd::Element,
@@ -298,8 +298,8 @@ fn masked_contiguous_access_selects_packed_and_ordered_paths() {
 
 #[test]
 fn a_full_gather_has_one_bounds_branch_for_all_lanes() {
-    use splice::{kernel, simd::Lane};
-    #[kernel]
+    use splice_core::{kernel, simd::Lane};
+    #[kernel(crate = splice_core)]
     fn first_block(data: &[i32]) -> i32 {
         Lane::<i32>::gather(data, Lane::<i32>::iota()).last()
     }
