@@ -19,7 +19,10 @@ use splice::{
     },
     simd::Element,
 };
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
 fn binary(op: Binary) -> hir::Binary {
     use hir::Binary as H;
@@ -110,6 +113,8 @@ impl<'a> Builder<'a> {
             current: Some(entry),
             types: vec![ValueType::Scalar; arity],
             demands: Vec::new(),
+            observed: HashMap::new(),
+            unassigned: HashSet::new(),
             labels: Vec::new(),
             error: None,
             has_shared_i32: kinds.contains(&BufferKind::Read),
@@ -157,12 +162,25 @@ struct Builder<'a> {
     blocks: DenseMap<Block, State>,
     current: Option<Block>,
     types: Vec<ValueType>,
-    demands: Vec<(Block, Reg)>,
+    /// Blocks whose parameter for a register needs a value from every
+    /// predecessor. `required` is false while only source points observe it.
+    demands: Vec<Demand>,
+    /// Parameters that only source points read, with their block.
+    observed: HashMap<Value, (Block, Reg)>,
+    /// Placeholders for a register that is unassigned on some path.
+    unassigned: HashSet<Value>,
     labels: Vec<Destination>,
     error: Option<String>,
     has_shared_i32: bool,
     constants: HashMap<Value, i32>,
     shared_loads: HashMap<(Buffer, LoadIndex), Value>,
+}
+
+#[derive(Clone, Copy)]
+struct Demand {
+    block: Block,
+    reg: Reg,
+    required: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
@@ -224,7 +242,7 @@ impl Builder<'_> {
             .append(block, Op::PtrOffset(base, index, hir::Scale::Four))
             .unwrap()
     }
-    fn parameter(&mut self, block: Block, r: Reg) -> Value {
+    fn parameter(&mut self, block: Block, r: Reg, required: bool) -> Value {
         let ty = self
             .types
             .get(r.0 as usize)
@@ -234,10 +252,45 @@ impl Builder<'_> {
         let state = &mut self.blocks[block];
         state.incoming.push(r);
         state.defs.insert(r, v);
-        self.demands.push((block, r));
+        if !required {
+            self.observed.insert(v, (block, r));
+        }
+        self.demands.push(Demand {
+            block,
+            reg: r,
+            required,
+        });
         v
     }
+    /// A use of `v` requires every parameter it came from to be assigned.
+    fn require(&mut self, v: Value) {
+        if let Some((block, reg)) = self.observed.remove(&v) {
+            self.demands.push(Demand {
+                block,
+                reg,
+                required: true,
+            });
+        }
+    }
     fn read(&mut self, r: Reg) -> Value {
+        self.valid(r);
+        let Some(b) = self.current else {
+            return Value::INVALID;
+        };
+        if let Some(&v) = self.blocks[b].defs.get(&r) {
+            self.require(v);
+            return v;
+        }
+        if b == self.graph.entry() {
+            self.error
+                .get_or_insert_with(|| format!("uninitialized {r:?} at function entry"));
+            return Value::INVALID;
+        }
+        self.parameter(b, r, true)
+    }
+    /// Read a scalar register for a source point. It need not be assigned on
+    /// every path; where it is not, the point sees zero.
+    fn observe(&mut self, r: Reg) -> Value {
         self.valid(r);
         let Some(b) = self.current else {
             return Value::INVALID;
@@ -246,11 +299,9 @@ impl Builder<'_> {
             return v;
         }
         if b == self.graph.entry() {
-            self.error
-                .get_or_insert_with(|| format!("uninitialized {r:?} at function entry"));
-            return Value::INVALID;
+            return self.graph.append(b, Op::Const(0)).unwrap();
         }
-        self.parameter(b, r)
+        self.parameter(b, r, false)
     }
     fn result(&mut self, op: Op) -> Reg {
         let r = self.local();

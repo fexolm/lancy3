@@ -309,11 +309,24 @@ impl Instr {
             | Self::RustContextCall { .. }
             | Self::TrapBounds => true,
             Self::Call { function, .. } => function.needs_status(),
+            Self::Simd { inst, .. } => inst.op.may_trap(),
             _ => false,
         }
     }
 
+    /// Registers the instruction reads, including those a source point saves.
     fn reads(&self) -> impl Iterator<Item = Reg> + '_ {
+        let variables = match self {
+            Self::Debug(point) => point.variables.as_ref(),
+            _ => &[],
+        };
+        self.operands()
+            .chain(variables.iter().filter_map(|var| var.value.register()))
+    }
+
+    /// Registers whose values the instruction uses. A source point only
+    /// observes its variables, which need not be assigned on every path.
+    fn operands(&self) -> impl Iterator<Item = Reg> + '_ {
         use std::slice::from_ref;
         let (first, rest): (_, &[Reg]) = match self {
             Self::Copy(_, r)
@@ -331,14 +344,7 @@ impl Instr {
             | Self::Simd { args, .. } => (None, args),
             _ => (None, &[]),
         };
-        let variables = match self {
-            Self::Debug(point) => point.variables.as_ref(),
-            _ => &[],
-        };
-        first
-            .into_iter()
-            .chain(rest.iter().copied())
-            .chain(variables.iter().filter_map(|var| var.value.register()))
+        first.into_iter().chain(rest.iter().copied())
     }
 
     fn written(&self) -> Option<Reg> {

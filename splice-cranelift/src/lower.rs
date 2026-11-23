@@ -132,11 +132,15 @@ pub(super) fn emit(
                         DebugValue::Register(reg, _) => {
                             for (part, &variable) in vars.get(reg).iter().enumerate() {
                                 let mut value = b.use_var(variable);
-                                if matches!(
-                                    ty,
-                                    splice::debug::Type::Scalar(splice::debug::Scalar::Index)
-                                ) {
-                                    value = b.ins().sextend(I64, value);
+                                match ty {
+                                    splice::debug::Type::Scalar(splice::debug::Scalar::Index) => {
+                                        value = b.ins().sextend(I64, value);
+                                    }
+                                    // A DWARF bool is one byte holding 0 or 1.
+                                    splice::debug::Type::Scalar(splice::debug::Scalar::Bool) => {
+                                        value = b.ins().band_imm(value, 1);
+                                    }
+                                    _ => {}
                                 }
                                 b.ins()
                                     .stack_store(value, slot, offset + (part * 16) as i32);

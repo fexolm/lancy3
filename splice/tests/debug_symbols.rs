@@ -144,3 +144,129 @@ fn selected_match_patterns_and_guards_have_their_own_source_points() {
     // the fallback body each have a distinct source position.
     assert_eq!(locations.len(), 4);
 }
+
+/// `value` is assigned only when `flag` is nonzero, but a source point after
+/// the join names it. Debug reads are not uses, so this is valid in debug
+/// mode exactly as in release mode (CORE-18).
+fn partially_assigned(b: &mut dyn splice::frontend::KernelBuilder) -> splice::Result<()> {
+    observe_partially_assigned(b, false)
+}
+
+/// Returning `value` is a real use, which stays an error.
+fn partially_returned(b: &mut dyn splice::frontend::KernelBuilder) -> splice::Result<()> {
+    observe_partially_assigned(b, true)
+}
+
+fn observe_partially_assigned(
+    b: &mut dyn splice::frontend::KernelBuilder,
+    use_value: bool,
+) -> splice::Result<()> {
+    let flag = b.arg(0);
+    let value = b.local();
+    let (assign, join) = (b.label(), b.label());
+    b.branch(flag, assign, join);
+    b.mark(assign);
+    let five = b.constant(5);
+    b.assign(value, five);
+    b.jump(join);
+    b.mark(join);
+    let location = debug::Location {
+        file: file!(),
+        directory: env!("CARGO_MANIFEST_DIR"),
+        line: line!(),
+        column: 1,
+    };
+    let variables = [debug::Variable {
+        name: "value",
+        value: debug::Value::Register(value, debug::Scalar::I32),
+    }];
+    b.debug_point(location, &variables);
+    b.ret(if use_value { value } else { flag });
+    Ok(())
+}
+
+fn exercise_partial<B: Codegen<Output: Executable>>() {
+    let options = BuildOptions::Debug;
+    let ir =
+        splice::frontend::materialize_with_options(1, &[], Box::new(partially_assigned), options)
+            .unwrap();
+    assert!(
+        ir.instructions()
+            .iter()
+            .any(|op| matches!(op, Instr::Debug(_)))
+    );
+    for kernel in [
+        B::build_with_options(1, &[], Box::new(partially_assigned), options).unwrap(),
+        B::compile(&ir).unwrap(),
+    ] {
+        for flag in [0, 3] {
+            assert_eq!(kernel.call(&[flag], &mut []), Ok(flag));
+        }
+    }
+    for options in [BuildOptions::Debug, BuildOptions::Release] {
+        assert!(B::build_with_options(1, &[], Box::new(partially_returned), options).is_err());
+    }
+}
+
+#[test]
+fn source_points_may_name_partially_assigned_variables() {
+    exercise_partial::<splice_lancy::Lancy>();
+    exercise_partial::<splice_cranelift::Cranelift>();
+    exercise_partial::<splice_llvm::Llvm>();
+}
+
+#[kernel]
+fn flagged(x: i32) -> i32 {
+    let positive = x > 0;
+    let doubled = x * 2; // gdb: positive is assigned
+    if positive { doubled } else { x }
+}
+
+/// A runtime `bool` reads as a Rust `bool` in GDB on every native backend
+/// (CORE-16). Needs `gdb`; run with `--ignored`.
+#[test]
+#[ignore = "requires gdb"]
+fn gdb_shows_runtime_bools_as_rust_bools() {
+    const CHILD: &str = "SPLICE_GDB_BOOL_CHILD";
+    if std::env::var_os(CHILD).is_some() {
+        fn run<B: Codegen<Output: Executable>>() {
+            let options = BuildOptions::Debug;
+            let code = flagged::build_with_options::<B>(options, flagged::BuildArgs {}).unwrap();
+            assert_eq!(code.call(flagged::CallArgs { x: 4 }), Ok(8));
+        }
+        run::<splice_lancy::Lancy>();
+        run::<splice_cranelift::Cranelift>();
+        run::<splice_llvm::Llvm>();
+        return;
+    }
+    let source = include_str!("debug_symbols.rs");
+    let line = 1 + source
+        .lines()
+        .position(|l| l.ends_with("// gdb: positive is assigned"))
+        .unwrap();
+    let output = std::process::Command::new("gdb")
+        .args(["-q", "-batch", "-ex", "set breakpoint pending on"])
+        .args([
+            "-ex",
+            &format!("break debug_symbols.rs:{line}"),
+            "-ex",
+            "run",
+        ])
+        .args(["-ex", "print positive", "-ex", "continue"].repeat(3))
+        .arg("--args")
+        .arg(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "gdb_shows_runtime_bools_as_rust_bools",
+            "--ignored",
+        ])
+        .env(CHILD, "1")
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let values: Vec<_> = stdout
+        .lines()
+        .filter_map(|l| l.strip_prefix('$')?.split_once(" = ").map(|(_, v)| v))
+        .collect();
+    assert_eq!(values, ["true"; 3], "{stdout}");
+}

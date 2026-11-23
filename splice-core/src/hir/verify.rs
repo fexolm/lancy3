@@ -149,7 +149,7 @@ impl Function {
         }
         starts.push(self.code.len());
         check_initialization(&self, &starts, &targets)?;
-        self.needs_status = !self.buffer_kinds.is_empty() || self.code.iter().any(Instr::may_trap);
+        self.needs_status = self.code.iter().any(Instr::may_trap);
         Ok(self)
     }
 }
@@ -192,7 +192,7 @@ fn check_initialization(
         for pc in starts[block]..starts[block + 1] {
             let op = &f.code[pc];
             if let Some(r) = op
-                .reads()
+                .operands()
                 .find(|r| bits[r.0 as usize / 64] & (1 << (r.0 % 64)) == 0)
             {
                 return Err(format!("uninitialized {r:?} at instruction {pc}"));

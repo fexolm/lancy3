@@ -57,6 +57,9 @@ impl<'ctx> Body<'_, 'ctx> {
                     } else if matches!(layout, debug::Type::Scalar(debug::Scalar::Index)) {
                         b.build_int_s_extend(value.into_int_value(), self.ctx.i64_type(), "")?
                             .into()
+                    } else if matches!(layout, debug::Type::Scalar(debug::Scalar::Bool)) {
+                        // A DWARF bool is one byte holding 0 or 1.
+                        b.build_and(value.into_int_value(), self.int(1), "")?.into()
                     } else {
                         value
                     };

@@ -699,3 +699,40 @@ fn nested_loop_exits_and_generated_names_preserve_rust_bindings() {
     check::<Lancy>();
     check::<Llvm>();
 }
+
+#[kernel]
+fn slice_length(xs: &[i32]) -> i32 {
+    xs.len() as i32
+}
+
+#[kernel]
+fn first_lane(xs: &[i32]) -> i32 {
+    splice::simd::Lane::<i32>::load(xs, 0).extract_wrapping(0)
+}
+
+#[kernel]
+fn through_callee(xs: &[i32]) -> i32 {
+    first_lane(xs) + 1
+}
+
+#[test]
+fn only_operations_that_can_fail_need_a_status_channel() {
+    assert!(!slice_length::ir().unwrap().needs_status());
+    assert!(first_lane::ir().unwrap().needs_status());
+    assert!(through_callee::ir().unwrap().needs_status());
+    fn check<B: Codegen<Output: Executable>>() {
+        let code = through_callee::build::<B>(through_callee::BuildArgs {}).unwrap();
+        let short = [7];
+        let error = code
+            .call(through_callee::CallArgs { xs: &short })
+            .unwrap_err();
+        assert_eq!(error.to_string(), "kernel slice index out of bounds");
+        let lanes = vec![7; 64];
+        assert_eq!(code.call(through_callee::CallArgs { xs: &lanes }), Ok(8));
+        let code = slice_length::build::<B>(slice_length::BuildArgs {}).unwrap();
+        assert_eq!(code.call(slice_length::CallArgs { xs: &short }), Ok(1));
+    }
+    check::<splice_lancy::Lancy>();
+    check::<splice_cranelift::Cranelift>();
+    check::<splice_llvm::Llvm>();
+}

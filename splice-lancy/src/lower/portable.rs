@@ -76,15 +76,23 @@ fn lower_body<'a>(
                     let offset = u32::try_from(offset).map_err(|_| "debug frame too large")?;
                     match var.value {
                         splice::debug::Value::Register(reg, _) => {
-                            let mut value = b.read(reg);
-                            if matches!(
-                                ty,
-                                splice::debug::Type::Scalar(splice::debug::Scalar::Index)
-                            ) {
-                                value = b
-                                    .graph
-                                    .append(block, Op::Cast(hir::Type::I64, value))
-                                    .unwrap();
+                            let mut value = b.observe(reg);
+                            match ty {
+                                splice::debug::Type::Scalar(splice::debug::Scalar::Index) => {
+                                    value = b
+                                        .graph
+                                        .append(block, Op::Cast(hir::Type::I64, value))
+                                        .unwrap();
+                                }
+                                // A DWARF bool is one byte holding 0 or 1.
+                                splice::debug::Type::Scalar(splice::debug::Scalar::Bool) => {
+                                    let one = b.graph.append(block, Op::Const(1)).unwrap();
+                                    value = b
+                                        .graph
+                                        .append(block, Op::Bin(hir::Binary::And, value, one))
+                                        .unwrap();
+                                }
+                                _ => {}
                             }
                             b.graph.append(block, Op::DebugStore(offset, value));
                         }

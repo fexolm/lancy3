@@ -73,6 +73,25 @@ pub struct Simd {
     pub op: SimdOp,
 }
 
+impl SimdOp {
+    /// Whether the operation can fail: only buffer accesses check bounds.
+    pub fn may_trap(self) -> bool {
+        use SimdOp::*;
+        matches!(
+            self,
+            CompressStore(_)
+                | Load(_)
+                | Store(_)
+                | LoadSelect(_)
+                | StoreSelect(_)
+                | Gather(_)
+                | Scatter(_)
+                | GatherSelect(_)
+                | ScatterSelect(_)
+        )
+    }
+}
+
 impl Simd {
     pub fn output(self) -> Option<ValueType> {
         use SimdOp::*;
