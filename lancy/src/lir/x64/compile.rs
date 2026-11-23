@@ -83,7 +83,7 @@ pub(super) fn compile(
         frame.slots = frame
             .slots
             .checked_add(scratch_words)
-            .ok_or(CompileError::FrameOverflow)?;
+            .ok_or(CompileError::Unsupported(crate::Limit::Frame))?;
         if id == entry {
             // Save the host's nonvolatile registers once, including those
             // written by descendants. Normal and trapping exits restore them.
@@ -100,7 +100,7 @@ pub(super) fn compile(
         let workspace = frame
             .slots
             .checked_add(child_peak)
-            .ok_or(CompileError::FrameOverflow)?;
+            .ok_or(CompileError::Unsupported(crate::Limit::Frame))?;
         Ok(CompiledFunction {
             body,
             allocation,
@@ -113,7 +113,7 @@ pub(super) fn compile(
     })?;
     let slots = module.functions[entry].workspace.max(arity);
     if slots > i32::MAX as usize / 8 {
-        return Err(CompileError::WorkspaceTooLarge { slots });
+        return Err(CompileError::Unsupported(crate::Limit::Workspace { slots }));
     }
     Ok(module)
 }

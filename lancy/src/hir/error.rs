@@ -67,6 +67,14 @@ pub enum IrError {
     },
     #[error("invalid numeric operation in {inst:?} for {ty:?}")]
     InvalidNumeric { inst: Inst, ty: Type },
+    /// A scalar operation, load, store or conversion received a vector.
+    #[error("{inst:?} applies a scalar operation to {ty:?}; use its SIMD form")]
+    UseSimdForm { inst: Inst, ty: Type },
+    /// Pointers convert only by a bitcast to `U64`, which exposes the
+    /// address bits for alignment arithmetic. Every other conversion would
+    /// let integer arithmetic forge an address.
+    #[error("{inst:?} converts {from:?} to {to:?}; a pointer only bitcasts to U64")]
+    PointerCast { inst: Inst, from: Type, to: Type },
     #[error("unknown SSA call {call:?} in {inst:?}")]
     UnknownCall { inst: Inst, call: Call },
     #[error("invalid Rust import packet in {inst:?}")]

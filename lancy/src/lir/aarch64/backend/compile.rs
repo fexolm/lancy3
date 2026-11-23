@@ -80,20 +80,20 @@ pub(super) fn compile(
             .num_spillslots
             .checked_mul(8)
             .and_then(|n| n.checked_add(spills))
-            .ok_or(CompileError::FrameOverflow)?;
+            .ok_or(CompileError::Unsupported(crate::Limit::Frame))?;
         let temporary = outgoing
             .checked_add(arg_bytes)
-            .ok_or(CompileError::FrameOverflow)?;
+            .ok_or(CompileError::Unsupported(crate::Limit::Frame))?;
         let saves = temporary
             .checked_add(if needs_temp { TEMP_BYTES } else { 0 })
-            .ok_or(CompileError::FrameOverflow)?;
+            .ok_or(CompileError::Unsupported(crate::Limit::Frame))?;
         let debug_base = saves
             .checked_add(if id == root {
                 written.into_iter().count() * 8
             } else {
                 0
             })
-            .ok_or(CompileError::FrameOverflow)?;
+            .ok_or(CompileError::Unsupported(crate::Limit::Frame))?;
         let debug_size = body
             .insts()
             .iter()
@@ -105,13 +105,13 @@ pub(super) fn compile(
             .unwrap_or(0);
         let scratch_base = debug_base
             .checked_add(debug_size.next_multiple_of(8))
-            .ok_or(CompileError::FrameOverflow)?;
+            .ok_or(CompileError::Unsupported(crate::Limit::Frame))?;
         let bytes = scratch_base
             .checked_add(scratch_bytes.next_multiple_of(8))
-            .ok_or(CompileError::FrameOverflow)?;
+            .ok_or(CompileError::Unsupported(crate::Limit::Frame))?;
         let peak = bytes
             .checked_add(child_peak)
-            .ok_or(CompileError::FrameOverflow)?;
+            .ok_or(CompileError::Unsupported(crate::Limit::Frame))?;
         Ok(Compiled {
             body,
             allocation,

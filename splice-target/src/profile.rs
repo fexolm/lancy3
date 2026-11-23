@@ -20,21 +20,17 @@ pub struct Simd {
 
 /// Read SPLICE_SIMD once so that staging, listings and executable kernels
 /// agree on the logical vector width throughout the process.
-pub fn simd() -> Result<Simd, String> {
-    static CONFIG: OnceLock<Result<Simd, String>> = OnceLock::new();
-    CONFIG
-        .get_or_init(select)
-        .as_ref()
-        .copied()
-        .map_err(Clone::clone)
+pub fn simd() -> Result<Simd, TargetError> {
+    static CONFIG: OnceLock<Result<Simd, TargetError>> = OnceLock::new();
+    CONFIG.get_or_init(select).clone()
 }
 
-fn select() -> Result<Simd, String> {
+fn select() -> Result<Simd, TargetError> {
     use Profile::*;
     let name = match std::env::var("SPLICE_SIMD") {
         Ok(name) => name,
         Err(std::env::VarError::NotPresent) => String::from("auto"),
-        Err(error) => return Err(format!("invalid SPLICE_SIMD: {error}")),
+        Err(std::env::VarError::NotUnicode(_)) => return Err(TargetError::InvalidVariable),
     };
     let profile = match name.as_str() {
         "auto" => Auto,
@@ -45,7 +41,7 @@ fn select() -> Result<Simd, String> {
         "neon" => Neon,
         "sve" => Sve,
         "sve2" => Sve2,
-        _ => return Err(format!("unknown SPLICE_SIMD profile {name:?}")),
+        _ => return Err(TargetError::UnknownProfile(name)),
     };
     // On Linux AArch64 Auto picks the best ISA exposed to userspace.
     #[cfg(all(target_arch = "aarch64", target_os = "linux"))]
@@ -60,8 +56,7 @@ fn select() -> Result<Simd, String> {
     } else {
         profile
     };
-    let bytes = width(profile)
-        .ok_or_else(|| format!("SPLICE_SIMD={name} is unavailable on this CPU/OS"))?;
+    let bytes = width(profile).ok_or(TargetError::Unavailable(profile))?;
     Ok(Simd { profile, bytes })
 }
 
@@ -178,6 +173,10 @@ impl Simd {
 #[non_exhaustive]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TargetError {
+    /// `SPLICE_SIMD` is not valid Unicode.
+    InvalidVariable,
+    /// `SPLICE_SIMD` names no profile.
+    UnknownProfile(String),
     /// The CPU or OS does not provide this profile.
     Unavailable(Profile),
     /// The calling thread's SVE vector length is shorter than the code needs.
@@ -190,6 +189,8 @@ pub enum TargetError {
 impl fmt::Display for TargetError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::InvalidVariable => f.write_str("SPLICE_SIMD is not valid Unicode"),
+            Self::UnknownProfile(name) => write!(f, "unknown SPLICE_SIMD profile {name:?}"),
             Self::Unavailable(profile) => write!(f, "{profile:?} is unavailable on this CPU/OS"),
             Self::VectorLength {
                 required,

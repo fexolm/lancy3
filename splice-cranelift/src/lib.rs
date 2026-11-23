@@ -27,7 +27,7 @@ fn builder(debug: bool) -> Result<JITBuilder> {
     use cranelift_codegen::settings::{self, Configurable};
     use splice_target::Profile;
 
-    let simd = splice_target::simd()?;
+    let simd = splice_target::simd().map_err(|e| e.to_string())?;
     let mut flags = settings::builder();
     for (name, value) in [
         ("opt_level", if debug { "none" } else { "speed" }),

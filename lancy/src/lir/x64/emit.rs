@@ -7,7 +7,7 @@ use super::{
 };
 use crate::hir::operation::Action;
 use crate::{
-    CompileError, Trap,
+    CompileError, Limit, Trap,
     hir::{Binary, Function, Type, ssa::VerifiedBody},
     jit::{DebugFrame, DebugFunction},
     lir::layout,
@@ -145,7 +145,33 @@ fn position(a: &mut CodeAssembler) -> Result<u64, IcedError> {
     Ok(index)
 }
 
+/// An assembly failure: either a limit of the target or an encoder error,
+/// which can only be a Lancy defect.
+enum Failure {
+    Assembly(IcedError),
+    Limit(Limit),
+}
+
+impl From<IcedError> for Failure {
+    fn from(error: IcedError) -> Self {
+        Self::Assembly(error)
+    }
+}
+
+impl From<Failure> for CompileError {
+    fn from(failure: Failure) -> Self {
+        match failure {
+            Failure::Assembly(error) => Self::internal(error),
+            Failure::Limit(limit) => limit.into(),
+        }
+    }
+}
+
 fn emit_mode(module: &Module<CompiledFunction>, debug: bool) -> Result<Code, CompileError> {
+    Ok(assemble(module, debug)?)
+}
+
+fn assemble(module: &Module<CompiledFunction>, debug: bool) -> Result<Code, Failure> {
     let _span = tracing::debug_span!(target: "splice::compile", "emit_machine_code").entered();
     let entry = module.call_graph.root();
     let mut a = CodeAssembler::new(64)?;
@@ -278,10 +304,7 @@ fn emit_mode(module: &Module<CompiledFunction>, debug: bool) -> Result<Code, Com
     // Executable::new may install at any address. All label references must
     // fit RIP-relative addressing, including the LEA for each continuation.
     if bytes.len() > i32::MAX as usize {
-        return Err(CompileError::BranchOutOfRange {
-            offset: 0,
-            target: bytes.len(),
-        });
+        return Err(Failure::Limit(Limit::CodeSize { bytes: bytes.len() }));
     }
     Ok(Code {
         #[cfg(test)]

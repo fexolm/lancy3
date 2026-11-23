@@ -17,7 +17,7 @@ pub(crate) fn check_machine(
     if case.checks.is_empty() && case.encodings.is_empty() {
         return Ok(());
     }
-    let simd = splice_target::simd()?;
+    let simd = splice_target::simd().map_err(|error| error.to_string())?;
     let compiled = super::compile(module, ids, simd)
         .map_err(|error| format!("aarch64 allocation: {error}"))?;
     let root = &compiled.functions[compiled.call_graph.root()];

@@ -32,7 +32,7 @@ impl<I: TargetInst> Function<I> {
 
     pub fn new(blocks: usize, vregs: usize) -> Result<Self, CompileError> {
         if vregs > VReg::MAX || blocks > i32::MAX as usize {
-            return Err(CompileError::FunctionTooLarge);
+            return Err(CompileError::Unsupported(crate::Limit::Registers));
         }
         Ok(Self {
             insts: Vec::new(),
@@ -51,7 +51,7 @@ impl<I: TargetInst> Function<I> {
     #[cfg(target_arch = "x86_64")]
     pub fn temp(&mut self, class: RegClass) -> Result<VReg, CompileError> {
         if self.vregs == VReg::MAX {
-            return Err(CompileError::FunctionTooLarge);
+            return Err(CompileError::Unsupported(crate::Limit::Registers));
         }
         let reg = VReg::new(self.vregs, class);
         self.vregs += 1;
@@ -112,7 +112,7 @@ impl<I: TargetInst> Function<I> {
     ) -> Result<(), CompileError> {
         // regalloc2 packs a before/after bit into its 32-bit program points.
         if self.insts.len() > i32::MAX as usize || self.operands.len() > u32::MAX as usize {
-            return Err(CompileError::FunctionTooLarge);
+            return Err(CompileError::Unsupported(crate::Limit::Registers));
         }
         let first = self
             .blocks

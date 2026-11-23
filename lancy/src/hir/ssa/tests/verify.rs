@@ -129,3 +129,34 @@ fn rust_packet_calls_verify_word_types_and_arity() {
         }
     }
 }
+
+#[test]
+fn scalar_operations_name_the_vector_and_pointer_misuse() {
+    use crate::hir::{Binary, Lane};
+    let vector = Type::Vector(Lane::F32);
+    let mut f = Function::new(&[vector], vector);
+    let x = f.params(f.entry())[0];
+    let sum = f.append(f.entry(), Op::Bin(Binary::Add, x, x)).unwrap();
+    f.set_terminator(f.entry(), Terminator::Return(sum));
+    assert!(matches!(f.verify(), Err(IrError::UseSimdForm { ty, .. }) if ty == vector));
+
+    for (op, to) in [
+        (Op::Bitcast as fn(Type, _) -> Op, Type::I64),
+        (Op::Cast, Type::U64),
+    ] {
+        let mut f = Function::new(&[Type::Ptr], Type::I32);
+        let p = f.params(f.entry())[0];
+        f.append(f.entry(), op(to, p)).unwrap();
+        let zero = f.append(f.entry(), Op::Const(0)).unwrap();
+        f.set_terminator(f.entry(), Terminator::Return(zero));
+        assert!(matches!(
+            f.verify(),
+            Err(IrError::PointerCast { from: Type::Ptr, to: actual, .. }) if actual == to
+        ));
+    }
+    let mut f = Function::new(&[Type::Ptr], Type::U64);
+    let p = f.params(f.entry())[0];
+    let address = f.append(f.entry(), Op::Bitcast(Type::U64, p)).unwrap();
+    f.set_terminator(f.entry(), Terminator::Return(address));
+    f.verify().unwrap();
+}

@@ -20,7 +20,7 @@ pub(super) fn allocate<I: TargetInst + Schedulable>(
         validate_ssa: cfg!(any(test, debug_assertions)),
         ..Default::default()
     };
-    regalloc2::run_with_ctx(f, I::machine_env(), &options, ctx)?;
+    regalloc2::run_with_ctx(f, I::machine_env(), &options, ctx).map_err(CompileError::internal)?;
     #[cfg(test)]
     {
         let mut checker = regalloc2::checker::Checker::new(f, I::machine_env());

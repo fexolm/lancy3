@@ -115,14 +115,20 @@ impl Function {
                     Op::Bin(op, a, b) => {
                         let ty = operand(a)?;
                         expect(b, ty)?;
-                        if matches!(ty, Type::Vector(_)) || !op.supports(ty) {
+                        if matches!(ty, Type::Vector(_)) {
+                            return Err(IrError::UseSimdForm { inst, ty });
+                        }
+                        if !op.supports(ty) {
                             return Err(IrError::InvalidNumeric { inst, ty });
                         }
                         op.result_type(ty)
                     }
                     Op::Unary(op, v) => {
                         let ty = operand(v)?;
-                        if matches!(ty, Type::Vector(_)) || !op.supports(ty) {
+                        if matches!(ty, Type::Vector(_)) {
+                            return Err(IrError::UseSimdForm { inst, ty });
+                        }
+                        if !op.supports(ty) {
                             return Err(IrError::InvalidNumeric { inst, ty });
                         }
                         op.result_type(ty)
@@ -130,7 +136,7 @@ impl Function {
                     Op::Ternary(op, a, b, c) => {
                         let ty = operand(b)?;
                         if matches!(ty, Type::Vector(_)) {
-                            return Err(IrError::InvalidNumeric { inst, ty });
+                            return Err(IrError::UseSimdForm { inst, ty });
                         }
                         expect(
                             a,
@@ -151,18 +157,19 @@ impl Function {
                     }
                     Op::Cast(to, v) | Op::Bitcast(to, v) => {
                         let ty = operand(v)?;
-                        let valid = match (ty, to) {
-                            // Expose the address bits for alignment arithmetic.
-                            (Type::Ptr, Type::U64) => matches!(self.op(inst), Op::Bitcast(..)),
-                            (Type::Ptr, _) | (_, Type::Ptr) => false,
-                            (Type::Vector(_), _) | (_, Type::Vector(_)) => false,
-                            _ => {
-                                matches!(self.op(inst), Op::Cast(..))
-                                    || ty.bytes(16) == to.bytes(16)
+                        let bitcast = matches!(self.op(inst), Op::Bitcast(..));
+                        match (ty, to) {
+                            (Type::Ptr, Type::U64) if bitcast => {}
+                            (Type::Ptr, _) | (_, Type::Ptr) => {
+                                return Err(IrError::PointerCast { inst, from: ty, to });
                             }
-                        };
-                        if !valid {
-                            return Err(IrError::InvalidNumeric { inst, ty });
+                            (Type::Vector(_), _) | (_, Type::Vector(_)) => {
+                                return Err(IrError::UseSimdForm { inst, ty });
+                            }
+                            _ if bitcast && ty.bytes(16) != to.bytes(16) => {
+                                return Err(IrError::InvalidNumeric { inst, ty });
+                            }
+                            _ => {}
                         }
                         to
                     }
@@ -227,7 +234,7 @@ impl Function {
                     }
                     Op::Load(ty, addr) => {
                         if matches!(ty, Type::Vector(_)) {
-                            return Err(IrError::InvalidNumeric { inst, ty });
+                            return Err(IrError::UseSimdForm { inst, ty });
                         }
                         expect(addr, Type::Ptr)?;
                         ty
@@ -236,7 +243,7 @@ impl Function {
                         expect(addr, Type::Ptr)?;
                         let ty = operand(value)?;
                         if matches!(ty, Type::Vector(_)) {
-                            return Err(IrError::InvalidNumeric { inst, ty });
+                            return Err(IrError::UseSimdForm { inst, ty });
                         }
                         continue;
                     }

@@ -56,7 +56,7 @@ fn build_module<'ctx>(
     #[cfg(target_arch = "aarch64")]
     {
         use inkwell::attributes::{Attribute, AttributeLoc};
-        let simd = splice_target::simd()?;
+        let simd = splice_target::simd().map_err(|e| e.to_string())?;
         if target::scalable(simd) {
             // LLVM encodes the minimum vscale in the high 32 bits and the
             // maximum in the low 32. SVE has at most 16 architectural quads.
@@ -231,7 +231,7 @@ impl LlvmKernel {
         Llvm::version()?;
         // The target machine makes the same choice on this thread.
         #[cfg(target_arch = "aarch64")]
-        let scalable = target::scalable(splice_target::simd()?);
+        let scalable = target::scalable(splice_target::simd().map_err(|e| e.to_string())?);
         let (owner, entry, registration) =
             jit::Jit::compile(auto_vectorize, source, options, populate)?;
         Ok(Self {

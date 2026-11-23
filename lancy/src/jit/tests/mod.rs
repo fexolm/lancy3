@@ -39,7 +39,7 @@ fn an_unrepresentable_expansion_keeps_the_shared_graph_executable() {
     let (m, ids) = f.verified_module().unwrap();
     assert!(matches!(
         passes::inline_all(&m, &ids),
-        Err(crate::CompileError::FunctionTooLarge)
+        Err(crate::CompileError::Unsupported(crate::Limit::Registers))
     ));
     let code = ScalarKernel::compile(&f).unwrap();
     assert_eq!(code.call(&[0]), Ok(1));
@@ -59,13 +59,14 @@ fn every_size_limit_of_the_expanded_body_falls_back_to_calls() {
     root.set_terminator(entry, Terminator::Return(result));
     let (module, ids) = root.verified_module().unwrap();
     let limits = [
-        CompileError::FunctionTooLarge,
-        CompileError::BranchOutOfRange {
+        CompileError::Unsupported(crate::Limit::Registers),
+        CompileError::Unsupported(crate::Limit::BranchRange {
             offset: 0,
             target: 0,
-        },
-        CompileError::WorkspaceTooLarge { slots: 0 },
-        CompileError::FrameOverflow,
+        }),
+        CompileError::Unsupported(crate::Limit::CodeSize { bytes: 0 }),
+        CompileError::Unsupported(crate::Limit::Workspace { slots: 0 }),
+        CompileError::Unsupported(crate::Limit::Frame),
     ];
     for limit in limits {
         let mut limit = Some(limit);

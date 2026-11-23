@@ -116,7 +116,7 @@ impl Size {
             || self.edges > u32::MAX as u64
             || self.args > u32::MAX as u64
         {
-            Err(CompileError::FunctionTooLarge)
+            Err(CompileError::Unsupported(crate::Limit::Registers))
         } else {
             Ok(())
         }
@@ -169,7 +169,7 @@ fn check_expansion(
             }
         }
         if frame.iter().any(|&bytes| bytes > u64::from(u32::MAX)) {
-            return Err(CompileError::FrameOverflow);
+            return Err(CompileError::Unsupported(crate::Limit::Frame));
         }
         frames.insert(frame);
         let callee = |site| {

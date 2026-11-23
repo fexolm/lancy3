@@ -34,7 +34,7 @@ pub(super) fn allocate(len: usize) -> Result<NonNull<c_void>, CompileError> {
     }
     NonNull::new(p).ok_or_else(|| {
         unsafe { munmap(p, len) };
-        CompileError::ExecutableMemory {
+        CompileError::Os {
             operation: "mmap",
             source: std::io::Error::other("mapping has a null base address"),
         }

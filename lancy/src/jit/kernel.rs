@@ -51,7 +51,7 @@ impl ScalarKernel {
         let _span =
             tracing::debug_span!(target: "splice::compile", "lancy_jit", inlining = ?inlining)
                 .entered();
-        splice_target::simd().map_err(CompileError::SimdProfile)?;
+        splice_target::simd()?;
         let (source, ids) = function.verified_module()?;
         // Scratch can materialize a pointer even for a numeric signature.
         // Its raw caller must ensure initialization and bound every access.

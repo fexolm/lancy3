@@ -23,7 +23,7 @@ pub(crate) fn host_machine_with_debug(debug: bool) -> Result<TargetMachine, Stri
     });
     let triple = TargetMachine::get_default_triple();
     let target = Target::from_triple(&triple).map_err(|e| e.to_string())?;
-    let simd = splice_target::simd()?;
+    let simd = splice_target::simd().map_err(|e| e.to_string())?;
     // Explicit profiles start from a baseline CPU: an inferred CPU model
     // could re-enable extensions that the selected profile excludes.
     let (cpu, features) = match simd.profile {

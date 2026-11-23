@@ -62,7 +62,7 @@ pub(crate) fn build_with_source(
     kinds: &[BufferKind],
     body: Body<'_>,
 ) -> Result<(Function, Option<&'static KernelSource>), String> {
-    splice_target::simd()?;
+    splice_target::simd().map_err(|e| e.to_string())?;
     let mut builder = Builder::new(arity, kinds)?;
     body(&mut builder)?;
     let source = builder.source;

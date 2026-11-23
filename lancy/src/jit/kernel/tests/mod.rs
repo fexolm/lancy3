@@ -143,6 +143,6 @@ fn one_kernel_serves_concurrent_callers_and_drops_on_another_thread() {
 fn empty_machine_code_is_not_mapped() {
     assert!(matches!(
         super::Executable::new(&[]),
-        Err(CompileError::EmptyCode)
+        Err(CompileError::Internal(_))
     ));
 }

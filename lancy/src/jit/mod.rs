@@ -74,7 +74,7 @@ pub(crate) fn optimize_and_lower<T>(
             });
         match expanded {
             // Inlining or lowering the expanded body can exceed a size limit.
-            Err(error) if error.is_size_limit() => {}
+            Err(error) if error.is_limit() => {}
             other => return other,
         }
     }

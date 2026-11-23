@@ -83,6 +83,15 @@ struct CallData {
 
 crate::slot_key!(pub Edge);
 
+/// An SSA function under construction or verified by [`Function::verify`].
+///
+/// # Panics
+///
+/// `Block`, `Value`, `Inst`, `Edge`, `Call` and `PacketCall` handles index
+/// the function that issued them. Every method that takes a handle panics
+/// for a handle of another function or a block retired by
+/// [`Function::merge_blocks`]. Structural errors that a builder can make
+/// with valid handles are reported by `verify` as an [`IrError`].
 #[derive(Clone, Debug)]
 pub struct Function {
     arity: usize,
@@ -147,6 +156,11 @@ impl Function {
     /// slices, given the (element byte width, writable) pair for each.
     /// This is part of the raw call contract. Writable bytes are exclusively
     /// borrowed and shared bytes stay immutable throughout the call.
+    ///
+    /// # Panics
+    ///
+    /// If the parameters from `first` are not `(Ptr, I32)` pairs, one per
+    /// slice, or an element width is not 2, 4 or 8 bytes.
     pub fn set_slice_params(&mut self, first: usize, slices: Box<[(u8, bool)]>) {
         let params = &self.param_types()[first..first + 2 * slices.len()];
         assert!(
@@ -247,6 +261,9 @@ impl Function {
             }),
         }
     }
+    /// # Panics
+    ///
+    /// If `b` has no terminator yet. A verified function terminates every block.
     pub fn terminator(&self, b: Block) -> &Terminator {
         self.blocks[b]
             .term

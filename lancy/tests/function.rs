@@ -62,8 +62,6 @@ fn verify_rejects_bad_edges_dominance_call_signatures_and_unterminated_blocks() 
 
 #[test]
 fn compile_preserves_the_verifier_error_from_a_callee() {
-    use std::error::Error;
-
     let child = Arc::new(Function::scalar(0));
     let mut parent = Function::scalar(0);
     let site = parent.add_call(child.clone(), &[]);
@@ -75,8 +73,8 @@ fn compile_preserves_the_verifier_error_from_a_callee() {
         panic!("compiled an unterminated callee");
     };
     assert!(matches!(
-        err.source().and_then(|source| source.downcast_ref::<IrError>()),
-        Some(IrError::UnterminatedBlock { block }) if *block == child.entry()
+        err,
+        CompileError::InvalidIr(IrError::UnterminatedBlock { block }) if block == child.entry()
     ));
 }
 

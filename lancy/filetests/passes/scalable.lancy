@@ -153,7 +153,7 @@ fn main a:vec.f64 b:vec.i32 -> vec.f64
 fn main x:i32 -> i32
   bad = bitcast ptr x
   ret x
-@reject invalid numeric operation
+@reject a pointer only bitcasts to U64
 ---
 fn main x:i32 -> i32
   a = simd.splat x
@@ -175,7 +175,7 @@ block exit picked:vec.i32
 fn main x:vec.f32 -> vec.f32
   invalid = add x x
   ret invalid
-@reject invalid numeric operation
+@reject use its SIMD form
 ---
 fn main x:f64 -> f64
   invalid = simd.add x x

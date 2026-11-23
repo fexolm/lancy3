@@ -47,7 +47,7 @@ impl<T> Module<T> {
                     let key = std::ptr::from_ref(node);
                     if let Some(&id) = ids.get(&key) {
                         if id == FunctionId::INVALID {
-                            return Err(CompileError::RecursiveCall);
+                            return Err(CompileError::Unsupported(crate::Limit::Recursion));
                         }
                         continue;
                     }
@@ -134,6 +134,9 @@ mod tests {
             children.push(&nodes[1 - *n]);
             Ok(())
         });
-        assert!(matches!(result, Err(CompileError::RecursiveCall)));
+        assert!(matches!(
+            result,
+            Err(CompileError::Unsupported(crate::Limit::Recursion))
+        ));
     }
 }

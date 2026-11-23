@@ -125,10 +125,10 @@ impl Assembler {
             let pc = at as u64 * 4;
             self.words[at] = code.encode(0, &[O::label(target)], pc).map_err(|error| {
                 if matches!(error, super::EncodeError::Branch { .. }) {
-                    CompileError::BranchOutOfRange {
+                    CompileError::from(crate::Limit::BranchRange {
                         offset: pc as usize,
                         target: target as usize,
-                    }
+                    })
                 } else {
                     super::Error::from(error).into()
                 }
@@ -727,7 +727,7 @@ fn emit_mode(
     ids: &FunctionIds<Function>,
     debug: bool,
 ) -> Result<Code> {
-    let config = splice_target::simd().map_err(CompileError::SimdProfile)?;
+    let config = splice_target::simd()?;
     let module = compile(source, ids, config)?;
     emit_compiled(&module, config, debug)
 }
@@ -879,7 +879,7 @@ fn emit_compiled(module: &Module<Compiled>, config: Simd, debug: bool) -> Result
     }
     let bytes = ROOT_BYTES
         .checked_add(module.functions[root].peak)
-        .ok_or(CompileError::FrameOverflow)?;
+        .ok_or(CompileError::Unsupported(crate::Limit::Frame))?;
     Ok(Code {
         bytes: a.finish()?,
         words: bytes / 8,

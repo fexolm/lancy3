@@ -24,7 +24,7 @@ fn lower_mode<'a>(
     root: &'a Function,
     mut sources: Option<&mut DebugSources<'a>>,
 ) -> Result<hir::Function, String> {
-    splice_target::simd()?;
+    splice_target::simd().map_err(|e| e.to_string())?;
     let mut callees = HashMap::new();
     let mut pending = vec![(root, false)];
     while let Some((f, visited)) = pending.pop() {
