@@ -2,9 +2,11 @@ use super::super::{Entry, Executable};
 use iced_x86::{IcedError, code_asm::*};
 
 /// Call the real JIT entry with host register canaries. Return one if any
-/// nonvolatile GPR changed, after restoring the test caller's own registers.
+/// nonvolatile GPR of the entry's convention changed, after restoring the
+/// test caller's own registers. The probe has the entry's convention.
 fn abi_probe(entry: Entry) -> Result<Vec<u8>, IcedError> {
-    let regs: &[AsmRegister64] = if cfg!(windows) {
+    let win64 = matches!(entry, Entry::Win64(_));
+    let regs: &[AsmRegister64] = if win64 {
         &[rbx, rbp, rsi, rdi, r12, r13, r14, r15]
     } else {
         &[rbx, rbp, r12, r13, r14, r15]
@@ -18,9 +20,9 @@ fn abi_probe(entry: Entry) -> Result<Vec<u8>, IcedError> {
     }
     // Both lists have even length. Align RSP before CALL and provide
     // the 32 bytes of outgoing shadow space required by Windows x64.
-    let outgoing = if cfg!(windows) { 40 } else { 8 };
+    let outgoing = if win64 { 40 } else { 8 };
     a.sub(rsp, outgoing)?;
-    a.mov(rax, entry as usize as u64)?;
+    a.mov(rax, entry.address() as u64)?;
     a.call(rax)?;
     a.add(rsp, outgoing)?;
     a.xor(eax, eax)?;
@@ -38,18 +40,17 @@ fn abi_probe(entry: Entry) -> Result<Vec<u8>, IcedError> {
 /// Enter `entry` with canaries in the nonvolatile GPRs; nonzero if any changed.
 pub(super) fn call_with_canaries(entry: Entry, args: *const u64, workspace: *mut u64) -> u64 {
     let probe = Executable::new(&abi_probe(entry).unwrap()).unwrap();
-    // SAFETY: abi_probe emits the same two-argument C ABI, forwards the
-    // arguments unchanged and retains stack alignment at the nested call.
-    // `probe` owns the mapping until this function returns.
-    let check =
-        unsafe { std::mem::transmute::<*mut std::ffi::c_void, Entry>(probe.address.as_ptr()) };
+    // SAFETY: abi_probe emits the entry's two-argument convention, forwards
+    // the arguments unchanged and retains stack alignment at the nested
+    // call. `probe` owns the mapping until this function returns.
+    let check = unsafe { entry.at(probe.address.as_ptr().cast_const().cast()) };
     // SAFETY: forwarded from the caller of the kernel entry.
-    unsafe { check(args, workspace) }
+    unsafe { check.call(args, workspace) }
 }
 
 // Windows preserves the low 128 bits of XMM6..15. Give the kernel ten distinct
 // 128-bit canaries and copy the observed values back before returning to Rust.
-#[cfg(windows)]
+// The probe itself has the Windows convention, which Rust can call on any OS.
 fn xmm_abi_probe(entry: Entry) -> Result<Vec<u8>, IcedError> {
     let regs = [
         xmm6, xmm7, xmm8, xmm9, xmm10, xmm11, xmm12, xmm13, xmm14, xmm15,
@@ -65,7 +66,7 @@ fn xmm_abi_probe(entry: Entry) -> Result<Vec<u8>, IcedError> {
         a.movdqu(xmmword_ptr(rsp + 32 + off), reg)?;
         a.movdqu(reg, xmmword_ptr(r8 + off))?;
     }
-    a.mov(rax, entry as usize as u64)?;
+    a.mov(rax, entry.address() as u64)?;
     a.call(rax)?;
     a.mov(r8, qword_ptr(rsp + 192))?;
     for (i, &reg) in regs.iter().enumerate() {
@@ -78,7 +79,6 @@ fn xmm_abi_probe(entry: Entry) -> Result<Vec<u8>, IcedError> {
     a.assemble(0)
 }
 
-#[cfg(windows)]
 #[test]
 fn outlined_vector_pressure_preserves_windows_xmm_registers_on_normal_and_trapping_exits() {
     use super::super::ScalarKernel;
@@ -87,10 +87,11 @@ fn outlined_vector_pressure_preserves_windows_xmm_registers_on_normal_and_trappi
         hir::{Binary, Function, Lane, Op, Scale, Simd, Terminator, Type},
     };
     use iced_x86::{Decoder, DecoderOptions, Mnemonic, Register};
+    use splice_target::CallingConvention;
     use std::sync::Arc;
 
     const VECTORS: usize = 20;
-    let lanes = ScalarKernel::vector_bytes() / 8;
+    let lanes = crate::test_target::width() / 8;
     let params = [Type::Ptr, Type::Ptr, Type::I32];
     let mut leaf = Function::new(&params, Type::I32);
     let b = leaf.entry();
@@ -128,7 +129,11 @@ fn outlined_vector_pressure_preserves_windows_xmm_registers_on_normal_and_trappi
         .append(b, Op::Bin(Binary::Add, result, result))
         .unwrap();
     root.set_terminator(b, Terminator::Return(answer));
-    let kernel = ScalarKernel::compile_with_inlining(&root, Inlining::Never).unwrap();
+    let target = crate::test_target::target()
+        .with_calling_convention(CallingConvention::Win64)
+        .unwrap();
+    let options = crate::CompileOptions::new(target).with_inlining(Inlining::Never);
+    let kernel = ScalarKernel::compile(&root, &options).unwrap();
 
     // SAFETY: the owner keeps this readable executable mapping alive. This
     // kernel only uses immediate integer constants, so the mapping is all text.
@@ -158,7 +163,7 @@ fn outlined_vector_pressure_preserves_windows_xmm_registers_on_normal_and_trappi
     );
 
     let probe = Executable::new(&xmm_abi_probe(kernel.entry).unwrap()).unwrap();
-    type Probe = unsafe extern "C" fn(*const u64, *mut u64, *mut [u64; 2]) -> u64;
+    type Probe = unsafe extern "win64" fn(*const u64, *mut u64, *mut [u64; 2]) -> u64;
     // SAFETY: xmm_abi_probe implements this exact three-argument Windows ABI,
     // forwards the first two arguments to the live kernel and preserves RAX.
     let invoke =

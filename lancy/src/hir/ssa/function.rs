@@ -706,7 +706,7 @@ impl Function {
             })
             .into());
         }
-        let width = crate::ScalarKernel::vector_bytes();
+        let width = crate::test_target::width();
         if self.param_types().iter().any(|ty| ty.bytes(width) > 8)
             || self.return_type.bytes(width) > 8
         {

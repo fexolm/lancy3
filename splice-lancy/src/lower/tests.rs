@@ -171,7 +171,8 @@ fn rust_imports_fill_unused_abi_arguments_with_zero_in_both_staging_paths() {
     let direct = build(1, &[], Box::new(body)).unwrap();
     let portable = splice_core::frontend::materialize(1, &[], Box::new(body)).unwrap();
     for graph in [direct, lower(&portable).unwrap()] {
-        let kernel = lancy::ScalarKernel::compile(&graph).unwrap();
+        let kernel =
+            lancy::ScalarKernel::compile(&graph, &lancy::CompileOptions::host().unwrap()).unwrap();
         assert_eq!(kernel.call(&[5]), Ok(13));
         assert_eq!(kernel.call(&[-5]), Ok(-7));
     }
@@ -230,7 +231,8 @@ fn portable_calls_share_one_lowered_body_and_preserve_argument_reassignment() {
         .collect();
     assert_eq!(calls.len(), 2);
     assert!(Arc::ptr_eq(calls[0], calls[1]));
-    let kernel = lancy::ScalarKernel::compile(&graph).unwrap();
+    let kernel =
+        lancy::ScalarKernel::compile(&graph, &lancy::CompileOptions::host().unwrap()).unwrap();
     assert_eq!(kernel.call(&[22]), Ok(24));
 }
 
@@ -259,7 +261,8 @@ fn backedge_swaps_live_names_on_the_selected_edge() {
         }),
     )
     .unwrap();
-    let kernel = lancy::ScalarKernel::compile(&graph).unwrap();
+    let kernel =
+        lancy::ScalarKernel::compile(&graph, &lancy::CompileOptions::host().unwrap()).unwrap();
     for n in 0..10 {
         assert_eq!(
             kernel.call(&[n, 20, 91]),
@@ -291,7 +294,9 @@ fn backward_jump_into_previously_unreferenced_label_is_reachable() {
     )
     .unwrap();
     assert_eq!(
-        lancy::ScalarKernel::compile(&f).unwrap().call(&[41]),
+        lancy::ScalarKernel::compile(&f, &lancy::CompileOptions::host().unwrap())
+            .unwrap()
+            .call(&[41]),
         Ok(42)
     );
 }
@@ -419,7 +424,13 @@ fn lowered_call_graphs_retain_slice_contracts_for_out_of_line_calls() {
         }
         crate::LancyKernel {
             _debug: None,
-            code: ScalarKernel::compile_with_inlining(&root, Inlining::Never).unwrap(),
+            code: ScalarKernel::compile(
+                &root,
+                &lancy::CompileOptions::host()
+                    .unwrap()
+                    .with_inlining(Inlining::Never),
+            )
+            .unwrap(),
             arity: ir.arity(),
             slices: ir.buffer_kinds().into(),
         }

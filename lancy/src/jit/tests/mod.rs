@@ -41,7 +41,7 @@ fn an_unrepresentable_expansion_keeps_the_shared_graph_executable() {
         passes::inline_all(&m, &ids),
         Err(crate::CompileError::Unsupported(crate::Limit::Registers))
     ));
-    let code = ScalarKernel::compile(&f).unwrap();
+    let code = ScalarKernel::compile(&f, &crate::test_target::options()).unwrap();
     assert_eq!(code.call(&[0]), Ok(1));
     assert_eq!(code.call(&[1]), Ok(2));
 }

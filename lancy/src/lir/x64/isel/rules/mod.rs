@@ -17,6 +17,7 @@ pub(in crate::lir::x64) use packed::packed_half;
 
 use super::super::inst::{Cond, Inst, SelectCond, class};
 use super::masks::Masks;
+use crate::lir::x64::Cpu;
 use crate::{
     CompileError,
     hir::{Function, Lane, Op, Simd, Ternary, Type, Value},
@@ -27,14 +28,13 @@ use crate::{
     module::FunctionId,
 };
 use regalloc2::{PRegSet, VReg};
-use splice_target::Features;
 
 pub(super) fn select(
     ctx: &mut Context,
     f: &Function,
     body: &mut lir::Function<Inst>,
     out: &mut Vec<Inst>,
-    target: (Features, &Masks),
+    target: (Cpu, &Masks),
     root: Root,
     callee: impl Fn(&Function) -> (FunctionId, PRegSet),
 ) -> Result<(), CompileError> {
@@ -63,7 +63,7 @@ struct Rules<'a> {
     f: &'a Function,
     body: &'a mut lir::Function<Inst>,
     out: &'a mut Vec<Inst>,
-    cpu: Features,
+    cpu: Cpu,
     masks: &'a Masks,
     result: Option<Value>,
 }

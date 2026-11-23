@@ -3,7 +3,7 @@ use super::reduce::Form as ReduceForm;
 use super::unary::Form as UnaryForm;
 use super::wide::MathForm as WideMath;
 use super::width::{Narrow, Widen};
-use super::{A, C, Cond};
+use super::{A, C, Cond, Config};
 use crate::{
     hir::operation::Action,
     hir::{Lane, RustContextImport, RustImport, RustPacketImport, Scale, Type, Unary},
@@ -41,12 +41,31 @@ fn volatile() -> [PRegSet; 3] {
 }
 
 pub(super) fn call_clobbers() -> PRegSet {
-    let [ints, _, vectors] = Inst::machine_env().preferred_regs_by_class;
+    let [ints, _, vectors] = machine_env().preferred_regs_by_class;
     ints | vectors
 }
 
 pub(super) fn nonvolatile() -> PRegSet {
-    Inst::machine_env().non_preferred_regs_by_class[RegClass::Int as usize]
+    machine_env().non_preferred_regs_by_class[RegClass::Int as usize]
+}
+
+/// AAPCS64 is the only convention, whatever the vector width.
+fn machine_env() -> &'static MachineEnv {
+    static ENV: OnceLock<MachineEnv> = OnceLock::new();
+    ENV.get_or_init(|| MachineEnv {
+        preferred_regs_by_class: volatile(),
+        non_preferred_regs_by_class: [
+            registers(RegClass::Int, 23..=28),
+            PRegSet::empty(),
+            PRegSet::empty(),
+        ],
+        scratch_by_class: [
+            Some(PReg::new(9, RegClass::Int)),
+            None,
+            Some(PReg::new(16, RegClass::Vector)),
+        ],
+        fixed_stack_slots: vec![],
+    })
 }
 
 fn return_reg(ty: Type) -> PReg {
@@ -228,7 +247,8 @@ pub(super) enum Inst {
 }
 
 impl TargetInst for Inst {
-    fn operands(&self, out: &mut Vec<Operand>) {
+    type Machine = Config;
+    fn operands(&self, _: &Config, out: &mut Vec<Operand>) {
         let input = Operand::reg_use;
         let output = Operand::reg_def;
         match *self {
@@ -450,7 +470,7 @@ impl TargetInst for Inst {
         }
     }
 
-    fn clobbers(&self) -> PRegSet {
+    fn clobbers(&self, _: &Config) -> PRegSet {
         match *self {
             Self::Call(_, written, ty, _) => {
                 let mut regs = call_clobbers() | written;
@@ -517,27 +537,13 @@ impl TargetInst for Inst {
         matches!(self, Self::Return(..))
     }
 
-    fn machine_env() -> &'static MachineEnv {
-        static ENV: OnceLock<MachineEnv> = OnceLock::new();
-        ENV.get_or_init(|| MachineEnv {
-            preferred_regs_by_class: volatile(),
-            non_preferred_regs_by_class: [
-                registers(RegClass::Int, 23..=28),
-                PRegSet::empty(),
-                PRegSet::empty(),
-            ],
-            scratch_by_class: [
-                Some(PReg::new(9, RegClass::Int)),
-                None,
-                Some(PReg::new(16, RegClass::Vector)),
-            ],
-            fixed_stack_slots: vec![],
-        })
+    fn machine_env(_: &Config) -> &'static MachineEnv {
+        machine_env()
     }
 
-    fn spillslot_size(class: RegClass) -> usize {
+    fn spillslot_size(config: &Config, class: RegClass) -> usize {
         if class == RegClass::Vector {
-            splice_target::vector_bytes() / 8
+            config.bytes / 8
         } else {
             1
         }

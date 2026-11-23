@@ -46,7 +46,9 @@ fn repeated_calls_clone_loops_and_each_early_return_into_its_own_continuation() 
     let expanded = inline_all(&source, &ids).unwrap();
     assert_eq!(expanded.verified_module().unwrap().0.functions.len(), 1);
     for policy in [Inlining::Always, Inlining::Never] {
-        let code = ScalarKernel::compile_with_inlining(&root, policy).unwrap();
+        let code =
+            ScalarKernel::compile(&root, &crate::test_target::options().with_inlining(policy))
+                .unwrap();
         for (x, y) in [(7, -5), (-5, 7), (0, 1), (-3, -9)] {
             let expected = (if x < 0 { x } else { 1 }) - (if y < 0 { y } else { 1 });
             assert_eq!(code.call(&[x, y]), Ok(expected));
@@ -82,7 +84,12 @@ fn non_returning_callee_removes_only_the_unreachable_continuation() {
             .count(),
         1
     );
-    assert_eq!(ScalarKernel::compile(&root).unwrap().call(&[0]), Ok(0));
+    assert_eq!(
+        ScalarKernel::compile(&root, &crate::test_target::options())
+            .unwrap()
+            .call(&[0]),
+        Ok(0)
+    );
 }
 
 #[test]
@@ -137,7 +144,7 @@ fn remove_dominated_checks_but_keep_sibling_checks_and_unused_trapping_math() {
             .count(),
         1
     );
-    let kernel = ScalarKernel::compile(&f).unwrap();
+    let kernel = ScalarKernel::compile(&f, &crate::test_target::options()).unwrap();
     for cond in [0, 1] {
         assert_eq!(
             kernel.call(&[cond, 1, 1]),
@@ -177,7 +184,7 @@ block done out:i32
             .all(|b| !matches!(optimized.terminator(b), Terminator::Branch { .. })),
         "the loop must be replaced by its closed form"
     );
-    let kernel = ScalarKernel::compile(&f).unwrap();
+    let kernel = ScalarKernel::compile(&f, &crate::test_target::options()).unwrap();
     for (start, bound) in [
         (i32::MIN, i32::MAX),
         (i32::MIN, 0),

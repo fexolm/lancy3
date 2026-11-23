@@ -16,15 +16,15 @@
 //! assert_eq!(encoder.bytes(), &[0x20, 0x1c, 0x00, 0x91]);
 //! # Ok::<(), lancy::aarch64::Error>(())
 //! ```
-#[cfg(target_arch = "aarch64")]
 mod backend;
 mod instruction;
 mod operand;
 
-#[cfg(all(test, target_arch = "aarch64"))]
-pub(crate) use backend::check_machine;
 #[cfg(target_arch = "aarch64")]
-pub(crate) use backend::{SITE_POINTER, Site, emit, emit_debug};
+pub(crate) use backend::SITE_POINTER;
+#[cfg(test)]
+pub(crate) use backend::check_machine;
+pub(crate) use backend::{Site, emit, emit_debug};
 
 pub use instruction::{Code, EncodeError, Feature, FeatureSet, Instruction};
 pub use operand::{Arrangement, ConditionCode, Operand, PredQual, Register, ShiftKind};

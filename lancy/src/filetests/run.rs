@@ -237,7 +237,7 @@ impl Run {
     }
 
     fn typed(&self, f: &Function) -> Result<Typed> {
-        let width = ScalarKernel::vector_bytes();
+        let width = crate::test_target::width();
         let at = |e: String| format!("line {}: {e}", self.line);
         let params = f.param_types();
         let pointers = params.iter().filter(|&&ty| ty == Type::Ptr).count();

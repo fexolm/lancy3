@@ -22,7 +22,7 @@ fn a_small_callee_leaves_registers_available_to_its_caller() {
     let (source, ids) = f.verified_module().unwrap();
     let entry = source.call_graph.root();
     let edges = source.call_graph.callees(entry).as_ptr();
-    let module = compile(source, &ids).unwrap();
+    let module = compile(crate::lir::x64::Machine::host(), source, &ids).unwrap();
     assert_eq!(module.call_graph.callees(entry).as_ptr(), edges);
     assert_eq!(
         module.functions[module.call_graph.root()]
@@ -31,7 +31,9 @@ fn a_small_callee_leaves_registers_available_to_its_caller() {
         0
     );
     assert_eq!(
-        ScalarKernel::compile(&f).unwrap().call(&[1, 2, 3, 4]),
+        ScalarKernel::compile(&f, &crate::test_target::options())
+            .unwrap()
+            .call(&[1, 2, 3, 4]),
         Ok(11)
     );
 }
@@ -63,7 +65,7 @@ fn checked_nested_access_preserves_prior_stores_and_forwards_addresses() {
     let last = root.append(b, H::PtrOffset(dst, two, Scale::Four)).unwrap();
     root.append(b, H::Store(last, result));
     root.set_terminator(b, Terminator::Return(result));
-    let k = ScalarKernel::compile(&root).unwrap();
+    let k = ScalarKernel::compile(&root, &crate::test_target::options()).unwrap();
     assert_eq!(
         k.call(&[0; 6]),
         Err(crate::CallError::Signature(
@@ -124,8 +126,18 @@ fn shared_calls_preserve_live_registers_and_spilled_arguments() {
     }
     f.set_terminator(b, Terminator::Return(v));
     let (source, ids) = f.verified_module().unwrap();
-    assert_eq!(compile(source, &ids).unwrap().functions.len(), 2);
-    let k = ScalarKernel::compile_with_inlining(&f, crate::Inlining::Never).unwrap();
+    assert_eq!(
+        compile(crate::lir::x64::Machine::host(), source, &ids)
+            .unwrap()
+            .functions
+            .len(),
+        2
+    );
+    let k = ScalarKernel::compile(
+        &f,
+        &crate::test_target::options().with_inlining(crate::Inlining::Never),
+    )
+    .unwrap();
     for input in [[1, 2, 3, 4, 5, 6], [-1, -2, 5, i32::MIN, i32::MAX, 0]] {
         assert_eq!(k.call(&input).unwrap(), f.interpret(&input).unwrap());
     }

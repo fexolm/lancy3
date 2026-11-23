@@ -52,7 +52,7 @@ impl Codegen for Lancy {
         if options == BuildOptions::Debug {
             let mut sources = Vec::new();
             let hir = lower::lower_debug(function, &mut sources)?;
-            let code = ScalarKernel::compile_debug(&hir)
+            let code = ScalarKernel::compile(&hir, &lancy::CompileOptions::host()?.with_debug())
                 .map_err(|e| splice_core::BuildError::backend("lancy", e))?;
             let registration = debug_info::publish(&code, &sources)?;
             return Ok(LancyKernel {
@@ -88,7 +88,7 @@ impl LancyKernel {
         kinds: &[splice_core::BufferKind],
         source: Option<&splice_core::frontend::KernelSource>,
     ) -> Result<Self, CompileError> {
-        let code = ScalarKernel::compile(&function)?;
+        let code = ScalarKernel::compile(&function, &lancy::CompileOptions::host()?)?;
         if splice_jit::perf_enabled() {
             splice_jit::profile(&[splice_jit::Function {
                 name: debug_info::name(source),

@@ -53,7 +53,7 @@ struct Node {
     height: u16,
 }
 
-struct Region<'a, I> {
+struct Region<'a, I: TargetInst> {
     f: &'a Function<I>,
     start: usize,
     nodes: &'a [Node],
@@ -322,7 +322,7 @@ impl Workspace {
 }
 
 pub(super) fn run<I: TargetInst + Schedulable>(f: &mut Function<I>) {
-    let env = I::machine_env();
+    let env = I::machine_env(f.machine());
     let limit = std::array::from_fn(|c| {
         (env.preferred_regs_by_class[c] | env.non_preferred_regs_by_class[c]).len() as u16
     });

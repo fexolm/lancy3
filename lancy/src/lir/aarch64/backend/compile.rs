@@ -1,3 +1,4 @@
+use super::Config;
 use super::{
     Result,
     inst::{Inst, nonvolatile},
@@ -10,7 +11,6 @@ use crate::{
     module::{FunctionIds, Module},
 };
 use regalloc2::{Ctx, Edit, Function as _, OperandKind, Output, PRegSet};
-use splice_target::Simd;
 
 pub(super) const TEMP_WORD_BYTES: usize = 64;
 const TEMP_BYTES: usize = 4 * TEMP_WORD_BYTES;
@@ -36,7 +36,7 @@ pub(super) struct Compiled {
 pub(super) fn compile(
     source: Module<VerifiedBody<'_>>,
     ids: &FunctionIds<Function>,
-    config: Simd,
+    config: Config,
 ) -> Result<Module<Compiled>> {
     let root = source.call_graph.root();
     let mut ctx = Ctx::default();

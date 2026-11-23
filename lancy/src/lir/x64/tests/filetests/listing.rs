@@ -143,7 +143,7 @@ fn location(a: Allocation) -> String {
         Some(r) if r.class() == regalloc2::RegClass::Float => format!("k{}", r.hw_enc()),
         Some(r) if r.class() == regalloc2::RegClass::Vector => format!(
             "{}{}",
-            match crate::ScalarKernel::vector_bytes() {
+            match crate::test_target::width() {
                 16 => "xmm",
                 32 => "ymm",
                 _ => "zmm",

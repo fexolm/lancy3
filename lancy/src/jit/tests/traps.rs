@@ -9,7 +9,7 @@ fn bounds_check_compares_both_i32_operands_as_unsigned() {
     let [index, len] = f.params(b).try_into().unwrap();
     f.append(b, Op::BoundsCheck(index, len));
     f.set_terminator(b, Terminator::Return(index));
-    let kernel = ScalarKernel::compile(&f).unwrap();
+    let kernel = ScalarKernel::compile(&f, &crate::test_target::options()).unwrap();
     for index in [0, 1, i32::MAX, i32::MIN, -2, -1] {
         for len in [0, 1, i32::MAX, i32::MIN, -2, -1] {
             let expected = if (index as u32) < len as u32 {
@@ -87,7 +87,9 @@ fn first_trap_stops_at_the_exact_store_in_each_callee() {
     for op in [Binary::Div, Binary::Rem] {
         let f = two_checked_calls(op);
         for policy in [Inlining::Always, Inlining::Never] {
-            let kernel = ScalarKernel::compile_with_inlining(&f, policy).unwrap();
+            let kernel =
+                ScalarKernel::compile(&f, &crate::test_target::options().with_inlining(policy))
+                    .unwrap();
             for (inputs @ [n, d1, i1, d2, i2], expected_result, writes) in cases.clone() {
                 let mut output = [-777; 7];
                 let mut args = [0u64; 6];

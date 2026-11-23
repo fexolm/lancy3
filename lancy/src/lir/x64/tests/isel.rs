@@ -7,7 +7,7 @@ use crate::lir::x64::{
 
 fn selected(f: &Function) -> Vec<Inst> {
     let (m, ids) = f.verified_module().unwrap();
-    let m = compile(m, &ids).unwrap();
+    let m = compile(crate::lir::x64::Machine::host(), m, &ids).unwrap();
     m.functions[m.call_graph.root()].body.insts().to_vec()
 }
 
@@ -34,7 +34,7 @@ fn branch_covers_a_single_use_comparison_and_retains_a_shared_mask() {
             !shared
         );
         assert_eq!(insts.iter().any(|i| matches!(i, Inst::Compare(..))), shared);
-        let code = ScalarKernel::compile(&f).unwrap();
+        let code = ScalarKernel::compile(&f, &crate::test_target::options()).unwrap();
         assert_eq!(code.call(&[-9]), Ok(if shared { -1 } else { -9 }));
         assert_eq!(code.call(&[2]), Ok(1));
     }
@@ -42,7 +42,7 @@ fn branch_covers_a_single_use_comparison_and_retains_a_shared_mask() {
 
 #[test]
 fn all_true_branch_only_covers_an_unshared_result() {
-    let cpu = crate::lir::x64::Features::host();
+    let cpu = crate::lir::x64::Cpu::host();
     for shared in [false, true] {
         let mut f = Function::scalar(1);
         let b = f.entry();
@@ -60,9 +60,9 @@ fn all_true_branch_only_covers_an_unshared_result() {
             selected(&f)
                 .iter()
                 .any(|i| matches!(i, Inst::BranchAll(Lane::I32, _))),
-            cfg!(feature = "experimental-simd") && !shared && (cpu.bytes != 32 || cpu.avx2)
+            cfg!(feature = "experimental-simd") && !shared && (cpu.bytes != 32 || cpu.isa.avx2)
         );
-        let code = ScalarKernel::compile(&f).unwrap();
+        let code = ScalarKernel::compile(&f, &crate::test_target::options()).unwrap();
         assert_eq!(code.call(&[0]), Ok(0));
         assert_eq!(code.call(&[1]), Ok(if shared { -1 } else { 1 }));
     }
@@ -104,7 +104,7 @@ fn load_covers_scaled_address_and_shift_covers_its_constant() {
     );
     let words = [-0x123456i32, 0];
     let args = [words[1..].as_ptr() as u64, u32::MAX as u64];
-    let code = ScalarKernel::compile(&f).unwrap();
+    let code = ScalarKernel::compile(&f, &crate::test_target::options()).unwrap();
     // SAFETY: index -1 from the second element addresses the first live i32.
     assert_eq!(
         unsafe { code.call_raw(&args) }.unwrap() as i32,
@@ -119,7 +119,8 @@ fn all_scalar_casts_emit_call_free_machine_code() {
         for to in crate::jit::tests::numeric_coverage::LANES {
             let f = crate::jit::tests::numeric_coverage::conversions::scalar_cast(from, to);
             let (module, ids) = f.verified_module().unwrap();
-            let code = crate::lir::x64::emit::emit(module, &ids).unwrap();
+            let code =
+                crate::lir::x64::emit::emit(&crate::test_target::target(), module, &ids).unwrap();
             for inst in Decoder::new(64, &code.bytes[..code.text_len], DecoderOptions::NONE) {
                 assert!(!inst.is_invalid(), "{from:?} -> {to:?} at {}", inst.ip());
                 assert_ne!(

@@ -1,8 +1,4 @@
-use super::{
-    frame::Frame,
-    inst::{Inst, nonvolatile},
-    isel,
-};
+use super::{Machine, frame::Frame, inst::Inst, isel};
 use crate::{
     CompileError, hir,
     lir::{self, TargetInst, regalloc},
@@ -23,11 +19,12 @@ pub(super) struct CompiledFunction {
 }
 
 pub(super) fn compile(
+    machine: Machine,
     source: Module<hir::ssa::VerifiedBody<'_>>,
     ids: &FunctionIds<hir::Function>,
 ) -> Result<Module<CompiledFunction>, CompileError> {
     let entry = source.call_graph.root();
-    let width = super::Features::host().bytes;
+    let width = machine.cpu.bytes;
     let arg_words = |f: &hir::Function| {
         f.param_types()
             .iter()
@@ -37,13 +34,13 @@ pub(super) fn compile(
     let arity = arg_words(source.functions[entry].function);
     let mut ctx = Ctx::default();
     let module = source.try_map_functions::<CompiledFunction>(|id, src, calls, compiled| {
-        let mut body = isel::select(src, id == entry, |callee| {
+        let mut body = isel::select(machine, src, id == entry, |callee| {
             let id = ids[&std::ptr::from_ref(callee)];
             (id, compiled[id].written)
         })?;
         let allocation = regalloc::allocate(&mut body, &mut ctx)?;
         let (written, defined) = written_regs(&body, &allocation);
-        let mut saved = defined & nonvolatile();
+        let mut saved = defined & machine.abi.saved;
         for &callee in calls {
             saved.union_from(compiled[callee].saved);
         }
@@ -69,6 +66,11 @@ pub(super) fn compile(
                 Inst::CallScratch(offset, bytes, _) => {
                     scratch_words =
                         scratch_words.max((offset as usize + bytes as usize).div_ceil(8))
+                }
+                Inst::RustCall(..) | Inst::RustPacketCall(..) | Inst::RustContextCall(..)
+                    if machine.abi.is_foreign() =>
+                {
+                    return Err(foreign_calls(machine));
                 }
                 Inst::RustPacketCall(import, offset, _) => {
                     let bytes = import.packet_bytes().expect("verified Rust packet");
@@ -118,12 +120,22 @@ pub(super) fn compile(
     Ok(module)
 }
 
+/// Rust imports are `extern "C"` functions of this process.
+fn foreign_calls(machine: Machine) -> CompileError {
+    let convention = if machine.abi.is_win64() {
+        splice_target::CallingConvention::Win64
+    } else {
+        splice_target::CallingConvention::SysV
+    };
+    CompileError::Target(splice_target::TargetError::HostCalls(convention))
+}
+
 pub(super) fn written_regs(f: &lir::Function<Inst>, allocation: &Output) -> (PRegSet, PRegSet) {
     let mut defined = PRegSet::empty();
     let mut written = PRegSet::empty();
     for (i, op) in f.insts().iter().enumerate() {
         let i = regalloc2::Inst::new(i);
-        written.union_from(op.clobbers());
+        written.union_from(op.clobbers(f.machine()));
         for (operand, loc) in f.inst_operands(i).iter().zip(allocation.inst_allocs(i)) {
             if operand.kind() == OperandKind::Def
                 && let Some(r) = loc.as_reg()
@@ -139,8 +151,9 @@ pub(super) fn written_regs(f: &lir::Function<Inst>, allocation: &Output) -> (PRe
     }
     // Move resolution may also write R10, which is reserved throughout
     // the internal ABI and cannot hold a caller value across a call.
-    let regs = &Inst::machine_env().preferred_regs_by_class;
+    let machine = f.machine();
+    let regs = &Inst::machine_env(machine).preferred_regs_by_class;
     written.union_from(defined);
-    written.intersect_from(regs[0] | regs[1] | regs[2] | nonvolatile());
+    written.intersect_from(regs[0] | regs[1] | regs[2] | machine.abi.saved);
     (written, defined)
 }

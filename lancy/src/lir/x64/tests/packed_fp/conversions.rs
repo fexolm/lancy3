@@ -1,5 +1,6 @@
 use super::*;
 use Lane::{BF16, F16, F32, F64, I64, U32, U64};
+use splice_target::X86Features;
 
 #[test]
 fn unsigned_and_qword_casts_saturate_at_ieee_neighbors() {
@@ -207,7 +208,7 @@ fn packed_float_and_double_widen_and_narrow_keep_lane_order() {
     check_width(F64, F32, Action::Narrow, &both_signs(F64, F32, pairs));
 }
 
-fn decoded_conversion(cpu: Features, from: Lane, to: Lane, action: Action) -> Vec<Instruction> {
+fn decoded_conversion(cpu: Cpu, from: Lane, to: Lane, action: Action) -> Vec<Instruction> {
     let Some(op) = Native::select(action, Type::Vector(from), Type::Vector(to), cpu) else {
         return Vec::new();
     };
@@ -236,7 +237,7 @@ fn integer_conversions_respect_avx512_subsets_and_avx10_vector_length() {
             });
             assert_eq!(
                 packed,
-                (cpu.bytes == 64 || cpu.avx10 == 1) && (!needs_dq || cpu.dq),
+                (cpu.bytes == 64 || cpu.isa.avx10 == 1) && (!needs_dq || cpu.isa.dq),
                 "{from:?} -> {to:?} on {cpu:?}: {instructions:?}"
             );
         }
@@ -246,11 +247,17 @@ fn integer_conversions_respect_avx512_subsets_and_avx10_vector_length() {
 #[test]
 fn widen_and_narrow_use_legal_packed_instructions_at_the_available_width() {
     let [sse2, avx2, foundation, extended] = profiles();
-    let avx1 = Features { bytes: 32, ..sse2 };
+    let avx1 = Cpu { bytes: 32, ..sse2 };
     for cpu in [
         sse2,
         avx1,
-        Features { f16c: true, ..avx1 },
+        Cpu {
+            isa: X86Features {
+                f16c: true,
+                ..avx1.isa
+            },
+            ..avx1
+        },
         avx2,
         foundation,
         extended,
@@ -282,8 +289,8 @@ fn widen_and_narrow_use_legal_packed_instructions_at_the_available_width() {
                 ),
             ] {
                 let supported = match narrow {
-                    F16 => cpu.f16c || cpu.bytes == 64,
-                    BF16 => cpu.bytes == 16 || cpu.avx2,
+                    F16 => cpu.isa.f16c || cpu.bytes == 64,
+                    BF16 => cpu.bytes == 16 || cpu.isa.avx2,
                     _ => true,
                 };
                 let code = decoded_conversion(cpu, from, to, action);

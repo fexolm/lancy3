@@ -80,7 +80,7 @@ fn staged_and_portable_compilation_report_their_nested_stages() {
         .map(|p| p.join(" / "))
         .collect();
     let mut expected = vec!["materialize_ir".to_owned(), "render_text_ir".to_owned()];
-    let jit = "lancy_jit{inlining=Always}";
+    let jit = "lancy_jit{inlining=Always,debug=false}";
     for (input, frontend) in [
         ("staged", "stage_lancy_hir"),
         ("portable", "lower_lancy_hir"),

@@ -81,8 +81,7 @@ impl Rules<'_> {
                 self.input(value),
             )),
             Op::Simd(Simd::Reduce(Binary::Add, value))
-                if self.ty(value) == Type::Vector(Lane::I32)
-                    && is_x86_feature_detected!("popcnt") =>
+                if self.ty(value) == Type::Vector(Lane::I32) && self.cpu.isa.popcnt =>
             {
                 let Op::Simd(Simd::Unary(Unary::Neg, mask)) = self.ctx.single_use(value)? else {
                     return None;
@@ -131,7 +130,7 @@ impl Rules<'_> {
             };
             return Some(Inst::MaskImmediate(self.dst(), (1u64 << count) - 1));
         }
-        if !is_x86_feature_detected!("bmi2") {
+        if !self.cpu.isa.bmi2 {
             return None;
         }
         let unsigned = match self.ctx.defining_op(count) {
@@ -193,7 +192,7 @@ impl Rules<'_> {
         };
         let lane = self.ty(lhs).lane()?;
         let supported = match lane.bytes() {
-            1 | 2 => self.cpu.bw && !lane.float(),
+            1 | 2 => self.cpu.isa.bw && !lane.float(),
             4 | 8 => true,
             _ => false,
         };

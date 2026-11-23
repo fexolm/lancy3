@@ -35,7 +35,7 @@ fn conditional_backedge_rotates_block_arguments_in_parallel() {
     f.set_terminator(result, Terminator::Return(diff));
     assert_eq!(f.prune_unreachable().unwrap(), 1);
 
-    let kernel = ScalarKernel::compile(&f).unwrap();
+    let kernel = ScalarKernel::compile(&f, &crate::test_target::options()).unwrap();
     for n in 0..20 {
         assert_eq!(
             kernel.call(&[-3, 8, n]),
@@ -74,7 +74,7 @@ fn fused_signed_branches_choose_the_correct_edge_in_either_layout() {
                 f.set_terminator(entry, Terminator::Branch { cond, yes, no });
                 f.jump(detour, join, &[other_value]);
                 f.set_terminator(join, Terminator::Return(result));
-                let kernel = ScalarKernel::compile(&f).unwrap();
+                let kernel = ScalarKernel::compile(&f, &crate::test_target::options()).unwrap();
                 for x in [i32::MIN, -130, -129, -128, 0, i32::MAX] {
                     for input_y in [i32::MIN, -129, 0, i32::MAX] {
                         let y = if immediate { -129 } else { input_y };
@@ -145,7 +145,7 @@ fn critical_backedges_permute_spilled_block_parameters() {
         result = f.append(exit, Op::Bin(Binary::Add, scaled, lane)).unwrap();
     }
     f.set_terminator(exit, Terminator::Return(result));
-    let kernel = ScalarKernel::compile(&f).unwrap();
+    let kernel = ScalarKernel::compile(&f, &crate::test_target::options()).unwrap();
     for selector in [0, 1, 6, -1] {
         for count in [0, 1, 2, 5, 24, 25] {
             let mut lanes: [i32; LANES] = std::array::from_fn(|i| 17 * i as i32 - 83);

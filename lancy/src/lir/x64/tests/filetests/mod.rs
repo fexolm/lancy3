@@ -7,6 +7,7 @@ use crate::hir::{Function, ssa::VerifiedBody};
 use crate::lir::{
     layout, regalloc,
     x64::{
+        Machine,
         compile::{compile, written_regs},
         emit::emit_compiled,
         isel,
@@ -16,18 +17,20 @@ use crate::module::{FunctionIds, Module};
 
 pub(crate) fn check_machine(
     case: &mut Case<'_>,
+    target: &splice_target::Target,
     module: Module<VerifiedBody<'_>>,
     ids: &FunctionIds<Function>,
 ) -> Result<()> {
+    let machine = Machine::new(target);
     if case.checks.contains_key("isel") {
-        let text = selected(&module, ids).map_err(|e| format!("isel: {e}"))?;
+        let text = selected(machine, &module, ids).map_err(|e| format!("isel: {e}"))?;
         case.check("isel", || text)?;
     }
     if ["alloc", "asm", "layout"]
         .iter()
         .any(|stage| case.checks.contains_key(stage))
     {
-        let module = compile(module, ids).map_err(|e| format!("alloc: {e}"))?;
+        let module = compile(machine, module, ids).map_err(|e| format!("alloc: {e}"))?;
         case.check("alloc", || {
             let mut out = String::new();
             for (id, f) in module.functions.iter() {
@@ -50,6 +53,7 @@ pub(crate) fn check_machine(
 // ISel does not depend on the root allocation. For outlined calls it needs
 // the exact transitive clobber set of each already-allocated child.
 fn selected(
+    machine: Machine,
     module: &Module<VerifiedBody>,
     ids: &FunctionIds<Function>,
 ) -> std::result::Result<String, CompileError> {
@@ -58,7 +62,7 @@ fn selected(
     let mut ctx = regalloc2::Ctx::default();
     for (id, src) in module.functions.iter() {
         let root = id == module.call_graph.root();
-        let mut f = isel::select(src, root, |callee| {
+        let mut f = isel::select(machine, src, root, |callee| {
             let id = ids[&std::ptr::from_ref(callee)];
             (id, clobbers[id])
         })?;

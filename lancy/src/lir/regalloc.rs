@@ -11,19 +11,20 @@ pub(super) fn allocate<I: TargetInst + Schedulable>(
 ) -> Result<Output, CompileError> {
     {
         let _span =
-            tracing::debug_span!(target: "splice::compile", "schedule_instructions").entered();
+            tracing::debug_span!(target: "lancy::compile", "schedule_instructions").entered();
         schedule::run(f);
     }
-    let _span = tracing::debug_span!(target: "splice::compile", "allocate_registers").entered();
+    let _span = tracing::debug_span!(target: "lancy::compile", "allocate_registers").entered();
     let options = RegallocOptions {
         algorithm: Algorithm::Ion,
         validate_ssa: cfg!(any(test, debug_assertions)),
         ..Default::default()
     };
-    regalloc2::run_with_ctx(f, I::machine_env(), &options, ctx).map_err(CompileError::internal)?;
+    regalloc2::run_with_ctx(f, I::machine_env(f.machine()), &options, ctx)
+        .map_err(CompileError::internal)?;
     #[cfg(test)]
     {
-        let mut checker = regalloc2::checker::Checker::new(f, I::machine_env());
+        let mut checker = regalloc2::checker::Checker::new(f, I::machine_env(f.machine()));
         checker.prepare(&ctx.output);
         checker.run().expect("invalid register allocation");
     }

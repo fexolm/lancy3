@@ -21,4 +21,24 @@ pub mod support;
 pub use lir::aarch64;
 
 pub use error::{CallError, CompileError, InternalError, Limit, SignatureError, Trap};
-pub use jit::{Inlining, ScalarKernel};
+pub use jit::{CompileOptions, Inlining, ScalarKernel};
+/// Targets: extensions, vector width and calling convention.
+pub use splice_target::{self as target, Target};
+
+/// The `SPLICE_SIMD` target that tests compile for unless they name one.
+#[cfg(test)]
+pub(crate) mod test_target {
+    use crate::{CompileOptions, Target};
+
+    pub fn options() -> CompileOptions {
+        CompileOptions::host().expect("SPLICE_SIMD names a target of this machine")
+    }
+
+    pub fn target() -> Target {
+        options().target
+    }
+
+    pub fn width() -> usize {
+        target().vector_bytes()
+    }
+}

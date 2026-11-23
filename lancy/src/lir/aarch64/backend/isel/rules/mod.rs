@@ -13,6 +13,7 @@ mod values;
 mod vector_binary;
 mod wide;
 
+use crate::lir::aarch64::backend::Config;
 use crate::{
     hir::operation::operation,
     hir::{Binary, Function, Lane, Op, Simd, Ternary, Type, Unary, Value},
@@ -26,7 +27,6 @@ use crate::{
     module::FunctionId,
 };
 use regalloc2::{PRegSet, VReg};
-use splice_target::Simd as Config;
 
 pub(super) fn reg(f: &Function, v: Value) -> VReg {
     VReg::new(v.index(), class(f.value_type(v)))

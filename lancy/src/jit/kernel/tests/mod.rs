@@ -39,7 +39,11 @@ fn scratch_pointers_require_the_raw_call_contract_transitively() {
     caller.set_terminator(block, Terminator::Return(returned));
 
     for policy in [crate::Inlining::Always, crate::Inlining::Never] {
-        let kernel = ScalarKernel::compile_with_inlining(&caller, policy).unwrap();
+        let kernel = ScalarKernel::compile(
+            &caller,
+            &crate::test_target::options().with_inlining(policy),
+        )
+        .unwrap();
         assert_eq!(
             kernel.call(&[]),
             Err(crate::CallError::Signature(
@@ -83,11 +87,26 @@ fn nested_division() -> Function {
     f
 }
 
+/// The test target in every calling convention of its architecture.
+fn conventions() -> Vec<crate::CompileOptions> {
+    use splice_target::CallingConvention as C;
+    let target = crate::test_target::target();
+    [C::SysV, C::Win64, C::Aapcs64]
+        .into_iter()
+        .filter_map(|convention| target.with_calling_convention(convention).ok())
+        .map(crate::CompileOptions::new)
+        .collect()
+}
+
 #[test]
 fn nested_normal_and_trapping_returns_restore_host_registers() {
     let f = nested_division();
-    for policy in [Inlining::Always, Inlining::Never] {
-        let kernel = ScalarKernel::compile_with_inlining(&f, policy).unwrap();
+    for (options, policy) in conventions()
+        .into_iter()
+        .flat_map(|options| [Inlining::Always, Inlining::Never].map(|policy| (options, policy)))
+    {
+        let policy = (options.target.calling_convention(), policy);
+        let kernel = ScalarKernel::compile(&f, &options.with_inlining(policy.1)).unwrap();
         for (divisor, expected) in [(3, Ok(0)), (0, Err(CallError::Trap(Trap::DivisionByZero)))] {
             let mut args = [7u64; 24];
             args[1] = divisor;
@@ -95,7 +114,7 @@ fn nested_normal_and_trapping_returns_restore_host_registers() {
             let mut changed = u64::MAX;
             // SAFETY: the verified kernel only takes integer inputs; `args`
             // and `workspace` live across the call, and the canary caller
-            // enters the entry once with the C ABI.
+            // enters the entry once in its convention.
             let status = unsafe {
                 kernel.invoke_with(args.as_ptr(), &mut workspace, |entry, args, workspace| {
                     changed = call_with_canaries(entry, args, workspace);
@@ -114,7 +133,7 @@ fn nested_normal_and_trapping_returns_restore_host_registers() {
 #[test]
 fn one_kernel_serves_concurrent_callers_and_drops_on_another_thread() {
     let f = nested_division();
-    let kernel = ScalarKernel::compile(&f).unwrap();
+    let kernel = ScalarKernel::compile(&f, &crate::test_target::options()).unwrap();
     let expected = |i: u64| -> Result<i32, CallError> {
         if i == 0 {
             return Err(CallError::Trap(Trap::DivisionByZero));

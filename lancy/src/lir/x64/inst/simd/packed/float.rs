@@ -94,7 +94,7 @@ impl Rule {
                         }
                     };
                 }
-                if v.width == 64 && v.cpu.dq {
+                if v.width == 64 && v.cpu.isa.dq {
                     let (imm, invert) = match op {
                         Unary::IsNan => (0x81, false),
                         Unary::IsInfinite => (0x18, false),

@@ -121,7 +121,7 @@ fn rust_packet_calls_verify_word_types_and_arity() {
         if valid {
             assert_eq!(function.interpret(&[1, 2, 3, 4]), Ok(10));
             assert_eq!(
-                crate::ScalarKernel::compile(&function)
+                crate::ScalarKernel::compile(&function, &crate::test_target::options())
                     .unwrap()
                     .call(&[1, 2, 3, 4]),
                 Ok(10)

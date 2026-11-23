@@ -1,6 +1,6 @@
 use super::{B, K, Lane};
+use crate::lir::x64::Cpu;
 use iced_x86::{IcedError, code_asm::*};
-use splice_target::Features;
 
 pub(in crate::lir::x64) fn immediate(
     a: &mut CodeAssembler,
@@ -22,7 +22,7 @@ pub(in crate::lir::x64) fn immediate(
 
 pub(in crate::lir::x64) fn test_all(
     a: &mut CodeAssembler,
-    cpu: Features,
+    cpu: Cpu,
     lane: Lane,
     src: usize,
 ) -> Result<(), IcedError> {
@@ -40,7 +40,7 @@ pub(in crate::lir::x64) fn test_all(
             a.knotw(k1, k)?;
             a.kortestw(k1, k1)
         }
-        8 if cpu.dq => {
+        8 if cpu.isa.dq => {
             a.knotb(k1, k)?;
             a.kortestb(k1, k1)
         }
@@ -79,7 +79,7 @@ pub(in crate::lir::x64) fn logic(
 
 pub(in crate::lir::x64) fn not(
     a: &mut CodeAssembler,
-    cpu: Features,
+    cpu: Cpu,
     lane: Lane,
     dst: usize,
     src: usize,
@@ -89,7 +89,7 @@ pub(in crate::lir::x64) fn not(
         64 => a.knotq(d, x),
         32 => a.knotd(d, x),
         16 => a.knotw(d, x),
-        8 if cpu.dq => a.knotb(d, x),
+        8 if cpu.isa.dq => a.knotb(d, x),
         lanes => {
             // Bits above the logical lane count must stay zero for KORTEST.
             a.mov(r10d, (1i32 << lanes) - 1)?;

@@ -7,10 +7,7 @@ mod integer;
 
 use crate::hir::operation::Action;
 use crate::hir::{Binary, Lane, Ternary, Type, Unary};
-use crate::lir::x64::{
-    Features,
-    emit::{R32, R64, bind},
-};
+use crate::lir::x64::emit::{R32, R64, bind};
 use iced_x86::{IcedError, code_asm::*};
 type Result = std::result::Result<(), IcedError>;
 type Faults = [Option<CodeLabel>; 3];
@@ -91,6 +88,8 @@ struct Args {
     y: i32,
     z: i32,
     out: i32,
+    /// Math library calls use the Win64 convention.
+    win64: bool,
 }
 fn elem(
     a: &mut CodeAssembler,
@@ -100,7 +99,7 @@ fn elem(
     p: Args,
     faults: &mut Faults,
 ) -> Result {
-    let Args { x, y, z, out } = p;
+    let Args { x, y, z, out, .. } = p;
     let lane = input.lane().unwrap();
     let size = lane.bytes();
     let dest = output.lane().unwrap();
@@ -156,18 +155,21 @@ fn elem(
 pub(super) fn calls_library(action: Action, input: Type) -> bool {
     input
         .lane()
-        .and_then(|lane| float::math_function(action, lane))
+        .and_then(|lane| float::math_function(action, lane, false))
         .is_some()
 }
 
+/// Expand `action` over `width`-byte vectors. Library calls use the Win64
+/// convention when `win64` and System V otherwise.
 pub(in crate::lir::x64) fn emit(
     a: &mut CodeAssembler,
+    width: usize,
+    win64: bool,
     action: Action,
     input: Type,
     output: Type,
     faults: &mut Faults,
 ) -> Result {
-    let width = Features::host().bytes;
     let lane = input.lane().unwrap();
     let size = lane.bytes();
     let n = size as i32;
@@ -281,6 +283,7 @@ pub(in crate::lir::x64) fn emit(
                         y: x + i * n,
                         z,
                         out,
+                        win64,
                     },
                     faults,
                 )?;
@@ -312,6 +315,7 @@ pub(in crate::lir::x64) fn emit(
                         y: y + i * n,
                         z: z + i * n,
                         out: out + i * d,
+                        win64,
                     },
                     faults,
                 )?;

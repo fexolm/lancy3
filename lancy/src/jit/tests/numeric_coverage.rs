@@ -122,8 +122,9 @@ fn differential(params: &[Type], ret: Type, make_op: impl FnOnce(&[Value]) -> Op
     let (action, input_type, output_type, _) = operation(op, |v| f.value_type(v)).unwrap();
     let v = f.append(b, op).unwrap();
     f.set_terminator(b, Terminator::Return(v));
-    let k = ScalarKernel::compile(&f).unwrap_or_else(|e| panic!("{params:?} {op:?}: {e}"));
-    let width = ScalarKernel::vector_bytes();
+    let k = ScalarKernel::compile(&f, &crate::test_target::options())
+        .unwrap_or_else(|e| panic!("{params:?} {op:?}: {e}"));
+    let width = crate::test_target::width();
     for inputs in [ordinary, boundary] {
         // Lanes of one vector already see every offset between two arguments;
         // a scalar needs one round per pair of the first two arguments.
@@ -150,7 +151,7 @@ fn check_round(
     round: usize,
     reference: impl FnOnce(&[Bits; 3]) -> Result<Bits, CallError>,
 ) {
-    let width = ScalarKernel::vector_bytes();
+    let width = crate::test_target::width();
     let mut bits: [Bits; 3] = [[0; 64]; 3];
     let mut args = Vec::new();
     for (arg, &ty) in params.iter().enumerate() {
@@ -387,7 +388,7 @@ fn wide_integer_cast_resolves_ties_from_the_low_word() {
         let b = f.entry();
         let r = f.append(b, Op::Cast(dest, f.params(b)[0])).unwrap();
         f.set_terminator(b, Terminator::Return(r));
-        let k = ScalarKernel::compile(&f).unwrap();
+        let k = ScalarKernel::compile(&f, &crate::test_target::options()).unwrap();
         for (input, bits) in [
             (midpoint - 1, expected),
             (midpoint, expected),
@@ -410,8 +411,8 @@ fn overflowing_and_zero_divisors_trap_in_lane_order() {
         let [lhs, rhs] = f.params(b).try_into().unwrap();
         let r = f.append(b, Op::Simd(Simd::Bin(op, lhs, rhs))).unwrap();
         f.set_terminator(b, Terminator::Return(r));
-        let k = ScalarKernel::compile(&f).unwrap();
-        let n = ScalarKernel::vector_bytes() / 8;
+        let k = ScalarKernel::compile(&f, &crate::test_target::options()).unwrap();
+        let n = crate::test_target::width() / 8;
         for (overflow, zero, err) in [
             (0, 1, CallError::Trap(Trap::DivisionOverflow)),
             (1, 0, CallError::Trap(Trap::DivisionByZero)),

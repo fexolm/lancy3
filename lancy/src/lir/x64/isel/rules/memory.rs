@@ -57,8 +57,8 @@ impl Rules<'_> {
         let evex = evex_masked_memory(self.cpu, size, indices.is_some());
         // AVX2 gather needs a scratch vector for its destructive mask.
         let temp = if self.cpu.bytes == 32
-            && self.cpu.avx10 == 0
-            && self.cpu.avx2
+            && self.cpu.isa.avx10 == 0
+            && self.cpu.isa.avx2
             && address.indices.is_some()
             && dst.is_some()
             && matches!(ty.lane().unwrap().bytes(), 4 | 8)
@@ -72,8 +72,9 @@ impl Rules<'_> {
         } else {
             VectorMask::Lanes(self.input(mask))
         };
-        let vex =
-            self.cpu.bytes == 32 && matches!(size, 4 | 8) && (indices.is_none() || self.cpu.avx2);
+        let vex = self.cpu.bytes == 32
+            && matches!(size, 4 | 8)
+            && (indices.is_none() || self.cpu.isa.avx2);
         let zero = dst.is_some()
             && (evex || vex)
             && matches!(self.ctx.defining_op(value), Some(Op::Simd(Simd::Splat(x))) if
@@ -97,7 +98,7 @@ impl Rules<'_> {
     ) -> Result<Option<Inst>, CompileError> {
         if self.ty(result) != Type::Vector(Lane::I32)
             || !self.masks.contains(enabled)
-            || !is_x86_feature_detected!("bmi2")
+            || !self.cpu.isa.bmi2
         {
             return Ok(None);
         }

@@ -33,7 +33,7 @@ fn pointer_arguments_survive_spills_calls_and_block_parameters() {
     let ptr = f.append(b, Op::Load(Ptr, at)).unwrap();
     f.set_terminator(b, Terminator::Return(ptr));
 
-    let kernel = ScalarKernel::compile(&f).unwrap();
+    let kernel = ScalarKernel::compile(&f, &crate::test_target::options()).unwrap();
     for native in [false, true] {
         for condition in [0, 1] {
             let mut data = [0i32; 5];
@@ -71,7 +71,7 @@ fn pointer_offsets_sign_extend_indices_before_scaling() {
         .append(b, Op::PtrOffset(base, index, Scale::Eight))
         .unwrap();
     f.set_terminator(b, Terminator::Return(ptr));
-    let kernel = ScalarKernel::compile(&f).unwrap();
+    let kernel = ScalarKernel::compile(&f, &crate::test_target::options()).unwrap();
     let data = [0u64; 3];
     let base = data[1..].as_ptr() as u64;
     // SAFETY: this kernel only computes an address and never dereferences it.
@@ -108,7 +108,7 @@ fn constant_offsets_outside_disp32_keep_the_full_pointer_width() {
             let i = f.append(b, Op::Const(index)).unwrap();
             let at = f.append(b, Op::PtrOffset(base, i, scale)).unwrap();
             f.set_terminator(b, Terminator::Return(at));
-            let kernel = ScalarKernel::compile(&f).unwrap();
+            let kernel = ScalarKernel::compile(&f, &crate::test_target::options()).unwrap();
             let word = 0u64;
             let base = std::ptr::from_ref(&word) as u64;
             let expected = base.wrapping_add_signed(i64::from(index) * stride);
@@ -139,7 +139,7 @@ fn scaled_store_between_overlapping_loads_changes_exactly_four_bytes() {
         let after = f.append(b, Op::Load(Type::I32, window)).unwrap();
         let change = f.append(b, Op::Bin(Binary::Sub, after, before)).unwrap();
         f.set_terminator(b, Terminator::Return(change));
-        let kernel = ScalarKernel::compile(&f).unwrap();
+        let kernel = ScalarKernel::compile(&f, &crate::test_target::options()).unwrap();
 
         for index in -3i32..=3 {
             let dst = (33 + index * stride) as usize;

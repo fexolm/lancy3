@@ -1,10 +1,10 @@
 use super::{XMM, YMM};
+use crate::lir::x64::Cpu;
 use crate::lir::x64::{
     emit::{R32, R64},
     inst::SCRATCH,
 };
 use iced_x86::{IcedError, code_asm::*};
-use splice_target::Features;
 
 const fn indices<const LANES: usize, const ENTRIES: usize>(expand: bool) -> [[i8; LANES]; ENTRIES] {
     let mut table = [[-1; LANES]; ENTRIES];
@@ -81,7 +81,7 @@ static EXPAND_SSE2: DwordControls = dwords(true);
 
 pub(in crate::lir::x64) fn emit(
     a: &mut CodeAssembler,
-    cpu: Features,
+    cpu: Cpu,
     expand: bool,
     regs: [usize; 4],
 ) -> Result<(), IcedError> {
@@ -97,7 +97,7 @@ pub(in crate::lir::x64) fn emit(
         a.vpermd(YMM[dst], control, YMM[value])?;
         a.vpsrad(control, control, 31)?;
         a.vpandn(YMM[dst], control, YMM[dst])
-    } else if cpu.ssse3 {
+    } else if cpu.isa.ssse3 {
         let table = if expand { &EXPAND_XMM } else { &COMPRESS_XMM };
         a.movmskps(R32[index], XMM[mask])?;
         a.mov(r10, table.0.as_ptr() as u64)?;

@@ -2,6 +2,8 @@
 //! R10 is the allocator's move scratch and is available inside a pseudo-op.
 pub(super) mod lanes;
 pub(super) mod simd;
+pub(super) use super::abi::SCRATCH;
+use super::abi::{MASKS, Machine, gprs, vectors};
 use crate::hir::operation::Action;
 use crate::hir::{Binary, Lane, RustContextImport, RustImport, RustPacketImport, Scale, Type};
 use crate::{lir::TargetInst, module::FunctionId};
@@ -58,39 +60,9 @@ impl VectorMask<VReg> {
     }
 }
 
-const fn gpr(enc: usize) -> PReg {
-    PReg::new(enc, RegClass::Int)
-}
-const AX: PReg = gpr(0);
-const CX: PReg = gpr(1);
-const DX: PReg = gpr(2);
-const ARGV: PReg = if cfg!(windows) { CX } else { gpr(7) };
-const RUST_ARGS: [PReg; 4] = if cfg!(windows) {
-    [CX, DX, gpr(8), gpr(9)]
-} else {
-    [gpr(7), gpr(6), DX, CX]
-};
-
-const fn gprs(encodings: &[usize]) -> PRegSet {
-    let mut set = PRegSet::empty();
-    let mut i = 0;
-    while i < encodings.len() {
-        set.add(gpr(encodings[i]));
-        i += 1;
-    }
-    set
-}
-
-const VOLATILE: PRegSet = if cfg!(windows) {
-    gprs(&[0, 1, 2, 8, 9])
-} else {
-    gprs(&[0, 1, 2, 6, 7, 8, 9])
-};
-const SAVED_GPRS: PRegSet = if cfg!(windows) {
-    gprs(&[3, 5, 6, 7, 12, 13, 14, 15])
-} else {
-    gprs(&[3, 5, 12, 13, 14, 15])
-};
+const AX: PReg = PReg::new(0, RegClass::Int);
+const CX: PReg = PReg::new(1, RegClass::Int);
+const DX: PReg = PReg::new(2, RegClass::Int);
 
 // XMM, YMM and ZMM are aliases. Scalars and packed values must share one class.
 pub(super) fn class(ty: Type) -> RegClass {
@@ -106,53 +78,6 @@ pub(super) fn class(ty: Type) -> RegClass {
 fn return_reg(v: VReg) -> PReg {
     PReg::new(0, v.class())
 }
-const SCRATCH: usize = if cfg!(windows) { 5 } else { 15 };
-const fn vectors(mut start: usize, end: usize) -> PRegSet {
-    let mut regs = PRegSet::empty();
-    while start < end {
-        regs.add(PReg::new(start, RegClass::Vector));
-        start += 1;
-    }
-    regs
-}
-const SAVED_SIMD: PRegSet = if cfg!(windows) {
-    vectors(6, 16)
-} else {
-    PRegSet::empty()
-};
-pub(super) fn nonvolatile() -> PRegSet {
-    SAVED_GPRS | SAVED_SIMD
-}
-const SIMD: PRegSet = {
-    let mut set = PRegSet::empty();
-    let mut i = 0;
-    while i < SCRATCH {
-        set.add(PReg::new(i, RegClass::Vector));
-        i += 1;
-    }
-    set
-};
-// K0 cannot predicate EVEX, and K1 is reserved for destructive masks and moves.
-const MASKS: PRegSet = {
-    let mut regs = PRegSet::empty();
-    let mut i = 2;
-    while i <= 7 {
-        regs.add(PReg::new(i, RegClass::Float));
-        i += 1;
-    }
-    regs
-};
-
-static ENV: MachineEnv = MachineEnv {
-    preferred_regs_by_class: [VOLATILE, MASKS, SIMD],
-    non_preferred_regs_by_class: [SAVED_GPRS, PRegSet::empty(), SAVED_SIMD],
-    scratch_by_class: [
-        Some(gpr(10)),
-        Some(PReg::new(1, RegClass::Float)),
-        Some(PReg::new(SCRATCH, RegClass::Vector)),
-    ],
-    fixed_stack_slots: Vec::new(),
-};
 
 #[derive(Clone, Copy, Debug)]
 pub(super) enum Alu {
@@ -380,10 +305,11 @@ impl Inst {
 }
 
 impl TargetInst for Inst {
-    fn operands(&self, out: &mut Vec<Operand>) {
+    type Machine = Machine;
+    fn operands(&self, machine: &Machine, out: &mut Vec<Operand>) {
         use Operand as O;
         match *self {
-            Self::Argv(v) => out.push(O::reg_fixed_def(v, ARGV)),
+            Self::Argv(v) => out.push(O::reg_fixed_def(v, machine.abi.args[0])),
             Self::LoadArg { dst, argv, .. } => {
                 out.extend(argv.map(O::reg_use));
                 out.push(O::reg_def(dst));
@@ -514,8 +440,8 @@ impl TargetInst for Inst {
                 out.extend(temp.map(O::reg_temp));
             }
             Self::CompactLookup(_, d, x, m, index) => {
-                let cpu = super::Features::host();
-                let dst = if cpu.bytes == 16 && !cpu.ssse3 {
+                let cpu = machine.cpu;
+                let dst = if cpu.bytes == 16 && !cpu.isa.ssse3 {
                     // The SSE2 sequence reads the source after writing the result.
                     O::reg_def_at_start(d)
                 } else {
@@ -564,15 +490,15 @@ impl TargetInst for Inst {
             | Self::Branch(v) => out.push(O::reg_use(v)),
             Self::Call { dst, .. } => out.push(O::reg_fixed_def(dst, return_reg(dst))),
             Self::RustCall(_, a, b, dst) => out.extend([
-                O::reg_fixed_use(a, RUST_ARGS[0]),
-                O::reg_fixed_use(b, RUST_ARGS[1]),
+                O::reg_fixed_use(a, machine.abi.args[0]),
+                O::reg_fixed_use(b, machine.abi.args[1]),
                 O::reg_fixed_def(dst, AX),
             ]),
             Self::RustPacketCall(_, _, dst) => out.push(O::reg_fixed_def(dst, AX)),
             Self::RustContextCall(_, args, dst) => {
                 out.extend(
                     args.into_iter()
-                        .zip(RUST_ARGS)
+                        .zip(machine.abi.args)
                         .map(|(arg, reg)| O::reg_fixed_use(arg, reg)),
                 );
                 out.push(O::reg_fixed_def(dst, AX));
@@ -582,16 +508,21 @@ impl TargetInst for Inst {
             Self::Jump | Self::DebugPoint(_) => {}
         }
     }
-    fn clobbers(&self) -> PRegSet {
+    fn clobbers(&self, machine: &Machine) -> PRegSet {
+        let abi = machine.abi;
+        // A wider value in a preserved vector register loses its upper lanes.
+        let wide = machine.cpu.bytes > 16;
+        let callee = || {
+            let mut regs = abi.volatile | MASKS | abi.volatile_vectors;
+            if wide {
+                regs.union_from(abi.saved & vectors(0, 16));
+            }
+            regs
+        };
         match self {
             Self::Call { clobbers, .. } => *clobbers,
             Self::RustCall(..) | Self::RustPacketCall(..) | Self::RustContextCall(..) => {
-                let wide = super::Features::host().bytes > 16;
-                let mut regs = VOLATILE | MASKS | SIMD;
-                if wide {
-                    // Win64 preserves XMM6..15, but not their upper lanes.
-                    regs.union_from(SAVED_SIMD);
-                }
+                let mut regs = callee();
                 regs.remove(AX);
                 regs
             }
@@ -601,8 +532,7 @@ impl TargetInst for Inst {
                 // The inline expansions use only these scratch registers. A real
                 // math call may also overwrite the upper halves of Windows YMM/ZMM6..15.
                 let mut set = if lanes::calls_library(*action, *input) {
-                    let wide = super::Features::host().bytes > 16;
-                    VOLATILE | MASKS | SIMD | if wide { SAVED_SIMD } else { PRegSet::empty() }
+                    callee()
                 } else {
                     gprs(&[0, 1, 2, 8, 9]) | vectors(0, 3)
                 };
@@ -626,12 +556,12 @@ impl TargetInst for Inst {
     fn is_ret(&self) -> bool {
         matches!(self, Self::Ret(_))
     }
-    fn machine_env() -> &'static MachineEnv {
-        &ENV
+    fn machine_env(machine: &Machine) -> &'static MachineEnv {
+        machine.abi.env()
     }
-    fn spillslot_size(class: RegClass) -> usize {
+    fn spillslot_size(machine: &Machine, class: RegClass) -> usize {
         if class == RegClass::Vector {
-            super::Features::host().bytes / 8
+            machine.cpu.bytes / 8
         } else {
             1
         }

@@ -69,7 +69,7 @@ pub(super) fn call_with_canaries(entry: Entry, args: *const u64, workspace: *mut
             "add sp, sp, #160",
             inout("x0") args => changed,
             in("x1") workspace,
-            inout("x9") entry => _,
+            inout("x9") entry.address() => _,
             inout("x10") CANARY => _,
             clobber_abi("C"),
         );

@@ -2,6 +2,7 @@ use crate::{
     CallError, Inlining, ScalarKernel, SignatureError, Trap,
     hir::{Binary, Function, Lane, Op, Simd, Terminator, Ternary, Type, Unary},
 };
+use splice_target::X86Features;
 use std::sync::Arc;
 
 fn kernel(
@@ -14,7 +15,7 @@ fn kernel(
     let op = body(f.params(b));
     let r = f.append(b, op).unwrap();
     f.set_terminator(b, Terminator::Return(r));
-    ScalarKernel::compile(&f).unwrap()
+    ScalarKernel::compile(&f, &crate::test_target::options()).unwrap()
 }
 
 #[test]
@@ -24,7 +25,7 @@ fn each_integer_width_wraps_and_divides_with_its_signedness() {
         I8, U8, I16, U16, I32, U32, I64, U64, I128, U128, Isize, Usize,
     ] {
         for ty in [l.scalar(), Type::Vector(l)] {
-            let bytes = ty.bytes(ScalarKernel::vector_bytes());
+            let bytes = ty.bytes(crate::test_target::width());
             let words = bytes.div_ceil(8);
             for op in [Binary::Add, Binary::Div, Binary::Lt] {
                 let k = kernel(&[ty, ty], op.result_type(ty), |v| {
@@ -86,7 +87,7 @@ fn fp_results_include_signed_zero_nan_and_fused_rounding() {
         Type::F64,
         Type::Vector(Lane::F64),
     ] {
-        let bytes = ty.bytes(ScalarKernel::vector_bytes());
+        let bytes = ty.bytes(crate::test_target::width());
         let lane = ty.lane().unwrap();
         let from = |x: f64| {
             if lane == Lane::F32 {
@@ -160,7 +161,7 @@ fn fp_results_include_signed_zero_nan_and_fused_rounding() {
 #[test]
 fn wide_spills_and_outlined_calls_preserve_every_lane() {
     let v = Type::Vector(Lane::U64);
-    let w = ScalarKernel::vector_bytes() / 8;
+    let w = crate::test_target::width() / 8;
     let mut leaf = Function::new(&[v, Type::I32, v], v);
     let b = leaf.entry();
     let [x, idx, y] = leaf.params(b).try_into().unwrap();
@@ -183,7 +184,8 @@ fn wide_spills_and_outlined_calls_preserve_every_lane() {
     }
     root.set_terminator(b, Terminator::Return(sum));
     for policy in [Inlining::Never, Inlining::Always] {
-        let k = ScalarKernel::compile_with_inlining(&root, policy).unwrap();
+        let k = ScalarKernel::compile(&root, &crate::test_target::options().with_inlining(policy))
+            .unwrap();
         let mut input: Vec<_> = (0..22 * w).map(|i| 0x100000003 * (i + 1) as u64).collect();
         input.push(0);
         let mut out = vec![0; w];
@@ -211,8 +213,8 @@ fn unaligned_vector_store_precedes_trap() {
     f.append(b, Op::BoundsCheck(i, n));
     f.append(b, Op::Simd(Simd::Store(p, x)));
     f.set_terminator(b, Terminator::Return(i));
-    let k = ScalarKernel::compile(&f).unwrap();
-    let w = ScalarKernel::vector_bytes();
+    let k = ScalarKernel::compile(&f, &crate::test_target::options()).unwrap();
+    let w = crate::test_target::width();
     let original: Vec<_> = (0..w + 2).map(|i| (201 + 19 * i) as u8).collect();
     for (i, result) in [
         (0, Ok(0)),
@@ -242,31 +244,40 @@ fn unaligned_vector_store_precedes_trap() {
 fn instruction_encodings_require_their_exact_isa() {
     use crate::{
         hir::operation::Action,
-        lir::x64::{Features, inst::simd::Native},
+        lir::x64::{Cpu, inst::simd::Native},
     };
     use iced_x86::{Code, Decoder, DecoderOptions};
-    let base = Features {
+    let base = Cpu {
         bytes: 16,
-        avx2: false,
-        avx10: 0,
-        bw: false,
-        dq: false,
-        sse41: false,
-        ssse3: false,
-        sse42: false,
-        vbmi2: false,
-        vbmi: false,
-        f16c: false,
-        bf16: false,
-        fp16: false,
-        fma: false,
-        vpopcnt: false,
-        bitalg: false,
-        cd: false,
+        isa: X86Features {
+            avx2: false,
+            avx10: 0,
+            bw: false,
+            dq: false,
+            sse41: false,
+            ssse3: false,
+            sse42: false,
+            vbmi2: false,
+            vbmi: false,
+            f16c: false,
+            bf16: false,
+            fp16: false,
+            fma: false,
+            vpopcnt: false,
+            bitalg: false,
+            cd: false,
+            ..X86Features::default()
+        },
     };
-    let avx = Features { bytes: 32, ..base };
-    let avx2 = Features { avx2: true, ..avx };
-    let avx512 = Features { bytes: 64, ..avx2 };
+    let avx = Cpu { bytes: 32, ..base };
+    let avx2 = Cpu {
+        isa: X86Features {
+            avx2: true,
+            ..avx.isa
+        },
+        ..avx
+    };
+    let avx512 = Cpu { bytes: 64, ..avx2 };
     let vector = Type::Vector;
     let encode = |features, action, input, output, regs: &[usize]| {
         let op = Native::select(action, input, output, features)?;
@@ -294,7 +305,20 @@ fn instruction_encodings_require_their_exact_isa() {
     );
     assert!(binary(avx512, Lane::I32, Binary::Add).is_some());
     assert!(binary(avx512, Lane::U8, Binary::Add).is_some());
-    assert!(binary(Features { bw: true, ..avx512 }, Lane::U8, Binary::Add).is_some());
+    assert!(
+        binary(
+            Cpu {
+                isa: X86Features {
+                    bw: true,
+                    ..avx512.isa
+                },
+                ..avx512
+            },
+            Lane::U8,
+            Binary::Add
+        )
+        .is_some()
+    );
     let mul = encode(
         avx512,
         Action::Binary(Binary::Mul),
@@ -309,7 +333,20 @@ fn instruction_encodings_require_their_exact_isa() {
         .collect::<Vec<_>>();
     assert!(ops.contains(&iced_x86::Mnemonic::Vpmuludq));
     assert!(!ops.contains(&iced_x86::Mnemonic::Vpmullq));
-    assert!(binary(Features { dq: true, ..avx512 }, Lane::U64, Binary::Mul).is_some());
+    assert!(
+        binary(
+            Cpu {
+                isa: X86Features {
+                    dq: true,
+                    ..avx512.isa
+                },
+                ..avx512
+            },
+            Lane::U64,
+            Binary::Mul
+        )
+        .is_some()
+    );
     let reduce_mask = |cpu, action, lane| {
         encode(cpu, action, vector(lane), Type::I32, &[1, 0]).map(|bytes| {
             Decoder::new(64, &bytes, DecoderOptions::NONE)
@@ -331,7 +368,17 @@ fn instruction_encodings_require_their_exact_isa() {
         Some(Vptestmq)
     );
     assert_eq!(
-        reduce_mask(Features { dq: true, ..avx512 }, Action::AllTrue, Lane::I64),
+        reduce_mask(
+            Cpu {
+                isa: X86Features {
+                    dq: true,
+                    ..avx512.isa
+                },
+                ..avx512
+            },
+            Action::AllTrue,
+            Lane::I64
+        ),
         Some(Vptestmq)
     );
     // Golden register-register forms independently assembled by LLVM 21 llvm-mc.
@@ -369,10 +416,12 @@ fn instruction_encodings_require_their_exact_isa() {
             [0x62, 0x55, 0xfd, 0x28, 0x6c, 0xeb],
         ),
     ] {
-        let cpu = Features {
+        let cpu = Cpu {
             bytes: width,
-            avx10: 2,
-            ..avx512
+            isa: X86Features {
+                avx10: 2,
+                ..avx512.isa
+            },
         };
         assert_eq!(
             encode(cpu, Action::Cast, vector(from), vector(to), &[src, dst]).unwrap(),
@@ -381,7 +430,13 @@ fn instruction_encodings_require_their_exact_isa() {
         // Earlier targets may synthesize saturation, but cannot execute this
         // AVX10.2-only instruction.
         let older = encode(
-            Features { avx10: 1, ..cpu },
+            Cpu {
+                isa: X86Features {
+                    avx10: 1,
+                    ..cpu.isa
+                },
+                ..cpu
+            },
             Action::Cast,
             vector(from),
             vector(to),
@@ -437,7 +492,7 @@ fn avx512_splat_reads_integer_gprs_and_floating_point_xmm_sources() {
 
 #[test]
 fn signed_zero_and_unordered_fp_comparisons_make_per_lane_masks() {
-    let w = ScalarKernel::vector_bytes() / 4;
+    let w = crate::test_target::width() / 4;
     let ty = Type::Vector(Lane::F32);
     let xs = [-0., f32::NAN, 4., -3.];
     let ys = [0., 7., f32::NAN, -4.];
@@ -485,7 +540,7 @@ fn signed_zero_and_unordered_fp_comparisons_make_per_lane_masks() {
 fn typed_word_abi_rejects_short_buffers_before_execution() {
     let ty = Type::Vector(Lane::U64);
     let f = kernel(&[ty], ty, |v| Op::Copy(v[0]));
-    let n = ScalarKernel::vector_bytes() / 8;
+    let n = crate::test_target::width() / 8;
     let result = &mut vec![0xdead; n];
     assert_eq!(
         f.call_words(&[1], result),
@@ -510,7 +565,7 @@ fn saturating_float_cast_uses_every_lane() {
         let k = kernel(&[Type::Vector(Lane::F32)], ty, |v| {
             Op::Simd(Simd::Cast(ty.lane().unwrap(), v[0]))
         });
-        let w = ScalarKernel::vector_bytes() / 8;
+        let w = crate::test_target::width() / 8;
         let cases = [
             f32::NAN,
             f32::INFINITY,
@@ -544,7 +599,7 @@ fn mixed_scalar_mask_selects_full_width_values() {
         let k = kernel(&[Type::I32, ty, ty], ty, |v| {
             Op::Ternary(Ternary::Select, v[0], v[1], v[2])
         });
-        let size = ty.bytes(ScalarKernel::vector_bytes());
+        let size = ty.bytes(crate::test_target::width());
         let words = size.div_ceil(8);
         for cond in [0, 1, 0x80000000] {
             let mut args = vec![cond];

@@ -1,12 +1,13 @@
 //! Packed FP results are compared bit-for-bit with independent Rust operations.
 //! Inputs contain a different lane pattern on each invocation, including NaN payloads.
+use splice_target::X86Features;
 mod conversions;
 use super::packed_code::{body, executable, host_supports, profiles, supports};
 use crate::ScalarKernel;
 use crate::hir::{Binary, Function, Lane, Op, Simd, Terminator, Type, Unary};
 use crate::{
     hir::operation::Action,
-    lir::x64::{Features, inst::simd::Native},
+    lir::x64::{Cpu, inst::simd::Native},
 };
 use iced_x86::{Decoder, DecoderOptions, EncodingKind, Instruction, Mnemonic};
 use std::num::FpCategory;
@@ -83,7 +84,7 @@ fn registers(op: Native, arity: usize) -> Vec<usize> {
     regs
 }
 
-fn decoded(cpu: Features, native: Native, bytes: &[u8]) -> Vec<Instruction> {
+fn decoded(cpu: Cpu, native: Native, bytes: &[u8]) -> Vec<Instruction> {
     Decoder::new(64, bytes, DecoderOptions::NONE)
         .into_iter()
         .inspect(|i| {
@@ -105,19 +106,21 @@ fn decoded(cpu: Features, native: Native, bytes: &[u8]) -> Vec<Instruction> {
         .collect()
 }
 
-fn avx10_1_profiles() -> [Features; 2] {
+fn avx10_1_profiles() -> [Cpu; 2] {
     let features = profiles()[3];
-    [16, 32].map(|bytes| Features {
+    [16, 32].map(|bytes| Cpu {
         bytes,
-        avx10: 1,
-        ..features
+        isa: X86Features {
+            avx10: 1,
+            ..features.isa
+        },
     })
 }
 
 fn run_profiles(from: Lane, to: Lane, op: Action, run_cases: impl Fn(usize, &dyn Fn(&mut Slots))) {
-    let host = Features::host();
+    let host = Cpu::host();
     let arity = arity(op);
-    let k = ScalarKernel::compile(&function(from, to, op)).unwrap();
+    let k = ScalarKernel::compile(&function(from, to, op), &crate::test_target::options()).unwrap();
     run_cases(host.bytes, &|slots| {
         let args: Vec<_> = slots[..arity]
             .iter()
@@ -133,17 +136,26 @@ fn run_profiles(from: Lane, to: Lane, op: Action, run_cases: impl Fn(usize, &dyn
 
     let (action, input, output) = (op, Type::Vector(from), Type::Vector(to));
     let [sse2, avx2, foundation, extended] = profiles();
-    let avx1 = Features { bytes: 32, ..sse2 };
+    let avx1 = Cpu { bytes: 32, ..sse2 };
     let mut targets = vec![sse2, avx1, avx2, foundation, extended];
     if matches!(op, Action::Cast) {
         targets.extend(avx10_1_profiles());
     }
     if matches!(from, Lane::F16) || matches!(to, Lane::F16) {
-        targets.push(Features { f16c: true, ..avx1 });
+        targets.push(Cpu {
+            isa: X86Features {
+                f16c: true,
+                ..avx1.isa
+            },
+            ..avx1
+        });
     }
     if matches!(from, Lane::BF16) || matches!(to, Lane::BF16) {
-        targets.push(Features {
-            bf16: true,
+        targets.push(Cpu {
+            isa: X86Features {
+                bf16: true,
+                ..extended.isa
+            },
             ..extended
         });
     }
@@ -448,7 +460,7 @@ fn packed_casts_saturate_before_overflow_and_round_halfway_to_even() {
 fn signed_float_casts_select_packed_conversions_at_each_x64_width() {
     // The architectural baseline does not include AVX2, SSE4.1, or AVX-512DQ.
     let baseline = profiles()[0];
-    let ordinary = [16, 32, 64].map(|bytes| Features { bytes, ..baseline });
+    let ordinary = [16, 32, 64].map(|bytes| Cpu { bytes, ..baseline });
     for cpu in ordinary.into_iter().chain(avx10_1_profiles()) {
         let bytes = cpu.bytes;
         for (from, to) in [(Lane::F32, Lane::I32), (Lane::I32, Lane::F32)] {

@@ -16,7 +16,7 @@ pub(in crate::lir::x64) enum Recipe {
     Rearrange(rearrange::Rule),
 }
 impl Recipe {
-    pub fn temporaries(self, action: Action, input: Type, output: Type, c: Features) -> usize {
+    pub fn temporaries(self, action: Action, input: Type, output: Type, c: Cpu) -> usize {
         match self {
             Self::Halves => {
                 packed_half(action, input, output, c).unwrap().temporaries()
@@ -95,7 +95,7 @@ fn emit_halves(v: &mut Vector, native: Native, r: &[usize], temps: &[usize]) -> 
 struct Vector<'a> {
     a: &'a mut CodeAssembler,
     width: usize,
-    cpu: Features,
+    cpu: Cpu,
     pool: &'a mut emit::Constants,
 }
 
@@ -160,7 +160,7 @@ impl Vector<'_> {
     fn ones(&mut self, d: usize) -> Result {
         match self.width {
             64 => self.a.vpternlogd(ZMM[d], ZMM[d], ZMM[d], 0xff),
-            32 if self.cpu.avx2 => self.a.vpcmpeqd(YMM[d], YMM[d], YMM[d]),
+            32 if self.cpu.isa.avx2 => self.a.vpcmpeqd(YMM[d], YMM[d], YMM[d]),
             32 => {
                 self.a.pcmpeqd(XMM[d], XMM[d])?;
                 self.a.vinsertf128(YMM[d], YMM[d], XMM[d], 1)

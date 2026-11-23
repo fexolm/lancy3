@@ -294,7 +294,7 @@ cargo xtask bench '^gap_' --warm-up-time 0.3 --measurement-time 0.7 --sample-siz
 ## Время этапов компиляции
 
 Splice публикует вложенные спаны `tracing` уровня `DEBUG` с target
-`splice::compile`. Для замеров добавьте в приложение `tracing-subscriber = "0.3"`
+`splice::compile` (бэкенды — `splice_core::compile`, сам Lancy — `lancy::compile`). Для замеров добавьте в приложение `tracing-subscriber = "0.3"`
 и установите подписчик до вызова `build::<B>` или `B::compile`.
 
 ```rust

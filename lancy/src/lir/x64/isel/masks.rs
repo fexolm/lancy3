@@ -4,19 +4,19 @@ use crate::hir::transforms::ControlFlowGraph;
 use crate::hir::{
     Binary, Block, Function, Lane, Op, Simd, Terminator, Ternary, Type, Unary, Value,
 };
+use crate::lir::x64::Cpu;
 use regalloc2::{RegClass, VReg};
-use splice_target::Features;
 
 pub(super) struct Masks(Vec<bool>);
 
 impl Masks {
-    pub fn analyze(f: &Function, cfg: &ControlFlowGraph, cpu: Features) -> Self {
+    pub fn analyze(f: &Function, cfg: &ControlFlowGraph, cpu: Cpu) -> Self {
         if !simd::evex(cpu) {
             return Self(Vec::new());
         }
         let mut groups = Groups::new(f.value_count());
         let mut literals = vec![None; f.value_count()];
-        let uses = if is_x86_feature_detected!("popcnt") {
+        let uses = if cpu.isa.popcnt {
             count_only_uses(f, cfg)
         } else {
             Vec::new()

@@ -26,11 +26,12 @@ enum Kind {
 }
 
 impl TargetInst for Fake {
-    fn operands(&self, out: &mut Vec<Operand>) {
+    type Machine = ();
+    fn operands(&self, _: &(), out: &mut Vec<Operand>) {
         out.extend(self.uses.iter().flatten().map(|&v| Operand::reg_use(v)));
         out.extend(self.def.map(Operand::reg_def));
     }
-    fn clobbers(&self) -> PRegSet {
+    fn clobbers(&self, _: &()) -> PRegSet {
         PRegSet::empty()
     }
     fn is_branch(&self) -> bool {
@@ -39,7 +40,7 @@ impl TargetInst for Fake {
     fn is_ret(&self) -> bool {
         self.kind == Kind::Ret
     }
-    fn machine_env() -> &'static MachineEnv {
+    fn machine_env(_: &()) -> &'static MachineEnv {
         static ENV: OnceLock<MachineEnv> = OnceLock::new();
         ENV.get_or_init(|| {
             let mut regs = PRegSet::empty();
@@ -54,7 +55,7 @@ impl TargetInst for Fake {
             }
         })
     }
-    fn spillslot_size(_: RegClass) -> usize {
+    fn spillslot_size(_: &(), _: RegClass) -> usize {
         1
     }
 }
@@ -86,7 +87,7 @@ fn scheduling_keeps_data_ordered_and_barrier_dependencies() {
     let mut reordered = 0;
     for _ in 0..300 {
         let len = 8 + random.below(90);
-        let mut f = Function::<Fake>::new(1, len).unwrap();
+        let mut f = Function::<Fake>::new((), 1, len).unwrap();
         let mut defined = Vec::new();
         for id in 0..len {
             let kind = match random.below(10) {
@@ -240,7 +241,7 @@ fn liveness_matches_iterative_dataflow() {
                 id += 1;
             }
         }
-        let mut f = Function::<Fake>::new(blocks, owner.len()).unwrap();
+        let mut f = Function::<Fake>::new((), blocks, owner.len()).unwrap();
         for b in 0..blocks {
             for &inst in &code[b] {
                 f.push(inst);

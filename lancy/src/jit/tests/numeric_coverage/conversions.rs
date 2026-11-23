@@ -88,7 +88,9 @@ fn scalar_casts_match_reference_across_ieee_and_word_boundaries() {
     for from in LANES {
         let cases = inputs(from);
         for to in LANES {
-            let kernel = ScalarKernel::compile(&scalar_cast(from, to)).unwrap();
+            let kernel =
+                ScalarKernel::compile(&scalar_cast(from, to), &crate::test_target::options())
+                    .unwrap();
             for &bits in &cases {
                 let mut args = [[0; 64]; 3];
                 args[0][..16].copy_from_slice(&bits.to_le_bytes());
@@ -97,7 +99,7 @@ fn scalar_casts_match_reference_across_ieee_and_word_boundaries() {
                     from.scalar(),
                     to.scalar(),
                     &args,
-                    ScalarKernel::vector_bytes(),
+                    crate::test_target::width(),
                 )
                 .unwrap();
                 let mask = u128::MAX >> (128 - to.bytes() * 8);
@@ -126,7 +128,9 @@ fn half_cast_rounds_both_sides_of_normal_subnormal_and_infinity_midpoints() {
         (Lane::F16, -24, -14, 10, 0x7c00u64),
         (Lane::BF16, -133, -126, 7, 0x7f80),
     ] {
-        let kernel = ScalarKernel::compile(&scalar_cast(Lane::F64, to)).unwrap();
+        let kernel =
+            ScalarKernel::compile(&scalar_cast(Lane::F64, to), &crate::test_target::options())
+                .unwrap();
         let bias = 1 - min_normal;
         let half_sub = 2f64.powi(min_sub - 1);
         for (center, lower, tied, upper) in [
@@ -199,7 +203,7 @@ fn half_fma_preserves_guard_bits_and_signed_zero() {
             .append(block, Op::Ternary(Ternary::MulAdd, a, b, c))
             .unwrap();
         f.set_terminator(block, Terminator::Return(v));
-        let kernel = ScalarKernel::compile(&f).unwrap();
+        let kernel = ScalarKernel::compile(&f, &crate::test_target::options()).unwrap();
         // The exact product lies on a target midpoint. A minimum subnormal
         // addend changes its rounding direction, even if f64 addition loses it.
         for (a, b, c, expected) in [

@@ -1,6 +1,7 @@
 mod rules;
 
 use super::{Result, inst::Inst};
+use crate::lir::aarch64::backend::Config;
 use crate::{
     hir::{Function, ssa::VerifiedBody},
     lir::{
@@ -10,7 +11,6 @@ use crate::{
     module::FunctionId,
 };
 use regalloc2::PRegSet;
-use splice_target::Simd as Config;
 
 pub(super) fn select(
     source: &VerifiedBody<'_>,
@@ -18,7 +18,7 @@ pub(super) fn select(
     entry: bool,
     callee: impl Fn(&Function) -> (FunctionId, PRegSet),
 ) -> Result<lir::Function<Inst>> {
-    let _span = tracing::debug_span!(target: "splice::compile", "select_instructions").entered();
+    let _span = tracing::debug_span!(target: "lancy::compile", "select_instructions").entered();
     let (f, cfg) = (source.function, &source.cfg);
     let reg = |v| rules::reg(f, v);
     let edges = Edges::new(source);
@@ -27,7 +27,7 @@ pub(super) fn select(
         Ok(())
     })?;
 
-    let mut body = edges.function()?;
+    let mut body = edges.function(config)?;
     for &b in cfg.reverse_postorder() {
         if b == f.entry() {
             let mut offset = 0;

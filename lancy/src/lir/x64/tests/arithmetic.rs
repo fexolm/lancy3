@@ -23,7 +23,7 @@ fn arithmetic_and_spills_match_the_reference() {
             result = f.append(b, H::Bin(Add, result, *a)).unwrap();
         }
         f.set_terminator(b, Terminator::Return(result));
-        let k = ScalarKernel::compile(&f).unwrap();
+        let k = ScalarKernel::compile(&f, &crate::test_target::options()).unwrap();
         assert!(k.workspace_words() >= 36);
         let mut input = [1; 40];
         for left in [i32::MIN, -42, 0, 1, i32::MAX] {
@@ -58,7 +58,7 @@ fn selection_uses_an_immediate_and_drops_an_unused_multiply() {
     f.append(b, H::Bin(Binary::Mul, four, two));
     f.set_terminator(b, Terminator::Return(four));
     let (source, ids) = f.verified_module().unwrap();
-    let module = compile(source, &ids).unwrap();
+    let module = compile(crate::lir::x64::Machine::host(), source, &ids).unwrap();
     assert!(matches!(
         module.functions[module.call_graph.root()].body.insts(),
         [
@@ -67,7 +67,12 @@ fn selection_uses_an_immediate_and_drops_an_unused_multiply() {
             Inst::Ret(_)
         ]
     ));
-    assert_eq!(ScalarKernel::compile(&f).unwrap().call(&[]), Ok(4));
+    assert_eq!(
+        ScalarKernel::compile(&f, &crate::test_target::options())
+            .unwrap()
+            .call(&[]),
+        Ok(4)
+    );
 }
 
 #[test]
@@ -79,7 +84,7 @@ fn aliased_fixed_operands_keep_the_live_input() {
         let y = f.append(b, H::Bin(op, x, x)).unwrap();
         let result = f.append(b, H::Bin(Binary::Xor, y, x)).unwrap();
         f.set_terminator(b, Terminator::Return(result));
-        let k = ScalarKernel::compile(&f).unwrap();
+        let k = ScalarKernel::compile(&f, &crate::test_target::options()).unwrap();
         for x in [i32::MIN, -33, -1, 0, 1, 31, 32, i32::MAX] {
             let value = match op {
                 Binary::Shl => Some(x.wrapping_shl(x as u32)),
@@ -117,7 +122,7 @@ fn disjoint_pressure_peaks_reuse_workspace() {
             }
         }
         f.set_terminator(b, Terminator::Return(sum));
-        ScalarKernel::compile(&f).unwrap()
+        ScalarKernel::compile(&f, &crate::test_target::options()).unwrap()
     }
     let single = compile(1);
     let many = compile(8);

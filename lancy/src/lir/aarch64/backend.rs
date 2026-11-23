@@ -37,9 +37,35 @@ use crate::{
 use compile::{Compiled, Frame, TEMP_WORD_BYTES, compile};
 use inst::Inst;
 use regalloc2::{Allocation, Block, Edit, Function as _, InstOrEdit, PReg, RegClass};
-use splice_target::{Profile, Simd};
+use splice_target::Profile;
 
 pub(crate) use operations::Site;
+
+/// The vector extension and width one compilation selects for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Config {
+    pub profile: Profile,
+    pub bytes: usize,
+}
+
+impl Config {
+    pub fn new(target: &splice_target::Target) -> Self {
+        let features = target
+            .arm64()
+            .expect("AArch64 code generation for an AArch64 target");
+        let profile = if features.sve2 {
+            Profile::Sve2
+        } else if features.sve {
+            Profile::Sve
+        } else {
+            Profile::Neon
+        };
+        Self {
+            profile,
+            bytes: target.vector_bytes(),
+        }
+    }
+}
 
 // Status pointer, eight result words, and the address of the immutable libcall table.
 pub(crate) const SITE_POINTER: usize = 9;
@@ -224,7 +250,7 @@ struct Emitter<'a> {
     frame: &'a Frame,
     sites: &'a mut Vec<Site>,
     entries: &'a DenseMap<FunctionId, Label>,
-    config: Simd,
+    config: Config,
     epilogue: Label,
     byte_predicate: bool,
     /// Per-trap side exits, indexed by `Trap::code() - 1`.
@@ -711,29 +737,34 @@ fn invert(c: Cond) -> Cond {
     }
 }
 
-pub(crate) fn emit(source: Module<VerifiedBody<'_>>, ids: &FunctionIds<Function>) -> Result<Code> {
-    emit_mode(source, ids, false)
-}
-
-pub(crate) fn emit_debug(
+pub(crate) fn emit(
+    target: &splice_target::Target,
     source: Module<VerifiedBody<'_>>,
     ids: &FunctionIds<Function>,
 ) -> Result<Code> {
-    emit_mode(source, ids, true)
+    emit_mode(Config::new(target), source, ids, false)
+}
+
+pub(crate) fn emit_debug(
+    target: &splice_target::Target,
+    source: Module<VerifiedBody<'_>>,
+    ids: &FunctionIds<Function>,
+) -> Result<Code> {
+    emit_mode(Config::new(target), source, ids, true)
 }
 
 fn emit_mode(
+    config: Config,
     source: Module<VerifiedBody<'_>>,
     ids: &FunctionIds<Function>,
     debug: bool,
 ) -> Result<Code> {
-    let config = splice_target::simd()?;
     let module = compile(source, ids, config)?;
     emit_compiled(&module, config, debug)
 }
 
-fn emit_compiled(module: &Module<Compiled>, config: Simd, debug: bool) -> Result<Code> {
-    let _span = tracing::debug_span!(target: "splice::compile", "emit_machine_code").entered();
+fn emit_compiled(module: &Module<Compiled>, config: Config, debug: bool) -> Result<Code> {
+    let _span = tracing::debug_span!(target: "lancy::compile", "emit_machine_code").entered();
     let root = module.call_graph.root();
     let mut a = Assembler::default();
     let mut sites = Vec::new();

@@ -34,6 +34,46 @@ pub(crate) mod tests;
 use crate::CompileError;
 use crate::hir::{Function, ssa::VerifiedBody, transforms::passes};
 use crate::module::{FunctionIds, Module};
+use splice_target::Target;
+use splice_target::TargetError;
+
+/// What to compile for and how.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CompileOptions {
+    pub target: Target,
+    pub inlining: Inlining,
+    /// Keep source points, outlined calls and debugger frame layouts.
+    /// Debug code is never inlined, whatever `inlining` says.
+    pub debug: bool,
+}
+
+impl CompileOptions {
+    /// Optimized code for `target`, with calls inlined.
+    pub fn new(target: Target) -> Self {
+        Self {
+            target,
+            inlining: Inlining::Always,
+            debug: false,
+        }
+    }
+
+    /// Optimized code for [`Target::host`]: the `SPLICE_SIMD` profile, or
+    /// the best of this machine.
+    pub fn host() -> Result<Self, TargetError> {
+        Target::host().map(Self::new)
+    }
+
+    pub fn with_inlining(self, inlining: Inlining) -> Self {
+        Self { inlining, ..self }
+    }
+
+    pub fn with_debug(self) -> Self {
+        Self {
+            debug: true,
+            ..self
+        }
+    }
+}
 
 /// Controls expansion of runtime calls in HIR.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -59,16 +99,16 @@ pub(crate) fn optimize_and_lower<T>(
     mut lower: impl FnMut(Module<VerifiedBody<'_>>, &FunctionIds<Function>) -> Result<T, CompileError>,
 ) -> Result<T, CompileError> {
     let _span =
-        tracing::debug_span!(target: "splice::compile", "optimize_and_lower_lancy").entered();
+        tracing::debug_span!(target: "lancy::compile", "optimize_and_lower_lancy").entered();
     let mut emit = |body: Function| {
         let (module, ids) = body.verified_module()?;
         lower(module, &ids)
     };
     if inlining.should_inline(source) {
-        let expanded = tracing::debug_span!(target: "splice::compile", "inline_lancy_hir")
+        let expanded = tracing::debug_span!(target: "lancy::compile", "inline_lancy_hir")
             .in_scope(|| passes::inline_all(source, ids))
             .and_then(|mut body| {
-                tracing::debug_span!(target: "splice::compile", "optimize_lancy_hir")
+                tracing::debug_span!(target: "lancy::compile", "optimize_lancy_hir")
                     .in_scope(|| passes::simplify(&mut body))?;
                 emit(body)
             });
@@ -78,7 +118,7 @@ pub(crate) fn optimize_and_lower<T>(
             other => return other,
         }
     }
-    let body = tracing::debug_span!(target: "splice::compile", "optimize_lancy_hir")
+    let body = tracing::debug_span!(target: "lancy::compile", "optimize_lancy_hir")
         .in_scope(|| passes::simplify_bodies(source, ids))?;
     emit(body)
 }

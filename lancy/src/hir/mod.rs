@@ -1,13 +1,13 @@
 mod error;
-#[cfg(any(test, target_arch = "aarch64"))]
 pub(crate) mod eval;
 mod integer;
 pub(crate) mod operation;
 pub mod ssa;
 pub mod transforms;
 
-pub(crate) const MIN_VECTOR_BYTES: usize = 16;
-pub(crate) const MAX_VECTOR_BYTES: usize = 64;
+/// Width-independent proofs (`Count::at_most`) hold for every target width
+/// in this range.
+pub(crate) use splice_target::{MAX_VECTOR_BYTES, MIN_VECTOR_BYTES};
 
 pub use error::IrError;
 pub use ssa::{

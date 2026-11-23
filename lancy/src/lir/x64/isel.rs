@@ -3,7 +3,7 @@ mod rules;
 
 pub(super) use rules::packed_half;
 
-use super::{Features, inst::Inst};
+use super::{Machine, inst::Inst};
 use crate::{
     CompileError,
     hir::{Function, ssa::VerifiedBody},
@@ -16,17 +16,18 @@ use crate::{
 use regalloc2::{PRegSet, RegClass};
 
 pub(super) fn select(
+    machine: Machine,
     source: &VerifiedBody<'_>,
     root: bool,
     callee_info: impl Fn(&Function) -> (FunctionId, PRegSet),
 ) -> Result<lir::Function<Inst>, CompileError> {
-    let _span = tracing::debug_span!(target: "splice::compile", "select_instructions").entered();
+    let _span = tracing::debug_span!(target: "lancy::compile", "select_instructions").entered();
     let (f, cfg) = (source.function, &source.cfg);
-    let cpu = Features::host();
+    let cpu = machine.cpu;
     let masks = masks::Masks::analyze(f, cfg, cpu);
     let reg = |v| masks.reg(f, v);
     let edges = Edges::new(source);
-    let mut body = edges.function()?;
+    let mut body = edges.function(machine)?;
     let mut blocks = isel::select(f, cfg, |ctx, root, out| {
         rules::select(ctx, f, &mut body, out, (cpu, &masks), root, &callee_info)
     })?;

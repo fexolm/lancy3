@@ -33,7 +33,7 @@ fn check_immediates(op: Binary, reference: fn(i32, i32) -> Option<i32>) {
             let (lhs, rhs) = if constant_on_left { (c, x) } else { (x, c) };
             let value = f.append(b, Op::Bin(op, lhs, rhs)).unwrap();
             f.set_terminator(b, Terminator::Return(value));
-            let kernel = ScalarKernel::compile(&f).unwrap();
+            let kernel = ScalarKernel::compile(&f, &crate::test_target::options()).unwrap();
             for &input in VALUES {
                 let (a, b) = if constant_on_left {
                     (constant, input)
@@ -91,7 +91,7 @@ fn right_then_left_shift_clears_low_bits() {
     let high = f.append(b, Op::Bin(Binary::Shr, x, count)).unwrap();
     let result = f.append(b, Op::Bin(Binary::Shl, high, count)).unwrap();
     f.set_terminator(b, Terminator::Return(result));
-    let kernel = ScalarKernel::compile(&f).unwrap();
+    let kernel = ScalarKernel::compile(&f, &crate::test_target::options()).unwrap();
     for &x in VALUES {
         for count in -65..=65 {
             let expected = x & (-1i32).wrapping_shl(count as u32);

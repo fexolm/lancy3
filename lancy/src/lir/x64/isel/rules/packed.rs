@@ -1,3 +1,4 @@
+use crate::lir::x64::Cpu;
 use crate::{
     hir::operation::Action,
     hir::{Binary as B, Type, Unary},
@@ -6,10 +7,9 @@ use crate::{
         packed::{Recipe, float, integer, rearrange},
     },
 };
-use splice_target::Features;
 
 impl Recipe {
-    pub fn select(action: Action, input: Type, output: Type, c: Features) -> Option<Self> {
+    pub fn select(action: Action, input: Type, output: Type, c: Cpu) -> Option<Self> {
         integer::Rule::select(action, input, c)
             .map(Self::Int)
             .or_else(|| float::Rule::select(action, input, output, c).map(Self::Float))
@@ -18,8 +18,8 @@ impl Recipe {
                 let lane = input.lane()?;
                 if lane.float()
                     || lane.bytes() > 8
-                    || !(c.bytes == 32 && !c.avx2
-                        || c.bytes == 64 && !c.bw && lane.bytes() < 4 && c.avx2)
+                    || !(c.bytes == 32 && !c.isa.avx2
+                        || c.bytes == 64 && !c.isa.bw && lane.bytes() < 4 && c.isa.avx2)
                 {
                     return None;
                 }
@@ -39,13 +39,13 @@ pub(in crate::lir::x64) fn packed_half(
     action: Action,
     input: Type,
     output: Type,
-    c: Features,
+    c: Cpu,
 ) -> Option<Native> {
     Native::select(
         action,
         input,
         output,
-        Features {
+        Cpu {
             bytes: c.bytes / 2,
             ..c
         },

@@ -46,7 +46,8 @@ fn program(mut seed: u32) -> Function {
 fn mixed_instruction_sequences_match_unoptimized_ssa() {
     for seed in 1..=64 {
         let f = program(seed);
-        let kernel = ScalarKernel::compile(&f).unwrap_or_else(|e| panic!("seed={seed}: {e}"));
+        let kernel = ScalarKernel::compile(&f, &crate::test_target::options())
+            .unwrap_or_else(|e| panic!("seed={seed}: {e}"));
         let mut state = seed;
         let inputs = [
             [0; WIDTH],

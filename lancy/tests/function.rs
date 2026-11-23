@@ -54,7 +54,9 @@ fn verify_rejects_bad_edges_dominance_call_signatures_and_unterminated_blocks() 
     );
 
     let f = Function::scalar(0);
-    let Err(CompileError::InvalidIr(error)) = ScalarKernel::compile(&f) else {
+    let Err(CompileError::InvalidIr(error)) =
+        ScalarKernel::compile(&f, &lancy::CompileOptions::host().unwrap())
+    else {
         panic!("expected an SSA error for an empty function");
     };
     assert_eq!(error, IrError::UnterminatedBlock { block: f.entry() });
@@ -69,7 +71,7 @@ fn compile_preserves_the_verifier_error_from_a_callee() {
     parent.set_terminator(parent.entry(), Terminator::Return(returned));
     parent.verify().unwrap();
 
-    let Err(err) = ScalarKernel::compile(&parent) else {
+    let Err(err) = ScalarKernel::compile(&parent, &lancy::CompileOptions::host().unwrap()) else {
         panic!("compiled an unterminated callee");
     };
     assert!(matches!(
@@ -86,7 +88,7 @@ fn a_compiled_division_reports_each_arithmetic_trap() {
     let result = f.append(entry, Op::Bin(Binary::Div, lhs, rhs)).unwrap();
     f.set_terminator(entry, Terminator::Return(result));
 
-    let kernel = ScalarKernel::compile(&f).unwrap();
+    let kernel = ScalarKernel::compile(&f, &lancy::CompileOptions::host().unwrap()).unwrap();
     assert_eq!(
         kernel.call(&[7, 0]),
         Err(CallError::Trap(Trap::DivisionByZero))
@@ -136,7 +138,7 @@ fn calls_and_joins_preserve_noncanonical_branch_masks() {
     f.set_terminator(entry, Terminator::Branch { cond, yes, no });
     f.set_terminator(join, Terminator::Return(output));
 
-    let kernel = ScalarKernel::compile(&f).unwrap();
+    let kernel = ScalarKernel::compile(&f, &lancy::CompileOptions::host().unwrap()).unwrap();
     for (mask, x) in [
         (1, i32::MIN),
         (-2, i32::MAX),
@@ -185,7 +187,7 @@ fn loop_carried_parameters_handle_zero_trip_inputs() {
     f.set_terminator(body, Terminator::Jump(back));
     f.set_terminator(exit, Terminator::Return(total));
 
-    let kernel = ScalarKernel::compile(&f).unwrap();
+    let kernel = ScalarKernel::compile(&f, &lancy::CompileOptions::host().unwrap()).unwrap();
     for (n, sum) in [(0, 0), (4, 10), (1, 1), (10, 55), (-1, 0)] {
         assert_eq!(kernel.call(&[n]).unwrap(), sum);
     }
@@ -244,7 +246,7 @@ fn jit_agrees_with_rust_on_forward_edges_and_shared_returns() {
             let no = f.add_edge(blocks[other].0, &[value]);
             f.set_terminator(block, Terminator::Branch { cond, yes, no });
         }
-        let kernel = ScalarKernel::compile(&f).unwrap();
+        let kernel = ScalarKernel::compile(&f, &lancy::CompileOptions::host().unwrap()).unwrap();
         for mask in [0, 1, 7, 0x55, 0xaa, -1] {
             let args = [mask, -207, 42];
             let mut value: i32 = args[1];
@@ -281,7 +283,7 @@ fn release_code_drops_debug_points() {
             f.append(entry, Op::DebugPoint(points + id));
         }
         f.set_terminator(entry, Terminator::Return(value));
-        ScalarKernel::compile(&f).unwrap()
+        ScalarKernel::compile(&f, &lancy::CompileOptions::host().unwrap()).unwrap()
     };
     let (plain, marked) = (build(0), build(32));
     assert_eq!(marked.call(&[7]), Ok(21));

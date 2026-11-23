@@ -106,14 +106,18 @@ fn bits(a: &mut CodeAssembler, action: Action, input: Type, output: Type, p: Arg
     a.mov(r9, sign - 1)?;
     match action {
         Action::Unary(U::Signum) => {
-            let done = a.create_label();
+            // Like Rust's `signum`, a NaN becomes the canonical quiet NaN.
+            let (nan, done) = (a.create_label(), a.create_label());
             a.and(r9, rax)?;
             a.mov(r10, inf)?;
             a.cmp(r9, r10)?;
-            a.ja(done)?;
+            a.ja(nan)?;
             a.and(rax, r8)?;
             a.mov(r10, (fmt.bias as u64) << fmt.fraction)?;
             a.or(rax, r10)?;
+            a.jmp(done)?;
+            bind(a, nan)?;
+            a.mov(rax, inf | 1 << (fmt.fraction - 1))?;
             bind(a, done)?;
         }
         Action::Unary(U::Neg) => a.xor(rax, r8)?,
@@ -191,43 +195,62 @@ fn bits(a: &mut CodeAssembler, action: Action, input: Type, output: Type, p: Arg
     put(a, p.out, output.lane().unwrap().bytes())
 }
 
-// Functions with no exact instruction use the platform scalar math ABI.
-// The call site contains only the address of the concrete function; its
-// arguments and result are plain floating point values (XMM0..2 on both ABIs).
-pub(super) fn math_function(action: Action, lane: Lane) -> Option<u64> {
+// Functions with no exact instruction call Rust's scalar math. The call site
+// contains only the address of the concrete function, compiled for the
+// kernel's convention; its arguments and result are plain floating point
+// values (XMM0..2 on both conventions).
+pub(super) fn math_function(action: Action, lane: Lane, win64: bool) -> Option<u64> {
     if !lane.float() {
         return None;
     }
     let single = lane == Lane::F32;
-    macro_rules! unary {
-        ($op:ident) => {{
-            extern "C" fn f(x: f32) -> f32 {
-                x.$op()
+    // One function per precision and convention. The code only runs on
+    // x86-64; elsewhere any address serves listings.
+    #[cfg(target_arch = "x86_64")]
+    macro_rules! pick {
+        (|$($x:ident),+| $body:expr) => {{
+            extern "sysv64" fn f($($x: f32),+) -> f32 {
+                $body
             }
-            extern "C" fn d(x: f64) -> f64 {
-                x.$op()
+            extern "sysv64" fn d($($x: f64),+) -> f64 {
+                $body
             }
-            if single {
-                f as *const ()
-            } else {
-                d as *const ()
+            extern "win64" fn wf($($x: f32),+) -> f32 {
+                $body
+            }
+            extern "win64" fn wd($($x: f64),+) -> f64 {
+                $body
+            }
+            match (single, win64) {
+                (true, false) => f as *const (),
+                (false, false) => d as *const (),
+                (true, true) => wf as *const (),
+                (false, true) => wd as *const (),
             }
         }};
     }
-    macro_rules! binary {
-        ($op:ident) => {{
-            extern "C" fn f(x: f32, y: f32) -> f32 {
-                x.$op(y)
+    #[cfg(not(target_arch = "x86_64"))]
+    macro_rules! pick {
+        (|$($x:ident),+| $body:expr) => {{
+            extern "C" fn f($($x: f32),+) -> f32 {
+                $body
             }
-            extern "C" fn d(x: f64, y: f64) -> f64 {
-                x.$op(y)
+            extern "C" fn d($($x: f64),+) -> f64 {
+                $body
             }
-            if single {
-                f as *const ()
-            } else {
-                d as *const ()
-            }
+            let _ = win64;
+            if single { f as *const () } else { d as *const () }
         }};
+    }
+    macro_rules! unary {
+        ($op:ident) => {
+            pick!(|x| x.$op())
+        };
+    }
+    macro_rules! binary {
+        ($op:ident) => {
+            pick!(|x, y| x.$op(y))
+        };
     }
     let address = match action {
         Action::Unary(op) => match op {
@@ -257,33 +280,11 @@ pub(super) fn math_function(action: Action, lane: Lane) -> Option<u64> {
             B::Pow => binary!(powf),
             B::Atan2 => binary!(atan2),
             B::Hypot => binary!(hypot),
-            B::Rem => {
-                extern "C" fn f(x: f32, y: f32) -> f32 {
-                    x % y
-                }
-                extern "C" fn d(x: f64, y: f64) -> f64 {
-                    x % y
-                }
-                if single {
-                    f as *const ()
-                } else {
-                    d as *const ()
-                }
-            }
+            B::Rem => pick!(|x, y| x % y),
             _ => return None,
         },
         Action::Ternary(Ternary::MulAdd) if matches!(lane, Lane::F32 | Lane::F64) => {
-            extern "C" fn f(x: f32, y: f32, z: f32) -> f32 {
-                x.mul_add(y, z)
-            }
-            extern "C" fn d(x: f64, y: f64, z: f64) -> f64 {
-                x.mul_add(y, z)
-            }
-            if single {
-                f as *const ()
-            } else {
-                d as *const ()
-            }
+            pick!(|x, y, z| x.mul_add(y, z))
         }
         _ => return None,
     };
@@ -480,7 +481,7 @@ pub(super) fn emit(
         _ => {
             a.mov(
                 r10,
-                math_function(action, lane).expect("verified scalar math operation"),
+                math_function(action, lane, p.win64).expect("verified scalar math operation"),
             )?;
             a.call(r10)?;
         }

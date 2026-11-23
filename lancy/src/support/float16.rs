@@ -21,7 +21,6 @@ impl Format {
             _ => unreachable!(),
         }
     }
-    #[cfg(any(test, target_arch = "aarch64"))]
     pub fn fraction_bits(&self) -> u32 {
         self.fraction
     }
@@ -29,7 +28,6 @@ impl Format {
     pub fn infinity(&self) -> u16 {
         0x7fff & !((1 << self.fraction) - 1)
     }
-    #[cfg(any(test, target_arch = "aarch64"))]
     pub fn decode(&self, raw: u16) -> f64 {
         let magnitude = raw & 0x7fff;
         let frac = magnitude & ((1 << self.fraction) - 1);

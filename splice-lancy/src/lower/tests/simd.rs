@@ -88,7 +88,10 @@ fn packed_load_and_store_have_an_ordered_short_store_exit() {
         );
         let kernel = crate::LancyKernel::new(graph, 1, &kinds, None).unwrap();
         let lanes = Element::U16.lanes();
-        assert_eq!(lanes * 2, lancy::ScalarKernel::vector_bytes());
+        assert_eq!(
+            lanes * 2,
+            splice_target::Target::host().unwrap().vector_bytes()
+        );
         let mut src: Vec<_> = (0..lanes as u16).collect();
         src[lanes - 1] = u16::MAX;
         for len in [lanes + 1, lanes, 2, 1, 0] {

@@ -2,7 +2,7 @@
 pub(in crate::lir::x64) mod opmask;
 pub(in crate::lir::x64) mod packed;
 use super::VectorMask;
-use crate::lir::x64::{Features, emit};
+use crate::lir::x64::{Cpu, emit};
 use crate::{
     hir::operation::Action,
     hir::{Binary as B, Lane, Ternary, Type, Unary},
@@ -38,20 +38,20 @@ macro_rules! predicated {
     };
 }
 
-pub(in crate::lir::x64) fn evex(cpu: Features) -> bool {
-    cpu.bytes == 64 || cpu.avx10 >= 1
+pub(in crate::lir::x64) fn evex(cpu: Cpu) -> bool {
+    cpu.bytes == 64 || cpu.isa.avx10 >= 1
 }
 
-pub(in crate::lir::x64) fn mask_lanes(cpu: Features, lane: Lane) -> bool {
+pub(in crate::lir::x64) fn mask_lanes(cpu: Cpu, lane: Lane) -> bool {
     match lane.bytes() {
-        1 | 2 => cpu.bw,
+        1 | 2 => cpu.isa.bw,
         4 | 8 => true,
         _ => false,
     }
 }
 
-pub(in crate::lir::x64) fn compact_lanes(cpu: Features, lane: Lane) -> bool {
-    evex(cpu) && mask_lanes(cpu, lane) && (lane.bytes() >= 4 || cpu.vbmi2)
+pub(in crate::lir::x64) fn compact_lanes(cpu: Cpu, lane: Lane) -> bool {
+    evex(cpu) && mask_lanes(cpu, lane) && (lane.bytes() >= 4 || cpu.isa.vbmi2)
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -60,7 +60,7 @@ pub(in crate::lir::x64) struct Native {
     pub input: Type,
     pub output: Type,
     pub(in crate::lir::x64) bytes: usize,
-    pub(in crate::lir::x64) cpu: Features,
+    pub(in crate::lir::x64) cpu: Cpu,
     pub(in crate::lir::x64) recipe: Option<packed::Recipe>,
 }
 
@@ -559,7 +559,7 @@ pub(in crate::lir::x64) fn copy(
 /// Sets ZF when every lane is nonzero.
 pub(in crate::lir::x64) fn test_all(
     a: &mut CodeAssembler,
-    cpu: Features,
+    cpu: Cpu,
     lane: Lane,
     src: usize,
 ) -> Result<(), IcedError> {
@@ -607,7 +607,7 @@ pub(in crate::lir::x64) fn test_all(
             }
             8 => {
                 a.vptestmq(k1, ZMM[src], ZMM[src])?;
-                if cpu.dq {
+                if cpu.isa.dq {
                     a.knotb(k1, k1)?;
                     a.kortestb(k1, k1)
                 } else {
@@ -624,7 +624,7 @@ pub(in crate::lir::x64) fn test_all(
 /// Sets ZF when every bit of the vector is zero.
 pub(in crate::lir::x64) fn test_any(
     a: &mut CodeAssembler,
-    cpu: Features,
+    cpu: Cpu,
     src: usize,
 ) -> Result<(), IcedError> {
     match cpu.bytes {
@@ -633,7 +633,7 @@ pub(in crate::lir::x64) fn test_any(
             a.kortestw(k1, k1)
         }
         32 => a.vptest(YMM[src], YMM[src]),
-        _ if cpu.sse41 => a.ptest(XMM[src], XMM[src]),
+        _ if cpu.isa.sse41 => a.ptest(XMM[src], XMM[src]),
         _ => {
             let t = XMM[super::SCRATCH];
             a.pxor(t, t)?;
@@ -647,11 +647,11 @@ pub(in crate::lir::x64) fn test_any(
 // K1 is reserved inside masked pseudo-instructions and never holds a live SSA value.
 fn mask_from_signs(
     a: &mut CodeAssembler,
-    cpu: Features,
+    cpu: Cpu,
     size: usize,
     mask: usize,
 ) -> Result<(), IcedError> {
-    if !cpu.dq && size >= 4 {
+    if !cpu.isa.dq && size >= 4 {
         let z = ZMM[super::SCRATCH];
         a.vpxord(z, z, z)?;
         return if size == 4 {
@@ -743,7 +743,7 @@ enum MaskBits {
 
 fn emit_opmask(
     a: &mut CodeAssembler,
-    cpu: Features,
+    cpu: Cpu,
     size: usize,
     mask: VectorMask<usize>,
     bits: MaskBits,
@@ -783,7 +783,7 @@ fn emit_opmask(
 
 pub(in crate::lir::x64) fn test_vector_mask(
     a: &mut CodeAssembler,
-    cpu: Features,
+    cpu: Cpu,
     mask: VectorMask<usize>,
 ) -> Result<(), IcedError> {
     let lane = match mask {
@@ -825,7 +825,7 @@ fn blend(
 
 pub(in crate::lir::x64) fn blend_comparison(
     a: &mut CodeAssembler,
-    cpu: Features,
+    cpu: Cpu,
     lane: Lane,
     mask: VectorMask<usize>,
     dst: usize,
@@ -866,8 +866,8 @@ pub(in crate::lir::x64) fn compact(
     }
 }
 
-pub(in crate::lir::x64) fn evex_masked_memory(cpu: Features, size: usize, indexed: bool) -> bool {
-    evex(cpu) && (matches!(size, 4 | 8) || !indexed && size <= 2 && cpu.bw)
+pub(in crate::lir::x64) fn evex_masked_memory(cpu: Cpu, size: usize, indexed: bool) -> bool {
+    evex(cpu) && (matches!(size, 4 | 8) || !indexed && size <= 2 && cpu.isa.bw)
 }
 
 pub(in crate::lir::x64) struct MaskedMemory {
@@ -883,7 +883,7 @@ impl MaskedMemory {
     pub(in crate::lir::x64) fn emit(
         self,
         a: &mut CodeAssembler,
-        cpu: Features,
+        cpu: Cpu,
     ) -> Result<(), IcedError> {
         use crate::lir::x64::emit::R64;
         let Self {
@@ -972,7 +972,7 @@ impl MaskedMemory {
         };
         if width == 32 && matches!(size, 4 | 8) {
             if let (Some(i), Some(d)) = (index, dst)
-                && cpu.avx2
+                && cpu.isa.avx2
             {
                 // AVX2 clears enabled mask lanes as the gather completes. Regalloc
                 // provides a distinct temporary for that destructive operand.

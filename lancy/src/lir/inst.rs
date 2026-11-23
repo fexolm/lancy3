@@ -2,11 +2,14 @@
 use regalloc2::{MachineEnv, Operand, PRegSet, RegClass};
 
 pub(super) trait TargetInst: Copy {
+    /// What operands and clobbers depend on: the calling convention and the
+    /// vector width the function is compiled for.
+    type Machine: Copy;
     /// Append operands in the same order in which the emitter consumes allocations.
-    fn operands(&self, out: &mut Vec<Operand>);
-    fn clobbers(&self) -> PRegSet;
+    fn operands(&self, machine: &Self::Machine, out: &mut Vec<Operand>);
+    fn clobbers(&self, machine: &Self::Machine) -> PRegSet;
     fn is_branch(&self) -> bool;
     fn is_ret(&self) -> bool;
-    fn machine_env() -> &'static MachineEnv;
-    fn spillslot_size(class: RegClass) -> usize;
+    fn machine_env(machine: &Self::Machine) -> &'static MachineEnv;
+    fn spillslot_size(machine: &Self::Machine, class: RegClass) -> usize;
 }

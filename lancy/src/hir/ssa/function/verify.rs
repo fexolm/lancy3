@@ -331,7 +331,7 @@ impl Function {
     pub(crate) fn verified_module(
         &self,
     ) -> Result<(Module<VerifiedBody<'_>>, FunctionIds<Self>), CompileError> {
-        let _span = tracing::debug_span!(target: "splice::compile", "verify_lancy_hir").entered();
+        let _span = tracing::debug_span!(target: "lancy::compile", "verify_lancy_hir").entered();
         Module::discover(self, |function, callees| {
             let body = function.verified_body()?;
             for inst in function.insts.values() {

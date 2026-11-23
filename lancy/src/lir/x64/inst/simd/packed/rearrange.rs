@@ -188,7 +188,7 @@ pub(in crate::lir::x64) fn shift_dwords(
 
 pub(in crate::lir::x64) fn extract_lane(
     a: &mut CodeAssembler,
-    cpu: Features,
+    cpu: Cpu,
     lane: Lane,
     dst: usize,
     src: usize,
@@ -236,7 +236,7 @@ pub(in crate::lir::x64) fn extract_lane(
     }
     let dword = R32[dst];
     match size {
-        1 if wide || cpu.sse41 => encoding!(pextrb, vpextrb, dword, source, offset),
+        1 if wide || cpu.isa.sse41 => encoding!(pextrb, vpextrb, dword, source, offset),
         1 => {
             a.pextrw(dword, source, offset / 2)?;
             if offset % 2 == 0 {
@@ -248,8 +248,8 @@ pub(in crate::lir::x64) fn extract_lane(
         2 => encoding!(pextrw, vpextrw, dword, source, offset / 2),
         4 if offset == 0 => encoding!(movd, vmovd, dword, source),
         8 if offset == 0 => encoding!(movq, vmovq, R64[dst], source),
-        4 if wide || cpu.sse41 => encoding!(pextrd, vpextrd, dword, source, offset / 4),
-        8 if wide || cpu.sse41 => encoding!(pextrq, vpextrq, R64[dst], source, offset / 8),
+        4 if wide || cpu.isa.sse41 => encoding!(pextrd, vpextrd, dword, source, offset / 4),
+        8 if wide || cpu.isa.sse41 => encoding!(pextrq, vpextrq, R64[dst], source, offset / 8),
         _ => {
             let shifted = XMM[SCRATCH];
             a.pshufd(shifted, source, if size == 8 { 0x4e } else { offset / 4 })?;
@@ -271,7 +271,7 @@ pub(in crate::lir::x64) enum Rule {
     Reduce(B),
 }
 impl Rule {
-    pub(super) fn temps(self, action: Action, input: Type, c: Features) -> usize {
+    pub(super) fn temps(self, action: Action, input: Type, c: Cpu) -> usize {
         match self {
             Self::FloatWidth => match (action, input.lane().unwrap()) {
                 (Action::Widen(high), Lane::F32) => usize::from(high),
@@ -280,7 +280,7 @@ impl Rule {
                 _ => 5,
             },
             Self::Shuffle if c.bytes == 32 && !evex(c) => 3,
-            Self::Widen(false) if c.bytes != 16 || c.sse41 => 0,
+            Self::Widen(false) if c.bytes != 16 || c.isa.sse41 => 0,
             Self::Shuffle | Self::Widen(_) => 1,
             Self::Narrow if c.bytes == 64 => 1,
             Self::Narrow | Self::Reduce(_) => 2,
@@ -338,7 +338,7 @@ impl Rule {
                 v.a.vpcmpeqd(YMM[b], YMM[b], YMM[c])?;
                 v.and(d, d, b)
             }
-            Self::Widen(high) if v.width == 16 && !v.cpu.sse41 => {
+            Self::Widen(high) if v.width == 16 && !v.cpu.isa.sse41 => {
                 let a = t[0];
                 v.zero(a)?;
                 if e.signed() {

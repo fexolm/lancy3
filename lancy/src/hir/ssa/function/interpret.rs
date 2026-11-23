@@ -116,7 +116,7 @@ pub(super) unsafe fn run(
     args: Vec<Bits>,
     mut buffer: Option<&mut [Vec<u8>]>,
 ) -> Result<Bits> {
-    let width = crate::ScalarKernel::vector_bytes();
+    let width = crate::test_target::width();
     let mut frames = vec![Frame::new(function, args, None)];
     loop {
         let f = frames.last_mut().unwrap();

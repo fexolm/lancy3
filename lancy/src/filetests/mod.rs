@@ -156,13 +156,6 @@ impl<'a> Case<'a> {
         if self.done() {
             return Err("case has no expectations".into());
         }
-        #[cfg(target_arch = "aarch64")]
-        self.checks.retain(|stage, _| !X64_STAGES.contains(stage));
-        #[cfg(target_arch = "x86_64")]
-        {
-            self.checks.retain(|stage, _| !ARM_STAGES.contains(stage));
-            self.encodings.clear();
-        }
         let (source, ids) = verified.map_err(|e| format!("verify: {e}"))?;
         self.check("source", || listing::hir(&source, &ids))?;
         self.check("cfg", || listing::cfg(&source))?;
@@ -194,8 +187,11 @@ impl<'a> Case<'a> {
         .map_err(|e| format!("opt: {e}"))??;
         self.all_checks_reached()?;
         if !self.runs.is_empty() {
-            let kernel = ScalarKernel::compile_with_inlining(&f, self.policy)
-                .map_err(|e| format!("JIT: {e}"))?;
+            let kernel = ScalarKernel::compile(
+                &f,
+                &crate::test_target::options().with_inlining(self.policy),
+            )
+            .map_err(|e| format!("JIT: {e}"))?;
             for run in self.runs {
                 // SAFETY: these inputs passed checked interpretation on f above;
                 // the kernel was compiled from f and remains live across the call.
@@ -231,16 +227,15 @@ fn run_text(text: &str) -> Result<()> {
 }
 
 /// Every `.lancy` file under `filetests/`, found at run time so that no build
-/// script runs for consumers of the crate. `aarch64/` runs only on AArch64 and
-/// `passes/experimental/` only with `experimental-simd`.
+/// script runs for consumers of the crate. `passes/experimental/` runs only
+/// with `experimental-simd`.
 fn fixtures(root: &Path, dir: &Path, files: &mut Vec<PathBuf>) -> std::io::Result<()> {
     for entry in fs::read_dir(dir)? {
         let path = entry?.path();
         let relative = path.strip_prefix(root).unwrap();
         if path.is_dir() {
-            let skip = (relative == Path::new("aarch64") && !cfg!(target_arch = "aarch64"))
-                || (relative == Path::new("passes/experimental")
-                    && !cfg!(feature = "experimental-simd"));
+            let skip = relative == Path::new("passes/experimental")
+                && !cfg!(feature = "experimental-simd");
             if !skip {
                 fixtures(root, &path, files)?;
             }
@@ -302,12 +297,7 @@ fn filetests() {
 
 #[test]
 fn mismatches_identify_the_stage_even_when_native_execution_would_succeed() {
-    let target = if cfg!(target_arch = "aarch64") {
-        &ARM_STAGES[..]
-    } else {
-        &X64_STAGES[..]
-    };
-    for &stage in COMMON_STAGES.iter().chain(target) {
+    for &stage in COMMON_STAGES.iter().chain(&X64_STAGES).chain(&ARM_STAGES) {
         let source = format!(
             "fn main x:i32 -> i32\nret x\n@{stage} regex: ANY=.*\n@run 8 -> 8\n@{stage} check: absent_opcode"
         );
@@ -339,15 +329,13 @@ fn unknown_directives_report_the_absolute_line_in_later_cases() {
 }
 
 #[test]
-fn foreign_machine_expectations_leave_common_checks_active() {
-    let foreign = if cfg!(target_arch = "aarch64") {
-        "isel"
-    } else {
-        "aarch64-isel"
-    };
-    let case =
-        format!("fn main x:i32 -> i32\nret x\n@{foreign} check: absent_opcode\n@opt check: ret v0");
-    run_text(&case).unwrap();
+fn both_machines_are_checked_on_every_host() {
+    for stage in ["isel", "aarch64-isel"] {
+        let case = format!("fn main x:i32 -> i32\nret x\n@{stage} check: absent_opcode");
+        let error = run_text(&case).unwrap_err();
+        assert!(error.contains(&format!("{stage}:")), "{error}");
+    }
+    run_text("fn main x:i32 -> i32\nret x\n@isel check: ret\n@aarch64-isel check: Return").unwrap();
 }
 
 #[test]
@@ -373,7 +361,6 @@ fn run_literals_must_match_the_signature() {
     }
 }
 
-#[cfg(target_arch = "aarch64")]
 #[test]
 fn aarch64_encodings_are_named_and_profiles_known() {
     for (check, error) in [
