@@ -7,7 +7,7 @@
 ## Фазы
 - [x] Ф0 — подтверждённые ошибки и быстрые исправления
 - [x] Ф1 — страховочная сетка: явный путь понижения, харнессы, CI
-- [ ] Ф2 — типизированные ошибки и общий `Trap`
+- [x] Ф2 — типизированные ошибки и общий `Trap`
 - [ ] Ф3 — цель как значение
 - [ ] Ф4 — splice-core: типизированные скаляры и единый контракт бэкендов
 - [ ] Ф5 — lancy HIR
@@ -167,3 +167,4 @@
 - Тесты сравнивают варианты (`Verify`/`Staging`/`Unsupported`/`Comptime`); новые проверки: `error::tests` (паника при сборке → `RustPanic`, Display без повтора причины), `overflow.rs` и `known_bounds.rs` ждут `Comptime(Trap::Overflow | Trap::Bounds)`, `column_table` — `Staging`. Документация: варианты `BuildError` в `docs/splice-language.md`.
 - Отклонение: `Catalog::new` в примере `relational` оставлен с `Result<_, String>` — это ошибка предметной области примера, не API Splice.
 - Проверки: `cargo +1.94.1 xtask ci --quick` зелёный; `cargo check --target aarch64-unknown-linux-gnu --all-targets` (lancy, splice-core, splice-lancy, splice-cranelift, splice-kernel); `cargo check --target x86_64-pc-windows-msvc --tests` (splice-core, splice-jit, splice-lancy, splice-cranelift).
+- Полный `cargo +1.94.1 xtask ci` локально зелёный. Ф2 закрыта; отложено: CORE-20 сентинел → Ф4.2, вторая половина A64-14 → Ф6, сигнатуры HIR-15 → Ф5/Ф9.1, `SliceDescriptor`/ABI Rust-вызова → Ф4.4/4.5.
