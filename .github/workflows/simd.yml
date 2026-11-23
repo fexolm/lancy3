@@ -82,11 +82,12 @@ jobs:
       LLVM_SYS_191_PREFIX: /usr/lib/llvm-19
     steps:
       - uses: actions/checkout@v4
+      # Ubuntu's static LLVM link line names Polly, packaged separately.
       - name: Install Rust and LLVM
         run: |
           rustup toolchain install "$TOOLCHAIN" --profile minimal
           sudo apt-get update
-          sudo apt-get install -y g++ libffi-dev llvm-19-dev
+          sudo apt-get install -y g++ libffi-dev llvm-19-dev libpolly-19-dev
       - uses: Swatinem/rust-cache@v2
       - run: cargo +"$TOOLCHAIN" xtask features
       - run: cargo +"$TOOLCHAIN" xtask static-llvm

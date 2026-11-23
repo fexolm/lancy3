@@ -11,7 +11,8 @@
 //!   generate code, tested with `SPLICE_SIMD=SIMD`. Skipped when the host
 //!   cannot run that profile, unless `--expect-bytes` demands N-byte vectors.
 //! - `static-llvm`: link LLVM statically and check that the GDB JIT
-//!   interface has one definition (Linux).
+//!   interface has one definition (Linux; on Ubuntu the static link line
+//!   also needs `libpolly-19-dev`).
 //! - `doc`: rustdoc for the workspace with warnings denied.
 //! - `bench [ARGS]`: the backend comparison bench, with ARGS for Criterion.
 //!
