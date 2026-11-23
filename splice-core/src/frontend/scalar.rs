@@ -157,25 +157,28 @@ impl RunArg for Host<i32> {
 #[doc(hidden)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum HostFault {
-    DivisionByZero,
-    DivisionOverflow,
+    /// `Div` or `Rem` by zero.
+    DivisionByZero(Binary),
+    /// `Div` or `Rem` of the minimum by `-1`.
+    DivisionOverflow(Binary),
     Overflow,
 }
 
 impl HostFault {
-    /// An i32 kernel operation that traps with the same error.
+    /// An i32 kernel operation, with the faulting operator, that traps with
+    /// the same error.
     pub fn kernel_operation(self) -> (Binary, i32, i32) {
         match self {
-            Self::DivisionByZero => (Binary::Div, 0, 0),
-            Self::DivisionOverflow => (Binary::Div, i32::MIN, -1),
+            Self::DivisionByZero(op) => (op, 0, 0),
+            Self::DivisionOverflow(op) => (op, i32::MIN, -1),
             Self::Overflow => (Binary::CheckedAdd, i32::MAX, 1),
         }
     }
 
     pub fn message(self) -> &'static str {
         match self {
-            Self::DivisionByZero => "kernel integer division by zero",
-            Self::DivisionOverflow => "kernel signed division overflow",
+            Self::DivisionByZero(_) => "kernel integer division by zero",
+            Self::DivisionOverflow(_) => "kernel signed division overflow",
             Self::Overflow => "kernel integer arithmetic overflow",
         }
     }
@@ -210,10 +213,10 @@ macro_rules! host_integer {
                     Binary::CheckedSub => lhs.checked_sub(rhs).is_some(),
                     Binary::CheckedMul => lhs.checked_mul(rhs).is_some(),
                     Binary::Div | Binary::Rem if rhs == 0 => {
-                        return Some(HostFault::DivisionByZero);
+                        return Some(HostFault::DivisionByZero(op));
                     }
                     Binary::Div | Binary::Rem => {
-                        return lhs.checked_div(rhs).is_none().then_some(HostFault::DivisionOverflow);
+                        return lhs.checked_div(rhs).is_none().then_some(HostFault::DivisionOverflow(op));
                     }
                     _ => true,
                 };
