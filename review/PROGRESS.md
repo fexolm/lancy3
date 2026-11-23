@@ -112,9 +112,15 @@
 - LNC-11: `@aarch64 <профиль> has|lacks <имя>`; 68 кодировок в `ENCODINGS` с именами по `llvm-mc`, 189 строк фикстур переписаны. Неизвестное имя/профиль — ошибка. Поиска «только в `text_len`» не потребовалось: у AArch64 нет литерального пула, все слова — инструкции.
 - Проверки: fmt, clippy 1.94.1 (x64, aarch64, `experimental-simd`), `cargo test --workspace --release`; lancy под QEMU neon VL16, sve VL16/32, sve2 VL48/64; typed-runs при `SPLICE_SIMD=sse|avx2|avx512`.
 
-### Ф1.5 — splice-testkit (в работе; коммиты b4b10d5, a47dfb3)
+### Ф1.5 — splice-testkit и тесты (коммиты b4b10d5, a47dfb3, 9de13da, 5316a83)
 - SPL-02: крейт `splice-testkit` (`publish = false`), `each_backend!(B => …)` — единственный список {Lancy, Cranelift, Llvm, LlvmManualSimd}. Все ≈60 групп `check::<B>` и ручные пары build/compile в `splice/tests` переведены; покрытие Cranelift/LlvmManualSimd выросло с 18/4 до всех тестов — расхождений не нашлось. Оставлены одиночные `build::<Lancy>` там, где проверяется ошибка фронтенда (бэкенд не участвует).
 - SPL-03/MAC-17 (дифф. часть): `agree()` — матрица бэкенд × {build, compile(ir)} × {Debug, Release}, одинаковые наблюдения включая буферы после ошибки; `splice-testkit/tests/differential.rs` воссоздаёт `zz_diff.rs` со сверкой с Rust: 23 `Binary` против `checked_eval`, приведения, float, сравнения, целые полосы, `first_n`, compress/expand, u16 gather/scatter у 32768/65535, частичные доступы, narrow/widen. Прогнано при `SPLICE_SIMD=auto|sse|avx2|avx512` и в debug.
 - SPL-14: `builders!(B => …)` в бенчмарках (аргументы один раз), `xorshift` в `benches/common`; `cargo bench -- --test` зелёный.
 - SPL-15: свой `tracing::Layer` записывает пути закрытых спанов; тест проверяет наличие и вложенность стадий, а не формат и не точное число.
 - SPL-18: LLVM-ветка дерева из 32 сканов идёт на глубине 4, Lancy — 5.
+- SPL-17 (trybuild): `splice/tests/ui/{signatures,declarations,bodies}.rs` — каждая достижимая диагностика `#[kernel]`; снимки под 1.94.1. В `splice-macros` удалены недостижимые ветки (дубль проверки скалярной сигнатуры, ресивер в `parameter()` → `unreachable!`, конец диапазона → `expect`). Непокрываемо: «expected a cfg condition» — rustc раскрывает пустой `#[cfg_attr()]` до макроса.
+- splice-jit: тест читает символьный файл обратно через `object`+`gimli` (ELF, символы, строки, переменные); `tests/registry_threads.rs` — 8 потоков × 200 регистраций.
+- CORE-14: модульные тесты `hir::verify` — по одному на каждую ветку ошибки (пустая функция, метки, вызов, регистры, debug, SIMD, copy, буферы, инициализация на всех путях, выпадение за конец).
+- BE-15: закрыт дифференциальным тестом; матрица профилей в CI — в Ф1.6. `assert_lowered` не вводился (отклонение 1.1).
+- Закрыто: SPL-02, SPL-03, SPL-14, SPL-15, SPL-17(trybuild), SPL-18, MAC-17, CORE-14, BE-15.
+- Проверки: fmt, clippy 1.94.1, `cargo test --workspace --release`.
