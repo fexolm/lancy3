@@ -7,7 +7,7 @@ mod control;
 pub(crate) use calls::select_free;
 pub(super) use comptime::can_fold;
 pub(crate) use comptime::uses_stage_requirements;
-pub(super) use context::{Context, context_argument};
+pub(super) use context::Context;
 mod host;
 use host::guarded_negation;
 mod memory;

@@ -8,7 +8,7 @@ fn checked(value: i32) -> Result<(), &'static str> {
     (value >= 0).then_some(()).ok_or("negative")
 }
 
-#[kernel]
+#[kernel(rust)]
 fn write_around_result(out: &mut [i32], value: i32) -> Result<i32, &'static str> {
     out[0] = 7;
     checked(value)?;
@@ -16,7 +16,7 @@ fn write_around_result(out: &mut [i32], value: i32) -> Result<i32, &'static str>
     Ok(value)
 }
 
-#[kernel]
+#[kernel(rust)]
 fn catches_slice_panic(xs: &[u8], index: i32) -> bool {
     std::panic::catch_unwind(|| xs[index as usize]).is_err()
 }
@@ -34,7 +34,7 @@ impl Matcher {
     }
 }
 
-#[kernel]
+#[kernel(rust)]
 fn guarded_match(matcher: &Matcher, matches: bool, value: i32) -> bool {
     if matches {
         matcher.matches(value)
@@ -53,12 +53,12 @@ fn runtime_step(value: i32) -> i32 {
     value.wrapping_mul(2)
 }
 
-#[kernel]
+#[kernel(rust)]
 fn published_in_region(value: i32) -> Result<i32, &'static str> {
     Ok(published(value).wrapping_add(line!() as i32))
 }
 
-#[kernel]
+#[kernel(rust)]
 fn matched_stages_in_region(
     #[comptime] planned: bool,
     #[comptime] offset: i32,
@@ -372,7 +372,7 @@ fn slice_regions_preserve_drop_order_and_native_aggregates() {
 
 struct Weight(i32);
 
-#[kernel]
+#[kernel(rust)]
 fn render_captures(
     #[comptime] weight: Weight,
     #[comptime] number: i32,
@@ -437,6 +437,7 @@ trait PlainWideRule {
 #[kernel]
 trait PublishedWideRule {
     type Output;
+    #[kernel(rust)]
     fn widen(value: i32) -> Self::Output;
     fn widen_known(#[comptime] value: i32) -> u64;
     fn pure(value: i32) -> u64;
@@ -507,7 +508,7 @@ fn narrow_requires_known<T: PublishedWideRule>(value: i32) -> i32 {
     <T as PublishedWideRule>::widen_known(value) as i32
 }
 
-#[kernel]
+#[kernel(rust)]
 pub(crate) fn wide_result<T: PublishedWideRule>(
     #[comptime] planned: bool,
     #[comptime] known: i32,

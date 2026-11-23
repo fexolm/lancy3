@@ -32,6 +32,7 @@ splice-lancy = { path = "../splice-lancy" }
 splice-llvm = { path = "../splice-llvm" }
 splice-test-traits = { path = "../tests/fixtures/trait-provider" }
 splice-text = { path = "../splice-text" }
+trybuild = "1"
 
 [[bench]]
 name = "backends"

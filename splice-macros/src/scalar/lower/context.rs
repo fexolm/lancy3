@@ -515,7 +515,7 @@ fn direct_object(expr: &Expr, lower: &Lower<'_>, object: &Ident) -> bool {
     context_argument(expr).is_some_and(|path| is_object(path, lower, object))
 }
 
-pub(in crate::scalar) fn context_argument(expr: &Expr) -> Option<&ExprPath> {
+fn context_argument(expr: &Expr) -> Option<&ExprPath> {
     match ungroup(expr) {
         Expr::Path(path) => Some(path),
         _ => reborrow_argument(expr, true),

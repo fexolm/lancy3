@@ -40,10 +40,16 @@ pub(crate) fn trait_defaults(
     root: &syn::Path,
     signature: &Signature,
     trait_owner: &TokenStream,
-) -> (TraitMethodKind, Vec<TokenStream>) {
+) -> syn::Result<(TraitMethodKind, Vec<TokenStream>)> {
     let kind = TraitMethodKind::for_result(&signature.output);
     if kind == TraitMethodKind::Rust {
-        return (kind, Vec::new());
+        let ReturnType::Type(_, ty) = &signature.output else {
+            unreachable!("a method without a result returns ()")
+        };
+        return Err(syn::Error::new_spanned(
+            ty,
+            "a Splice trait method returns (), i32, bool or a primitive; mark it #[kernel(rust)] to keep it in Rust",
+        ));
     }
     let mut signature = normalize(signature, None);
     signature
@@ -72,17 +78,14 @@ pub(crate) fn trait_defaults(
         }
     };
     if kind == TraitMethodKind::EvalOnly {
-        return (kind, vec![evaluator]);
+        return Ok((kind, vec![evaluator]));
     }
-    let Ok(params) = signature
+    let params = signature
         .inputs
         .iter()
         .zip(abi::parameter_names(&signature))
         .map(|(argument, name)| parameter(argument, &types, name))
-        .collect::<syn::Result<Vec<_>>>()
-    else {
-        return (TraitMethodKind::Rust, Vec::new());
-    };
+        .collect::<syn::Result<Vec<_>>>()?;
     let mut declarations = Vec::new();
     let mut args = Vec::new();
     let mut stage_checks = Vec::new();
@@ -115,7 +118,12 @@ pub(crate) fn trait_defaults(
                 materializable = false;
                 emit!(#id: #hir::Buffer)
             }
-            _ => return (TraitMethodKind::Rust, Vec::new()),
+            _ => {
+                return Err(syn::Error::new_spanned(
+                    param.pattern,
+                    "a Splice trait method parameter is #[comptime], i32, bool or a slice",
+                ));
+            }
         });
         args.push(id);
     }
@@ -199,7 +207,7 @@ pub(crate) fn trait_defaults(
         }
     });
     items.push(evaluator);
-    (kind, items)
+    Ok((kind, items))
 }
 
 pub(crate) fn stage_shape(

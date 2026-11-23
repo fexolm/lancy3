@@ -28,7 +28,7 @@ pub(crate) fn publish(
     body: &Block,
     visibility: &Visibility,
     trait_impl: bool,
-) -> Vec<TokenStream> {
+) -> syn::Result<Vec<TokenStream>> {
     let runtime_receiver = !trait_impl
         && signature.receiver().is_some_and(|r| {
             r.reference.is_some()
@@ -64,23 +64,24 @@ pub(crate) fn publish(
         ReturnType::Type(_, ty) if !unit_result => match Scalar::from_type(ty, &types) {
             Some(result @ (Scalar::Int | Scalar::Bool)) => result,
             _ if eval_only => Scalar::Int,
-            _ => return Vec::new(),
+            _ => {
+                return Err(syn::Error::new_spanned(
+                    ty,
+                    "a Splice method returns (), i32 or bool; mark it #[kernel(rust)] to keep it in Rust",
+                ));
+            }
         },
         _ => Scalar::Int,
     };
     let params = if eval_only {
         Vec::new()
     } else {
-        let Ok(params) = signature
+        signature
             .inputs
             .iter()
             .zip(abi::parameter_names(&signature))
             .map(|(argument, name)| parameter(argument, &types, name))
-            .collect::<syn::Result<Vec<_>>>()
-        else {
-            return Vec::new();
-        };
-        params
+            .collect::<syn::Result<Vec<_>>>()?
     };
 
     let mut formals = Vec::new();
@@ -94,9 +95,7 @@ pub(crate) fn publish(
     let support = emit!(#root::frontend::scalar);
     let hir = emit!(#root::hir);
     for param in &params {
-        let Ok(pat) = super::named(param.pattern) else {
-            return Vec::new();
-        };
+        let pat = super::named(param.pattern)?;
         let id = &pat.ident;
         let ty = param.ty;
         if matches!(param.binding, Binding::Host(_)) {
@@ -125,7 +124,12 @@ pub(crate) fn publish(
                 context = Some(super::lower::Context::new(id.clone()));
                 emit!(#id: #hir::Buffer)
             }
-            _ => return Vec::new(),
+            _ => {
+                return Err(syn::Error::new_spanned(
+                    param.pattern,
+                    "a Splice method parameter is #[comptime], i32, bool, a slice, or the &mut self receiver",
+                ));
+            }
         };
         declarations.push(declaration);
         formals.push(param.binding);
@@ -165,14 +169,14 @@ pub(crate) fn publish(
         name,
     );
     if eval_only {
-        return lower
-            .evaluator(&signature, &body, visibility, Some(&eval_name))
-            .into_iter()
-            .collect();
+        return Ok(vec![lower.evaluator(
+            &signature,
+            &body,
+            visibility,
+            Some(&eval_name),
+        )?]);
     }
-    let Ok(code) = lower.kernel_body(&body) else {
-        return Vec::new();
-    };
+    let code = lower.kernel_body(&body)?;
     let stage_name = entry_name(
         if runtime_receiver {
             "stage_context"
@@ -234,16 +238,14 @@ pub(crate) fn publish(
                 #dispatch
             }
         ));
-        return items;
+        return Ok(items);
     }
     if !trait_impl {
         let marker = entry_name("published", name);
         items.push(emit!(#[doc(hidden)] #visibility fn #marker() -> bool { true }));
     }
-    if let Ok(eval) = lower.evaluator(&signature, &body, visibility, Some(&eval_name)) {
-        items.push(eval);
-    }
-    items
+    items.push(lower.evaluator(&signature, &body, visibility, Some(&eval_name))?);
+    Ok(items)
 }
 
 fn normalize(signature: &Signature, body: Option<&mut Block>) -> Signature {

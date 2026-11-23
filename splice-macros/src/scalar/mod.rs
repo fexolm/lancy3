@@ -685,46 +685,6 @@ fn context_slice_types(
     emit!(::core::marker::PhantomData<(#(#elements,)*)>)
 }
 
-pub(crate) fn supports_context_call(
-    sig: &syn::Signature,
-    types: &[&Ident],
-    arguments: &syn::punctuated::Punctuated<syn::Expr, syn::Token![,]>,
-) -> bool {
-    let mut has_context = false;
-    for (input, name) in sig.inputs.iter().zip(abi::parameter_names(sig)) {
-        let Ok(parameter) = parameter(input, types, name) else {
-            return false;
-        };
-        match parameter.binding {
-            Binding::Context if !has_context => {
-                let Pat::Ident(binding) = parameter.pattern else {
-                    return false;
-                };
-                if binding.by_ref.is_some()
-                    || binding.subpat.is_some()
-                    || !arguments.iter().any(|arg| {
-                        lower::context_argument(arg)
-                            .is_some_and(|path| path.path.is_ident(&binding.ident))
-                    })
-                {
-                    return false;
-                }
-                has_context = true;
-            }
-            Binding::Buffer(_) | Binding::Reg(Scalar::Int | Scalar::Bool, _) => {}
-            Binding::Host(_)
-                if matches!(
-                    Scalar::from_type(parameter.ty, types),
-                    Some(Scalar::Int | Scalar::Bool)
-                ) => {}
-            _ => return false,
-        }
-    }
-    // This singleton can also resolve to an ordinary Rust function. Keep the
-    // typed Rust entry when the contextual bridge cannot represent its inputs.
-    has_context
-}
-
 fn parameter<'a>(arg: &'a FnArg, types: &[&Ident], name: Ident) -> Result<abi::Parameter<'a>> {
     let FnArg::Typed(arg) = arg else {
         return Err(Error::new_spanned(arg, "kernel methods are unsupported"));
@@ -895,8 +855,12 @@ mod tests {
             ),
         ];
         for (item, diagnostic) in examples {
-            let error =
-                crate::declaration::expand(parse_quote!(::splice), emit!(#item)).unwrap_err();
+            let error = crate::declaration::expand(
+                parse_quote!(::splice),
+                crate::import::Lowering::Ir,
+                emit!(#item),
+            )
+            .unwrap_err();
             assert!(error.to_string().contains(diagnostic), "{error}");
         }
     }

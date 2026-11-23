@@ -3,11 +3,8 @@ use crate::scalar::abi::{Elision, body_generics, param_name, parameter_names, us
 use proc_macro2::{Ident, Span, TokenStream};
 use quote::quote;
 use std::collections::HashSet;
-use syn::visit::Visit;
 use syn::visit_mut::VisitMut;
-use syn::{
-    Error, Expr, FnArg, GenericParam, ItemFn, Meta, Pat, Path, Result, ReturnType, Stmt, Type,
-};
+use syn::{Error, Expr, FnArg, GenericParam, ItemFn, Meta, Path, Result, ReturnType, Stmt, Type};
 
 macro_rules! emit {
     ($($tokens:tt)*) => { quote::quote_spanned!(proc_macro2::Span::mixed_site()=> $($tokens)*) };
@@ -31,243 +28,41 @@ pub(crate) fn scope_checks(root: &Path, function: &ItemFn) -> Option<TokenStream
     })
 }
 
-pub(crate) fn expand_function(root: Path, mut function: ItemFn) -> Result<TokenStream> {
-    if needs_rust_abi(&function) {
-        let checks = region::checks(&function).calls;
-        return expand(&root, function, checks);
-    }
-    match crate::scalar::expand(root.clone(), &mut function) {
-        Ok(native) => Ok(native),
-        Err(error) => {
-            let guards = region::checks(&function);
-            if guards.complete {
-                expand(&root, function, guards.calls).or(Err(error))
-            } else {
-                Err(error)
-            }
-        }
-    }
-}
-
-fn needs_rust_abi(function: &ItemFn) -> bool {
-    let operation = leaf(&function.block.stmts);
-    let scalar_result = match &function.sig.output {
-        ReturnType::Default => true,
-        ReturnType::Type(_, ty) => scalar_type(ty, &[]),
-    };
-    let types: Vec<_> = function
-        .sig
-        .generics
-        .type_params()
-        .map(|t| &t.ident)
-        .collect();
-    // A single named call can inline a published kernel on the borrowed
-    // object. Let scalar lowering resolve the declaration in scope.
-    if scalar_result
-        && let Some(Expr::Call(call)) = operation
-        && let Expr::Path(path) = &*call.func
-    {
-        if crate::scalar::methods::method_path(path) {
-            if let Some(Expr::Path(receiver)) = call.args.first()
-                && function.sig.inputs.iter().any(|arg| matches!(arg, FnArg::Typed(a)
-                    if a.attrs.is_empty() && matches!(&*a.ty, Type::Reference(r) if r.mutability.is_some() && !matches!(&*r.elem,Type::Slice(_)))
-                        && matches!(&*a.pat, Pat::Ident(id) if receiver.path.is_ident(&id.ident))))
-            {
-                return false;
-            }
-        } else if crate::scalar::supports_context_call(&function.sig, &types, &call.args) {
-            return false;
-        }
-    }
-    let scalar_params = function.sig.inputs.iter().all(|arg| {
-        let FnArg::Typed(arg) = arg else { return false };
-        if arg
-            .attrs
-            .iter()
-            .any(|attr| attr.path().is_ident("comptime"))
-        {
-            if let (Some(operation), Pat::Ident(binding)) = (operation, &*arg.pat)
-                && !builtin_operand(&arg.ty, &types)
-            {
-                return !calls_overload(operation, &binding.ident);
-            }
-            return true;
-        }
-        arg.attrs.iter().any(|attr| attr.path().is_ident("columns")) || scalar_type(&arg.ty, &types)
-    });
-    if scalar_result && scalar_params {
-        return false;
-    }
-    operation.is_some_and(|expr| {
-        let mut visitor = LeafSyntax { forbidden: false };
-        visitor.visit_expr(expr);
-        !visitor.forbidden
-    }) || (operation.is_none() && rust_region(&function.block.stmts))
-}
-
-fn builtin_operand(ty: &Type, types: &[&Ident]) -> bool {
-    if scalar_type(ty, types) {
-        return true;
-    }
-    match ty {
-        Type::Reference(reference) => builtin_operand(&reference.elem, types),
-        Type::Array(_) => true,
-        Type::Path(path) => path.path.get_ident().is_some_and(|id| {
-            matches!(
-                id.to_string().as_str(),
-                "char"
-                    | "isize"
-                    | "usize"
-                    | "i8"
-                    | "u8"
-                    | "i16"
-                    | "u16"
-                    | "u32"
-                    | "i64"
-                    | "u64"
-                    | "i128"
-                    | "u128"
-                    | "f32"
-                    | "f64"
-            )
+/// Publish a free function. `#[kernel]` lowers the body to Splice IR or
+/// reports why it cannot; only `#[kernel(rust)]` keeps the body in Rust.
+pub(crate) fn expand_function(
+    root: Path,
+    mut function: ItemFn,
+    lowering: Lowering,
+) -> Result<TokenStream> {
+    match lowering {
+        Lowering::Ir => crate::scalar::expand(root, &mut function).map_err(|mut error| {
+            error.combine(Error::new_spanned(
+                &function.sig.ident,
+                "this function is not a Splice kernel; mark it #[kernel(rust)] to publish it as a Rust call",
+            ));
+            error
         }),
-        _ => false,
+        Lowering::Rust => {
+            let checks = region::checks(&function).calls;
+            expand(&root, function, checks)
+        }
     }
 }
 
-fn calls_overload(operation: &Expr, name: &Ident) -> bool {
-    struct Operators<'a> {
-        name: &'a Ident,
-        found: bool,
-    }
-    impl Operators<'_> {
-        fn reads_operand(&self, mut expr: &Expr) -> bool {
-            loop {
-                match expr {
-                    Expr::Paren(value) => expr = &value.expr,
-                    Expr::Group(value) => expr = &value.expr,
-                    Expr::Path(value) => return value.path.is_ident(self.name),
-                    _ => return false,
-                }
-            }
-        }
-    }
-    impl Visit<'_> for Operators<'_> {
-        fn visit_expr(&mut self, expr: &Expr) {
-            self.found |= match expr {
-                Expr::Call(operation) => self.reads_operand(&operation.func),
-                Expr::Binary(operation) => {
-                    self.reads_operand(&operation.left) || self.reads_operand(&operation.right)
-                }
-                Expr::Unary(operation) if !matches!(operation.op, syn::UnOp::Deref(_)) => {
-                    self.reads_operand(&operation.expr)
-                }
-                Expr::Index(operation) => self.reads_operand(&operation.expr),
-                Expr::MethodCall(operation) => self.reads_operand(&operation.receiver),
-                _ => false,
-            };
-            syn::visit::visit_expr(self, expr);
-        }
-    }
-    let mut operators = Operators { name, found: false };
-    operators.visit_expr(operation);
-    operators.found
-}
-
-fn scalar_type(ty: &Type, types: &[&Ident]) -> bool {
-    match ty {
-        Type::Path(path) => path.path.segments.last().is_some_and(|s| {
-            matches!(
-                s.ident.to_string().as_str(),
-                "i32" | "bool" | "Lane" | "Mask"
-            )
-        }),
-        Type::Tuple(ty) => ty.elems.is_empty(),
-        Type::Reference(reference) => {
-            matches!(&*reference.elem, Type::Slice(slice) if crate::scalar::Elem::parse(&slice.elem, types).is_some())
-        }
-        _ => false,
-    }
+/// How `#[kernel]` publishes a free function or an `impl`/`trait` method.
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub(crate) enum Lowering {
+    /// Lower the body to Splice IR; an unsupported body is a compile error.
+    Ir,
+    /// `#[kernel(rust)]`: keep the body in Rust behind a typed import.
+    Rust,
 }
 
 fn leaf(stmts: &[Stmt]) -> Option<&Expr> {
     match stmts {
         [Stmt::Expr(expr, _)] => Some(expr),
         _ => None,
-    }
-}
-
-fn rust_region(stmts: &[Stmt]) -> bool {
-    let mut owned = HashSet::new();
-    let mut uses_owner = false;
-    for stmt in stmts {
-        match stmt {
-            Stmt::Item(syn::Item::Use(_)) if owned.is_empty() => (),
-            Stmt::Local(local) => {
-                let Some(init) = &local.init else {
-                    return false;
-                };
-                let names = region_reads(&init.expr);
-                if owned.is_empty() {
-                    if !matches!(
-                        &*init.expr,
-                        Expr::Call(_) | Expr::MethodCall(_) | Expr::Struct(_)
-                    ) {
-                        return false;
-                    }
-                } else if owned.is_disjoint(&names) {
-                    return false;
-                } else {
-                    uses_owner = true;
-                }
-                owned.extend(
-                    pattern_bindings(&local.pat)
-                        .into_iter()
-                        .map(|id| id.to_string()),
-                );
-            }
-            Stmt::Expr(expr, _) if !owned.is_disjoint(&region_reads(expr)) => uses_owner = true,
-            _ => return false,
-        }
-    }
-    if !uses_owner {
-        return false;
-    }
-    struct HasComptime(bool);
-    impl<'ast> Visit<'ast> for HasComptime {
-        fn visit_macro(&mut self, mac: &'ast syn::Macro) {
-            self.0 |= mac.path.is_ident("comptime");
-        }
-    }
-    let mut inspect = HasComptime(false);
-    for stmt in stmts {
-        inspect.visit_stmt(stmt);
-    }
-    !inspect.0
-}
-
-struct LeafSyntax {
-    forbidden: bool,
-}
-
-impl<'ast> Visit<'ast> for LeafSyntax {
-    fn visit_expr(&mut self, expr: &'ast Expr) {
-        self.forbidden |= matches!(
-            expr,
-            Expr::Block(_)
-                | Expr::If(_)
-                | Expr::Match(_)
-                | Expr::Loop(_)
-                | Expr::ForLoop(_)
-                | Expr::While(_)
-                | Expr::Try(_)
-                | Expr::Return(_)
-                | Expr::Break(_)
-                | Expr::Continue(_)
-                | Expr::Closure(_)
-                | Expr::Async(_)
-        ) || matches!(expr, Expr::Macro(mac) if mac.mac.path.is_ident("comptime"));
-        syn::visit::visit_expr(self, expr);
     }
 }
 
@@ -338,6 +133,16 @@ fn expand(root: &Path, mut function: ItemFn, checks: Vec<Check>) -> Result<Token
                     patterns.push(emit!(#[allow(unused_variables)] let #pattern = __splice_environment.#name;));
                 }
                 if !matches!(capture, Usage::Unused) {
+                    let borrowed = used_generics(&elision.generics, std::iter::once(&ty))
+                        .lifetimes()
+                        .next()
+                        .is_some();
+                    if borrowed {
+                        return Err(Error::new_spanned(
+                            arg,
+                            "a #[kernel(rust)] function keeps its specialization arguments after build, so a borrowed one must be passed at call time or owned",
+                        ));
+                    }
                     environment.push((name, ty.clone()));
                 }
                 stage.push((name, ty));
@@ -376,14 +181,12 @@ fn expand(root: &Path, mut function: ItemFn, checks: Vec<Check>) -> Result<Token
     let environment_generics =
         used_generics(&elision.generics, environment.iter().map(|(_, ty)| ty));
     let (_, environment_args, environment_where) = environment_generics.split_for_impl();
-    let borrowed_environment = environment_generics.lifetimes().next().is_some();
-    let retained_types = environment.iter().filter(|_| !borrowed_environment);
     let invoke_types = call
         .iter()
-        .chain(retained_types)
+        .chain(&environment)
         .map(|(_, ty)| ty)
         .chain(std::iter::once(&output));
-    let invoke_generics = if opaque_result || borrowed_environment {
+    let invoke_generics = if opaque_result {
         used_generics(&elision.generics, invoke_types)
     } else {
         body_generics(&elision.generics, invoke_types, &expr)
@@ -392,12 +195,7 @@ fn expand(root: &Path, mut function: ItemFn, checks: Vec<Check>) -> Result<Token
     let constrained: HashSet<_> = call_generics
         .params
         .iter()
-        .chain(
-            environment_generics
-                .params
-                .iter()
-                .filter(|_| !borrowed_environment),
-        )
+        .chain(&environment_generics.params)
         .map(param_name)
         .collect();
     let needs_signature_dispatch = invoke_generics
@@ -430,11 +228,7 @@ fn expand(root: &Path, mut function: ItemFn, checks: Vec<Check>) -> Result<Token
     let marker_lifetimes = signature_generics.lifetimes().map(|p| &p.lifetime);
     let type_params = signature_generics.type_params().map(|p| &p.ident);
     let marker = emit!(Signature #signature_args);
-    let environment_type = if borrowed_environment {
-        emit!(__SpliceEnvironment)
-    } else {
-        emit!(__SpliceEnvironment #environment_args)
-    };
+    let environment_type = emit!(__SpliceEnvironment #environment_args);
     let ir_type = if opaque_result {
         emit!(__SpliceOpaqueIr<#marker, #environment_type>)
     } else {
@@ -459,34 +253,19 @@ fn expand(root: &Path, mut function: ItemFn, checks: Vec<Check>) -> Result<Token
     if opaque_result {
         create_import = emit!(__SpliceOpaqueIr(#create_import));
     }
-    let (environment_decl, stage_body, call_body) = if borrowed_environment {
-        // Such a kernel can never be linked: it needs the caller's plan
-        // address after build has ended. The environment is uninhabited.
-        (
-            emit!(#vis enum __SpliceEnvironment {}),
-            emit! {
-                #(let _ = ( #host_names, );)*
-                ::core::result::Result::Err(::core::convert::Into::into("Rust import would retain a borrowed specialization argument"))
-            },
-            emit!(match *__splice_environment {}),
-        )
-    } else {
-        let checks = checks
-            .into_iter()
-            .map(|check| check.emit(root, region::in_child_module));
-        (
-            emit!(#vis struct __SpliceEnvironment #environment_generics #environment_where { #(#environment_fields,)* }),
-            emit! {
-                #(#checks)*
-                #(let _ = (#unused_host_names,);)*
-                ::core::result::Result::Ok(#create_import)
-            },
-            emit! {
-                let CallArgs { #(#call_names,)* } = __splice_arguments;
-                #(#patterns)*
-                #expr #semi
-            },
-        )
+    let checks = checks
+        .into_iter()
+        .map(|check| check.emit(root, region::in_child_module));
+    let environment_decl = emit!(#vis struct __SpliceEnvironment #environment_generics #environment_where { #(#environment_fields,)* });
+    let stage_body = emit! {
+        #(#checks)*
+        #(let _ = (#unused_host_names,);)*
+        ::core::result::Result::Ok(#create_import)
+    };
+    let call_body = emit! {
+        let CallArgs { #(#call_names,)* } = __splice_arguments;
+        #(#patterns)*
+        #expr #semi
     };
     let mut ir_generics = sig.generics.clone();
     ir_generics.params = elision.generics.params.iter().filter(|p| {
@@ -507,11 +286,16 @@ fn expand(root: &Path, mut function: ItemFn, checks: Vec<Check>) -> Result<Token
         .predicates
         .push(syn::parse_quote!(<__SpliceBackend as #root::Codegen>::Output: #root::ImportTarget));
     let (build_decls, _, build_where) = build_generics.split_for_impl();
-    let args = sig.generics.params.iter().filter_map(|p| match p {
-        GenericParam::Type(p) => Some(&p.ident),
-        GenericParam::Const(p) => Some(&p.ident),
-        _ => None,
-    });
+    let args: Vec<_> = sig
+        .generics
+        .params
+        .iter()
+        .filter_map(|p| match p {
+            GenericParam::Type(p) => Some(&p.ident),
+            GenericParam::Const(p) => Some(&p.ident),
+            _ => None,
+        })
+        .collect();
     let mut output_type = emit!(<<__SpliceBackend as #root::Codegen>::Output as #root::ImportTarget>::Linked<#marker, #environment_type>);
     let invocation = if opaque_result {
         output_type = emit!(OpaqueKernel<#output_type>);
@@ -583,47 +367,34 @@ fn expand(root: &Path, mut function: ItemFn, checks: Vec<Check>) -> Result<Token
                 <__SpliceBackend as #root::Codegen>::compile(&ir)
             }
 
+            /// The Rust body has no Splice code generation to configure.
+            #vis fn build_with_options #build_decls (_: #root::BuildOptions, args: BuildArgs #host_args)
+                -> ::core::result::Result<#output_type, #root::BuildError> #build_where
+            {
+                build::<__SpliceBackend, #(#args),*>(args)
+            }
+
             #vis fn ir #ir_decls (#(#host_fields),*)
                 -> ::core::result::Result<#ir_type, #root::BuildError> #ir_where
             {
                 #root::build_boundary(move || { #stage_body })
             }
 
+            /// The Rust body has no Splice code generation to configure.
+            #vis fn ir_with_options #ir_decls (_: #root::BuildOptions, #(#host_fields),*)
+                -> ::core::result::Result<#ir_type, #root::BuildError> #ir_where
+            {
+                ir::<#(#args),*>(#(#host_names),*)
+            }
+
+            #vis fn print #ir_decls (#(#host_fields),*) -> #root::Result<::std::string::String> #ir_where {
+                #(let _ = #host_names;)*
+                ::core::result::Result::Err(::core::convert::Into::into(::core::concat!(
+                    "`", ::core::stringify!(#name), "` is a #[kernel(rust)] function without Splice source",
+                )))
+            }
+
             #invocation
         }
     })
-}
-
-fn region_reads(expr: &Expr) -> HashSet<String> {
-    #[derive(Default)]
-    struct Reads {
-        names: HashSet<String>,
-        locals: HashSet<String>,
-    }
-    impl<'ast> Visit<'ast> for Reads {
-        fn visit_expr_path(&mut self, path: &'ast syn::ExprPath) {
-            if let Some(name) = path.path.get_ident()
-                && !self.locals.contains(&name.to_string())
-            {
-                self.names.insert(name.to_string());
-            }
-        }
-        fn visit_block(&mut self, block: &'ast syn::Block) {
-            let outer = self.locals.clone();
-            for stmt in &block.stmts {
-                self.visit_stmt(stmt);
-                if let Stmt::Local(local) = stmt {
-                    self.locals.extend(
-                        pattern_bindings(&local.pat)
-                            .into_iter()
-                            .map(|id| id.to_string()),
-                    );
-                }
-            }
-            self.locals = outer;
-        }
-    }
-    let mut reads = Reads::default();
-    reads.visit_expr(expr);
-    reads.names
 }

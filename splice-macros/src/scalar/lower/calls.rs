@@ -13,6 +13,15 @@ impl Lower<'_> {
         let Expr::Path(p) = &*c.func else {
             return err(&c.func, "expected a kernel function path");
         };
+        if p.path
+            .get_ident()
+            .is_some_and(|name| self.bindings.contains_key(&name.to_string()))
+        {
+            return err(
+                &c.func,
+                "a Splice kernel calls functions by path, not through a local function value",
+            );
+        }
         let root = self.root;
         let support = emit!(#root::frontend::scalar);
         let values = c

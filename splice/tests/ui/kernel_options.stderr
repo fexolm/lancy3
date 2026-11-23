@@ -1,0 +1,27 @@
+error: expected `rust` or `crate = path`, each at most once
+ --> tests/ui/kernel_options.rs:3:10
+  |
+3 | #[kernel(fast)]
+  |          ^^^^
+
+error: expected `rust` or `crate = path`, each at most once
+ --> tests/ui/kernel_options.rs:8:16
+  |
+8 | #[kernel(rust, rust)]
+  |                ^^^^
+
+error: put #[kernel(rust)] on individual methods of a #[kernel] impl or trait
+  --> tests/ui/kernel_options.rs:14:1
+   |
+14 | / impl Unit {
+15 | |     fn one() -> i32 {
+16 | |         1
+17 | |     }
+18 | | }
+   | |_^
+
+error: a #[kernel(rust)] function keeps its specialization arguments after build, so a borrowed one must be passed at call time or owned
+  --> tests/ui/kernel_options.rs:24:13
+   |
+24 | fn borrowed(#[comptime] plan: &[i32], x: i32) -> i32 {
+   |             ^^^^^^^^^^^^^^^^^^^^^^^^

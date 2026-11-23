@@ -3,12 +3,7 @@ use splice_lancy::Lancy;
 use splice_llvm::Llvm;
 use std::{
     cell::Cell,
-    sync::{
-        atomic::{AtomicUsize, Ordering},
-        mpsc,
-    },
-    thread,
-    time::Duration,
+    sync::atomic::{AtomicUsize, Ordering},
 };
 
 #[kernel]
@@ -130,18 +125,14 @@ fn check_limits<B: Codegen<Output: Executable>>() {
     }
 }
 
+// `count_by_twos(1)` and `mandatory_loop(1)` never terminate without the
+// iteration budget, and the budget is what the `is_err` assertions observe.
+// A broken budget hangs this test; the CI job timeout reports it. A wall-clock
+// watchdog would instead depend on how fast the host (or QEMU) runs codegen.
 #[test]
 fn only_specialization_obeys_the_iteration_and_expansion_budgets() {
-    let (send, receive) = mpsc::sync_channel(1);
-    let worker = thread::spawn(move || {
-        check_limits::<Lancy>();
-        check_limits::<Llvm>();
-        send.send(()).unwrap();
-    });
-    receive
-        .recv_timeout(Duration::from_secs(10))
-        .expect("specialization must terminate");
-    worker.join().unwrap();
+    check_limits::<Lancy>();
+    check_limits::<Llvm>();
 }
 
 #[kernel]
