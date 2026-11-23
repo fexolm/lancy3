@@ -131,8 +131,7 @@ fn check_limits<B: Codegen<Output: Executable>>() {
 // watchdog would instead depend on how fast the host (or QEMU) runs codegen.
 #[test]
 fn only_specialization_obeys_the_iteration_and_expansion_budgets() {
-    check_limits::<Lancy>();
-    check_limits::<Llvm>();
+    splice_testkit::each_backend!(B => check_limits::<B>());
 }
 
 #[kernel]

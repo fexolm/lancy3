@@ -1,8 +1,5 @@
 use splice::hir::{Instr, RustContextTarget};
 use splice::{Codegen, Executable, TypedIr, kernel};
-use splice_cranelift::Cranelift;
-use splice_lancy::Lancy;
-use splice_llvm::Llvm;
 use std::collections::HashSet;
 use std::ops::AddAssign;
 
@@ -315,9 +312,7 @@ fn nested_opaque_operations_use_the_callers_reordered_shared_slices() {
         }
     }
 
-    check::<Lancy>(&ir);
-    check::<Llvm>(&ir);
-    check::<Cranelift>(&ir);
+    splice_testkit::each_backend!(B => check::<B>(&ir));
 }
 
 #[test]
@@ -381,9 +376,7 @@ fn native_and_rust_operations_reborrow_the_same_writable_slice_in_order() {
         }
     }
 
-    check::<Lancy>(&ir);
-    check::<Llvm>(&ir);
-    check::<Cranelift>(&ir);
+    splice_testkit::each_backend!(B => check::<B>(&ir));
 }
 
 #[test]
@@ -416,9 +409,7 @@ fn nested_slice_descriptors_preserve_inferred_element_types() {
             assert_eq!(totals.count.operands, [2, 3]);
         }
     }
-    check::<Lancy>(&ir);
-    check::<Llvm>(&ir);
-    check::<Cranelift>(&ir);
+    splice_testkit::each_backend!(B => check::<B>(&ir));
 }
 
 #[test]
@@ -473,9 +464,7 @@ fn opaque_context_operations_receive_all_scalar_words() {
             }
         }
     }
-    check::<Lancy>(&ir);
-    check::<Llvm>(&ir);
-    check::<Cranelift>(&ir);
+    splice_testkit::each_backend!(B => check::<B>(&ir));
 }
 
 #[kernel]
@@ -575,9 +564,7 @@ fn rust_context_operations_surround_a_native_fault_and_keep_their_effects() {
         }
     }
 
-    check::<Lancy>(&ir);
-    check::<Llvm>(&ir);
-    check::<Cranelift>(&ir);
+    splice_testkit::each_backend!(B => check::<B>(&ir));
 }
 
 #[test]
@@ -632,9 +619,7 @@ fn published_methods_share_the_receivers_context_without_confusing_their_operati
         }
     }
 
-    check::<Lancy>(&ir);
-    check::<Llvm>(&ir);
-    check::<Cranelift>(&ir);
+    splice_testkit::each_backend!(B => check::<B>(&ir));
 }
 
 #[test]
@@ -751,9 +736,7 @@ fn published_free_functions_share_the_enclosing_context() {
         }
     }
 
-    check::<Lancy>(&ir, &forwarded);
-    check::<Llvm>(&ir, &forwarded);
-    check::<Cranelift>(&ir, &forwarded);
+    splice_testkit::each_backend!(B => check::<B>(&ir, &forwarded));
 }
 
 #[test]
@@ -810,7 +793,5 @@ fn published_and_ordinary_methods_preserve_shared_slice_arguments() {
         }
     }
 
-    check::<Lancy>(&ir);
-    check::<Llvm>(&ir);
-    check::<Cranelift>(&ir);
+    splice_testkit::each_backend!(B => check::<B>(&ir));
 }

@@ -1,7 +1,4 @@
 use splice::{BuildOptions, Codegen, Executable, kernel};
-use splice_cranelift::Cranelift;
-use splice_lancy::Lancy;
-use splice_llvm::Llvm;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
 #[derive(Clone, Copy, Debug)]
@@ -165,9 +162,7 @@ fn check_arithmetic<B: Codegen<Output: Executable>>(options: BuildOptions) {
 #[test]
 fn operator_overflow_respects_the_rust_profile_in_both_compilation_paths() {
     for options in [BuildOptions::Release, BuildOptions::Debug] {
-        check_arithmetic::<Lancy>(options);
-        check_arithmetic::<Llvm>(options);
-        check_arithmetic::<Cranelift>(options);
+        splice_testkit::each_backend!(B => check_arithmetic::<B>(options));
     }
 }
 
@@ -293,8 +288,6 @@ fn check_host_faults<B: Codegen<Output: Executable>>(options: BuildOptions) {
 #[test]
 fn host_arithmetic_faults_are_deferred_for_every_integer_type() {
     for options in [BuildOptions::Release, BuildOptions::Debug] {
-        check_host_faults::<Lancy>(options);
-        check_host_faults::<Llvm>(options);
-        check_host_faults::<Cranelift>(options);
+        splice_testkit::each_backend!(B => check_host_faults::<B>(options));
     }
 }

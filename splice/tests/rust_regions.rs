@@ -1,6 +1,4 @@
 use splice::{CallError, Codegen, Executable, hir::Instr, kernel};
-use splice_lancy::Lancy;
-use splice_llvm::Llvm;
 use std::cell::Cell;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -176,8 +174,7 @@ fn rust_regions_keep_result_control_flow_local_panics_and_borrowed_methods() {
         }
     }
 
-    check::<Lancy>();
-    check::<Llvm>();
+    splice_testkit::each_backend!(B => check::<B>());
 }
 
 static RUNTIME_DROPS: AtomicUsize = AtomicUsize::new(0);
@@ -218,8 +215,7 @@ fn runtime_aggregate_drops_once_per_call() {
         }
     }
 
-    check::<Lancy>();
-    check::<Llvm>();
+    splice_testkit::each_backend!(B => check::<B>());
 }
 
 static SLICE_DROPS: AtomicUsize = AtomicUsize::new(0);
@@ -366,8 +362,7 @@ fn slice_regions_preserve_drop_order_and_native_aggregates() {
         }
     }
 
-    check::<Lancy>();
-    check::<Llvm>();
+    splice_testkit::each_backend!(B => check::<B>());
 }
 
 struct Weight(i32);
@@ -426,8 +421,7 @@ fn rust_regions_capture_only_lexically_free_build_arguments() {
         }
     }
 
-    check::<Lancy>();
-    check::<Llvm>();
+    splice_testkit::each_backend!(B => check::<B>());
 }
 
 trait PlainWideRule {
@@ -591,6 +585,5 @@ fn trait_result_casts_run_in_rust_and_preserve_staging() {
         }
     }
 
-    check::<Lancy>();
-    check::<Llvm>();
+    splice_testkit::each_backend!(B => check::<B>());
 }

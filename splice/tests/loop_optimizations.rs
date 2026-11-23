@@ -1,8 +1,5 @@
 use splice::simd::Lane;
 use splice::{Codegen, Executable, kernel};
-use splice_cranelift::Cranelift;
-use splice_lancy::Lancy;
-use splice_llvm::{Llvm, LlvmManualSimd};
 
 #[kernel]
 fn apply_coefficients(src: &[i32], coefficients: &[i32], dst: &mut [i32]) -> i32 {
@@ -89,8 +86,7 @@ fn check<B: Codegen<Output: Executable>>() {
 
 #[test]
 fn loop_memory_optimizations_preserve_partial_writes() {
-    check::<Lancy>();
-    check::<LlvmManualSimd>();
+    splice_testkit::each_backend!(B => check::<B>());
 }
 
 #[kernel]
@@ -132,8 +128,7 @@ fn forwarding_between_independent_slices_preserves_each_write() {
         }
     }
 
-    check::<Lancy>();
-    check::<LlvmManualSimd>();
+    splice_testkit::each_backend!(B => check::<B>());
 }
 
 #[kernel]
@@ -171,8 +166,7 @@ fn vector_store_reload_preserves_the_short_store_prefix() {
             }
         }
     }
-    check::<Lancy>();
-    check::<LlvmManualSimd>();
+    splice_testkit::each_backend!(B => check::<B>());
 }
 
 #[kernel]
@@ -255,8 +249,7 @@ fn packet_loops_preserve_tail_and_partial_store_semantics() {
             }
         }
     }
-    check::<Lancy>();
-    check::<LlvmManualSimd>();
+    splice_testkit::each_backend!(B => check::<B>());
 }
 
 #[kernel]
@@ -313,15 +306,12 @@ fn invariant_loop_branch_matches_rust_on_both_build_paths() {
         }
     }
     let ir = invariant_loop_branch::ir().unwrap();
-    check("Lancy", Lancy::compile(&ir).unwrap());
-    check("Cranelift", Cranelift::compile(&ir).unwrap());
-    check("LLVM", Llvm::compile(&ir).unwrap());
-    check(
-        "direct Lancy",
-        invariant_loop_branch::build::<Lancy>(invariant_loop_branch::BuildArgs {}).unwrap(),
-    );
-    check(
-        "direct LLVM",
-        invariant_loop_branch::build::<Llvm>(invariant_loop_branch::BuildArgs {}).unwrap(),
-    );
+    splice_testkit::each_backend!(B => {
+        let name = std::any::type_name::<B>();
+        check(name, B::compile(&ir).unwrap());
+        check(
+            name,
+            invariant_loop_branch::build::<B>(invariant_loop_branch::BuildArgs {}).unwrap(),
+        );
+    });
 }

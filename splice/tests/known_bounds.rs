@@ -1,7 +1,4 @@
 use splice::{BuildOptions, Codegen, Executable, hir::Instr, kernel};
-use splice_cranelift::Cranelift;
-use splice_lancy::Lancy;
-use splice_llvm::Llvm;
 use splice_text::Text;
 use std::{
     ops::Index,
@@ -141,9 +138,7 @@ fn check<B: Codegen<Output: Executable>>() {
 
 #[test]
 fn known_indices_only_fault_on_the_reached_execution_path() {
-    check::<Lancy>();
-    check::<Llvm>();
-    check::<Cranelift>();
+    splice_testkit::each_backend!(B => check::<B>());
     let ir = chosen::ir(&[]).unwrap();
     assert!(
         Text::compile(&ir)

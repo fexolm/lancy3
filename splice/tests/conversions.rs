@@ -5,9 +5,6 @@ use splice::frontend::{self, KernelBuilder};
 use splice::hir::{Buffer, Simd, SimdOp};
 use splice::simd::Element;
 use splice::{BufferElement, BufferKind, Codegen, Executable};
-use splice_cranelift::Cranelift;
-use splice_lancy::Lancy;
-use splice_llvm::{Llvm, LlvmManualSimd};
 
 trait Lane: BufferElement + Copy + std::fmt::Debug {
     fn samples() -> Vec<Self>;
@@ -205,10 +202,7 @@ fn check<F: Lane + As<T>, T: Lane>(conversion: Conversion) {
             }
             Conversion::Narrow => input.iter().map(|&x| x.to()).collect(),
         };
-        run::<Lancy, F, T>(conversion, &input, &expected);
-        run::<Cranelift, F, T>(conversion, &input, &expected);
-        run::<Llvm, F, T>(conversion, &input, &expected);
-        run::<LlvmManualSimd, F, T>(conversion, &input, &expected);
+        splice_testkit::each_backend!(B => run::<B, F, T>(conversion, &input, &expected));
     }
 }
 

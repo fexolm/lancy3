@@ -4,7 +4,6 @@ use splice::{
     BufferArg, BufferKind, BuildOptions, Codegen, ContextArguments, Executable, StaticRustCall,
     StaticRustSymbol,
 };
-use splice_cranelift::Cranelift;
 use splice_lancy::Lancy;
 use splice_llvm::Llvm;
 use splice_text::Text;
@@ -41,9 +40,7 @@ fn static_packets_can_have_no_operands() {
         }
     }
 
-    check::<Lancy>();
-    check::<Llvm>();
-    check::<Cranelift>();
+    splice_testkit::each_backend!(B => check::<B>());
 }
 
 struct Modify;
@@ -173,9 +170,7 @@ fn static_packets_keep_nested_slice_borrows_and_effect_order() {
         }
     }
 
-    check::<Lancy>(&ir);
-    check::<Llvm>(&ir);
-    check::<Cranelift>(&ir);
+    splice_testkit::each_backend!(B => check::<B>(&ir));
 }
 
 #[test]
@@ -251,7 +246,5 @@ fn static_rust_adapters_cannot_reinterpret_a_slice_element_type() {
         }
     }
 
-    check::<Lancy>(&ir);
-    check::<Llvm>(&ir);
-    check::<Cranelift>(&ir);
+    splice_testkit::each_backend!(B => check::<B>(&ir));
 }

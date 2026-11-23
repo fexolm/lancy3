@@ -1,6 +1,5 @@
 use splice::simd::Lane;
 use splice::{BuildError, Codegen, Executable, kernel};
-use splice_cranelift::Cranelift;
 use splice_lancy::Lancy;
 use splice_llvm::Llvm;
 use splice_text::Text;
@@ -55,8 +54,7 @@ fn named_arguments_preserve_field_values_and_rust_evaluation_order() {
         }
     }
 
-    check::<Lancy>();
-    check::<Llvm>();
+    splice_testkit::each_backend!(B => check::<B>());
 }
 
 #[kernel]
@@ -85,8 +83,7 @@ fn argument_patterns_keep_signature_indices_and_explicit_names() {
         }
     }
 
-    check::<Lancy>();
-    check::<Llvm>();
+    splice_testkit::each_backend!(B => check::<B>());
 }
 
 struct Plan {
@@ -140,8 +137,7 @@ fn fields_inherit_the_stage_of_the_constructed_aggregate() {
             );
         }
     }
-    check::<Lancy>();
-    check::<Llvm>();
+    splice_testkit::each_backend!(B => check::<B>());
 }
 
 #[kernel]
@@ -174,8 +170,7 @@ fn portable_and_direct_specializations_outlive_the_plan_and_its_changes() {
         }
     }
 
-    check::<Lancy>();
-    check::<Llvm>();
+    splice_testkit::each_backend!(B => check::<B>());
 }
 
 static BUILD_EFFECTS: AtomicUsize = AtomicUsize::new(0);
@@ -246,8 +241,7 @@ fn opaque_rust_effects_run_only_during_call() {
         assert_eq!(BUILD_EFFECTS.load(Ordering::Relaxed), before + 4);
     }
 
-    check::<Lancy>();
-    check::<Llvm>();
+    splice_testkit::each_backend!(B => check::<B>());
 }
 
 #[kernel]
@@ -314,8 +308,7 @@ fn specialization_checks_requirements_in_reachable_branches() {
         ));
     }
 
-    check::<Lancy>();
-    check::<Llvm>();
+    splice_testkit::each_backend!(B => check::<B>());
 }
 
 #[test]
@@ -354,8 +347,7 @@ fn ordinary_division_fails_only_when_reached_and_keeps_prior_writes() {
         }
     }
 
-    check::<Lancy>();
-    check::<Llvm>();
+    splice_testkit::each_backend!(B => check::<B>());
 }
 
 mod effects {
@@ -416,9 +408,7 @@ fn a_runtime_effect_follows_control_and_stores_even_if_its_result_is_unused() {
         }
     }
 
-    check::<Lancy>();
-    check::<Llvm>();
-    check::<Cranelift>();
+    splice_testkit::each_backend!(B => check::<B>());
 }
 
 #[kernel]
@@ -466,8 +456,7 @@ fn mandatory_nested_calls_distinguish_a_bound_input_from_an_effectful_argument()
         }
     }
 
-    check::<Lancy>();
-    check::<Llvm>();
+    splice_testkit::each_backend!(B => check::<B>());
     assert_eq!(NESTED_ARGUMENT_EVALS.load(Ordering::Relaxed), 0);
 }
 
@@ -506,8 +495,7 @@ fn a_nested_callee_inherits_the_stage_of_its_input() {
         }
     }
 
-    check::<Lancy>();
-    check::<Llvm>();
+    splice_testkit::each_backend!(B => check::<B>());
 }
 
 #[kernel]
@@ -539,8 +527,7 @@ fn runtime_argument_to_recursive_comptime_parameter_fails_only_if_reached() {
         }
     }
 
-    check::<Lancy>();
-    check::<Llvm>();
+    splice_testkit::each_backend!(B => check::<B>());
 }
 
 #[kernel(rust)]
@@ -669,8 +656,7 @@ fn a_published_method_uses_its_body_when_the_intrinsic_is_unavailable() {
         }
     }
 
-    check::<Lancy>();
-    check::<Llvm>();
+    splice_testkit::each_backend!(B => check::<B>());
 }
 
 #[kernel(rust)]
@@ -818,9 +804,7 @@ fn iterating_a_runtime_slice_lowers_to_a_loop_and_handles_an_empty_input() {
         }
     }
 
-    check::<Lancy>(&ir);
-    check::<Llvm>(&ir);
-    check::<Cranelift>(&ir);
+    splice_testkit::each_backend!(B => check::<B>(&ir));
 }
 
 static ADD_CALLS: AtomicUsize = AtomicUsize::new(0);
@@ -992,8 +976,7 @@ fn trait_dispatch_requires_publication_on_the_selected_implementation() {
         assert_eq!(ORDINARY_MAP_CALLS.load(Ordering::Relaxed), before + 2);
     }
 
-    check::<Lancy>();
-    check::<Llvm>();
+    splice_testkit::each_backend!(B => check::<B>());
 }
 
 fn add_three(value: i32) -> i32 {
@@ -1084,8 +1067,7 @@ fn inherent_methods_in_a_marked_impl_can_specialize() {
         }
     }
 
-    check::<Lancy>();
-    check::<Llvm>();
+    splice_testkit::each_backend!(B => check::<B>());
 }
 
 mod trait_stage {
@@ -1164,8 +1146,7 @@ mod trait_stage {
             assert_eq!(ORDINARY_CALLS.load(Ordering::Relaxed), before + 4);
         }
 
-        check::<Lancy>();
-        check::<Llvm>();
+        splice_testkit::each_backend!(B => check::<B>());
     }
 }
 
@@ -1213,9 +1194,7 @@ fn mixed_stage_conditions_fold_in_the_frontend_on_every_path() {
             }
         }
     }
-    check::<Lancy>();
-    check::<Cranelift>();
-    check::<Llvm>();
+    splice_testkit::each_backend!(B => check::<B>());
 
     // The listing shows the structure that the backends compile: a known
     // condition keeps one arm and no branch, an unknown one branches. The

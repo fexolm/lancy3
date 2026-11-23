@@ -1,4 +1,27 @@
 //! JIT compilation and warm execution on the same inputs for all three backends.
+
+/// One workload's builders with the arguments written once: `$b` names each
+/// benchmarked backend in turn.
+macro_rules! builders {
+    ($b:ident => $build:expr) => {
+        $crate::Builders {
+            lancy: &|| {
+                type $b = splice_lancy::Lancy;
+                $build
+            },
+            cranelift: &|| {
+                type $b = splice_cranelift::Cranelift;
+                $build
+            },
+            llvm: &|| {
+                type $b = splice_llvm::LlvmManualSimd;
+                $build
+            },
+        }
+    };
+}
+
+mod common;
 mod gaps;
 #[path = "large/mod.rs"]
 mod large;
@@ -15,9 +38,9 @@ use criterion::{
 };
 use relational::{Catalog, pricing_plan, query};
 use splice::{BufferArg, BuildError, Codegen, Executable, TypedIr, TypedKernel, kernel};
-use splice_cranelift::{Cranelift, CraneliftKernel};
-use splice_lancy::{Lancy, LancyKernel};
-use splice_llvm::{LlvmKernel, LlvmManualSimd};
+use splice_cranelift::CraneliftKernel;
+use splice_lancy::LancyKernel;
+use splice_llvm::LlvmKernel;
 use std::{cell::LazyCell, hint::black_box, ops::Not};
 
 #[kernel]
@@ -151,15 +174,7 @@ where
         });
         self.bench_route(c, "build", builds);
         let ir = stage().expect("stage shared IR");
-        self.bench_route(
-            c,
-            "from_ir",
-            Builders {
-                lancy: &|| Lancy::compile(black_box(&ir)),
-                cranelift: &|| Cranelift::compile(black_box(&ir)),
-                llvm: &|| LlvmManualSimd::compile(black_box(&ir)),
-            },
-        );
+        self.bench_route(c, "from_ir", builders!(B => B::compile(black_box(&ir))));
     }
 }
 
@@ -192,23 +207,9 @@ fn projection(c: &mut Criterion) {
     workload.compare(
         c,
         || line_totals::ir(black_box(2)),
-        Builders {
-            lancy: &|| {
-                line_totals::build::<Lancy>(line_totals::BuildArgs {
-                    minimum: black_box(2),
-                })
-            },
-            cranelift: &|| {
-                line_totals::build::<Cranelift>(line_totals::BuildArgs {
-                    minimum: black_box(2),
-                })
-            },
-            llvm: &|| {
-                line_totals::build::<LlvmManualSimd>(line_totals::BuildArgs {
-                    minimum: black_box(2),
-                })
-            },
-        },
+        builders!(B => line_totals::build::<B>(line_totals::BuildArgs {
+            minimum: black_box(2),
+        })),
     );
 }
 
@@ -277,23 +278,9 @@ fn sql_plan(c: &mut Criterion) {
     workload.compare(
         c,
         || query::ir(&plan.prepare()),
-        Builders {
-            lancy: &|| {
-                query::build::<Lancy>(query::BuildArgs {
-                    program: &plan.prepare(),
-                })
-            },
-            cranelift: &|| {
-                query::build::<Cranelift>(query::BuildArgs {
-                    program: &plan.prepare(),
-                })
-            },
-            llvm: &|| {
-                query::build::<LlvmManualSimd>(query::BuildArgs {
-                    program: &plan.prepare(),
-                })
-            },
-        },
+        builders!(B => query::build::<B>(query::BuildArgs {
+            program: &plan.prepare(),
+        })),
     );
 }
 
@@ -326,11 +313,7 @@ fn simd_matmul(c: &mut Criterion) {
     workload.compare(
         c,
         multiply::ir,
-        Builders {
-            lancy: &|| multiply::build::<Lancy>(multiply::BuildArgs {}),
-            cranelift: &|| multiply::build::<Cranelift>(multiply::BuildArgs {}),
-            llvm: &|| multiply::build::<LlvmManualSimd>(multiply::BuildArgs {}),
-        },
+        builders!(B => multiply::build::<B>(multiply::BuildArgs {})),
     );
 }
 
@@ -359,11 +342,7 @@ fn simd_hash_lookup(c: &mut Criterion) {
     workload.compare(
         c,
         lookup::ir,
-        Builders {
-            lancy: &|| lookup::build::<Lancy>(lookup::BuildArgs {}),
-            cranelift: &|| lookup::build::<Cranelift>(lookup::BuildArgs {}),
-            llvm: &|| lookup::build::<LlvmManualSimd>(lookup::BuildArgs {}),
-        },
+        builders!(B => lookup::build::<B>(lookup::BuildArgs {})),
     );
 }
 

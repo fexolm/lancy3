@@ -52,9 +52,7 @@ fn repeated_values_skip_staging_across_parents_and_keep_all_calls() {
     // emits the same bias but is a different set of specialization arguments.
     let modes = [Mode::Add(&a), Mode::Add(&b), Mode::Sub(&a), Mode::Add(&[5])];
     let expected = chain(&modes, 12);
-    check_direct::<Lancy>(&modes, expected);
-    check_direct::<Llvm>(&modes, expected);
-    check_direct::<Cranelift>(&modes, expected);
+    splice_testkit::each_backend!(B => check_direct::<B>(&modes, expected));
 
     let ir = chain::ir(&modes).unwrap();
     let listing = Text::compile(&ir).unwrap();
@@ -69,9 +67,9 @@ fn repeated_values_skip_staging_across_parents_and_keep_all_calls() {
         listing.as_inner()
     );
     let args = || chain::CallArgs { x: 12 };
-    assert_eq!(Lancy::compile(&ir).unwrap().call(args()), Ok(expected));
-    assert_eq!(Llvm::compile(&ir).unwrap().call(args()), Ok(expected));
-    assert_eq!(Cranelift::compile(&ir).unwrap().call(args()), Ok(expected));
+    splice_testkit::each_backend!(B => {
+        assert_eq!(B::compile(&ir).unwrap().call(args()), Ok(expected));
+    });
 }
 
 trait Flavor: ComptimeKey {
@@ -105,18 +103,13 @@ fn type_and_const_arguments_distinguish_monomorphizations() {
     assert_eq!(listing.matches("fn affine.").count(), 3);
     assert_eq!(listing.matches(" = affine.").count(), 4);
     let expected = instances(3);
-    assert_eq!(
-        instances::build::<Lancy>(instances::BuildArgs {})
-            .unwrap()
-            .call(instances::CallArgs { x: 3 }),
-        Ok(expected)
-    );
-    assert_eq!(
-        instances::build::<Llvm>(instances::BuildArgs {})
-            .unwrap()
-            .call(instances::CallArgs { x: 3 }),
-        Ok(expected)
-    );
+    let ir = instances::ir().unwrap();
+    splice_testkit::each_backend!(B => {
+        let direct = instances::build::<B>(instances::BuildArgs {}).unwrap();
+        for code in [direct, B::compile(&ir).unwrap()] {
+            assert_eq!(code.call(instances::CallArgs { x: 3 }), Ok(expected));
+        }
+    });
 }
 
 fn retry(root: &mut dyn splice::frontend::KernelBuilder) -> splice::Result<()> {
@@ -231,20 +224,20 @@ fn invalid_arguments_are_rejected_before_staging_or_reusing_a_callee() -> splice
     }
     let kinds = [BufferKind::Read, BufferKind::Write];
     let ir = splice::frontend::materialize(1, &kinds, Box::new(stage))?;
-    for code in [
-        Box::new(Lancy::build(1, &kinds, Box::new(stage))?) as Box<dyn Executable>,
-        Box::new(Llvm::build(1, &kinds, Box::new(stage))?),
-        Box::new(Lancy::compile(&ir)?),
-        Box::new(Llvm::compile(&ir)?),
-    ] {
-        assert_eq!(
-            code.call(
-                &[37],
-                &mut [BufferArg::Read(&[]), BufferArg::Write(&mut [])]
-            )?,
-            37
-        );
-    }
+    splice_testkit::each_backend!(B => {
+        for code in [
+            Box::new(B::build(1, &kinds, Box::new(stage))?) as Box<dyn Executable>,
+            Box::new(B::compile(&ir)?),
+        ] {
+            assert_eq!(
+                code.call(
+                    &[37],
+                    &mut [BufferArg::Read(&[]), BufferArg::Write(&mut [])]
+                )?,
+                37
+            );
+        }
+    });
     Ok(())
 }
 
@@ -294,7 +287,6 @@ fn shared_fallible_body_observes_each_calls_buffers_and_arguments() -> splice::R
         Ok(())
     }
 
-    check::<Lancy>(&ir)?;
-    check::<Llvm>(&ir)?;
-    check::<Cranelift>(&ir)
+    splice_testkit::each_backend!(B => check::<B>(&ir)?);
+    Ok(())
 }

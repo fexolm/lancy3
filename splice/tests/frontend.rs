@@ -61,9 +61,6 @@ fn staged_weights(#[comptime] bias: i32, value: i32) -> i32 {
 
 #[test]
 fn collection_computed_by_the_application_can_specialize_a_kernel() {
-    use splice_lancy::Lancy;
-    use splice_llvm::Llvm;
-
     let mut weights = vec![1; 3];
     weights.push(4);
     let bias = weights.iter().sum::<i32>();
@@ -107,8 +104,7 @@ fn collection_computed_by_the_application_can_specialize_a_kernel() {
         }
     }
 
-    check::<Lancy>(bias);
-    check::<Llvm>(bias);
+    splice_testkit::each_backend!(B => check::<B>(bias));
 }
 
 trait Factor {
@@ -638,9 +634,6 @@ fn by_value_array_patterns_bind_comptime_operands() {
 
 #[test]
 fn nested_loop_exits_and_generated_names_preserve_rust_bindings() {
-    use splice_lancy::Lancy;
-    use splice_llvm::Llvm;
-
     #[allow(non_upper_case_globals)]
     const builder: i32 = 5;
 
@@ -701,8 +694,7 @@ fn nested_loop_exits_and_generated_names_preserve_rust_bindings() {
         }
     }
 
-    check::<Lancy>();
-    check::<Llvm>();
+    splice_testkit::each_backend!(B => check::<B>());
 }
 
 #[kernel]

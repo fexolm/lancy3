@@ -1,7 +1,4 @@
 use splice::{Codegen, Executable, TypedIr, kernel};
-use splice_cranelift::Cranelift;
-use splice_lancy::Lancy;
-use splice_llvm::Llvm;
 use std::sync::Mutex;
 
 static EFFECTS: Mutex<Vec<i32>> = Mutex::new(Vec::new());
@@ -79,7 +76,5 @@ fn a_wide_scalar_rust_import_preserves_native_stores_and_effects() {
             }
         }
     }
-    check::<Lancy>(&ir);
-    check::<Llvm>(&ir);
-    check::<Cranelift>(&ir);
+    splice_testkit::each_backend!(B => check::<B>(&ir));
 }

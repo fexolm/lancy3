@@ -683,19 +683,22 @@ fn balanced_tree_with_32_scans_runs_through_one_entry_point() {
             Plan::Join(Box::new(left.clone()), Box::new(left), Combine::Add)
         }
     }
-    let plan = subtree(5);
-    let ir = query::ir(&plan.prepare()).unwrap();
-    let lancy = Lancy::compile(&ir).unwrap().into_inner();
-    let llvm = Llvm::compile(&ir).unwrap().into_inner();
     let cat = Catalog::new(&[&[(12, 2), (7, 3)]]).unwrap();
-    for code in [&lancy as &dyn Executable, &llvm] {
+    let check = |depth, code: &dyn Executable| {
+        let plan = subtree(depth);
+        let scans = 1 << depth;
         assert_rows(
             &plan,
             cat.run(code, &mut [0; 1024], &mut vec![0; plan.state_words()])
                 .unwrap(),
-            &[(12, 64), (7, 96)],
+            &[(12, 2 * scans), (7, 3 * scans)],
         );
-    }
+    };
+    let ir = |depth| query::ir(&subtree(depth).prepare()).unwrap();
+    check(5, &Lancy::compile(&ir(5)).unwrap().into_inner());
+    // LLVM's time grows faster than the IR (6.4k/13.5k/27.6k instructions
+    // take 0.7/1.8/5.7 s at depths 3/4/5), so it stops one level earlier.
+    check(4, &Llvm::compile(&ir(4)).unwrap().into_inner());
 }
 
 fn simd_ops(f: &Function) -> Vec<SimdOp> {

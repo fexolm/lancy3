@@ -1,6 +1,4 @@
 use splice::{Codegen, Executable, hir::Instr, kernel};
-use splice_lancy::Lancy;
-use splice_llvm::Llvm;
 use splice_test_traits::IndexedTransform as ImportedIndexed;
 use splice_test_traits::ReverseTransform as ImportedReverse;
 use splice_test_traits::Transform as Imported;
@@ -301,8 +299,7 @@ fn lifetimed_receivers_are_consumed_or_borrowed_only_at_build() {
         assert_eq!(LIFETIMED_DROPS.load(Ordering::Relaxed), before + 3);
     }
 
-    check::<Lancy>();
-    check::<Llvm>();
+    splice_testkit::each_backend!(B => check::<B>());
 }
 
 #[kernel]
@@ -378,8 +375,7 @@ fn generic_arguments_select_the_exact_trait_instance() {
         assert_eq!(PARAMETERIZED_CALLS.load(Ordering::Relaxed), before + 2);
     }
 
-    check::<Lancy>();
-    check::<Llvm>();
+    splice_testkit::each_backend!(B => check::<B>());
 }
 
 #[kernel]
@@ -432,8 +428,7 @@ fn owned_receiver_drops_once_in_each_build() {
         assert_eq!(OWNED_PLAN_DROPS.load(Ordering::Relaxed), before + 4);
     }
 
-    check::<Lancy>();
-    check::<Llvm>();
+    splice_testkit::each_backend!(B => check::<B>());
 }
 
 #[test]
@@ -462,8 +457,7 @@ fn macro_generated_impl_specializes_a_generic_borrow_without_a_static_bound() {
         }
     }
 
-    check::<Lancy>();
-    check::<Llvm>();
+    splice_testkit::each_backend!(B => check::<B>());
 }
 
 #[test]
@@ -565,6 +559,5 @@ fn trait_and_impl_publication_follow_an_imported_trait_alias() {
         assert_eq!(ORDINARY_CALLS.load(Ordering::Relaxed), before + 2);
     }
 
-    check::<Lancy>();
-    check::<Llvm>();
+    splice_testkit::each_backend!(B => check::<B>());
 }

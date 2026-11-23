@@ -2,9 +2,7 @@ use splice::{
     BufferArg, BufferKind, Codegen, Executable, TypedKernel, kernel,
     simd::{Element, Lane},
 };
-use splice_cranelift::Cranelift;
 use splice_lancy::Lancy;
-use splice_llvm::Llvm;
 use splice_text::Text;
 
 enum Expr {
@@ -110,32 +108,18 @@ fn float_column_matches_the_rust_filter_including_nan_and_tail() -> splice::Resu
     assert!(!rust.contains("filter_ge"));
     assert!(!rust.contains("comptime"));
     assert!(!rust.contains("store out of bounds"));
-    check(
-        query::build::<Lancy>(query::BuildArgs {
-            schema: &schema,
-            plan: &plan,
-        })?,
-        &schema,
-        &plan,
-    )?;
-    check(Lancy::compile(&ir)?, &schema, &plan)?;
-    check(
-        query::build::<Llvm>(query::BuildArgs {
-            schema: &schema,
-            plan: &plan,
-        })?,
-        &schema,
-        &plan,
-    )?;
-    check(Llvm::compile(&ir)?, &schema, &plan)?;
-    check(
-        query::build::<Cranelift>(query::BuildArgs {
-            schema: &schema,
-            plan: &plan,
-        })?,
-        &schema,
-        &plan,
-    )
+    splice_testkit::each_backend!(B => {
+        check(
+            query::build::<B>(query::BuildArgs {
+                schema: &schema,
+                plan: &plan,
+            })?,
+            &schema,
+            &plan,
+        )?;
+        check(B::compile(&ir)?, &schema, &plan)?;
+    });
+    Ok(())
 }
 
 fn check<E: Executable>(
@@ -213,35 +197,18 @@ fn sql_specialization_reads_the_selected_column_from_each_batch() -> splice::Res
             })?
             .contains("filter_ge")
         );
-        check(
-            query::build::<Lancy>(query::BuildArgs {
-                schema: &schema,
-                plan: &plan,
-            })?,
-            &schema,
-            &plan,
-            slot,
-        )?;
-        check(Lancy::compile(&ir)?, &schema, &plan, slot)?;
-        check(
-            query::build::<Llvm>(query::BuildArgs {
-                schema: &schema,
-                plan: &plan,
-            })?,
-            &schema,
-            &plan,
-            slot,
-        )?;
-        check(Llvm::compile(&ir)?, &schema, &plan, slot)?;
-        check(
-            query::build::<Cranelift>(query::BuildArgs {
-                schema: &schema,
-                plan: &plan,
-            })?,
-            &schema,
-            &plan,
-            slot,
-        )?;
+        splice_testkit::each_backend!(B => {
+            check(
+                query::build::<B>(query::BuildArgs {
+                    schema: &schema,
+                    plan: &plan,
+                })?,
+                &schema,
+                &plan,
+                slot,
+            )?;
+            check(B::compile(&ir)?, &schema, &plan, slot)?;
+        });
     }
     Ok(())
 }

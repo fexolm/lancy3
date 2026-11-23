@@ -2,9 +2,6 @@ use splice::{
     BufferArg, BuildError, Codegen, Executable, TypedKernel, kernel,
     simd::{Lane, Mask},
 };
-use splice_cranelift::Cranelift;
-use splice_lancy::Lancy;
-use splice_llvm::Llvm;
 use splice_text::Text;
 
 #[kernel]
@@ -85,21 +82,11 @@ macro_rules! compile_all {
     ($name:ident) => {{
         let ir = $name::ir().unwrap();
         let mut v = Vec::new();
-        kernels(
+        splice_testkit::each_backend!(B => kernels(
             &mut v,
-            $name::build::<Lancy>($name::BuildArgs {}),
-            Lancy::compile(&ir),
-        );
-        kernels(
-            &mut v,
-            $name::build::<Llvm>($name::BuildArgs {}),
-            Llvm::compile(&ir),
-        );
-        kernels(
-            &mut v,
-            $name::build::<Cranelift>($name::BuildArgs {}),
-            Cranelift::compile(&ir),
-        );
+            $name::build::<B>($name::BuildArgs {}),
+            B::compile(&ir),
+        ));
         v
     }};
 }
@@ -349,21 +336,11 @@ fn vector_rotate_wraps_the_count_and_rotates_signed_lane_bits() {
             matches!(instr, Instr::Simd { inst, .. } if inst.op == SimdOp::RotateLeft(count & 31))
         }));
         let mut backends = Vec::new();
-        kernels(
+        splice_testkit::each_backend!(B => kernels(
             &mut backends,
-            rotate_words::build::<Lancy>(rotate_words::BuildArgs { count }),
-            Lancy::compile(&ir),
-        );
-        kernels(
-            &mut backends,
-            rotate_words::build::<Cranelift>(rotate_words::BuildArgs { count }),
-            Cranelift::compile(&ir),
-        );
-        kernels(
-            &mut backends,
-            rotate_words::build::<Llvm>(rotate_words::BuildArgs { count }),
-            Llvm::compile(&ir),
-        );
+            rotate_words::build::<B>(rotate_words::BuildArgs { count }),
+            B::compile(&ir),
+        ));
         let expected: Vec<_> = source.iter().map(|v| v.rotate_left(count)).collect();
         for kernel in backends {
             let mut out = vec![23; lanes + 1];
@@ -1580,8 +1557,7 @@ fn host_scratch_slots_retain_independent_runtime_values() {
         let want = if slot == 0 { 29 } else { 22 };
         let mut expected = [0; 2];
         assert_eq!(scratch_slots(slot, 5, &mut expected), want);
-        check::<Lancy>(slot, want, expected);
-        check::<Llvm>(slot, want, expected);
+        splice_testkit::each_backend!(B => check::<B>(slot, want, expected));
     }
 }
 #[kernel]

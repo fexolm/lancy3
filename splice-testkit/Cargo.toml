@@ -1,0 +1,14 @@
+[package]
+name = "splice-testkit"
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.94"
+license = "MIT OR Apache-2.0"
+publish = false
+description = "Backend matrix and differential checks for Splice tests"
+
+[dependencies]
+splice = { package = "splice-core", path = "../splice-core" }
+splice-cranelift = { path = "../splice-cranelift" }
+splice-lancy = { path = "../splice-lancy" }
+splice-llvm = { path = "../splice-llvm" }

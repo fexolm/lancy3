@@ -956,6 +956,7 @@ dependencies = [
  "splice-lancy",
  "splice-llvm",
  "splice-test-traits",
+ "splice-testkit",
  "splice-text",
  "tracing",
  "tracing-subscriber",
@@ -1005,6 +1006,16 @@ name = "splice-test-traits"
 version = "0.0.0"
 dependencies = [
  "splice-kernel",
+]
+
+[[package]]
+name = "splice-testkit"
+version = "0.0.0"
+dependencies = [
+ "splice-core",
+ "splice-cranelift",
+ "splice-lancy",
+ "splice-llvm",
 ]
 
 [[package]]
