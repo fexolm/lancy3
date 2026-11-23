@@ -61,8 +61,8 @@ pub(crate) fn method_policy(root: &Path, signature: &Signature, body: &syn::Bloc
         .into_iter()
         .map(|check| check.emit(root, std::convert::identity));
     emit!({
-        let Ok(_guard) = #root::frontend::scalar::enter_expansion() else { return true; };
-        let check = || -> #root::Result<()> { #(#checks)* Ok(()) };
+        let ::core::result::Result::Ok(_guard) = #root::frontend::scalar::enter_expansion() else { return true; };
+        let check = || -> #root::Result<()> { #(#checks)* ::core::result::Result::Ok(()) };
         check().is_err()
     })
 }

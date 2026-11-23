@@ -23,6 +23,7 @@ pub(crate) fn expand(root: Path, tokens: TokenStream) -> Result<TokenStream> {
             if method_context(&function.attrs, &function.sig) {
                 return Err(Error::new_spanned(&function.sig, method_error));
             }
+            hoist_lint_attributes(&mut function.attrs, &mut function.sig);
             signature(&function.sig)?;
             item_markers(&mut function.attrs, false)?;
             crate::import::expand_function(root, function)
@@ -136,6 +137,23 @@ mod tests {
     use super::*;
 
     #[test]
+    fn rebased_use_trees_keep_their_targets() {
+        let mut body: syn::Expr = syn::parse_quote!({
+            use self::inner::{a, b};
+            use super::offset;
+            use crate::root;
+            offset() + self::f(1) + super::g()
+        });
+        rebase_expression(&mut body);
+        let text = quote::ToTokens::to_token_stream(&body).to_string();
+        assert!(text.contains("use super :: super :: offset ;"), "{text}");
+        assert!(text.contains("use super :: inner :: { a , b } ;"), "{text}");
+        assert!(text.contains("use crate :: root ;"), "{text}");
+        assert!(text.contains("super :: f (1)"), "{text}");
+        assert!(text.contains("super :: super :: g ()"), "{text}");
+    }
+
+    #[test]
     fn methods_must_be_published_by_their_block() {
         for item in [
             quote!(
@@ -234,6 +252,7 @@ fn prepare_method(
     sig: &mut Signature,
     body: Option<&mut Block>,
 ) -> Result<()> {
+    hoist_lint_attributes(attrs, sig);
     signature(sig)?;
     if let Some(attr) = attrs.iter().find(|attr| marker(attr, "kernel")) {
         return Err(Error::new_spanned(
@@ -269,6 +288,24 @@ fn prepare_method(
         native_body(body)?;
     }
     Ok(())
+}
+
+/// Move lint attributes (`#[allow(..)]` and friends) from parameters to the
+/// function. They only affect diagnostics, and the parameter keeps its Splice
+/// meaning from the remaining markers.
+fn hoist_lint_attributes(attrs: &mut Vec<Attribute>, sig: &mut Signature) {
+    const LINTS: [&str; 5] = ["allow", "expect", "warn", "deny", "forbid"];
+    for arg in &mut sig.inputs {
+        let params = match arg {
+            FnArg::Typed(arg) => &mut arg.attrs,
+            FnArg::Receiver(arg) => &mut arg.attrs,
+        };
+        let (lints, markers) = std::mem::take(params)
+            .into_iter()
+            .partition(|attr| LINTS.iter().any(|lint| attr.path().is_ident(lint)));
+        *params = markers;
+        attrs.extend::<Vec<_>>(lints);
+    }
 }
 
 fn marker(attr: &Attribute, name: &str) -> bool {
@@ -398,9 +435,30 @@ impl VisitMut for RebasePaths {
             return;
         }
         if path.segments[0].ident == "self" {
-            path.segments[0].ident = syn::parse_quote!(super);
+            path.segments[0].ident =
+                proc_macro2::Ident::new("super", path.segments[0].ident.span());
         } else if path.segments[0].ident == "super" {
             *path = syn::parse_quote!(super::#path);
+        }
+    }
+
+    fn visit_item_use_mut(&mut self, item: &mut syn::ItemUse) {
+        if item.leading_colon.is_none()
+            && let syn::UseTree::Path(root) = &mut item.tree
+        {
+            if root.ident == "self" {
+                root.ident = proc_macro2::Ident::new("super", root.ident.span());
+            } else if root.ident == "super" {
+                let placeholder = syn::UseTree::Glob(syn::UseGlob {
+                    star_token: Default::default(),
+                });
+                let tree = std::mem::replace(&mut item.tree, placeholder);
+                item.tree = syn::UseTree::Path(syn::UsePath {
+                    ident: proc_macro2::Ident::new("super", proc_macro2::Span::call_site()),
+                    colon2_token: Default::default(),
+                    tree: Box::new(tree),
+                });
+            }
         }
     }
 }

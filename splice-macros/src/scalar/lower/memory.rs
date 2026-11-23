@@ -269,7 +269,7 @@ impl Lower<'_> {
                 return Ok(Value::new(
                     Stage::Reg(Scalar::Int),
                     emit!(
-                        Err::<#root::hir::Reg, String>("runtime index requires a runtime slice".into())?
+                        ::core::result::Result::Err::<#root::hir::Reg, ::std::string::String>(::core::convert::Into::into("runtime index requires a runtime slice"))?
                     ),
                 ));
             }
@@ -278,7 +278,7 @@ impl Lower<'_> {
             return Ok(Value::new(
                 Stage::Host,
                 emit!({
-                    let Some(value) = (#read) else { #fail };
+                    let ::core::option::Option::Some(value) = (#read) else { #fail };
                     value
                 }),
             ));
@@ -298,7 +298,7 @@ impl Lower<'_> {
         if let Some(label) = &self.source_fault {
             let root = self.root;
             emit! {
-                __splice_source.transfer = Some(#root::frontend::source::Transfer::Return);
+                __splice_source.transfer = ::core::option::Option::Some(#root::frontend::source::Transfer::Return);
                 break #label r#"panic!("kernel slice index out of bounds")"#.to_owned();
             }
         } else {

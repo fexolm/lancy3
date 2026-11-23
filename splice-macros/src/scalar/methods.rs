@@ -202,15 +202,15 @@ pub(crate) fn publish(
             let __splice_wants_debug = __splice_builder.debug_enabled();
             #(let #host_args = #support::KnownArg::require(#host_args)?;)*
             #(#debug_arguments)*
-            let __splice_known: [Option<i32>; #arity] = [#(#support::RunArg::known(&#scalar_args)),*];
+            let __splice_known: [::core::option::Option<i32>; #arity] = [#(#support::RunArg::known(&#scalar_args)),*];
             #(let #scalar_args = #support::RunArg::reg(#scalar_args, __splice_builder);)*
-            let __splice_inputs: &[(#hir::Reg, Option<i32>)] = &[#((#scalar_args, __splice_known[#indices])),*];
+            let __splice_inputs: &[(#hir::Reg, ::core::option::Option<i32>)] = &[#((#scalar_args, __splice_known[#indices])),*];
             #(let #mutable_args = __splice_builder.copy(#mutable_args);)*
             let __splice_result = __splice_builder.typed_local(#value_type);
             let __splice_return_label = __splice_builder.label();
             #code
             __splice_builder.mark(__splice_return_label);
-            Ok(__splice_result)
+            ::core::result::Result::Ok(__splice_result)
         }
     };
 
@@ -263,12 +263,50 @@ fn normalize(signature: &Signature, body: Option<&mut Block>) -> Signature {
                     syn::visit_mut::visit_expr_path_mut(self, path);
                 }
             }
+            // `comptime!`, `vec!` and other macro bodies are unparsed tokens.
+            fn visit_macro_mut(&mut self, mac: &mut syn::Macro) {
+                mac.tokens = rename_receiver(std::mem::take(&mut mac.tokens), self.0);
+            }
         }
         if let Some(body) = body {
             Receiver(&replacement).visit_block_mut(body);
         }
     }
     signature
+}
+
+/// Replace the `self` value in macro tokens; `self::` paths keep their meaning.
+fn rename_receiver(
+    tokens: proc_macro2::TokenStream,
+    replacement: &Ident,
+) -> proc_macro2::TokenStream {
+    use proc_macro2::{Group, TokenTree};
+    let mut tokens = tokens.into_iter().peekable();
+    let mut out = Vec::new();
+    while let Some(token) = tokens.next() {
+        out.push(match token {
+            TokenTree::Ident(ident) if ident == "self" => {
+                let path = matches!(tokens.peek(), Some(TokenTree::Punct(p)) if p.as_char() == ':');
+                if path {
+                    TokenTree::Ident(ident)
+                } else {
+                    let mut renamed = replacement.clone();
+                    renamed.set_span(replacement.span().located_at(ident.span()));
+                    TokenTree::Ident(renamed)
+                }
+            }
+            TokenTree::Group(group) => {
+                let mut renamed = Group::new(
+                    group.delimiter(),
+                    rename_receiver(group.stream(), replacement),
+                );
+                renamed.set_span(group.span());
+                TokenTree::Group(renamed)
+            }
+            token => token,
+        });
+    }
+    out.into_iter().collect()
 }
 
 pub(crate) fn method_path(path: &syn::ExprPath) -> bool {

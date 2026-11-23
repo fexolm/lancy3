@@ -179,12 +179,16 @@ pub(super) fn expand(root: Path, native: &mut ItemFn) -> Result<TokenStream> {
             let writable = matches!(formal, Binding::Reg(_, true));
             let prefix = if writable { "mut " } else { "" };
             let source_ty = if matches!(formal, Binding::Columns) {
-                emit!(concat!("&[", stringify!(#root::BufferArg), "<'_>]"))
+                emit!(::core::concat!(
+                    "&[",
+                    ::core::stringify!(#root::BufferArg),
+                    "<'_>]"
+                ))
             } else {
                 emit!(::core::any::type_name::<#ty>())
             };
             source_params.push(emit!(
-                format!("{}{}: {}", #prefix, stringify!(#id), #source_ty)
+                ::std::format!("{}{}: {}", #prefix, ::core::stringify!(#id), #source_ty)
             ));
         }
         if matches!(formal, Binding::Columns) {
@@ -319,25 +323,25 @@ pub(super) fn expand(root: Path, native: &mut ItemFn) -> Result<TokenStream> {
     let debug_arguments = host_names.iter().map(|id| lower.capture_constant(id));
     let source_support = emit!(#root::frontend::source);
     let source_body = if context.is_some() {
-        emit!(return Err("Rust context kernels can be inspected through the Text backend".into());)
+        emit!(return ::core::result::Result::Err(::core::convert::Into::into("Rust context kernels can be inspected through the Text backend"));)
     } else {
         match lower.source_body(&lowered_block) {
             Ok(body) => emit!(let __splice_printed = #body;),
             Err(error) => {
                 let error = error.to_string();
-                emit!(return Err(#error.to_owned());)
+                emit!(return ::core::result::Result::Err(::std::borrow::ToOwned::to_owned(#error));)
             }
         }
     };
     let source_aliases = types.iter().map(|ty| {
         emit!((
-            stringify!(#ty).to_owned(),
-            format!("type {} = {};", stringify!(#ty), ::core::any::type_name::<#ty>())
+            ::std::borrow::ToOwned::to_owned(::core::stringify!(#ty)),
+            ::std::format!("type {} = {};", ::core::stringify!(#ty), ::core::any::type_name::<#ty>())
         ))
     }).chain(generic.const_params().map(|param| {
         let name = &param.ident;
         let ty = &param.ty;
-        emit!((stringify!(#name).to_owned(), format!("const {}: {} = {};", stringify!(#name), stringify!(#ty), #source_support::literal(#name))))
+        emit!((::std::borrow::ToOwned::to_owned(::core::stringify!(#name)), ::std::format!("const {}: {} = {};", ::core::stringify!(#name), ::core::stringify!(#ty), #source_support::literal(#name))))
     }));
     let (source_entry, source_body_method) = {
         let source_layout = columns.as_ref().map(|layout| emit! {
@@ -348,37 +352,37 @@ pub(super) fn expand(root: Path, native: &mut ItemFn) -> Result<TokenStream> {
             emit! {
                 #[doc(hidden)]
                 #[allow(clippy::too_many_arguments)]
-                #vis fn __splice_source_call #generic (#(#source_decls,)* __splice_source: &mut #source_support::Source) -> #root::Result<String> #where_ {
+                #vis fn __splice_source_call #generic (#(#source_decls,)* __splice_source: &mut #source_support::Source) -> #root::Result<::std::string::String> #where_ {
                     #(#extract_known)*
                     let name = __SpliceDefinition::__splice_print #fish (#(#host_names,)* __splice_source)?;
-                    let arguments: &[String] = &[#(#source_args),*];
-                    Ok(format!("{}({})", name, arguments.join(", ")))
+                    let arguments: &[::std::string::String] = &[#(#source_args),*];
+                    ::core::result::Result::Ok(::std::format!("{}({})", name, arguments.join(", ")))
                 }
             }
         } else {
             emit!()
         };
         let entry = emit! {
-            #vis fn print #generic (#host_decls) -> #root::Result<String> #where_ {
-                let mut source = #source_support::Source::default();
+            #vis fn print #generic (#host_decls) -> #root::Result<::std::string::String> #where_ {
+                let mut source = <#source_support::Source as ::core::default::Default>::default();
                 __SpliceDefinition::__splice_print #fish (#(#host_names,)* &mut source)?;
-                Ok(format!("#[allow(unused_imports)]\nuse {}::simd::{{Lane, Mask}};\n\n{}", stringify!(#root), source.functions.join("\n")))
+                ::core::result::Result::Ok(::std::format!("#[allow(unused_imports)]\nuse {}::simd::{{Lane, Mask}};\n\n{}", ::core::stringify!(#root), source.functions.join("\n")))
             }
             #nested_source
         };
         let body = emit! {
             #[allow(unused_variables, unreachable_code)]
-            fn __splice_print #outer_generic (#outer_host_decls __splice_source: &mut #source_support::Source) -> #root::Result<String> #outer_where {
+            fn __splice_print #outer_generic (#outer_host_decls __splice_source: &mut #source_support::Source) -> #root::Result<::std::string::String> #outer_where {
                 let _guard = #support::enter_expansion()?;
-                let (id, name) = __splice_source.function(stringify!(#name));
+                let (id, name) = __splice_source.function(::core::stringify!(#name));
                 let transfer = __splice_source.transfer.take();
                 #source_layout
                 #(#mutable_host)*
-                let __splice_printed: String;
+                let __splice_printed: ::std::string::String;
                 #source_body
                 __splice_source.transfer = transfer;
                 __splice_source.functions[id] = #source_support::function(&name, &[#(#source_params),*], ::core::any::type_name::<#ty>(), &[#(#source_aliases),*], &__splice_printed);
-                Ok(name)
+                ::core::result::Result::Ok(name)
             }
         };
         (entry, body)
@@ -452,22 +456,22 @@ pub(super) fn expand(root: Path, native: &mut ItemFn) -> Result<TokenStream> {
         #[allow(unused_imports)]
         use #frontend::MaybeKey as _;
         #[allow(unused_mut)]
-        let mut __splice_key = Some(#frontend::Specialization::new::<__SpliceIdentity>(#arity, #kinds));
+        let mut __splice_key = ::core::option::Option::Some(#frontend::Specialization::new::<__SpliceIdentity>(#arity, #kinds));
         #((&#frontend::KeyArgument::<#type_args>::for_type()).add_type(&mut __splice_key);)*
         #((&#frontend::KeyArgument::for_value(&#value_args)).add_value(&#value_args, &mut __splice_key);)*
     };
     let result_value_type = result_type.value_type(&root, &types);
     let source = emit! {
         __splice_builder.set_source(&#root::frontend::KernelSource {
-            name: stringify!(#name),
-            scalars: &[#(stringify!(#reg_names)),*],
-            buffers: &[#(stringify!(#buffer_names)),*],
+            name: ::core::stringify!(#name),
+            scalars: &[#(::core::stringify!(#reg_names)),*],
+            buffers: &[#(::core::stringify!(#buffer_names)),*],
         });
     };
     let nested_body = if context.is_some() {
-        emit!(Err(
-            "a runtime object requires a compatible enclosing Rust context".into()
-        ))
+        emit!(::core::result::Result::Err(::core::convert::Into::into(
+            "a runtime object requires a compatible enclosing Rust context"
+        )))
     } else {
         emit! {
             #(#extract_known)*
@@ -478,8 +482,8 @@ pub(super) fn expand(root: Path, native: &mut ItemFn) -> Result<TokenStream> {
             #specialize
             let __splice_body: #frontend::Body<'_> = #callback;
             match __splice_key {
-                Some(key) => __splice_builder.call_specialized(key, &[#(#reg_names),*], &[#(#buffer_names),*], __splice_body),
-                None => __splice_builder.call_kernel(#arity, #kinds, &[#(#reg_names),*], &[#(#buffer_names),*], __splice_body),
+                ::core::option::Option::Some(key) => __splice_builder.call_specialized(key, &[#(#reg_names),*], &[#(#buffer_names),*], __splice_body),
+                ::core::option::Option::None => __splice_builder.call_kernel(#arity, #kinds, &[#(#reg_names),*], &[#(#buffer_names),*], __splice_body),
             }
         }
     };
@@ -489,7 +493,7 @@ pub(super) fn expand(root: Path, native: &mut ItemFn) -> Result<TokenStream> {
                 #source
                 let output = __SpliceDefinition::__splice_inline #fish (#(#inline_args,)* #root_context_args __splice_builder)?;
                 __splice_builder.ret(output);
-                Ok(())
+                ::core::result::Result::Ok(())
             }
             #[doc(hidden)]
             #[allow(clippy::too_many_arguments)]
@@ -515,7 +519,7 @@ pub(super) fn expand(root: Path, native: &mut ItemFn) -> Result<TokenStream> {
             let __splice_layout = #layout;
             let __splice_columns: &[#hir::BufferKind] = ::core::convert::AsRef::as_ref(&__splice_layout);
             if __splice_columns.iter().any(|column| column.writable()) {
-                return Err("a shared column table cannot contain writable columns".into());
+                return ::core::result::Result::Err(::core::convert::Into::into("a shared column table cannot contain writable columns"));
             }
             let __splice_column_base = #base;
             let mut __splice_kinds = (#kinds).to_vec();
@@ -524,7 +528,7 @@ pub(super) fn expand(root: Path, native: &mut ItemFn) -> Result<TokenStream> {
                 #source
                 let output = __SpliceDefinition::__splice_inline #fish (#(#inline_args,)* #root_context_args __splice_builder)?;
                 __splice_builder.ret(output);
-                Ok(())
+                ::core::result::Result::Ok(())
             });
             let __splice_kinds = &__splice_kinds;
         };
@@ -568,7 +572,7 @@ pub(super) fn expand(root: Path, native: &mut ItemFn) -> Result<TokenStream> {
                 -> ::core::result::Result<#root::TypedKernel<#signature, <#backend as #root::Codegen>::Output>, #root::BuildError> #where_
             {
                 build_with_options::<#backend #(, #args)*>(
-                    #root::BuildOptions::for_profile(cfg!(debug_assertions)), __splice_args,
+                    #root::BuildOptions::for_profile(::core::cfg!(debug_assertions)), __splice_args,
                 )
             }
             #vis fn build_with_options #compile_generics (
@@ -585,7 +589,7 @@ pub(super) fn expand(root: Path, native: &mut ItemFn) -> Result<TokenStream> {
             #vis fn ir #generic (#host_decls)
                 -> ::core::result::Result<#root::TypedIr<#signature>, #root::BuildError> #where_
             {
-                ir_with_options #fish (#root::BuildOptions::for_profile(cfg!(debug_assertions)), #(#host_names,)*)
+                ir_with_options #fish (#root::BuildOptions::for_profile(::core::cfg!(debug_assertions)), #(#host_names,)*)
             }
             #vis fn ir_with_options #generic (__splice_options: #root::BuildOptions, #host_decls)
                 -> ::core::result::Result<#root::TypedIr<#signature>, #root::BuildError> #where_
@@ -638,10 +642,10 @@ pub(super) fn expand(root: Path, native: &mut ItemFn) -> Result<TokenStream> {
                 -> #root::Result<#hir::Reg> #outer_where {
                 let __splice_guard = #support::enter_expansion()?;
                 let __splice_wants_debug = __splice_builder.debug_enabled();
-                let __splice_input_values: [Option<i32>; #arity] = [#(#support::RunArg::known(&#reg_names)),*];
+                let __splice_input_values: [::core::option::Option<i32>; #arity] = [#(#support::RunArg::known(&#reg_names)),*];
                 #unpack
                 #owned_scope;
-                let __splice_inputs: &[(#hir::Reg, Option<i32>)] = &[#((#reg_names, __splice_input_values[#reg_indices])),*];
+                let __splice_inputs: &[(#hir::Reg, ::core::option::Option<i32>)] = &[#((#reg_names, __splice_input_values[#reg_indices])),*];
                 #(#copy_mutable)*
                 #(#mutable_host)*
                 #(#debug_arguments)*
@@ -649,7 +653,7 @@ pub(super) fn expand(root: Path, native: &mut ItemFn) -> Result<TokenStream> {
                 let __splice_return_label = __splice_builder.label();
                 #code
                 __splice_builder.mark(__splice_return_label);
-                Ok(__splice_result)
+                ::core::result::Result::Ok(__splice_result)
             }
         }
     };

@@ -212,7 +212,7 @@ impl Lower<'_> {
                 let __splice_index: usize = #v;
                 let __splice_word = __splice_index as i32;
                 if __splice_word as usize != __splice_index {
-                    return Err("runtime usize value exceeds the scalar register width".into());
+                    return ::core::result::Result::Err(::core::convert::Into::into("runtime usize value exceeds the scalar register width"));
                 }
                 __splice_word
             }),
@@ -292,7 +292,7 @@ impl Lower<'_> {
                 let checked = Ident::new(checked, proc_macro2::Span::call_site());
                 emit!({
                     let (a, b) = (#x, #y);
-                    let op = if cfg!(debug_assertions) {
+                    let op = if ::core::cfg!(debug_assertions) {
                         #root::hir::Binary::#checked
                     } else {
                         #root::hir::Binary::#op
@@ -374,7 +374,7 @@ impl Lower<'_> {
                 Value::new(
                     Stage::Reg(Scalar::Inferred),
                     emit! {
-                        Err::<#root::hir::Reg, String>("a runtime Rust object cannot be used as a scalar operand".into())?
+                        ::core::result::Result::Err::<#root::hir::Reg, ::std::string::String>(::core::convert::Into::into("a runtime Rust object cannot be used as a scalar operand"))?
                     },
                 )
             }
@@ -428,7 +428,7 @@ impl Lower<'_> {
                 #[allow(unused_imports)]
                 use #root::debug::SnapshotConstant as _;
                 (&#root::debug::ConstantArgument(&#value)).snapshot()
-            } else { None };
+            } else { ::core::option::Option::None };
         }
     }
     fn debug_point(&self, span: proc_macro2::Span) -> TokenStream {

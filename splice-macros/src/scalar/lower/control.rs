@@ -144,8 +144,8 @@ impl Lower<'_> {
                     (__splice_builder.label(), __splice_builder.label(), __splice_builder.label());
                 let __splice_known_condition = __splice_builder.immediate_condition(__splice_cond);
                 if __splice_known_condition.is_none() { __splice_builder.branch(__splice_cond, __splice_yes, __splice_no); }
-                if __splice_known_condition != Some(false) { __splice_builder.mark(__splice_yes); #yes_code; }
-                if __splice_known_condition != Some(true) { __splice_builder.mark(__splice_no); #no_code; }
+                if __splice_known_condition != ::core::option::Option::Some(false) { __splice_builder.mark(__splice_yes); #yes_code; }
+                if __splice_known_condition != ::core::option::Option::Some(true) { __splice_builder.mark(__splice_no); #no_code; }
                 __splice_builder.mark(__splice_join); #result
             }),
         ))

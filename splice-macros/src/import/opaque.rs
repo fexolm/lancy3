@@ -72,17 +72,17 @@ impl Interface<'_> {
 
         emit! {
             #[doc(hidden)]
-            #vis struct OpaqueIr<S, E>(#root::RustImport<S, E>);
+            #vis struct __SpliceOpaqueIr<S, E>(#root::RustImport<S, E>);
 
             #[doc(hidden)]
             #vis struct OpaqueKernel<K>(K);
 
-            impl<S, E, B: #root::Codegen> #root::CompileInput<B> for OpaqueIr<S, E>
+            impl<S, E, B: #root::Codegen> #root::CompileInput<B> for __SpliceOpaqueIr<S, E>
             where B::Output: #root::ImportTarget {
                 type Output = OpaqueKernel<<B::Output as #root::ImportTarget>::Linked<S, E>>;
                 type Error = #root::BuildError;
 
-                fn compile_with(&self, options: Option<#root::BuildOptions>)
+                fn compile_with(&self, options: ::core::option::Option<#root::BuildOptions>)
                     -> ::core::result::Result<Self::Output, Self::Error>
                 {
                     <#root::RustImport<S, E> as #root::CompileInput<B>>::compile_with(&self.0, options)

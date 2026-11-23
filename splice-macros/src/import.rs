@@ -431,12 +431,12 @@ fn expand(root: &Path, mut function: ItemFn, checks: Vec<Check>) -> Result<Token
     let type_params = signature_generics.type_params().map(|p| &p.ident);
     let marker = emit!(Signature #signature_args);
     let environment_type = if borrowed_environment {
-        emit!(Environment)
+        emit!(__SpliceEnvironment)
     } else {
-        emit!(Environment #environment_args)
+        emit!(__SpliceEnvironment #environment_args)
     };
     let ir_type = if opaque_result {
-        emit!(OpaqueIr<#marker, #environment_type>)
+        emit!(__SpliceOpaqueIr<#marker, #environment_type>)
     } else {
         emit!(#root::RustImport<#marker, #environment_type>)
     };
@@ -453,20 +453,20 @@ fn expand(root: &Path, mut function: ItemFn, checks: Vec<Check>) -> Result<Token
         .filter(|(host, _)| !environment.iter().any(|(captured, _)| captured == host))
         .map(|(name, _)| name);
     let mut create_import = emit!(#root::RustImport::new(
-        stringify!(#name),
-        Environment { #(#environment_names,)* },
+        ::core::stringify!(#name),
+        __SpliceEnvironment { #(#environment_names,)* },
     ));
     if opaque_result {
-        create_import = emit!(OpaqueIr(#create_import));
+        create_import = emit!(__SpliceOpaqueIr(#create_import));
     }
     let (environment_decl, stage_body, call_body) = if borrowed_environment {
         // Such a kernel can never be linked: it needs the caller's plan
         // address after build has ended. The environment is uninhabited.
         (
-            emit!(#vis enum Environment {}),
+            emit!(#vis enum __SpliceEnvironment {}),
             emit! {
                 #(let _ = ( #host_names, );)*
-                Err("Rust import would retain a borrowed specialization argument".into())
+                ::core::result::Result::Err(::core::convert::Into::into("Rust import would retain a borrowed specialization argument"))
             },
             emit!(match *__splice_environment {}),
         )
@@ -475,11 +475,11 @@ fn expand(root: &Path, mut function: ItemFn, checks: Vec<Check>) -> Result<Token
             .into_iter()
             .map(|check| check.emit(root, region::in_child_module));
         (
-            emit!(#vis struct Environment #environment_generics #environment_where { #(#environment_fields,)* }),
+            emit!(#vis struct __SpliceEnvironment #environment_generics #environment_where { #(#environment_fields,)* }),
             emit! {
                 #(#checks)*
                 #(let _ = (#unused_host_names,);)*
-                Ok(#create_import)
+                ::core::result::Result::Ok(#create_import)
             },
             emit! {
                 let CallArgs { #(#call_names,)* } = __splice_arguments;
@@ -563,7 +563,7 @@ fn expand(root: &Path, mut function: ItemFn, checks: Vec<Check>) -> Result<Token
             #region_policy
             #[doc(hidden)]
             #vis fn __splice_eval<Args, Output>(_: Args) -> #root::Result<Output> {
-                Err("a Rust import cannot run during specialization".into())
+                ::core::result::Result::Err(::core::convert::Into::into("a Rust import cannot run during specialization"))
             }
 
             #vis struct BuildArgs #host_generics #host_where { #(#vis #host_fields,)* }

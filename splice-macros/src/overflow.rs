@@ -3,7 +3,7 @@ use std::sync::OnceLock;
 pub(crate) fn enabled() -> proc_macro2::TokenStream {
     match explicit_mode() {
         Some(mode) => quote::quote!(#mode),
-        None => quote::quote!(cfg!(debug_assertions)),
+        None => quote::quote!(::core::cfg!(debug_assertions)),
     }
 }
 

@@ -24,7 +24,8 @@ impl Lower<'_> {
                         let pat = &local.pat;
                         let binding = scope.aggregate_local(pat, literal)?;
                         statements.push(binding);
-                        let line = emit!(format!("let {} = {};", stringify!(#pat), #value));
+                        let line =
+                            emit!(::std::format!("let {} = {};", ::core::stringify!(#pat), #value));
                         statements.push(
                             emit!({ __splice_text.push_str(&#line); __splice_text.push('\n'); }),
                         );
@@ -45,7 +46,7 @@ impl Lower<'_> {
                     let value = scope.source_expr(&init.expr, hint)?;
                     let pat = &local.pat;
                     scope.local(local)?;
-                    emit!(format!("let {} = {};", stringify!(#pat), #value))
+                    emit!(::std::format!("let {} = {};", ::core::stringify!(#pat), #value))
                 }
                 Stmt::Expr(expr, semi) => {
                     let last = i + 1 == block.stmts.len() && semi.is_none();
@@ -67,25 +68,27 @@ impl Lower<'_> {
                     if last {
                         rendered
                     } else {
-                        emit!({ let text = #rendered; if text.is_empty() { text } else { format!("{text};") } })
+                        emit!({ let text = #rendered; if text.is_empty() { text } else { ::std::format!("{text};") } })
                     }
                 }
                 Stmt::Item(item @ syn::Item::Use(_)) => {
                     statements.push(emit!(#[allow(unused_imports)] #item));
-                    emit!(stringify!(#item).to_owned())
+                    emit!(::std::borrow::ToOwned::to_owned(::core::stringify!(#item)))
                 }
                 _ => return err(stmt, "unsupported statement in Rust source output"),
             };
             statements.push(emit!({ let text = #rendered; if !text.is_empty() {
                 __splice_text.push_str(&text); __splice_text.push('\n');
-            } if __splice_source.transfer.is_some() { break #end String::new(); }}));
+            } if __splice_source.transfer.is_some() { break #end (::std::string::String::new()); }}));
             if let Stmt::Expr(Expr::Return(_) | Expr::Break(_) | Expr::Continue(_), _) = stmt {
                 break;
             }
         }
-        Ok(emit!({ let mut __splice_text = String::new();
-                #[allow(unused_labels)] let fault = #end: { #(#statements)* String::new() };
-                __splice_text.push_str(&fault); __splice_text }))
+        Ok(
+            emit!({ let mut __splice_text = ::std::string::String::new();
+                #[allow(unused_labels)] let fault = #end: { #(#statements)* ::std::string::String::new() };
+                __splice_text.push_str(&fault); __splice_text }),
+        )
     }
 
     fn source_expr(&self, e: &Expr, hint: Option<Scalar>) -> Result<TokenStream> {
@@ -101,7 +104,7 @@ impl Lower<'_> {
         if let Some(body) = loop_body
             && let Some(code) = self.host_loop(e, body)?
         {
-            return Ok(emit!({ #code; String::new() }));
+            return Ok(emit!({ #code; ::std::string::String::new() }));
         }
         match e {
             Expr::Block(b) => return Ok(braces(self.source_body(&b.block)?)),
@@ -125,14 +128,14 @@ impl Lower<'_> {
                     })
                     .transpose()?;
                 if cond.stage.is_host() {
-                    let no = no.unwrap_or_else(|| emit!("{}".to_owned()));
+                    let no = no.unwrap_or_else(|| emit!(::std::borrow::ToOwned::to_owned("{}")));
                     return Ok(emit!(if #cond { #yes } else { #no }));
                 }
                 let cond = self.source_expr(&i.cond, Some(Scalar::Bool))?;
                 let yes = isolate(yes);
                 return Ok(match no {
-                    Some(no) => emit!(format!("if {} {} else {}", #cond, #yes, #no)),
-                    None => emit!(format!("if {} {}", #cond, #yes)),
+                    Some(no) => emit!(::std::format!("if {} {} else {}", #cond, #yes, #no)),
+                    None => emit!(::std::format!("if {} {}", #cond, #yes)),
                 });
             }
             Expr::Match(m) => {
@@ -162,16 +165,16 @@ impl Lower<'_> {
                     let body = scope.isolated_expr(&arm.body, hint)?;
                     let guard = if let Some((_, g)) = &arm.guard {
                         let guard = scope.isolated_expr(g, Some(Scalar::Bool))?;
-                        emit!(format!(" if {}", #guard))
+                        emit!(::std::format!(" if {}", #guard))
                     } else {
-                        emit!(String::new())
+                        emit!(::std::string::String::new())
                     };
                     arms.push(emit!(
-                        format!("{}{} => {},", stringify!(#pat), #guard, #body)
+                        ::std::format!("{}{} => {},", ::core::stringify!(#pat), #guard, #body)
                     ));
                 }
                 return Ok(emit!(
-                    format!("match {} {}", #test, #support::block(&[#(#arms),*].join("\n")))
+                    ::std::format!("match {} {}", #test, #support::block(&[#(#arms),*].join("\n")))
                 ));
             }
             Expr::ForLoop(f) => {
@@ -181,7 +184,7 @@ impl Lower<'_> {
                     let mut scope = self.with_pattern(pat);
                     scope.loop_kind = Some(LoopKind::Unrolled);
                     let body = scope.source_body(&f.body)?;
-                    return Ok(emit!({ let mut text = String::new();
+                    return Ok(emit!({ let mut text = ::std::string::String::new();
                         for #pat in #iter {
                             #root::frontend::scalar::specialization_step()?;
                             let body = #body;
@@ -189,14 +192,14 @@ impl Lower<'_> {
                             if body.contains("break '__splice_iteration") { text.push_str("'__splice_iteration: "); }
                             text.push_str(&block); text.push_str(";\n");
                             match __splice_source.transfer {
-                                Some(#support::Transfer::Break) => { __splice_source.transfer = None; break; }
-                                Some(#support::Transfer::Continue) => __splice_source.transfer = None,
-                                Some(#support::Transfer::Return) => break,
-                                None => {}
+                                ::core::option::Option::Some(#support::Transfer::Break) => { __splice_source.transfer = ::core::option::Option::None; break; }
+                                ::core::option::Option::Some(#support::Transfer::Continue) => __splice_source.transfer = ::core::option::Option::None,
+                                ::core::option::Option::Some(#support::Transfer::Return) => break,
+                                ::core::option::Option::None => {}
                             }
                         }
                         if text.contains("break '__splice_unrolled") {
-                            format!("'__splice_unrolled: {}", #support::block(&text))
+                            ::std::format!("'__splice_unrolled: {}", #support::block(&text))
                         } else { #support::block(&text) }
                     }));
                 }
@@ -210,7 +213,7 @@ impl Lower<'_> {
                 let range = self.source_syntax(&f.expr)?;
                 let body = isolate(braces(scope.source_body(&f.body)?));
                 return Ok(emit!(
-                    format!("for {} in {} {}", stringify!(#pat), #range, #body)
+                    ::std::format!("for {} in {} {}", ::core::stringify!(#pat), #range, #body)
                 ));
             }
             Expr::While(w) => {
@@ -218,13 +221,13 @@ impl Lower<'_> {
                 let cond = scope.isolated_expr(&w.cond, Some(Scalar::Bool))?;
                 scope.loop_kind = Some(LoopKind::Runtime);
                 let body = isolate(braces(scope.source_body(&w.body)?));
-                return Ok(emit!(format!("while {} {}", #cond, #body)));
+                return Ok(emit!(::std::format!("while {} {}", #cond, #body)));
             }
             Expr::Loop(l) => {
                 let mut scope = self.nested_region();
                 scope.loop_kind = Some(LoopKind::Runtime);
                 let body = isolate(braces(scope.source_body(&l.body)?));
-                return Ok(emit!(format!("loop {}", #body)));
+                return Ok(emit!(::std::format!("loop {}", #body)));
             }
             Expr::MethodCall(method) => {
                 if let Expr::Index(index) = &*method.receiver
@@ -241,7 +244,7 @@ impl Lower<'_> {
                     return Ok(emit!({
                         let slot = #slot;
                         #root::frontend::scalar::column((__splice_column_layout, #root::hir::Buffer(0)), slot, #element)?;
-                        format!("{}[{}].as_slice::<{}>()", stringify!(#table), slot, stringify!(#ty))
+                        ::std::format!("{}[{}].as_slice::<{}>()", ::core::stringify!(#table), slot, ::core::stringify!(#ty))
                     }));
                 }
             }
@@ -293,12 +296,12 @@ impl Lower<'_> {
                 let text = if let Some(label) = label
                     && matches!(self.loop_kind, Some(LoopKind::Unrolled))
                 {
-                    emit!(#label.to_owned())
+                    emit!(::std::borrow::ToOwned::to_owned(#label))
                 } else {
                     self.source_syntax(e)?
                 };
                 return Ok(
-                    emit!({ let text = #text; __splice_source.transfer = Some(#support::Transfer::#transfer); text }),
+                    emit!({ let text = #text; __splice_source.transfer = ::core::option::Option::Some(#support::Transfer::#transfer); text }),
                 );
             }
             Expr::Binary(binary) if matches!(binary.op, syn::BinOp::And(_) | syn::BinOp::Or(_)) => {
@@ -306,9 +309,9 @@ impl Lower<'_> {
                 if lhs.stage.is_host() {
                     let rhs = self.source_expr(&binary.right, Some(Scalar::Bool))?;
                     return Ok(if matches!(binary.op, syn::BinOp::And(_)) {
-                        emit!(if #lhs { #rhs } else { "false".to_owned() })
+                        emit!(if #lhs { #rhs } else { ::std::borrow::ToOwned::to_owned("false") })
                     } else {
-                        emit!(if #lhs { "true".to_owned() } else { #rhs })
+                        emit!(if #lhs { ::std::borrow::ToOwned::to_owned("true") } else { #rhs })
                     });
                 }
                 let lhs = self.source_expr(&binary.left, Some(Scalar::Bool))?;
@@ -316,7 +319,9 @@ impl Lower<'_> {
                     .nested_region()
                     .isolated_expr(&binary.right, Some(Scalar::Bool))?;
                 let op = &binary.op;
-                return Ok(emit!(format!("{} {} {}", #lhs, stringify!(#op), #rhs)));
+                return Ok(emit!(
+                    ::std::format!("{} {} {}", #lhs, ::core::stringify!(#op), #rhs)
+                ));
             }
             Expr::Range(_) => {
                 return self.source_syntax(e);
@@ -372,7 +377,7 @@ impl Lower<'_> {
         visit::visit_expr(&mut children, e);
         let original = e.to_token_stream().to_string();
         if children.0.is_empty() {
-            return Ok(emit!(#original.to_owned()));
+            return Ok(emit!(::std::borrow::ToOwned::to_owned(#original)));
         }
         // A marker absent even from literal text cannot collide with a user's path.
         let mut marker = "__splice_source_child_".to_owned();
@@ -410,7 +415,7 @@ impl Lower<'_> {
             .map(|expr| self.source_operand(expr, None))
             .collect::<Result<Vec<_>>>()?;
         if self.region_depth == 0 {
-            return Ok(emit!(format!(#format, #(#args),*)));
+            return Ok(emit!(::std::format!(#format, #(#args),*)));
         }
         let label = syn::Lifetime::new(
             &format!("'__splice_source_operands_{}", crate::scalar::flow::key(e)),
@@ -419,14 +424,14 @@ impl Lower<'_> {
         let root = self.root;
         let indices = 0..args.len();
         Ok(emit!(#label: {
-            let mut operands = Vec::new();
+            let mut operands = ::std::vec::Vec::new();
             #(
                 operands.push(#args);
                 if __splice_source.transfer.is_some() {
                     break #label (#root::frontend::source::block(&operands.join(";\n")));
                 }
             )*
-            format!(#format, #(operands[#indices]),*)
+            ::std::format!(#format, #(operands[#indices]),*)
         }))
     }
 }

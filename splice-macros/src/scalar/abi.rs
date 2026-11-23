@@ -247,7 +247,7 @@ pub(super) fn generate(
                     let __splice_result = #root::Executable::call(
                         executable, &__splice_registers, &mut __splice_buffers,
                     )?;
-                    Ok(#decode)
+                    ::core::result::Result::Ok(#decode)
                 })
             }
         }

@@ -67,8 +67,8 @@ pub(crate) fn trait_defaults(
     let evaluator = emit! {
         #[doc(hidden)]
         #[allow(clippy::type_complexity)]
-        fn #eval_name #generics (_: (#(Option<#operand_types>,)*)) -> #root::Result<#result_type> #where_ {
-            Err("a trait method without a published implementation is opaque".into())
+        fn #eval_name #generics (_: (#(::core::option::Option<#operand_types>,)*)) -> #root::Result<#result_type> #where_ {
+            ::core::result::Result::Err(::core::convert::Into::into("a trait method without a published implementation is opaque"))
         }
     };
     if kind == TraitMethodKind::EvalOnly {
@@ -152,7 +152,7 @@ pub(crate) fn trait_defaults(
                 },
                 emit! {
                     __splice_builder.rust_call(#hir::RustCall {
-                        symbol: &#hir::RustSymbol {name: stringify!(#name), resolve: || <Self as #trait_owner>::#adapter_name #func},
+                        symbol: &#hir::RustSymbol {name: ::core::stringify!(#name), resolve: || <Self as #trait_owner>::#adapter_name #func},
                         arity: #arity as u8,
                     }, &args)
                 },
@@ -171,7 +171,7 @@ pub(crate) fn trait_defaults(
                 },
                 emit! {
                     __splice_builder.rust_packet_call(&#hir::RustPacketSymbol {
-                        name: stringify!(#name),
+                        name: ::core::stringify!(#name),
                         arity: #arity as u32,
                         resolve: || <Self as #trait_owner>::#adapter_name #func,
                     }, &args)
@@ -184,9 +184,9 @@ pub(crate) fn trait_defaults(
             #call
         }
     } else {
-        emit!(Err(
-            "trait method requires Rust arguments that cannot cross the scalar ABI".into()
-        ))
+        emit!(::core::result::Result::Err(::core::convert::Into::into(
+            "trait method requires Rust arguments that cannot cross the scalar ABI"
+        )))
     };
     items.push(emit! {
         #[doc(hidden)]

@@ -32,7 +32,7 @@ impl Lower<'_> {
         let checks=sig.inputs.iter().zip(&names).filter_map(|(a,name)|{
             let FnArg::Typed(a)=a else{return None};
             a.attrs.iter().any(|a|a.path().is_ident("comptime")).then(||emit!(
-                if #name.is_none(){return Err("unknown argument passed to a comptime parameter".into());}
+                if #name.is_none(){return ::core::result::Result::Err(::core::convert::Into::into("unknown argument passed to a comptime parameter"));}
             ))
         });
         let ty = match &sig.output {
@@ -64,16 +64,20 @@ impl Lower<'_> {
             )?;
             emit!(#[allow(unused_labels)] #label: { #body })
         } else {
-            emit!(return Err("body cannot be evaluated at specialization".into()))
+            emit!(
+                return ::core::result::Result::Err(::core::convert::Into::into(
+                    "body cannot be evaluated at specialization"
+                ))
+            )
         };
         Ok(emit! {
             #[doc(hidden)]
             #[allow(unused_variables,unreachable_code,clippy::type_complexity)]
-            #vis fn #name #generics ((#(#names,)*): (#(Option<#types>,)*))
+            #vis fn #name #generics ((#(#names,)*): (#(::core::option::Option<#types>,)*))
                 -> #root::Result<#ty> #where_clause {
                 let _depth=#root::frontend::scalar::enter_expansion()?;
                 #(#checks)*
-                Ok(#body)
+                ::core::result::Result::Ok(#body)
             }
         })
     }
@@ -103,14 +107,14 @@ impl Lower<'_> {
             // An unevaluated operand supplies the Rust result type when all
             // names have their original type in the specialization factory.
             if inputs.is_empty() && !super::simd::uses_lane(expr) && self.host_only(expr) {
-                emit!(if false { #expr } else { return Err("opaque operation in comptime!".into()) })
+                emit!(if false { #expr } else { return ::core::result::Result::Err(::core::convert::Into::into("opaque operation in comptime!")) })
             } else {
                 let ty = match hint {
                     Some(Scalar::Bool) => emit!(bool),
                     Some(Scalar::Index | Scalar::Length) => emit!(usize),
                     _ => emit!(i32),
                 };
-                emit!(Err::<#ty,String>("value unavailable at specialization".into())?)
+                emit!(::core::result::Result::Err::<#ty,::std::string::String>(::core::convert::Into::into("value unavailable at specialization"))?)
             }
         };
         Ok(match expr {
@@ -138,7 +142,7 @@ impl Lower<'_> {
                         _ => emit!(i32),
                     };
                     if self.source_fault.is_some() {
-                        emit!(Err::<#ty,String>("runtime argument read in comptime!".into())?)
+                        emit!(::core::result::Result::Err::<#ty,::std::string::String>(::core::convert::Into::into("runtime argument read in comptime!"))?)
                     } else {
                         let convert = match ty.to_string().as_str() {
                             "bool" => emit!(word != 0),
@@ -160,7 +164,7 @@ impl Lower<'_> {
                         emit!(i32)
                     };
                     if self.source_fault.is_some() {
-                        emit!(Err::<#ty,String>("runtime value in comptime!".into())?)
+                        emit!(::core::result::Result::Err::<#ty,::std::string::String>(::core::convert::Into::into("runtime value in comptime!"))?)
                     } else {
                         emit!(<#ty as #support::frontend::scalar::ImportWord>::decode(
                             #support::frontend::scalar::RunArg::known(&#path).ok_or("runtime value in comptime!")?
@@ -219,8 +223,8 @@ impl Lower<'_> {
                     let checks = super::host::fault_checks(false);
                     emit! {
                         use #support::frontend::scalar::HostNegation as _;
-                        if #checks && let Some(fault) = (&(&value,)).negation_fault() {
-                            return Err(fault.message().into());
+                        if #checks && let ::core::option::Option::Some(fault) = (&(&value,)).negation_fault() {
+                            return ::core::result::Result::Err(fault.message().into());
                         }
                     }
                 });
@@ -427,14 +431,14 @@ impl Lower<'_> {
                                 Some(Binding::Reg(..) | Binding::Buffer(_) | Binding::Columns)
                             ) {
                                 return Ok(if trait_owner.is_some() {
-                                    emit!(None)
+                                    emit!(::core::option::Option::None)
                                 } else {
-                                    emit!(None::<i32>)
+                                    emit!(::core::option::Option::None::<i32>)
                                 });
                             }
                         }
                         let arg = visit(arg)?;
-                        Ok(emit!(Some(#arg)))
+                        Ok(emit!(::core::option::Option::Some(#arg)))
                     })
                     .collect::<Result<Vec<_>>>()?;
                 let output = match hint {
@@ -455,7 +459,7 @@ impl Lower<'_> {
                     emit!({
                     trait __SpliceOpaqueMethod {
                         fn #method<Args>(_: Args) -> #support::Result<#output> {
-                            Err("opaque Rust method in comptime!".into())
+                            ::core::result::Result::Err(::core::convert::Into::into("opaque Rust method in comptime!"))
                         }
                     }
                     impl<T: ?Sized> __SpliceOpaqueMethod for T {}
@@ -487,13 +491,13 @@ impl Lower<'_> {
                                     Some(Binding::Reg(Scalar::Int | Scalar::Inferred, _)) => {
                                         emit!(i32)
                                     }
-                                    _ => return Ok(emit!(None)),
+                                    _ => return Ok(emit!(::core::option::Option::None)),
                                 };
-                                return Ok(emit!(None::<#ty>));
+                                return Ok(emit!(::core::option::Option::None::<#ty>));
                             }
                         }
                         let a = visit(a)?;
-                        Ok(emit!(Some(#a)))
+                        Ok(emit!(::core::option::Option::Some(#a)))
                     })
                     .collect::<Result<Vec<_>>>()?;
                 let mut item = path.path.clone();
@@ -549,7 +553,9 @@ impl Lower<'_> {
                 }
                 _ => {
                     return Ok(emit!({
-                        return Err("unsupported statement in comptime!".into());
+                        return ::core::result::Result::Err(::core::convert::Into::into(
+                            "unsupported statement in comptime!",
+                        ));
                     }));
                 }
             }
@@ -740,8 +746,8 @@ fn comptime_fault(support: &syn::Path, kind: &str, operands: TokenStream) -> Opt
     let checks = super::host::fault_checks(division);
     Some(emit! {
         use #support::frontend::scalar::{HostArithmetic as _, HostShift as _};
-        if #checks && let Some(fault) = #guard {
-            return Err(fault.message().into());
+        if #checks && let ::core::option::Option::Some(fault) = #guard {
+            return ::core::result::Result::Err(fault.message().into());
         }
     })
 }

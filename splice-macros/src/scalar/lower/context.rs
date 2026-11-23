@@ -123,7 +123,7 @@ impl Context {
         let local = self.arms(root, types);
         let children = self.children.borrow();
         if children.is_empty() {
-            return emit!(match __splice_operation { #local _ => unreachable!("verified Rust operation") });
+            return emit!(match __splice_operation { #local _ => ::core::unreachable!("verified Rust operation") });
         }
         let routes = children.iter().enumerate().map(|(index, child)| {
             let index = index as u32;
@@ -134,7 +134,7 @@ impl Context {
                 let dispatch = super::calls::dispatch_free(
                     root, target,
                     emit!(#item::__splice_dispatch_context #generics (__splice_object, operation, __splice_arguments, #witness)),
-                    emit!(unreachable!("an ordinary Rust function has no child context")),
+                    emit!(::core::unreachable!("an ordinary Rust function has no child context")),
                 );
                 return emit!(#index => #dispatch,);
             }
@@ -142,18 +142,18 @@ impl Context {
             let name = &dispatch.path.segments.last().unwrap().ident;
             emit!(#index => {
                 trait Missing { fn #name<Elements>(&mut self, _:u32, _:#root::ContextArguments<'_>, _: ::core::marker::PhantomData<Elements>) -> i32 {
-                    unreachable!("unlinked method has no context operations")
+                    ::core::unreachable!("unlinked method has no context operations")
                 } }
                 impl<T: ?Sized> Missing for T {}
                 #dispatch(__splice_object, operation, __splice_arguments, #witness)
             },)
         });
         emit!(match (#signature).operation_at(__splice_operation) {
-            Some(#root::ContextOperation::Local(__splice_operation)) =>
-                match __splice_operation { #local _ => unreachable!("verified local operation") },
-            Some(#root::ContextOperation::Child{ index, operation }) =>
-                match index { #(#routes)* _ => unreachable!("verified child context") },
-            None => unreachable!("verified Rust operation"),
+            ::core::option::Option::Some(#root::ContextOperation::Local(__splice_operation)) =>
+                match __splice_operation { #local _ => ::core::unreachable!("verified local operation") },
+            ::core::option::Option::Some(#root::ContextOperation::Child{ index, operation }) =>
+                match index { #(#routes)* _ => ::core::unreachable!("verified child context") },
+            ::core::option::Option::None => ::core::unreachable!("verified Rust operation"),
         })
     }
 
@@ -261,7 +261,7 @@ impl Context {
         let mut code = self.opaque_operation(lower, expr)?;
         if let Some(target) = rust_callee {
             let unsupported = emit!({
-                Err::<#root::hir::Reg, String>("a nested kernel cannot take this runtime object".into())?
+                ::core::result::Result::Err::<#root::hir::Reg, ::std::string::String>(::core::convert::Into::into("a nested kernel cannot take this runtime object"))?
             });
             code = lower.dispatch_call(target, unsupported, code);
         }
@@ -283,8 +283,10 @@ impl Context {
         };
         captures.visit_expr(expr);
         if captures.rejected {
-            return Ok(emit!(Err::<#root::hir::Reg,String>(
-                "a Rust object operation requires materializable operands and cannot transfer control".into())?));
+            return Ok(
+                emit!(::core::result::Result::Err::<#root::hir::Reg,::std::string::String>(
+                ::core::convert::Into::into("a Rust object operation requires materializable operands and cannot transfer control"))?),
+            );
         }
         let operands = captures
             .operands
@@ -370,7 +372,7 @@ impl Context {
             emit!(__splice_context_frame.child(#child)?)
         };
         let fallback = if recursive {
-            emit!(unreachable!("the current method is published"))
+            emit!(::core::unreachable!("the current method is published"))
         } else {
             self.opaque_operation(lower, expr)?
         };
@@ -386,7 +388,7 @@ impl Context {
                 fn #marker() -> bool {false}
                 fn #name<Elements, #(#params),*>(_: #root::hir::Buffer, #(_: #params,)*
                     _: ::core::marker::PhantomData<Elements>, _: #root::ContextFrame, _: &mut dyn #root::frontend::KernelBuilder) -> #root::Result<#root::hir::Reg> {
-                    Err("Rust method cannot be linked into the scalar kernel".into())
+                    ::core::result::Result::Err(::core::convert::Into::into("Rust method cannot be linked into the scalar kernel"))
                 }
             }
             impl<T: ?Sized> Missing for T {}
@@ -436,7 +438,7 @@ impl Context {
             }
             Err(error) => {
                 let error = error.to_string();
-                emit!(Err::<#root::hir::Reg, String>(#error.into())?)
+                emit!(::core::result::Result::Err::<#root::hir::Reg, ::std::string::String>(::core::convert::Into::into(#error))?)
             }
         };
         let code = if recursive {

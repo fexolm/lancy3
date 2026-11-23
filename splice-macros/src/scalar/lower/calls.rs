@@ -69,7 +69,7 @@ impl Lower<'_> {
                     fn #name<#(#parameters),*>(#(_: #parameters,)* _: &mut dyn #root::frontend::KernelBuilder)
                         -> #root::Result<#root::hir::Reg>
                     {
-                        Err("method does not have a scalar Splice implementation".into())
+                        ::core::result::Result::Err(::core::convert::Into::into("method does not have a scalar Splice implementation"))
                     }
                 }
                 impl<T: ?Sized> __SpliceOpaqueMethod for T {}
@@ -79,7 +79,7 @@ impl Lower<'_> {
             let mut path = p.path.clone();
             let fish = std::mem::take(&mut path.segments.last_mut().unwrap().arguments);
             let expected = output.value_type(root, self.types);
-            check = emit!(const {assert!(matches!(#path::__SPLICE_RETURN,#expected),"annotate the kernel helper result with its Lane<T> or Mask<T> type")};);
+            check = emit!(const {::core::assert!(::core::matches!(#path::__SPLICE_RETURN,#expected),"annotate the kernel helper result with its Lane<T> or Mask<T> type")};);
             emit!(#path::__splice_call #fish)
         };
         let all_known = named && values.iter().all(|v| v.stage.is_host());
@@ -105,7 +105,9 @@ impl Lower<'_> {
                 (_, Stage::Word(_)) => value.code,
                 (_, stage) if stage.is_host() => emit!(#support::Host(#value)),
                 (Some(Binding::Host(_)), _) => emit!({
-                    return Err("runtime value passed to a comptime parameter".into());
+                    return ::core::result::Result::Err(::core::convert::Into::into(
+                        "runtime value passed to a comptime parameter",
+                    ));
                 }),
                 (
                     None,
@@ -142,11 +144,11 @@ impl Lower<'_> {
             let generics = std::mem::take(&mut item.segments.last_mut().unwrap().arguments);
             let kernel = emit!({
                 let (#(#params,)*)=(#(#original_args,)*);
-                let mut runtime=||{Ok::<_,String>(#support::Word::Runtime(#target(#(#bound,)* __splice_builder)?))};
+                let mut runtime=||{::core::result::Result::Ok::<_,::std::string::String>(#support::Word::Runtime(#target(#(#bound,)* __splice_builder)?))};
                 #item::__splice_fold!(
-                    match #root::build_boundary(|| #item::__SpliceDefinition::__splice_eval #generics ((#(Some(#params),)*))) {
-                        Ok(value)=>#support::Word::Known(#support::ImportWord::encode(value)),
-                        Err(_)=>runtime()?,
+                    match #root::build_boundary(|| #item::__SpliceDefinition::__splice_eval #generics ((#(::core::option::Option::Some(#params),)*))) {
+                        ::core::result::Result::Ok(value)=>#support::Word::Known(#support::ImportWord::encode(value)),
+                        ::core::result::Result::Err(_)=>runtime()?,
                     },
                     runtime()?
                 )
@@ -281,7 +283,7 @@ impl Lower<'_> {
         uses_self.visit_expr_path(path);
         uses_self.visit_generics(self.generics);
         if uses_self.0 {
-            return emit!(Err::<#root::hir::Reg,String>("unpublished Self method requires its owning Rust context".into())?);
+            return emit!(::core::result::Result::Err::<#root::hir::Reg,::std::string::String>(::core::convert::Into::into("unpublished Self method requires its owning Rust context"))?);
         }
         let (adapter, call) = if arity <= 2 {
             (
@@ -315,7 +317,7 @@ impl Lower<'_> {
                     }
                     impl<F, P> __SplicePacketAdapter for &&#native::Candidate<F, P> {
                         fn supported(self) -> bool { false }
-                        fn invoke(self, _: &[i32]) -> i32 { unreachable!("verified scalar packet adapter") }
+                        fn invoke(self, _: &[i32]) -> i32 { ::core::unreachable!("verified scalar packet adapter") }
                     }
                     fn adapter #generics (words: &[i32]) -> i32 #where_clause {
                         (&#candidate).invoke(words)
@@ -323,7 +325,7 @@ impl Lower<'_> {
                 },
                 emit! {
                     __splice_builder.rust_packet_call(&#root::hir::RustPacketSymbol {
-                        name: stringify!(#path), arity: #arity as u32, resolve: || adapter #fish,
+                        name: ::core::stringify!(#path), arity: #arity as u32, resolve: || adapter #fish,
                     }, &operands)?
                 },
             )
@@ -336,10 +338,10 @@ impl Lower<'_> {
                 #(if !__splice_import_stages.#indices.is_empty()
                     && !(&__splice_import_values.#indices).known()
                 {
-                    return Err("runtime value passed to a comptime parameter".into());
+                    return ::core::result::Result::Err(::core::convert::Into::into("runtime value passed to a comptime parameter"));
                 })*
                 if #needs_stages() {
-                    return Err("a published kernel call cannot be specialized inside this Rust region".into());
+                    return ::core::result::Result::Err(::core::convert::Into::into("a published kernel call cannot be specialized inside this Rust region"));
                 }
                 let operands = [#((&__splice_import_values.#indices).materialize(__splice_builder)?),*];
             }
@@ -351,7 +353,7 @@ impl Lower<'_> {
             #adapter
             use #root::frontend::native::{Materialize as _, Operand};
             if !(&#candidate).supported() {
-                return Err("Rust import requires a non-scalar argument or result".into());
+                return ::core::result::Result::Err(::core::convert::Into::into("Rust import requires a non-scalar argument or result"));
             }
             #operands
             #call

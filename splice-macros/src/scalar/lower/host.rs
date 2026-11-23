@@ -111,9 +111,12 @@ impl PrepareHost<'_, '_> {
             return None;
         };
         let Expr::Path(base) = &*index.expr else {
-            return Some(emit!(Err::<(), String>(
-                "specialization cannot write through an opaque place".into()
-            )?));
+            return Some(emit!(::core::result::Result::Err::<
+                (),
+                ::std::string::String,
+            >(::core::convert::Into::into(
+                "specialization cannot write through an opaque place"
+            ))?));
         };
         self.visit_expr_mut(right);
         self.visit_expr_mut(&mut index.index);
@@ -272,7 +275,7 @@ impl Lower<'_> {
         self.host_check(expr, false)?;
         let reject = || {
             emit!(if false { #expr } else {
-                return Err("opaque iterator constructor during specialization".into());
+                return ::core::result::Result::Err(::core::convert::Into::into("opaque iterator constructor during specialization"));
             })
         };
         match expr {
@@ -370,7 +373,7 @@ impl Lower<'_> {
             let receiver = &(#base);
             let operand = Operand::of(receiver);
             if !(&operand).own_field(#name) && !(&operand).referent_field(#name) {
-                return Err("field has no Splice layout description".into());
+                return ::core::result::Result::Err(::core::convert::Into::into("field has no Splice layout description"));
             }
             &receiver.#member
         })
@@ -514,7 +517,7 @@ impl Lower<'_> {
         let checks = fault_checks(division);
         let fault = if let Some(label) = &self.source_fault {
             emit! {
-                __splice_source.transfer = Some(#root::frontend::source::Transfer::Return);
+                __splice_source.transfer = ::core::option::Option::Some(#root::frontend::source::Transfer::Return);
                 break #label (#root::frontend::source::fault_panic(fault));
             }
         } else {
@@ -528,7 +531,7 @@ impl Lower<'_> {
         };
         emit! {
             use #root::frontend::scalar::{HostArithmetic as _, HostNegation as _, HostShift as _};
-            if #checks && let Some(fault) = #guard {
+            if #checks && let ::core::option::Option::Some(fault) = #guard {
                 #fault
             }
         }
