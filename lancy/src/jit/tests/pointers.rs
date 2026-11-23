@@ -1,4 +1,5 @@
 use crate::ScalarKernel;
+use crate::hir::ssa::InterpretError;
 use crate::hir::{Binary, Function, Op, Scale, Terminator, Type};
 use std::sync::Arc;
 
@@ -45,7 +46,7 @@ fn pointer_arguments_survive_spills_calls_and_block_parameters() {
             // SAFETY: each scalar has its own writable address and output[1..9] holds one pointer.
             let result = unsafe {
                 if native {
-                    kernel.call_raw(&args).map_err(|e| e.to_string())
+                    kernel.call_raw(&args).map_err(InterpretError::Trap)
                 } else {
                     f.interpret_raw(&args)
                 }

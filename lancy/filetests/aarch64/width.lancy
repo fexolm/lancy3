@@ -29,10 +29,10 @@ fn main x:i32 -> i32
 @aarch64-isel check: Widen(
 @aarch64-isel check: Widen(
 @aarch64-isel check: Narrow(
-@aarch64 neon has 0xff3ffc00 0x4e212800
-@aarch64 sve has 0xff3ffc00 0x05303800
-@aarch64 sve2 has 0xff3fe000 0x052c8000
-@aarch64 all lacks 0xfffffc1f 0xd63f0000
+@aarch64 neon has v.xtn2
+@aarch64 sve has z.sunpklo
+@aarch64 sve2 has z.splice
+@aarch64 all lacks blr
 @run 32766 -> 0
 @run -15 -> 0
 ---
@@ -69,7 +69,7 @@ fn main x:i32 -> i32
   ret r
 @aarch64-isel check: Widen(
 @aarch64-isel check: Narrow(
-@aarch64 all lacks 0xfffffc1f 0xd63f0000
+@aarch64 all lacks blr
 @run 0x00000001 -> 0
 @run 0x80000000 -> 0
 @run 0xbf800001 -> 0
@@ -89,7 +89,7 @@ fn main x:i32 -> i32
   ret both
 @aarch64-isel check: Widen(Wide
 @aarch64-isel check: Narrow(
-@aarch64 all lacks 0xfffffc1f 0xd63f0000
+@aarch64 all lacks blr
 @run -2147483647 -> -2147483647
 @run 2147483647 -> 2147483647
 ---
@@ -103,7 +103,7 @@ fn main raw:i32 -> i32
   r = bitcast i32 f
   ret r
 @aarch64-isel check: Widen(Convert
-@aarch64 all lacks 0xfffffc1f 0xd63f0000
+@aarch64 all lacks blr
 @run 1 -> 0x00010000
 @run 0x8000 -> 0x80000000
 @run 0xff81 -> 0xffc00000

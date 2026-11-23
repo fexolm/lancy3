@@ -1,3 +1,4 @@
+use crate::hir::ssa::InterpretError;
 use crate::hir::{Binary, Function, Op as H, Terminator};
 use crate::{
     CallError, ScalarKernel,
@@ -31,14 +32,15 @@ fn arithmetic_and_spills_match_the_reference() {
                 input[39] = right;
                 let expected = f.interpret(&input);
                 let native = k.call(&input);
-                match expected {
-                    Ok(value) => assert_eq!(native, Ok(value), "{op:?}({left}, {right})"),
+                match &expected {
+                    Ok(value) => assert_eq!(native, Ok(*value), "{op:?}({left}, {right})"),
                     Err(_) => {
                         let trap = if right == 0 {
                             CallError::DivisionByZero
                         } else {
                             CallError::DivisionOverflow
                         };
+                        assert_eq!(expected, Err(InterpretError::Trap(trap)));
                         assert_eq!(native, Err(trap), "{op:?}({left}, {right})");
                     }
                 }

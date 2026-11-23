@@ -6,7 +6,7 @@ fn main x:i32 -> i32
 @aarch64-isel check: Imm(Add_32_addsub_imm, 4095, 0,
 @aarch64-alloc check: spill words 0
 @aarch64-alloc check: Imm(Add_32_addsub_imm, 4095, 0,
-@aarch64 all has 0xfffffc00 0x113ffc00
+@aarch64 all has add.w.4095
 @run 2147483647 -> -2147479554
 ---
 fn main x:i32 -> i32
@@ -15,7 +15,7 @@ fn main x:i32 -> i32
   ret r
 @aarch64-isel not: Literal
 @aarch64-isel check: Imm(Sub_32_addsub_imm, 1, 12,
-@aarch64 all has 0xfffffc00 0x51400400
+@aarch64 all has sub.w.4096
 @run -2147483648 -> 2147479552
 ---
 fn main x:i32 -> i32
@@ -24,7 +24,7 @@ fn main x:i32 -> i32
   ret r
 @aarch64-isel check: Literal(I32, 4097,
 @aarch64-isel check: Three(Add_32_addsub_shift)
-@aarch64 all has 0xffe0fc00 0x0b000000
+@aarch64 all has add.w
 @run -4098 -> -1
 ---
 fn main x:i32 -> i32
@@ -33,7 +33,7 @@ fn main x:i32 -> i32
   ret r
 @aarch64-isel check: Literal(I32, 37,
 @aarch64-isel check: Three(Sub_32_addsub_shift)
-@aarch64 all has 0xffe0fc00 0x4b000000
+@aarch64 all has sub.w
 @run 12 -> 25
 @run -12 -> 49
 ---

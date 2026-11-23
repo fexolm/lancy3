@@ -12,7 +12,7 @@ fn main x:i32 y:i32 -> i32
 @aarch64-isel check: Float(Fsub_scalar
 @aarch64-isel check: Float(Fmul_scalar
 @aarch64-isel check: Float(Fdiv_scalar
-@aarch64 all lacks 0xfffffc1f 0xd63f0000
+@aarch64 all lacks blr
 @run 0x40c00000 0x40000000 -> 0x3fd55555
 ---
 fn main x:i32 y:i32 -> i32
@@ -21,7 +21,7 @@ fn main x:i32 y:i32 -> i32
   q = div xf yf
   r = bitcast i32 q
   ret r
-@aarch64 all has 0xffe0fc00 0x1e201800
+@aarch64 all has fdiv.s
 @run 0x80000000 0x40000000 -> 0x80000000
 @run 0x3f800000 0x00000000 -> 0x7f800000
 ---
@@ -39,10 +39,10 @@ fn main x:vec.f64 y:vec.f64 -> vec.f64
   q = simd.div x y
   r = simd.sub x q
   ret r
-@aarch64 neon has 0xffe0fc00 0x6e60fc00
-@aarch64 sve has 0xffffe000 0x65cd8000
-@aarch64 sve2 has 0xffffe000 0x65cd8000
-@aarch64 all lacks 0xfffffc1f 0xd63f0000
+@aarch64 neon has v.fdiv.2d
+@aarch64 sve has z.fdiv.d
+@aarch64 sve2 has z.fdiv.d
+@aarch64 all lacks blr
 ---
 fn main dst:ptr x:i32 -> i32
   s = cast i8 x
@@ -55,7 +55,7 @@ fn main dst:ptr x:i32 -> i32
   store next uw
   ret x
 @aarch64-isel check: IntCast
-@aarch64 all lacks 0xfffffc1f 0xd63f0000
+@aarch64 all lacks blr
 @run -128 -> -128 | 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 | 80 ff ff ff ff ff ff ff 80 00 00 00 00 00 00 00
 ---
 fn main x:i32 y:i32 -> i32
@@ -66,8 +66,8 @@ fn main x:i32 y:i32 -> i32
   r = bitcast i32 fused
   ret r
 @aarch64-isel check: Fma(Fmadd_scalar
-@aarch64 all has 0xffe08000 0x1f000000
-@aarch64 all lacks 0xfffffc1f 0xd63f0000
+@aarch64 all has fmadd.s
+@aarch64 all lacks blr
 @run 0x3f800001 0x3f7ffffe -> 0xa8800000
 ---
 fn main x:i32 y:i32 -> i32
@@ -82,8 +82,8 @@ fn main x:i32 y:i32 -> i32
   lane = simd.extract fused z
   r = bitcast i32 lane
   ret r
-@aarch64 neon has 0xffe0fc00 0x4e20cc00
-@aarch64 sve has 0xffe0e000 0x65a00000
-@aarch64 sve2 has 0xffe0e000 0x65a00000
-@aarch64 all lacks 0xfffffc1f 0xd63f0000
+@aarch64 neon has v.fmla.4s
+@aarch64 sve has z.fmla.s
+@aarch64 sve2 has z.fmla.s
+@aarch64 all lacks blr
 @run 0x3f800001 0x3f7ffffe -> 0xa8800000

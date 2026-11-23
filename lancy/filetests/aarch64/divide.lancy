@@ -16,10 +16,10 @@ fn main p:ptr first:i32 second:i32 -> i32
   result = simd.extract value zero
   ret result
 @aarch64-isel check: VectorDivide(
-@aarch64 neon has 0x7fe0fc00 0x1ac00c00
-@aarch64 sve has 0xff3fe000 0x04140000
-@aarch64 sve2 has 0xff3fe000 0x04140000
-@aarch64 all lacks 0xfffffc1f 0xd63f0000
+@aarch64 neon has sdiv
+@aarch64 sve has z.sdiv
+@aarch64 sve2 has z.sdiv
+@aarch64 all lacks blr
 @run 0 -1 -> !zero | 00 00 00 00 00 00 00 00 | 4d 00 00 00 00 00 00 00
 @run -1 0 -> !overflow | 00 00 00 00 00 00 00 00 | 4d 00 00 00 00 00 00 00
 @run 2 3 -> -1073741824 | 00 00 00 00 00 00 00 00 | 4d 00 00 00 63 00 00 00
@@ -42,13 +42,13 @@ fn main p:ptr first:i32 second:i32 -> i32
   result = simd.extract value zero
   ret result
 @aarch64-isel check: VectorDivide(
-@aarch64 neon has 0x7fe0fc00 0x1ac00c00
-@aarch64 sve has 0xff3fe000 0x04140000
-@aarch64 sve2 has 0xff3fe000 0x04140000
-@aarch64 neon has 0x7fe08000 0x1b008000
-@aarch64 sve has 0xff20e000 0x04006000
-@aarch64 sve2 has 0xff20e000 0x04006000
-@aarch64 all lacks 0xfffffc1f 0xd63f0000
+@aarch64 neon has sdiv
+@aarch64 sve has z.sdiv
+@aarch64 sve2 has z.sdiv
+@aarch64 neon has msub
+@aarch64 sve has z.mls
+@aarch64 sve2 has z.mls
+@aarch64 all lacks blr
 @run 0 -1 -> !zero | 00 00 00 00 00 00 00 00 | 4d 00 00 00 00 00 00 00
 @run -1 0 -> !overflow | 00 00 00 00 00 00 00 00 | 4d 00 00 00 00 00 00 00
 @run 2 3 -> 0 | 00 00 00 00 00 00 00 00 | 4d 00 00 00 63 00 00 00
@@ -66,7 +66,7 @@ fn main x:i32 y:i32 -> i32
   result = cast i32 lane
   ret result
 @aarch64-isel check: VectorDivide(
-@aarch64 all lacks 0xfffffc1f 0xd63f0000
+@aarch64 all lacks blr
 @run -7 3 -> -1
 @run 7 -3 -> 1
 @run -128 -1 -> !overflow
@@ -81,6 +81,6 @@ fn main x:i32 -> i32
   unused = simd.div a b
   ret zero
 @aarch64-isel check: VectorDivide(
-@aarch64 all lacks 0xfffffc1f 0xd63f0000
+@aarch64 all lacks blr
 @run 0 -> !zero
 @run 1 -> 0

@@ -1,6 +1,7 @@
-use crate::ScalarKernel;
+use crate::hir::ssa::InterpretError;
 use crate::hir::{Binary, Function, Op as H, Scale, Terminator, Type};
 use crate::lir::x64::compile::compile;
+use crate::{CallError, ScalarKernel};
 use std::sync::Arc;
 
 #[test]
@@ -79,7 +80,7 @@ fn checked_nested_access_preserves_prior_stores_and_forwards_addresses() {
             // SAFETY: both arrays have three elements and all variable indices are checked.
             let result = unsafe {
                 if native {
-                    k.call_raw(&args).map_err(|e| e.to_string())
+                    k.call_raw(&args).map_err(InterpretError::Trap)
                 } else {
                     root.interpret_raw(&args)
                 }
@@ -88,7 +89,7 @@ fn checked_nested_access_preserves_prior_stores_and_forwards_addresses() {
                 assert_eq!(result, Ok(45));
                 assert_eq!(out, [9, 45, 45]);
             } else {
-                assert!(result.unwrap_err().contains("bounds"));
+                assert_eq!(result, Err(InterpretError::Trap(CallError::OutOfBounds)));
                 assert_eq!(out, [9, -77, -77]);
             }
         }

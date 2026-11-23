@@ -9,6 +9,9 @@ use crate::{CompileError, Inlining, ScalarKernel, jit, lir};
 use filecheck::{CheckerBuilder, NO_VARIABLES};
 use run::Run;
 use std::collections::BTreeMap;
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 pub(crate) type Result<T> = std::result::Result<T, String>;
 
@@ -107,6 +110,18 @@ impl<'a> Case<'a> {
         Ok(())
     }
 
+    /// Every directive must reach its stage: a check that silently never
+    /// runs would pass regardless of the compiler's output.
+    fn all_checks_reached(&self) -> Result<()> {
+        if let Some(stage) = self.checks.keys().next() {
+            return Err(format!("@{stage} checks were never reached"));
+        }
+        if !self.encodings.is_empty() {
+            return Err("@aarch64 checks were never reached".into());
+        }
+        Ok(())
+    }
+
     fn done(&self) -> bool {
         self.runs.is_empty() && self.checks.is_empty() && self.encodings.is_empty()
     }
@@ -177,6 +192,7 @@ impl<'a> Case<'a> {
             Ok(self.check_optimized(module, ids))
         })
         .map_err(|e| format!("opt: {e}"))??;
+        self.all_checks_reached()?;
         if !self.runs.is_empty() {
             let kernel = ScalarKernel::compile_with_inlining(&f, self.policy)
                 .map_err(|e| format!("JIT: {e}"))?;
@@ -184,7 +200,7 @@ impl<'a> Case<'a> {
                 // SAFETY: these inputs passed checked interpretation on f above;
                 // the kernel was compiled from f and remains live across the call.
                 unsafe {
-                    run.native(&kernel)?;
+                    run.native(&f, &kernel)?;
                 }
             }
         }
@@ -214,13 +230,75 @@ fn run_text(text: &str) -> Result<()> {
         .map_err(|e| format!("case at line {start}: {e}"))
 }
 
-fn fixture(file: &str, text: &str) {
-    if let Err(error) = run_text(text) {
-        panic!("{file}: {error}");
+/// Every `.lancy` file under `filetests/`, found at run time so that no build
+/// script runs for consumers of the crate. `aarch64/` runs only on AArch64 and
+/// `passes/experimental/` only with `experimental-simd`.
+fn fixtures(root: &Path, dir: &Path, files: &mut Vec<PathBuf>) -> std::io::Result<()> {
+    for entry in fs::read_dir(dir)? {
+        let path = entry?.path();
+        let relative = path.strip_prefix(root).unwrap();
+        if path.is_dir() {
+            let skip = (relative == Path::new("aarch64") && !cfg!(target_arch = "aarch64"))
+                || (relative == Path::new("passes/experimental")
+                    && !cfg!(feature = "experimental-simd"));
+            if !skip {
+                fixtures(root, &path, files)?;
+            }
+        } else if path.extension().is_some_and(|ext| ext == "lancy") {
+            files.push(relative.to_owned());
+        }
     }
+    Ok(())
 }
 
-include!(concat!(env!("OUT_DIR"), "/filetests.rs"));
+/// Run every fixture, or those whose path contains `LANCY_FILETEST`, in
+/// parallel, and report all failures together.
+#[test]
+fn filetests() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("filetests");
+    let mut files = Vec::new();
+    fixtures(&root, &root, &mut files).expect("read lancy/filetests");
+    files.sort();
+    assert!(!files.is_empty(), "no .lancy tests found");
+    if let Some(filter) = std::env::var_os("LANCY_FILETEST") {
+        let filter = filter.to_string_lossy().into_owned();
+        files.retain(|file| file.to_string_lossy().contains(&filter));
+        assert!(!files.is_empty(), "no .lancy test matches {filter}");
+    }
+    let next = AtomicUsize::new(0);
+    let workers = std::thread::available_parallelism().map_or(1, usize::from);
+    let mut failures: Vec<String> = std::thread::scope(|scope| {
+        let workers: Vec<_> = (0..workers.min(files.len()))
+            .map(|_| {
+                scope.spawn(|| {
+                    let mut failures = Vec::new();
+                    while let Some(file) = files.get(next.fetch_add(1, Ordering::Relaxed)) {
+                        let text = fs::read_to_string(root.join(file)).unwrap();
+                        let name = file.display().to_string().replace('\\', "/");
+                        match std::panic::catch_unwind(|| run_text(&text)) {
+                            Ok(Ok(())) => {}
+                            Ok(Err(error)) => failures.push(format!("{name}: {error}")),
+                            Err(_) => failures.push(format!("{name}: panicked")),
+                        }
+                    }
+                    failures
+                })
+            })
+            .collect();
+        workers
+            .into_iter()
+            .flat_map(|worker| worker.join().unwrap())
+            .collect()
+    });
+    failures.sort();
+    assert!(
+        failures.is_empty(),
+        "{} of {} filetests failed:\n\n{}",
+        failures.len(),
+        files.len(),
+        failures.join("\n\n")
+    );
+}
 
 #[test]
 fn mismatches_identify_the_stage_even_when_native_execution_would_succeed() {
@@ -270,4 +348,40 @@ fn foreign_machine_expectations_leave_common_checks_active() {
     let case =
         format!("fn main x:i32 -> i32\nret x\n@{foreign} check: absent_opcode\n@opt check: ret v0");
     run_text(&case).unwrap();
+}
+
+#[test]
+fn checks_that_never_reach_their_stage_are_errors() {
+    let mut case = Case::default();
+    case.line(1, "@opt check: ret").unwrap();
+    let error = case.all_checks_reached().unwrap_err();
+    assert!(error.contains("@opt checks were never reached"), "{error}");
+}
+
+#[test]
+fn run_literals_must_match_the_signature() {
+    for (run, error) in [
+        ("@run 1.5f64 -> 1", "expected F32, written as f64"),
+        ("@run 1 2 -> 1", "signature takes 1 values and 0 buffers"),
+        ("@run 1 -> vec.f32[1]", "expected F32, written as vec.f32"),
+        ("@run 1 -> 1 | 00", "bytes before | bytes after"),
+        ("@run 1 -> !nope", "unknown trap !nope"),
+    ] {
+        let text = format!("fn main x:f32 -> f32\nret x\n{run}");
+        let actual = run_text(&text).unwrap_err();
+        assert!(actual.contains(error), "{run}: {actual}");
+    }
+}
+
+#[cfg(target_arch = "aarch64")]
+#[test]
+fn aarch64_encodings_are_named_and_profiles_known() {
+    for (check, error) in [
+        ("all has no.such", "unknown AArch64 encoding no.such"),
+        ("sme has blr", "invalid AArch64 assertion"),
+    ] {
+        let text = format!("fn main x:i32 -> i32\nret x\n@aarch64 {check}");
+        let actual = run_text(&text).unwrap_err();
+        assert!(actual.contains(error), "{check}: {actual}");
+    }
 }

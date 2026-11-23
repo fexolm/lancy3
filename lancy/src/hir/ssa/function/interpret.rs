@@ -1,9 +1,29 @@
+use crate::CallError;
 use crate::hir::{Block, Edge, Function, Inst, Op, Simd, Terminator, Type, Value};
 use crate::hir::{
     eval::{Bits, evaluate, read},
     operation::operation,
 };
 use crate::support::slotmap::DenseMap;
+
+/// Why the test interpreter stopped without a result.
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+pub(crate) enum InterpretError {
+    /// The trap native code raises for the same input.
+    #[error(transparent)]
+    Trap(#[from] CallError),
+    /// A fixture access left its run buffer.
+    #[error("access outside buffer {buffer} at offset {offset}")]
+    OutOfBuffer { buffer: usize, offset: u64 },
+    /// The interpreter cannot model this signature or operation.
+    #[error("unsupported by the interpreter: {0}")]
+    Unsupported(&'static str),
+    /// The function does not verify.
+    #[error("invalid IR: {0}")]
+    Invalid(String),
+}
+
+type Result<T> = std::result::Result<T, InterpretError>;
 
 struct Frame<'a> {
     function: &'a Function,
@@ -55,34 +75,43 @@ impl<'a> Frame<'a> {
     }
 }
 
-fn buffer_value(bytes: &mut [u8], addr: u64, ty: Type, width: usize) -> Result<&mut [u8], String> {
-    if ty == Type::Ptr {
-        return Err("filetest buffer cannot contain native pointers".into());
-    }
-    bytes
-        .get_mut(addr as usize..)
-        .and_then(|tail| tail.get_mut(..ty.bytes(width)))
-        .ok_or_else(|| format!("filetest access outside buffer at offset {addr}"))
+/// Run buffer `k` starts at address `k << 32`, so a pointer names its buffer
+/// and every access is checked against that buffer alone.
+pub(crate) fn buffer_address(buffer: usize) -> u64 {
+    (buffer as u64) << 32
 }
 
-fn word(x: u64) -> Bits {
+fn buffer_value(buffers: &mut [Vec<u8>], addr: u64, ty: Type, width: usize) -> Result<&mut [u8]> {
+    if ty == Type::Ptr {
+        return Err(InterpretError::Unsupported(
+            "native pointers in a run buffer",
+        ));
+    }
+    let (buffer, offset) = ((addr >> 32) as usize, addr & u64::from(u32::MAX));
+    buffers
+        .get_mut(buffer)
+        .and_then(|bytes| bytes.get_mut(offset as usize..))
+        .and_then(|tail| tail.get_mut(..ty.bytes(width)))
+        .ok_or(InterpretError::OutOfBuffer { buffer, offset })
+}
+
+pub(super) fn word(x: u64) -> Bits {
     let mut bits = [0; 64];
     bits[..8].copy_from_slice(&x.to_le_bytes());
     bits
 }
 
+/// # Safety
+/// Without `buffer`, pointer arguments and addresses read from memory must be
+/// valid for every executed access. With it, pointers are
+/// [`buffer_address`]es and every access is checked.
 pub(super) unsafe fn run(
     function: &Function,
-    args: &[u64],
-    mut buffer: Option<&mut [u8]>,
-) -> Result<u64, String> {
+    args: Vec<Bits>,
+    mut buffer: Option<&mut [Vec<u8>]>,
+) -> Result<Bits> {
     let width = crate::ScalarKernel::vector_bytes();
-    if function.param_types().iter().any(|ty| ty.bytes(width) > 8)
-        || function.return_type().bytes(width) > 8
-    {
-        return Err("expected word-sized root signature".into());
-    }
-    let mut frames = vec![Frame::new(function, args.iter().copied().map(word), None)];
+    let mut frames = vec![Frame::new(function, args, None)];
     loop {
         let f = frames.last_mut().unwrap();
         let graph = f.function;
@@ -96,7 +125,7 @@ pub(super) unsafe fn run(
                     if let Some(ret) = ret {
                         frames.last_mut().unwrap().values[ret] = result;
                     } else {
-                        return Ok(read(&result[..8]) as u64);
+                        return Ok(result);
                     }
                 }
                 Terminator::Jump(edge) => f.jump(edge),
@@ -119,13 +148,13 @@ pub(super) unsafe fn run(
             Op::Copy(v) => f.values[v],
             Op::BoundsCheck(index, len) => {
                 if f.read(index) as u32 >= f.read(len) as u32 {
-                    return Err("kernel slice index out of bounds".into());
+                    return Err(CallError::OutOfBounds.into());
                 }
                 continue;
             }
             Op::CheckOverflow(cond) => {
                 if f.read(cond) as u32 != 0 {
-                    return Err(crate::CallError::IntegerOverflow.to_string());
+                    return Err(CallError::IntegerOverflow.into());
                 }
                 continue;
             }
@@ -227,7 +256,7 @@ pub(super) unsafe fn run(
             Op::RustCall(import, a, b) => {
                 let result = ((import.resolve)())(f.read(a) as i32, f.read(b) as i32);
                 if result >> 32 != 0 {
-                    return Err(crate::CallError::RustPanic.to_string());
+                    return Err(CallError::RustPanic.into());
                 }
                 word(u64::from(result as u32))
             }
@@ -236,13 +265,17 @@ pub(super) unsafe fn run(
                 let arguments: Vec<_> = words.iter().map(|&value| f.read(value) as i32).collect();
                 let result = import.invoke(&arguments);
                 if result >> 32 != 0 {
-                    return Err(crate::CallError::RustPanic.to_string());
+                    return Err(CallError::RustPanic.into());
                 }
                 word(u64::from(result as u32))
             }
-            Op::RustContextCall(..) => return Err("interpreter has no Rust context".into()),
+            Op::RustContextCall(..) => {
+                return Err(InterpretError::Unsupported("Rust context calls"));
+            }
             Op::CallScratch { .. } if buffer.is_some() => {
-                return Err("filetest buffer cannot address native scratch memory".into());
+                return Err(InterpretError::Unsupported(
+                    "call scratch with a run buffer",
+                ));
             }
             Op::CallScratch { offset, .. } => {
                 word(f.scratch.as_mut_ptr() as u64 + u64::from(offset))
@@ -261,11 +294,7 @@ pub(super) unsafe fn run(
                 let (action, input, output, inputs) =
                     operation(op, |v| graph.value_type(v)).unwrap();
                 let args = inputs.map(|v| v.map_or([0; 64], |v| f.values[v]));
-                evaluate(action, input, output, &args, width).map_err(|e| match e {
-                    crate::CallError::DivisionOverflow => "signed division overflow".to_owned(),
-                    crate::CallError::DivisionByZero => "integer division by zero".to_owned(),
-                    e => e.to_string(),
-                })?
+                evaluate(action, input, output, &args, width)?
             }
         };
         f.values[graph.result(inst).unwrap()] = result;

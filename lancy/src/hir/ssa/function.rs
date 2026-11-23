@@ -3,6 +3,8 @@
 
 #[cfg(test)]
 mod interpret;
+#[cfg(test)]
+pub(crate) use interpret::{InterpretError, buffer_address};
 mod verify;
 
 pub(crate) use verify::VerifiedBody;
@@ -665,9 +667,11 @@ impl Function {
 
 #[cfg(test)]
 impl Function {
-    pub fn interpret(&self, args: &[i32]) -> Result<i32, String> {
+    pub(crate) fn interpret(&self, args: &[i32]) -> Result<i32, InterpretError> {
         if self.param_types().iter().any(|&ty| ty != Type::I32) || self.return_type != Type::I32 {
-            return Err("expected an i32-only signature".into());
+            return Err(InterpretError::Unsupported(
+                "a signature that is not all i32",
+            ));
         }
         let args: Vec<_> = args.iter().map(|&x| x as u32 as u64).collect();
         // SAFETY: no pointer can enter a verified function through this signature.
@@ -677,37 +681,77 @@ impl Function {
     /// # Safety
     /// Pointer arguments and addresses read from memory must be valid for all
     /// accesses executed by the function and its callees, including writes.
-    pub(crate) unsafe fn interpret_raw(&self, args: &[u64]) -> Result<u64, String> {
+    pub(crate) unsafe fn interpret_raw(&self, args: &[u64]) -> Result<u64, InterpretError> {
         if args.len() != self.arity() {
-            return Err("wrong argument count".into());
+            return Err(crate::CallError::Arity {
+                expected: self.arity(),
+                actual: args.len(),
+            }
+            .into());
         }
-        self.verified_module().map_err(|error| error.to_string())?;
+        let width = crate::ScalarKernel::vector_bytes();
+        if self.param_types().iter().any(|ty| ty.bytes(width) > 8)
+            || self.return_type.bytes(width) > 8
+        {
+            return Err(InterpretError::Unsupported(
+                "a root signature wider than a word",
+            ));
+        }
+        self.verified_module()
+            .map_err(|error| InterpretError::Invalid(error.to_string()))?;
+        let args = args.iter().map(|&x| interpret::word(x)).collect();
         // SAFETY: the caller supplies every pointer reachable during execution.
-        unsafe { interpret::run(self, args, None) }
+        let result = unsafe { interpret::run(self, args, None) }?;
+        Ok(u64::from_le_bytes(result[..8].try_into().unwrap()))
     }
 
-    /// Execute a filetest with one buffer. Its pointer is represented by a
-    /// byte offset so an invalid fixture is rejected before entering the JIT.
-    pub(crate) fn interpret_buffer(&self, args: &[i32], buffer: &mut [u8]) -> Result<i32, String> {
-        let Some((Type::Ptr, scalars)) = self.param_types().split_first() else {
-            return Err("expected leading buffer argument".into());
-        };
-        if self.return_type != Type::I32
-            || scalars.len() != args.len()
-            || scalars.iter().any(|&t| t != Type::I32)
-        {
-            return Err("expected (ptr, i32...) -> i32 matching the run arguments".into());
+    /// Execute a filetest. Each pointer argument is an
+    /// [`interpret::buffer_address`] into `buffers`, so an invalid fixture is
+    /// rejected before entering the JIT.
+    pub(crate) fn interpret_buffers(
+        &self,
+        args: &[crate::hir::eval::Bits],
+        buffers: &mut [Vec<u8>],
+    ) -> Result<crate::hir::eval::Bits, InterpretError> {
+        if args.len() != self.arity() {
+            return Err(crate::CallError::Arity {
+                expected: self.arity(),
+                actual: args.len(),
+            }
+            .into());
         }
-        if let Some((_, width, _)) = self.slice_param(Value::from_index(0))
-            && (args[0] < 0 || args[0] as usize > buffer.len() / usize::from(width))
-        {
-            return Err("declared slice extends beyond the run buffer".into());
+        let params = self.params(self.entry());
+        let word = |i: usize| u64::from_le_bytes(args[i][..8].try_into().unwrap());
+        for (i, &ty) in self.param_types().iter().enumerate() {
+            if ty != Type::Ptr {
+                continue;
+            }
+            let buffer = (0..buffers.len())
+                .find(|&k| interpret::buffer_address(k) == word(i))
+                .ok_or(InterpretError::Unsupported(
+                    "a pointer that is not a run buffer",
+                ))?;
+            if let Some((len, bytes, _)) = self.slice_param(params[i]) {
+                let len = params.iter().position(|&param| param == len).unwrap();
+                let len = word(len) as u32 as i32;
+                if len < 0 || len as usize > buffers[buffer].len() / usize::from(bytes) {
+                    return Err(InterpretError::OutOfBuffer {
+                        buffer,
+                        offset: buffers[buffer].len() as u64,
+                    });
+                }
+            }
         }
-        self.verified_module().map_err(|e| e.to_string())?;
-        let words: Vec<_> = std::iter::once(0)
-            .chain(args.iter().map(|&x| u64::from(x as u32)))
-            .collect();
-        // SAFETY: buffer mode services every load/store through checked slice accesses.
-        unsafe { interpret::run(self, &words, Some(buffer)) }.map(|v| v as i32)
+        self.verified_module()
+            .map_err(|error| InterpretError::Invalid(error.to_string()))?;
+        if self.param_types().contains(&Type::Ptr) {
+            // SAFETY: buffer mode services every load/store through checked accesses.
+            unsafe { interpret::run(self, args.to_vec(), Some(buffers)) }
+        } else {
+            // SAFETY: no pointer enters a verified function without pointer
+            // parameters; its only addresses come from CallScratch inside a
+            // live interpreter frame.
+            unsafe { interpret::run(self, args.to_vec(), None) }
+        }
     }
 }

@@ -8,7 +8,7 @@ fn main x:i32 -> i32
   sum = call plus_one x
   ret sum
 
-@aarch64 all lacks 0xfc000000 0x94000000
+@aarch64 all lacks bl
 @run 41 -> 42
 
 ---
@@ -23,5 +23,5 @@ fn main x:i32 -> i32
   sum = call plus_one x
   ret sum
 
-@aarch64 all has 0xfc000000 0x94000000
+@aarch64 all has bl
 @run 41 -> 42

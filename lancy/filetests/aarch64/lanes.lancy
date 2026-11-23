@@ -6,9 +6,9 @@ fn main idx:i32 x:i32 -> i32
   r = sub after before
   ret r
 @aarch64-isel check: LaneAccess
-@aarch64 sve has 0xffffffe0 0x04a14000
-@aarch64 sve2 has 0xffffffe0 0x04a14000
-@aarch64 all lacks 0xfffffc1f 0xd63f0000
+@aarch64 sve has z.index.s.0.1
+@aarch64 sve2 has z.index.s.0.1
+@aarch64 all lacks blr
 @run 0 11 -> 11
 @run 3 11 -> 8
 @run -1 11 -> !bounds
@@ -45,7 +45,7 @@ fn main x:i32 y:i32 -> i32
   s2 = add s s
   r = add s2 u
   ret r
-@aarch64 all lacks 0xfffffc1f 0xd63f0000
+@aarch64 all lacks blr
 @run -1 0 -> -2
 @run 0 -1 -> -1
 @run 1 2 -> -3
@@ -70,7 +70,7 @@ fn main x:i32 y:i32 -> i32
   partial = add e n2
   r = add partial l4
   ret r
-@aarch64 all lacks 0xfffffc1f 0xd63f0000
+@aarch64 all lacks blr
 @run 0x7fc01234 0x3f800000 -> -2
 @run 0x80000000 0 -> -1
 @run 0xbf800000 0x3f800000 -> -6
@@ -85,7 +85,7 @@ fn main x:i32 -> i32
   b = simd.all mixed
   r = add a b
   ret r
-@aarch64 all lacks 0xfffffc1f 0xd63f0000
+@aarch64 all lacks blr
 @run 0 -> -1
 @run 2 -> -2
 @run 0x80000000 -> -2

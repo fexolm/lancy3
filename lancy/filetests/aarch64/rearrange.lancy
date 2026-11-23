@@ -30,10 +30,10 @@ fn main extra:i32 -> i32
   result = add first_pair last_pair
   ret result
 @aarch64-isel check: Shuffle(
-@aarch64 neon has 0xffe0fc00 0x4e002000
-@aarch64 sve has 0xff20fc00 0x05203000
-@aarch64 sve2 has 0xff20fc00 0x05203000
-@aarch64 all lacks 0xfffffc1f 0xd63f0000
+@aarch64 neon has v.tbl2.16b
+@aarch64 sve has z.tbl
+@aarch64 sve2 has z.tbl
+@aarch64 all lacks blr
 @run 0 -> 218
 @run 1 -> 219
 @run 32 -> 208
@@ -56,7 +56,7 @@ fn main delta:i32 -> i32
   lane = simd.extract result zero
   r = cast i32 lane
   ret r
-@aarch64 all lacks 0xfffffc1f 0xd63f0000
+@aarch64 all lacks blr
 @run -1 -> 23
 @run 0 -> 0
 @run 127 -> 0
@@ -82,10 +82,10 @@ fn main first:i32 last:i32 -> i32
   sum = add a upper
   result = add sum skip
   ret result
-@aarch64 sve2 has 0xffe0e000 0x45a0c000
-@aarch64 all lacks 0xfffffc1f 0xd63f0000
-@aarch64 sve lacks 0xffa0e000 0x45a0c000
-@aarch64 neon lacks 0xffa0e000 0x45a0c000
+@aarch64 sve2 has z.histcnt.s
+@aarch64 all lacks blr
+@aarch64 sve lacks z.histcnt
+@aarch64 neon lacks z.histcnt
 @run 0x80000001 -7 -> 203
 @run 1 -7 -> 176
 @run -1 1 -> 11
@@ -115,8 +115,8 @@ fn main first:i32 last:i32 -> i32
   upper = mul b32 sixteen
   result = add a32 upper
   ret result
-@aarch64 sve2 has 0xffe0e000 0x45e0c000
-@aarch64 all lacks 0xfffffc1f 0xd63f0000
+@aarch64 sve2 has z.histcnt.d
+@aarch64 all lacks blr
 @run -1 -7 -> 203
 @run 1 -7 -> 176
 @run -1 1 -> 11
@@ -153,9 +153,9 @@ fn main first:i32 last:i32 -> i32
   result = add sum middle
   ret result
 @aarch64-isel check: Expand(
-@aarch64 sve has 0xff3fe000 0x052c8000
-@aarch64 sve2 has 0xff3fe000 0x052c8000
-@aarch64 all lacks 0xfffffc1f 0xd63f0000
+@aarch64 sve has z.splice
+@aarch64 sve2 has z.splice
+@aarch64 all lacks blr
 @run 0x8001 0x8100 -> 197504
 @run 0x8001 0x0080 -> 384
 @run 0x0080 0x8100 -> 196608
@@ -172,7 +172,7 @@ fn main first:i32 -> i32
   diff = simd.ne expanded values
   result = simd.any diff
   ret result
-@aarch64 all lacks 0xfffffc1f 0xd63f0000
+@aarch64 all lacks blr
 @run 21 -> 0
 @run 255 -> 0
 ---
@@ -193,10 +193,10 @@ fn main -> i32
   r = cast i32 first
   ret r
 @aarch64-isel check: Compact {
-@aarch64 neon has 0xffe08400 0x6e000000
-@aarch64 sve has 0xffffe000 0x05a18000
-@aarch64 sve2 has 0xffffe000 0x05a18000
-@aarch64 all lacks 0xfffffc1f 0xd63f0000
+@aarch64 neon has v.ext.16b
+@aarch64 sve has z.compact.s
+@aarch64 sve2 has z.compact.s
+@aarch64 all lacks blr
 @run -> 0
 ---
 fn main -> i32
@@ -211,5 +211,5 @@ fn main -> i32
   result = simd.any extra
   ret result
 @aarch64-isel check: WideMaskTest(
-@aarch64 all lacks 0xfffffc1f 0xd63f0000
+@aarch64 all lacks blr
 @run -> 0

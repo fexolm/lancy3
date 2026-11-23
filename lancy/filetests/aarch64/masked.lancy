@@ -13,10 +13,10 @@ fn main data:ptr flag:i32 -> i32
   second = simd.extract got one
   r = sub first second
   ret r
-@aarch64 sve has 0xffffe000 0xa540a000
-@aarch64 sve has 0xffffe000 0xe540e000
-@aarch64 sve2 has 0xffffe000 0xa540a000
-@aarch64 sve2 has 0xffffe000 0xe540e000
+@aarch64 sve has z.ld1w
+@aarch64 sve has z.st1w
+@aarch64 sve2 has z.ld1w
+@aarch64 sve2 has z.st1w
 @run 0x80000000 -> -37 | 2a 00 00 00 0b 00 00 00 | 63 00 00 00 0b 00 00 00
 @run 1 -> 0 | 2a 00 00 00 0b 00 00 00 | 2a 00 00 00 0b 00 00 00
 ---
@@ -49,9 +49,9 @@ fn main flag1:i32 flag3:i32 -> i32
   hi = add c8 d12
   r = add lo hi
   ret r
-@aarch64 neon lacks 0xffffe000 0x05a18000
-@aarch64 sve has 0xffffe000 0x05a18000
-@aarch64 sve2 has 0xffffe000 0x05a18000
+@aarch64 neon lacks z.compact.s
+@aarch64 sve has z.compact.s
+@aarch64 sve2 has z.compact.s
 @run 0x80000000 0x80000000 -> 236
 @run 0x80000001 0x80000000 -> 236
 @run 1 0x80000000 -> 14
@@ -87,9 +87,9 @@ fn main data:ptr flag:i32 -> i32
   ab = add ai bi
   r = add ab ci
   ret r
-@aarch64 sve has 0xffe0e000 0x84e04000
-@aarch64 sve2 has 0xffe0e000 0x84e04000
-@aarch64 all lacks 0xfffffc1f 0xd63f0000
+@aarch64 sve has z.ld1h.gather.s
+@aarch64 sve2 has z.ld1h.gather.s
+@aarch64 all lacks blr
 @run 0x8001 -> 207 | 21 00 43 00 65 00 | 21 00 43 00 65 00
 @run 1 -> 247 | 21 00 43 00 65 00 | 21 00 43 00 65 00
 ---
@@ -116,8 +116,8 @@ fn main data:ptr flag:i32 -> i32
   values = simd.insert data_a last b
   simd.maskedstore base indices flags values
   ret z
-@aarch64 sve has 0xffe0e000 0xe440c000
-@aarch64 sve2 has 0xffe0e000 0xe440c000
-@aarch64 all lacks 0xfffffc1f 0xd63f0000
+@aarch64 sve has z.st1b.scatter.s
+@aarch64 sve2 has z.st1b.scatter.s
+@aarch64 all lacks blr
 @run 0x81 -> 0 | 00 43 65 | 95 43 65
 @run 1 -> 0 | 00 43 65 | 31 43 65
