@@ -87,3 +87,18 @@
 - `numeric_coverage`: кроме «мягких» входов — граничные (NaN, sNaN, ±0, ±inf, субнормальные, экстремумы, ничьи округления, MIN/MAX/−1, 0-делители, сдвиги ≥ ширины), каждое значение в паре с каждым; сравнивается `Result` вместе с видом ловушки. Расхождений нет ни на x64, ни на NEON/SVE/SVE2.
 - ABI-проба callee-saved переносимая: `ScalarKernel::invoke_with` (production `invoke` — его частный случай) позволяет войти через вызывающего с канарейками: iced на x64, `asm!` для x19–x28/d8–d15 на AArch64; нормальный выход и ловушка, Always/Never. Проверено, что порча x21/d12 ловится. Новые тесты: 8 потоков на одном ядре + `drop` в другом потоке; `EmptyCode`.
 - Проверки: `cargo test -p lancy --release` при `SPLICE_SIMD=sse|avx2|auto`; под `qemu-aarch64 -cpu max`: neon, sve VL16, sve2 VL32/VL64 — зелёные; clippy x64 и aarch64; `cargo check --target x86_64-pc-windows-msvc --tests`.
+
+### Min/Max с плавающей точкой (коммит 6d1d681, по итогам CI)
+- `hir::eval` задаёт Min/Max явно как IEEE 754-2019 minimumNumber/maximumNumber: NaN (в т.ч. sNaN) уступает числу, `min(-0, +0) = -0`, `max(-0, +0) = +0`. Ранее ответ зависел от цели: FMINNM на arm64 возвращал quiet NaN для sNaN, MINPS на x64 отдавал второй операнд при ±0.
+- x64: скалярный и упакованный путь (вкл. F16) после MINPS/MAXPS чинят ничью через OR/AND знаков; aarch64 F16 идёт через `ordered_minmax`. Тесты `numeric_coverage` (граничные входы) прогнаны при `SPLICE_SIMD=sse|avx2|avx512|auto` и под QEMU neon/sve/sve2.
+
+### Ф1.3 — инварианты lancy (коммит fc6e28d)
+- Закрыто: HIR-09, X64-19. Отложено: A64-16 (golden-таблица `llvm-mc`) — в Ф6; HIR-13 (`DebugStore` при инлайнинге) — своя фаза.
+- `checkpoint(f, pass)`: `f.verify()` + паника в `cfg(any(test, debug_assertions))` после каждого прохода `simplify` и после `inline`. SCCP проверяется после `prune` (до него недостижимые блоки законно ссылаются на удалённые значения).
+- Новые тесты: `witnesses::index` против наивной модели (случайные вложенные/смежные интервалы); SCCP с uniform-векторами (`filetests/passes/uniform-vector-constants.lancy`); рекуррентность при `trip > i32::MAX`; планировщик — 300 случайных тел, частичный порядок Ordered/Barrier соблюдён и перестановки действительно происходят; `Liveness` против итеративного dataflow на случайных CFG; исчерпывающий roundtrip `logical_immediate` против DecodeBitMasks (5334 значений для 64 бит, 1302 для 32).
+- X64-19: пул констант обязателен (`Native::emit_allocated(.., pool)`); путь `mov r10`-splat и тестовый `Native::emit` удалены.
+
+### CI arm64: SVE с VL 48 байт (коммит 08b19f1)
+- Строка QEMU `sve2 max 48 32` падала SIGSEGV в `sql_plan` только с LLVM. На main было LLVM 21, сейчас 19 (Р3); AArch64-бэкенд LLVM считает vscale степенью двойки, а VL 48 даёт vscale 3. Теперь `target::scalable`: SVE-код только при VL степени двойки, иначе NEON фиксированной ширины профиля; ядро, собранное с SVE, отказывается работать в потоке с VL не степени двойки. Тест `aarch64_tests::sve_code_is_only_generated_and_run_at_power_of_two_vector_lengths` (prctl 32/48). Локально aarch64 LLVM не линкуется — проверено clippy под aarch64, рантайм подтверждает CI.
+- `frontend.rs::collection_computed_by_the_application_can_specialize_a_kernel` падал в debug: в debug-сборке `+` — `CheckedAdd`. Ожидание теперь следует профилю сборки.
+- Проверки: fmt, clippy 1.94.1 `-D warnings`, `cargo test --workspace --release`, `cargo test -p splice-kernel` (debug) — зелёные.
