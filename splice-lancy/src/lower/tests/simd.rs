@@ -165,7 +165,10 @@ fn masked_contiguous_store_never_wraps_an_invalid_offset_to_zero() {
         let kernel = crate::LancyKernel::new(graph, 1, &kinds, None).unwrap();
         let mut dst = [8, 9];
         let result = kernel.call(&[-1], &mut [BufferArg::WriteU16(&mut dst)]);
-        assert_eq!(result.unwrap_err(), "kernel slice index out of bounds");
+        assert_eq!(
+            result.unwrap_err(),
+            splice_core::CallError::Trap(splice_core::Trap::Bounds)
+        );
         assert_eq!(dst, [8, 9]);
     }
 }

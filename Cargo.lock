@@ -927,6 +927,7 @@ version = "0.1.0"
 dependencies = [
  "splice-macros",
  "splice-target",
+ "thiserror 2.0.21",
  "tracing",
 ]
 
@@ -1023,6 +1024,7 @@ name = "splice-testkit"
 version = "0.0.0"
 dependencies = [
  "splice-kernel",
+ "splice-target",
 ]
 
 [[package]]

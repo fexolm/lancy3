@@ -54,7 +54,7 @@ impl Word {
     }
     pub fn binary(self, op: Binary, rhs: Self, b: &mut dyn KernelBuilder) -> Self {
         if let (Self::Known(a), Self::Known(z)) = (self, rhs)
-            && let Some(value) = op.checked_eval(a, z)
+            && let Ok(value) = op.checked_eval(a, z)
         {
             return Self::Known(value);
         }
@@ -473,8 +473,5 @@ impl ImportWord for () {
 /// The generated adapter calls this inside its C entry point. Unwinding
 /// finishes inside Rust before control returns to the native kernel.
 pub fn invoke_import<R: ImportWord>(call: impl FnOnce() -> R) -> i64 {
-    match crate::call_boundary(|| Ok(call().encode())) {
-        Ok(word) => i64::from(word as u32),
-        Err(_) => 5_i64 << 32,
-    }
+    splice_target::abi::rust_entry(|| call().encode())
 }

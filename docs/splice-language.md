@@ -281,7 +281,7 @@ impl Foo {
 
 ## Ошибки и переносимый IR
 
-`BuildError` и `CallError` реализуют `std::error::Error`.
+`BuildError` и `CallError` реализуют `std::error::Error`. `CallError` различает причину без разбора текста: `Trap(Trap)` — ловушка ядра (`Bounds`, `DivisionByZero`, `DivisionOverflow`, `Overflow`, `Abi`; код у всех бэкендов один), `RustPanic(сообщение)` — паника Rust-импорта или Rust-участка с текстом `panic!`, `Signature(SignatureError)` — аргументы не совпали с сигнатурой ядра, `Target(TargetError)` — поток не может исполнить код (например, длина вектора SVE меньше требуемой). Перечисления помечены `#[non_exhaustive]`.
 
 | Когда возникает ошибка | Что получает приложение |
 | --- | --- |

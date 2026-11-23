@@ -46,7 +46,10 @@ fn partial_columns_have_the_same_store_order_through_both_splice_entry_points() 
                 ],
             );
             if short < n {
-                assert!(result.unwrap_err().contains("bounds"));
+                assert_eq!(
+                    result,
+                    Err(splice_core::CallError::Trap(splice_core::Trap::Bounds))
+                );
             } else {
                 assert_eq!(result.unwrap(), n as i32);
             }

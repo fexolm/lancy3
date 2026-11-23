@@ -1,4 +1,4 @@
-use std::sync::OnceLock;
+use std::{fmt, sync::OnceLock};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Profile {
@@ -158,18 +158,51 @@ impl Simd {
 
     /// Verify the current thread can execute code generated for this width.
     /// Linux lets each thread change its SVE length independently.
-    pub fn check_execution(self) -> Result<(), String> {
+    pub fn check_execution(self) -> Result<(), TargetError> {
         #[cfg(all(target_arch = "aarch64", target_os = "linux"))]
         if matches!(self.profile, Profile::Sve | Profile::Sve2) {
-            let vl = thread_sve_bytes(self.profile)
-                .ok_or_else(|| format!("{:?} is unavailable on this CPU/OS", self.profile))?;
+            let vl =
+                thread_sve_bytes(self.profile).ok_or(TargetError::Unavailable(self.profile))?;
             if vl < self.bytes {
-                return Err(format!(
-                    "kernel requires an SVE vector length of at least {} bytes",
-                    self.bytes
-                ));
+                return Err(TargetError::VectorLength {
+                    required: self.bytes,
+                    available: vl,
+                });
             }
         }
         Ok(())
     }
 }
+
+/// The selected SIMD profile cannot be used.
+#[non_exhaustive]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TargetError {
+    /// The CPU or OS does not provide this profile.
+    Unavailable(Profile),
+    /// The calling thread's SVE vector length is shorter than the code needs.
+    VectorLength { required: usize, available: usize },
+    /// The code was generated for scalable vectors, which need a power-of-two
+    /// SVE vector length on the calling thread.
+    VectorLengthNotPowerOfTwo,
+}
+
+impl fmt::Display for TargetError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Unavailable(profile) => write!(f, "{profile:?} is unavailable on this CPU/OS"),
+            Self::VectorLength {
+                required,
+                available,
+            } => write!(
+                f,
+                "kernel requires an SVE vector length of at least {required} bytes, the thread has {available}"
+            ),
+            Self::VectorLengthNotPowerOfTwo => {
+                f.write_str("scalable code requires a power-of-two SVE vector length")
+            }
+        }
+    }
+}
+
+impl std::error::Error for TargetError {}

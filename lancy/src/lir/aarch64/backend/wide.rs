@@ -1,4 +1,5 @@
 use super::{A, C, Cond, Emitter, O, PredQual, R, Result, invert};
+use crate::Trap;
 use crate::hir::{Binary, Type, Unary};
 
 #[derive(Clone, Copy, Debug)]
@@ -308,7 +309,7 @@ impl Emitter<'_> {
         self.a.put(C::Orr_64_log_shift, &[x(11), x(13), x(14)])?;
         self.a
             .put(C::Subs_64_addsub_imm, &[x(31), x(11), O::imm(0)])?;
-        self.trap_if(Cond::Eq, 2)?;
+        self.trap_if(Cond::Eq, Trap::DivisionByZero)?;
         if signed {
             self.a.imm(R::X11, 1 << 63)?;
             self.a.put(C::Eor_64_log_shift, &[x(11), x(10), x(11)])?;
@@ -320,7 +321,7 @@ impl Emitter<'_> {
             }
             self.a
                 .put(C::Subs_64_addsub_imm, &[x(31), x(11), O::imm(0)])?;
-            self.trap_if(Cond::Eq, 3)?;
+            self.trap_if(Cond::Eq, Trap::DivisionOverflow)?;
             let sign = if remainder {
                 10
             } else {

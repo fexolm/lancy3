@@ -13,3 +13,6 @@ llvm = ["splice/llvm"]
 
 [dependencies]
 splice = { package = "splice-kernel", path = "../splice", default-features = false, features = ["lancy", "cranelift"] }
+
+[dev-dependencies]
+splice-target = { path = "../splice-target" }

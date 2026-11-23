@@ -40,7 +40,7 @@ use std::rc::Rc;
 pub type Stage = Rc<dyn Fn(&mut dyn KernelBuilder) -> Result<(), String>>;
 
 /// Calls one compiled kernel.
-pub type Invoke<'a> = &'a dyn Fn(&[i32], &mut [BufferArg<'_>]) -> splice::Result<i32>;
+pub type Invoke<'a> = &'a dyn Fn(&[i32], &mut [BufferArg<'_>]) -> Result<i32, splice::CallError>;
 
 /// Compile `stage` with every backend, staged (`build`) and from portable IR
 /// (`compile`), in Debug and Release. `observe` runs each kernel and reports

@@ -97,7 +97,7 @@ fn identifier_in_path(x: i32) -> i32 {
 }
 
 #[test]
-fn printer_and_builder_specialize_host_iterations() -> splice_core::Result<()> {
+fn printer_and_builder_specialize_host_iterations() -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(host_iterations(3, 5), 12);
     assert!(host_iterations::print(3)?.contains("x + 7"));
     assert!(
@@ -107,7 +107,8 @@ fn printer_and_builder_specialize_host_iterations() -> splice_core::Result<()> {
 }
 
 #[test]
-fn division_under_runtime_control_faults_only_in_the_selected_arm() -> splice_core::Result<()> {
+fn division_under_runtime_control_faults_only_in_the_selected_arm()
+-> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(print_division(0, 0), 9);
     let text = print_division::print(0)?;
     assert!(text.contains("if x > 0"));
@@ -125,7 +126,7 @@ fn division_under_runtime_control_faults_only_in_the_selected_arm() -> splice_co
 }
 
 #[test]
-fn source_substitutions_leave_other_identifiers_intact() -> splice_core::Result<()> {
+fn source_substitutions_leave_other_identifiers_intact() -> Result<(), Box<dyn std::error::Error>> {
     assert!(identifier_in_path::print()?.contains("__splice_source_child_0"));
     assert!(
         identifier_in_path::build::<Text>(identifier_in_path::BuildArgs {})?.contains("return")
@@ -161,8 +162,8 @@ fn adjust(#[comptime] steps: &[Step], data: &mut [i32]) -> i32 {
 }
 
 #[test]
-fn only_the_chosen_comptime_arm_is_printed() -> splice_core::Result<()> {
-    fn specialize<B: Codegen>(step: &Step) -> splice_core::Result<B::Output> {
+fn only_the_chosen_comptime_arm_is_printed() -> Result<(), Box<dyn std::error::Error>> {
+    fn specialize<B: Codegen>(step: &Step) -> Result<B::Output, Box<dyn std::error::Error>> {
         Ok(apply::build::<B>(apply::BuildArgs { step })?.into_inner())
     }
     let scale: String = specialize::<Text>(&Step::Scale(13))?;
@@ -180,7 +181,8 @@ fn only_the_chosen_comptime_arm_is_printed() -> splice_core::Result<()> {
 }
 
 #[test]
-fn unrolled_calls_reuse_equal_steps_and_keep_the_runtime_loop() -> splice_core::Result<()> {
+fn unrolled_calls_reuse_equal_steps_and_keep_the_runtime_loop()
+-> Result<(), Box<dyn std::error::Error>> {
     let steps = [Step::Scale(3), Step::Offset(7), Step::Scale(3)];
     let listing = adjust::build::<Text>(adjust::BuildArgs { steps: &steps })?;
     assert_eq!(

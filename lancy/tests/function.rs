@@ -1,5 +1,5 @@
 use lancy::hir::{Binary, Block, Function, IrError, Op, Terminator};
-use lancy::{CallError, CompileError, ScalarKernel};
+use lancy::{CallError, CompileError, ScalarKernel, SignatureError, Trap};
 use std::sync::Arc;
 
 #[test]
@@ -89,10 +89,13 @@ fn a_compiled_division_reports_each_arithmetic_trap() {
     f.set_terminator(entry, Terminator::Return(result));
 
     let kernel = ScalarKernel::compile(&f).unwrap();
-    assert_eq!(kernel.call(&[7, 0]), Err(CallError::DivisionByZero));
+    assert_eq!(
+        kernel.call(&[7, 0]),
+        Err(CallError::Trap(Trap::DivisionByZero))
+    );
     assert_eq!(
         kernel.call(&[i32::MIN, -1]),
-        Err(CallError::DivisionOverflow)
+        Err(CallError::Trap(Trap::DivisionOverflow))
     );
     assert_eq!(kernel.call(&[15, 3]), Ok(5));
 }
@@ -152,10 +155,10 @@ fn calls_and_joins_preserve_noncanonical_branch_masks() {
     }
     assert_eq!(
         kernel.call(&[1]),
-        Err(CallError::Arity {
+        Err(CallError::Signature(SignatureError::Arity {
             expected: 2,
             actual: 1
-        })
+        }))
     );
 }
 

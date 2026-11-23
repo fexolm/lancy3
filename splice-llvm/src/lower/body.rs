@@ -11,7 +11,7 @@ use inkwell::{IntPredicate, module::Module};
 use splice_core::hir::{
     Binary, Buffer, BufferKind, ContextSlice, Instr, Label, Reg, RustContextTarget, ValueType,
 };
-use splice_core::{ContextArguments, Function};
+use splice_core::{ContextArguments, Function, Trap};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -52,14 +52,23 @@ struct Slice<'ctx> {
     element: splice_core::simd::Element,
 }
 
+/// A side exit: forward the status a failed callee already stored, or
+/// store a new trap code.
 #[derive(Clone, Copy, PartialEq)]
 enum Failure {
-    Propagate = 0,
-    Bounds = 1,
-    DivideByZero = 2,
-    Overflow = 3,
-    IntegerOverflow = 4,
-    RustPanic = 5,
+    Propagate,
+    Trap(Trap),
+}
+
+impl Failure {
+    const COUNT: usize = Trap::ALL.len() + 1;
+
+    fn index(self) -> usize {
+        match self {
+            Self::Propagate => 0,
+            Self::Trap(trap) => trap.code() as usize,
+        }
+    }
 }
 
 pub(super) struct Body<'a, 'ctx> {
@@ -73,7 +82,9 @@ pub(super) struct Body<'a, 'ctx> {
     context_scratch: Option<(u32, PointerValue<'ctx>)>,
     static_rust_slice_operands: bool,
     labels: Vec<Option<BasicBlock<'ctx>>>,
-    exits: [Option<BasicBlock<'ctx>>; 6],
+    exits: [Option<BasicBlock<'ctx>>; Failure::COUNT],
+    /// A Rust call can report its own trap code.
+    calls_rust: bool,
 }
 
 /// Declare intrinsic `name` overloaded on `types`, if the loaded LLVM has it.
@@ -136,7 +147,8 @@ impl<'a, 'ctx> Body<'a, 'ctx> {
             context_scratch: None,
             static_rust_slice_operands: false,
             labels: Vec::new(),
-            exits: [None; 6],
+            exits: [None; Failure::COUNT],
+            calls_rust: false,
         })
     }
 
@@ -237,7 +249,7 @@ impl<'a, 'ctx> Body<'a, 'ctx> {
         Ok(())
     }
     pub(super) fn needs_status(&self) -> bool {
-        self.exits.iter().any(Option::is_some)
+        self.calls_rust || self.exits.iter().any(Option::is_some)
     }
 
     pub(super) fn static_rust_slice_operands(&self) -> bool {
@@ -264,17 +276,17 @@ impl<'a, 'ctx> Body<'a, 'ctx> {
     // Guards of the same type share one side exit. Failed calls preserve
     // their callee's status and return immediately to the enclosing caller.
     fn exit_if(&mut self, condition: IntValue<'ctx>, fault: Failure) -> Built<()> {
-        let existing = self.exits[fault as usize];
+        let existing = self.exits[fault.index()];
         let exit = existing.unwrap_or_else(|| self.ctx.append_basic_block(self.function, "error"));
         let next = self.ctx.append_basic_block(self.function, "");
         self.builder
             .build_conditional_branch(condition, exit, next)?;
         if existing.is_none() {
-            self.exits[fault as usize] = Some(exit);
+            self.exits[fault.index()] = Some(exit);
             self.builder.position_at_end(exit);
-            if fault != Failure::Propagate {
+            if let Failure::Trap(trap) = fault {
                 self.builder
-                    .build_store(self.status, self.int(fault as i32))?;
+                    .build_store(self.status, self.int(trap.code() as i32))?;
             }
             self.builder.build_return(Some(&self.int(0)))?;
         }
@@ -292,7 +304,7 @@ impl<'a, 'ctx> Body<'a, 'ctx> {
 
     pub(super) fn trap_bounds(&self) -> Built<()> {
         self.builder
-            .build_store(self.status, self.int(Failure::Bounds as i32))?;
+            .build_store(self.status, self.int(Trap::Bounds.code() as i32))?;
         self.builder.build_return(Some(&self.int(0)))?;
         Ok(())
     }
@@ -307,7 +319,7 @@ impl<'a, 'ctx> Body<'a, 'ctx> {
         let invalid = self
             .builder
             .build_int_compare(IntPredicate::UGE, index, slice.len, "")?;
-        self.exit_if(invalid, Failure::Bounds)?;
+        self.exit_if(invalid, Failure::Trap(Trap::Bounds))?;
         // SAFETY: Only the edge with index < slice.len reaches this instruction.
         Ok(unsafe {
             self.builder
@@ -340,7 +352,7 @@ impl<'a, 'ctx> Body<'a, 'ctx> {
                 let result = ir.build_int_truncate(wide, self.ctx.i32_type(), "")?;
                 let extended = ir.build_int_s_extend(result, wide_type, "")?;
                 let invalid = ir.build_int_compare(IntPredicate::NE, wide, extended, "")?;
-                self.exit_if(invalid, Failure::IntegerOverflow)?;
+                self.exit_if(invalid, Failure::Trap(Trap::Overflow))?;
                 Ok(result)
             }
             And => Ok(ir.build_and(a, b, "")?),
@@ -348,10 +360,13 @@ impl<'a, 'ctx> Body<'a, 'ctx> {
             Xor => Ok(ir.build_xor(a, b, "")?),
             Div | Rem => {
                 let zero = ir.build_int_compare(IntPredicate::EQ, b, self.int(0), "")?;
-                self.exit_if(zero, Failure::DivideByZero)?;
+                self.exit_if(zero, Failure::Trap(Trap::DivisionByZero))?;
                 let min = ir.build_int_compare(IntPredicate::EQ, a, self.int(i32::MIN), "")?;
                 let minus_one = ir.build_int_compare(IntPredicate::EQ, b, self.int(-1), "")?;
-                self.exit_if(ir.build_and(min, minus_one, "")?, Failure::Overflow)?;
+                self.exit_if(
+                    ir.build_and(min, minus_one, "")?,
+                    Failure::Trap(Trap::DivisionOverflow),
+                )?;
                 if op == Div {
                     Ok(ir.build_int_signed_div(a, b, "")?)
                 } else {
@@ -361,7 +376,7 @@ impl<'a, 'ctx> Body<'a, 'ctx> {
             Shl | Shr | CheckedShl | CheckedShr => {
                 let count = if matches!(op, CheckedShl | CheckedShr) {
                     let invalid = ir.build_int_compare(IntPredicate::UGE, b, self.int(32), "")?;
-                    self.exit_if(invalid, Failure::IntegerOverflow)?;
+                    self.exit_if(invalid, Failure::Trap(Trap::Overflow))?;
                     b
                 } else {
                     ir.build_and(b, self.int(31), "")?
@@ -677,12 +692,28 @@ impl<'a, 'ctx> Body<'a, 'ctx> {
         Ok(packet)
     }
 
+    /// Store a Rust call's result word, or report the trap code in the
+    /// upper word of its status.
     fn rust_result(&mut self, dst: Reg, value: IntValue<'ctx>) -> Built<()> {
-        let max = self.ctx.i64_type().const_int(u64::from(u32::MAX), false);
+        self.calls_rust = true;
+        let wide = self.ctx.i64_type();
+        let max = wide.const_int(u64::from(u32::MAX), false);
         let failed = self
             .builder
             .build_int_compare(IntPredicate::UGT, value, max, "")?;
-        self.exit_if(failed, Failure::RustPanic)?;
+        let exit = self.ctx.append_basic_block(self.function, "rust_error");
+        let next = self.ctx.append_basic_block(self.function, "");
+        self.builder.build_conditional_branch(failed, exit, next)?;
+        self.builder.position_at_end(exit);
+        let code = self
+            .builder
+            .build_right_shift(value, wide.const_int(32, false), false, "")?;
+        let code = self
+            .builder
+            .build_int_truncate(code, self.ctx.i32_type(), "")?;
+        self.builder.build_store(self.status, code)?;
+        self.builder.build_return(Some(&self.int(0)))?;
+        self.builder.position_at_end(next);
         self.store(
             dst,
             self.builder

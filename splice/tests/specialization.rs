@@ -159,7 +159,8 @@ fn a_failed_body_can_be_retried_and_its_completed_children_reused() {
 }
 
 #[test]
-fn invalid_arguments_are_rejected_before_staging_or_reusing_a_callee() -> splice::Result<()> {
+fn invalid_arguments_are_rejected_before_staging_or_reusing_a_callee()
+-> Result<(), Box<dyn std::error::Error>> {
     use splice::frontend::{KernelBuilder, Specialization};
     use splice::hir::{Buffer, Reg, ValueType};
     use splice::simd::Element;
@@ -249,12 +250,13 @@ fn two_buffers(left: &mut [i32], right: &mut [i32], d: i32) -> i32 {
     store_ratio(right, first, d)
 }
 #[test]
-fn shared_fallible_body_observes_each_calls_buffers_and_arguments() -> splice::Result<()> {
+fn shared_fallible_body_observes_each_calls_buffers_and_arguments()
+-> Result<(), Box<dyn std::error::Error>> {
     let ir = two_buffers::ir()?;
     assert_eq!(Text::compile(&ir)?.matches("fn store_ratio.").count(), 1);
     fn check<B: Codegen<Output: Executable>>(
         ir: &splice::TypedIr<two_buffers::Signature>,
-    ) -> splice::Result<()> {
+    ) -> Result<(), Box<dyn std::error::Error>> {
         for code in [
             two_buffers::build::<B>(two_buffers::BuildArgs {})?,
             B::compile(ir)?,

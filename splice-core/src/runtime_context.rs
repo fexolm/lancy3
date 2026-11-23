@@ -1,4 +1,5 @@
 //! A synchronous Rust dispatcher borrowed for one native invocation.
+use splice_target::abi::{Trap, rust_entry};
 use std::{
     fmt,
     hash::{Hash, Hasher},
@@ -363,8 +364,6 @@ const _: () = {
     assert!(std::mem::offset_of!(SliceView, element) == ContextArguments::ELEMENT_OFFSET as usize);
 };
 
-const RUST_FAILURE: i64 = 5_i64 << 32;
-
 impl fmt::Debug for RuntimeContext<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("RuntimeContext")
@@ -387,7 +386,7 @@ pub unsafe extern "C" fn invoke_runtime_context(
     // types, contains the same erased Rust dispatcher representation.
     let context = unsafe { &mut *raw.cast::<RuntimeContext<'_>>() };
     let Some((words @ 0..=2, 0)) = context.signature.shape(operation) else {
-        return RUST_FAILURE;
+        return Trap::Abi.status();
     };
     let scalars = [a, b];
     invoke(
@@ -416,10 +415,10 @@ pub unsafe extern "C" fn invoke_packet_runtime_context(
     // sized, aligned packet under the contract above.
     let context = unsafe { &mut *raw.cast::<RuntimeContext<'_>>() };
     let Some((words, count)) = context.signature.shape(operation) else {
-        return RUST_FAILURE;
+        return Trap::Abi.status();
     };
     if (words <= 2 && count == 0) || !matches!(context.invoke, Dispatcher::Packet(_)) {
-        return RUST_FAILURE;
+        return Trap::Abi.status();
     }
     // SAFETY: the native caller supplies initialized, disjoint views and the
     // validated context signature gives the exact packet shape.
@@ -441,7 +440,7 @@ unsafe extern "C" fn invoke_static_rust_packet<F: StaticRustCall>(
     // the verified slice views for the duration of this call.
     unsafe {
         with_packet(packet, F::WORDS, F::SLICES, |args| {
-            pack_result(|| F::invoke(args))
+            rust_entry(|| F::invoke(args))
         })
     }
 }
@@ -455,7 +454,7 @@ unsafe fn with_packet(
     call: impl FnOnce(ContextArguments<'_>) -> i64,
 ) -> i64 {
     let Some(layout) = ContextArguments::packet_layout(words, count) else {
-        return RUST_FAILURE;
+        return Trap::Abi.status();
     };
     // SAFETY: the verified packet contains initialized words and exactly
     // count descriptors at the checked aligned byte offset.
@@ -470,7 +469,7 @@ unsafe fn with_packet(
 }
 
 fn invoke(context: &mut RuntimeContext<'_>, operation: u32, args: ContextArguments<'_>) -> i64 {
-    pack_result(|| match &mut context.invoke {
+    rust_entry(|| match &mut context.invoke {
         Dispatcher::Scalars(invoke) => invoke(
             operation,
             args.words.first().copied().unwrap_or(0),
@@ -478,13 +477,6 @@ fn invoke(context: &mut RuntimeContext<'_>, operation: u32, args: ContextArgumen
         ),
         Dispatcher::Packet(invoke) => invoke(operation, args),
     })
-}
-
-fn pack_result(call: impl FnOnce() -> i32) -> i64 {
-    match crate::call_boundary(|| Ok(call())) {
-        Ok(result) => i64::from(result as u32),
-        Err(_) => RUST_FAILURE,
-    }
 }
 
 #[cfg(test)]

@@ -1,5 +1,5 @@
 use splice::hir::{Instr, RustContextTarget};
-use splice::{Codegen, Executable, TypedIr, kernel};
+use splice::{CallError, Codegen, Executable, Trap, TypedIr, kernel};
 use std::collections::HashSet;
 use std::ops::AddAssign;
 
@@ -510,13 +510,13 @@ fn rust_context_operations_surround_a_native_fault_and_keep_their_effects() {
             totals.count.total = 7;
             let xs = [2, 3];
 
-            assert!(
+            assert_eq!(
                 code.call(update::CallArgs {
                     totals: &mut totals,
                     xs: &xs,
                     index: 2
-                })
-                .is_err()
+                }),
+                Err(CallError::Trap(Trap::Bounds))
             );
             assert_eq!(totals.count.total, 12);
             assert_eq!(totals.count.operands, [5]);
@@ -539,13 +539,14 @@ fn rust_context_operations_surround_a_native_fault_and_keep_their_effects() {
                 fail_completion: true,
                 ..Totals::default()
             };
-            assert!(
+            // The context operation's own panic message reaches the caller.
+            assert_eq!(
                 code.call(update::CallArgs {
                     totals: &mut other,
                     xs: &xs,
                     index: 0
-                })
-                .is_err()
+                }),
+                Err(CallError::RustPanic("completion failed".into()))
             );
             assert_eq!(other.count.operands, [5]);
             assert_eq!(other.completed, 1);

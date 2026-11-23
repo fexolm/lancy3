@@ -17,7 +17,10 @@ mod target;
 mod aarch64_tests;
 
 use inkwell::{context::Context, module::Module, targets::TargetMachine};
-use splice_core::{BufferArg, BufferKind, BuildOptions, Codegen, Executable, Function};
+use splice_core::{
+    BufferArg, BufferKind, BuildOptions, CallError, Codegen, Executable, Function, SignatureError,
+    Trap,
+};
 
 /// In-process LLVM code generator.
 pub struct Llvm;
@@ -95,7 +98,7 @@ const _: () = {
     assert!(std::mem::size_of::<Descriptor>() == 16);
 };
 
-type Entry = unsafe extern "C" fn(*const i32, *const Descriptor, *mut i32) -> i32;
+type Entry = unsafe extern "C" fn(*const i32, *const Descriptor, *mut u32) -> i32;
 
 /// Owns the LLVM session and the executable kernel it compiled.
 pub struct LlvmKernel {
@@ -244,21 +247,21 @@ impl LlvmKernel {
 }
 
 impl Executable for LlvmKernel {
-    fn call(&self, args: &[i32], buffers: &mut [BufferArg<'_>]) -> Result<i32, String> {
+    fn call(&self, args: &[i32], buffers: &mut [BufferArg<'_>]) -> Result<i32, CallError> {
         #[cfg(target_arch = "aarch64")]
         {
-            let simd = splice_target::simd()?;
+            let simd = splice_target::simd().expect("compilation validated the selected profile");
             simd.check_execution()?;
             if self.scalable && !target::scalable(simd) {
-                return Err("LLVM SVE code requires a power-of-two SVE vector length".into());
+                return Err(splice_target::TargetError::VectorLengthNotPowerOfTwo.into());
             }
         }
         if self.arity != args.len() {
-            return Err(format!(
-                "expected {} scalar arguments, got {}",
-                self.arity,
-                args.len()
-            ));
+            return Err(SignatureError::Scalars {
+                expected: self.arity,
+                actual: args.len(),
+            }
+            .into());
         }
         splice_core::validate_buffers(&self.buffers, buffers)?;
         let descriptors: Vec<_> = buffers
@@ -275,13 +278,9 @@ impl Executable for LlvmKernel {
         // permissions, element indices, and context descriptor kinds.
         let result = unsafe { (self.entry)(args.as_ptr(), descriptors.as_ptr(), &mut status) };
         match status {
-            5 => Err("Rust import panicked".into()),
             0 => Ok(result),
-            1 => Err("kernel slice index out of bounds".into()),
-            2 => Err("kernel integer division by zero".into()),
-            3 => Err("kernel signed division overflow".into()),
-            4 => Err("kernel integer arithmetic overflow".into()),
-            code => Err(format!("unexpected LLVM kernel status {code}")),
+            // Native code stores only trap codes.
+            code => Err(Trap::from_code(code).unwrap_or(Trap::Abi).into()),
         }
     }
 }
@@ -635,10 +634,7 @@ mod tests {
                         BufferArg::Write(&mut dst[1..=dst_len]),
                     ],
                 );
-                assert_eq!(
-                    actual,
-                    expected.ok_or_else(|| "kernel slice index out of bounds".to_owned())
-                );
+                assert_eq!(actual, expected.ok_or(CallError::Trap(Trap::Bounds)));
                 assert_eq!(mid, want_mid);
                 assert_eq!(dst, want_dst);
             }

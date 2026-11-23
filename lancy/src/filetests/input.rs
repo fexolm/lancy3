@@ -341,11 +341,11 @@ fn instruction<'a>(
     Ok(false)
 }
 
+/// Return `value`, or report the trap whose code is `fail`.
 extern "C" fn identity_or_error(value: i32, fail: i32) -> i64 {
-    if fail == 0 {
-        i64::from(value as u32)
-    } else {
-        5_i64 << 32
+    match crate::Trap::from_code(fail as u32) {
+        Some(trap) => trap.status(),
+        None => i64::from(value as u32),
     }
 }
 

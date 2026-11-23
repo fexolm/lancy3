@@ -1,6 +1,6 @@
 //! Integer lane semantics shared by constant folding and the reference evaluator.
 use super::{Binary, Lane, Unary, operation::Action};
-use crate::CallError;
+use crate::Trap;
 
 pub(super) fn mask(lane: Lane) -> u128 {
     u128::MAX >> (128 - lane.bytes() * 8)
@@ -19,7 +19,7 @@ pub(super) fn extend(lane: Lane, x: u128) -> u128 {
 }
 
 /// Evaluate a verified integer binary operation on lane bit patterns.
-pub(super) fn binary(op: Binary, lane: Lane, x: u128, y: u128) -> Result<u128, CallError> {
+pub(super) fn binary(op: Binary, lane: Lane, x: u128, y: u128) -> Result<u128, Trap> {
     let mask = mask(lane);
     evaluate(Action::Binary(op), lane, x & mask, y & mask, mask)
 }
@@ -30,7 +30,7 @@ pub(super) fn evaluate(
     x: u128,
     y: u128,
     mask: u128,
-) -> Result<u128, CallError> {
+) -> Result<u128, Trap> {
     use Binary::*;
     let bits = lane.bytes() as u32 * 8;
     let (a, b) = (signed(x, bits), signed(y, bits));
@@ -64,10 +64,10 @@ pub(super) fn evaluate(
             Xor => x ^ y,
             Div | Rem => {
                 if y == 0 {
-                    return Err(CallError::DivisionByZero);
+                    return Err(Trap::DivisionByZero);
                 }
                 if sign && a == min && b == -1 {
-                    return Err(CallError::DivisionOverflow);
+                    return Err(Trap::DivisionOverflow);
                 }
                 match (sign, op) {
                     (true, Div) => (a / b) as u128,

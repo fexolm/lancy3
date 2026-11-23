@@ -1,6 +1,6 @@
 use super::ScalarKernel;
 use crate::hir::{Binary, Function, Op, Terminator};
-use crate::{CallError, CompileError, Inlining};
+use crate::{CallError, CompileError, Inlining, SignatureError, Trap};
 use std::mem::MaybeUninit;
 use std::sync::Arc;
 
@@ -40,10 +40,17 @@ fn scratch_pointers_require_the_raw_call_contract_transitively() {
 
     for policy in [crate::Inlining::Always, crate::Inlining::Never] {
         let kernel = ScalarKernel::compile_with_inlining(&caller, policy).unwrap();
-        assert_eq!(kernel.call(&[]), Err(crate::CallError::PointerSignature));
+        assert_eq!(
+            kernel.call(&[]),
+            Err(crate::CallError::Signature(
+                SignatureError::PointerSignature
+            ))
+        );
         assert_eq!(
             kernel.call_words(&[], &mut [0]),
-            Err(crate::CallError::PointerSignature)
+            Err(crate::CallError::Signature(
+                SignatureError::PointerSignature
+            ))
         );
         // SAFETY: the only access is the initialized first word of this
         // live frame's aligned scratch area. No pointers cross the ABI.
@@ -81,7 +88,7 @@ fn nested_normal_and_trapping_returns_restore_host_registers() {
     let f = nested_division();
     for policy in [Inlining::Always, Inlining::Never] {
         let kernel = ScalarKernel::compile_with_inlining(&f, policy).unwrap();
-        for (divisor, expected) in [(3, Ok(0)), (0, Err(CallError::DivisionByZero))] {
+        for (divisor, expected) in [(3, Ok(0)), (0, Err(CallError::Trap(Trap::DivisionByZero)))] {
             let mut args = [7u64; 24];
             args[1] = divisor;
             let mut workspace = vec![MaybeUninit::uninit(); kernel.words];
@@ -110,7 +117,7 @@ fn one_kernel_serves_concurrent_callers_and_drops_on_another_thread() {
     let kernel = ScalarKernel::compile(&f).unwrap();
     let expected = |i: u64| -> Result<i32, CallError> {
         if i == 0 {
-            return Err(CallError::DivisionByZero);
+            return Err(CallError::Trap(Trap::DivisionByZero));
         }
         // The leaf adds the 22 sevens of args[2..]; both callers subtract one.
         Ok((100 / i + 20 * 7) as i32)

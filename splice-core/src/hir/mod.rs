@@ -76,14 +76,20 @@ impl Binary {
     }
 
     /// Scalar semantics shared by code generators. True comparisons produce
-    /// all bits set. Trapping arithmetic with invalid operands returns `None`.
-    pub fn checked_eval(self, a: i32, b: i32) -> Option<i32> {
-        Some(match self {
+    /// all bits set. Trapping arithmetic with invalid operands returns its trap.
+    pub fn checked_eval(self, a: i32, b: i32) -> Result<i32, crate::Trap> {
+        use crate::Trap::{DivisionByZero, DivisionOverflow, Overflow};
+        let divide = |quotient: Option<i32>| match (b, quotient) {
+            (0, _) => Err(DivisionByZero),
+            (_, None) => Err(DivisionOverflow),
+            (_, Some(value)) => Ok(value),
+        };
+        Ok(match self {
             Self::Add => a.wrapping_add(b),
             Self::Sub => a.wrapping_sub(b),
             Self::Mul => a.wrapping_mul(b),
-            Self::Div => a.checked_div(b)?,
-            Self::Rem => a.checked_rem(b)?,
+            Self::Div => divide(a.checked_div(b))?,
+            Self::Rem => divide(a.checked_rem(b))?,
             Self::And => a & b,
             Self::Or => a | b,
             Self::Xor => a ^ b,
@@ -95,11 +101,11 @@ impl Binary {
             Self::Ge => -i32::from(a >= b),
             Self::Shl => a.wrapping_shl(b as u32),
             Self::Shr => a.wrapping_shr(b as u32),
-            Self::CheckedAdd => a.checked_add(b)?,
-            Self::CheckedSub => a.checked_sub(b)?,
-            Self::CheckedMul => a.checked_mul(b)?,
-            Self::CheckedShl => a.checked_shl(b as u32)?,
-            Self::CheckedShr => a.checked_shr(b as u32)?,
+            Self::CheckedAdd => a.checked_add(b).ok_or(Overflow)?,
+            Self::CheckedSub => a.checked_sub(b).ok_or(Overflow)?,
+            Self::CheckedMul => a.checked_mul(b).ok_or(Overflow)?,
+            Self::CheckedShl => a.checked_shl(b as u32).ok_or(Overflow)?,
+            Self::CheckedShr => a.checked_shr(b as u32).ok_or(Overflow)?,
             Self::Min => a.min(b),
             Self::Max => a.max(b),
         })

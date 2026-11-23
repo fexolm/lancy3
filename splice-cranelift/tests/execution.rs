@@ -1,5 +1,5 @@
 use splice_core::hir::{Binary, FunctionBuilder};
-use splice_core::{BufferArg, Codegen, Executable, kernel};
+use splice_core::{BufferArg, CallError, Codegen, Executable, Trap, kernel};
 use splice_cranelift::Cranelift;
 use std::sync::Arc;
 
@@ -42,22 +42,17 @@ fn staged_and_portable_calls_keep_writes_up_to_the_first_fault() {
             assert_eq!(out, expected);
         }
         for (input, divisor, message, expected) in [
-            (
-                &values[..1],
-                3,
-                "kernel slice index out of bounds",
-                [3, 42, 0],
-            ),
+            (&values[..1], 3, CallError::Trap(Trap::Bounds), [3, 42, 0]),
             (
                 &values[..],
                 -1,
-                "kernel signed division overflow",
+                CallError::Trap(Trap::DivisionOverflow),
                 [-9, 42, 0],
             ),
             (
                 &values[..],
                 0,
-                "kernel integer division by zero",
+                CallError::Trap(Trap::DivisionByZero),
                 [42, 0, 0],
             ),
         ] {
@@ -68,8 +63,7 @@ fn staged_and_portable_calls_keep_writes_up_to_the_first_fault() {
                     out: &mut out,
                     divisor
                 })
-                .unwrap_err()
-                .to_string(),
+                .unwrap_err(),
                 message
             );
             assert_eq!(out, expected);
@@ -84,17 +78,40 @@ fn staged_and_portable_calls_keep_writes_up_to_the_first_fault() {
         );
         let code = code.as_inner();
         let mut out = [17];
-        assert!(
+        use splice_core::SignatureError::*;
+        assert_eq!(
             code.call(
                 &[],
                 &mut [BufferArg::Read(&values), BufferArg::Write(&mut out)]
-            )
-            .is_err()
+            ),
+            Err(Scalars {
+                expected: 1,
+                actual: 0
+            }
+            .into())
         );
-        assert!(code.call(&[1], &mut [BufferArg::Write(&mut out)]).is_err());
-        assert!(
-            code.call(&[1], &mut [BufferArg::Read(&values), BufferArg::Read(&out)])
-                .is_err()
+        assert_eq!(
+            code.call(&[1], &mut [BufferArg::Write(&mut out)]),
+            Err(Buffers {
+                expected: 2,
+                actual: 1
+            }
+            .into())
+        );
+        assert_eq!(
+            code.call(&[1], &mut [BufferArg::Read(&values), BufferArg::Read(&out)]),
+            Err(ReadOnly { buffer: 1 }.into())
+        );
+        assert_eq!(
+            code.call(
+                &[1],
+                &mut [BufferArg::from(&[1.0f32][..]), BufferArg::Write(&mut out)]
+            ),
+            Err(splice_core::SignatureError::Element {
+                buffer: 0,
+                expected: splice_core::simd::Element::I32
+            }
+            .into())
         );
         assert_eq!(out, [17]);
     }
@@ -114,8 +131,8 @@ fn every_binary_operation_matches_splice_on_signed_boundaries() {
         for a in cases {
             for b in cases {
                 assert_eq!(
-                    kernel.call(&[a, b], &mut []).ok(),
-                    op.checked_eval(a, b),
+                    kernel.call(&[a, b], &mut []),
+                    op.checked_eval(a, b).map_err(CallError::from),
                     "{a} {op:?} {b}"
                 );
             }
@@ -135,9 +152,8 @@ fn negative_and_past_end_indices_stop_before_the_first_store() {
                 values: &[5],
                 divisor: 1
             })
-            .unwrap_err()
-            .to_string(),
-            "kernel slice index out of bounds"
+            .unwrap_err(),
+            CallError::Trap(Trap::Bounds)
         );
         assert_eq!(out, [17]);
     }
@@ -257,7 +273,7 @@ fn masked_f64_memory_keeps_global_lane_order_across_chunks() {
         for (&x, &i) in data.iter().zip(&indices) {
             if x > 0.0 {
                 let Some(slot) = expected.get_mut(i as usize) else {
-                    expected_result = Err("kernel slice index out of bounds".to_owned());
+                    expected_result = Err(CallError::Trap(Trap::Bounds));
                     break;
                 };
                 *slot = x + table[i as usize];

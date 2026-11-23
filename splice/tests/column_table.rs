@@ -69,12 +69,13 @@ fn any_ge_float(col: &[f32], #[comptime] val: f32) -> i32 {
 }
 
 #[test]
-fn float_column_matches_the_rust_filter_including_nan_and_tail() -> splice::Result<()> {
+fn float_column_matches_the_rust_filter_including_nan_and_tail()
+-> Result<(), Box<dyn std::error::Error>> {
     fn check<E: Executable>(
         code: TypedKernel<query::Signature, E>,
         schema: &Schema,
         plan: &Plan,
-    ) -> splice::Result<()> {
+    ) -> Result<(), Box<dyn std::error::Error>> {
         for values in [&[][..], &[f32::NAN, 0.0, -1.0], &[2.5, f32::NAN]] {
             let expected = i32::from(values.iter().any(|&x| x >= 2.5));
             let columns = [BufferArg::Read(&[99]), BufferArg::ReadF32(values)];
@@ -127,7 +128,7 @@ fn check<E: Executable>(
     schema: &Schema,
     plan: &Plan,
     slot: usize,
-) -> splice::Result<()> {
+) -> Result<(), Box<dyn std::error::Error>> {
     let aux = [9.0_f64];
     for values in [[-4, 7, 8, 3], [7, -1, 10, 22]] {
         let mut expected = [0; 4];
@@ -174,7 +175,8 @@ fn check<E: Executable>(
 }
 
 #[test]
-fn sql_specialization_reads_the_selected_column_from_each_batch() -> splice::Result<()> {
+fn sql_specialization_reads_the_selected_column_from_each_batch()
+-> Result<(), Box<dyn std::error::Error>> {
     let int = BufferKind::Read;
     let float = BufferKind::new(Element::F64, false);
     for (slot, val, layout) in [(0, 7, vec![int, float]), (1, 9, vec![float, int])] {

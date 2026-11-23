@@ -4,7 +4,7 @@ use cranelift_codegen::ir::{Opcode, Type};
 use cranelift_jit::JITBuilder;
 use cranelift_module::default_libcall_names;
 use splice_core::{
-    Codegen, Executable,
+    CallError, Codegen, Executable, Trap,
     hir::{Binary, FunctionBuilder},
 };
 
@@ -220,7 +220,7 @@ fn packed_chunks_cover_the_vector_and_a_short_store_keeps_its_prefix() {
         &[0],
         &mut [source.as_slice().into(), (&mut dst[..limit]).into()],
     );
-    assert_eq!(res.unwrap_err(), "kernel slice index out of bounds");
+    assert_eq!(res.unwrap_err(), CallError::Trap(Trap::Bounds));
     let expected: Vec<_> = (0..dst.len())
         .map(|i| {
             if i < limit {
@@ -279,7 +279,7 @@ fn masked_contiguous_access_selects_packed_and_ordered_paths() {
         for lane in 0..active {
             let i = offset as usize + lane;
             if i >= dst_len {
-                status = Err("kernel slice index out of bounds".to_owned());
+                status = Err(CallError::Trap(Trap::Bounds));
                 break;
             }
             expected[1 + i] = source[i];

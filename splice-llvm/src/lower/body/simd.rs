@@ -7,6 +7,7 @@ use inkwell::{
     types::{BasicTypeEnum, VectorType},
     values::{BasicValueEnum, VectorValue},
 };
+use splice_core::Trap;
 use splice_core::{
     hir::{Reg, Simd, SimdOp, ValueType},
     simd::Element,
@@ -487,7 +488,7 @@ impl<'ctx> Body<'_, 'ctx> {
             &[data.into(), ptr.into(), enabled.as_basic_value().into()],
             "",
         )?;
-        self.exit_if(short, Failure::Bounds)
+        self.exit_if(short, Failure::Trap(Trap::Bounds))
     }
 
     fn splat(
@@ -588,7 +589,7 @@ impl<'ctx> Body<'_, 'ctx> {
                 let end = ir.build_int_add(start, wide.const_int(u64::from(count), false), "")?;
                 let outside = ir.build_int_compare(IntPredicate::UGT, end, slice.len, "")?;
                 if !store {
-                    self.exit_if(outside, Failure::Bounds)?;
+                    self.exit_if(outside, Failure::Trap(Trap::Bounds))?;
                     let val = ir.build_load(ty, addr, "")?.into_vector_value();
                     val.as_instruction()
                         .unwrap()
@@ -648,7 +649,7 @@ impl<'ctx> Body<'_, 'ctx> {
                 .into_vector_value();
             ir.build_and(active, prefix, "enabled")?
         } else {
-            self.exit_if(failed, Failure::Bounds)?;
+            self.exit_if(failed, Failure::Trap(Trap::Bounds))?;
             active
         };
         let name = match (indexed, store) {
@@ -665,7 +666,7 @@ impl<'ctx> Body<'_, 'ctx> {
                 &[values.into(), address.into(), align, enabled.into()],
                 "",
             )?;
-            self.exit_if(failed, Failure::Bounds)?;
+            self.exit_if(failed, Failure::Trap(Trap::Bounds))?;
             if let Some(done) = full_store_exit {
                 ir.build_unconditional_branch(done)?;
                 ir.position_at_end(done);

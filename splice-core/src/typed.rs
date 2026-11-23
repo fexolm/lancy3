@@ -1,66 +1,6 @@
 //! The declaration marker ties a kernel's Rust argument type to its specialized IR.
-use crate::{BuildOptions, Codegen, Executable, Function};
-use std::{
-    fmt,
-    marker::PhantomData,
-    ops::Deref,
-    panic::{AssertUnwindSafe, catch_unwind},
-};
-
-macro_rules! phase_error {
-    ($name:ident) => {
-        #[derive(Clone, Debug, Eq, PartialEq)]
-        pub struct $name(String);
-        impl fmt::Display for $name {
-            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                self.0.fmt(f)
-            }
-        }
-        impl std::error::Error for $name {}
-        impl From<String> for $name {
-            fn from(message: String) -> Self {
-                Self(message)
-            }
-        }
-        impl From<$name> for String {
-            fn from(error: $name) -> Self {
-                error.0
-            }
-        }
-    };
-}
-phase_error!(BuildError);
-phase_error!(CallError);
-
-fn boundary<T, E: From<String>>(action: impl FnOnce() -> crate::Result<T>) -> Result<T, E> {
-    // Returning an error abandons this build or invocation. Mutations to the
-    // caller's arguments made before an unwind retain their Rust semantics.
-    match catch_unwind(AssertUnwindSafe(action)) {
-        Ok(value) => value.map_err(E::from),
-        Err(payload) => {
-            let message = payload
-                .downcast_ref::<String>()
-                .cloned()
-                .or_else(|| payload.downcast_ref::<&str>().map(|s| (*s).to_owned()))
-                .unwrap_or_else(|| "kernel panicked".to_owned());
-            // A panic payload can itself own a panicking destructor. Keep that
-            // second unwind inside Rust as well, including at an extern entry.
-            if let Err(secondary) = catch_unwind(AssertUnwindSafe(|| drop(payload))) {
-                std::mem::forget(secondary);
-            }
-            Err(E::from(message))
-        }
-    }
-}
-
-#[doc(hidden)]
-pub fn build_boundary<T>(action: impl FnOnce() -> crate::Result<T>) -> Result<T, BuildError> {
-    boundary(action)
-}
-#[doc(hidden)]
-pub fn call_boundary<T>(action: impl FnOnce() -> crate::Result<T>) -> Result<T, CallError> {
-    boundary(action)
-}
+use crate::{BuildError, BuildOptions, CallError, Codegen, Executable, Function, build_boundary};
+use std::{fmt, marker::PhantomData, ops::Deref};
 
 /// Argument record emitted by an individual kernel declaration.
 pub trait CallArgs {

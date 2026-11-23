@@ -1,7 +1,7 @@
 use crate::hir::ssa::InterpretError;
 use crate::hir::{Binary, Function, Op as H, Scale, Terminator, Type};
 use crate::lir::x64::compile::compile;
-use crate::{CallError, ScalarKernel};
+use crate::{CallError, ScalarKernel, SignatureError, Trap};
 use std::sync::Arc;
 
 #[test]
@@ -64,7 +64,12 @@ fn checked_nested_access_preserves_prior_stores_and_forwards_addresses() {
     root.append(b, H::Store(last, result));
     root.set_terminator(b, Terminator::Return(result));
     let k = ScalarKernel::compile(&root).unwrap();
-    assert_eq!(k.call(&[0; 6]), Err(crate::CallError::PointerSignature));
+    assert_eq!(
+        k.call(&[0; 6]),
+        Err(crate::CallError::Signature(
+            SignatureError::PointerSignature
+        ))
+    );
     for (i, j) in [(-1, 1), (1, -1), (3, 0), (0, 3), (1, 1)] {
         let data = [2i32, 42, 1];
         for native in [false, true] {
@@ -89,7 +94,10 @@ fn checked_nested_access_preserves_prior_stores_and_forwards_addresses() {
                 assert_eq!(result, Ok(45));
                 assert_eq!(out, [9, 45, 45]);
             } else {
-                assert_eq!(result, Err(InterpretError::Trap(CallError::OutOfBounds)));
+                assert_eq!(
+                    result,
+                    Err(InterpretError::Trap(CallError::Trap(Trap::Bounds)))
+                );
                 assert_eq!(out, [9, -77, -77]);
             }
         }

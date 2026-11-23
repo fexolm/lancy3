@@ -683,10 +683,10 @@ impl Function {
     /// accesses executed by the function and its callees, including writes.
     pub(crate) unsafe fn interpret_raw(&self, args: &[u64]) -> Result<u64, InterpretError> {
         if args.len() != self.arity() {
-            return Err(crate::CallError::Arity {
+            return Err(crate::CallError::Signature(crate::SignatureError::Arity {
                 expected: self.arity(),
                 actual: args.len(),
-            }
+            })
             .into());
         }
         let width = crate::ScalarKernel::vector_bytes();
@@ -714,10 +714,10 @@ impl Function {
         buffers: &mut [Vec<u8>],
     ) -> Result<crate::hir::eval::Bits, InterpretError> {
         if args.len() != self.arity() {
-            return Err(crate::CallError::Arity {
+            return Err(crate::CallError::Signature(crate::SignatureError::Arity {
                 expected: self.arity(),
                 actual: args.len(),
-            }
+            })
             .into());
         }
         let params = self.params(self.entry());

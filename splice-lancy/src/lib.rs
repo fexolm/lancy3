@@ -4,7 +4,9 @@ mod lower;
 
 use lancy::{CompileError, ScalarKernel};
 pub use lower::lower;
-use splice_core::{BufferArg, BuildOptions, Codegen, Executable, Function};
+use splice_core::{
+    BufferArg, BuildOptions, CallError, Codegen, Executable, Function, SignatureError, Trap,
+};
 
 /// Compile Splice kernels through Lancy's SSA HIR and host backend.
 pub struct Lancy;
@@ -103,17 +105,17 @@ impl LancyKernel {
 }
 
 impl Executable for LancyKernel {
-    fn call(&self, args: &[i32], buffers: &mut [BufferArg<'_>]) -> Result<i32, String> {
+    fn call(&self, args: &[i32], buffers: &mut [BufferArg<'_>]) -> Result<i32, CallError> {
         if args.len() != self.arity {
-            return Err(format!(
-                "expected {} scalar arguments, got {}",
-                self.arity,
-                args.len()
-            ));
+            return Err(SignatureError::Scalars {
+                expected: self.arity,
+                actual: args.len(),
+            }
+            .into());
         }
         splice_core::hir::validate_buffers(&self.slices, buffers)?;
         if self.slices.is_empty() && !self.code.requires_raw_call() {
-            return self.code.call(args).map_err(|e| e.to_string());
+            return self.code.call(args).map_err(call_error);
         }
         let mut words = Vec::with_capacity(self.arity + 2 * buffers.len());
         words.extend(args.iter().map(|&v| v as u32 as u64));
@@ -125,6 +127,16 @@ impl Executable for LancyKernel {
         // native call scratch only for initialized, shape-checked packets.
         unsafe { self.code.call_raw(&words) }
             .map(|v| v as i32)
-            .map_err(|e| e.to_string())
+            .map_err(call_error)
+    }
+}
+
+fn call_error(error: lancy::CallError) -> CallError {
+    match error {
+        lancy::CallError::Trap(trap) => trap.into(),
+        lancy::CallError::Target(error) => error.into(),
+        // The arguments were checked against the Splice signature above, so
+        // a Lancy signature mismatch is a defect at the native boundary.
+        _ => Trap::Abi.into(),
     }
 }

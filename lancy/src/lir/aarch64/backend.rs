@@ -27,7 +27,7 @@ use super::{
     ShiftKind,
 };
 use crate::{
-    CompileError,
+    CompileError, Trap,
     hir::{Function, Type, ssa::VerifiedBody},
     jit::{DebugFrame, DebugFunction},
     lir::layout,
@@ -227,7 +227,10 @@ struct Emitter<'a> {
     config: Simd,
     epilogue: Label,
     byte_predicate: bool,
-    failures: [Option<Label>; 5],
+    /// Per-trap side exits, indexed by `Trap::code() - 1`.
+    failures: [Option<Label>; Trap::ALL.len()],
+    /// The shared tail of every side exit: report the trap code in W16.
+    report: Option<Label>,
 }
 
 impl Emitter<'_> {
@@ -255,22 +258,39 @@ impl Emitter<'_> {
         Ok(())
     }
 
-    fn trap_if(&mut self, cond: Cond, status: usize) -> Result {
-        let trap = *self.failures[status - 1].get_or_insert_with(|| self.a.label());
+    fn trap_if(&mut self, cond: Cond, trap: Trap) -> Result {
+        let exit = *self.failures[trap.code() as usize - 1].get_or_insert_with(|| self.a.label());
         self.a.skip_if(invert(cond))?;
-        self.a.jump(trap);
+        self.a.jump(exit);
+        Ok(())
+    }
+
+    /// Trap with the code a Rust entry or runtime helper left in W16.
+    fn report_if(&mut self, cond: Cond) -> Result {
+        let report = *self.report.get_or_insert_with(|| self.a.label());
+        self.a.skip_if(invert(cond))?;
+        self.a.jump(report);
         Ok(())
     }
 
     fn traps(&mut self) -> Result {
-        for (i, label) in self.failures.into_iter().enumerate() {
-            if let Some(label) = label {
-                self.a.bind(label);
-                self.a.access(true, 8, 10, (R::X20, 0))?;
-                self.a.imm(R::W9, (i + 1) as u64)?;
-                self.a.access(false, 4, 9, (R::X10, 0))?;
-                self.a.jump(self.epilogue);
+        let mut report = self.report;
+        for (trap, exit) in Trap::ALL.into_iter().zip(self.failures) {
+            if let Some(exit) = exit {
+                self.a.bind(exit);
+                self.a.imm(R::W16, trap.code().into())?;
+                let tail = match report {
+                    Some(tail) => tail,
+                    None => *report.insert(self.a.label()),
+                };
+                self.a.jump(tail);
             }
+        }
+        if let Some(report) = report {
+            self.a.bind(report);
+            self.a.access(true, 8, 10, (R::X20, 0))?;
+            self.a.access(false, 4, 16, (R::X10, 0))?;
+            self.a.jump(self.epilogue);
         }
         Ok(())
     }
@@ -530,12 +550,12 @@ impl Emitter<'_> {
                     C::Subs_32_addsub_shift,
                     &[r(R::WZR), r(word(0)), r(word(1))],
                 )?;
-                self.trap_if(Cond::Cs, 1)
+                self.trap_if(Cond::Cs, Trap::Bounds)
             }
             Inst::CheckOverflow(..) => {
                 self.a
                     .put(C::Subs_32_addsub_shift, &[r(R::WZR), r(word(0)), r(R::WZR)])?;
-                self.trap_if(Cond::Ne, 4)
+                self.trap_if(Cond::Ne, Trap::Overflow)
             }
             Inst::CallScratch(offset, ..) => {
                 self.a
@@ -569,9 +589,10 @@ impl Emitter<'_> {
                     C::Ubfm_64m_bitfield,
                     &[r(R::X16), r(R::X0), O::imm(32), O::imm(63)],
                 )?;
+                // The status's upper word is the entry's trap code.
                 self.a
                     .put(C::Subs_32_addsub_imm, &[r(R::WZR), r(R::W16), O::imm(0)])?;
-                self.trap_if(Cond::Ne, 5)
+                self.report_if(Cond::Ne)
             }
             Inst::Offset(scale, ..) => self.a.put(
                 C::Add_64_addsub_sxtw,
@@ -769,7 +790,8 @@ fn emit_compiled(module: &Module<Compiled>, config: Simd, debug: bool) -> Result
             config,
             epilogue,
             byte_predicate: false,
-            failures: [None; 5],
+            failures: [None; Trap::ALL.len()],
+            report: None,
         };
         let order = layout::place(&machine.body);
         for (index, &block) in order.iter().enumerate() {

@@ -265,7 +265,7 @@ fn query(
     count
 }
 
-fn main() -> splice::Result<()> {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     let columns = demo_columns();
     let schema = Schema::from_batch(&columns);
     let plan = demo_plan();
@@ -281,7 +281,7 @@ fn main() -> splice::Result<()> {
                 columns
             )?
         ),
-        Some(mode) => return Err(format!("unknown mode {mode}; use run or rust")),
+        Some(mode) => return Err(format!("unknown mode {mode}; use run or rust").into()),
     }
     Ok(())
 }
@@ -346,7 +346,7 @@ fn demo_columns() -> [BufferArg<'static>; 6] {
 fn run(
     code: splice::TypedKernel<query::Signature, impl Executable>,
     columns: [BufferArg<'_>; 6],
-) -> splice::Result<Vec<i32>> {
+) -> Result<Vec<i32>, Box<dyn std::error::Error>> {
     let capacity = columns[0].len() * columns[3].len();
     let mut keep = vec![0; columns[0].len()];
     let mut right = vec![0; capacity];
@@ -363,7 +363,8 @@ fn run(
 }
 
 #[test]
-fn mixed_schema_specializes_the_same_operators_for_different_elements() -> splice::Result<()> {
+fn mixed_schema_specializes_the_same_operators_for_different_elements()
+-> Result<(), Box<dyn std::error::Error>> {
     use splice::Codegen;
     use splice_cranelift::Cranelift;
     #[cfg(feature = "llvm")]

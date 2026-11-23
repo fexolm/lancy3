@@ -1,10 +1,10 @@
-use crate::CallError;
 use crate::hir::{Block, Edge, Function, Inst, Op, Simd, Terminator, Type, Value};
 use crate::hir::{
     eval::{Bits, evaluate, read},
     operation::operation,
 };
 use crate::support::slotmap::DenseMap;
+use crate::{CallError, Trap};
 
 /// Why the test interpreter stopped without a result.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
@@ -21,6 +21,12 @@ pub(crate) enum InterpretError {
     /// The function does not verify.
     #[error("invalid IR: {0}")]
     Invalid(String),
+}
+
+impl From<Trap> for InterpretError {
+    fn from(trap: Trap) -> Self {
+        Self::Trap(trap.into())
+    }
 }
 
 type Result<T> = std::result::Result<T, InterpretError>;
@@ -148,13 +154,13 @@ pub(super) unsafe fn run(
             Op::Copy(v) => f.values[v],
             Op::BoundsCheck(index, len) => {
                 if f.read(index) as u32 >= f.read(len) as u32 {
-                    return Err(CallError::OutOfBounds.into());
+                    return Err(Trap::Bounds.into());
                 }
                 continue;
             }
             Op::CheckOverflow(cond) => {
                 if f.read(cond) as u32 != 0 {
-                    return Err(CallError::IntegerOverflow.into());
+                    return Err(Trap::Overflow.into());
                 }
                 continue;
             }
@@ -254,20 +260,14 @@ pub(super) unsafe fn run(
             }
             Op::DebugStore(..) | Op::DebugPoint(_) => continue,
             Op::RustCall(import, a, b) => {
-                let result = ((import.resolve)())(f.read(a) as i32, f.read(b) as i32);
-                if result >> 32 != 0 {
-                    return Err(CallError::RustPanic.into());
-                }
-                word(u64::from(result as u32))
+                let status = ((import.resolve)())(f.read(a) as i32, f.read(b) as i32);
+                word(u64::from(splice_target::abi::decode_status(status)?))
             }
             Op::RustPacketCall(site) => {
                 let (import, _, words) = graph.packet_call(site);
                 let arguments: Vec<_> = words.iter().map(|&value| f.read(value) as i32).collect();
-                let result = import.invoke(&arguments);
-                if result >> 32 != 0 {
-                    return Err(CallError::RustPanic.into());
-                }
-                word(u64::from(result as u32))
+                let status = import.invoke(&arguments);
+                word(u64::from(splice_target::abi::decode_status(status)?))
             }
             Op::RustContextCall(..) => {
                 return Err(InterpretError::Unsupported("Rust context calls"));

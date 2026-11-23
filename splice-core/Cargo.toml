@@ -9,5 +9,6 @@ description = "Core types and frontend for the Splice kernel language"
 
 [dependencies]
 tracing.workspace = true
+thiserror = "2"
 splice-target = { path = "../splice-target", version = "0.1.0" }
 splice-macros = { path = "../splice-macros", version = "0.1.0" }

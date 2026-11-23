@@ -1,5 +1,5 @@
 use crate::hir::{Binary, Function, Op, Scale, Terminator, Type};
-use crate::{CallError, Inlining, ScalarKernel};
+use crate::{CallError, Inlining, ScalarKernel, Trap};
 use std::sync::Arc;
 
 #[test]
@@ -15,7 +15,7 @@ fn bounds_check_compares_both_i32_operands_as_unsigned() {
             let expected = if (index as u32) < len as u32 {
                 Ok(index)
             } else {
-                Err(CallError::OutOfBounds)
+                Err(CallError::Trap(Trap::Bounds))
             };
             assert_eq!(
                 kernel.call(&[index, len]),
@@ -72,23 +72,23 @@ fn two_checked_calls(op: Binary) -> Function {
 
 #[test]
 fn first_trap_stops_at_the_exact_store_in_each_callee() {
-    use CallError::*;
+    use Trap::*;
     // Each invocation can leave a different prefix of the seven writes visible.
     // The last case also checks a successful call after earlier traps on this kernel.
     let cases = [
-        ([13, 0, -1, 2, 1], Err(OutOfBounds), 1),
-        ([13, 0, 1, 2, -1], Err(DivisionByZero), 2),
-        ([i32::MIN, -1, 0, 0, 0], Err(DivisionOverflow), 2),
-        ([13, 3, 1, 0, 2], Err(OutOfBounds), 4),
-        ([13, 3, 0, 0, 1], Err(DivisionByZero), 5),
-        ([i32::MIN, 2, 1, -1, 0], Err(DivisionOverflow), 5),
+        ([13, 0, -1, 2, 1], Err(Bounds.into()), 1),
+        ([13, 0, 1, 2, -1], Err(DivisionByZero.into()), 2),
+        ([i32::MIN, -1, 0, 0, 0], Err(DivisionOverflow.into()), 2),
+        ([13, 3, 1, 0, 2], Err(Bounds.into()), 4),
+        ([13, 3, 0, 0, 1], Err(DivisionByZero.into()), 5),
+        ([i32::MIN, 2, 1, -1, 0], Err(DivisionOverflow.into()), 5),
         ([-17, 3, 0, -5, 1], Ok(1), 7),
     ];
     for op in [Binary::Div, Binary::Rem] {
         let f = two_checked_calls(op);
         for policy in [Inlining::Always, Inlining::Never] {
             let kernel = ScalarKernel::compile_with_inlining(&f, policy).unwrap();
-            for (inputs @ [n, d1, i1, d2, i2], expected_result, writes) in cases {
+            for (inputs @ [n, d1, i1, d2, i2], expected_result, writes) in cases.clone() {
                 let mut output = [-777; 7];
                 let mut args = [0u64; 6];
                 args[0] = output.as_mut_ptr() as u64;

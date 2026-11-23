@@ -4,7 +4,7 @@ use super::{
     A, C, Cond, Emitter, O, PredQual, R, Result, SITE_POINTER, ShiftKind, TEMP_WORD_BYTES, invert,
 };
 use crate::{
-    CallError,
+    Trap,
     hir::{Lane, Type},
     hir::{eval::evaluate, operation::Action},
 };
@@ -17,39 +17,45 @@ pub(crate) struct Site {
     width: usize,
 }
 
-/// Execute a numeric operation using the JIT's four-slot libcall area.
+/// Execute a numeric operation using the JIT's four-slot libcall area and
+/// return 0 or a trap code. A panic cannot unwind into native code: it stops
+/// here and reports [`Trap::Abi`], as would any other helper defect.
 unsafe extern "C" fn primitive(site: &Site, area: *mut u8) -> u32 {
-    let args = std::array::from_fn(|i| {
-        let mut data = [0; TEMP_WORD_BYTES];
-        let bytes = site.sizes[i];
-        if bytes != 0 {
-            // SAFETY: isel emits the matching argument stores before this call.
-            unsafe {
-                std::ptr::copy_nonoverlapping(
-                    area.add(i * TEMP_WORD_BYTES),
-                    data.as_mut_ptr(),
-                    bytes,
-                )
-            };
+    let run = || -> std::result::Result<(), Trap> {
+        let args = std::array::from_fn(|i| {
+            let mut data = [0; TEMP_WORD_BYTES];
+            let bytes = site.sizes[i];
+            if bytes != 0 {
+                // SAFETY: isel emits the matching argument stores before this call.
+                unsafe {
+                    std::ptr::copy_nonoverlapping(
+                        area.add(i * TEMP_WORD_BYTES),
+                        data.as_mut_ptr(),
+                        bytes,
+                    )
+                };
+            }
+            data
+        });
+        let value = evaluate(site.action, site.input, site.output, &args, site.width)?;
+        // SAFETY: the compiler reserves a separate output slot of TEMP_WORD_BYTES bytes.
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                value.as_ptr(),
+                area.add(3 * TEMP_WORD_BYTES),
+                site.output.bytes(site.width),
+            )
+        };
+        Ok(())
+    };
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(run)) {
+        Ok(Ok(())) => 0,
+        Ok(Err(trap)) => trap.code(),
+        Err(payload) => {
+            // Only the code reaches the caller: this is a backend defect.
+            drop(splice_target::abi::panic_message(payload));
+            Trap::Abi.code()
         }
-        data
-    });
-    match evaluate(site.action, site.input, site.output, &args, site.width) {
-        Ok(value) => {
-            // SAFETY: the compiler reserves a separate output slot of TEMP_WORD_BYTES bytes.
-            unsafe {
-                std::ptr::copy_nonoverlapping(
-                    value.as_ptr(),
-                    area.add(3 * TEMP_WORD_BYTES),
-                    site.output.bytes(site.width),
-                )
-            };
-            0
-        }
-        Err(CallError::OutOfBounds) => 1,
-        Err(CallError::DivisionByZero) => 2,
-        Err(CallError::DivisionOverflow) => 3,
-        Err(_) => unreachable!("numeric primitive can only report HIR traps"),
     }
 }
 
@@ -369,7 +375,7 @@ impl Emitter<'_> {
             C::Subs_32_addsub_imm,
             &[O::reg(R::WZR), O::reg(index), O::imm((width / size) as u64)],
         )?;
-        self.trap_if(Cond::Cs, 1)?;
+        self.trap_if(Cond::Cs, Trap::Bounds)?;
         let temp = self.temp(0);
         self.access(false, width, src, temp)?;
         self.a.addr(R::X10, temp.0, temp.1)?;
@@ -471,17 +477,12 @@ impl Emitter<'_> {
         self.a.imm(R::X16, primitive as *const () as u64)?;
         self.a.put(C::Blr_64_branch_reg, &[O::reg(R::X16)])?;
         self.byte_predicate = false;
+        // W16 keeps the returned trap code for the side exit.
         self.a.put(
             C::Subs_32_addsub_imm,
-            &[O::reg(R::WZR), O::reg(R::W0), O::imm(0)],
+            &[O::reg(R::W16), O::reg(R::W0), O::imm(0)],
         )?;
-        let success = self.a.label();
-        self.a.skip_if(Cond::Ne)?;
-        self.a.jump(success);
-        self.a.access(true, 8, 10, (R::X20, 0))?;
-        self.a.access(false, 4, 0, (R::X10, 0))?;
-        self.a.jump(self.epilogue);
-        self.a.bind(success);
+        self.report_if(Cond::Ne)?;
         Ok(())
     }
 
@@ -533,7 +534,7 @@ impl Emitter<'_> {
             }
             Divide { signed, remainder } => {
                 self.a.put(cmp_imm, &[zero, b, O::imm(0)])?;
-                self.trap_if(Cond::Eq, 2)?;
+                self.trap_if(Cond::Eq, Trap::DivisionByZero)?;
                 let div = if signed {
                     let safe = self.a.label();
                     let cmn = code(C::Adds_32_addsub_imm, C::Adds_64_addsub_imm);
@@ -544,7 +545,7 @@ impl Emitter<'_> {
                     let min_reg = if wide { R::X15 } else { R::W15 };
                     self.a.imm(min_reg, min as u64)?;
                     self.a.put(cmp, &[zero, a, reg(15)])?;
-                    self.trap_if(Cond::Eq, 3)?;
+                    self.trap_if(Cond::Eq, Trap::DivisionOverflow)?;
                     self.a.bind(safe);
                     code(C::Sdiv_32_dp_2src, C::Sdiv_64_dp_2src)
                 } else {

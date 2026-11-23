@@ -31,10 +31,12 @@ pub trait KernelType {
     const FIELDS: &'static [KernelField];
 }
 
+mod error;
 mod typed;
-pub use typed::{BuildError, CallArgs, CallError, CompileInput, TypedIr, TypedKernel};
+pub use error::{BuildError, CallError, SignatureError, TargetError, Trap};
 #[doc(hidden)]
-pub use typed::{build_boundary, call_boundary};
+pub use error::{build_boundary, call_boundary};
+pub use typed::{CallArgs, CompileInput, TypedIr, TypedKernel};
 
 pub use frontend::ComptimeKey;
 pub use hir::{BufferArg, BufferElement, BufferKind, Function, validate_buffers};
@@ -113,5 +115,9 @@ pub trait Codegen: Sized {
 /// argument lists, each following declaration order. An error stops execution;
 /// completed stores remain visible to the caller.
 pub trait Executable {
-    fn call(&self, args: &[i32], buffers: &mut [BufferArg<'_>]) -> Result<i32>;
+    fn call(
+        &self,
+        args: &[i32],
+        buffers: &mut [BufferArg<'_>],
+    ) -> std::result::Result<i32, CallError>;
 }

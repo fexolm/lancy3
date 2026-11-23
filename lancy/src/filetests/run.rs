@@ -3,7 +3,7 @@
 use super::Result;
 use crate::hir::ssa::{InterpretError, buffer_address};
 use crate::hir::{Function, Lane, Type, eval::Bits};
-use crate::{CallError, ScalarKernel};
+use crate::{CallError, ScalarKernel, Trap};
 
 pub(crate) struct Run {
     line: usize,
@@ -216,11 +216,12 @@ impl Run {
             .split_once("->")
             .ok_or("expected @run args -> result")?;
         let expected = match result.trim() {
-            "!bounds" => Err(CallError::OutOfBounds),
-            "!zero" => Err(CallError::DivisionByZero),
-            "!overflow" => Err(CallError::DivisionOverflow),
-            "!arithmetic_overflow" => Err(CallError::IntegerOverflow),
-            "!rust_panic" => Err(CallError::RustPanic),
+            "!bounds" => Err(CallError::Trap(Trap::Bounds)),
+            "!zero" => Err(CallError::Trap(Trap::DivisionByZero)),
+            "!overflow" => Err(CallError::Trap(Trap::DivisionOverflow)),
+            "!arithmetic_overflow" => Err(CallError::Trap(Trap::Overflow)),
+            "!rust_panic" => Err(CallError::Trap(Trap::RustPanic)),
+            "!abi" => Err(CallError::Trap(Trap::Abi)),
             trap if trap.starts_with('!') => return Err(format!("unknown trap {trap}")),
             value => match literals(value)?.as_slice() {
                 [value] => Ok(value.clone()),
@@ -265,7 +266,7 @@ impl Run {
             .map_err(at)?;
         let expected = match &self.expected {
             Ok(text) => Ok(literal(text, f.return_type(), width).map_err(at)?),
-            Err(trap) => Err(*trap),
+            Err(trap) => Err(trap.clone()),
         };
         Ok(Typed {
             args,

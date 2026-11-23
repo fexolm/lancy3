@@ -766,8 +766,8 @@ fn narrow_division_reports_the_earliest_fault_across_groups() {
         ));
         let code = ScalarKernel::compile(&f).unwrap();
         for (first, second, error) in [
-            (0, 255, CallError::DivisionByZero),
-            (255, 0, CallError::DivisionOverflow),
+            (0, 255, CallError::Trap(crate::Trap::DivisionByZero)),
+            (255, 0, CallError::Trap(crate::Trap::DivisionOverflow)),
         ] {
             let mut rhs = vec![2; width];
             rhs[boundary - 1] = first;
@@ -1343,7 +1343,15 @@ fn sve_logical_width_and_shorter_thread_are_checked() {
             // SAFETY: both arrays remain live for the call and cover the original width.
             let result =
                 unsafe { code.call_raw(&[output.as_mut_ptr() as u64, original.as_ptr() as u64]) };
-            assert_eq!(result, Err(CallError::VectorLength));
+            assert_eq!(
+                result,
+                Err(CallError::Target(
+                    splice_target::TargetError::VectorLength {
+                        required: config.bytes,
+                        available: 16
+                    }
+                ))
+            );
             assert!(output.iter().all(|&v| v == -1));
             // SAFETY: use the length read from this thread before reducing its VL.
             let restored = unsafe { prctl(50, initial, 0usize, 0usize, 0usize) };

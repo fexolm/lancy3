@@ -1,4 +1,5 @@
 use crate::hir::IrError;
+pub use splice_target::{TargetError, abi::Trap};
 use std::io;
 use thiserror::Error;
 
@@ -51,10 +52,25 @@ impl CompileError {
 }
 
 /// Failure to invoke a kernel, or a trap raised during its execution.
-#[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+#[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum CallError {
-    #[error("the calling thread's SVE vector length is smaller than the compiled kernel requires")]
-    VectorLength,
+    /// The calling thread cannot run the code, for example because its SVE
+    /// vector length is shorter than the compiled kernel requires.
+    #[error(transparent)]
+    Target(#[from] TargetError),
+    #[error(transparent)]
+    Signature(#[from] SignatureError),
+    /// The kernel stopped. A [`Trap::RustPanic`] message is available from
+    /// [`splice_target::abi::take_panic_message`] on the calling thread.
+    #[error(transparent)]
+    Trap(#[from] Trap),
+}
+
+/// The arguments or the entry point do not match the kernel's signature.
+#[non_exhaustive]
+#[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
+pub enum SignatureError {
     #[error("expected {expected} arguments, got {actual}")]
     Arity { expected: usize, actual: usize },
     #[error("use call_words or call_words_raw for a multiword signature")]
@@ -63,14 +79,4 @@ pub enum CallError {
     ResultWords { expected: usize, actual: usize },
     #[error("signature requires a typed invocation")]
     PointerSignature,
-    #[error("kernel slice index out of bounds")]
-    OutOfBounds,
-    #[error("kernel integer division by zero")]
-    DivisionByZero,
-    #[error("kernel signed division overflow")]
-    DivisionOverflow,
-    #[error("kernel integer arithmetic overflow")]
-    IntegerOverflow,
-    #[error("kernel Rust import panicked")]
-    RustPanic,
 }

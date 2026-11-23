@@ -129,13 +129,17 @@ fn context_slice_operands_require_valid_nonaliasing_descriptors() {
 #[test]
 fn rust_imports_fill_unused_abi_arguments_with_zero_in_both_staging_paths() {
     extern "C" fn three(a: i32, b: i32) -> i64 {
-        if (a, b) == (0, 0) { 3 } else { 5_i64 << 32 }
+        if (a, b) == (0, 0) {
+            3
+        } else {
+            splice_core::Trap::Abi.status()
+        }
     }
     extern "C" fn double(a: i32, b: i32) -> i64 {
         if b == 0 {
             i64::from(a.wrapping_mul(2) as u32)
         } else {
-            5_i64 << 32
+            splice_core::Trap::Abi.status()
         }
     }
     fn body(b: &mut dyn KernelBuilder) -> splice_core::Result<()> {
@@ -349,7 +353,10 @@ fn checked_nested_call_preserves_writes_before_failure() {
             ],
         )
         .unwrap_err();
-    assert_eq!(error, "kernel integer division by zero");
+    assert_eq!(
+        error,
+        splice_core::CallError::Trap(splice_core::Trap::DivisionByZero)
+    );
     assert_eq!(out, [27]);
 }
 

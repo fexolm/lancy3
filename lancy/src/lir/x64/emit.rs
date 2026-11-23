@@ -7,7 +7,7 @@ use super::{
 };
 use crate::hir::operation::Action;
 use crate::{
-    CompileError,
+    CompileError, Trap,
     hir::{Binary, Function, Type, ssa::VerifiedBody},
     jit::{DebugFrame, DebugFunction},
     lir::layout,
@@ -200,7 +200,7 @@ fn emit_mode(module: &Module<CompiledFunction>, debug: bool) -> Result<Code, Com
             root: is_root,
             entries: &entries,
             epilogue,
-            failures: [None; 5],
+            exits: Exits::default(),
             debug,
             points: &mut points,
         }
@@ -292,6 +292,25 @@ fn emit_mode(module: &Module<CompiledFunction>, debug: bool) -> Result<Code, Com
     })
 }
 
+/// Side exits of one function, created on first use and emitted at its end.
+#[derive(Default)]
+struct Exits {
+    /// Indexed by `Trap::code() - 1`.
+    traps: [Option<CodeLabel>; Trap::ALL.len()],
+    /// The shared tail: report the trap code held in R10D.
+    report: Option<CodeLabel>,
+}
+
+impl Exits {
+    fn trap(&mut self, a: &mut CodeAssembler, trap: Trap) -> CodeLabel {
+        *self.traps[trap.code() as usize - 1].get_or_insert_with(|| a.create_label())
+    }
+
+    fn report(&mut self, a: &mut CodeAssembler) -> CodeLabel {
+        *self.report.get_or_insert_with(|| a.create_label())
+    }
+}
+
 struct Emitter<'a> {
     constants: &'a mut Constants,
     a: &'a mut CodeAssembler,
@@ -299,7 +318,7 @@ struct Emitter<'a> {
     root: bool,
     entries: &'a DenseMap<FunctionId, CodeLabel>,
     epilogue: CodeLabel,
-    failures: [Option<CodeLabel>; 5],
+    exits: Exits,
     debug: bool,
     points: &'a mut Vec<(u32, u64)>,
 }
@@ -372,28 +391,39 @@ impl Emitter<'_> {
                 }
             }
         }
-        for (i, label) in self.failures.into_iter().enumerate() {
-            if let Some(label) = label {
-                bind(self.a, label)?;
-                // A trap can bypass every internal continuation. Recover the
-                // root workspace, report through the live status pointer
-                // supplied by ScalarKernel::invoke, and restore the host ABI.
-                if !self.root {
-                    if self.debug {
-                        self.a.mov(r10, slot(1))?;
-                        self.a.mov(r10, qword_ptr(r10))?;
-                        self.a.mov(dword_ptr(r10), (i + 1) as i32)?;
-                        self.a.xor(eax, eax)?;
-                        self.a.ret()?;
-                        continue;
-                    }
-                    self.a.mov(r11, slot(1))?;
-                }
-                self.a.mov(r10, slot(0))?;
-                self.a.mov(dword_ptr(r10), (i + 1) as i32)?;
-                self.a.xor(eax, eax)?;
-                self.a.jmp(self.epilogue)?;
+        let Exits { traps, report } = self.exits;
+        let mut report = report;
+        for (trap, exit) in Trap::ALL.into_iter().zip(traps) {
+            if let Some(exit) = exit {
+                bind(self.a, exit)?;
+                self.a.mov(r10d, trap.code())?;
+                let tail = match report {
+                    Some(tail) => tail,
+                    None => *report.insert(self.a.create_label()),
+                };
+                self.a.jmp(tail)?;
             }
+        }
+        if let Some(report) = report {
+            bind(self.a, report)?;
+            // A trap can bypass every internal continuation. Recover the
+            // root workspace, report the code in R10D through the live status
+            // pointer supplied by ScalarKernel::invoke, and restore the host ABI.
+            if !self.root {
+                if self.debug {
+                    self.a.mov(rax, slot(1))?;
+                    self.a.mov(rax, qword_ptr(rax))?;
+                    self.a.mov(dword_ptr(rax), r10d)?;
+                    self.a.xor(eax, eax)?;
+                    self.a.ret()?;
+                    return Ok(());
+                }
+                self.a.mov(r11, slot(1))?;
+            }
+            self.a.mov(rax, slot(0))?;
+            self.a.mov(dword_ptr(rax), r10d)?;
+            self.a.xor(eax, eax)?;
+            self.a.jmp(self.epilogue)?;
         }
         Ok(())
     }
@@ -429,7 +459,10 @@ impl Emitter<'_> {
                     bind(a, label)?;
                     a.mov(r11, qword_ptr(rsp + WORKSPACE))?;
                     a.add(rsp, FRAME)?;
-                    let fail = *self.failures[i].get_or_insert_with(|| a.create_label());
+                    let fail = self.exits.trap(
+                        a,
+                        [Trap::Bounds, Trap::DivisionByZero, Trap::DivisionOverflow][i],
+                    );
                     a.jmp(fail)?;
                 }
             }
@@ -511,7 +544,7 @@ impl Emitter<'_> {
             } => {
                 let width = Features::host().bytes;
                 if checked {
-                    let fail = *self.failures[0].get_or_insert_with(|| a.create_label());
+                    let fail = self.exits.trap(a, Trap::Bounds);
                     a.cmp(r(1), (width / 4) as i32)?;
                     a.jae(fail)?;
                 }
@@ -684,8 +717,8 @@ impl Emitter<'_> {
             }
             Inst::Cdq { .. } => a.cdq(),
             Inst::IDiv { .. } => {
-                let zero = *self.failures[1].get_or_insert_with(|| a.create_label());
-                let overflow = *self.failures[2].get_or_insert_with(|| a.create_label());
+                let zero = self.exits.trap(a, Trap::DivisionByZero);
+                let overflow = self.exits.trap(a, Trap::DivisionOverflow);
                 let divide = a.create_label();
                 a.test(r(2), r(2))?;
                 a.jz(zero)?;
@@ -738,7 +771,7 @@ impl Emitter<'_> {
                 Ok(())
             }
             Inst::CheckMask(mask) => {
-                let fail = *self.failures[0].get_or_insert_with(|| a.create_label());
+                let fail = self.exits.trap(a, Trap::Bounds);
                 simd::test_vector_mask(a, Features::host(), allocate_mask(mask, allocs).0)?;
                 a.jne(fail)
             }
@@ -823,12 +856,12 @@ impl Emitter<'_> {
                 }
             }
             Inst::CheckBounds(..) => {
-                let fail = *self.failures[0].get_or_insert_with(|| a.create_label());
+                let fail = self.exits.trap(a, Trap::Bounds);
                 rm32!(cmp, r(0), 1)?;
                 a.jae(fail)
             }
             Inst::CheckOverflow(..) => {
-                let fail = *self.failures[3].get_or_insert_with(|| a.create_label());
+                let fail = self.exits.trap(a, Trap::Overflow);
                 a.test(r(0), r(0))?;
                 a.jne(fail)
             }
@@ -974,10 +1007,11 @@ impl Emitter<'_> {
                 a.call(r10)?;
                 a.mov(r11, qword_ptr(rsp + shadow))?;
                 a.add(rsp, shadow + 8)?;
-                let fail = *self.failures[4].get_or_insert_with(|| a.create_label());
+                // The status's upper word is the entry's trap code.
+                let report = self.exits.report(a);
                 a.mov(r10, rax)?;
                 a.shr(r10, 32)?;
-                a.jne(fail)
+                a.jne(report)
             }
             Inst::Call { target, .. } => {
                 if self.root {

@@ -15,7 +15,7 @@
 //! assert!(text.starts_with("fn adjust(value: i32)"));
 //! assert!(text.contains("value * "));
 //! assert!(!text.contains(" + "));
-//! # Ok::<(), String>(())
+//! # Ok::<(), splice_core::BuildError>(())
 //! ```
 #![forbid(unsafe_code)]
 

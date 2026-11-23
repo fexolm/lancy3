@@ -12,7 +12,7 @@ use splice_text::Text;
 #[path = "relational/tests.rs"]
 mod tests;
 
-fn main() -> Result<(), String> {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     let plan = pricing_plan();
     match std::env::args().nth(1).as_deref() {
         None | Some("lancy") => run(
@@ -52,11 +52,12 @@ fn main() -> Result<(), String> {
         }
         Some(other) => Err(format!(
             "unknown backend {other}; choose lancy, cranelift, llvm, text or rust"
-        )),
+        )
+        .into()),
     }
 }
 
-fn run(plan: &Plan, code: impl Executable) -> Result<(), String> {
+fn run(plan: &Plan, code: impl Executable) -> Result<(), Box<dyn std::error::Error>> {
     let catalog = Catalog::new(&[
         &[(7, 3), (8, 1), (7, 4)],
         &[(7, 10), (8, 2)],

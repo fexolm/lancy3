@@ -8,7 +8,7 @@ use splice_lancy::Lancy;
 #[cfg(feature = "llvm")]
 use splice_llvm::Llvm;
 
-fn main() -> Result<(), String> {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     let kernel: Box<dyn Executable> = match std::env::args().nth(1).as_deref() {
         #[cfg(feature = "llvm")]
         Some("llvm") => Box::new(lookup::build::<Llvm>(lookup::BuildArgs {})?.into_inner()),
@@ -18,7 +18,7 @@ fn main() -> Result<(), String> {
         None | Some("lancy") => {
             Box::new(lookup::build::<Lancy>(lookup::BuildArgs {})?.into_inner())
         }
-        Some(name) => return Err(format!("unknown backend {name}")),
+        Some(name) => return Err(format!("unknown backend {name}").into()),
     };
     let (table, queries) = fixture(16, 12, 9);
     let mut slots = vec![-2; queries.len()];

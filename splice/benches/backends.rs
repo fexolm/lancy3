@@ -98,7 +98,7 @@ fn bench_compile<K, E: std::fmt::Debug>(
 
 impl<Run, T> Workload<'_, Run, T>
 where
-    Run: Fn(&dyn Executable, &mut [T]) -> splice::Result<usize>,
+    Run: Fn(&dyn Executable, &mut [T]) -> Result<usize, Box<dyn std::error::Error>>,
     T: Copy + Default + Not<Output = T>,
 {
     fn verify(&self, kernel: &dyn Executable, workspace: &mut [T], backend: &str) {
@@ -272,7 +272,7 @@ fn sql_plan(c: &mut Criterion) {
         },
         run: |kernel: &dyn Executable, arena: &mut [i32]| {
             let (arena, state) = arena.split_at_mut(workspace_words);
-            data.0.run(kernel, arena, state).map(<[i32]>::len)
+            Ok(data.0.run(kernel, arena, state)?.len())
         },
     };
     workload.compare(

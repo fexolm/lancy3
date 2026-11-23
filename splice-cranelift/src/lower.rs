@@ -1,4 +1,4 @@
-use crate::{BOUNDS, DIV_ZERO, Descriptor, INTEGER_OVERFLOW, OVERFLOW};
+use crate::Descriptor;
 use cranelift_codegen::ir::{
     DebugTag, FuncRef, InstBuilder, MemFlags, Opcode, StackSlot, StackSlotData, StackSlotKind,
     TrapCode, Value,
@@ -6,6 +6,7 @@ use cranelift_codegen::ir::{
     types::{I8, I32, I64},
 };
 use cranelift_frontend::{FunctionBuilder, Variable};
+use splice_core::Trap;
 use splice_core::hir::{Binary, ContextSlice, Instr, Reg, RustContextTarget};
 use splice_core::{ContextArguments, Function};
 use std::collections::HashMap;
@@ -40,13 +41,18 @@ fn packet_words(
     }
 }
 
-fn import_result(builder: &mut FunctionBuilder, packed: Value) -> Value {
+/// Return a failed status from this function unchanged, then continue
+/// with its result word.
+fn forward_status(builder: &mut FunctionBuilder, status: Value) -> Value {
     let failed = builder
         .ins()
-        .icmp_imm(IntCC::UnsignedGreaterThan, packed, i64::from(u32::MAX));
-    let panic = builder.ins().iconst(I64, crate::RUST_PANIC);
-    return_if(builder, failed, panic);
-    builder.ins().ireduce(I32, packed)
+        .icmp_imm(IntCC::UnsignedGreaterThan, status, i64::from(u32::MAX));
+    return_if(builder, failed, status);
+    builder.ins().ireduce(I32, status)
+}
+
+pub(crate) fn trap(builder: &mut FunctionBuilder, trap: Trap) -> Value {
+    builder.ins().iconst(I64, trap.status())
 }
 
 fn parameters(b: &mut FunctionBuilder, f: &Function, is_entry: bool) -> Vec<Value> {
@@ -227,7 +233,7 @@ pub(super) fn emit(
                     .iconst(I64, (import.symbol.resolve)() as usize as i64);
                 let call = b.ins().call_indirect(sig, address, &words);
                 let packed = b.inst_results(call)[0];
-                let value = import_result(&mut b, packed);
+                let value = forward_status(&mut b, packed);
                 b.def_var(var(dst), value);
             }
             Instr::RustPacketCall {
@@ -259,7 +265,7 @@ pub(super) fn emit(
                 );
                 let call = b.ins().call_indirect(sig, address, &[symbol, words, count]);
                 let packed = b.inst_results(call)[0];
-                let value = import_result(&mut b, packed);
+                let value = forward_status(&mut b, packed);
                 b.def_var(var(dst), value);
             }
             Instr::RustContextCall {
@@ -336,7 +342,7 @@ pub(super) fn emit(
                 let address = b.ins().iconst(ptr, entry as usize as i64);
                 let call = b.ins().call_indirect(sig, address, &words);
                 let packed = b.inst_results(call)[0];
-                let value = import_result(&mut b, packed);
+                let value = forward_status(&mut b, packed);
                 b.def_var(var(dst), value);
             }
             Instr::Call {
@@ -350,12 +356,12 @@ pub(super) fn emit(
                     actuals.extend(buffers[slice.index()]);
                 }
                 let call = b.ins().call(imports[&Arc::as_ptr(function)], &actuals);
-                let result = b.inst_results(call)[0];
-                if function.needs_status() {
-                    let failed = b.ins().icmp_imm(IntCC::SignedLessThan, result, 0);
-                    return_if(&mut b, failed, result);
-                }
-                let value = b.ins().ireduce(I32, result);
+                let status = b.inst_results(call)[0];
+                let value = if function.needs_status() {
+                    forward_status(&mut b, status)
+                } else {
+                    b.ins().ireduce(I32, status)
+                };
                 b.def_var(var(dst), value);
             }
             Instr::Jump(label) => {
@@ -381,7 +387,7 @@ pub(super) fn emit(
                 open = false;
             }
             Instr::TrapBounds => {
-                let fault = b.ins().iconst(I64, BOUNDS);
+                let fault = trap(&mut b, Trap::Bounds);
                 b.ins().return_(&[fault]);
                 open = false;
             }
@@ -423,7 +429,7 @@ fn return_if(b: &mut FunctionBuilder, condition: Value, result: Value) {
 fn element(b: &mut FunctionBuilder, [data, len]: [Value; 2], index: Value) -> Value {
     // Slice lengths fit i32, so unsigned comparison also rejects negative indices.
     let invalid = b.ins().icmp(IntCC::UnsignedGreaterThanOrEqual, index, len);
-    let bounds = b.ins().iconst(I64, BOUNDS);
+    let bounds = trap(b, Trap::Bounds);
     return_if(b, invalid, bounds);
     let index = b.ins().uextend(I64, index);
     let bytes = b.ins().imul_imm(index, size_of::<i32>() as i64);
@@ -443,7 +449,7 @@ fn binary(b: &mut FunctionBuilder, op: Binary, lhs: Value, rhs: Value) -> Value 
                 CheckedMul => b.ins().smul_overflow(lhs, rhs),
                 _ => unreachable!(),
             };
-            let fault = b.ins().iconst(I64, INTEGER_OVERFLOW);
+            let fault = trap(b, Trap::Overflow);
             return_if(b, overflow, fault);
             return result;
         }
@@ -454,7 +460,7 @@ fn binary(b: &mut FunctionBuilder, op: Binary, lhs: Value, rhs: Value) -> Value 
         Shr => return b.ins().sshr(lhs, rhs),
         CheckedShl | CheckedShr => {
             let invalid = b.ins().icmp_imm(IntCC::UnsignedGreaterThanOrEqual, rhs, 32);
-            let fault = b.ins().iconst(I64, INTEGER_OVERFLOW);
+            let fault = trap(b, Trap::Overflow);
             return_if(b, invalid, fault);
             return if op == CheckedShl {
                 b.ins().ishl(lhs, rhs)
@@ -466,12 +472,12 @@ fn binary(b: &mut FunctionBuilder, op: Binary, lhs: Value, rhs: Value) -> Value 
         Max => return b.ins().smax(lhs, rhs),
         Div | Rem => {
             let zero = b.ins().icmp_imm(IntCC::Equal, rhs, 0);
-            let fault = b.ins().iconst(I64, DIV_ZERO);
+            let fault = trap(b, Trap::DivisionByZero);
             return_if(b, zero, fault);
             let min = b.ins().icmp_imm(IntCC::Equal, lhs, i64::from(i32::MIN));
             let minus_one = b.ins().icmp_imm(IntCC::Equal, rhs, -1);
             let overflow = b.ins().band(min, minus_one);
-            let fault = b.ins().iconst(I64, OVERFLOW);
+            let fault = trap(b, Trap::DivisionOverflow);
             return_if(b, overflow, fault);
             return if op == Div {
                 b.ins().sdiv(lhs, rhs)

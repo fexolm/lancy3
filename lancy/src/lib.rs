@@ -20,5 +20,5 @@ pub mod support;
 
 pub use lir::aarch64;
 
-pub use error::{CallError, CompileError};
+pub use error::{CallError, CompileError, SignatureError, Trap};
 pub use jit::{Inlining, ScalarKernel};

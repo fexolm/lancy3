@@ -160,7 +160,7 @@ fn check_workspace_boundary(plan: &Plan, tables: &[&[Row]], kernels: &[&dyn Exec
             catalog
                 .run(kernel, &mut storage[1..=short], &mut state)
                 .unwrap_err(),
-            "query workspace is too small"
+            RunError::WorkspaceTooSmall
         );
         assert_eq!(storage, failed);
         assert_rows(
@@ -415,7 +415,7 @@ fn fused_join_streams_all_hits_and_stays_successful_as_workspace_grows() {
                 if fits {
                     assert_rows(&plan, result.unwrap(), &expected);
                 } else {
-                    assert_eq!(result.unwrap_err(), "query workspace is too small");
+                    assert_eq!(result.unwrap_err(), RunError::WorkspaceTooSmall);
                 }
                 assert_eq!(storage[0], -971);
                 assert!(storage[1 + capacity..].iter().all(|&x| x == -971));
@@ -848,14 +848,15 @@ fn workspace_exhaustion_has_an_explicit_result_and_caller_can_retry() {
     for id in [2, usize::MAX] {
         let unknown_table =
             Lancy::compile(&query::ir(&Plan::Scan(id).prepare()).unwrap().into_inner()).unwrap();
-        assert!(
+        assert_eq!(
             cat.run(
                 &unknown_table,
                 &mut [0; 8],
                 &mut vec![0; Plan::Scan(id).state_words()]
-            )
-            .unwrap_err()
-            .contains("bounds")
+            ),
+            Err(RunError::Call(splice::CallError::Trap(
+                splice::Trap::Bounds
+            )))
         );
     }
 }

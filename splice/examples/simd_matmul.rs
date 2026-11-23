@@ -7,7 +7,7 @@ use splice_lancy::Lancy;
 #[cfg(feature = "llvm")]
 use splice_llvm::Llvm;
 
-fn main() -> splice::Result<()> {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     let kernel: Box<dyn Executable> = match std::env::args().nth(1).as_deref() {
         None | Some("lancy") => {
             Box::new(matmul::build::<Lancy>(matmul::BuildArgs {})?.into_inner())
@@ -18,9 +18,7 @@ fn main() -> splice::Result<()> {
         #[cfg(feature = "llvm")]
         Some("llvm") => Box::new(matmul::build::<Llvm>(matmul::BuildArgs {})?.into_inner()),
         Some(other) => {
-            return Err(format!(
-                "unknown backend {other}, choose lancy, cranelift or llvm"
-            ));
+            return Err(format!("unknown backend {other}, choose lancy, cranelift or llvm").into());
         }
     };
     let a = [1, 2, 3, 4, 5, 6];

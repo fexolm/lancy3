@@ -1,5 +1,5 @@
 use splice_core::hir::{Binary, Buffer, BufferKind, FunctionBuilder};
-use splice_core::{BufferArg, Codegen, Executable};
+use splice_core::{BufferArg, CallError, Codegen, Executable, Trap};
 use splice_llvm::Llvm;
 use std::sync::Arc;
 
@@ -27,9 +27,9 @@ fn all_binary_ops_match_splice_at_signed_boundaries() {
     for (i, &op) in ops.iter().enumerate() {
         for &a in &cases {
             for &b in &cases {
-                let expected = op.checked_eval(a, b);
+                let expected = op.checked_eval(a, b).map_err(CallError::from);
                 assert_eq!(
-                    code.call(&[i as i32, a, b], &mut []).ok(),
+                    code.call(&[i as i32, a, b], &mut []),
                     expected,
                     "{a} {op:?} {b}"
                 );
@@ -190,7 +190,7 @@ fn masked_f64_gather_checks_active_indices_at_full_i64_width() {
                 expected[0] = src[0];
                 assert_eq!(out, expected);
             } else {
-                assert!(result.unwrap_err().contains("bounds"));
+                assert_eq!(result, Err(CallError::Trap(Trap::Bounds)));
                 assert_eq!(out, vec![777.0; n]);
             }
         }

@@ -2,13 +2,14 @@
 //! the lane count identical across backends even when the selected Cranelift
 //! ISA legalizes a smaller vector than the host width.
 use super::return_if;
-use crate::BOUNDS;
+use crate::lower::trap;
 use cranelift_codegen::ir::{
     InstBuilder, MemFlags, Type, Value,
     condcodes::{FloatCC, IntCC},
     types::{F32X4, F64X2, I8X16, I16X8, I32, I32X4, I64, I64X2},
 };
 use cranelift_frontend::{FunctionBuilder, Variable};
+use splice_core::Trap;
 use splice_core::{
     Function,
     hir::{Reg, Simd, SimdOp, ValueType},
@@ -154,7 +155,7 @@ pub(super) fn emit(
                     b.ins().brif(active, store, &[], next, &[offset.into()]);
                     b.switch_to_block(store);
                     let outside = b.ins().icmp(IntCC::UnsignedGreaterThanOrEqual, offset, len);
-                    let fault = b.ins().iconst(I64, BOUNDS);
+                    let fault = trap(b, Trap::Bounds);
                     return_if(b, outside, fault);
                     let bytes = b.ins().imul_imm(offset, 4);
                     let ptr = b.ins().iadd(data, bytes);
@@ -756,7 +757,7 @@ impl Memory<'_> {
     }
 
     fn guard(&self, b: &mut FunctionBuilder, invalid: Value) {
-        let fault = b.ins().iconst(I64, BOUNDS);
+        let fault = trap(b, Trap::Bounds);
         if self.values.is_some() {
             // An invalid store can still write a valid prefix. Cold execution
             // checks and writes each lane in source order, up to the first fault.
@@ -922,7 +923,7 @@ impl Memory<'_> {
                 let invalid = b
                     .ins()
                     .icmp(IntCC::UnsignedGreaterThanOrEqual, index, self.len);
-                let fault = b.ins().iconst(I64, BOUNDS);
+                let fault = trap(b, Trap::Bounds);
                 return_if(b, invalid, fault);
             }
             let ptr = self.pointer(b, index);

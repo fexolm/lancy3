@@ -1,6 +1,6 @@
 use super::{inline_all, simplify};
 use crate::hir::{Binary, Function, Op, Terminator};
-use crate::{CallError, Inlining, ScalarKernel};
+use crate::{CallError, Inlining, ScalarKernel, Trap};
 use std::sync::Arc;
 
 #[test]
@@ -139,8 +139,14 @@ fn remove_dominated_checks_but_keep_sibling_checks_and_unused_trapping_math() {
     );
     let kernel = ScalarKernel::compile(&f).unwrap();
     for cond in [0, 1] {
-        assert_eq!(kernel.call(&[cond, 1, 1]), Err(CallError::OutOfBounds));
-        assert_eq!(kernel.call(&[cond, 0, 1]), Err(CallError::DivisionByZero));
+        assert_eq!(
+            kernel.call(&[cond, 1, 1]),
+            Err(CallError::Trap(Trap::Bounds))
+        );
+        assert_eq!(
+            kernel.call(&[cond, 0, 1]),
+            Err(CallError::Trap(Trap::DivisionByZero))
+        );
     }
 }
 

@@ -30,7 +30,7 @@ fn total(#[comptime] plan: &Price, price: i32, qty: i32) -> i32 {
     }
 }
 
-fn main() -> Result<(), String> {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     let plan = Price::Wholesale(3);
     let fast_build = total::build::<Lancy>(total::BuildArgs { plan: &plan })?;
     let cranelift = total::build::<Cranelift>(total::BuildArgs { plan: &plan })?;

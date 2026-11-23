@@ -2,7 +2,7 @@
 pub mod abi;
 mod profile;
 
-pub use profile::{Profile, Simd, simd};
+pub use profile::{Profile, Simd, TargetError, simd};
 
 #[cfg(target_arch = "x86_64")]
 use std::{

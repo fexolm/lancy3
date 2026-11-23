@@ -1,7 +1,7 @@
 //! Install verified HIR as executable machine code.
 use super::memory::Executable;
 use crate::hir::{Function, Type};
-use crate::{CallError, CompileError, Inlining};
+use crate::{CallError, CompileError, Inlining, SignatureError, Trap};
 use std::mem::MaybeUninit;
 
 #[cfg(test)]
@@ -120,7 +120,7 @@ impl ScalarKernel {
 
     pub fn call(&self, args: &[i32]) -> Result<i32, CallError> {
         if !self.scalar_signature {
-            return Err(CallError::PointerSignature);
+            return Err(CallError::Signature(SignatureError::PointerSignature));
         }
         self.check_arity(args.len())?;
         let mut scratch = vec![MaybeUninit::<u64>::uninit(); self.words + args.len()];
@@ -146,7 +146,7 @@ impl ScalarKernel {
     /// of the exact type expected by that dispatcher.
     pub unsafe fn call_raw(&self, args: &[u64]) -> Result<u64, CallError> {
         if self.result_words != 1 || self.arity != self.arg_words {
-            return Err(CallError::WideSignature);
+            return Err(CallError::Signature(SignatureError::WideSignature));
         }
         self.check_arity(args.len())?;
         let mut workspace = vec![MaybeUninit::<u64>::uninit(); self.words];
@@ -158,7 +158,7 @@ impl ScalarKernel {
     /// each starting at a word boundary. Narrow scalars use the low bits.
     pub fn call_words(&self, args: &[u64], result: &mut [u64]) -> Result<(), CallError> {
         if self.requires_raw_call() {
-            return Err(CallError::PointerSignature);
+            return Err(CallError::Signature(SignatureError::PointerSignature));
         }
         // SAFETY: verification prevents constructing pointers from numeric values.
         unsafe { self.call_words_raw(args, result) }
@@ -169,16 +169,16 @@ impl ScalarKernel {
     /// Pointer values must satisfy the memory and lifetime contract of `call_raw`.
     pub unsafe fn call_words_raw(&self, args: &[u64], result: &mut [u64]) -> Result<(), CallError> {
         if args.len() != self.arg_words {
-            return Err(CallError::Arity {
+            return Err(CallError::Signature(SignatureError::Arity {
                 expected: self.arg_words,
                 actual: args.len(),
-            });
+            }));
         }
         if result.len() != self.result_words {
-            return Err(CallError::ResultWords {
+            return Err(CallError::Signature(SignatureError::ResultWords {
                 expected: self.result_words,
                 actual: result.len(),
-            });
+            }));
         }
         let mut workspace = vec![MaybeUninit::<u64>::uninit(); self.words];
         // SAFETY: the sizes match the compiled ABI and the caller covers pointer validity.
@@ -196,10 +196,10 @@ impl ScalarKernel {
 
     fn check_arity(&self, count: usize) -> Result<(), CallError> {
         if count != self.arity {
-            return Err(CallError::Arity {
+            return Err(CallError::Signature(SignatureError::Arity {
                 expected: self.arity,
                 actual: count,
-            });
+            }));
         }
         Ok(())
     }
@@ -226,14 +226,13 @@ impl ScalarKernel {
         workspace: &mut [MaybeUninit<u64>],
         enter: impl FnOnce(Entry, *const u64, *mut u64) -> u64,
     ) -> Result<u64, CallError> {
-        let mut status = 0i32;
+        let mut status = 0u32;
         workspace[0].write(std::ptr::from_mut(&mut status) as u64);
         #[cfg(target_arch = "aarch64")]
         {
             splice_target::simd()
                 .expect("compilation validated the selected profile")
-                .check_execution()
-                .map_err(|_| CallError::VectorLength)?;
+                .check_execution()?;
             workspace[crate::aarch64::SITE_POINTER].write(self.sites.as_ptr() as u64);
             // SAFETY: the executable mapping was synchronized before publication.
             // ISB synchronizes the instruction stream on this calling core.
@@ -243,12 +242,9 @@ impl ScalarKernel {
         let value = enter(self.entry, args, workspace.as_mut_ptr().cast());
         match status {
             0 => Ok(value),
-            1 => Err(CallError::OutOfBounds),
-            2 => Err(CallError::DivisionByZero),
-            3 => Err(CallError::DivisionOverflow),
-            4 => Err(CallError::IntegerOverflow),
-            5 => Err(CallError::RustPanic),
-            _ => unreachable!("unknown native kernel status {status}"),
+            // Native code stores only trap codes; any other value would be a
+            // code generation defect at the native boundary.
+            code => Err(Trap::from_code(code).unwrap_or(Trap::Abi).into()),
         }
     }
 }

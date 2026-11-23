@@ -1,5 +1,5 @@
 use splice::{
-    BufferArg, BuildError, Codegen, Executable, TypedKernel, kernel,
+    BufferArg, BuildError, CallError, Codegen, Executable, Trap, TypedKernel, kernel,
     simd::{Lane, Mask},
 };
 use splice_text::Text;
@@ -232,7 +232,7 @@ fn unsigned_indices_above_i32_max_fault_only_when_active() {
                 assert_eq!(out[0], 17);
                 assert!(out[1..].iter().all(|&x| x == 9));
             } else {
-                assert_eq!(actual, Err("kernel slice index out of bounds".into()));
+                assert_eq!(actual, Err(CallError::Trap(Trap::Bounds)));
                 assert!(out.iter().all(|&x| x == 21));
             }
         }

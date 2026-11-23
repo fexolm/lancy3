@@ -5,7 +5,7 @@ use super::{
 };
 use crate::support::float16::Format;
 use crate::{
-    CallError,
+    Trap,
     hir::{Binary, Lane, Ternary, Type, Unary},
 };
 pub(crate) type Bits = [u8; 64];
@@ -22,7 +22,7 @@ pub(crate) fn evaluate(
     output: Type,
     args: &[Bits; 3],
     width: usize,
-) -> Result<Bits, CallError> {
+) -> Result<Bits, Trap> {
     let lane = match input {
         // Pointer-to-word bitcasts preserve the address bits without an element type.
         Type::Ptr if matches!(action, Action::Bitcast) => return Ok(args[0]),
@@ -108,7 +108,7 @@ pub(crate) fn evaluate(
         Action::Extract | Action::Insert => {
             let index = read(&b[..4]) as usize;
             if index >= width / size {
-                return Err(CallError::OutOfBounds);
+                return Err(Trap::Bounds);
             }
             let range = index * size..(index + 1) * size;
             if matches!(action, Action::Insert) {

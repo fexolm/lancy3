@@ -1,5 +1,5 @@
 use splice::hir::{Binary, BufferKind, FunctionBuilder, Instr};
-use splice::{BufferArg, Codegen, Executable, Function, kernel};
+use splice::{BufferArg, CallError, Codegen, Executable, Function, Trap, kernel};
 
 // A backend used only to inspect the IR handed off by build().
 struct Inspect(Function);
@@ -718,7 +718,7 @@ fn only_operations_that_can_fail_need_a_status_channel() {
         let error = code
             .call(through_callee::CallArgs { xs: &short })
             .unwrap_err();
-        assert_eq!(error.to_string(), "kernel slice index out of bounds");
+        assert_eq!(error, CallError::Trap(Trap::Bounds));
         let lanes = vec![7; 64];
         assert_eq!(code.call(through_callee::CallArgs { xs: &lanes }), Ok(8));
         let code = slice_length::build::<B>(slice_length::BuildArgs {}).unwrap();

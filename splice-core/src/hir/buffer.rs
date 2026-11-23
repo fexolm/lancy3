@@ -207,32 +207,32 @@ impl BufferArg<'_> {
 }
 
 /// Check arity, mutability and representable slice lengths before entering native code.
-pub fn validate_buffers(kinds: &[BufferKind], args: &[BufferArg<'_>]) -> Result<(), String> {
+pub fn validate_buffers(
+    kinds: &[BufferKind],
+    args: &[BufferArg<'_>],
+) -> Result<(), crate::SignatureError> {
+    use crate::SignatureError::*;
     if kinds.len() != args.len() {
-        return Err(format!(
-            "expected {} buffers, got {}",
-            kinds.len(),
-            args.len()
-        ));
+        return Err(Buffers {
+            expected: kinds.len(),
+            actual: args.len(),
+        });
     }
-    for (i, (&kind, arg)) in kinds.iter().zip(args).enumerate() {
-        if let Some(signature) = kind.context_signature() {
-            signature.validate()?;
-        }
+    for (buffer, (&kind, arg)) in kinds.iter().zip(args).enumerate() {
         if !kind.same_type(arg.kind()) {
             if kind.context_signature().is_some() {
-                return Err(format!("buffer {i} has the wrong Rust context signature"));
+                return Err(Context { buffer });
             }
-            return Err(format!(
-                "buffer {i} expects {} elements",
-                kind.element().name()
-            ));
+            return Err(Element {
+                buffer,
+                expected: kind.element(),
+            });
         }
         if !kind.accepts(arg.kind()) {
-            return Err(format!("buffer {i} requires a writable slice"));
+            return Err(ReadOnly { buffer });
         }
         if arg.len() > i32::MAX as usize {
-            return Err(format!("buffer {i} length exceeds i32::MAX"));
+            return Err(Length { buffer });
         }
     }
     Ok(())

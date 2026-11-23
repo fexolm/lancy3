@@ -3,6 +3,7 @@ use super::{
     groups::z,
     inst::{IntBinary, IntOp, VectorDivide},
 };
+use crate::Trap;
 
 impl Emitter<'_> {
     pub(super) fn vector_divide(&mut self, form: VectorDivide, a: u8, b: u8, dst: u8) -> Result {
@@ -90,11 +91,11 @@ impl Emitter<'_> {
             C::Ptest_p_p,
             &[active(zero_divisor_prefix), O::vec(R::P1, A::B)],
         )?;
-        self.trap_if(Cond::Ne, 2)?;
+        self.trap_if(Cond::Ne, Trap::DivisionByZero)?;
         if form.signed {
             self.a
                 .put(C::Ptest_p_p, &[active(R::P4), O::vec(R::P2, A::B)])?;
-            self.trap_if(Cond::Ne, 3)?;
+            self.trap_if(Cond::Ne, Trap::DivisionOverflow)?;
         }
 
         let div = if form.signed {

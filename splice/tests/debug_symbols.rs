@@ -1,4 +1,6 @@
-use splice::{BuildOptions, Codegen, Executable, debug, hir::Instr, kernel, simd::Lane};
+use splice::{
+    BuildOptions, CallError, Codegen, Executable, Trap, debug, hir::Instr, kernel, simd::Lane,
+};
 
 #[kernel]
 fn update(dst: &mut [i32], index: i32, value: i32) -> i32 {
@@ -64,9 +66,8 @@ fn exercise<B: Codegen<Output: Executable>>() {
                     bias: 12,
                     dst: &mut short
                 })
-                .unwrap_err()
-                .to_string(),
-            "kernel slice index out of bounds",
+                .unwrap_err(),
+            CallError::Trap(Trap::Bounds),
         );
         assert_eq!(short, [13]);
     }

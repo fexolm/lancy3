@@ -2,7 +2,7 @@
 pub(crate) mod conversions;
 mod rounding;
 use crate::{
-    CallError, ScalarKernel,
+    CallError, ScalarKernel, Trap,
     hir::{Binary, Function, Lane, Op, Simd, Terminator, Ternary, Type, Unary, Value},
     hir::{
         eval::{Bits, evaluate},
@@ -135,7 +135,7 @@ fn differential(params: &[Type], ret: Type, make_op: impl FnOnce(&[Value]) -> Op
         };
         for round in 0..rounds {
             check_round(&k, params, ret, op, inputs, round, |bits| {
-                evaluate(action, input_type, output_type, bits, width)
+                evaluate(action, input_type, output_type, bits, width).map_err(CallError::Trap)
             });
         }
     }
@@ -413,8 +413,8 @@ fn overflowing_and_zero_divisors_trap_in_lane_order() {
         let k = ScalarKernel::compile(&f).unwrap();
         let n = ScalarKernel::vector_bytes() / 8;
         for (overflow, zero, err) in [
-            (0, 1, CallError::DivisionOverflow),
-            (1, 0, CallError::DivisionByZero),
+            (0, 1, CallError::Trap(Trap::DivisionOverflow)),
+            (1, 0, CallError::Trap(Trap::DivisionByZero)),
         ] {
             let mut args = vec![5; 2 * n];
             args[overflow] = i64::MIN as u64;

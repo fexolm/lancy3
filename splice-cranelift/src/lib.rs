@@ -13,7 +13,11 @@ mod module;
 
 use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{Module, default_libcall_names};
-use splice_core::{BufferArg, BufferKind, BuildOptions, Codegen, Executable, Function, Result};
+use splice_core::{
+    BufferArg, BufferKind, BuildOptions, CallError, Codegen, Executable, Function, Result,
+    SignatureError,
+};
+use splice_target::abi::decode_status;
 use std::sync::Mutex;
 
 /// Compile a specialized kernel or a portable Splice function with Cranelift.
@@ -79,13 +83,8 @@ struct Descriptor {
     len: i32,
 }
 
-// A successful i32 is zero-extended. Negative i64s can therefore carry
-// faults through any number of calls without losing a valid i32 result.
-const BOUNDS: i64 = -1;
-const DIV_ZERO: i64 = -2;
-const OVERFLOW: i64 = -3;
-const RUST_PANIC: i64 = -5;
-const INTEGER_OVERFLOW: i64 = -4;
+/// Every function returns a status (see [`splice_core::Trap::status`]), so a callee's
+/// status forwards through any number of calls without losing a result.
 type Entry = unsafe extern "C" fn(*const i32, *const Descriptor) -> i64;
 
 struct CodeMemory(Option<JITModule>);
@@ -168,13 +167,17 @@ impl Codegen for Cranelift {
 }
 
 impl Executable for CraneliftKernel {
-    fn call(&self, args: &[i32], buffers: &mut [BufferArg<'_>]) -> Result<i32> {
+    fn call(
+        &self,
+        args: &[i32],
+        buffers: &mut [BufferArg<'_>],
+    ) -> std::result::Result<i32, CallError> {
         if args.len() != self.arity {
-            return Err(format!(
-                "expected {} scalar arguments, got {}",
-                self.arity,
-                args.len()
-            ));
+            return Err(SignatureError::Scalars {
+                expected: self.arity,
+                actual: args.len(),
+            }
+            .into());
         }
         splice_core::validate_buffers(&self.buffers, buffers)?;
         let descriptors: Vec<_> = buffers
@@ -187,15 +190,9 @@ impl Executable for CraneliftKernel {
         // SAFETY: The signature check covers both input arrays, and their
         // buffers and Rust contexts stay borrowed throughout the call. Verified
         // HIR checks descriptor kinds and permissions, and lowering guards indices.
-        let result = unsafe { (self.entry)(args.as_ptr(), descriptors.as_ptr()) };
-        match result {
-            BOUNDS => Err("kernel slice index out of bounds".into()),
-            DIV_ZERO => Err("kernel integer division by zero".into()),
-            OVERFLOW => Err("kernel signed division overflow".into()),
-            RUST_PANIC => Err("Rust import panicked".into()),
-            INTEGER_OVERFLOW => Err("kernel integer arithmetic overflow".into()),
-            0..=0xffff_ffff => Ok(result as i32),
-            _ => Err(format!("unexpected Cranelift kernel result {result}")),
-        }
+        let status = unsafe { (self.entry)(args.as_ptr(), descriptors.as_ptr()) };
+        decode_status(status)
+            .map(|word| word as i32)
+            .map_err(CallError::from)
     }
 }

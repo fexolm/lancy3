@@ -53,7 +53,7 @@ impl<F, P> ScalarAdapter for &&Candidate<F, P> {
         false
     }
     fn invoke(self, _: i32, _: i32) -> i64 {
-        5_i64 << 32
+        splice_target::abi::Trap::Abi.status()
     }
 }
 

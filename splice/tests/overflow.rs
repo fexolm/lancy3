@@ -1,4 +1,4 @@
-use splice::{BuildOptions, Codegen, Executable, kernel};
+use splice::{BuildOptions, CallError, Codegen, Executable, Trap, kernel};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
 #[derive(Clone, Copy, Debug)]
@@ -98,16 +98,14 @@ fn check_arithmetic<B: Codegen<Output: Executable>>(options: BuildOptions) {
             let mut expected_out = [0, a, 0];
             let expected =
                 catch_unwind(AssertUnwindSafe(|| arithmetic(op, &mut expected_out, a, b)))
-                    .map_err(|_| "kernel integer arithmetic overflow".to_owned());
+                    .map_err(|_| CallError::Trap(Trap::Overflow));
             for code in [&direct, &portable] {
                 let mut out = [0, a, 0];
-                let actual = code
-                    .call(arithmetic::CallArgs {
-                        out: &mut out,
-                        a,
-                        b,
-                    })
-                    .map_err(|error| error.to_string());
+                let actual = code.call(arithmetic::CallArgs {
+                    out: &mut out,
+                    a,
+                    b,
+                });
                 assert_eq!(actual, expected, "{op:?} {a}, {b} ({options:?})");
                 assert_eq!(out, expected_out, "{op:?} {a}, {b} ({options:?})");
             }
@@ -118,15 +116,13 @@ fn check_arithmetic<B: Codegen<Output: Executable>>(options: BuildOptions) {
     let portable = B::compile(&nested::ir_with_options(options).unwrap()).unwrap();
     let mut expected_out = [0, 0];
     let expected = catch_unwind(AssertUnwindSafe(|| nested(&mut expected_out, i32::MAX)))
-        .map_err(|_| "kernel integer arithmetic overflow".to_owned());
+        .map_err(|_| CallError::Trap(Trap::Overflow));
     for code in [&direct, &portable] {
         let mut out = [0, 0];
-        let actual = code
-            .call(nested::CallArgs {
-                out: &mut out,
-                x: i32::MAX,
-            })
-            .map_err(|error| error.to_string());
+        let actual = code.call(nested::CallArgs {
+            out: &mut out,
+            x: i32::MAX,
+        });
         assert_eq!(actual, expected);
         assert_eq!(out, expected_out);
     }
@@ -137,15 +133,13 @@ fn check_arithmetic<B: Codegen<Output: Executable>>(options: BuildOptions) {
     for flag in [0, 1] {
         let mut expected_out = [0];
         let expected = catch_unwind(AssertUnwindSafe(|| known(a, b, &mut expected_out, flag)))
-            .map_err(|_| "kernel integer arithmetic overflow".to_owned());
+            .map_err(|_| CallError::Trap(Trap::Overflow));
         for code in [&direct, &portable] {
             let mut out = [0];
-            let actual = code
-                .call(known::CallArgs {
-                    out: &mut out,
-                    flag,
-                })
-                .map_err(|error| error.to_string());
+            let actual = code.call(known::CallArgs {
+                out: &mut out,
+                flag,
+            });
             assert_eq!(actual, expected);
             assert_eq!(out, expected_out);
         }
@@ -218,7 +212,7 @@ fn panics<T>(f: impl FnOnce() -> T) -> (T, bool) {
     (value, PANICS.with(|n| n.get()) != before)
 }
 
-fn native(f: impl FnOnce() -> i32) -> Result<i32, String> {
+fn native(f: impl FnOnce() -> i32) -> Result<i32, CallError> {
     catch_unwind(AssertUnwindSafe(f)).map_err(|e| {
         let message = e
             .downcast_ref::<&str>()
@@ -226,11 +220,11 @@ fn native(f: impl FnOnce() -> i32) -> Result<i32, String> {
             .or_else(|| e.downcast_ref::<String>().cloned())
             .unwrap_or_default();
         if message.contains("divide by zero") {
-            "kernel integer division by zero".to_owned()
+            CallError::Trap(Trap::DivisionByZero)
         } else if message.contains("divide with overflow") {
-            "kernel signed division overflow".to_owned()
+            CallError::Trap(Trap::DivisionOverflow)
         } else {
-            "kernel integer arithmetic overflow".to_owned()
+            CallError::Trap(Trap::Overflow)
         }
     })
 }
@@ -245,9 +239,7 @@ fn check_host_faults<B: Codegen<Output: Executable>>(options: BuildOptions) {
     assert!(!panicked, "building host_div panicked");
     for code in &codes {
         for flag in [0, 1] {
-            let actual = code
-                .call(host_div::CallArgs { flag })
-                .map_err(|e| e.to_string());
+            let actual = code.call(host_div::CallArgs { flag });
             assert_eq!(actual, native(|| host_div(0, flag)), "host_div flag {flag}");
         }
     }
@@ -263,9 +255,7 @@ fn check_host_faults<B: Codegen<Output: Executable>>(options: BuildOptions) {
         assert!(!panicked, "building host_wide({a}, {shift}) panicked");
         for code in &codes {
             for flag in 0..=4 {
-                let actual = code
-                    .call(host_wide::CallArgs { flag })
-                    .map_err(|e| e.to_string());
+                let actual = code.call(host_wide::CallArgs { flag });
                 let expected = native(|| host_wide(a, shift, flag));
                 assert_eq!(actual, expected, "host_wide({a}, {shift}) flag {flag}");
             }

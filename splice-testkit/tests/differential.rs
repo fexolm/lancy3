@@ -3,7 +3,7 @@
 use splice::frontend::KernelBuilder;
 use splice::hir::{Binary, Buffer, Reg, Simd, SimdOp};
 use splice::simd::Element;
-use splice::{BufferArg, BufferKind};
+use splice::{BufferArg, BufferKind, CallError, Trap};
 use splice_testkit::{Stage, agree};
 use std::rc::Rc;
 
@@ -44,7 +44,7 @@ fn every_scalar_binary_matches_checked_eval() {
             let mut seen = Vec::new();
             for a in EDGE {
                 for c in EDGE {
-                    seen.push(format!("{:?}", call(&[a, c], &mut []).ok()));
+                    seen.push(format!("{:?}", call(&[a, c], &mut [])));
                 }
             }
             seen
@@ -52,11 +52,114 @@ fn every_scalar_binary_matches_checked_eval() {
         let mut expected = Vec::new();
         for a in EDGE {
             for c in EDGE {
-                expected.push(format!("{:?}", op.checked_eval(a, c)));
+                expected.push(format!(
+                    "{:?}",
+                    op.checked_eval(a, c).map_err(CallError::from)
+                ));
             }
         }
         assert_eq!(seen, expected, "{op:?}");
     }
+}
+
+/// A Rust import that returns `value` for `fail == 0`, panics for the
+/// `RustPanic` code and otherwise reports `fail` as its trap code.
+extern "C" fn import(value: i32, fail: i32) -> i64 {
+    match Trap::from_code(fail as u32) {
+        None => i64::from(value as u32),
+        Some(Trap::RustPanic) => {
+            splice_target::abi::rust_entry(|| panic!("import failed on {value}"))
+        }
+        Some(trap) => trap.status(),
+    }
+}
+
+static IMPORT: splice::hir::RustSymbol = splice::hir::RustSymbol {
+    name: "import",
+    resolve: || import,
+};
+
+#[test]
+fn every_backend_reports_the_same_typed_trap() {
+    // trap(kind, value): 0 bounds, 1 division by zero, 2 division overflow,
+    // 3 overflow, 4 Rust import; otherwise value through the import.
+    let stage: Stage = Rc::new(|b| {
+        let kind = b.arg(0);
+        let value = b.arg(1);
+        let exits: Vec<_> = (0..5).map(|_| b.label()).collect();
+        for (case, &exit) in exits.iter().enumerate() {
+            let next = b.label();
+            let k = b.constant(case as i32);
+            let hit = b.binary(Binary::Eq, kind, k);
+            b.branch(hit, exit, next);
+            b.mark(next);
+        }
+        let import = splice::hir::RustCall {
+            symbol: &IMPORT,
+            arity: 2,
+        };
+        let zero = b.constant(0);
+        let passed = b.rust_call(import, &[value, zero])?;
+        b.ret(passed);
+        let operations = [
+            (Binary::Div, 1, 0),
+            (Binary::Rem, i32::MIN, -1),
+            (Binary::CheckedMul, i32::MAX, 2),
+        ];
+        b.mark(exits[0]);
+        let read = b.load(Buffer(0), value);
+        b.ret(read);
+        for (&exit, (op, x, y)) in exits[1..4].iter().zip(&operations) {
+            b.mark(exit);
+            let (x, y) = (b.constant(*x), b.constant(*y));
+            let r = b.binary(*op, x, y);
+            b.ret(r);
+        }
+        b.mark(exits[4]);
+        let hundred = b.constant(100);
+        let fail = b.binary(Binary::Sub, value, hundred);
+        let r = b.rust_call(import, &[value, fail])?;
+        b.ret(r);
+        Ok(())
+    });
+    let cases = [
+        (0, 3),
+        (0, 4),
+        (1, 0),
+        (2, 0),
+        (3, 0),
+        (4, 105),
+        (4, 106),
+        (4, 104),
+        (4, 100),
+        (9, 7),
+    ];
+    let kinds = [BufferKind::new(Element::I32, false)];
+    let seen = agree("traps", 2, &kinds, &stage, |call| {
+        cases
+            .iter()
+            .map(|&(kind, value)| {
+                format!(
+                    "{:?}",
+                    call(&[kind, value], &mut [BufferArg::from(&[5, 6, 7, 8][..])])
+                )
+            })
+            .collect()
+    });
+    let expected = [
+        Ok(8),
+        Err(CallError::Trap(Trap::Bounds)),
+        Err(CallError::Trap(Trap::DivisionByZero)),
+        Err(CallError::Trap(Trap::DivisionOverflow)),
+        Err(CallError::Trap(Trap::Overflow)),
+        Err(CallError::RustPanic("import failed on 105".into())),
+        Err(CallError::Trap(Trap::Abi)),
+        Err(CallError::Trap(Trap::Overflow)),
+        Ok(100),
+        Ok(7),
+    ]
+    .map(|result: Result<i32, CallError>| format!("{result:?}"));
+    assert_eq!(seen, expected);
 }
 
 /// Load `extra + 1` vectors of `from` (at 0 and at each argument), apply

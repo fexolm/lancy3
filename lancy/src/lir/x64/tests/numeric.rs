@@ -1,5 +1,5 @@
 use crate::{
-    CallError, Inlining, ScalarKernel,
+    CallError, Inlining, ScalarKernel, SignatureError, Trap,
     hir::{Binary, Function, Lane, Op, Simd, Terminator, Ternary, Type, Unary},
 };
 use std::sync::Arc;
@@ -192,7 +192,10 @@ fn wide_spills_and_outlined_calls_preserve_every_lane() {
             assert_eq!(out[i], (0..22).map(|j| input[j * w + i]).sum());
         }
         *input.last_mut().unwrap() = w as u64;
-        assert_eq!(k.call_words(&input, &mut out), Err(CallError::OutOfBounds));
+        assert_eq!(
+            k.call_words(&input, &mut out),
+            Err(CallError::Trap(Trap::Bounds))
+        );
     }
 }
 
@@ -211,7 +214,10 @@ fn unaligned_vector_store_precedes_trap() {
     let k = ScalarKernel::compile(&f).unwrap();
     let w = ScalarKernel::vector_bytes();
     let original: Vec<_> = (0..w + 2).map(|i| (201 + 19 * i) as u8).collect();
-    for (i, result) in [(0, Ok(0)), (w as u64 / 4, Err(CallError::OutOfBounds))] {
+    for (i, result) in [
+        (0, Ok(0)),
+        (w as u64 / 4, Err(CallError::Trap(Trap::Bounds))),
+    ] {
         let mut buf = original.clone();
         let mut expected = original.clone();
         if result.is_err() {
@@ -483,17 +489,17 @@ fn typed_word_abi_rejects_short_buffers_before_execution() {
     let result = &mut vec![0xdead; n];
     assert_eq!(
         f.call_words(&[1], result),
-        Err(CallError::Arity {
+        Err(CallError::Signature(SignatureError::Arity {
             expected: n,
             actual: 1
-        })
+        }))
     );
     assert_eq!(
         f.call_words(&vec![0; n], &mut result[..1]),
-        Err(CallError::ResultWords {
+        Err(CallError::Signature(SignatureError::ResultWords {
             expected: n,
             actual: 1
-        })
+        }))
     );
     assert_eq!(result, &vec![0xdead; n]);
 }

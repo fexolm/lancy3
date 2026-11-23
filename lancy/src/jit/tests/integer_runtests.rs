@@ -3,7 +3,7 @@
 //! i32 semantics, including all-bits-set masks and trapping signed remainder.
 //! https://github.com/bytecodealliance/wasmtime/tree/v45.0.3/cranelift/filetests/filetests/runtests
 use crate::hir::{Binary, Function, Op, Terminator};
-use crate::{CallError, ScalarKernel};
+use crate::{CallError, ScalarKernel, Trap};
 
 // Cross the signed imm8 encoding boundary, the shift-count mask and the sign bit.
 const VALUES: &[i32] = &[
@@ -41,9 +41,9 @@ fn check_immediates(op: Binary, reference: fn(i32, i32) -> Option<i32>) {
                     (input, constant)
                 };
                 let expected = reference(a, b).ok_or(if b == 0 {
-                    CallError::DivisionByZero
+                    CallError::Trap(Trap::DivisionByZero)
                 } else {
-                    CallError::DivisionOverflow
+                    CallError::Trap(Trap::DivisionOverflow)
                 });
                 assert_eq!(
                     kernel.call(&[input]),

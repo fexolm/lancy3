@@ -1,7 +1,7 @@
 use crate::hir::ssa::InterpretError;
 use crate::hir::{Binary, Function, Op as H, Terminator};
 use crate::{
-    CallError, ScalarKernel,
+    CallError, ScalarKernel, Trap,
     lir::x64::{
         compile::compile,
         inst::{Alu, Inst, Rhs},
@@ -36,11 +36,11 @@ fn arithmetic_and_spills_match_the_reference() {
                     Ok(value) => assert_eq!(native, Ok(*value), "{op:?}({left}, {right})"),
                     Err(_) => {
                         let trap = if right == 0 {
-                            CallError::DivisionByZero
+                            CallError::Trap(Trap::DivisionByZero)
                         } else {
-                            CallError::DivisionOverflow
+                            CallError::Trap(Trap::DivisionOverflow)
                         };
-                        assert_eq!(expected, Err(InterpretError::Trap(trap)));
+                        assert_eq!(expected, Err(InterpretError::Trap(trap.clone())));
                         assert_eq!(native, Err(trap), "{op:?}({left}, {right})");
                     }
                 }
@@ -90,7 +90,9 @@ fn aliased_fixed_operands_keep_the_live_input() {
             };
             assert_eq!(
                 k.call(&[x]),
-                value.map(|y| y ^ x).ok_or(CallError::DivisionByZero)
+                value
+                    .map(|y| y ^ x)
+                    .ok_or(CallError::Trap(Trap::DivisionByZero))
             );
         }
     }

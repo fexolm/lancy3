@@ -24,7 +24,10 @@ fn main out:ptr value:i32 fail:i32 -> i32
 @isel check: rust_call identity_or_error
 @isel check: store.I32
 @run 7 0 -> 7 | aa aa aa aa | 00 00 00 00
-@run 7 1 -> !rust_panic | aa aa aa aa | 07 00 00 00
+@run 7 5 -> !rust_panic | aa aa aa aa | 07 00 00 00
+# Native code reports the import's own trap code, not a generic failure.
+@run 7 6 -> !abi | aa aa aa aa | 07 00 00 00
+@run 7 1 -> !bounds | aa aa aa aa | 07 00 00 00
 
 ---
 

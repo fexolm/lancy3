@@ -57,7 +57,7 @@ fn retry_delay(
     exponential_delay(policy, attempt)
 }
 
-fn main() -> Result<(), String> {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     let policy = RetryPolicy {
         base_ms: 100,
         max_ms: 2_000,

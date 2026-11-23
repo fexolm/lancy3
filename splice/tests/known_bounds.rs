@@ -1,4 +1,4 @@
-use splice::{BuildOptions, Codegen, Executable, hir::Instr, kernel};
+use splice::{BuildOptions, CallError, Codegen, Executable, Trap, hir::Instr, kernel};
 use splice_text::Text;
 use std::{
     ops::Index,
@@ -83,10 +83,8 @@ fn check<B: Codegen<Output: Executable>>() {
     for code in [direct, portable] {
         assert_eq!(code.call(chosen::CallArgs { flag: 0 }).unwrap(), 0);
         assert_eq!(
-            code.call(chosen::CallArgs { flag: 1 })
-                .unwrap_err()
-                .to_string(),
-            "kernel slice index out of bounds"
+            code.call(chosen::CallArgs { flag: 1 }).unwrap_err(),
+            CallError::Trap(Trap::Bounds)
         );
         assert_eq!(code.call(chosen::CallArgs { flag: 0 }).unwrap(), 0);
     }
