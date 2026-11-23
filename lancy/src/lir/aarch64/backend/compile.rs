@@ -61,10 +61,12 @@ pub(super) fn compile(
                     arg_bytes = arg_bytes.max(off + ty.bytes(config.bytes).next_multiple_of(8));
                 }
                 Inst::Libcall(..) | Inst::LaneAccess { .. } => needs_temp = true,
-                Inst::CallScratch(bytes, _) => scratch_bytes = scratch_bytes.max(bytes as usize),
-                Inst::RustPacketCall(import, _) => {
+                Inst::CallScratch(offset, bytes, _) => {
+                    scratch_bytes = scratch_bytes.max(offset as usize + bytes as usize);
+                }
+                Inst::RustPacketCall(import, offset, _) => {
                     let bytes = import.packet_bytes().expect("verified Rust packet");
-                    scratch_bytes = scratch_bytes.max(bytes as usize);
+                    scratch_bytes = scratch_bytes.max(offset as usize + bytes as usize);
                 }
                 _ => {}
             }

@@ -66,6 +66,13 @@ impl Span {
 crate::slot_key!(pub Call);
 crate::slot_key!(pub PacketCall);
 
+#[derive(Clone, Copy, Debug)]
+struct PacketData {
+    import: &'static RustPacketImport,
+    scratch: u32,
+    args: Span,
+}
+
 #[derive(Clone, Debug)]
 struct CallData {
     callee: Arc<Function>,
@@ -82,7 +89,7 @@ pub struct Function {
     insts: SlotMap<Inst, InstData>,
     edges: DenseMap<Edge, (Block, Span)>,
     calls: DenseMap<Call, CallData>,
-    packets: DenseMap<PacketCall, (&'static RustPacketImport, Span)>,
+    packets: DenseMap<PacketCall, PacketData>,
     operands: Vec<Value>,
     types: DenseMap<Value, Type>,
     slice_base: usize,
@@ -231,7 +238,7 @@ impl Function {
         let mut op = *self.op(i);
         match op {
             Op::Call(site) => self.call(site).1.iter().copied().for_each(visit),
-            Op::RustPacketCall(site) => self.packet_call(site).1.iter().copied().for_each(visit),
+            Op::RustPacketCall(site) => self.packet_call(site).2.iter().copied().for_each(visit),
             _ => op.map_operands(|v| {
                 visit(v);
                 v
@@ -287,9 +294,11 @@ impl Function {
         (&data.callee, &self.operands[data.args.range()])
     }
 
-    pub fn packet_call(&self, call: PacketCall) -> (&'static RustPacketImport, &[Value]) {
-        let (import, args) = self.packets[call];
-        (import, &self.operands[args.range()])
+    /// The import, the packet's offset in this frame's scratch memory and the
+    /// words stored into the packet.
+    pub fn packet_call(&self, call: PacketCall) -> (&'static RustPacketImport, u32, &[Value]) {
+        let data = self.packets[call];
+        (data.import, data.scratch, &self.operands[data.args.range()])
     }
 
     pub fn create_block(&mut self) -> Block {
@@ -343,7 +352,7 @@ impl Function {
                 Op::Bin(op, v, _) => {
                     op.result_type(self.types.get(v).copied().unwrap_or(Type::I32))
                 }
-                Op::PtrOffset(..) | Op::CallScratch(_) => Type::Ptr,
+                Op::PtrOffset(..) | Op::CallScratch { .. } => Type::Ptr,
                 Op::Load(ty, _) => ty,
                 Op::Copy(v) => self.types.get(v).copied().unwrap_or(Type::I32),
                 Op::Call(c) => self
@@ -371,13 +380,20 @@ impl Function {
         self.calls.insert(CallData { callee, args })
     }
 
+    /// Call `import` with a packet written at an 8-byte-aligned `scratch`
+    /// offset of this frame's scratch memory (see [`Op::CallScratch`]).
     pub fn add_packet_call(
         &mut self,
         import: &'static RustPacketImport,
+        scratch: u32,
         args: &[Value],
     ) -> PacketCall {
         let args = Span::append(&mut self.operands, args);
-        self.packets.insert((import, args))
+        self.packets.insert(PacketData {
+            import,
+            scratch,
+            args,
+        })
     }
     pub fn add_edge(&mut self, target: Block, args: &[Value]) -> Edge {
         let args = Span::append(&mut self.operands, args);
@@ -609,6 +625,41 @@ impl Function {
 
     pub(in crate::hir) fn callees_mut(&mut self) -> impl Iterator<Item = &mut Arc<Function>> {
         self.calls.values_mut().map(|site| &mut site.callee)
+    }
+
+    /// Scratch bytes addressed by this frame's own operations, rounded up so
+    /// that a region placed above them stays 8-byte aligned.
+    pub(crate) fn scratch_bytes(&self) -> u64 {
+        self.frame_extent(|op| match op {
+            Op::CallScratch { offset, bytes } => Some(u64::from(offset) + u64::from(bytes)),
+            Op::RustPacketCall(site) => {
+                let data = self.packets[site];
+                let bytes = data.import.packet_bytes().expect("verified Rust packet");
+                Some(u64::from(data.scratch) + u64::from(bytes))
+            }
+            _ => None,
+        })
+    }
+
+    /// Debugger workspace bytes written by this frame at any vector width,
+    /// rounded up like [`Self::scratch_bytes`].
+    pub(crate) fn debug_bytes(&self) -> u64 {
+        self.frame_extent(|op| match op {
+            Op::DebugStore(offset, value) => {
+                let bytes = self.types[value].bytes(crate::hir::MAX_VECTOR_BYTES);
+                Some(u64::from(offset) + bytes as u64)
+            }
+            _ => None,
+        })
+    }
+
+    fn frame_extent(&self, end: impl Fn(Op) -> Option<u64>) -> u64 {
+        self.blocks()
+            .flat_map(|block| self.instructions(block))
+            .filter_map(|inst| end(self.insts[inst].op))
+            .max()
+            .unwrap_or(0)
+            .next_multiple_of(8)
     }
 }
 

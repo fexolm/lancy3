@@ -75,9 +75,11 @@ fn opcode(inst: Inst) -> String {
         Inst::CheckOverflow(..) => "check_overflow".into(),
         Inst::RustCall(import, ..) => format!("rust_call {}", import.name),
         Inst::RustContextCall(..) => "rust_context_call".into(),
-        Inst::RustPacketCall(import, _) => format!("rust_packet_call {}", import.name),
+        Inst::RustPacketCall(import, offset, _) => {
+            format!("rust_packet_call {} scratch {offset}", import.name)
+        }
         Inst::StorePacketWord(offset, _) => format!("store_packet_word {offset}"),
-        Inst::CallScratch(bytes, _) => format!("call_scratch {bytes}"),
+        Inst::CallScratch(offset, bytes, _) => format!("call_scratch {offset} {bytes}"),
         Inst::Cdq { .. } => "cdq".into(),
         Inst::IDiv { remainder, .. } => if remainder { "irem" } else { "idiv" }.into(),
         Inst::DivImm {

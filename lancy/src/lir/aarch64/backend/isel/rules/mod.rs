@@ -176,7 +176,9 @@ impl Rules<'_> {
     fn instruction(&mut self, op: Op, callee: impl Fn(&Function) -> (FunctionId, PRegSet)) -> Inst {
         let native = match op {
             Op::Const(n) => return Inst::Literal(Type::I32, n as u32 as u128, self.dst()),
-            Op::CallScratch(bytes) => return Inst::CallScratch(bytes, self.dst()),
+            Op::CallScratch { offset, bytes } => {
+                return Inst::CallScratch(offset, bytes, self.dst());
+            }
             Op::Literal(lane, bits) => return Inst::Literal(lane.scalar(), bits, self.dst()),
             Op::Simd(Simd::LaneCount(lane)) => {
                 return Inst::Literal(
@@ -226,12 +228,13 @@ impl Rules<'_> {
                 return Inst::RustCall(import, self.input(a), self.input(b), self.dst());
             }
             Op::RustPacketCall(site) => {
-                let (import, args) = self.f.packet_call(site);
+                let (import, scratch, args) = self.f.packet_call(site);
                 for (index, &word) in args.iter().enumerate() {
                     let word = self.input(word);
-                    self.out.push(Inst::StorePacketWord(index as u32 * 4, word));
+                    self.out
+                        .push(Inst::StorePacketWord(scratch + index as u32 * 4, word));
                 }
-                return Inst::RustPacketCall(import, self.dst());
+                return Inst::RustPacketCall(import, scratch, self.dst());
             }
             Op::RustContextCall(import, args) => {
                 return Inst::RustContextCall(import, args.map(|arg| self.input(arg)), self.dst());

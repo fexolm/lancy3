@@ -937,7 +937,9 @@ impl Emitter<'_> {
                 a.nop()
             }
             Inst::StoreArg(i, ty, _) => store(a, ty, slot(frame.slots + CHILD_ARGS + i), reg(0)),
-            Inst::CallScratch(..) => a.lea(q(0), slot(frame.scratch_base)),
+            Inst::CallScratch(offset, ..) => {
+                a.lea(q(0), ptr(r11 + (disp(frame.scratch_base) + offset as i32)))
+            }
             Inst::StorePacketWord(offset, _) => store(
                 a,
                 Type::I32,
@@ -947,14 +949,14 @@ impl Emitter<'_> {
             Inst::RustCall(..) | Inst::RustPacketCall(..) | Inst::RustContextCall(..) => {
                 let entry = match inst {
                     Inst::RustCall(import, ..) => (import.resolve)() as usize,
-                    Inst::RustPacketCall(import, _) => {
+                    Inst::RustPacketCall(import, offset, _) => {
                         let (symbol, words, count) = if cfg!(windows) {
                             (rcx, rdx, r8)
                         } else {
                             (rdi, rsi, rdx)
                         };
                         a.mov(symbol, std::ptr::from_ref(import) as u64)?;
-                        a.lea(words, slot(frame.scratch_base))?;
+                        a.lea(words, ptr(r11 + (disp(frame.scratch_base) + offset as i32)))?;
                         a.mov(count, u64::from(import.arity))?;
                         splice_target::abi::invoke_packet_import as *const () as usize
                     }

@@ -76,7 +76,7 @@ impl Rules<'_> {
     ) -> Result<Inst, CompileError> {
         Ok(match op {
             Op::Const(n) => Inst::Imm(self.dst(), n),
-            Op::CallScratch(bytes) => Inst::CallScratch(bytes, self.dst()),
+            Op::CallScratch { offset, bytes } => Inst::CallScratch(offset, bytes, self.dst()),
             Op::Literal(lane, bits) => Inst::Literal(lane, bits, self.dst()),
             Op::Simd(Simd::Iota(lane)) => Inst::Iota(lane, self.dst()),
             Op::Simd(Simd::LaneCount(lane)) => {
@@ -130,12 +130,13 @@ impl Rules<'_> {
                 Inst::RustCall(import, self.input(a), self.input(b), self.dst())
             }
             Op::RustPacketCall(site) => {
-                let (import, args) = self.f.packet_call(site);
+                let (import, scratch, args) = self.f.packet_call(site);
                 for (index, &word) in args.iter().enumerate() {
                     let word = self.input(word);
-                    self.out.push(Inst::StorePacketWord(index as u32 * 4, word));
+                    self.out
+                        .push(Inst::StorePacketWord(scratch + index as u32 * 4, word));
                 }
-                Inst::RustPacketCall(import, self.dst())
+                Inst::RustPacketCall(import, scratch, self.dst())
             }
             Op::RustContextCall(import, args) => {
                 Inst::RustContextCall(import, args.map(|arg| self.input(arg)), self.dst())

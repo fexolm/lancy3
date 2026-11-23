@@ -300,6 +300,7 @@ fn instruction<'a>(
                     arity: 4,
                     resolve: || sum,
                 },
+                0,
                 &args,
             ))
         }
@@ -314,6 +315,11 @@ fn instruction<'a>(
                 _ => return Err(format!("invalid byte stride {stride}")),
             },
         ),
+        ["call_scratch", offset, bytes] => Op::CallScratch {
+            offset: super::integer(offset)? as u32,
+            bytes: super::integer(bytes)? as u32,
+        },
+        ["debug_store", offset, x] => Op::DebugStore(super::integer(offset)? as u32, v(x)?),
         ["load", t, p] => Op::Load(ty(t)?, v(p)?),
         ["store", p, x] => Op::Store(v(p)?, v(x)?),
         ["call", name, args @ ..] => {

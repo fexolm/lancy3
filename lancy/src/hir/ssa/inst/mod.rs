@@ -66,14 +66,20 @@ pub enum Op {
     CheckOverflow(Value),
     /// Base plus a signed i32 index times the byte stride, at pointer width.
     PtrOffset(Value, Value, Scale),
-    /// Address of this frame's aligned scratch memory, sized for its largest
-    /// request. The memory is reused between calls and starts uninitialized.
-    CallScratch(u32),
+    /// Address of `bytes` of this frame's scratch memory at an 8-byte-aligned
+    /// `offset`. The frame's scratch covers its largest `offset + bytes`,
+    /// starts uninitialized and is reused by Rust packet calls of the same
+    /// frame. Inlining moves a callee's scratch above the caller's.
+    CallScratch {
+        offset: u32,
+        bytes: u32,
+    },
     /// Read a value of the given type from an address, allowing unaligned access.
     Load(Type, Value),
     /// Write the value to an address using the value's width.
     Store(Value, Value),
     /// Save a value in this invocation's debugger workspace at a byte offset.
+    /// Inlining moves a callee's offsets above the caller's workspace.
     DebugStore(u32, Value),
     /// Associate the current machine-code position with an embedder's source point.
     DebugPoint(u32),
@@ -227,7 +233,7 @@ impl Op {
             | Self::Call(_)
             | Self::RustPacketCall(_)
             | Self::DebugPoint(_)
-            | Self::CallScratch(_) => {}
+            | Self::CallScratch { .. } => {}
         }
     }
 }

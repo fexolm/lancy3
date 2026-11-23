@@ -355,7 +355,7 @@ impl Builder<'_> {
         self.shared_loads.clear();
         if self.current.is_some() {
             let args: Vec<_> = args.iter().map(|&arg| self.scalar(arg)).collect();
-            let call = self.graph.add_packet_call(import, &args);
+            let call = self.graph.add_packet_call(import, 0, &args);
             self.define(dst, Op::RustPacketCall(call));
         }
         Ok(())
@@ -401,7 +401,13 @@ impl Builder<'_> {
                 .expect("validated packet size");
             let packet = self
                 .graph
-                .append(block, Op::CallScratch(layout.bytes.max(8)))
+                .append(
+                    block,
+                    Op::CallScratch {
+                        offset: 0,
+                        bytes: layout.bytes.max(8),
+                    },
+                )
                 .unwrap();
             let store = |graph: &mut Function, offset, value| {
                 let offset = graph.append(block, Op::Const(offset as i32)).unwrap();

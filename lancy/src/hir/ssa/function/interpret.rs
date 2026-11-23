@@ -12,6 +12,8 @@ struct Frame<'a> {
     values: DenseMap<Value, Bits>,
     return_to: Option<Value>,
     transfer: Vec<Bits>,
+    /// This invocation's scratch memory, in words to keep it 8-byte aligned.
+    scratch: Vec<u64>,
 }
 
 impl<'a> Frame<'a> {
@@ -32,6 +34,7 @@ impl<'a> Frame<'a> {
             values,
             return_to,
             transfer: Vec::new(),
+            scratch: vec![0; (function.scratch_bytes() / 8) as usize],
         }
     }
 
@@ -192,7 +195,9 @@ pub(super) unsafe fn run(
                 if let Some(buf) = buffer.as_deref_mut() {
                     dest.copy_from_slice(buffer_value(buf, addr, ty, width)?);
                 } else {
-                    // SAFETY: interpret_raw's caller supplies a live readable range of the declared width.
+                    // SAFETY: the address comes from interpret_raw's caller, which supplies
+                    // a live readable range of the declared width, or from CallScratch,
+                    // whose verified range lies in a live frame's `scratch`.
                     unsafe {
                         std::ptr::copy_nonoverlapping(
                             addr as *const u8,
@@ -210,7 +215,8 @@ pub(super) unsafe fn run(
                 if let Some(buf) = buffer.as_deref_mut() {
                     buffer_value(buf, addr, ty, width)?.copy_from_slice(src);
                 } else {
-                    // SAFETY: interpret_raw's caller supplies a writable range disjoint from interpreter storage.
+                    // SAFETY: interpret_raw's caller supplies a writable range disjoint from
+                    // interpreter storage; a CallScratch range lies in a live frame's `scratch`.
                     unsafe {
                         std::ptr::copy_nonoverlapping(src.as_ptr(), addr as *mut u8, src.len())
                     };
@@ -226,7 +232,7 @@ pub(super) unsafe fn run(
                 word(u64::from(result as u32))
             }
             Op::RustPacketCall(site) => {
-                let (import, words) = graph.packet_call(site);
+                let (import, _, words) = graph.packet_call(site);
                 let arguments: Vec<_> = words.iter().map(|&value| f.read(value) as i32).collect();
                 let result = import.invoke(&arguments);
                 if result >> 32 != 0 {
@@ -235,7 +241,12 @@ pub(super) unsafe fn run(
                 word(u64::from(result as u32))
             }
             Op::RustContextCall(..) => return Err("interpreter has no Rust context".into()),
-            Op::CallScratch(_) => return Err("interpreter has no native call workspace".into()),
+            Op::CallScratch { .. } if buffer.is_some() => {
+                return Err("filetest buffer cannot address native scratch memory".into());
+            }
+            Op::CallScratch { offset, .. } => {
+                word(f.scratch.as_mut_ptr() as u64 + u64::from(offset))
+            }
             Op::Call(call) => {
                 let (callee, args) = graph.call(call);
                 let child = Frame::new(

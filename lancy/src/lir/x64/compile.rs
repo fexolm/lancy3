@@ -66,12 +66,14 @@ pub(super) fn compile(
                 Inst::DebugStore(ty, offset, _) => {
                     debug_words = debug_words.max((offset as usize + ty.bytes(width)).div_ceil(8));
                 }
-                Inst::CallScratch(bytes, _) => {
-                    scratch_words = scratch_words.max((bytes as usize).div_ceil(8))
+                Inst::CallScratch(offset, bytes, _) => {
+                    scratch_words =
+                        scratch_words.max((offset as usize + bytes as usize).div_ceil(8))
                 }
-                Inst::RustPacketCall(import, _) => {
+                Inst::RustPacketCall(import, offset, _) => {
                     let bytes = import.packet_bytes().expect("verified Rust packet");
-                    scratch_words = scratch_words.max((bytes as usize).div_ceil(8));
+                    scratch_words =
+                        scratch_words.max((offset as usize + bytes as usize).div_ceil(8));
                 }
                 _ => {}
             }

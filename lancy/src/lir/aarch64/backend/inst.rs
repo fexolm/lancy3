@@ -213,10 +213,14 @@ pub(super) enum Inst {
     LibArg(Type, usize, VReg),
     Libcall(Action, Type, Type, [usize; 3]),
     RustCall(&'static RustImport, VReg, VReg, VReg),
-    RustPacketCall(&'static RustPacketImport, VReg),
+    /// Call with the packet at a byte offset of the frame's scratch memory.
+    RustPacketCall(&'static RustPacketImport, u32, VReg),
+    /// Store a packet word at a byte offset of the frame's scratch memory.
     StorePacketWord(u32, VReg),
     RustContextCall(RustContextImport, [VReg; 4], VReg),
-    CallScratch(u32, VReg),
+    /// Address of the frame's scratch memory at a byte offset, with the
+    /// region's size in bytes.
+    CallScratch(u32, u32, VReg),
     LibResult(Type, VReg),
     Jump,
     Branch(VReg),
@@ -430,7 +434,7 @@ impl TargetInst for Inst {
                 Operand::reg_fixed_use(b, PReg::new(1, RegClass::Int)),
                 Operand::reg_fixed_def(dst, return_reg(Type::I32)),
             ]),
-            Self::RustPacketCall(_, dst) => {
+            Self::RustPacketCall(_, _, dst) => {
                 out.push(Operand::reg_fixed_def(dst, return_reg(Type::I32)))
             }
             Self::RustContextCall(_, args, dst) => {
@@ -441,7 +445,7 @@ impl TargetInst for Inst {
                 );
                 out.push(Operand::reg_fixed_def(dst, return_reg(Type::I32)));
             }
-            Self::CallScratch(_, dst) => out.push(Operand::reg_def(dst)),
+            Self::CallScratch(_, _, dst) => out.push(Operand::reg_def(dst)),
             Self::Libcall(..) | Self::Jump | Self::DebugPoint(_) => {}
         }
     }

@@ -1,5 +1,10 @@
 //! Expand the verified call DAG in callee-first order. A template is built once
 //! per distinct function, including when many call sites share its body.
+//!
+//! Scratch memory and the debugger workspace belong to a frame. An inlined
+//! callee's regions move above the caller's own, so caller data stored there
+//! survives the call exactly as it did with separate frames. Calls of one
+//! caller never overlap in time, so they share the region above it.
 use crate::CompileError;
 use crate::hir::transforms::ControlFlowGraph;
 use crate::hir::{Block, Edge, Function, Op, Terminator, Value, ssa::VerifiedBody};
@@ -31,7 +36,8 @@ pub(crate) fn inline_all(
         body.copy_slice_params(src);
         let entry = body.entry();
         let args = body.params(entry).to_vec();
-        let mut copy = Copier::new(src, &source.cfg, &mut body, entry, &args);
+        let mut copy = Copier::new(src, &source.cfg, &mut body, entry, &args, Shift::default());
+        let above = Shift::above(src);
         copy.copy_blocks(
             &mut body,
             &source.cfg,
@@ -39,7 +45,7 @@ pub(crate) fn inline_all(
             |out, at, callee, args| {
                 let id = ids[&std::ptr::from_ref(callee)];
                 let template = templates[id].as_ref().unwrap();
-                let result = template.expand(out, at, args);
+                let result = template.expand(out, at, args, above);
                 uses[id] -= 1;
                 if uses[id] == 0 {
                     templates[id] = None;
@@ -116,13 +122,55 @@ impl Size {
     }
 }
 
+/// Offsets added to an inlined callee's frame-local regions.
+#[derive(Clone, Copy, Default)]
+struct Shift {
+    scratch: u32,
+    debug: u32,
+}
+
+impl Shift {
+    /// Place callee regions above everything `caller` addresses itself.
+    /// `check_expansion` has bounded the nested sums by `u32::MAX`.
+    fn above(caller: &Function) -> Self {
+        Self {
+            scratch: caller.scratch_bytes() as u32,
+            debug: caller.debug_bytes() as u32,
+        }
+    }
+
+    fn apply(self, op: Op) -> Op {
+        match op {
+            Op::CallScratch { offset, bytes } => Op::CallScratch {
+                offset: offset + self.scratch,
+                bytes,
+            },
+            Op::DebugStore(offset, value) => Op::DebugStore(offset + self.debug, value),
+            op => op,
+        }
+    }
+}
+
 fn check_expansion(
     module: &Module<VerifiedBody<'_>>,
     ids: &FunctionIds<Function>,
 ) -> Result<(), CompileError> {
     let mut sizes: DenseMap<FunctionId, Size> = DenseMap::new();
+    // Frame-local bytes after inlining: own regions plus the largest callee.
+    let mut frames: DenseMap<FunctionId, [u64; 2]> = DenseMap::new();
     for (id, src) in module.functions.iter() {
         let f = src.function;
+        let own = [f.scratch_bytes(), f.debug_bytes()];
+        let mut frame = own;
+        for &child in module.call_graph.callees(id) {
+            for i in 0..2 {
+                frame[i] = frame[i].max(own[i] + frames[child][i]);
+            }
+        }
+        if frame.iter().any(|&bytes| bytes > u64::from(u32::MAX)) {
+            return Err(CompileError::FrameOverflow);
+        }
+        frames.insert(frame);
         let callee = |site| {
             let (target, _) = f.call(site);
             (sizes[ids[&Arc::as_ptr(target)]], target.arity())
@@ -194,8 +242,14 @@ enum Exit {
 }
 
 impl Template {
-    fn expand(&self, out: &mut Function, at: Block, args: &[Value]) -> (Block, Value) {
-        let mut copy = Copier::new(&self.body, &self.cfg, out, at, args);
+    fn expand(
+        &self,
+        out: &mut Function,
+        at: Block,
+        args: &[Value],
+        shift: Shift,
+    ) -> (Block, Value) {
+        let mut copy = Copier::new(&self.body, &self.cfg, out, at, args, shift);
         let join = (self.returns != 1).then(|| {
             let b = out.create_block();
             (b, out.append_typed_param(b, self.body.return_type()))
@@ -213,6 +267,7 @@ struct Copier<'a> {
     src: &'a Function,
     blocks: DenseMap<Block, Block>,
     values: DenseMap<Value, Value>,
+    shift: Shift,
 }
 
 impl<'a> Copier<'a> {
@@ -222,6 +277,7 @@ impl<'a> Copier<'a> {
         out: &mut Function,
         entry: Block,
         args: &[Value],
+        shift: Shift,
     ) -> Self {
         let mut blocks = DenseMap::filled(src.block_capacity(), Block::INVALID);
         let mut values = DenseMap::filled(src.value_count(), Value::INVALID);
@@ -240,6 +296,7 @@ impl<'a> Copier<'a> {
             src,
             blocks,
             values,
+            shift,
         }
     }
 
@@ -270,12 +327,15 @@ impl<'a> Copier<'a> {
                     (at, self.values[result]) = call(out, at, callee, &self.arguments(args));
                 } else {
                     if let Op::RustPacketCall(site) = op {
-                        let (import, operands) = self.src.packet_call(site);
-                        op = Op::RustPacketCall(
-                            out.add_packet_call(import, &self.arguments(operands)),
-                        );
+                        let (import, scratch, operands) = self.src.packet_call(site);
+                        op = Op::RustPacketCall(out.add_packet_call(
+                            import,
+                            scratch + self.shift.scratch,
+                            &self.arguments(operands),
+                        ));
                     } else {
                         op.map_operands(|v| self.values[v]);
+                        op = self.shift.apply(op);
                     }
                     if let Some(result) = out.append(at, op) {
                         self.values[self.src.result(i).unwrap()] = result;

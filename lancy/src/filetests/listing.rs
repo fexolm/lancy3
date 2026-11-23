@@ -50,9 +50,9 @@ pub(super) fn hir(module: &Module<VerifiedBody>, ids: &FunctionIds<Function>) ->
                         format!("rust_call {} {} {}", import.name, v(a), v(b))
                     }
                     Op::RustPacketCall(site) => {
-                        let (import, args) = f.packet_call(site);
+                        let (import, scratch, args) = f.packet_call(site);
                         format!(
-                            "rust_packet_call {} {}",
+                            "rust_packet_call {} {} scratch {scratch}",
                             import.name,
                             list(args.iter().copied().map(v))
                         )
@@ -66,7 +66,7 @@ pub(super) fn hir(module: &Module<VerifiedBody>, ids: &FunctionIds<Function>) ->
                             v(b)
                         )
                     }
-                    Op::CallScratch(bytes) => format!("call_scratch {bytes}"),
+                    Op::CallScratch { offset, bytes } => format!("call_scratch {offset} {bytes}"),
                     Op::Simd(Simd::MaskedLoad {
                         address,
                         mask,

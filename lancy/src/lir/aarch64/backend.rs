@@ -537,7 +537,10 @@ impl Emitter<'_> {
                     .put(C::Subs_32_addsub_shift, &[r(R::WZR), r(word(0)), r(R::WZR)])?;
                 self.trap_if(Cond::Ne, 4)
             }
-            Inst::CallScratch(..) => self.a.addr(g(0), R::X19, self.frame.scratch_base),
+            Inst::CallScratch(offset, ..) => {
+                self.a
+                    .addr(g(0), R::X19, self.frame.scratch_base + offset as usize)
+            }
             Inst::StorePacketWord(offset, _) => self.value_access(
                 false,
                 Type::I32,
@@ -547,9 +550,10 @@ impl Emitter<'_> {
             Inst::RustCall(..) | Inst::RustPacketCall(..) | Inst::RustContextCall(..) => {
                 let entry = match op {
                     Inst::RustCall(import, ..) => (import.resolve)() as usize,
-                    Inst::RustPacketCall(import, _) => {
+                    Inst::RustPacketCall(import, offset, _) => {
                         self.a.imm(R::X0, std::ptr::from_ref(import) as u64)?;
-                        self.a.addr(R::X1, R::X19, self.frame.scratch_base)?;
+                        let packet = self.frame.scratch_base + offset as usize;
+                        self.a.addr(R::X1, R::X19, packet)?;
                         self.a.imm(R::X2, u64::from(import.arity))?;
                         splice_target::abi::invoke_packet_import as *const () as usize
                     }

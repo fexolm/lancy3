@@ -1,0 +1,86 @@
+# Scratch memory belongs to a frame. The caller's word at offset 0 survives
+# the call, so inlining moves the callee's scratch above it (HIR-01).
+fn callee x:i32 -> i32
+  p = call_scratch 0 8
+  v = const 19
+  store p v
+  r = load i32 p
+  ret r
+
+fn main x:i32 -> i32
+  p = call_scratch 0 8
+  seven = const 7
+  store p seven
+  r = call callee x
+  back = load i32 p
+  hundred = const 100
+  scaled = mul back hundred
+  result = add scaled r
+  ret result
+
+@inline check: call_scratch 0 8
+@inline check: call_scratch 8 8
+@inline not: call f
+@run 0 -> 719
+---
+# The same program keeps separate frames without inlining.
+fn callee x:i32 -> i32
+  p = call_scratch 0 8
+  v = const 19
+  store p v
+  r = load i32 p
+  ret r
+
+fn main x:i32 -> i32
+  p = call_scratch 0 8
+  seven = const 7
+  store p seven
+  r = call callee x
+  back = load i32 p
+  hundred = const 100
+  scaled = mul back hundred
+  result = add scaled r
+  ret result
+
+@policy never
+@inline check: call f0
+@run 0 -> 719
+---
+# A Rust packet is written to scratch too. An inlined callee's packet must not
+# overwrite the caller's scratch word.
+fn callee x:i32 -> i32
+  a = const 1
+  r = rust_packet_call sum4 a a a x
+  ret r
+
+fn main x:i32 -> i32
+  p = call_scratch 0 8
+  seven = const 7
+  store p seven
+  r = call callee x
+  back = load i32 p
+  hundred = const 100
+  scaled = mul back hundred
+  result = add scaled r
+  ret result
+
+@inline check: rust_packet_call sum4
+@inline sameln: scratch 8
+@run 16 -> 719
+---
+# The debugger workspace moves the same way (HIR-13).
+fn callee x:i32 -> i32
+  debug_store 0 x
+  ret x
+
+fn main x:i32 -> i32
+  debug_store 0 x
+  wide = cast i64 x
+  debug_store 8 wide
+  r = call callee x
+  ret r
+
+@inline check: debug_store 0
+@inline check: debug_store 8
+@inline check: debug_store 16
+@run 5 -> 5

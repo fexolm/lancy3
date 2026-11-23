@@ -105,7 +105,11 @@ impl Run {
             self.check_bytes("run", &bytes, expected)?;
             result
         } else {
-            kernel.call(&self.args)
+            let args: Vec<_> = self.args.iter().map(|&x| u64::from(x as u32)).collect();
+            // SAFETY: the interpreter accepted this function only with an i32
+            // signature, so no argument is a pointer. Its only native addresses
+            // come from CallScratch inside the kernel's own frame.
+            unsafe { kernel.call_raw(&args) }.map(|v| v as i32)
         };
         if actual != self.expected {
             return Err(format!(

@@ -7,7 +7,15 @@ use std::sync::Arc;
 fn scratch_pointers_require_the_raw_call_contract_transitively() {
     let mut callee = Function::scalar(0);
     let block = callee.entry();
-    let address = callee.append(block, Op::CallScratch(8)).unwrap();
+    let address = callee
+        .append(
+            block,
+            Op::CallScratch {
+                offset: 0,
+                bytes: 8,
+            },
+        )
+        .unwrap();
     let value = callee.append(block, Op::Const(19)).unwrap();
     callee.append(block, Op::Store(address, value));
     let read = callee

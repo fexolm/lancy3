@@ -114,7 +114,7 @@ fn rust_packet_calls_verify_word_types_and_arity() {
         let mut function = Function::new(types, Type::I32);
         let entry = function.entry();
         let args = function.params(entry).to_vec();
-        let site = function.add_packet_call(&IMPORT, &args);
+        let site = function.add_packet_call(&IMPORT, 0, &args);
         let result = function.append(entry, Op::RustPacketCall(site)).unwrap();
         function.set_terminator(entry, Terminator::Return(result));
         assert_eq!(function.verify().is_ok(), valid);

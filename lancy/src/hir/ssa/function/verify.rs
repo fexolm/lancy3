@@ -181,11 +181,18 @@ impl Function {
                         Type::I32
                     }
                     Op::RustPacketCall(site) => {
-                        let &(import, args) = self
+                        let &super::PacketData {
+                            import,
+                            scratch,
+                            args,
+                        } = self
                             .packets
                             .get(site)
                             .ok_or(IrError::InvalidRustPacket { inst })?;
-                        if import.packet_bytes().is_none() || args.len != import.arity {
+                        let Some(bytes) = import.packet_bytes() else {
+                            return Err(IrError::InvalidRustPacket { inst });
+                        };
+                        if args.len != import.arity || !valid_scratch(scratch, bytes) {
                             return Err(IrError::InvalidRustPacket { inst });
                         }
                         for &word in &self.operands[args.range()] {
@@ -206,7 +213,10 @@ impl Function {
                         expect(b, Type::I32)?;
                         Type::I32
                     }
-                    Op::CallScratch(_) => {
+                    Op::CallScratch { offset, bytes } => {
+                        if !valid_scratch(offset, bytes) {
+                            return Err(IrError::InvalidScratch { inst });
+                        }
                         has_call_scratch = true;
                         Type::Ptr
                     }
@@ -325,4 +335,9 @@ impl Function {
             Ok(body)
         })
     }
+}
+
+/// Scratch regions start 8-byte aligned and end within the 32-bit frame.
+fn valid_scratch(offset: u32, bytes: u32) -> bool {
+    offset.is_multiple_of(8) && offset.checked_add(bytes).is_some()
 }

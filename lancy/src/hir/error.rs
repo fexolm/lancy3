@@ -71,6 +71,8 @@ pub enum IrError {
     UnknownCall { inst: Inst, call: Call },
     #[error("invalid Rust import packet in {inst:?}")]
     InvalidRustPacket { inst: Inst },
+    #[error("scratch memory in {inst:?} is unaligned or exceeds 4 GiB")]
+    InvalidScratch { inst: Inst },
     #[error("wrong scalar arity at SSA call {call:?}: expected {expected}, got {actual}")]
     CallArity {
         call: Call,
