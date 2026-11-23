@@ -125,12 +125,7 @@ pub(super) fn symbols(
     }
     out[..8].copy_from_slice(b"\x7fELF\x02\x01\x01\0"); // ELF64, little endian, version 1.
     out[16..18].copy_from_slice(&2u16.to_le_bytes()); // ET_EXEC, symbol values are absolute.
-    let machine = if cfg!(target_arch = "x86_64") {
-        62u16
-    } else {
-        183u16
-    };
-    out[18..20].copy_from_slice(&machine.to_le_bytes());
+    out[18..20].copy_from_slice(&MACHINE.to_le_bytes());
     out[20..24].copy_from_slice(&1u32.to_le_bytes());
     out[40..48].copy_from_slice(&section_offset.to_le_bytes());
     out[52..54].copy_from_slice(&(HEADER_SIZE as u16).to_le_bytes());
@@ -139,3 +134,11 @@ pub(super) fn symbols(
     out[62..64].copy_from_slice(&shstrtab.to_le_bytes());
     Ok(out)
 }
+
+/// ELF `e_machine` of the symbol file: the host architecture.
+#[cfg(target_arch = "x86_64")]
+const MACHINE: u16 = 62; // EM_X86_64
+#[cfg(target_arch = "aarch64")]
+const MACHINE: u16 = 183; // EM_AARCH64
+#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+compile_error!("splice-jit describes JIT code only for x86_64 and AArch64 hosts");

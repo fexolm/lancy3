@@ -32,7 +32,9 @@ pub struct Features {
 }
 
 #[cfg(any(target_arch = "x86_64", test))]
-fn width_for_features(avx: bool, avx512: bool, avx10: u32) -> usize {
+/// Native vector bytes. 32-byte vectors need AVX2: AVX alone has no 256-bit
+/// integer operations, which every backend would have to split.
+fn width_for_features(avx2: bool, avx512: bool, avx10: u32) -> usize {
     if avx10 as u8 != 0 {
         if avx10 & (1 << 18) != 0 {
             64
@@ -43,7 +45,7 @@ fn width_for_features(avx: bool, avx512: bool, avx10: u32) -> usize {
         }
     } else if avx512 {
         64
-    } else if avx {
+    } else if avx2 {
         32
     } else {
         16
@@ -111,7 +113,7 @@ impl Features {
         let converged = avx10 & 0xff >= 1;
         Self {
             bytes: width_for_features(
-                is_x86_feature_detected!("avx"),
+                is_x86_feature_detected!("avx2"),
                 is_x86_feature_detected!("avx512f"),
                 avx10,
             ),

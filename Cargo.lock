@@ -926,6 +926,7 @@ name = "splice-jit"
 version = "0.1.0"
 dependencies = [
  "gimli",
+ "libc",
  "splice-core",
  "tracing",
 ]

@@ -89,8 +89,11 @@ fn width(profile: Profile) -> Option<usize> {
         target_arch = "x86_64",
         all(target_arch = "aarch64", target_os = "linux")
     )))]
-    {
-        (profile == Auto).then_some(16)
+    match profile {
+        Auto => Some(16),
+        // NEON is mandatory on AArch64.
+        Neon if cfg!(target_arch = "aarch64") => Some(16),
+        _ => None,
     }
 }
 

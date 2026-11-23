@@ -56,6 +56,15 @@ fn registrations_link_into_the_gdb_descriptor() {
         for entry in [newest, oldest] {
             let bytes = std::slice::from_raw_parts(entry.bytes, entry.size as usize);
             assert_eq!(&bytes[..4], b"\x7fELF");
+            let machine = u16::from_le_bytes([bytes[18], bytes[19]]);
+            assert_eq!(
+                machine,
+                if cfg!(target_arch = "x86_64") {
+                    62
+                } else {
+                    183
+                }
+            );
         }
         assert!((*descriptor).relevant.is_null());
     }
