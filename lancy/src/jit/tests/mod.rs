@@ -1,3 +1,12 @@
+//! JIT tests that hold on every supported architecture: they exercise
+//! `ScalarKernel` against the interpreter, the evaluator or Rust.
+mod control_flow;
+mod generated;
+mod integer_runtests;
+pub(crate) mod numeric_coverage;
+mod pointers;
+mod traps;
+
 use super::{Inlining, ScalarKernel, passes};
 use crate::CompileError;
 use crate::hir::{Binary, Function, Op, Terminator};

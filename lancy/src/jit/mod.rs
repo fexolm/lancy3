@@ -29,7 +29,7 @@ pub struct DebugFrame {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 use crate::CompileError;
 use crate::hir::{Function, ssa::VerifiedBody, transforms::passes};

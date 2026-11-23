@@ -1,15 +1,10 @@
 mod arithmetic;
 mod calls;
-mod control_flow;
 pub(super) mod filetests;
-mod generated;
-mod integer_runtests;
 mod isel;
 mod masked_memory;
 mod numeric;
-mod numeric_coverage;
 mod packed_code;
+mod packed_fp;
 mod packed_integer;
-mod pointers;
-mod traps;
 mod vector_patterns;

@@ -111,3 +111,24 @@ fn load_covers_scaled_address_and_shift_covers_its_constant() {
         words[0] >> 16
     );
 }
+
+#[test]
+fn all_scalar_casts_emit_call_free_machine_code() {
+    use iced_x86::{Decoder, DecoderOptions, Mnemonic};
+    for from in crate::jit::tests::numeric_coverage::LANES {
+        for to in crate::jit::tests::numeric_coverage::LANES {
+            let f = crate::jit::tests::numeric_coverage::conversions::scalar_cast(from, to);
+            let (module, ids) = f.verified_module().unwrap();
+            let code = crate::lir::x64::emit::emit(module, &ids).unwrap();
+            for inst in Decoder::new(64, &code.bytes[..code.text_len], DecoderOptions::NONE) {
+                assert!(!inst.is_invalid(), "{from:?} -> {to:?} at {}", inst.ip());
+                assert_ne!(
+                    inst.mnemonic(),
+                    Mnemonic::Call,
+                    "{from:?} -> {to:?} at {}",
+                    inst.ip()
+                );
+            }
+        }
+    }
+}

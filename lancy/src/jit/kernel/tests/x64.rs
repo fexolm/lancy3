@@ -1,45 +1,5 @@
-use super::{Entry, Executable, ScalarKernel};
-use crate::hir::{Binary, Function, Op, Terminator};
+use super::super::{Entry, Executable};
 use iced_x86::{IcedError, code_asm::*};
-use std::sync::Arc;
-
-#[test]
-fn scratch_pointers_require_the_raw_call_contract_transitively() {
-    let mut callee = Function::scalar(0);
-    let block = callee.entry();
-    let address = callee
-        .append(
-            block,
-            Op::CallScratch {
-                offset: 0,
-                bytes: 8,
-            },
-        )
-        .unwrap();
-    let value = callee.append(block, Op::Const(19)).unwrap();
-    callee.append(block, Op::Store(address, value));
-    let read = callee
-        .append(block, Op::Load(crate::hir::Type::I32, address))
-        .unwrap();
-    callee.set_terminator(block, Terminator::Return(read));
-    let mut caller = Function::scalar(0);
-    let block = caller.entry();
-    let call = caller.add_call(Arc::new(callee), &[]);
-    let returned = caller.append(block, Op::Call(call)).unwrap();
-    caller.set_terminator(block, Terminator::Return(returned));
-
-    for policy in [crate::Inlining::Always, crate::Inlining::Never] {
-        let kernel = ScalarKernel::compile_with_inlining(&caller, policy).unwrap();
-        assert_eq!(kernel.call(&[]), Err(crate::CallError::PointerSignature));
-        assert_eq!(
-            kernel.call_words(&[], &mut [0]),
-            Err(crate::CallError::PointerSignature)
-        );
-        // SAFETY: the only access is the initialized first word of this
-        // live frame's aligned scratch area. No pointers cross the ABI.
-        assert_eq!(unsafe { kernel.call_raw(&[]) }, Ok(19));
-    }
-}
 
 /// Call the real JIT entry with host register canaries. Return one if any
 /// nonvolatile GPR changed, after restoring the test caller's own registers.
@@ -75,47 +35,16 @@ fn abi_probe(entry: Entry) -> Result<Vec<u8>, IcedError> {
     a.assemble(0)
 }
 
-#[test]
-fn nested_normal_and_trapping_returns_restore_host_registers() {
-    let mut f = Function::scalar(24);
-    let b = f.entry();
-    let args = f.params(b).to_vec();
-    let mut sum = f.append(b, Op::Bin(Binary::Div, args[0], args[1])).unwrap();
-    for &v in &args[2..] {
-        sum = f.append(b, Op::Bin(Binary::Add, sum, v)).unwrap();
-    }
-    f.set_terminator(b, Terminator::Return(sum));
-    for _ in 0..2 {
-        let mut caller = Function::scalar(24);
-        let b = caller.entry();
-        let args = caller.params(b).to_vec();
-        let site = caller.add_call(Arc::new(f), &args);
-        let result = caller.append(b, Op::Call(site)).unwrap();
-        let result = caller
-            .append(b, Op::Bin(Binary::Sub, result, args[2]))
-            .unwrap();
-        caller.set_terminator(b, Terminator::Return(result));
-        f = caller;
-    }
-    for policy in [crate::Inlining::Always, crate::Inlining::Never] {
-        let kernel = ScalarKernel::compile_with_inlining(&f, policy).unwrap();
-        let probe = Executable::new(&abi_probe(kernel.entry).unwrap()).unwrap();
-        // SAFETY: abi_probe emits the same two-argument C ABI, forwards the
-        // arguments unchanged and retains stack alignment at the nested call.
-        let check =
-            unsafe { std::mem::transmute::<*mut std::ffi::c_void, Entry>(probe.address.as_ptr()) };
-        for (divisor, expected_status) in [(3, 0), (0, 2)] {
-            let mut args = [7u64; 24];
-            args[1] = divisor;
-            let mut status = 0i32;
-            let mut workspace = vec![0u64; kernel.words];
-            workspace[0] = std::ptr::from_mut(&mut status) as u64;
-            // SAFETY: both executable owners and all three data buffers live
-            // across this call. The verified kernel only accepts integer inputs.
-            assert_eq!(unsafe { check(args.as_ptr(), workspace.as_mut_ptr()) }, 0);
-            assert_eq!(status, expected_status);
-        }
-    }
+/// Enter `entry` with canaries in the nonvolatile GPRs; nonzero if any changed.
+pub(super) fn call_with_canaries(entry: Entry, args: *const u64, workspace: *mut u64) -> u64 {
+    let probe = Executable::new(&abi_probe(entry).unwrap()).unwrap();
+    // SAFETY: abi_probe emits the same two-argument C ABI, forwards the
+    // arguments unchanged and retains stack alignment at the nested call.
+    // `probe` owns the mapping until this function returns.
+    let check =
+        unsafe { std::mem::transmute::<*mut std::ffi::c_void, Entry>(probe.address.as_ptr()) };
+    // SAFETY: forwarded from the caller of the kernel entry.
+    unsafe { check(args, workspace) }
 }
 
 // Windows preserves the low 128 bits of XMM6..15. Give the kernel ten distinct
@@ -152,11 +81,13 @@ fn xmm_abi_probe(entry: Entry) -> Result<Vec<u8>, IcedError> {
 #[cfg(windows)]
 #[test]
 fn outlined_vector_pressure_preserves_windows_xmm_registers_on_normal_and_trapping_exits() {
+    use super::super::ScalarKernel;
     use crate::{
         Inlining,
-        hir::{Lane, Scale, Simd, Type},
+        hir::{Binary, Function, Lane, Op, Scale, Simd, Terminator, Type},
     };
     use iced_x86::{Decoder, DecoderOptions, Mnemonic, Register};
+    use std::sync::Arc;
 
     const VECTORS: usize = 20;
     let lanes = ScalarKernel::vector_bytes() / 8;

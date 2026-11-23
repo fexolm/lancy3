@@ -1,7 +1,7 @@
 use super::{Function, LANES, Lane, Op, ScalarKernel, Terminator, Ternary};
 use crate::hir::{eval::evaluate, operation::Action};
 
-fn scalar_cast(from: Lane, to: Lane) -> Function {
+pub(crate) fn scalar_cast(from: Lane, to: Lane) -> Function {
     let mut f = Function::new(&[from.scalar()], to.scalar());
     let block = f.entry();
     let v = f
@@ -81,27 +81,6 @@ fn inputs(lane: Lane) -> Vec<u128> {
     values.sort_unstable();
     values.dedup();
     values
-}
-
-#[test]
-fn all_scalar_casts_emit_call_free_machine_code() {
-    use iced_x86::{Decoder, DecoderOptions, Mnemonic};
-    for from in LANES {
-        for to in LANES {
-            let f = scalar_cast(from, to);
-            let (module, ids) = f.verified_module().unwrap();
-            let code = crate::lir::x64::emit::emit(module, &ids).unwrap();
-            for inst in Decoder::new(64, &code.bytes[..code.text_len], DecoderOptions::NONE) {
-                assert!(!inst.is_invalid(), "{from:?} -> {to:?} at {}", inst.ip());
-                assert_ne!(
-                    inst.mnemonic(),
-                    Mnemonic::Call,
-                    "{from:?} -> {to:?} at {}",
-                    inst.ip()
-                );
-            }
-        }
-    }
 }
 
 #[test]

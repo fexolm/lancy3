@@ -1,8 +1,9 @@
 //! Packed FP results are compared bit-for-bit with independent Rust operations.
 //! Inputs contain a different lane pattern on each invocation, including NaN payloads.
 mod conversions;
-use super::super::packed_code::{body, executable, host_supports, profiles, supports};
-use super::{Binary, Function, Lane, Op, ScalarKernel, Simd, Terminator, Type, Unary};
+use super::packed_code::{body, executable, host_supports, profiles, supports};
+use crate::ScalarKernel;
+use crate::hir::{Binary, Function, Lane, Op, Simd, Terminator, Type, Unary};
 use crate::{
     hir::operation::Action,
     lir::x64::{Features, inst::simd::Native},

@@ -4,7 +4,7 @@ use crate::hir::{Function, Type};
 use crate::{CallError, CompileError, Inlining};
 use std::mem::MaybeUninit;
 
-#[cfg(all(test, target_arch = "x86_64"))]
+#[cfg(test)]
 mod tests;
 
 type Entry = unsafe extern "C" fn(*const u64, *mut u64) -> u64;
@@ -209,6 +209,23 @@ impl ScalarKernel {
         args: *const u64,
         workspace: &mut [MaybeUninit<u64>],
     ) -> Result<u64, CallError> {
+        // SAFETY: the caller's contract is forwarded unchanged, and the
+        // closure enters the entry exactly once with the C ABI.
+        unsafe {
+            self.invoke_with(args, workspace, |entry, args, workspace| {
+                entry(args, workspace)
+            })
+        }
+    }
+
+    /// Prepare the workspace, enter through `enter` and decode the status.
+    /// `enter` must call the entry once with the given arguments and the C ABI.
+    unsafe fn invoke_with(
+        &self,
+        args: *const u64,
+        workspace: &mut [MaybeUninit<u64>],
+        enter: impl FnOnce(Entry, *const u64, *mut u64) -> u64,
+    ) -> Result<u64, CallError> {
         let mut status = 0i32;
         workspace[0].write(std::ptr::from_mut(&mut status) as u64);
         #[cfg(target_arch = "aarch64")]
@@ -223,7 +240,7 @@ impl ScalarKernel {
             unsafe { std::arch::asm!("isb", options(nostack, preserves_flags)) };
         }
         // SAFETY: compile verified the internal frame layout and the caller covers external memory.
-        let value = unsafe { (self.entry)(args, workspace.as_mut_ptr().cast()) };
+        let value = enter(self.entry, args, workspace.as_mut_ptr().cast());
         match status {
             0 => Ok(value),
             1 => Err(CallError::OutOfBounds),
