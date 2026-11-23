@@ -26,17 +26,16 @@ impl<'a> Pending<'a> {
         let mut points = Vec::new();
         for list in code.buffer.debug_tags() {
             if let [DebugTag::User(id), DebugTag::StackSlot(slot)] = *list.tags {
-                let frame = code
-                    .buffer
-                    .frame_layout()
-                    .ok_or("missing Cranelift frame layout")?;
+                let frame = code.buffer.frame_layout().ok_or_else(|| {
+                    splice_core::BuildError::backend("cranelift", "missing Cranelift frame layout")
+                })?;
                 points.push((list.offset, id, frame.stackslots[slot].offset));
             }
         }
         let unwind = if debug {
             match code
                 .create_unwind_info_of_kind(module.isa(), UnwindInfoKind::SystemV)
-                .map_err(|e| e.to_string())?
+                .map_err(|e| splice_core::BuildError::backend("cranelift", e))?
             {
                 Some(UnwindInfo::SystemV(info)) => Some(info),
                 _ => None,

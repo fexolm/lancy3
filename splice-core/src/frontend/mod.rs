@@ -16,7 +16,7 @@ use crate::hir::{Binary, Buffer, BufferKind, ContextSlice, Function, Label, Reg,
 
 /// A function body is staged once against the builder selected by its backend.
 /// Borrowed comptime parameters may live only for the duration of the build.
-pub type Body<'a> = Box<dyn FnOnce(&mut dyn KernelBuilder) -> Result<(), String> + 'a>;
+pub type Body<'a> = Box<dyn FnOnce(&mut dyn KernelBuilder) -> crate::Result<()> + 'a>;
 
 /// Names from a kernel declaration, in the runtime calling convention's order.
 #[derive(Debug)]
@@ -50,7 +50,9 @@ pub trait KernelBuilder {
         self.local()
     }
     fn simd(&mut self, _inst: Simd, _args: &[Reg]) -> crate::Result<Option<Reg>> {
-        Err("this builder does not support SIMD".into())
+        Err(crate::BuildError::unsupported(
+            "this builder does not support SIMD",
+        ))
     }
     fn constant(&mut self, value: i32) -> Reg;
     fn buffer_len(&mut self, buffer: Buffer) -> Reg;
@@ -64,7 +66,9 @@ pub trait KernelBuilder {
     fn branch(&mut self, cond: Reg, yes: Label, no: Label);
     fn ret(&mut self, value: Reg);
     fn trap_bounds(&mut self) -> crate::Result<()> {
-        Err("this builder does not support an explicit bounds trap".into())
+        Err(crate::BuildError::unsupported(
+            "this builder does not support an explicit bounds trap",
+        ))
     }
     fn rust_context_call(
         &mut self,
@@ -82,7 +86,9 @@ pub trait KernelBuilder {
         _args: &[Reg],
         _slices: &[ContextSlice],
     ) -> crate::Result<Reg> {
-        Err("this builder does not support Rust context operations".into())
+        Err(crate::BuildError::unsupported(
+            "this builder does not support Rust context operations",
+        ))
     }
     #[doc(hidden)]
     fn rust_static_call(
@@ -91,17 +97,17 @@ pub trait KernelBuilder {
         _args: &[Reg],
         _slices: &[ContextSlice],
     ) -> crate::Result<Reg> {
-        Err(format!(
+        Err(crate::BuildError::staging(format!(
             "backend cannot link Rust operation {}",
             symbol.name()
-        ))
+        )))
     }
     /// Emit a typed, effectful Rust operation at this point in the function.
     fn rust_call(&mut self, import: crate::hir::RustCall, _args: &[Reg]) -> crate::Result<Reg> {
-        Err(format!(
+        Err(crate::BuildError::staging(format!(
             "backend cannot link Rust import {}",
             import.symbol.name
-        ))
+        )))
     }
     #[doc(hidden)]
     fn rust_packet_call(
@@ -109,7 +115,10 @@ pub trait KernelBuilder {
         import: &'static crate::hir::RustPacketSymbol,
         _args: &[Reg],
     ) -> crate::Result<Reg> {
-        Err(format!("backend cannot link Rust import {}", import.name))
+        Err(crate::BuildError::staging(format!(
+            "backend cannot link Rust import {}",
+            import.name
+        )))
     }
     /// Reject mismatched call arguments before staging the callee body.
     fn call_kernel(
@@ -119,7 +128,7 @@ pub trait KernelBuilder {
         args: &[Reg],
         buffers: &[Buffer],
         body: Body<'_>,
-    ) -> Result<Reg, String>;
+    ) -> crate::Result<Reg>;
 
     /// Backends that retain callee definitions can reuse a successful specialization.
     /// Custom streaming builders may continue to stage every call independently.
@@ -130,7 +139,7 @@ pub trait KernelBuilder {
         args: &[Reg],
         buffers: &[Buffer],
         body: Body<'_>,
-    ) -> Result<Reg, String> {
+    ) -> crate::Result<Reg> {
         let (arity, kinds) = key.signature();
         self.call_kernel(arity, kinds, args, buffers, body)
     }
@@ -154,7 +163,7 @@ impl dyn KernelBuilder + '_ {
 }
 
 /// Explicitly materialize a verified portable IR for inspection or reuse.
-pub fn materialize(arity: usize, kinds: &[BufferKind], body: Body<'_>) -> Result<Function, String> {
+pub fn materialize(arity: usize, kinds: &[BufferKind], body: Body<'_>) -> crate::Result<Function> {
     materialize_with_options(arity, kinds, body, crate::BuildOptions::default())
 }
 
@@ -163,7 +172,7 @@ pub fn materialize_with_options(
     kinds: &[BufferKind],
     body: Body<'_>,
     options: crate::BuildOptions,
-) -> Result<Function, String> {
+) -> crate::Result<Function> {
     let _span = tracing::debug_span!(target: "splice::compile", "materialize_ir").entered();
     let mut builder = FunctionBuilder::with_options(arity, kinds.to_vec(), options);
     body(&mut builder)?;

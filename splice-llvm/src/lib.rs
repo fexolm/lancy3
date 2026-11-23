@@ -31,23 +31,30 @@ pub struct LlvmManualSimd;
 
 impl Llvm {
     /// Report the linked LLVM version after checking it matches the bindings.
-    pub fn version() -> Result<(u32, u32, u32), String> {
+    pub fn version() -> splice_core::Result<(u32, u32, u32)> {
         const EXPECTED: u32 = 19;
         let version @ (major, minor, patch) = inkwell::support::get_llvm_version();
         if major != EXPECTED {
-            return Err(format!(
+            return Err(splice_core::BuildError::unsupported(format!(
                 "splice-llvm was built for LLVM {EXPECTED}, but the process loaded LLVM {major}.{minor}.{patch}"
-            ));
+            )));
         }
         Ok(version)
     }
 }
 
+/// LLVM rejected something it was asked to build or link.
+pub(crate) fn error(
+    error: impl Into<Box<dyn std::error::Error + Send + Sync>>,
+) -> splice_core::BuildError {
+    splice_core::BuildError::backend("llvm", error)
+}
+
 fn build_module<'ctx>(
     context: &'ctx Context,
     target: &TargetMachine,
-    populate: impl FnOnce(&'ctx Context, &Module<'ctx>) -> Result<(), String>,
-) -> Result<Module<'ctx>, String> {
+    populate: impl FnOnce(&'ctx Context, &Module<'ctx>) -> splice_core::Result<()>,
+) -> splice_core::Result<Module<'ctx>> {
     let module = context.create_module("splice");
     module.set_triple(&target.get_triple());
     module.set_data_layout(&target.get_target_data().get_data_layout());
@@ -56,7 +63,7 @@ fn build_module<'ctx>(
     #[cfg(target_arch = "aarch64")]
     {
         use inkwell::attributes::{Attribute, AttributeLoc};
-        let simd = splice_target::simd().map_err(|e| e.to_string())?;
+        let simd = splice_target::simd()?;
         if target::scalable(simd) {
             // LLVM encodes the minimum vscale in the high 32 bits and the
             // maximum in the low 32. SVE has at most 16 architectural quads.
@@ -72,12 +79,12 @@ fn build_module<'ctx>(
     }
     tracing::debug_span!(target: "splice_core::compile", "verify_llvm_ir")
         .in_scope(|| module.verify())
-        .map_err(|error| error.to_string())?;
+        .map_err(crate::error)?;
     Ok(module)
 }
 
 /// Print LLVM's verified module before host-target optimization.
-pub fn to_llvm_ir(function: &Function) -> Result<String, String> {
+pub fn to_llvm_ir(function: &Function) -> splice_core::Result<String> {
     Llvm::version()?;
     let context = Context::create();
     Ok(build_module(&context, &target::host_machine()?, |ctx, m| {
@@ -223,15 +230,14 @@ impl LlvmKernel {
         populate: impl for<'ctx> FnOnce(
             &'ctx Context,
             &Module<'ctx>,
-        ) -> Result<
+        ) -> splice_core::Result<
             Option<&'static splice_core::frontend::KernelSource>,
-            String,
         >,
     ) -> splice_core::Result<Self> {
         Llvm::version()?;
         // The target machine makes the same choice on this thread.
         #[cfg(target_arch = "aarch64")]
-        let scalable = target::scalable(splice_target::simd().map_err(|e| e.to_string())?);
+        let scalable = target::scalable(splice_target::simd()?);
         let (owner, entry, registration) =
             jit::Jit::compile(auto_vectorize, source, options, populate)?;
         Ok(Self {

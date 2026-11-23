@@ -63,7 +63,7 @@ impl FunctionBuilder {
             .map(|&r| {
                 self.function
                     .checked_reg_type(r)
-                    .ok_or("invalid SIMD register")
+                    .ok_or_else(|| crate::BuildError::verify("invalid SIMD register"))
             })
             .collect::<Result<Vec<_>, _>>()?;
         inst.validate(&types, &self.function.buffer_kinds)?;
@@ -162,7 +162,7 @@ impl FunctionBuilder {
         function: Function,
         args: &[Reg],
         buffers: &[Buffer],
-    ) -> Result<Reg, String> {
+    ) -> crate::Result<Reg> {
         super::check_call(
             function.arity(),
             function.buffer_kinds(),
@@ -210,7 +210,7 @@ impl FunctionBuilder {
         }
         Ok(self.emit_call(callee, args, buffers))
     }
-    pub fn finish(self) -> Result<Function, String> {
+    pub fn finish(self) -> crate::Result<Function> {
         self.function.verify()
     }
 }
@@ -312,7 +312,7 @@ impl KernelBuilder for FunctionBuilder {
         args: &[Reg],
         buffers: &[Buffer],
         body: Body<'_>,
-    ) -> Result<Reg, String> {
+    ) -> crate::Result<Reg> {
         self.staged_call(arity, kinds, args, buffers, None, body)
     }
     fn call_specialized(

@@ -43,20 +43,20 @@ impl Flow {
     pub fn add_label(&mut self) {
         self.blocks.push(Block::default());
     }
-    pub fn reference(&mut self, label: Label) -> Result<(), String> {
+    pub fn reference(&mut self, label: Label) -> splice_core::Result<()> {
         self.blocks
             .get_mut(index(label))
-            .ok_or("invalid LLVM label")?
+            .ok_or_else(|| splice_core::BuildError::verify("invalid LLVM label"))?
             .referenced = true;
         Ok(())
     }
-    pub fn begin(&mut self, label: Label) -> Result<(), String> {
+    pub fn begin(&mut self, label: Label) -> splice_core::Result<()> {
         let block = self
             .blocks
             .get_mut(index(label))
-            .ok_or("invalid LLVM label")?;
+            .ok_or_else(|| splice_core::BuildError::verify("invalid LLVM label"))?;
         if std::mem::replace(&mut block.marked, true) {
-            return Err("duplicate LLVM label".into());
+            return Err(splice_core::BuildError::verify("duplicate LLVM label"));
         }
         self.current = Some(index(label));
         Ok(())
@@ -77,9 +77,9 @@ impl Flow {
             self.blocks[i].exit = exit;
         }
     }
-    pub fn verify(&self, arity: usize, regs: usize) -> Result<(), String> {
+    pub fn verify(&self, arity: usize, regs: usize) -> splice_core::Result<()> {
         if self.blocks.iter().any(|b| b.referenced && !b.marked) {
-            return Err("undefined LLVM label".into());
+            return Err(splice_core::BuildError::verify("undefined LLVM label"));
         }
         let mut entry = vec![0u64; regs.div_ceil(64)];
         for i in 0..arity {
@@ -93,7 +93,9 @@ impl Flow {
             let b = &self.blocks[i];
             for &Reg(r) in &b.incoming_uses {
                 if bits[r as usize / 64] & (1 << (r % 64)) == 0 {
-                    return Err(format!("uninitialized register {r} in LLVM kernel"));
+                    return Err(splice_core::BuildError::verify(format!(
+                        "uninitialized register {r} in LLVM kernel"
+                    )));
                 }
             }
             for &Reg(r) in &b.defined {
@@ -117,7 +119,11 @@ impl Flow {
                 }
             };
             match b.exit {
-                Exit::Open => return Err("reachable LLVM kernel path falls off the end".into()),
+                Exit::Open => {
+                    return Err(splice_core::BuildError::verify(
+                        "reachable LLVM kernel path falls off the end",
+                    ));
+                }
                 Exit::Return => {}
                 Exit::Jump(target) => propagate(target),
                 Exit::Branch(yes, no) => {

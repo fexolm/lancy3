@@ -47,11 +47,10 @@ impl Jit {
         populate: impl for<'ctx> FnOnce(
             &'ctx Context,
             &Module<'ctx>,
-        ) -> Result<
+        ) -> splice_core::Result<
             Option<&'static splice_core::frontend::KernelSource>,
-            String,
         >,
-    ) -> Result<(Self, Entry, Option<splice_jit::Registration>), String> {
+    ) -> splice_core::Result<(Self, Entry, Option<splice_jit::Registration>)> {
         let debug = options == splice_core::BuildOptions::Debug;
         let target = tracing::debug_span!(target: "splice_core::compile", "llvm_target")
             .in_scope(|| host_machine_with_debug(debug))?;
@@ -66,7 +65,7 @@ impl Jit {
         }
         let object = tracing::debug_span!(target: "splice_core::compile", "emit_llvm_object")
             .in_scope(|| target.write_to_memory_buffer(&module, FileType::Object))
-            .map_err(|error| error.to_string())?;
+            .map_err(crate::error)?;
         let info = if debug || splice_jit::perf_enabled() {
             Some(crate::debug_info::ObjectSymbols::read(&object, debug)?)
         } else {
@@ -92,7 +91,7 @@ impl Jit {
     /// `splice-jit` owns the process-wide `__jit_debug_descriptor`, which is
     /// LLVM's own definition when LLVM is linked statically, and registers
     /// symbols under a lock that LLVM does not take.
-    fn link(object: MemoryBuffer<'static>) -> Result<Self, String> {
+    fn link(object: MemoryBuffer<'static>) -> splice_core::Result<Self> {
         unsafe {
             let mut raw = null_mut();
             check(LLVMOrcCreateLLJIT(&mut raw, null_mut()))?;
@@ -114,7 +113,7 @@ impl Jit {
         }
     }
 
-    pub(super) fn lookup(&self, symbol: &CStr) -> Result<u64, String> {
+    pub(super) fn lookup(&self, symbol: &CStr) -> splice_core::Result<u64> {
         let mut address = 0;
         // SAFETY: self owns the live ORC session and address points to a u64
         // that LLVM fills synchronously.
@@ -122,10 +121,10 @@ impl Jit {
             check(LLVMOrcLLJITLookup(self.0, &mut address, symbol.as_ptr()))?;
         }
         if address == 0 {
-            return Err(format!(
+            return Err(crate::error(format!(
                 "LLVM returned a null address for {}",
                 symbol.to_string_lossy()
-            ));
+            )));
         }
         Ok(address)
     }
@@ -136,14 +135,14 @@ pub(crate) fn optimize(
     module: &Module<'_>,
     target: &TargetMachine,
     auto_vectorize: bool,
-) -> Result<(), String> {
+) -> splice_core::Result<()> {
     let _span =
         tracing::debug_span!(target: "splice_core::compile", "optimize_llvm_ir", auto_vectorize)
             .entered();
     let run = || {
         module
             .run_passes("default<O3>", target, PassBuilderOptions::create())
-            .map_err(|error| error.to_string())
+            .map_err(crate::error)
     };
     if auto_vectorize {
         return run();
@@ -167,7 +166,7 @@ pub(crate) fn optimize(
     result
 }
 
-unsafe fn check(error: LLVMErrorRef) -> Result<(), String> {
+unsafe fn check(error: LLVMErrorRef) -> splice_core::Result<()> {
     if error.is_null() {
         return Ok(());
     }
@@ -175,6 +174,6 @@ unsafe fn check(error: LLVMErrorRef) -> Result<(), String> {
         let message = LLVMGetErrorMessage(error); // consumes error
         let reason = CStr::from_ptr(message).to_string_lossy().into_owned();
         LLVMDisposeErrorMessage(message);
-        Err(reason)
+        Err(crate::error(reason))
     }
 }

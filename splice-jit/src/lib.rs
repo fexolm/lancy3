@@ -76,7 +76,8 @@ pub struct Registration {
 
 impl Registration {
     pub fn new(functions: &[Function], frames: &FrameTable) -> splice_core::Result<Self> {
-        let sections = dwarf::sections(functions, frames).map_err(|e| e.to_string())?;
+        let sections = dwarf::sections(functions, frames)
+            .map_err(|e| splice_core::BuildError::backend("JIT debug info", e))?;
         let file = elf::symbols(functions, &sections)?;
         tracing::debug!(target: "splice_core::compile", count = functions.len(), "register_jit_symbols");
         Ok(Self {

@@ -225,6 +225,16 @@ fn shared_callable_has_one_definition_and_two_uses() -> splice_core::Result<()> 
 
 #[test]
 fn build_propagates_the_original_staging_error() {
-    let result = Text::build(0, &[], Box::new(|_| Err("invalid specialization".into())));
-    assert_eq!(result, Err("invalid specialization".into()));
+    let result = Text::build(
+        0,
+        &[],
+        Box::new(|_| {
+            Err(splice_core::BuildError::unsupported(
+                "invalid specialization",
+            ))
+        }),
+    );
+    assert!(
+        matches!(result, Err(splice_core::BuildError::Unsupported(feature)) if feature == "invalid specialization")
+    );
 }

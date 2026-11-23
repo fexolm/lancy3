@@ -15,8 +15,9 @@ impl Builder<'_> {
         r: Reg,
         required: bool,
         preds: &DenseMap<Block, Vec<Block>>,
-    ) -> Result<Value, String> {
-        let unassigned = || format!("uninitialized {r:?} on path to {start:?}");
+    ) -> splice_core::Result<Value> {
+        let unassigned =
+            || splice_core::BuildError::verify(format!("uninitialized {r:?} on path to {start:?}"));
         let mut path = Vec::new();
         let mut b = start;
         let value = loop {
@@ -50,12 +51,12 @@ impl Builder<'_> {
         Ok(value)
     }
 
-    pub(super) fn seal(mut self) -> Result<Function, String> {
+    pub(super) fn seal(mut self) -> splice_core::Result<Function> {
         if let Some(error) = self.error {
             return Err(error);
         }
         if self.labels.iter().any(|l| l.block.is_some() && !l.marked) {
-            return Err("undefined kernel label".into());
+            return Err(splice_core::BuildError::verify("undefined kernel label"));
         }
         let mut pending = vec![self.graph.entry()];
         let mut live = DenseMap::filled(self.blocks.len(), false);
@@ -64,9 +65,9 @@ impl Builder<'_> {
             if std::mem::replace(&mut live[b], true) {
                 continue;
             }
-            let term = self.blocks[b]
-                .exit
-                .ok_or("reachable kernel path falls off the end")?;
+            let term = self.blocks[b].exit.ok_or_else(|| {
+                splice_core::BuildError::verify("reachable kernel path falls off the end")
+            })?;
             for next in term.successors() {
                 if preds[next].last() != Some(&b) {
                     preds[next].push(b);
@@ -106,9 +107,13 @@ impl Builder<'_> {
             self.graph.set_terminator(block, term);
         }
         if live.as_slice().contains(&false) {
-            self.graph.prune_unreachable().map_err(|e| e.to_string())?;
+            self.graph
+                .prune_unreachable()
+                .map_err(|e| splice_core::BuildError::backend("lancy", e))?;
         }
-        self.graph.verify().map_err(|e| e.to_string())?;
+        self.graph
+            .verify()
+            .map_err(|e| splice_core::BuildError::backend("lancy", e))?;
         Ok(self.graph)
     }
 }

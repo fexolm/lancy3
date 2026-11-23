@@ -37,7 +37,7 @@ use splice::{BufferArg, BufferKind, BuildOptions, Codegen, Executable};
 use std::rc::Rc;
 
 /// A kernel body that can be staged repeatedly.
-pub type Stage = Rc<dyn Fn(&mut dyn KernelBuilder) -> Result<(), String>>;
+pub type Stage = Rc<dyn Fn(&mut dyn KernelBuilder) -> splice::Result<()>>;
 
 /// Calls one compiled kernel.
 pub type Invoke<'a> = &'a dyn Fn(&[i32], &mut [BufferArg<'_>]) -> Result<i32, splice::CallError>;

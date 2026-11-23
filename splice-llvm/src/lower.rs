@@ -20,7 +20,7 @@ pub(crate) fn populate<'ctx>(
     ctx: &'ctx Context,
     module: &Module<'ctx>,
     root: &Function,
-) -> Result<(), String> {
+) -> splice_core::Result<()> {
     populate_mode(ctx, module, root, false)
 }
 
@@ -29,7 +29,7 @@ pub(crate) fn populate_mode<'ctx>(
     module: &Module<'ctx>,
     root: &Function,
     debug: bool,
-) -> Result<(), String> {
+) -> splice_core::Result<()> {
     let (functions, ids) = root.reachable_functions();
     if debug
         && (u32::try_from(functions.len()).is_err()
@@ -37,7 +37,9 @@ pub(crate) fn populate_mode<'ctx>(
                 .iter()
                 .any(|f| u32::try_from(f.instructions().len()).is_err()))
     {
-        return Err("too many LLVM source points".into());
+        return Err(splice_core::BuildError::unsupported(
+            "too many LLVM source points",
+        ));
     }
 
     let mut declarations = Vec::with_capacity(functions.len());
@@ -61,7 +63,7 @@ pub(crate) fn populate_mode<'ctx>(
         root.buffer_kinds().len(),
         declarations[0],
     )
-    .map_err(|e| e.to_string())?;
+    .map_err(crate::error)?;
     let mut static_rust_slice_operands = false;
     for (id, f) in functions.into_iter().enumerate() {
         static_rust_slice_operands |= Body::emit(
@@ -73,7 +75,7 @@ pub(crate) fn populate_mode<'ctx>(
             &callees,
             debug.then_some(id),
         )
-        .map_err(|e| e.to_string())?;
+        .map_err(crate::error)?;
     }
     if static_rust_slice_operands {
         permit_buffer_capture(module);
@@ -98,14 +100,16 @@ fn declare<'ctx>(
     arity: usize,
     buffers: &[BufferKind],
     id: usize,
-) -> Result<FunctionValue<'ctx>, String> {
+) -> splice_core::Result<FunctionValue<'ctx>> {
     let n = buffers
         .len()
         .checked_mul(2)
         .and_then(|n| n.checked_add(arity))
         .and_then(|n| n.checked_add(1))
-        .ok_or("LLVM kernel signature too large")?;
-    u32::try_from(n).map_err(|_| "kernel signature exceeds LLVM's parameter count")?;
+        .ok_or_else(|| splice_core::BuildError::unsupported("LLVM kernel signature too large"))?;
+    u32::try_from(n).map_err(|_| {
+        splice_core::BuildError::unsupported("kernel signature exceeds LLVM's parameter count")
+    })?;
     let mut params = Vec::with_capacity(n);
     let pointer = ctx.ptr_type(AddressSpace::default());
     params.push(pointer.into()); // status

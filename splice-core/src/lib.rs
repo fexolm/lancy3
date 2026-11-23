@@ -42,8 +42,8 @@ pub use frontend::ComptimeKey;
 pub use hir::{BufferArg, BufferElement, BufferKind, Function, validate_buffers};
 pub use splice_macros::{ComptimeKey, KernelType, kernel};
 
-/// Result of a Splice operation, with the staging or backend error message.
-pub type Result<T> = std::result::Result<T, String>;
+/// Result of staging or compiling a kernel.
+pub type Result<T> = std::result::Result<T, BuildError>;
 
 /// Selects the optimization and source-level debug information for a kernel.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

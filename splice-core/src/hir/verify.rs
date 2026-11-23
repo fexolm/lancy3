@@ -5,16 +5,15 @@ use crate::simd::Element;
 use std::collections::VecDeque;
 
 impl Function {
-    pub(super) fn verify(mut self) -> Result<Self, String> {
+    pub(super) fn verify(mut self) -> crate::Result<Self> {
         if self.register_count() > u32::MAX as usize {
-            return Err("too many registers".into());
+            return Err(crate::BuildError::verify("too many registers"));
         }
         if self.buffer_kinds.len() > u32::MAX as usize {
-            return Err("too many buffer parameters".into());
+            return Err(crate::BuildError::verify("too many buffer parameters"));
         }
-        super::check_context_layout(&self.buffer_kinds)?;
         if self.code.is_empty() {
-            return Err("empty scalar function".into());
+            return Err(crate::BuildError::verify("empty scalar function"));
         }
         let mut targets = vec![None; self.labels];
         let mut starts = Vec::new();
@@ -25,9 +24,11 @@ impl Function {
             }
             new_block = op.terminates();
             if let Instr::Label(l) = op {
-                let slot = targets.get_mut(l.0 as usize).ok_or("invalid label index")?;
+                let slot = targets
+                    .get_mut(l.0 as usize)
+                    .ok_or_else(|| crate::BuildError::verify("invalid label index"))?;
                 if slot.replace(starts.len() - 1).is_some() {
-                    return Err(format!("duplicate label {l:?}"));
+                    return Err(crate::BuildError::verify(format!("duplicate label {l:?}")));
                 }
             }
             if let Instr::Call {
@@ -44,10 +45,11 @@ impl Function {
                     &self.buffer_kinds,
                     buffers,
                 )
-                .map_err(|e| format!("call at instruction {i}: {e}"))?;
+                .map_err(|e| e.at(i))?;
                 if self.checked_reg_type(*dst) != Some(ValueType::Scalar) {
-                    return Err(format!(
-                        "invalid result register for call at instruction {i}"
+                    return Err(crate::BuildError::verify_at(
+                        i,
+                        "invalid result register for call",
                     ));
                 }
                 continue;
@@ -57,7 +59,7 @@ impl Function {
                 .chain(op.written())
                 .any(|r| r.0 as usize >= self.register_count())
             {
-                return Err(format!("invalid register at instruction {i}"));
+                return Err(crate::BuildError::verify_at(i, "invalid register"));
             }
             match op {
                 Instr::RustContextCall {
@@ -73,13 +75,15 @@ impl Function {
                         slices,
                     )?;
                     if self.reg_type(*dst) != ValueType::Scalar {
-                        return Err("invalid Rust context operation result type".into());
+                        return Err(crate::BuildError::verify(
+                            "invalid Rust context operation result type",
+                        ));
                     }
                 }
                 Instr::RustCall { dst, import, args } => {
                     import.validate(args.iter().map(|&reg| self.checked_reg_type(reg)))?;
                     if self.reg_type(*dst) != ValueType::Scalar {
-                        return Err("invalid Rust import result type".into());
+                        return Err(crate::BuildError::verify("invalid Rust import result type"));
                     }
                 }
                 Instr::RustPacketCall { dst, import, args } => {
@@ -88,7 +92,7 @@ impl Function {
                         args.iter().map(|&reg| self.checked_reg_type(reg)),
                     )?;
                     if self.reg_type(*dst) != ValueType::Scalar {
-                        return Err("invalid Rust import result type".into());
+                        return Err(crate::BuildError::verify("invalid Rust import result type"));
                     }
                 }
                 Instr::Debug(point) => {
@@ -99,24 +103,27 @@ impl Function {
                         || location.directory.contains('\0')
                         || location.line == 0
                     {
-                        return Err(format!("invalid debug source location at instruction {i}"));
+                        return Err(crate::BuildError::verify_at(
+                            i,
+                            "invalid debug source location",
+                        ));
                     }
                     if point.variables.iter().any(|var| {
                         matches!(var.value, crate::debug::Value::Slice(buffer)
                             if self.buffer_kinds.get(buffer.index()).is_none_or(|kind| kind.context_signature().is_some()))
                     }) {
-                        return Err(format!("invalid debug buffer at instruction {i}"));
+                        return Err(crate::BuildError::verify_at(i, "invalid debug buffer"));
                     }
                 }
                 Instr::Simd { dst, inst, args } => {
                     let types: Vec<_> = args.iter().map(|&r| self.reg_type(r)).collect();
                     inst.validate(&types, &self.buffer_kinds)?;
                     if dst.map(|r| self.reg_type(r)) != inst.output() {
-                        return Err("invalid SIMD result type".into());
+                        return Err(crate::BuildError::verify("invalid SIMD result type"));
                     }
                 }
                 Instr::Copy(d, s) if self.reg_type(*d) != self.reg_type(*s) => {
-                    return Err("register copy type mismatch".into());
+                    return Err(crate::BuildError::verify("register copy type mismatch"));
                 }
                 Instr::Copy(..) => {}
                 _ if op
@@ -124,7 +131,7 @@ impl Function {
                     .chain(op.written())
                     .any(|r| self.reg_type(r) != ValueType::Scalar) =>
                 {
-                    return Err("expected a scalar register".into());
+                    return Err(crate::BuildError::verify("expected a scalar register"));
                 }
                 _ => {}
             }
@@ -135,15 +142,19 @@ impl Function {
                 let kind = self
                     .buffer_kinds
                     .get(buffer.index())
-                    .ok_or_else(|| format!("invalid buffer at instruction {i}"))?;
+                    .ok_or_else(|| crate::BuildError::verify_at(i, "invalid buffer"))?;
                 if kind.context_signature().is_some() {
-                    return Err("slice memory operation cannot use Rust context".into());
+                    return Err(crate::BuildError::verify(
+                        "slice memory operation cannot use Rust context",
+                    ));
                 }
                 if !matches!(op, Instr::BufferLen { .. }) && kind.element() != Element::I32 {
-                    return Err("scalar element access requires an i32 buffer".into());
+                    return Err(crate::BuildError::verify(
+                        "scalar element access requires an i32 buffer",
+                    ));
                 }
                 if matches!(op, Instr::Store { .. }) && !kind.writable() {
-                    return Err(format!("store to read-only buffer at instruction {i}"));
+                    return Err(crate::BuildError::verify_at(i, "store to read-only buffer"));
                 }
             }
         }
@@ -160,13 +171,13 @@ fn check_initialization(
     f: &Function,
     starts: &[usize],
     targets: &[Option<usize>],
-) -> Result<(), String> {
+) -> crate::Result<()> {
     let target = |l: Label| {
         targets
             .get(l.0 as usize)
             .copied()
             .flatten()
-            .ok_or_else(|| format!("undefined label {l:?}"))
+            .ok_or_else(|| crate::BuildError::verify(format!("undefined label {l:?}")))
     };
     // Resolve every edge, including jumps in unreachable blocks. Fallthrough
     // past the last block is an error only if execution can reach it.
@@ -195,7 +206,10 @@ fn check_initialization(
                 .operands()
                 .find(|r| bits[r.0 as usize / 64] & (1 << (r.0 % 64)) == 0)
             {
-                return Err(format!("uninitialized {r:?} at instruction {pc}"));
+                return Err(crate::BuildError::verify_at(
+                    pc,
+                    format!("uninitialized {r:?}"),
+                ));
             }
             if let Some(r) = op.written() {
                 bits[r.0 as usize / 64] |= 1 << (r.0 % 64);
@@ -203,7 +217,9 @@ fn check_initialization(
         }
         for next in edges[block].into_iter().flatten() {
             if next == edges.len() {
-                return Err("reachable path falls off the end of the function".into());
+                return Err(crate::BuildError::verify(
+                    "reachable path falls off the end of the function",
+                ));
             }
             if let Some(existing) = &mut states[next] {
                 let mut changed = false;
@@ -268,7 +284,22 @@ mod tests {
         locals: Vec<ValueType>,
         code: Vec<Instr>,
     ) -> String {
-        function(arity, kinds, locals, code).verify().unwrap_err()
+        reason(function(arity, kinds, locals, code).verify().unwrap_err())
+    }
+
+    /// The verifier's reason, with the instruction it names.
+    fn reason(error: crate::BuildError) -> String {
+        match error {
+            crate::BuildError::Verify {
+                instr: Some(i),
+                reason,
+            } => format!("{reason} at instruction {i}"),
+            crate::BuildError::Verify {
+                instr: None,
+                reason,
+            } => reason,
+            other => panic!("expected a verifier error, got {other:?}"),
+        }
     }
 
     fn debug(location: Location, variables: Vec<Variable>) -> Instr {
@@ -310,7 +341,10 @@ mod tests {
         assert_eq!(error(0, vec![], vec![], vec![]), "empty scalar function");
         let mut bad_label = function(1, vec![], vec![], vec![Instr::Label(L0), Instr::Return(R0)]);
         bad_label.labels = 0;
-        assert_eq!(bad_label.verify().unwrap_err(), "invalid label index");
+        assert_eq!(
+            reason(bad_label.verify().unwrap_err()),
+            "invalid label index"
+        );
         assert_eq!(
             error(
                 1,
@@ -420,9 +454,9 @@ mod tests {
             args,
             buffers: vec![],
         };
-        assert!(
-            error(1, vec![], vec![], vec![call(R0, vec![]), Instr::Return(R0)])
-                .starts_with("call at instruction 0: ")
+        assert_eq!(
+            error(1, vec![], vec![], vec![call(R0, vec![]), Instr::Return(R0)]),
+            "expected 1 scalar arguments, got 0 at instruction 0"
         );
         assert_eq!(
             error(

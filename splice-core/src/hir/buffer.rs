@@ -244,13 +244,13 @@ pub fn check_forwarding(
     caller: &[BufferKind],
     callee: &[BufferKind],
     actual: &[Buffer],
-) -> Result<(), String> {
+) -> crate::Result<()> {
     if callee.len() != actual.len() {
-        return Err(format!(
+        return Err(crate::BuildError::verify(format!(
             "expected {} buffer arguments, got {}",
             callee.len(),
             actual.len()
-        ));
+        )));
     }
     if actual.is_empty() {
         return Ok(());
@@ -259,22 +259,28 @@ pub fn check_forwarding(
     for (&required, &buffer) in callee.iter().zip(actual) {
         let kind = caller
             .get(buffer.index())
-            .ok_or_else(|| format!("unknown buffer {}", buffer.0))?;
+            .ok_or_else(|| crate::BuildError::verify(format!("unknown buffer {}", buffer.0)))?;
         if !required.same_type(*kind) {
-            return Err(format!("buffer {} has wrong element type", buffer.0));
+            return Err(crate::BuildError::verify(format!(
+                "buffer {} has wrong element type",
+                buffer.0
+            )));
         }
         if !required.accepts(*kind) {
-            return Err(format!("buffer {} is read-only", buffer.0));
+            return Err(crate::BuildError::verify(format!(
+                "buffer {} is read-only",
+                buffer.0
+            )));
         }
         if actual.len() > 1
             && seen
                 .insert(buffer, required)
                 .is_some_and(|prior| !prior.may_alias(required))
         {
-            return Err(format!(
+            return Err(crate::BuildError::verify(format!(
                 "writable buffer {} aliases another call argument",
                 buffer.0
-            ));
+            )));
         }
     }
     Ok(())

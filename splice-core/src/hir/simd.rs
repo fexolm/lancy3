@@ -118,38 +118,66 @@ impl Simd {
         let expected: &[ValueType] = match self.op {
             Lanes | Splat(_) | Iota => &[],
             Shuffle(_) if self.element == Element::I32 => &[v, v],
-            Shuffle(_) => return Err("paired shuffle requires i32 lanes".into()),
+            Shuffle(_) => {
+                return Err(crate::BuildError::verify(
+                    "paired shuffle requires i32 lanes",
+                ));
+            }
             AlignmentPrefix(_) if self.element == Element::I32 => &[s],
             Compress if self.element == Element::I32 => &[v, m],
             ExtractWrapping if self.element == Element::I32 => &[v, s],
             ReplaceWrapping if self.element == Element::I32 => &[v, s, s],
-            ExtractWrapping | ReplaceWrapping => return Err("expected i32 lanes".into()),
+            ExtractWrapping | ReplaceWrapping => {
+                return Err(crate::BuildError::verify("expected i32 lanes"));
+            }
             Swizzle if self.element == Element::I32 => &[v, v],
             Expand if self.element == Element::I32 => &[v, m, v],
             Compress | Expand | Swizzle | AlignmentPrefix(_) => {
-                return Err("expected i32 lanes".into());
+                return Err(crate::BuildError::verify("expected i32 lanes"));
             }
             Count if self.element == Element::I32 => &[m],
             CompressStore(_) if self.element == Element::I32 => &[s, m, v],
             Count | CompressStore(_) => {
-                return Err("mask count and compact store require i32 lanes".into());
+                return Err(crate::BuildError::verify(
+                    "mask count and compact store require i32 lanes",
+                ));
             }
             Shr(_) | RotateLeft(_) if matches!(self.element, Element::I32 | Element::U32) => &[v],
             PrefixSum | Last | ReduceSum if self.element == Element::I32 => &[v],
-            ReduceSum => return Err("SIMD reduce_sum requires i32 lanes".into()),
+            ReduceSum => {
+                return Err(crate::BuildError::verify(
+                    "SIMD reduce_sum requires i32 lanes",
+                ));
+            }
             Shr(_) | RotateLeft(_) | PrefixSum | Last => {
-                return Err("shift, rotate, prefix_sum and last require i32 lanes".into());
+                return Err(crate::BuildError::verify(
+                    "shift, rotate, prefix_sum and last require i32 lanes",
+                ));
             }
             SplatScalar if self.element == Element::I32 => &[s],
-            SplatScalar => return Err("runtime splat expects an i32 element".into()),
+            SplatScalar => {
+                return Err(crate::BuildError::verify(
+                    "runtime splat expects an i32 element",
+                ));
+            }
             Div if self.element.is_float() => &[v, v],
-            Div => return Err("SIMD division requires floating point elements".into()),
+            Div => {
+                return Err(crate::BuildError::verify(
+                    "SIMD division requires floating point elements",
+                ));
+            }
             Min | Max if matches!(self.element, Element::I32 | Element::U32) => &[v, v],
-            Min | Max => return Err("SIMD min and max require i32 or u32 lanes".into()),
+            Min | Max => {
+                return Err(crate::BuildError::verify(
+                    "SIMD min and max require i32 or u32 lanes",
+                ));
+            }
             Sqrt if self.element.is_float() => &[v],
             MulAdd if self.element.is_float() => &[v, v, v],
             Sqrt | MulAdd => {
-                return Err("SIMD sqrt and mul_add require floating point lanes".into());
+                return Err(crate::BuildError::verify(
+                    "SIMD sqrt and mul_add require floating point lanes",
+                ));
             }
             Cast(to) if self.element.bytes() == to.bytes() => &[v],
             Widen { to, .. }
@@ -164,7 +192,9 @@ impl Simd {
             {
                 &[v, v]
             }
-            Cast(_) | Widen { .. } | Narrow(_) => return Err("invalid SIMD lane conversion".into()),
+            Cast(_) | Widen { .. } | Narrow(_) => {
+                return Err(crate::BuildError::verify("invalid SIMD lane conversion"));
+            }
             FirstN | Load(_) => &[s],
             Store(_) => &[s, v],
             LoadSelect(_) | StoreSelect(_) => &[s, m, v],
@@ -173,7 +203,9 @@ impl Simd {
             GatherSelect(_) | ScatterSelect(_) => &[i, m, v],
             Add | Sub | Mul | Eq | Ne | Lt | Le | Gt | Ge => &[v, v],
             And | Or | Xor | Not if self.element.is_float() => {
-                return Err("bitwise SIMD operations require integer elements".into());
+                return Err(crate::BuildError::verify(
+                    "bitwise SIMD operations require integer elements",
+                ));
             }
             And | Or | Xor => &[v, v],
             Not => &[v],
@@ -186,10 +218,10 @@ impl Simd {
             _ => actual == want,
         };
         if args.len() != expected.len() || !args.iter().zip(expected).all(compatible) {
-            return Err(format!(
+            return Err(crate::BuildError::verify(format!(
                 "invalid SIMD operands for {:?}: expected {expected:?}, got {args:?}",
                 self.op
-            ));
+            )));
         }
         let (buffer, write) = match self.op {
             AlignmentPrefix(b) | Load(b) | LoadSelect(b) | Gather(b) | GatherSelect(b) => {
@@ -200,12 +232,16 @@ impl Simd {
             }
             _ => return Ok(()),
         };
-        let kind = buffers.get(buffer.index()).ok_or("invalid SIMD buffer")?;
+        let kind = buffers
+            .get(buffer.index())
+            .ok_or_else(|| crate::BuildError::verify("invalid SIMD buffer"))?;
         if kind.context_signature().is_some() || kind.element() != self.element {
-            return Err("SIMD buffer element type mismatch".into());
+            return Err(crate::BuildError::verify(
+                "SIMD buffer element type mismatch",
+            ));
         }
         if write && !kind.writable() {
-            return Err("SIMD store to read-only buffer".into());
+            return Err(crate::BuildError::verify("SIMD store to read-only buffer"));
         }
         Ok(())
     }

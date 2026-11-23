@@ -21,11 +21,13 @@ pub(super) struct ObjectSymbols {
 
 impl ObjectSymbols {
     pub fn read(object: &MemoryBuffer<'_>, debug: bool) -> splice_core::Result<Self> {
-        let file = object.create_binary_file(None).map_err(|e| e.to_string())?;
+        let file = object.create_binary_file(None).map_err(crate::error)?;
         let mut symbols = file
             .get_symbols()
-            .ok_or("LLVM object has no symbol table")?;
-        let mut sections = file.get_sections().ok_or("LLVM object has no sections")?;
+            .ok_or_else(|| crate::error("LLVM object has no symbol table"))?;
+        let mut sections = file
+            .get_sections()
+            .ok_or_else(|| crate::error("LLVM object has no sections"))?;
         let mut result = Self::default();
         while let Some(symbol) = symbols.next_symbol() {
             let Some(name) = symbol.get_name() else {
@@ -44,7 +46,7 @@ impl ObjectSymbols {
                 sections.move_to_containing_section(&symbol);
                 let section = sections
                     .next_section()
-                    .ok_or("LLVM function missing its text section")?;
+                    .ok_or_else(|| crate::error("LLVM function missing its text section"))?;
                 result.functions.push(NativeFunction {
                     name: name.into(),
                     source_id,
@@ -71,11 +73,13 @@ impl ObjectSymbols {
                     .unwrap_or(f.section_end);
                 result.functions[index].size = end
                     .checked_sub(f.start)
-                    .ok_or("invalid LLVM function range")?;
+                    .ok_or_else(|| crate::error("invalid LLVM function range"))?;
             }
         }
         if debug {
-            let mut sections = file.get_sections().ok_or("LLVM object has no sections")?;
+            let mut sections = file
+                .get_sections()
+                .ok_or_else(|| crate::error("LLVM object has no sections"))?;
             while let Some(section) = sections.next_section() {
                 if section.get_name() == Some(c".llvm_stackmaps") {
                     result.points = stack_map::read(section.get_contents())?;
@@ -123,16 +127,16 @@ impl ObjectSymbols {
                 for location in points {
                     let offset = u64::from(location.offset);
                     if offset >= native.size {
-                        return Err(format!(
+                        return Err(crate::error(format!(
                             "LLVM sequence point {offset:#x} lies outside {} (size {:#x})",
                             native.name.to_string_lossy(),
                             native.size
-                        ));
+                        )));
                     }
                     let Some(Instr::Debug(point)) = f.instructions().get(location.index) else {
-                        return Err(
-                            "LLVM label does not correspond to a Splice source point".into()
-                        );
+                        return Err(crate::error(
+                            "LLVM label does not correspond to a Splice source point",
+                        ));
                     };
                     function.statement(
                         f,

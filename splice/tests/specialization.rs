@@ -128,10 +128,12 @@ fn retry(root: &mut dyn splice::frontend::KernelBuilder) -> splice::Result<()> {
                     Ok(())
                 }),
             )?;
-            Err("rejected".into())
+            Err(splice::BuildError::unsupported("rejected"))
         }),
     );
-    assert_eq!(failed, Err("rejected".into()));
+    assert!(
+        matches!(failed, Err(splice::BuildError::Unsupported(feature)) if feature == "rejected")
+    );
     let result = root.call_specialized(
         Specialization::new::<Parent>(0, &[]),
         &[],

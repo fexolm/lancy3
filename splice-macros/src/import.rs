@@ -347,7 +347,7 @@ fn expand(root: &Path, mut function: ItemFn, checks: Vec<Check>) -> Result<Token
             #region_policy
             #[doc(hidden)]
             #vis fn __splice_eval<Args, Output>(_: Args) -> #root::Result<Output> {
-                ::core::result::Result::Err(::core::convert::Into::into("a Rust import cannot run during specialization"))
+                ::core::result::Result::Err(#root::BuildError::staging("a Rust import cannot run during specialization"))
             }
 
             #vis struct BuildArgs #host_generics #host_where { #(#vis #host_fields,)* }
@@ -389,7 +389,7 @@ fn expand(root: &Path, mut function: ItemFn, checks: Vec<Check>) -> Result<Token
 
             #vis fn print #ir_decls (#(#host_fields),*) -> #root::Result<::std::string::String> #ir_where {
                 #(let _ = #host_names;)*
-                ::core::result::Result::Err(::core::convert::Into::into(::core::concat!(
+                ::core::result::Result::Err(#root::BuildError::staging(::core::concat!(
                     "`", ::core::stringify!(#name), "` is a #[kernel(rust)] function without Splice source",
                 )))
             }

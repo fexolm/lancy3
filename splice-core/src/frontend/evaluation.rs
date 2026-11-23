@@ -9,7 +9,9 @@ pub struct Dropless<T>(PhantomData<fn() -> T>);
 impl<T> Dropless<T> {
     pub fn check() -> crate::Result<Self> {
         if std::mem::needs_drop::<T>() {
-            return Err("this value would run a destructor during specialization".into());
+            return Err(crate::BuildError::staging(
+                "this value would run a destructor during specialization",
+            ));
         }
         Ok(Self(PhantomData))
     }
@@ -76,7 +78,9 @@ where
 }
 impl<T: ?Sized, I, V: ?Sized> ReadIndex<T, I, V> for &&Operand<T> {
     fn read_index(self, _: &T, _: I, _: fn(&T, I) -> &V) -> crate::Result<Option<&V>> {
-        Err("opaque indexing in specialization".into())
+        Err(crate::BuildError::staging(
+            "opaque indexing in specialization",
+        ))
     }
 }
 trait Primitive {}
@@ -104,7 +108,9 @@ impl<T: OwnedBuffer, I: std::slice::SliceIndex<[T::Item]>> CheckOwnedIndex<I> fo
 }
 impl<T: ?Sized, I> CheckOwnedIndex<I> for &&Operand<T> {
     fn check_owned_index(self, _: &I) -> crate::Result<()> {
-        Err("specialization cannot write through a captured or opaque index".into())
+        Err(crate::BuildError::staging(
+            "specialization cannot write through a captured or opaque index",
+        ))
     }
 }
 
@@ -123,7 +129,9 @@ impl<T: ?Sized> CheckReference for &Operand<&mut T> {
 }
 impl<T: ?Sized> CheckReference for &&Operand<T> {
     fn check_reference(self) -> crate::Result<()> {
-        Err("user-defined dereference during specialization".into())
+        Err(crate::BuildError::staging(
+            "user-defined dereference during specialization",
+        ))
     }
 }
 
@@ -137,7 +145,9 @@ impl<T: Primitive> CheckPrimitive for &Operand<T> {
 }
 impl<T: ?Sized> CheckPrimitive for &&Operand<T> {
     fn check(self) -> crate::Result<()> {
-        Err("user-defined operation in comptime!".into())
+        Err(crate::BuildError::staging(
+            "user-defined operation in comptime!",
+        ))
     }
 }
 pub trait ReadLength<T: ?Sized> {
@@ -173,7 +183,7 @@ impl<T: Length + ?Sized> ReadLength<T> for &Operand<T> {
 }
 impl<T: ?Sized> ReadLength<T> for &&Operand<T> {
     fn length(self, _: &T) -> crate::Result<usize> {
-        Err("opaque length in comptime!".into())
+        Err(crate::BuildError::staging("opaque length in comptime!"))
     }
 }
 
@@ -231,6 +241,8 @@ impl<T: PlanSource + ?Sized> CheckPlanSource for &Operand<T> {
 }
 impl<T: ?Sized> CheckPlanSource for &&Operand<T> {
     fn check_source(self) -> crate::Result<()> {
-        Err("opaque iterator cannot run during specialization".into())
+        Err(crate::BuildError::staging(
+            "opaque iterator cannot run during specialization",
+        ))
     }
 }

@@ -261,7 +261,7 @@ impl Context {
         let mut code = self.opaque_operation(lower, expr)?;
         if let Some(target) = rust_callee {
             let unsupported = emit!({
-                ::core::result::Result::Err::<#root::hir::Reg, ::std::string::String>(::core::convert::Into::into("a nested kernel cannot take this runtime object"))?
+                ::core::result::Result::Err::<#root::hir::Reg, #root::BuildError>(#root::BuildError::staging("a nested kernel cannot take this runtime object"))?
             });
             code = lower.dispatch_call(target, unsupported, code);
         }
@@ -284,8 +284,8 @@ impl Context {
         captures.visit_expr(expr);
         if captures.rejected {
             return Ok(
-                emit!(::core::result::Result::Err::<#root::hir::Reg,::std::string::String>(
-                ::core::convert::Into::into("a Rust object operation requires materializable operands and cannot transfer control"))?),
+                emit!(::core::result::Result::Err::<#root::hir::Reg,#root::BuildError>(
+                #root::BuildError::staging("a Rust object operation requires materializable operands and cannot transfer control"))?),
             );
         }
         let operands = captures
@@ -388,7 +388,7 @@ impl Context {
                 fn #marker() -> bool {false}
                 fn #name<Elements, #(#params),*>(_: #root::hir::Buffer, #(_: #params,)*
                     _: ::core::marker::PhantomData<Elements>, _: #root::ContextFrame, _: &mut dyn #root::frontend::KernelBuilder) -> #root::Result<#root::hir::Reg> {
-                    ::core::result::Result::Err(::core::convert::Into::into("Rust method cannot be linked into the scalar kernel"))
+                    ::core::result::Result::Err(#root::BuildError::staging("Rust method cannot be linked into the scalar kernel"))
                 }
             }
             impl<T: ?Sized> Missing for T {}
@@ -438,7 +438,7 @@ impl Context {
             }
             Err(error) => {
                 let error = error.to_string();
-                emit!(::core::result::Result::Err::<#root::hir::Reg, ::std::string::String>(::core::convert::Into::into(#error))?)
+                emit!(::core::result::Result::Err::<#root::hir::Reg, #root::BuildError>(#root::BuildError::staging(#error))?)
             }
         };
         let code = if recursive {

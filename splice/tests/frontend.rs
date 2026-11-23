@@ -7,7 +7,7 @@ struct Inspect(Function);
 impl Codegen for Inspect {
     type Output = Self;
 
-    fn compile_raw(f: &Function) -> Result<Self, String> {
+    fn compile_raw(f: &Function) -> splice::Result<Self> {
         Ok(Self(f.clone()))
     }
 }
@@ -22,7 +22,9 @@ fn oversized_signature_is_rejected_by_the_portable_builder() {
             Ok(())
         }),
     );
-    assert!(matches!(result, Err(message) if message.contains("too many")));
+    assert!(
+        matches!(result, Err(splice::BuildError::Verify { reason, .. }) if reason.contains("too many"))
+    );
 }
 
 mod pricing {
@@ -152,7 +154,7 @@ fn slice_parameters_expose_their_alias_contract() {
     impl Codegen for InspectKinds {
         type Output = Vec<BufferKind>;
 
-        fn compile_raw(_: &Function) -> Result<Self::Output, String> {
+        fn compile_raw(_: &Function) -> splice::Result<Self::Output> {
             panic!("expected direct staging")
         }
 
@@ -160,7 +162,7 @@ fn slice_parameters_expose_their_alias_contract() {
             _: usize,
             kinds: &[BufferKind],
             _: splice::frontend::Body<'_>,
-        ) -> Result<Self::Output, String> {
+        ) -> splice::Result<Self::Output> {
             Ok(kinds.to_vec())
         }
     }
@@ -354,7 +356,9 @@ fn verification_rechecks_a_loop_after_a_delayed_predecessor() {
         b.finish()
     };
 
-    assert!(build(false).unwrap_err().contains("uninitialized"));
+    assert!(
+        matches!(build(false).unwrap_err(), splice::BuildError::Verify { reason, .. } if reason.contains("uninitialized"))
+    );
     let function = build(true).unwrap();
     splice_testkit::each_backend!(B => {
         let code = B::compile(&function).unwrap();
@@ -381,7 +385,9 @@ fn verification_resolves_jumps_even_in_unreachable_code() {
     let mut dangling = body();
     let missing = dangling.label();
     dangling.jump(missing);
-    assert!(dangling.finish().unwrap_err().contains("undefined label"));
+    assert!(
+        matches!(dangling.finish().unwrap_err(), splice::BuildError::Verify { reason, .. } if reason.contains("undefined label"))
+    );
 }
 
 mod directly_staged {
@@ -412,10 +418,10 @@ mod directly_staged {
     }
     impl Codegen for Trace {
         type Output = Self;
-        fn compile_raw(_: &Function) -> Result<Self, String> {
+        fn compile_raw(_: &Function) -> splice::Result<Self> {
             panic!("direct build materialized portable IR")
         }
-        fn build(arity: usize, kinds: &[BufferKind], body: Body<'_>) -> Result<Self, String> {
+        fn build(arity: usize, kinds: &[BufferKind], body: Body<'_>) -> splice::Result<Self> {
             assert!(kinds.is_empty());
             let mut builder = Self {
                 args: arity,
@@ -472,7 +478,7 @@ mod directly_staged {
             args: &[Reg],
             buffers: &[Buffer],
             body: Body<'_>,
-        ) -> Result<Reg, String> {
+        ) -> splice::Result<Reg> {
             assert_eq!(args.len(), arity);
             assert_eq!(buffers.len(), kinds.len());
             let child = Self::build(arity, kinds, body)?;

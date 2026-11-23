@@ -74,7 +74,7 @@ pub(crate) fn trait_defaults(
         #[doc(hidden)]
         #[allow(clippy::type_complexity)]
         fn #eval_name #generics (_: (#(::core::option::Option<#operand_types>,)*)) -> #root::Result<#result_type> #where_ {
-            ::core::result::Result::Err(::core::convert::Into::into("a trait method without a published implementation is opaque"))
+            ::core::result::Result::Err(#root::BuildError::staging("a trait method without a published implementation is opaque"))
         }
     };
     if kind == TraitMethodKind::EvalOnly {
@@ -192,7 +192,7 @@ pub(crate) fn trait_defaults(
             #call
         }
     } else {
-        emit!(::core::result::Result::Err(::core::convert::Into::into(
+        emit!(::core::result::Result::Err(#root::BuildError::staging(
             "trait method requires Rust arguments that cannot cross the scalar ABI"
         )))
     };

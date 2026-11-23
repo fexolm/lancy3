@@ -53,7 +53,7 @@ pub(crate) fn build(
     arity: usize,
     kinds: &[BufferKind],
     body: Body<'_>,
-) -> Result<Function, String> {
+) -> splice_core::Result<Function> {
     build_with_source(arity, kinds, body).map(|(function, _)| function)
 }
 
@@ -61,8 +61,8 @@ pub(crate) fn build_with_source(
     arity: usize,
     kinds: &[BufferKind],
     body: Body<'_>,
-) -> Result<(Function, Option<&'static KernelSource>), String> {
-    splice_target::simd().map_err(|e| e.to_string())?;
+) -> splice_core::Result<(Function, Option<&'static KernelSource>)> {
+    splice_target::simd()?;
     let mut builder = Builder::new(arity, kinds)?;
     body(&mut builder)?;
     let source = builder.source;
@@ -70,11 +70,13 @@ pub(crate) fn build_with_source(
 }
 
 impl<'a> Builder<'a> {
-    fn new(arity: usize, kinds: &'a [BufferKind]) -> Result<Self, String> {
-        splice_core::hir::check_context_layout(kinds)?;
-        let count = u32::try_from(arity).map_err(|_| "too many kernel parameters")?;
+    fn new(arity: usize, kinds: &'a [BufferKind]) -> splice_core::Result<Self> {
+        let count = u32::try_from(arity)
+            .map_err(|_| splice_core::BuildError::unsupported("too many kernel parameters"))?;
         if count == u32::MAX {
-            return Err("too many kernel parameters".into());
+            return Err(splice_core::BuildError::unsupported(
+                "too many kernel parameters",
+            ));
         }
         let mut params = vec![hir::Type::I32; arity];
         for _ in kinds {
@@ -170,7 +172,7 @@ struct Builder<'a> {
     /// Placeholders for a register that is unassigned on some path.
     unassigned: HashSet<Value>,
     labels: Vec<Destination>,
-    error: Option<String>,
+    error: Option<splice_core::BuildError>,
     has_shared_i32: bool,
     constants: HashMap<Value, i32>,
     shared_loads: HashMap<(Buffer, LoadIndex), Value>,
@@ -192,14 +194,16 @@ enum LoadIndex {
 impl Builder<'_> {
     fn valid(&mut self, r: Reg) {
         if r.0 as usize >= self.types.len() {
-            self.error
-                .get_or_insert_with(|| format!("invalid register {r:?}"));
+            self.error.get_or_insert_with(|| {
+                splice_core::BuildError::verify(format!("invalid register {r:?}"))
+            });
         }
     }
     fn expect_type(&mut self, r: Reg, ty: ValueType) {
         if self.types.get(r.0 as usize) != Some(&ty) {
-            self.error
-                .get_or_insert_with(|| format!("expected {ty:?} register, got {r:?}"));
+            self.error.get_or_insert_with(|| {
+                splice_core::BuildError::verify(format!("expected {ty:?} register, got {r:?}"))
+            });
         }
     }
     fn scalar(&mut self, r: Reg) -> Value {
@@ -209,13 +213,15 @@ impl Builder<'_> {
     fn slice(&mut self, buffer: Buffer, write: bool) -> (Value, Value) {
         match self.kinds.get(buffer.index()) {
             None => {
-                self.error
-                    .get_or_insert_with(|| format!("unknown buffer {}", buffer.0));
+                self.error.get_or_insert_with(|| {
+                    splice_core::BuildError::verify(format!("unknown buffer {}", buffer.0))
+                });
                 return (Value::INVALID, Value::INVALID);
             }
             Some(kind) if write && !kind.writable() => {
-                self.error
-                    .get_or_insert_with(|| format!("buffer {} is read-only", buffer.0));
+                self.error.get_or_insert_with(|| {
+                    splice_core::BuildError::verify(format!("buffer {} is read-only", buffer.0))
+                });
             }
             _ => {}
         }
@@ -230,8 +236,9 @@ impl Builder<'_> {
             .get(buffer.index())
             .is_some_and(|k| k.context_signature().is_some() || k.element() != Element::I32)
         {
-            self.error
-                .get_or_insert_with(|| "scalar memory access requires an i32 buffer".into());
+            self.error.get_or_insert_with(|| {
+                splice_core::BuildError::verify("scalar memory access requires an i32 buffer")
+            });
         }
         let (base, len) = self.slice(buffer, write);
         let Some(block) = self.current else {
@@ -282,8 +289,9 @@ impl Builder<'_> {
             return v;
         }
         if b == self.graph.entry() {
-            self.error
-                .get_or_insert_with(|| format!("uninitialized {r:?} at function entry"));
+            self.error.get_or_insert_with(|| {
+                splice_core::BuildError::verify(format!("uninitialized {r:?} at function entry"))
+            });
             return Value::INVALID;
         }
         self.parameter(b, r, true)
@@ -553,8 +561,9 @@ impl Builder<'_> {
     }
     fn target(&mut self, label: Label) -> Block {
         let Some(dest) = self.labels.get_mut(label.0 as usize) else {
-            self.error
-                .get_or_insert_with(|| format!("invalid label {label:?}"));
+            self.error.get_or_insert_with(|| {
+                splice_core::BuildError::verify(format!("invalid label {label:?}"))
+            });
             return self.graph.entry();
         };
         *dest.block.get_or_insert_with(|| {
@@ -610,8 +619,9 @@ impl KernelBuilder for Builder<'_> {
             .get(buffer.index())
             .is_some_and(|kind| kind.context_signature().is_some())
         {
-            self.error
-                .get_or_insert_with(|| "slice length cannot use Rust context".into());
+            self.error.get_or_insert_with(|| {
+                splice_core::BuildError::verify("slice length cannot use Rust context")
+            });
         }
         let (_, len) = self.slice(buffer, false);
         self.result(Op::Copy(len))
@@ -655,8 +665,9 @@ impl KernelBuilder for Builder<'_> {
             return;
         };
         if std::mem::replace(&mut dest.marked, true) {
-            self.error
-                .get_or_insert_with(|| format!("duplicate label {label:?}"));
+            self.error.get_or_insert_with(|| {
+                splice_core::BuildError::verify(format!("duplicate label {label:?}"))
+            });
             return;
         }
         self.end(Exit::Jump(block));
@@ -730,7 +741,7 @@ impl KernelBuilder for Builder<'_> {
         args: &[Reg],
         buffers: &[Buffer],
         body: Body<'_>,
-    ) -> Result<Reg, String> {
+    ) -> splice_core::Result<Reg> {
         self.staged_call(arity, kinds, args, buffers, None, body)
     }
     fn call_specialized(

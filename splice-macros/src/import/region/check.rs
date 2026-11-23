@@ -43,7 +43,7 @@ impl Check {
                 let guard = select_free(root, &path, &selector, staged_call, emit!(false));
                 let message =
                     "a published kernel call cannot be specialized inside this Rust region";
-                emit!(if #guard { return ::core::result::Result::Err(::core::convert::Into::into(#message)); })
+                emit!(if #guard { return ::core::result::Result::Err(#root::BuildError::staging(#message)); })
             }
             Self::Method {
                 path,
@@ -71,10 +71,10 @@ impl Check {
                 let checks = emit! {
                     let (#(#masks,)*) = #shape();
                     if false #(|| (!#masks.is_empty() && !#known))* {
-                        return ::core::result::Result::Err(::core::convert::Into::into("runtime value passed to a comptime parameter"));
+                        return ::core::result::Result::Err(#root::BuildError::staging("runtime value passed to a comptime parameter"));
                     }
                     if #needs_stages() {
-                        return ::core::result::Result::Err(::core::convert::Into::into("a published kernel call cannot be specialized inside this Rust region"));
+                        return ::core::result::Result::Err(#root::BuildError::staging("a published kernel call cannot be specialized inside this Rust region"));
                     }
                 };
                 if trait_method {

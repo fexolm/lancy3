@@ -77,6 +77,8 @@ impl<T> Materialize for &&Operand<T> {
     }
 
     fn materialize(self, _: &mut dyn KernelBuilder) -> crate::Result<Reg> {
-        Err("argument cannot be materialized as a scalar Rust operand".into())
+        Err(crate::BuildError::staging(
+            "argument cannot be materialized as a scalar Rust operand",
+        ))
     }
 }

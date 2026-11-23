@@ -212,7 +212,7 @@ impl Lower<'_> {
                 let __splice_index: usize = #v;
                 let __splice_word = __splice_index as i32;
                 if __splice_word as usize != __splice_index {
-                    return ::core::result::Result::Err(::core::convert::Into::into("runtime usize value exceeds the scalar register width"));
+                    return ::core::result::Result::Err(#root::BuildError::staging("runtime usize value exceeds the scalar register width"));
                 }
                 __splice_word
             }),
@@ -374,7 +374,7 @@ impl Lower<'_> {
                 Value::new(
                     Stage::Reg(Scalar::Inferred),
                     emit! {
-                        ::core::result::Result::Err::<#root::hir::Reg, ::std::string::String>(::core::convert::Into::into("a runtime Rust object cannot be used as a scalar operand"))?
+                        ::core::result::Result::Err::<#root::hir::Reg, #root::BuildError>(#root::BuildError::staging("a runtime Rust object cannot be used as a scalar operand"))?
                     },
                 )
             }

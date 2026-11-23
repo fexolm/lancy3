@@ -4,11 +4,11 @@ use inkwell::targets::{CodeModel, InitializationConfig, RelocMode, Target, Targe
 use splice_target::{Profile, Simd};
 use std::sync::Once;
 
-pub(crate) fn host_machine() -> Result<TargetMachine, String> {
+pub(crate) fn host_machine() -> splice_core::Result<TargetMachine> {
     host_machine_with_debug(false)
 }
 
-pub(crate) fn host_machine_with_debug(debug: bool) -> Result<TargetMachine, String> {
+pub(crate) fn host_machine_with_debug(debug: bool) -> splice_core::Result<TargetMachine> {
     static INIT: Once = Once::new();
     INIT.call_once(|| {
         let config = InitializationConfig {
@@ -22,8 +22,8 @@ pub(crate) fn host_machine_with_debug(debug: bool) -> Result<TargetMachine, Stri
         Target::initialize_aarch64(&config);
     });
     let triple = TargetMachine::get_default_triple();
-    let target = Target::from_triple(&triple).map_err(|e| e.to_string())?;
-    let simd = splice_target::simd().map_err(|e| e.to_string())?;
+    let target = Target::from_triple(&triple).map_err(crate::error)?;
+    let simd = splice_target::simd()?;
     // Explicit profiles start from a baseline CPU: an inferred CPU model
     // could re-enable extensions that the selected profile excludes.
     let (cpu, features) = match simd.profile {
@@ -43,7 +43,7 @@ pub(crate) fn host_machine_with_debug(debug: bool) -> Result<TargetMachine, Stri
                 Profile::Avx10 => match simd.bytes {
                     32 => "+avx10.1-256",
                     64 => "+avx10.1-512",
-                    _ => return Err("LLVM requires at least 256-bit AVX10 support".into()),
+                    _ => return Err(crate::error("LLVM requires at least 256-bit AVX10 support")),
                 },
                 Profile::Neon => "+neon",
                 Profile::Sve | Profile::Sve2 if !scalable(simd) => "+neon",
@@ -72,7 +72,7 @@ pub(crate) fn host_machine_with_debug(debug: bool) -> Result<TargetMachine, Stri
             RelocMode::PIC,
             CodeModel::JITDefault,
         )
-        .ok_or_else(|| "LLVM failed to create the host target machine".into())
+        .ok_or_else(|| crate::error("LLVM failed to create the host target machine"))
 }
 
 /// Whether SVE code generation is sound on the calling thread. LLVM's

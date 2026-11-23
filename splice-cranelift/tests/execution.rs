@@ -168,7 +168,9 @@ fn unrepresentable_callee_signature_returns_a_build_error() {
     let value = root.call(callee.finish().unwrap(), &vec![root.arg(0); count]);
     root.ret(value);
     let result = Cranelift::compile(&root.finish().unwrap());
-    assert!(result.err().unwrap().contains("too many parameters"));
+    assert!(
+        matches!(result.err().unwrap(), splice_core::BuildError::Unsupported(feature) if feature.contains("too many parameters"))
+    );
 }
 
 #[test]

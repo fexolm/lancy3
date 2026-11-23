@@ -269,7 +269,7 @@ impl Lower<'_> {
                 return Ok(Value::new(
                     Stage::Reg(Scalar::Int),
                     emit!(
-                        ::core::result::Result::Err::<#root::hir::Reg, ::std::string::String>(::core::convert::Into::into("runtime index requires a runtime slice"))?
+                        ::core::result::Result::Err::<#root::hir::Reg, #root::BuildError>(#root::BuildError::staging("runtime index requires a runtime slice"))?
                     ),
                 ));
             }

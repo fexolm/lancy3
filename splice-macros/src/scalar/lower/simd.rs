@@ -178,7 +178,7 @@ impl Lower<'_> {
         match output {
             Some(ty) => Value::new(
                 Stage::Reg(ty),
-                emit!({#args #res.ok_or("missing SIMD result")?}),
+                emit!({#args #res.ok_or_else(|| #root::BuildError::staging("missing SIMD result"))?}),
             ),
             None => Value::unit(emit!({#args #res;})),
         }

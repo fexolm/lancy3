@@ -27,7 +27,7 @@ fn builder(debug: bool) -> Result<JITBuilder> {
     use cranelift_codegen::settings::{self, Configurable};
     use splice_target::Profile;
 
-    let simd = splice_target::simd().map_err(|e| e.to_string())?;
+    let simd = splice_target::simd()?;
     let mut flags = settings::builder();
     for (name, value) in [
         ("opt_level", if debug { "none" } else { "speed" }),
@@ -41,10 +41,13 @@ fn builder(debug: bool) -> Result<JITBuilder> {
         ("use_colocated_libcalls", "false"),
         ("is_pic", "false"),
     ] {
-        flags.set(name, value).map_err(|e| e.to_string())?;
+        flags
+            .set(name, value)
+            .map_err(|e| splice_core::BuildError::backend("cranelift", e))?;
     }
     let auto = simd.profile == Profile::Auto;
-    let isa = cranelift_native::builder_with_options(auto)?;
+    let isa = cranelift_native::builder_with_options(auto)
+        .map_err(splice_core::BuildError::unsupported)?;
     #[cfg(target_arch = "x86_64")]
     let isa = {
         let mut isa = isa;
@@ -66,14 +69,15 @@ fn builder(debug: bool) -> Result<JITBuilder> {
             (profile == Profile::Avx512, "has_avx512f"),
         ] {
             if !auto && enabled {
-                isa.enable(flag).map_err(|e| e.to_string())?;
+                isa.enable(flag)
+                    .map_err(|e| splice_core::BuildError::backend("cranelift", e))?;
             }
         }
         isa
     };
     let isa = isa
         .finish(settings::Flags::new(flags))
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| splice_core::BuildError::backend("cranelift", e))?;
     Ok(JITBuilder::with_isa(isa, default_libcall_names()))
 }
 
@@ -142,15 +146,25 @@ impl Codegen for Cranelift {
         let sources = std::mem::take(&mut kernel.functions);
         let mut symbols = Vec::new();
         kernel.emit(&mut module.make_context(), debug, |id, ctx| {
-            tracing::debug_span!(target: "splice_core::compile", "emit_cranelift_code")
-                .in_scope(|| module.define_function(id, ctx).map_err(|e| e.to_string()))?;
+            tracing::debug_span!(target: "splice_core::compile", "emit_cranelift_code").in_scope(
+                || {
+                    module
+                        .define_function(id, ctx)
+                        .map_err(|e| splice_core::BuildError::backend("cranelift", e))
+                },
+            )?;
             if let Some(source) = sources.get(&id) {
                 symbols.push((id, debug_info::Pending::new(module, ctx, source, debug)?));
             }
             Ok(())
         })?;
-        tracing::debug_span!(target: "splice_core::compile", "finalize_cranelift_code")
-            .in_scope(|| module.finalize_definitions().map_err(|e| e.to_string()))?;
+        tracing::debug_span!(target: "splice_core::compile", "finalize_cranelift_code").in_scope(
+            || {
+                module
+                    .finalize_definitions()
+                    .map_err(|e| splice_core::BuildError::backend("cranelift", e))
+            },
+        )?;
         let address = module.get_finalized_function(id);
         let registration = debug_info::publish(module, symbols, debug)?;
         // SAFETY: KernelModule declares the entry with the host C calling convention,

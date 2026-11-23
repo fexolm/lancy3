@@ -1,4 +1,4 @@
-use splice::{BuildOptions, CallError, Codegen, Executable, Trap, hir::Instr, kernel};
+use splice::{BuildError, BuildOptions, CallError, Codegen, Executable, Trap, hir::Instr, kernel};
 use splice_text::Text;
 use std::{
     ops::Index,
@@ -115,8 +115,13 @@ fn check<B: Codegen<Output: Executable>>() {
         assert_eq!(out, [7, 21]);
     }
 
-    assert!(mandatory::ir(&[]).is_err());
-    assert!(mandatory::build::<B>(mandatory::BuildArgs { table: &[] }).is_err());
+    let bounds = |error: BuildError| matches!(error, BuildError::Comptime(Trap::Bounds));
+    assert!(mandatory::ir(&[]).err().is_some_and(bounds));
+    assert!(
+        mandatory::build::<B>(mandatory::BuildArgs { table: &[] })
+            .err()
+            .is_some_and(bounds)
+    );
     assert!(runtime_offset::ir(&[3]).is_err());
     assert!(runtime_offset::build::<B>(runtime_offset::BuildArgs { table: &[3] }).is_err());
     let plan = Indexed {

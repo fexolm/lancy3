@@ -45,7 +45,8 @@ impl Codegen for Text {
         let _span =
             tracing::debug_span!(target: "splice_core::compile", "render_text_ir").entered();
         let mut output = String::new();
-        render(root, &mut output).map_err(|error| error.to_string())?;
+        render(root, &mut output)
+            .map_err(|error| splice_core::BuildError::backend("text IR", error))?;
         Ok(output)
     }
 }

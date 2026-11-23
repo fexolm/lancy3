@@ -71,7 +71,9 @@ pub fn aggregate<T, const N: usize>(
     builder: &mut dyn KernelBuilder,
 ) -> crate::Result<[Word; N]> {
     if std::mem::needs_drop::<T>() {
-        return Err("a Rust aggregate with drop glue requires a Rust call".into());
+        return Err(crate::BuildError::staging(
+            "a Rust aggregate with drop glue requires a Rust call",
+        ));
     }
     if fields.iter().any(|field| matches!(field, Word::Runtime(_))) {
         for field in &mut fields {
@@ -91,7 +93,7 @@ pub fn known_field<T, F: ImportWord>(
     word: Option<i32>,
 ) -> crate::Result<F> {
     word.map(F::decode)
-        .ok_or_else(|| "runtime aggregate in comptime!".into())
+        .ok_or_else(|| crate::BuildError::staging("runtime aggregate in comptime!"))
 }
 impl RunArg for Word {
     fn known(&self) -> Option<i32> {
@@ -118,19 +120,23 @@ impl<T> KnownArg<T> for Host<T> {
 }
 impl<T> KnownArg<T> for Reg {
     fn require(self) -> crate::Result<T> {
-        Err("runtime value passed to a comptime parameter".into())
+        Err(crate::BuildError::staging(
+            "runtime value passed to a comptime parameter",
+        ))
     }
 }
 impl<T> KnownArg<T> for String {
     fn require(self) -> crate::Result<T> {
-        Err("runtime value passed to a comptime parameter".into())
+        Err(crate::BuildError::staging(
+            "runtime value passed to a comptime parameter",
+        ))
     }
 }
 impl<T: ImportWord> KnownArg<T> for Word {
     fn require(self) -> crate::Result<T> {
-        self.known()
-            .map(T::decode)
-            .ok_or_else(|| "runtime value passed to a comptime parameter".into())
+        self.known().map(T::decode).ok_or_else(|| {
+            crate::BuildError::staging("runtime value passed to a comptime parameter")
+        })
     }
 }
 
@@ -153,7 +159,7 @@ impl RunArg for Host<i32> {
 
 /// A host integer operation on which Rust panics (or would panic with
 /// overflow checks). Kernels defer it: staged code traps when the operation
-/// is reached, and `comptime!` returns the message as a build error.
+/// is reached, and `comptime!` returns its trap as a build error.
 #[doc(hidden)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum HostFault {
@@ -175,11 +181,12 @@ impl HostFault {
         }
     }
 
-    pub fn message(self) -> &'static str {
+    /// The trap the staged operation reports.
+    pub fn trap(self) -> crate::Trap {
         match self {
-            Self::DivisionByZero(_) => "kernel integer division by zero",
-            Self::DivisionOverflow(_) => "kernel signed division overflow",
-            Self::Overflow => "kernel integer arithmetic overflow",
+            Self::DivisionByZero(_) => crate::Trap::DivisionByZero,
+            Self::DivisionOverflow(_) => crate::Trap::DivisionOverflow,
+            Self::Overflow => crate::Trap::Overflow,
         }
     }
 }
@@ -343,11 +350,13 @@ thread_local! {
 pub struct ExpansionGuard(PhantomData<Rc<()>>);
 
 #[doc(hidden)]
-pub fn enter_expansion() -> Result<ExpansionGuard, String> {
+pub fn enter_expansion() -> crate::Result<ExpansionGuard> {
     EXPANSION.with(|slot| {
         let mut state = slot.get();
         if state.depth >= 64 {
-            return Err("kernel specialization exceeded 64 nested expansions".into());
+            return Err(crate::BuildError::staging(
+                "kernel specialization exceeded 64 nested expansions",
+            ));
         }
         if state.depth == 0 {
             state.remaining = SPECIALIZATION_STEPS;
@@ -364,7 +373,9 @@ pub fn specialization_step() -> crate::Result<()> {
     EXPANSION.with(|slot| {
         let mut state = slot.get();
         let Some(remaining) = state.remaining.checked_sub(1) else {
-            return Err("kernel specialization exceeded its iteration budget".into());
+            return Err(crate::BuildError::staging(
+                "kernel specialization exceeded its iteration budget",
+            ));
         };
         state.remaining = remaining;
         slot.set(state);
@@ -394,11 +405,16 @@ pub fn column(
                 .index()
                 .checked_add(slot)
                 .and_then(|i| u32::try_from(i).ok())
-                .ok_or_else(|| format!("column {slot} is not representable"))?;
+                .ok_or_else(|| {
+                    crate::BuildError::staging(format!("column {slot} is not representable"))
+                })?;
             Ok(crate::hir::Buffer(index))
         }
-        Some(_) => Err(format!("column {slot} expects {} elements", element.name())),
-        None => Err(format!("unknown column {slot}")),
+        Some(_) => Err(crate::BuildError::staging(format!(
+            "column {slot} expects {} elements",
+            element.name()
+        ))),
+        None => Err(crate::BuildError::staging(format!("unknown column {slot}"))),
     }
 }
 

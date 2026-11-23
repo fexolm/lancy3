@@ -12,7 +12,7 @@ fn context_descriptors_reject_other_signatures_and_slice_operations() {
     const KINDS: [BufferKind; 1] = [BufferKind::context(&FIRST)];
 
     fn good(b: &mut dyn KernelBuilder) -> splice_core::Result<()> {
-        let operation = ContextFrame::root(&FIRST)?.child(0)?.operation(0)?;
+        let operation = ContextFrame::root(&FIRST).child(0)?.operation(0)?;
         let result = b.rust_context_call(Buffer(0), operation, &[b.arg(0)])?;
         b.ret(result);
         Ok(())
@@ -179,7 +179,7 @@ fn rust_imports_fill_unused_abi_arguments_with_zero_in_both_staging_paths() {
 
 #[test]
 fn reuses_shared_loads_across_writes_in_both_staging_paths() {
-    fn body(b: &mut dyn KernelBuilder) -> Result<(), String> {
+    fn body(b: &mut dyn KernelBuilder) -> splice_core::Result<()> {
         let zero = b.constant(0);
         let before = b.load(Buffer(0), zero);
         b.store(Buffer(1), b.arg(0), before);
@@ -313,7 +313,9 @@ fn reads_require_a_definition_on_every_reachable_edge() {
             Ok(())
         }),
     );
-    assert!(result.unwrap_err().contains("uninitialized"));
+    assert!(
+        matches!(result.unwrap_err(), splice_core::BuildError::Verify { reason, .. } if reason.contains("uninitialized"))
+    );
 }
 
 #[test]
@@ -465,7 +467,9 @@ fn rejects_undefined_labels_and_aliased_writable_arguments() {
             Ok(())
         }),
     );
-    assert!(undefined.unwrap_err().contains("undefined"));
+    assert!(
+        matches!(undefined.unwrap_err(), splice_core::BuildError::Verify { reason, .. } if reason.contains("undefined"))
+    );
     let alias = build(
         0,
         &[BufferKind::Write],
@@ -485,5 +489,7 @@ fn rejects_undefined_labels_and_aliased_writable_arguments() {
             Ok(())
         }),
     );
-    assert!(alias.unwrap_err().contains("aliases"));
+    assert!(
+        matches!(alias.unwrap_err(), splice_core::BuildError::Verify { reason, .. } if reason.contains("aliases"))
+    );
 }

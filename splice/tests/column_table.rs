@@ -225,20 +225,25 @@ fn unchecked_query(
 
 #[test]
 fn invalid_column_casts_return_build_errors() {
-    assert_eq!(
-        unchecked_query::ir(0).err().unwrap().to_string(),
-        "column 0 expects i32 elements"
+    let staging = |error: splice::BuildError, expected: &str| {
+        assert!(
+            matches!(&error, splice::BuildError::Staging(message) if message == expected),
+            "{error:?}"
+        );
+    };
+    staging(
+        unchecked_query::ir(0).err().unwrap(),
+        "column 0 expects i32 elements",
     );
-    assert_eq!(
+    staging(
         unchecked_query::build::<Lancy>(unchecked_query::BuildArgs { col: 1 })
             .err()
-            .unwrap()
-            .to_string(),
-        "unknown column 1"
+            .unwrap(),
+        "unknown column 1",
     );
-    assert_eq!(
+    staging(
         unchecked_query::print(0).unwrap_err(),
-        "column 0 expects i32 elements"
+        "column 0 expects i32 elements",
     );
-    assert_eq!(unchecked_query::print(1).unwrap_err(), "unknown column 1");
+    staging(unchecked_query::print(1).unwrap_err(), "unknown column 1");
 }

@@ -43,10 +43,9 @@ impl Builder<'_> {
         let types = args
             .iter()
             .map(|r| {
-                self.types
-                    .get(r.0 as usize)
-                    .copied()
-                    .ok_or_else(|| format!("invalid SIMD register {r:?}"))
+                self.types.get(r.0 as usize).copied().ok_or_else(|| {
+                    splice_core::BuildError::verify(format!("invalid SIMD register {r:?}"))
+                })
             })
             .collect::<Result<Vec<_>, _>>()?;
         inst.validate(&types, self.kinds)?;

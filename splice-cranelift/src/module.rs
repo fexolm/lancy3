@@ -35,7 +35,9 @@ fn declare(
     } else {
         // Cranelift uses u16 indices for block parameters.
         if f.arity() + 2 * f.buffer_kinds().len() > usize::from(u16::MAX) + 1 {
-            return Err("too many parameters for a Cranelift kernel call".into());
+            return Err(splice_core::BuildError::unsupported(
+                "too many parameters for a Cranelift kernel call",
+            ));
         }
         sig.params.resize(f.arity(), AbiParam::new(I32));
         for _ in f.buffer_kinds() {
@@ -49,7 +51,7 @@ fn declare(
     } else {
         module.declare_anonymous_function(&sig)
     };
-    id.map_err(|e| e.to_string())
+    id.map_err(|e| splice_core::BuildError::backend("cranelift", e))
 }
 
 pub(super) struct KernelModule<'a> {
@@ -117,7 +119,11 @@ impl<'a> KernelModule<'a> {
                     .max()
                     .map(i32::try_from)
                     .transpose()
-                    .map_err(|_| "debug frame exceeds Cranelift's stack slot limit")?
+                    .map_err(|_| {
+                        splice_core::BuildError::unsupported(
+                            "debug frame exceeds Cranelift's stack slot limit",
+                        )
+                    })?
                     .map(|size| size as u32)
             } else {
                 None
@@ -133,8 +139,10 @@ impl<'a> KernelModule<'a> {
                 lower::keep_compared_loads_in_registers(&mut ctx.func);
             }
             // Context::inline requires legalized and valid callee bodies.
-            ctx.legalize(module.isa()).map_err(|e| e.to_string())?;
-            ctx.verify(module.isa()).map_err(|e| e.to_string())?;
+            ctx.legalize(module.isa())
+                .map_err(|e| splice_core::BuildError::backend("cranelift", e))?;
+            ctx.verify(module.isa())
+                .map_err(|e| splice_core::BuildError::backend("cranelift", e))?;
             bodies.insert(id, ctx.func);
         }
         Ok(Self {
@@ -174,7 +182,7 @@ impl<'a> KernelModule<'a> {
             ctx.func = func;
             tracing::debug_span!(target: "splice_core::compile", "inline_cranelift_ir")
                 .in_scope(|| ctx.inline(&mut inliner))
-                .map_err(|e| e.to_string())?;
+                .map_err(|e| splice_core::BuildError::backend("cranelift", e))?;
             for child in local_callees(&ctx.func) {
                 if seen.insert(child) {
                     pending.push((child, bodies[&child].clone()));

@@ -26,7 +26,9 @@ fn failed_nested_specialization_can_be_replaced_before_installation() {
                             Ok(())
                         }),
                     )?;
-                    Err("specialization rejected".into())
+                    Err(splice_core::BuildError::unsupported(
+                        "specialization rejected",
+                    ))
                 }),
             );
             assert!(failed.is_err());
@@ -137,7 +139,9 @@ fn direct_builder_rejects_uninitialized_values_on_a_backedge_and_diamond() {
                 Ok(())
             }),
         );
-        assert!(result.err().unwrap().contains("uninitialized"));
+        assert!(
+            matches!(result.err().unwrap(), splice_core::BuildError::Verify { reason, .. } if reason.contains("uninitialized"))
+        );
     }
 }
 

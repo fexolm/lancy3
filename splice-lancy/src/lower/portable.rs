@@ -7,7 +7,7 @@ use std::{collections::HashMap, sync::Arc};
 /// construction as direct Splice staging. Preserve shared callee identities.
 /// Raw invocation of the result must uphold Splice's slice contract:
 /// immutable buffers may overlap and writable buffers have exclusive access.
-pub fn lower(root: &Function) -> Result<hir::Function, String> {
+pub fn lower(root: &Function) -> splice_core::Result<hir::Function> {
     lower_mode(root, None)
 }
 
@@ -16,15 +16,15 @@ pub(crate) type DebugSources<'a> = Vec<(&'a Function, Option<&'a splice_core::de
 pub(crate) fn lower_debug<'a>(
     root: &'a Function,
     sources: &mut DebugSources<'a>,
-) -> Result<hir::Function, String> {
+) -> splice_core::Result<hir::Function> {
     lower_mode(root, Some(sources))
 }
 
 fn lower_mode<'a>(
     root: &'a Function,
     mut sources: Option<&mut DebugSources<'a>>,
-) -> Result<hir::Function, String> {
-    splice_target::simd().map_err(|e| e.to_string())?;
+) -> splice_core::Result<hir::Function> {
+    splice_target::simd()?;
     let mut callees = HashMap::new();
     let mut pending = vec![(root, false)];
     while let Some((f, visited)) = pending.pop() {
@@ -54,7 +54,7 @@ fn lower_body<'a>(
     function: &'a Function,
     callees: &HashMap<*const Function, Arc<hir::Function>>,
     mut sources: Option<&mut DebugSources<'a>>,
-) -> Result<hir::Function, String> {
+) -> splice_core::Result<hir::Function> {
     let mut b = Builder::new(function.arity(), function.buffer_kinds())?;
     b.types = (0..function.register_count())
         .map(|i| function.reg_type(splice_core::hir::Reg(i as u32)))
@@ -62,7 +62,8 @@ fn lower_body<'a>(
     b.labels
         .resize_with(function.label_count(), Destination::default);
     if let Some(sources) = &mut sources {
-        let id = u32::try_from(sources.len()).map_err(|_| "too many debug points")?;
+        let id = u32::try_from(sources.len())
+            .map_err(|_| splice_core::BuildError::unsupported("too many debug points"))?;
         b.graph.append(b.graph.entry(), Op::DebugPoint(id));
         sources.push((function, None));
     }
@@ -73,7 +74,9 @@ fn lower_body<'a>(
                     continue;
                 };
                 for (var, ty, offset) in point.slots(function) {
-                    let offset = u32::try_from(offset).map_err(|_| "debug frame too large")?;
+                    let offset = u32::try_from(offset).map_err(|_| {
+                        splice_core::BuildError::unsupported("debug frame too large")
+                    })?;
                     match var.value {
                         splice_core::debug::Value::Register(reg, _) => {
                             let mut value = b.observe(reg);
@@ -102,8 +105,9 @@ fn lower_body<'a>(
                         }
                         splice_core::debug::Value::Slice(buffer) => {
                             let (data, len) = b.slice(buffer, false);
-                            let length_offset =
-                                offset.checked_add(8).ok_or("debug frame too large")?;
+                            let length_offset = offset.checked_add(8).ok_or_else(|| {
+                                splice_core::BuildError::unsupported("debug frame too large")
+                            })?;
                             b.graph.append(block, Op::DebugStore(offset, data));
                             let len = b
                                 .graph
@@ -116,7 +120,8 @@ fn lower_body<'a>(
                         }
                     }
                 }
-                let id = u32::try_from(sources.len()).map_err(|_| "too many debug points")?;
+                let id = u32::try_from(sources.len())
+                    .map_err(|_| splice_core::BuildError::unsupported("too many debug points"))?;
                 b.graph.append(block, Op::DebugPoint(id));
                 sources.push((function, Some(point)));
             }

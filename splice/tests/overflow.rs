@@ -1,4 +1,4 @@
-use splice::{BuildOptions, CallError, Codegen, Executable, Trap, kernel};
+use splice::{BuildError, BuildOptions, CallError, Codegen, Executable, Trap, kernel};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
 #[derive(Clone, Copy, Debug)]
@@ -146,11 +146,19 @@ fn check_arithmetic<B: Codegen<Output: Executable>>(options: BuildOptions) {
     }
 
     let checks = catch_unwind(|| required(a, b, 1)).is_err();
+    let overflow = |error: BuildError| matches!(error, BuildError::Comptime(Trap::Overflow));
     assert_eq!(
-        required::build_with_options::<B>(options, required::BuildArgs { a, b }).is_err(),
+        required::build_with_options::<B>(options, required::BuildArgs { a, b })
+            .err()
+            .is_some_and(overflow),
         checks
     );
-    assert_eq!(required::ir_with_options(options, a, b).is_err(), checks);
+    assert_eq!(
+        required::ir_with_options(options, a, b)
+            .err()
+            .is_some_and(overflow),
+        checks
+    );
 }
 
 #[test]

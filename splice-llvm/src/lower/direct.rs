@@ -38,8 +38,7 @@ impl<'ctx> Graph<'_, 'ctx> {
         key: Option<Specialization>,
         root: bool,
         stage: StagedBody<'_>,
-    ) -> Result<(FunctionValue<'ctx>, bool), String> {
-        splice_core::hir::check_context_layout(kinds)?;
+    ) -> splice_core::Result<(FunctionValue<'ctx>, bool)> {
         if let Some(hit) = key
             .as_ref()
             .and_then(|k| self.callees.borrow().get(k).copied())
@@ -73,7 +72,7 @@ impl<'ctx> Graph<'_, 'ctx> {
         kinds: &[BufferKind],
         root: bool,
         stage: StagedBody<'_>,
-    ) -> Result<bool, String> {
+    ) -> splice_core::Result<bool> {
         let builder = self.ctx.create_builder();
         let native = Body::start(
             self.ctx,
@@ -84,7 +83,7 @@ impl<'ctx> Graph<'_, 'ctx> {
             std::iter::repeat_n(ValueType::Scalar, arity),
             kinds,
         )
-        .map_err(|e| e.to_string())?;
+        .map_err(crate::error)?;
         let mut direct = Direct {
             native,
             graph: self,
@@ -102,7 +101,7 @@ impl<'ctx> Graph<'_, 'ctx> {
         direct.flow.verify(arity, direct.native.register_count())?;
         if direct.flow.current.is_some() {
             // The verifier only permits fallthrough in a disconnected dead block.
-            direct.native.unreachable().map_err(|e| e.to_string())?;
+            direct.native.unreachable().map_err(crate::error)?;
         }
         if direct.native.static_rust_slice_operands() {
             self.static_rust_slice_operands.set(true);
@@ -117,7 +116,7 @@ pub(crate) fn populate_direct<'ctx>(
     arity: usize,
     kinds: &[BufferKind],
     stage: StagedBody<'_>,
-) -> Result<Option<&'static KernelSource>, String> {
+) -> splice_core::Result<Option<&'static KernelSource>> {
     let graph = Graph {
         ctx,
         module,
@@ -128,7 +127,7 @@ pub(crate) fn populate_direct<'ctx>(
     };
     let (root, _) = graph.function(arity, kinds, None, true, stage)?;
     emit_entry(ctx, module, &ctx.create_builder(), arity, kinds.len(), root)
-        .map_err(|e| e.to_string())?;
+        .map_err(crate::error)?;
     if graph.static_rust_slice_operands.get() {
         permit_buffer_capture(module);
     }
@@ -144,7 +143,7 @@ struct Direct<'a, 'ctx> {
     kinds: &'a [BufferKind],
     flow: Flow,
     // Infallible frontend operations defer errors to the enclosing build.
-    error: Option<String>,
+    error: Option<splice_core::BuildError>,
 }
 
 impl<'a, 'ctx> Direct<'a, 'ctx> {
@@ -159,8 +158,9 @@ impl<'a, 'ctx> Direct<'a, 'ctx> {
                 .reg_type(r)
                 .is_some_and(|ty| ty != ValueType::Scalar)
         }) {
-            self.error
-                .get_or_insert_with(|| "expected a scalar LLVM register".into());
+            self.error.get_or_insert_with(|| {
+                splice_core::BuildError::verify("expected a scalar LLVM register")
+            });
             return;
         }
         self.emit_typed(reads, dst, generate);
@@ -180,13 +180,13 @@ impl<'a, 'ctx> Direct<'a, 'ctx> {
             .chain(dst)
             .any(|r| r.0 as usize >= self.native.register_count())
         {
-            self.error = Some("invalid LLVM register".into());
+            self.error = Some(splice_core::BuildError::verify("invalid LLVM register"));
             return;
         }
         if self.flow.current.is_some() {
             self.flow.operands(reads, dst);
             if let Err(e) = generate(&mut self.native) {
-                self.error = Some(e.to_string());
+                self.error = Some(crate::error(e));
             }
         }
     }
@@ -203,15 +203,19 @@ impl<'a, 'ctx> Direct<'a, 'ctx> {
         match self.kinds.get(b.index()) {
             None => {
                 self.error
-                    .get_or_insert_with(|| "invalid LLVM buffer".into());
+                    .get_or_insert_with(|| splice_core::BuildError::verify("invalid LLVM buffer"));
             }
             Some(kind) if kind.context_signature().is_some() => {
-                self.error
-                    .get_or_insert_with(|| "slice memory operation cannot use Rust context".into());
+                self.error.get_or_insert_with(|| {
+                    splice_core::BuildError::verify(
+                        "slice memory operation cannot use Rust context",
+                    )
+                });
             }
             Some(kind) if write && !kind.writable() => {
-                self.error
-                    .get_or_insert_with(|| "store to read-only LLVM buffer".into());
+                self.error.get_or_insert_with(|| {
+                    splice_core::BuildError::verify("store to read-only LLVM buffer")
+                });
             }
             _ => {}
         }
@@ -223,8 +227,9 @@ impl<'a, 'ctx> Direct<'a, 'ctx> {
             .get(b.index())
             .is_some_and(|k| k.element() != Element::I32)
         {
-            self.error
-                .get_or_insert_with(|| "scalar access requires an i32 buffer".into());
+            self.error.get_or_insert_with(|| {
+                splice_core::BuildError::verify("scalar access requires an i32 buffer")
+            });
         }
     }
     fn target(&mut self, label: Label) {
@@ -259,17 +264,22 @@ impl KernelBuilder for Direct<'_, '_> {
         if self.error.is_none() && self.native.register_count() < u32::MAX as usize {
             match self.native.new_local(&self.allocas, ty) {
                 Ok(r) => return r,
-                Err(e) => self.error = Some(e.to_string()),
+                Err(e) => self.error = Some(crate::error(e)),
             }
         }
-        self.error
-            .get_or_insert_with(|| "exhausted LLVM registers".into());
+        self.error.get_or_insert_with(|| {
+            splice_core::BuildError::unsupported("exhausted LLVM registers")
+        });
         Reg(u32::MAX)
     }
     fn simd(&mut self, inst: Simd, args: &[Reg]) -> splice_core::Result<Option<Reg>> {
         let types = args
             .iter()
-            .map(|&r| self.native.reg_type(r).ok_or("invalid LLVM register"))
+            .map(|&r| {
+                self.native
+                    .reg_type(r)
+                    .ok_or_else(|| splice_core::BuildError::verify("invalid LLVM register"))
+            })
             .collect::<Result<Vec<_>, _>>()?;
         inst.validate(&types, self.kinds)?;
         let dst = inst.output().map(|ty| self.typed_local(ty));
@@ -298,16 +308,18 @@ impl KernelBuilder for Direct<'_, '_> {
     }
     fn assign(&mut self, d: Reg, s: Reg) {
         if self.native.reg_type(d) != self.native.reg_type(s) {
-            self.error
-                .get_or_insert_with(|| "incompatible LLVM register assignment".into());
+            self.error.get_or_insert_with(|| {
+                splice_core::BuildError::verify("incompatible LLVM register assignment")
+            });
             return;
         }
         self.emit_typed(&[s], Some(d), |ir| ir.assign(d, s));
     }
     fn label(&mut self) -> Label {
         if self.native.label_count() >= u32::MAX as usize {
-            self.error
-                .get_or_insert_with(|| "exhausted LLVM labels".into());
+            self.error.get_or_insert_with(|| {
+                splice_core::BuildError::unsupported("exhausted LLVM labels")
+            });
             return Label(u32::MAX);
         }
         self.flow.add_label();
@@ -394,7 +406,7 @@ impl KernelBuilder for Direct<'_, '_> {
         args: &[Reg],
         buffers: &[Buffer],
         stage: StagedBody<'_>,
-    ) -> Result<Reg, String> {
+    ) -> splice_core::Result<Reg> {
         self.staged_call(arity, kinds, args, buffers, None, stage)
     }
     fn call_specialized(
@@ -447,8 +459,8 @@ impl Direct<'_, '_> {
         let dst = self.result(args, |ir, d| {
             ir.call_function(d, callee, fallible, args, buffers)
         });
-        if let Some(err) = &self.error {
-            return Err(err.clone());
+        if let Some(err) = self.error.take() {
+            return Err(err);
         }
         Ok(dst)
     }

@@ -126,16 +126,16 @@ impl RustCall {
         args: impl ExactSizeIterator<Item = Option<ValueType>>,
     ) -> crate::Result<()> {
         if self.arity > 2 || args.len() != usize::from(self.arity) {
-            return Err(format!(
+            return Err(crate::BuildError::verify(format!(
                 "incompatible arity for Rust import {}",
                 self.symbol.name
-            ));
+            )));
         }
         if args.into_iter().any(|ty| ty != Some(ValueType::Scalar)) {
-            return Err(format!(
+            return Err(crate::BuildError::verify(format!(
                 "expected scalar operands for Rust import {}",
                 self.symbol.name
-            ));
+            )));
         }
         Ok(())
     }
@@ -146,42 +146,18 @@ pub fn check_rust_packet_call(
     args: impl ExactSizeIterator<Item = Option<ValueType>>,
 ) -> crate::Result<()> {
     if symbol.packet_bytes().is_none() || args.len() != symbol.arity as usize {
-        return Err(format!(
+        return Err(crate::BuildError::verify(format!(
             "incompatible arity for Rust import {}",
             symbol.name
-        ));
+        )));
     }
     if args.into_iter().any(|ty| ty != Some(ValueType::Scalar)) {
-        return Err(format!(
+        return Err(crate::BuildError::verify(format!(
             "expected scalar operands for Rust import {}",
             symbol.name
-        ));
+        )));
     }
     Ok(())
-}
-
-/// Reject invalid context metadata in the ABI before generating native code.
-pub fn check_context_layout(kinds: &[BufferKind]) -> crate::Result<()> {
-    for signature in kinds.iter().filter_map(|kind| kind.context_signature()) {
-        signature.validate()?;
-    }
-    Ok(())
-}
-
-/// Validate the descriptor and words of a borrowed Rust context call.
-pub fn check_context_call(
-    kinds: &[BufferKind],
-    context: Buffer,
-    operation: u32,
-    args: impl ExactSizeIterator<Item = Option<ValueType>>,
-    slices: &[ContextSlice],
-) -> crate::Result<()> {
-    check_rust_context_call(
-        kinds,
-        RustContextTarget::Borrowed { context, operation },
-        args,
-        slices,
-    )
 }
 
 #[doc(hidden)]
@@ -196,44 +172,57 @@ pub fn check_rust_context_call(
             let signature = kinds
                 .get(context.index())
                 .and_then(|kind| kind.context_signature())
-                .ok_or("expected a Rust context descriptor")?;
-            signature.validate()?;
+                .ok_or_else(|| crate::BuildError::verify("expected a Rust context descriptor"))?;
             signature
                 .shape(operation)
-                .ok_or("unknown Rust context operation")?
+                .ok_or_else(|| crate::BuildError::verify("unknown Rust context operation"))?
         }
         RustContextTarget::Static(symbol) => {
             let (words, borrows) = symbol.shape();
             if crate::ContextArguments::packet_layout(words, borrows).is_none() {
-                return Err("invalid static Rust operation packet layout".into());
+                return Err(crate::BuildError::verify(
+                    "invalid static Rust operation packet layout",
+                ));
             }
             (words as usize, borrows)
         }
     };
     if args.len() != arity {
-        return Err("incompatible Rust context operation arity".into());
+        return Err(crate::BuildError::verify(
+            "incompatible Rust context operation arity",
+        ));
     }
     if args.into_iter().any(|ty| ty != Some(ValueType::Scalar)) {
-        return Err("expected scalar operands for Rust context operation".into());
+        return Err(crate::BuildError::verify(
+            "expected scalar operands for Rust context operation",
+        ));
     }
     if slices.len() != borrows as usize {
-        return Err("incompatible Rust context operation slice arity".into());
+        return Err(crate::BuildError::verify(
+            "incompatible Rust context operation slice arity",
+        ));
     }
     let mut seen = HashMap::new();
     for &ContextSlice { buffer, writable } in slices {
         let kind = kinds
             .get(buffer.index())
             .filter(|kind| kind.context_signature().is_none())
-            .ok_or("expected slice operands for Rust context operation")?;
+            .ok_or_else(|| {
+                crate::BuildError::verify("expected slice operands for Rust context operation")
+            })?;
         if writable && !kind.writable() {
-            return Err("Rust context operation requires a writable slice".into());
+            return Err(crate::BuildError::verify(
+                "Rust context operation requires a writable slice",
+            ));
         }
         if slices.len() > 1
             && seen
                 .insert(buffer, writable)
                 .is_some_and(|prior| prior || writable)
         {
-            return Err("writable Rust slice operand aliases another operand".into());
+            return Err(crate::BuildError::verify(
+                "writable Rust slice operand aliases another operand",
+            ));
         }
     }
     Ok(())
@@ -391,16 +380,24 @@ pub fn check_call(
     buffers: &[Buffer],
 ) -> crate::Result<()> {
     if args.len() != arity {
-        return Err(format!(
+        return Err(crate::BuildError::verify(format!(
             "expected {arity} scalar arguments, got {}",
             args.len()
-        ));
+        )));
     }
     for (i, ty) in args.enumerate() {
         match ty {
             Some(ValueType::Scalar) => {}
-            Some(_) => return Err(format!("expected a scalar register for call argument {i}")),
-            None => return Err(format!("invalid register for call argument {i}")),
+            Some(_) => {
+                return Err(crate::BuildError::verify(format!(
+                    "expected a scalar register for call argument {i}"
+                )));
+            }
+            None => {
+                return Err(crate::BuildError::verify(format!(
+                    "invalid register for call argument {i}"
+                )));
+            }
         }
     }
     check_forwarding(caller_kinds, kinds, buffers)

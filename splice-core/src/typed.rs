@@ -92,7 +92,7 @@ pub trait CompileInput<B: Codegen> {
 }
 impl<B: Codegen> CompileInput<B> for Function {
     type Output = B::Output;
-    type Error = String;
+    type Error = BuildError;
     fn compile_with(&self, options: Option<BuildOptions>) -> crate::Result<B::Output> {
         match options {
             Some(options) => B::compile_raw_with_options(self, options),

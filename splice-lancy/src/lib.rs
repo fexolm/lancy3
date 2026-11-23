@@ -36,7 +36,8 @@ impl Codegen for Lancy {
         let _span = tracing::debug_span!(target: "splice_core::compile", "compile", backend = "lancy", input = "staged").entered();
         let (hir, source) = tracing::debug_span!(target: "splice_core::compile", "stage_lancy_hir")
             .in_scope(|| lower::build_with_source(arity, kinds, body))?;
-        LancyKernel::new(hir, arity, kinds, source).map_err(|e| e.to_string())
+        LancyKernel::new(hir, arity, kinds, source)
+            .map_err(|e| splice_core::BuildError::backend("lancy", e))
     }
 
     fn compile_raw(function: &Function) -> splice_core::Result<Self::Output> {
@@ -51,7 +52,8 @@ impl Codegen for Lancy {
         if options == BuildOptions::Debug {
             let mut sources = Vec::new();
             let hir = lower::lower_debug(function, &mut sources)?;
-            let code = ScalarKernel::compile_debug(&hir).map_err(|e| e.to_string())?;
+            let code = ScalarKernel::compile_debug(&hir)
+                .map_err(|e| splice_core::BuildError::backend("lancy", e))?;
             let registration = debug_info::publish(&code, &sources)?;
             return Ok(LancyKernel {
                 _debug: Some(registration),
@@ -68,7 +70,7 @@ impl Codegen for Lancy {
             function.buffer_kinds(),
             function.source(),
         )
-        .map_err(|e| e.to_string())
+        .map_err(|e| splice_core::BuildError::backend("lancy", e))
     }
 }
 

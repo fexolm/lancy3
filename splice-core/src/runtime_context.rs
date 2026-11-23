@@ -11,7 +11,7 @@ pub struct ContextSignature {
     local: &'static [u32],
     borrows: &'static [u32],
     children: &'static [&'static Self],
-    size: Option<u32>,
+    size: u32,
     depth: u32,
 }
 
@@ -51,64 +51,93 @@ impl ContextSignature {
         Self::with_borrows(local, &[], children)
     }
 
+    /// # Panics
+    ///
+    /// On an invalid layout, which is a compile error when this initializes
+    /// a `static`: `borrows` must be empty or name one slice count per local
+    /// operation, every packet must fit `i32`, and nesting is limited to 64
+    /// levels and `u32::MAX` operations.
+    ///
+    /// ```compile_fail,E0080
+    /// # use splice_core::ContextSignature;
+    /// // Four billion words do not fit an i32 packet.
+    /// static HUGE: ContextSignature = ContextSignature::new(&[u32::MAX]);
+    /// ```
+    /// ```compile_fail,E0080
+    /// # use splice_core::ContextSignature;
+    /// // Two operations, but slice counts for one.
+    /// static MISMATCH: ContextSignature = ContextSignature::with_borrows(&[1, 1], &[0], &[]);
+    /// ```
+    /// ```compile_fail,E0080
+    /// # use splice_core::ContextSignature;
+    /// macro_rules! double {
+    ///     ($previous:ident;) => {};
+    ///     ($previous:ident; $next:ident $(, $rest:ident)*) => {
+    ///         static $next: ContextSignature = ContextSignature::with_children(&[], &[&$previous; 2]);
+    ///         double!($next; $($rest),*);
+    ///     };
+    /// }
+    /// static LEAF: ContextSignature = ContextSignature::new(&[2]);
+    /// // 2^32 operations.
+    /// double!(LEAF; N1, N2, N3, N4, N5, N6, N7, N8, N9, N10, N11, N12, N13, N14, N15, N16,
+    ///     N17, N18, N19, N20, N21, N22, N23, N24, N25, N26, N27, N28, N29, N30, N31, N32);
+    /// ```
+    /// ```
+    /// # use splice_core::ContextSignature;
+    /// static VALID: ContextSignature = ContextSignature::with_borrows(&[1, 2], &[0, 1], &[]);
+    /// assert_eq!(VALID.arity(1), Some(2));
+    /// ```
     pub const fn with_borrows(
         local: &'static [u32],
         borrows: &'static [u32],
         children: &'static [&'static Self],
     ) -> Self {
-        let mut signature = Self {
-            local,
-            borrows,
-            children,
-            size: None,
-            depth: 1,
-        };
-        if local.len() > u32::MAX as usize
-            || children.len() > u32::MAX as usize
-            || (!borrows.is_empty() && borrows.len() != local.len())
-        {
-            return signature;
-        }
+        assert!(
+            local.len() <= u32::MAX as usize && children.len() <= u32::MAX as usize,
+            "too many Rust context operations"
+        );
+        assert!(
+            borrows.is_empty() || borrows.len() == local.len(),
+            "Rust context slice counts must match its operations"
+        );
         let mut i = 0;
         while i < local.len() {
             let slices = if borrows.is_empty() { 0 } else { borrows[i] };
-            if ContextArguments::packet_layout(local[i], slices).is_none() {
-                return signature;
-            }
+            assert!(
+                ContextArguments::packet_layout(local[i], slices).is_some(),
+                "Rust context operation packet exceeds i32::MAX bytes"
+            );
             i += 1;
         }
-        let mut total = local.len() as u32;
+        let mut size = local.len() as u32;
+        let mut depth = 1;
         i = 0;
         while i < children.len() {
             let child = children[i];
-            let Some(count) = child.size else {
-                return signature;
+            let Some(next) = size.checked_add(child.size) else {
+                panic!("Rust context has more than u32::MAX operations");
             };
-            let Some(next) = total.checked_add(count) else {
-                return signature;
-            };
-            if child.depth >= MAX_CONTEXT_DEPTH {
-                return signature;
+            assert!(
+                child.depth < MAX_CONTEXT_DEPTH,
+                "Rust contexts nest more than 64 levels"
+            );
+            if depth <= child.depth {
+                depth = child.depth + 1;
             }
-            if signature.depth <= child.depth {
-                signature.depth = child.depth + 1;
-            }
-            total = next;
+            size = next;
             i += 1;
         }
-        signature.size = Some(total);
-        signature
-    }
-
-    pub fn validate(&self) -> crate::Result<()> {
-        self.size
-            .map(|_| ())
-            .ok_or_else(|| "invalid Rust context layout".to_owned())
+        Self {
+            local,
+            borrows,
+            children,
+            size,
+            depth,
+        }
     }
 
     pub fn operation_at(&self, mut operation: u32) -> Option<ContextOperation> {
-        let size = self.size?;
-        if operation >= size {
+        if operation >= self.size {
             return None;
         }
         let local = self.local.len() as u32;
@@ -117,7 +146,7 @@ impl ContextSignature {
         }
         operation -= local;
         for (index, child) in self.children.iter().enumerate() {
-            let size = child.size?;
+            let size = child.size;
             if operation < size {
                 return Some(ContextOperation::Child {
                     index: index as u32,
@@ -157,9 +186,8 @@ impl ContextSignature {
 }
 
 impl ContextFrame {
-    pub fn root(signature: &'static ContextSignature) -> crate::Result<Self> {
-        signature.validate()?;
-        Ok(Self { signature, base: 0 })
+    pub fn root(signature: &'static ContextSignature) -> Self {
+        Self { signature, base: 0 }
     }
 
     pub fn child(self, index: u32) -> crate::Result<Self> {
@@ -167,19 +195,23 @@ impl ContextFrame {
             .signature
             .children
             .split_at_checked(index as usize)
-            .ok_or("unknown child Rust context")?;
-        let signature = *remaining.first().ok_or("unknown child Rust context")?;
+            .ok_or_else(|| crate::BuildError::staging("unknown child Rust context"))?;
+        let signature = *remaining
+            .first()
+            .ok_or_else(|| crate::BuildError::staging("unknown child Rust context"))?;
         let mut base = self.base + self.signature.local.len() as u32;
         for child in previous {
             // Root construction validated all counts, and their sum fits u32.
-            base += child.size.expect("validated Rust context layout");
+            base += child.size;
         }
         Ok(Self { signature, base })
     }
 
     pub fn operation(self, local: u32) -> crate::Result<u32> {
         if local as usize >= self.signature.local.len() {
-            return Err("unknown local Rust context operation".into());
+            return Err(crate::BuildError::staging(
+                "unknown local Rust context operation",
+            ));
         }
         Ok(self.base + local)
     }
@@ -491,7 +523,7 @@ mod tests {
         static ROOT: ContextSignature =
             ContextSignature::with_children(&[1], &[&CHILD, &EMPTY, &CHILD]);
 
-        let frame = ContextFrame::root(&ROOT).unwrap();
+        let frame = ContextFrame::root(&ROOT);
         assert_eq!(frame.operation(0).unwrap(), 0);
         assert!(frame.operation(1).is_err());
         assert_eq!(frame.child(0).unwrap().operation(0).unwrap(), 1);
@@ -549,15 +581,6 @@ mod tests {
     }
 
     #[test]
-    fn invalid_descendant_layout_cannot_create_a_frame() {
-        static INVALID: ContextSignature = ContextSignature::new(&[u32::MAX]);
-        static ROOT: ContextSignature = ContextSignature::with_children(&[1], &[&INVALID]);
-        assert!(ContextFrame::root(&INVALID).is_err());
-        assert!(ContextFrame::root(&ROOT).is_err());
-        assert_eq!(ROOT.operation_at(0), None);
-    }
-
-    #[test]
     fn expanded_operation_count_must_fit_the_native_operand() {
         macro_rules! double {
             ($previous:ident;) => {};
@@ -570,10 +593,9 @@ mod tests {
         static LEAF: ContextSignature = ContextSignature::new(&[2]);
         double!(LEAF;
             N1, N2, N3, N4, N5, N6, N7, N8, N9, N10, N11, N12, N13, N14, N15, N16,
-            N17, N18, N19, N20, N21, N22, N23, N24, N25, N26, N27, N28, N29, N30, N31, N32
+            N17, N18, N19, N20, N21, N22, N23, N24, N25, N26, N27, N28, N29, N30, N31
         );
         assert_eq!(N31.arity((1 << 31) - 1), Some(2));
         assert_eq!(N31.arity(1 << 31), None);
-        assert!(ContextFrame::root(&N32).is_err());
     }
 }

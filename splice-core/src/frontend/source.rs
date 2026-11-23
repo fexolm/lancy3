@@ -93,13 +93,15 @@ impl<T: std::fmt::Debug> TryLiteral for &Literal<'_, T> {
 
 impl<T> TryLiteral for &&Literal<'_, T> {
     fn try_literal(self) -> crate::Result<String> {
-        Err("the specialized Rust value has no printable representation".into())
+        Err(crate::BuildError::staging(
+            "the specialized Rust value has no printable representation",
+        ))
     }
 }
 
 /// Rust source that panics like the kernel trap for `fault`.
 pub fn fault_panic(fault: super::scalar::HostFault) -> String {
-    format!("panic!({:?})", fault.message())
+    format!("panic!({:?})", fault.trap().to_string())
 }
 
 pub fn function(

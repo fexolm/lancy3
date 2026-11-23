@@ -110,18 +110,18 @@ impl PrepareHost<'_, '_> {
         let Expr::Index(index) = left else {
             return None;
         };
+        let root = self.lower.root;
         let Expr::Path(base) = &*index.expr else {
             return Some(emit!(::core::result::Result::Err::<
                 (),
-                ::std::string::String,
-            >(::core::convert::Into::into(
+                #root::BuildError,
+            >(#root::BuildError::staging(
                 "specialization cannot write through an opaque place"
             ))?));
         };
         self.visit_expr_mut(right);
         self.visit_expr_mut(&mut index.index);
         let offset = &index.index;
-        let root = self.lower.root;
         let place = emit!(#base[__splice_index]);
         let store = match op.and_then(|op| super::super::compound_op(op).map(|name| (op, name))) {
             Some((op, name)) => self
@@ -275,7 +275,7 @@ impl Lower<'_> {
         self.host_check(expr, false)?;
         let reject = || {
             emit!(if false { #expr } else {
-                return ::core::result::Result::Err(::core::convert::Into::into("opaque iterator constructor during specialization"));
+                return ::core::result::Result::Err(#root::BuildError::staging("opaque iterator constructor during specialization"));
             })
         };
         match expr {
@@ -373,7 +373,7 @@ impl Lower<'_> {
             let receiver = &(#base);
             let operand = Operand::of(receiver);
             if !(&operand).own_field(#name) && !(&operand).referent_field(#name) {
-                return ::core::result::Result::Err(::core::convert::Into::into("field has no Splice layout description"));
+                return ::core::result::Result::Err(#root::BuildError::staging("field has no Splice layout description"));
             }
             &receiver.#member
         })

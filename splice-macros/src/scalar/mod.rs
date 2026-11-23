@@ -315,13 +315,13 @@ pub(super) fn expand(root: Path, native: &mut ItemFn) -> Result<TokenStream> {
     let debug_arguments = host_names.iter().map(|id| lower.capture_constant(id));
     let source_support = emit!(#root::frontend::source);
     let source_body = if context.is_some() {
-        emit!(return ::core::result::Result::Err(::core::convert::Into::into("Rust context kernels can be inspected through the Text backend"));)
+        emit!(return ::core::result::Result::Err(#root::BuildError::staging("Rust context kernels can be inspected through the Text backend"));)
     } else {
         match lower.source_body(&lowered_block) {
             Ok(body) => emit!(let __splice_printed = #body;),
             Err(error) => {
                 let error = error.to_string();
-                emit!(return ::core::result::Result::Err(::std::borrow::ToOwned::to_owned(#error));)
+                emit!(return ::core::result::Result::Err(#root::BuildError::unsupported(#error));)
             }
         }
     };
@@ -396,7 +396,7 @@ pub(super) fn expand(root: Path, native: &mut ItemFn) -> Result<TokenStream> {
     });
     let root_context_args = context
         .as_ref()
-        .map(|_| emit!(#root::ContextFrame::root(&__SPLICE_CONTEXT_SIGNATURE)?,));
+        .map(|_| emit!(#root::ContextFrame::root(&__SPLICE_CONTEXT_SIGNATURE),));
     let context_decls = context
         .as_ref()
         .map(|_| emit!(__splice_context_frame: #root::ContextFrame,));
@@ -461,7 +461,7 @@ pub(super) fn expand(root: Path, native: &mut ItemFn) -> Result<TokenStream> {
         });
     };
     let nested_body = if context.is_some() {
-        emit!(::core::result::Result::Err(::core::convert::Into::into(
+        emit!(::core::result::Result::Err(#root::BuildError::staging(
             "a runtime object requires a compatible enclosing Rust context"
         )))
     } else {
@@ -511,7 +511,7 @@ pub(super) fn expand(root: Path, native: &mut ItemFn) -> Result<TokenStream> {
             let __splice_layout = #layout;
             let __splice_columns: &[#hir::BufferKind] = ::core::convert::AsRef::as_ref(&__splice_layout);
             if __splice_columns.iter().any(|column| column.writable()) {
-                return ::core::result::Result::Err(::core::convert::Into::into("a shared column table cannot contain writable columns"));
+                return ::core::result::Result::Err(#root::BuildError::staging("a shared column table cannot contain writable columns"));
             }
             let __splice_column_base = #base;
             let mut __splice_kinds = (#kinds).to_vec();

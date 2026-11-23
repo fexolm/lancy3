@@ -18,26 +18,13 @@ use std::sync::Arc;
 type Built<T> = Result<T, Error>;
 
 /// Failure to emit LLVM IR for a function body.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub(super) enum Error {
-    Builder(BuilderError),
+    #[error(transparent)]
+    Builder(#[from] BuilderError),
     /// The loaded LLVM does not provide this intrinsic for these types.
+    #[error("LLVM does not provide {0}")]
     MissingIntrinsic(&'static str),
-}
-
-impl From<BuilderError> for Error {
-    fn from(error: BuilderError) -> Self {
-        Self::Builder(error)
-    }
-}
-
-impl std::fmt::Display for Error {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Builder(error) => error.fmt(f),
-            Self::MissingIntrinsic(name) => write!(f, "LLVM does not provide {name}"),
-        }
-    }
 }
 
 pub(super) struct Callees<'a, 'ctx> {
