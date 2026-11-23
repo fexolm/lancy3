@@ -177,3 +177,8 @@
 - Временный мост: скрытые `splice_target::simd()`/`vector_bytes()` и `CompileOptions::host()` в splice-lancy — удаляются в Ф3.3.
 - Проверки: `cargo +1.94.1 xtask ci --quick` зелёный; `cargo test -p lancy --release` при SPLICE_SIMD=auto|sse|avx2|avx512; lancy под qemu-aarch64 (neon, sve, sve2 VL32); clippy aarch64 для lancy/splice-target.
 - Осталось в Ф3: CORE-26 (ветки `32 && !avx2` в x64 теперь недостижимы — удалить вместе с тестами AVX1-256), 3.3 (BuildOptions{mode,target}, бэкенды переводят одну цель, BE-04/BE-13), 3.4 (BE-06).
+
+### Ф3 — CORE-26: недостижимые ветки AVX1-256 (коммит 7d05919)
+- Закрыто: CORE-26 (остаток). Цель шириной 32 байта всегда с AVX2 (`Target::x86_64`), поэтому условия `bytes == 32 && !avx2` в isel (native, numeric, memory, experimental, packed, packed_integer, packed_rearrange) и в эмиссии (gather, `ones`, `Halves`) удалены. `Halves` теперь только для AVX-512F без BW. `not` маски на 256 битах — VEX `vpcmpeqd`/`vpxor` вместо legacy-SSE `pcmpeqd` + `vinsertf128` (без смешения SSE/AVX).
+- Тесты: удалены конфигурации AVX1 без AVX2 на 256 битах (`avx1_without_avx2_computes_both_sse_halves`, `avx1` в packed_fp/conversions/vector_patterns/numeric, `avx2: false` в masked_memory) — такую цель нельзя построить. F16C-случай перенесён на 16 байт (AVX+F16C при SSE-ширине); `profiles()` выставляют avx/avx512f по инварианту.
+- Проверки: `cargo test -p lancy --release` при SPLICE_SIMD=auto|sse|avx2|avx512 и с `experimental-simd`; `cargo +1.94.1 xtask ci --quick` зелёный.
