@@ -771,6 +771,10 @@ impl Lower<'_> {
         let Some(Binding::Reg(t, true)) = binding else {
             return err(left, "assignment requires a mutable runtime variable");
         };
+        if op.is_some() && matches!(t, Scalar::Index | Scalar::Length) {
+            // Registers hold usize in 32 bits with i32 checks; see `binary`.
+            return err(expr, "cast the runtime index to i32 before arithmetic");
+        }
         let rhs = self.operand(right, t)?;
 
         let code = if let Some((op, _)) = op {
