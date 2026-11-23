@@ -19,10 +19,10 @@ inkwell = { version = "0.11", default-features = false, features = ["target-x86"
 llvm-sys = { version = "191", features = ["disable-alltargets-init", "no-llvm-linking"] }
 
 [target.'cfg(all(target_os = "linux", target_arch = "x86_64"))'.dependencies]
-inkwell = { version = "0.11", default-features = false, features = ["target-x86", "llvm19-1-force-dynamic"] }
+inkwell = { version = "0.11", default-features = false, features = ["target-x86", "llvm19-1-prefer-dynamic"] }
 
 [target.'cfg(all(target_os = "linux", target_arch = "aarch64"))'.dependencies]
-inkwell = { version = "0.11", default-features = false, features = ["target-aarch64", "llvm19-1-force-dynamic"] }
+inkwell = { version = "0.11", default-features = false, features = ["target-aarch64", "llvm19-1-prefer-dynamic"] }
 
 [target.'cfg(all(target_os = "linux", target_arch = "aarch64"))'.dev-dependencies]
 libc = "0.2"

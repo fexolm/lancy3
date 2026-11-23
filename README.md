@@ -111,10 +111,10 @@ cargo run -p splice-kernel --release --example schema_plan -- rust
 ```sh
 cargo run -p splice-kernel --release --example sql_plan -- lancy
 cargo run -p splice-kernel --release --example sql_plan -- cranelift
-cargo run -p splice-kernel --release --example sql_plan -- llvm
+cargo run -p splice-kernel --release --features llvm --example sql_plan -- llvm
 cargo run -p splice-kernel --release --example sql_plan -- text
 cargo run -p splice-kernel --release --example sql_plan -- rust
-cargo bench -p splice-kernel --bench backends -- sql_plan
+cargo xtask bench sql_plan
 cargo test -p splice-kernel --release --example sql_plan --test simd
 ```
 
@@ -122,7 +122,7 @@ cargo test -p splice-kernel --release --example sql_plan --test simd
 
 Во всех группах стенда LLVM компилирует через `LlvmManualSimd`. На обоих путях сборки включён O3, а loop vectorization и SLP отключены. Явные SIMD-операции используют инструкции выбранного профиля. Исторические замеры SQL-плана ниже относятся к прежней конфигурации с обычным O3.
 
-Для одного SQL-плана выполните `cargo bench -p splice-kernel --bench backends -- sql_plan`. Фильтр `sql_plan/execute/build` выбирает вызовы ядер, собранных через `build::<B>`. HTML-отчёт и интервалы оценок доступны в `target/criterion/report/index.html`. [Код стенда](splice/benches/backends.rs) · [Как читать отчёт Criterion](https://criterion-rs.github.io/book/user_guide/command_line_output.html)
+Для одного SQL-плана выполните `cargo xtask bench sql_plan`. Фильтр `sql_plan/execute/build` выбирает вызовы ядер, собранных через `build::<B>`. HTML-отчёт и интервалы оценок доступны в `target/criterion/report/index.html`. [Код стенда](splice/benches/backends.rs) · [Как читать отчёт Criterion](https://criterion-rs.github.io/book/user_guide/command_line_output.html)
 
 Каждый замер `compile/build` включает специализацию и установку нового исполняемого ядра. Для Cranelift этот путь включает построение переносимого IR. Группа `stage_ir` измеряет построение IR отдельно, а `compile/from_ir` передаёт всем трём бэкендам одну готовую функцию. Освобождение JIT-кода происходит после замера сборки. Группы `execute/build` и `execute/from_ir` повторно вызывают готовые ядра на одних входах с заранее выделенным выходным буфером. Для SQL-плана стенд до и после измерений проверяет значения и число вхождений каждой пары по отдельной скалярной формуле для исходных данных.
 
@@ -196,12 +196,12 @@ assert_eq!(dst, vec![0u16; n]);
 cargo run -p splice-kernel --release --example simd_matmul
 cargo run -p splice-kernel --release --example simd_hash_lookup
 cargo test -p splice-kernel --release --example simd_matmul --example simd_hash_lookup
-cargo bench -p splice-kernel --bench backends -- simd_
+cargo xtask bench simd_
 ```
 
 Criterion использует те же функции, что примеры и тесты. Для матриц нагрузка равна 96×128 на 128×128, для поиска — 32 768 запросов к таблице из 16 384 слотов при заполнении 75% и доле попаданий 50%. Наборы данных детерминированы. Перед измерением и после него стенд сверяет весь выход с независимой скалярной реализацией. Группы `compile` и `execute` измеряют сборку и повторный вызов отдельно для каждого из двух путей — `build` и `from_ir`.
 
-AMD Ryzen 7 9800X3D, Windows x64, 16 полос `i32`. Первые четыре измерения относятся к прогону до правок LLVM и Cranelift, по 30 выборок Criterion. Последний столбец содержит время вызова через `build` после правок, по 15 выборок. Для повторения с теми же настройками выполните `cargo bench -p splice-kernel --bench backends -- simd_ --warm-up-time 1 --measurement-time 3 --sample-size 30 --noplot`.
+AMD Ryzen 7 9800X3D, Windows x64, 16 полос `i32`. Первые четыре измерения относятся к прогону до правок LLVM и Cranelift, по 30 выборок Criterion. Последний столбец содержит время вызова через `build` после правок, по 15 выборок. Для повторения с теми же настройками выполните `cargo xtask bench simd_ --warm-up-time 1 --measurement-time 3 --sample-size 30 --noplot`.
 
 | Ядро | Бэкенд | Сборка `build` | Вызов после `build` | Сборка из IR | Вызов после сборки из IR | Вызов `build` после правок |
 | --- | --- | ---: | ---: | ---: | ---: | ---: |
@@ -226,7 +226,7 @@ AMD Ryzen 7 9800X3D, Windows x64, 16 полос `i32`. Первые четыре
 | [`large_decimal_csv`](splice/benches/large/csv.rs) | 8 192 строки по четыре знаковых значения с тремя дробными разрядами, упаковка ASCII в `i32` | 362 |
 
 ```sh
-cargo bench -p splice-kernel --bench backends -- 'large_(audio|parquet|per_channel|decimal)' --warm-up-time 1 --measurement-time 2 --sample-size 30 --noplot
+cargo xtask bench 'large_(audio|parquet|per_channel|decimal)' --warm-up-time 1 --measurement-time 2 --sample-size 30 --noplot
 ```
 
 AMD Ryzen 7 9800X3D, Windows x64, 30 выборок Criterion. В таблице указано время повторного вызова в мкс на весь набор данных. Каждая ячейка содержит замеры `build / from_ir`.
@@ -252,7 +252,7 @@ AMD Ryzen 7 9800X3D, Windows x64, 30 выборок Criterion. В таблице
 | [`large_simd_remap_rgb16`](splice/benches/large/vector/remap.rs) | Плитка 145×145, три 16-битных канала, перенос пикселей по поканальным картам радиальной коррекции |
 
 ```sh
-cargo bench -p splice-kernel --bench backends -- large_simd_ --warm-up-time 0.5 --measurement-time 1 --sample-size 20 --nresamples 10000 --noplot
+cargo xtask bench large_simd_ --warm-up-time 0.5 --measurement-time 1 --sample-size 20 --nresamples 10000 --noplot
 ```
 
 Для сравнения исполнения на другой ширине задайте `SPLICE_SIMD=avx2` или `SPLICE_SIMD=sse` и замените фильтр `large_simd_` на `'large_simd_.*/execute/'`.
@@ -282,7 +282,7 @@ AMD Ryzen 7 9800X3D, Windows x64, 20 выборок Criterion. Время пов
 | `gap_loop_dead_checksum` | Копирование 65 539 отсчётов со специализированным отключением результата контрольной суммы из внутреннего цикла |
 
 ```powershell
-cargo bench -p splice-kernel --bench backends -- '^gap_' --warm-up-time 0.3 --measurement-time 0.7 --sample-size 15 --nresamples 10000 --noplot
+cargo xtask bench '^gap_' --warm-up-time 0.3 --measurement-time 0.7 --sample-size 15 --nresamples 10000 --noplot
 ```
 
 На Ryzen 7 9800X3D под Windows x64 сворачивание рекуррентностей сократило время `gap_ramp_integral` после прямого `build` с 1,42 мс до 28,7 мкс. Слияние трёх проходов тональной кривой сократило вызов со 101,6 до 67,1 мкс. Удаление неиспользуемой контрольной суммы сократило вызов с 2,25 мс до 42,2 мкс. Сравнение выполнено на одинаковых кернелах с предыдущим и новым набором проходов Lancy.
@@ -350,7 +350,9 @@ perf report --stdio
 Для `splice-llvm` на всех платформах выбран LLVM 19.1, поэтому тесты и замеры на разных ОС сравнивают один и тот же компилятор.
 
 * **Windows x64 MSVC.** Сборка находит LLVM в стандартном каталоге или в компонентах C++ Clang для Visual Studio. Для другой папки установки задайте `LLVM_SYS_191_PREFIX` до сборки. В ней должны быть `lib/LLVM-C.lib` и `bin/LLVM-C.dll`. Cargo подготавливает DLL для `cargo run`, тестов и бенчмарков. Для самостоятельного запуска готового приложения положите соответствующую DLL рядом с исполняемым файлом или добавьте её каталог в `PATH`.
-* **Linux x86-64 и AArch64.** LLVM линкуется динамически. Нужны инструменты разработки, включая `llvm-config-19`, и разделяемая библиотека LLVM; в Ubuntu 24.04 достаточно пакета `llvm-19-dev`. Для другой установки укажите префикс через `LLVM_SYS_191_PREFIX`, например `/usr/lib/llvm-19`.
+* **Linux x86-64 и AArch64.** LLVM линкуется динамически, а если `llvm-config` не сообщает о `libLLVM.so` — статически (сборку со статическим LLVM проверяет `cargo xtask static-llvm`). Нужны инструменты разработки, включая `llvm-config-19`, и разделяемая библиотека LLVM; в Ubuntu 24.04 достаточно пакета `llvm-19-dev`. Для другой установки укажите префикс через `LLVM_SYS_191_PREFIX`, например `/usr/lib/llvm-19`.
+
+Без LLVM работают `cargo test -p splice-kernel` (Lancy и Cranelift) и тесты остальных крейтов, кроме `splice-llvm` и `splice-testkit`. Те же проверки, что в CI, запускает `cargo xtask ci` (`--quick` — только rustfmt, Clippy и тесты воркспейса); список команд — в [xtask](xtask/src/main.rs).
 
 Версии Inkwell и LLVM указаны в [манифесте бэкенда](splice-llvm/Cargo.toml). Операции над LLVM-инструкциями, типами, значениями и базовыми блоками используют [Inkwell Builder](https://docs.rs/inkwell/0.11.0/inkwell/builder/struct.Builder.html).
 
