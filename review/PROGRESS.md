@@ -5,7 +5,7 @@
 Правило: один агент за раз, одна фаза (или подфаза) на агента. После каждого шага — коммит и запись сюда. Продолжать с первой незакрытой фазы.
 
 ## Фазы
-- [ ] Ф0 — подтверждённые ошибки и быстрые исправления
+- [x] Ф0 — подтверждённые ошибки и быстрые исправления
 - [ ] Ф1 — страховочная сетка: явный путь понижения, харнессы, CI
 - [ ] Ф2 — типизированные ошибки и общий `Trap`
 - [ ] Ф3 — цель как значение
@@ -58,3 +58,15 @@
 - Отклонение от буквы Р11(а): «`extern` при подключённом LLVM» через Cargo-фичу невозможен, потому что фичи в воркспейсе унифицируются, и бинари lancy/cranelift без LLVM получили бы неразрешённые символы. Вместо этого на ELF символы `__jit_debug_*` определены как **weak** (`global_asm!`) и используются через `extern`. Статический LLVM даёт сильное определение (оно и используется, дубля нет), с `libLLVM.so` динамический линкер связывает LLVM с единственной экспортированной копией. Суть Р11(а) сохранена: в процессе одно определение, пишем под своим замком, GDB-слушатель ORC запрещён (документировано в `splice-llvm/src/jit.rs` и README). Windows без изменений: LLVM там DLL со своими приватными копиями.
 - `links = "splice_jit_gdb"` (+ пустой `build.rs`, его требует Cargo).
 - Тест `splice-jit/tests/registry.rs` (регистрация попадает в общий дескриптор). Ручная проверка BE-05: тот же тест, слинкованный с `JITLoaderGDB.cpp.o` из `libLLVMOrcTargetProcess.a`, на старом коде падает (`rust-lld: duplicate symbol`), на новом проходит, `nm` показывает одно (сильное) определение. GDB-смоук `debug_kernel` (lancy/llvm) работает, AArch64 под qemu — зелёный. Постоянная CI-джоба со статическим LLVM — Ф1.6.
+
+### Ф0.10 — мелкие ошибки (коммиты 8b88d23, c1ae8c0, 1f97492, a7061c3, fe37be3)
+- X64-20: `DebugPoint` вне debug ничего не выдаёт (x64 и AArch64); тест `lancy/tests/function.rs::release_code_drops_debug_points` (79 байт против 15 до фикса).
+- HIR-20: `Select` по маске сравнения с «чужими» плечами доходит до обычных правил `Select` (`passes/simd-minmax.lancy`). Разбор правил на функции — в Ф5.
+- LNC-05(ж): откат инлайнинга по любому лимиту размера (`CompileError::is_size_limit`: `FunctionTooLarge`, `BranchOutOfRange`, `WorkspaceTooLarge`, `FrameOverflow`); тест `jit/tests.rs::every_size_limit_of_the_expanded_body_falls_back_to_calls` (естественного репро нет: инлайненные соседние вызовы делят одну scratch-область). Остальное из LNC-05 (`Limit`, `#[non_exhaustive]`) — в своей фазе.
+- SPL-17: стабильный rustdoc **не проверяет** коды ошибок `compile_fail` (проверено: `E9999` проходит). Поэтому каждый доктест без кода стоит после принимаемого двойника, который отличается только проверяемым свойством. trybuild-снимки — Ф1.5 (MAC-17).
+- BE-18: `intrinsic(module, name, types) -> Result` с `body::Error::MissingIntrinsic` вместо паники; код тел возвращает `body::Error` (обёртка `BuilderError`). BE-17: явный флаг `root` в `Graph::function/body`.
+- CORE-16: `bool` сохраняется как `value & 1` во всех трёх бэкендах (gdb-тест `debug_symbols.rs::gdb_shows_runtime_bools_as_rust_bools` под `#[ignore]`, прогнан здесь: до фикса `255`). Вынос правил сохранения в ядро (`Point::stores`) — в своей фазе (CORE-16, вторая часть).
+- CORE-18: `check_initialization` смотрит на `Instr::operands()` (без Debug-переменных). В splice-lancy SSA-строитель читает Debug-переменные «мягко»: на пути без присваивания ставится нулевая заглушка, а настоящее чтение того же параметра остаётся ошибкой. Cranelift и LLVM обработки не требуют. Тест `debug_symbols.rs::source_points_may_name_partially_assigned_variables`.
+- CORE-19: `SimdOp::may_trap` (доступ к буферам), `needs_status` только по `may_trap`; тест `frontend.rs::only_operations_that_can_fail_need_a_status_channel`. Таблица `SimdOp::info()` (CORE-10) заменит `may_trap` в своей фазе.
+- CORE-23: perf-map: `O_NOFOLLOW`, только обычный файл своего uid, усечение устаревшей карты, одно предупреждение на процесс (юнит-тест). CORE-25: `e_machine` — константа по архитектуре с `compile_error!`. CORE-26: `Auto` даёт 32 байта только при AVX2, `neon` доступен на AArch64 вне Linux. Ветки Lancy `32 if cpu.avx2` теперь недостижимы через `Auto`; убрать их при переходе на профиль-значение (Ф3).
+- Проверено: fmt, clippy `-D warnings`, `cargo test --workspace --release`; `SPLICE_SIMD=sse|avx2` для splice-cranelift/splice-lancy и SIMD/debug-тестов splice-kernel; lancy под qemu AArch64; `cargo check --target x86_64-pc-windows-msvc` для splice-jit/target/core.
