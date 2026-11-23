@@ -29,10 +29,7 @@ pub struct LlvmManualSimd;
 impl Llvm {
     /// Report the linked LLVM version after checking it matches the bindings.
     pub fn version() -> Result<(u32, u32, u32), String> {
-        #[cfg(windows)]
         const EXPECTED: u32 = 19;
-        #[cfg(target_os = "linux")]
-        const EXPECTED: u32 = 21;
         let version @ (major, minor, patch) = inkwell::support::get_llvm_version();
         if major != EXPECTED {
             return Err(format!(

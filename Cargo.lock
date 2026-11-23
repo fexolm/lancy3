@@ -521,8 +521,7 @@ dependencies = [
  "bitflags 2.13.2",
  "inkwell_internals",
  "libc",
- "llvm-sys 191.1.1",
- "llvm-sys 211.1.1",
+ "llvm-sys",
  "thiserror 2.0.21",
 ]
 
@@ -598,20 +597,6 @@ name = "llvm-sys"
 version = "191.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "50201c30aee9d8176a1b1c3431f4b610333fe78d69474804e5f1d6d00d78681e"
-dependencies = [
- "anyhow",
- "cc",
- "lazy_static",
- "libc",
- "regex-lite",
- "semver",
-]
-
-[[package]]
-name = "llvm-sys"
-version = "211.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "aaee56c721bdfbf4adffffa0756a34bd65df4b0aaf65a2539082a5650e521028"
 dependencies = [
  "anyhow",
  "cc",
@@ -978,7 +963,7 @@ dependencies = [
  "cc",
  "inkwell",
  "libc",
- "llvm-sys 191.1.1",
+ "llvm-sys",
  "splice-core",
  "splice-jit",
  "splice-target",

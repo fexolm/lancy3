@@ -121,7 +121,7 @@ fn declare<'ctx>(
     let attr = |name: &str| Attribute::get_named_enum_kind_id(name);
     let noalias = ctx.create_enum_attribute(attr("noalias"), 0);
     let readonly = ctx.create_enum_attribute(attr("readonly"), 0);
-    let capture = capture_attribute_kind().map(|id| ctx.create_enum_attribute(id, 0));
+    let nocapture = ctx.create_enum_attribute(attr("nocapture"), 0);
     // An opaque Rust operation may observe a borrowed slice's address and
     // record it in the caller's object. Preserve that possibility in LLVM IR.
     let exposes_slice_addresses = buffers
@@ -131,27 +131,15 @@ fn declare<'ctx>(
     for (i, kind) in buffers.iter().enumerate() {
         let slot = AttributeLoc::Param((1 + arity + i * 2) as u32);
         callee.add_attribute(slot, if kind.writable() { noalias } else { readonly });
-        if let Some(a) = capture
-            && !exposes_slice_addresses
-        {
-            callee.add_attribute(slot, a);
+        if !exposes_slice_addresses {
+            callee.add_attribute(slot, nocapture);
         }
     }
     Ok(callee)
 }
 
-fn capture_attribute_kind() -> Option<u32> {
-    // LLVM 21 replaced nocapture with captures(none), encoded as zero bits.
-    ["nocapture", "captures"]
-        .into_iter()
-        .map(Attribute::get_named_enum_kind_id)
-        .find(|&id| id != 0)
-}
-
 fn permit_buffer_capture(module: &Module<'_>) {
-    let Some(kind) = capture_attribute_kind() else {
-        return;
-    };
+    let kind = Attribute::get_named_enum_kind_id("nocapture");
     // A Rust operation can record a slice address even when the slice was
     // originally borrowed by an ancestor kernel. Remove the assumptions
     // from the whole generated call graph before running LLVM passes.
