@@ -18,3 +18,7 @@ tracing.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = "0.2"
+
+[dev-dependencies]
+gimli = { version = "0.33", default-features = false, features = ["read", "write", "std"] }
+object = { version = "0.37", default-features = false, features = ["read_core", "elf", "std"] }

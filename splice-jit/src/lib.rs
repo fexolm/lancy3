@@ -6,6 +6,8 @@ mod elf;
 #[cfg(target_os = "linux")]
 mod perf_map;
 mod registry;
+#[cfg(test)]
+mod tests;
 
 pub use gimli;
 use gimli::write::FrameTable;
