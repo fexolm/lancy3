@@ -1,7 +1,6 @@
 use splice::simd::Lane;
 use splice::{BuildError, Codegen, Executable, kernel};
 use splice_lancy::Lancy;
-use splice_llvm::Llvm;
 use splice_text::Text;
 use std::cell::Cell;
 use std::sync::Arc;
@@ -220,12 +219,9 @@ fn opaque_rust_effects_run_only_during_call() {
         destructure_owner::BuildArgs {},
     ));
     assert_build_error(opaque_requirement::ir(7));
-    assert_build_error(opaque_requirement::build::<Lancy>(
+    splice_testkit::each_backend!(B => assert_build_error(opaque_requirement::build::<B>(
         opaque_requirement::BuildArgs { value: 7 },
-    ));
-    assert_build_error(opaque_requirement::build::<Llvm>(
-        opaque_requirement::BuildArgs { value: 7 },
-    ));
+    )));
     assert_eq!(BUILD_EFFECTS.load(Ordering::Relaxed), 0);
 
     fn check<B: Codegen<Output: Executable>>() {
@@ -557,8 +553,7 @@ fn a_rust_result_can_borrow_the_callers_buffer_after_callargs_is_consumed() {
             }
         }};
     }
-    check!(Lancy);
-    check!(Llvm);
+    splice_testkit::each_backend!(B => check!(B));
 }
 
 struct Capture {
@@ -612,8 +607,7 @@ fn an_owned_rust_capture_lives_until_the_last_code_or_ir_owner_is_dropped() {
             assert_eq!(drops.load(Ordering::Relaxed), 2);
         }};
     }
-    check!(Lancy);
-    check!(Llvm);
+    splice_testkit::each_backend!(B => check!(B));
 }
 
 #[derive(splice::KernelType)]
@@ -686,8 +680,7 @@ fn a_runtime_collection_uses_rust_allocation_and_arithmetic() {
             }
         }};
     }
-    check!(Lancy);
-    check!(Llvm);
+    splice_testkit::each_backend!(B => check!(B));
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -715,8 +708,7 @@ fn an_owned_copy_capture_can_be_returned_on_every_call() {
             }
         }};
     }
-    check!(Lancy);
-    check!(Llvm);
+    splice_testkit::each_backend!(B => check!(B));
 }
 
 #[kernel(rust)]
@@ -743,8 +735,7 @@ fn a_borrowing_opaque_result_outlives_the_kernel() {
             assert!(portable.eq(&bytes));
         }};
     }
-    check!(Lancy);
-    check!(Llvm);
+    splice_testkit::each_backend!(B => check!(B));
 }
 
 #[kernel]
@@ -854,8 +845,7 @@ fn overload_resolution_does_not_make_custom_add_pure() {
         }};
     }
 
-    check!(Lancy);
-    check!(Llvm);
+    splice_testkit::each_backend!(B => check!(B));
 }
 
 struct Counter(Cell<i32>);
@@ -901,8 +891,7 @@ fn a_method_with_an_interior_write_cannot_use_a_short_build_borrow() {
         }};
     }
 
-    check!(Lancy);
-    check!(Llvm);
+    splice_testkit::each_backend!(B => check!(B));
 }
 
 #[kernel]
@@ -1015,8 +1004,7 @@ fn captured_function_pointers_keep_their_identity_and_handle_unwinds() {
         }};
     }
 
-    check!(Lancy);
-    check!(Llvm);
+    splice_testkit::each_backend!(B => check!(B));
 }
 
 #[derive(splice::KernelType)]

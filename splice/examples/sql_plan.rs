@@ -4,6 +4,7 @@ use relational::{Catalog, Plan, pricing_plan, query};
 use splice::Executable;
 use splice_cranelift::Cranelift;
 use splice_lancy::Lancy;
+#[cfg(feature = "llvm")]
 use splice_llvm::Llvm;
 use splice_text::Text;
 
@@ -28,6 +29,7 @@ fn main() -> Result<(), String> {
             })?
             .into_inner(),
         ),
+        #[cfg(feature = "llvm")]
         Some("llvm") => run(
             &plan,
             query::build::<Llvm>(query::BuildArgs {

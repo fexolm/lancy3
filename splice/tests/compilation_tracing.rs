@@ -110,7 +110,10 @@ fn staged_and_portable_compilation_report_their_nested_stages() {
             "optimize_llvm_ir{auto_vectorize=false}",
             "emit_llvm_object",
             "link_llvm_object",
-        ] {
+        ]
+        .into_iter()
+        .filter(|_| cfg!(feature = "llvm"))
+        {
             expected.push(format!("{root} / {stage}"));
         }
     }

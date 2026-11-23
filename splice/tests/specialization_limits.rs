@@ -1,6 +1,5 @@
 use splice::{BuildOptions, Codegen, Executable, kernel};
 use splice_lancy::Lancy;
-use splice_llvm::Llvm;
 use std::{
     cell::Cell,
     sync::atomic::{AtomicUsize, Ordering},
@@ -149,10 +148,12 @@ fn opaque_calls_are_not_executed_in_host_loops() {
             .is_err()
     );
     assert_eq!(TICKS.load(Ordering::Relaxed), 0);
-    let empty =
-        opaque_in_host_loop::build::<Llvm>(opaque_in_host_loop::BuildArgs { iterations: 0 })
-            .unwrap();
-    assert_eq!(empty.call(opaque_in_host_loop::CallArgs {}).unwrap(), 0);
+    splice_testkit::each_backend!(B => {
+        let empty =
+            opaque_in_host_loop::build::<B>(opaque_in_host_loop::BuildArgs { iterations: 0 })
+                .unwrap();
+        assert_eq!(empty.call(opaque_in_host_loop::CallArgs {}).unwrap(), 0);
+    });
     assert_eq!(opaque_in_host_loop(1), 1);
     assert_eq!(TICKS.load(Ordering::Relaxed), 1);
 }
@@ -201,8 +202,9 @@ fn opaque_iterator(#[comptime] plan: &CountingPlan, mut value: i32) -> i32 {
 #[test]
 fn specialization_rejects_an_opaque_iterator_before_constructing_or_advancing_it() {
     let plan = CountingPlan::default();
-    assert!(opaque_iterator::build::<Lancy>(opaque_iterator::BuildArgs { plan: &plan }).is_err());
-    assert!(opaque_iterator::build::<Llvm>(opaque_iterator::BuildArgs { plan: &plan }).is_err());
+    splice_testkit::each_backend!(B => assert!(
+        opaque_iterator::build::<B>(opaque_iterator::BuildArgs { plan: &plan }).is_err()
+    ));
     assert!(opaque_iterator::ir(&plan).is_err());
     assert!(opaque_iterator::print(&plan).is_err());
     assert_eq!((plan.starts.get(), plan.advances.get()), (0, 0));

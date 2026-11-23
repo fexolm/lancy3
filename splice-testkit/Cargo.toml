@@ -7,8 +7,9 @@ license = "MIT OR Apache-2.0"
 publish = false
 description = "Backend matrix and differential checks for Splice tests"
 
+[features]
+default = ["llvm"]
+llvm = ["splice/llvm"]
+
 [dependencies]
-splice-core = { path = "../splice-core" }
-splice-cranelift = { path = "../splice-cranelift" }
-splice-lancy = { path = "../splice-lancy" }
-splice-llvm = { path = "../splice-llvm" }
+splice = { package = "splice-kernel", path = "../splice", default-features = false, features = ["lancy", "cranelift"] }

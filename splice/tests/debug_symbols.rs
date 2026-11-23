@@ -74,10 +74,7 @@ fn exercise<B: Codegen<Output: Executable>>() {
 
 #[test]
 fn debug_and_release_follow_the_same_execution_contract() {
-    exercise::<splice_lancy::Lancy>();
-    exercise::<splice_cranelift::Cranelift>();
-    exercise::<splice_llvm::Llvm>();
-    exercise::<splice_llvm::LlvmManualSimd>();
+    splice_testkit::each_backend!(B => exercise::<B>());
 }
 
 #[test]
@@ -210,9 +207,7 @@ fn exercise_partial<B: Codegen<Output: Executable>>() {
 
 #[test]
 fn source_points_may_name_partially_assigned_variables() {
-    exercise_partial::<splice_lancy::Lancy>();
-    exercise_partial::<splice_cranelift::Cranelift>();
-    exercise_partial::<splice_llvm::Llvm>();
+    splice_testkit::each_backend!(B => exercise_partial::<B>());
 }
 
 #[kernel]
@@ -236,9 +231,11 @@ fn gdb_shows_runtime_bools_as_rust_bools() {
         }
         run::<splice_lancy::Lancy>();
         run::<splice_cranelift::Cranelift>();
+        #[cfg(feature = "llvm")]
         run::<splice_llvm::Llvm>();
         return;
     }
+    let backends = if cfg!(feature = "llvm") { 3 } else { 2 };
     let source = include_str!("debug_symbols.rs");
     let line = 1 + source
         .lines()
@@ -252,7 +249,7 @@ fn gdb_shows_runtime_bools_as_rust_bools() {
             "-ex",
             "run",
         ])
-        .args(["-ex", "print positive", "-ex", "continue"].repeat(3))
+        .args(["-ex", "print positive", "-ex", "continue"].repeat(backends))
         .arg("--args")
         .arg(std::env::current_exe().unwrap())
         .args([
@@ -268,5 +265,5 @@ fn gdb_shows_runtime_bools_as_rust_bools() {
         .lines()
         .filter_map(|l| l.strip_prefix('$')?.split_once(" = ").map(|(_, v)| v))
         .collect();
-    assert_eq!(values, ["true"; 3], "{stdout}");
+    assert_eq!(values, vec!["true"; backends], "{stdout}");
 }

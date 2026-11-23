@@ -5,6 +5,7 @@ use splice::hir::{BufferKind, Function, Instr, SimdOp};
 use splice::simd::Lane;
 use splice_cranelift::Cranelift;
 use splice_lancy::Lancy;
+#[cfg(feature = "llvm")]
 use splice_llvm::Llvm;
 
 type Row = (i32, i32);
@@ -177,12 +178,14 @@ fn check_workspace_boundary(plan: &Plan, tables: &[&[Row]], kernels: &[&dyn Exec
 fn with_kernels(plan: &Plan, test: impl FnOnce(&[&dyn Executable])) {
     let f = query::ir(&plan.prepare()).unwrap();
     let lancy = Lancy::compile(&f).unwrap().into_inner();
+    #[cfg(feature = "llvm")]
     let llvm = Llvm::compile(&f).unwrap().into_inner();
     let direct_lancy = query::build::<Lancy>(query::BuildArgs {
         program: &plan.prepare(),
     })
     .unwrap()
     .into_inner();
+    #[cfg(feature = "llvm")]
     let direct_llvm = query::build::<Llvm>(query::BuildArgs {
         program: &plan.prepare(),
     })
@@ -196,9 +199,11 @@ fn with_kernels(plan: &Plan, test: impl FnOnce(&[&dyn Executable])) {
     .into_inner();
     test(&[
         &lancy,
+        #[cfg(feature = "llvm")]
         &llvm,
         &cranelift,
         &direct_lancy,
+        #[cfg(feature = "llvm")]
         &direct_llvm,
         &direct_cranelift,
     ]);
@@ -603,9 +608,18 @@ fn self_join_after_rekey_handles_collisions_and_duplicate_rows() {
     );
     let f = query::ir(&plan.prepare()).unwrap();
     let lancy = Lancy::compile(&f).unwrap().into_inner();
+    #[cfg(feature = "llvm")]
     let llvm = Llvm::compile(&f).unwrap().into_inner();
     let duplicate = [(3, 3); 13];
-    compare(&plan, &[&duplicate], &[&lancy, &llvm]);
+    compare(
+        &plan,
+        &[&duplicate],
+        &[
+            &lancy,
+            #[cfg(feature = "llvm")]
+            &llvm,
+        ],
+    );
     let mixed = [
         (1, 9),
         (9, 1),
@@ -615,7 +629,15 @@ fn self_join_after_rekey_handles_collisions_and_duplicate_rows() {
         (i32::MIN, i32::MIN),
         (1, 9),
     ];
-    compare(&plan, &[&mixed], &[&lancy, &llvm]);
+    compare(
+        &plan,
+        &[&mixed],
+        &[
+            &lancy,
+            #[cfg(feature = "llvm")]
+            &llvm,
+        ],
+    );
 }
 
 #[test]
@@ -660,6 +682,7 @@ fn different_plan_shapes_match_a_nested_loop_oracle() {
         .unwrap()
         .into_inner();
         let from_ir = Lancy::compile(&f).unwrap().into_inner();
+        #[cfg(feature = "llvm")]
         let llvm = Llvm::compile(&f).unwrap().into_inner();
         compare(
             &plan,
@@ -668,7 +691,12 @@ fn different_plan_shapes_match_a_nested_loop_oracle() {
                 &[(7, 10), (-1, 9)],
                 &[(-1, 1), (0, -1), (7, 3)],
             ],
-            &[&direct, &from_ir, &llvm],
+            &[
+                &direct,
+                &from_ir,
+                #[cfg(feature = "llvm")]
+                &llvm,
+            ],
         );
     }
 }
@@ -698,6 +726,7 @@ fn balanced_tree_with_32_scans_runs_through_one_entry_point() {
     check(5, &Lancy::compile(&ir(5)).unwrap().into_inner());
     // LLVM's time grows faster than the IR (6.4k/13.5k/27.6k instructions
     // take 0.7/1.8/5.7 s at depths 3/4/5), so it stops one level earlier.
+    #[cfg(feature = "llvm")]
     check(4, &Llvm::compile(&ir(4)).unwrap().into_inner());
 }
 

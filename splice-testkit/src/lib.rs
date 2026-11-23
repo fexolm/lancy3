@@ -1,8 +1,10 @@
 //! One place that lists the Splice backends, so every test covers all of
 //! them and a new backend is added once.
-pub use splice_cranelift::Cranelift;
-pub use splice_lancy::Lancy;
-pub use splice_llvm::{Llvm, LlvmManualSimd};
+//!
+//! Lancy and Cranelift are always covered. LLVM needs a system libLLVM, so it
+//! is covered when the crate that expands [`each_backend!`] enables its own
+//! `llvm` feature, which must enable `splice-kernel/llvm`; `splice-kernel`'s
+//! feature is exactly that, and this crate's default one forwards to it.
 
 /// Run `body` once per backend with `$b` naming the backend type:
 /// `each_backend!(B => check::<B>(&ir))`.
@@ -10,33 +12,35 @@ pub use splice_llvm::{Llvm, LlvmManualSimd};
 macro_rules! each_backend {
     ($b:ident => $body:expr) => {{
         {
-            type $b = $crate::Lancy;
+            type $b = ::splice::Lancy;
             $body
         };
         {
-            type $b = $crate::Cranelift;
+            type $b = ::splice::Cranelift;
             $body
         };
+        #[cfg(feature = "llvm")]
         {
-            type $b = $crate::Llvm;
+            type $b = ::splice::Llvm;
             $body
         };
+        #[cfg(feature = "llvm")]
         {
-            type $b = $crate::LlvmManualSimd;
+            type $b = ::splice::LlvmManualSimd;
             $body
         };
     }};
 }
 
-use splice_core::frontend::{self, KernelBuilder};
-use splice_core::{BufferArg, BufferKind, BuildOptions, Codegen, Executable};
+use splice::frontend::{self, KernelBuilder};
+use splice::{BufferArg, BufferKind, BuildOptions, Codegen, Executable};
 use std::rc::Rc;
 
 /// A kernel body that can be staged repeatedly.
 pub type Stage = Rc<dyn Fn(&mut dyn KernelBuilder) -> Result<(), String>>;
 
 /// Calls one compiled kernel.
-pub type Invoke<'a> = &'a dyn Fn(&[i32], &mut [BufferArg<'_>]) -> splice_core::Result<i32>;
+pub type Invoke<'a> = &'a dyn Fn(&[i32], &mut [BufferArg<'_>]) -> splice::Result<i32>;
 
 /// Compile `stage` with every backend, staged (`build`) and from portable IR
 /// (`compile`), in Debug and Release. `observe` runs each kernel and reports

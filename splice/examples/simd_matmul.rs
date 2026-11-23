@@ -4,6 +4,7 @@ use matrix::{matmul, reference};
 use splice::{BufferArg, Executable};
 use splice_cranelift::Cranelift;
 use splice_lancy::Lancy;
+#[cfg(feature = "llvm")]
 use splice_llvm::Llvm;
 
 fn main() -> splice::Result<()> {
@@ -14,6 +15,7 @@ fn main() -> splice::Result<()> {
         Some("cranelift") => {
             Box::new(matmul::build::<Cranelift>(matmul::BuildArgs {})?.into_inner())
         }
+        #[cfg(feature = "llvm")]
         Some("llvm") => Box::new(matmul::build::<Llvm>(matmul::BuildArgs {})?.into_inner()),
         Some(other) => {
             return Err(format!(
@@ -73,6 +75,7 @@ mod tests {
                 "Cranelift/ir",
                 Box::new(Cranelift::compile(&ir).unwrap().into_inner()),
             ),
+            #[cfg(feature = "llvm")]
             (
                 "LLVM/direct",
                 Box::new(
@@ -81,6 +84,7 @@ mod tests {
                         .into_inner(),
                 ),
             ),
+            #[cfg(feature = "llvm")]
             (
                 "LLVM/ir",
                 Box::new(Llvm::compile(&ir).unwrap().into_inner()),

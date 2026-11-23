@@ -4,8 +4,6 @@ use splice::{
     BufferArg, BufferKind, BuildOptions, Codegen, ContextArguments, Executable, StaticRustCall,
     StaticRustSymbol,
 };
-use splice_lancy::Lancy;
-use splice_llvm::Llvm;
 use splice_text::Text;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -123,9 +121,12 @@ fn static_packets_keep_nested_slice_borrows_and_effect_order() {
         Instr::RustContextCall { target: RustContextTarget::Static(symbol), slices, .. }
         if symbol.name() == "modify" && slices == &[SHARED_INPUT, MUTABLE_OUTPUT]
     )));
-    let text = splice_llvm::to_llvm_ir(&ir).unwrap();
-    assert!(!text.contains("nocapture") && !text.contains("captures(none)"));
-    assert!(text.contains("readonly") && text.contains("noalias"));
+    #[cfg(feature = "llvm")]
+    {
+        let text = splice_llvm::to_llvm_ir(&ir).unwrap();
+        assert!(!text.contains("nocapture") && !text.contains("captures(none)"));
+        assert!(text.contains("readonly") && text.contains("noalias"));
+    }
     let text = Text::compile(&ir).unwrap();
     assert!(
         text.lines().any(|line| line.contains("rust modify(")
@@ -211,12 +212,9 @@ fn invalid_static_packet_operands_are_rejected_before_native_codegen() {
         assert!(
             materialize_with_options(1, &kinds, Box::new(body), BuildOptions::Release).is_err()
         );
-        assert!(
-            Lancy::build_with_options(1, &kinds, Box::new(body), BuildOptions::Release).is_err()
-        );
-        assert!(
-            Llvm::build_with_options(1, &kinds, Box::new(body), BuildOptions::Release).is_err()
-        );
+        splice_testkit::each_backend!(B => assert!(
+            B::build_with_options(1, &kinds, Box::new(body), BuildOptions::Release).is_err()
+        ));
     }
 }
 

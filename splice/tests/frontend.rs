@@ -175,24 +175,25 @@ fn slice_parameters_expose_their_alias_contract() {
     assert!(!direct[2].may_alias(direct[1]));
     assert!(!direct[2].may_alias(direct[2]));
     let input = [17, 42];
-    for kernel in [
-        overlapping_reads::build::<splice_llvm::LlvmManualSimd>(overlapping_reads::BuildArgs {})
-            .unwrap(),
-        splice_llvm::LlvmManualSimd::compile(&portable).unwrap(),
-    ] {
-        let mut output = [0];
-        assert_eq!(
-            kernel
-                .call(overlapping_reads::CallArgs {
-                    left: &input,
-                    right: &input[..1],
-                    out: &mut output,
-                })
-                .unwrap(),
-            1
-        );
-        assert_eq!(output, [34]);
-    }
+    splice_testkit::each_backend!(B => {
+        for kernel in [
+            overlapping_reads::build::<B>(overlapping_reads::BuildArgs {}).unwrap(),
+            B::compile(&portable).unwrap(),
+        ] {
+            let mut output = [0];
+            assert_eq!(
+                kernel
+                    .call(overlapping_reads::CallArgs {
+                        left: &input,
+                        right: &input[..1],
+                        out: &mut output,
+                    })
+                    .unwrap(),
+                1
+            );
+            assert_eq!(output, [34]);
+        }
+    });
 }
 
 #[kernel]
@@ -249,8 +250,7 @@ fn repeated_slice_reads_preserve_writes_and_errors() {
         }
     }
 
-    check::<splice_lancy::Lancy>();
-    check::<splice_llvm::Llvm>();
+    splice_testkit::each_backend!(B => check::<B>());
 }
 
 #[test]
@@ -356,15 +356,14 @@ fn verification_rechecks_a_loop_after_a_delayed_predecessor() {
 
     assert!(build(false).unwrap_err().contains("uninitialized"));
     let function = build(true).unwrap();
-    let lancy = splice_lancy::Lancy::compile(&function).unwrap();
-    let llvm = splice_llvm::Llvm::compile(&function).unwrap();
-    for code in [&lancy as &dyn Executable, &llvm] {
+    splice_testkit::each_backend!(B => {
+        let code = B::compile(&function).unwrap();
         for (fast, initial) in [(1, 7), (0, 11)] {
             for count in [0, 2] {
                 assert_eq!(code.call(&[fast, count], &mut []).unwrap(), initial + count);
             }
         }
-    }
+    });
 }
 
 #[test]
@@ -580,13 +579,12 @@ fn unrolled_host_plans_preserve_runtime_exits_and_prune_after_known_stops() {
         &[Finish, Unreachable],
     ] {
         let portable = walk::ir(plan).unwrap();
-        let lancy = walk::build::<splice_lancy::Lancy>(walk::BuildArgs { steps: plan }).unwrap();
-        let llvm = walk::build::<splice_llvm::Llvm>(walk::BuildArgs { steps: plan }).unwrap();
-        for x in [-23, 0, 7] {
-            let expected = walk(plan, x);
-            assert_eq!(lancy.call(walk::CallArgs { value: x }).unwrap(), expected);
-            assert_eq!(llvm.call(walk::CallArgs { value: x }).unwrap(), expected);
-        }
+        splice_testkit::each_backend!(B => {
+            let code = walk::build::<B>(walk::BuildArgs { steps: plan }).unwrap();
+            for x in [-23, 0, 7] {
+                assert_eq!(code.call(walk::CallArgs { value: x }).unwrap(), walk(plan, x));
+            }
+        });
         // Iterator progress and enum dispatch finish at specialization time.
         let mut labels = std::collections::HashSet::new();
         for op in portable.instructions() {
@@ -620,16 +618,13 @@ fn by_value_array_patterns_bind_comptime_operands() {
         1,
         "only the kernel return label is needed"
     );
-    let code = weighted::build::<splice_lancy::Lancy>(weighted::BuildArgs { terms }).unwrap();
-    assert_eq!(
-        code.call(weighted::CallArgs { x: 7 }).unwrap(),
-        weighted(terms, 7)
-    );
-    let code = weighted::build::<splice_llvm::Llvm>(weighted::BuildArgs { terms }).unwrap();
-    assert_eq!(
-        code.call(weighted::CallArgs { x: 7 }).unwrap(),
-        weighted(terms, 7)
-    );
+    splice_testkit::each_backend!(B => {
+        let code = weighted::build::<B>(weighted::BuildArgs { terms }).unwrap();
+        assert_eq!(
+            code.call(weighted::CallArgs { x: 7 }).unwrap(),
+            weighted(terms, 7)
+        );
+    });
 }
 
 #[test]
@@ -729,7 +724,5 @@ fn only_operations_that_can_fail_need_a_status_channel() {
         let code = slice_length::build::<B>(slice_length::BuildArgs {}).unwrap();
         assert_eq!(code.call(slice_length::CallArgs { xs: &short }), Ok(1));
     }
-    check::<splice_lancy::Lancy>();
-    check::<splice_cranelift::Cranelift>();
-    check::<splice_llvm::Llvm>();
+    splice_testkit::each_backend!(B => check::<B>());
 }

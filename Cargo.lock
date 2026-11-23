@@ -1022,10 +1022,7 @@ dependencies = [
 name = "splice-testkit"
 version = "0.0.0"
 dependencies = [
- "splice-core",
- "splice-cranelift",
- "splice-lancy",
- "splice-llvm",
+ "splice-kernel",
 ]
 
 [[package]]

@@ -29,15 +29,15 @@ tracing-subscriber = { version = "0.3", default-features = false, features = ["r
 criterion = { version = "0.8", features = ["html_reports"] }
 splice-cranelift = { path = "../splice-cranelift" }
 splice-lancy = { path = "../splice-lancy" }
-splice-llvm = { path = "../splice-llvm" }
 splice-test-traits = { path = "../tests/fixtures/trait-provider" }
 splice-text = { path = "../splice-text" }
-splice-testkit = { path = "../splice-testkit" }
+splice-testkit = { path = "../splice-testkit", default-features = false }
 trybuild = "1"
 
 [[bench]]
 name = "backends"
 harness = false
+required-features = ["llvm"]
 
 [[example]]
 name = "sql_plan"

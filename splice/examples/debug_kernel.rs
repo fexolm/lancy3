@@ -41,7 +41,9 @@ fn main() -> splice::Result<()> {
         .map_or(Ok(1), |value| value.parse::<usize>())
         .map_err(|error| error.to_string())?;
     match backend.as_deref() {
+        #[cfg(feature = "llvm")]
         Some("llvm") => run::<splice_llvm::Llvm>(repetitions),
+        #[cfg(feature = "llvm")]
         Some("llvm_manual_simd") => run::<splice_llvm::LlvmManualSimd>(repetitions),
         Some("cranelift") => run::<splice_cranelift::Cranelift>(repetitions),
         Some("lancy") | None => run::<splice_lancy::Lancy>(repetitions),

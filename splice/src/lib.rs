@@ -52,6 +52,6 @@ pub use splice_cranelift::Cranelift;
 #[cfg(feature = "lancy")]
 pub use splice_lancy::Lancy;
 #[cfg(feature = "llvm")]
-pub use splice_llvm::Llvm;
+pub use splice_llvm::{Llvm, LlvmManualSimd};
 #[cfg(feature = "text")]
 pub use splice_text::Text;

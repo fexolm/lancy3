@@ -424,8 +424,11 @@ fn opaque_context_operations_receive_all_scalar_words() {
         })
         .collect::<Vec<_>>();
     assert_eq!(shapes, [(4, 0), (3, 1)]);
-    let llvm = splice_llvm::to_llvm_ir(ir.as_inner()).unwrap();
-    assert_eq!(llvm.matches("rust_context_packet = alloca").count(), 1);
+    #[cfg(feature = "llvm")]
+    {
+        let llvm = splice_llvm::to_llvm_ir(ir.as_inner()).unwrap();
+        assert_eq!(llvm.matches("rust_context_packet = alloca").count(), 1);
+    }
 
     fn check<B: Codegen<Output: Executable>>(ir: &TypedIr<wide_context_pipeline::Signature>) {
         for code in [

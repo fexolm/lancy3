@@ -1,7 +1,4 @@
 use splice::{Codegen, ComptimeKey, Executable, kernel};
-use splice_cranelift::Cranelift;
-use splice_lancy::Lancy;
-use splice_llvm::Llvm;
 use splice_text::Text;
 
 #[derive(ComptimeKey)]
@@ -155,12 +152,10 @@ fn retry(root: &mut dyn splice::frontend::KernelBuilder) -> splice::Result<()> {
 }
 #[test]
 fn a_failed_body_can_be_retried_and_its_completed_children_reused() {
-    let lancy = Lancy::build(0, &[], Box::new(retry)).unwrap();
-    let llvm = Llvm::build(0, &[], Box::new(retry)).unwrap();
-    let cranelift = Cranelift::build(0, &[], Box::new(retry)).unwrap();
-    for code in [&lancy as &dyn Executable, &llvm, &cranelift] {
+    splice_testkit::each_backend!(B => {
+        let code = B::build(0, &[], Box::new(retry)).unwrap();
         assert_eq!(code.call(&[], &mut []), Ok(17));
-    }
+    });
 }
 
 #[test]

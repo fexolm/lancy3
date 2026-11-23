@@ -5,10 +5,12 @@ use probe::{fixture, lookup, reference};
 use splice::Executable;
 use splice_cranelift::Cranelift;
 use splice_lancy::Lancy;
+#[cfg(feature = "llvm")]
 use splice_llvm::Llvm;
 
 fn main() -> Result<(), String> {
     let kernel: Box<dyn Executable> = match std::env::args().nth(1).as_deref() {
+        #[cfg(feature = "llvm")]
         Some("llvm") => Box::new(lookup::build::<Llvm>(lookup::BuildArgs {})?.into_inner()),
         Some("cranelift") => {
             Box::new(lookup::build::<Cranelift>(lookup::BuildArgs {})?.into_inner())
@@ -80,7 +82,7 @@ mod tests {
     #[test]
     fn independent_probes_stop_on_matches_empty_slots_and_full_laps() {
         let ir = lookup::ir().unwrap();
-        let kernels: [Box<dyn Executable>; 6] = [
+        let kernels: Vec<Box<dyn Executable>> = vec![
             Box::new(
                 lookup::build::<Lancy>(lookup::BuildArgs {})
                     .unwrap()
@@ -93,11 +95,13 @@ mod tests {
                     .into_inner(),
             ),
             Box::new(Cranelift::compile(&ir).unwrap().into_inner()),
+            #[cfg(feature = "llvm")]
             Box::new(
                 lookup::build::<Llvm>(lookup::BuildArgs {})
                     .unwrap()
                     .into_inner(),
             ),
+            #[cfg(feature = "llvm")]
             Box::new(Llvm::compile(&ir).unwrap().into_inner()),
         ];
         let w = Lane::<i32>::lanes();

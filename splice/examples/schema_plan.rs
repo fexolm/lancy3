@@ -366,6 +366,7 @@ fn run(
 fn mixed_schema_specializes_the_same_operators_for_different_elements() -> splice::Result<()> {
     use splice::Codegen;
     use splice_cranelift::Cranelift;
+    #[cfg(feature = "llvm")]
     use splice_llvm::Llvm;
 
     let schema = Schema::from_batch(&demo_columns());
@@ -400,6 +401,7 @@ fn mixed_schema_specializes_the_same_operators_for_different_elements() -> splic
         expected
     );
     assert_eq!(run(Lancy::compile(&ir)?, demo_columns())?, expected);
+    #[cfg(feature = "llvm")]
     assert_eq!(
         run(
             query::build::<Llvm>(query::BuildArgs {
@@ -410,6 +412,7 @@ fn mixed_schema_specializes_the_same_operators_for_different_elements() -> splic
         )?,
         expected
     );
+    #[cfg(feature = "llvm")]
     assert_eq!(run(Llvm::compile(&ir)?, demo_columns())?, expected);
     assert_eq!(
         run(
