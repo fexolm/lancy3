@@ -80,3 +80,10 @@
 - Тесты: 15 ядер с намеренным Rust-путём помечены `#[kernel(rust)]` (rust_regions + language); `trybuild` ui-тесты `splice/tests/ui/` (метка цикла, `i64`, MAC-02 составное присваивание `usize`, методы, требование трейта `Self::Output`, опции атрибута, заимствованный comptime). `compound_index_assignment_matches_rust_usize` проходил только через откат — заменён ui-кейсом; **Ф4 обязана вернуть его рантайм-версию** (см. git 16cb379) вместе с настоящим `Index`.
 - CI arm64: `specialization_limits` падал под QEMU на 10-секундном watchdog (wall-clock). Watchdog удалён: завершение доказывают `is_err`-утверждения бюджета, зависание ловит `timeout-minutes` джобы (Ф1.6).
 - Проверки: fmt, clippy `-D warnings`, `cargo test --workspace --release` — зелёные.
+
+### Ф1.2 — переносимые тесты lancy (коммит 657e1a5)
+- Закрыто: LNC-01, A64-04.
+- `traps/pointers/control_flow/integer_runtests/generated/numeric_coverage(+conversions, rounding)` перенесены в `lancy/src/jit/tests/` без `cfg(target_arch)` (не в `lancy/tests/`: нужны `pub(crate)` `hir::eval`, `interpret`, `interpret_raw`). x64-специфичное осталось в `lir/x64/tests` (`isel.rs::all_scalar_casts_emit_call_free_machine_code`, `packed_fp`).
+- `numeric_coverage`: кроме «мягких» входов — граничные (NaN, sNaN, ±0, ±inf, субнормальные, экстремумы, ничьи округления, MIN/MAX/−1, 0-делители, сдвиги ≥ ширины), каждое значение в паре с каждым; сравнивается `Result` вместе с видом ловушки. Расхождений нет ни на x64, ни на NEON/SVE/SVE2.
+- ABI-проба callee-saved переносимая: `ScalarKernel::invoke_with` (production `invoke` — его частный случай) позволяет войти через вызывающего с канарейками: iced на x64, `asm!` для x19–x28/d8–d15 на AArch64; нормальный выход и ловушка, Always/Never. Проверено, что порча x21/d12 ловится. Новые тесты: 8 потоков на одном ядре + `drop` в другом потоке; `EmptyCode`.
+- Проверки: `cargo test -p lancy --release` при `SPLICE_SIMD=sse|avx2|auto`; под `qemu-aarch64 -cpu max`: neon, sve VL16, sve2 VL32/VL64 — зелёные; clippy x64 и aarch64; `cargo check --target x86_64-pc-windows-msvc --tests`.
