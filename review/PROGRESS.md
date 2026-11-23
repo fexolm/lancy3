@@ -28,3 +28,14 @@
 ### Ф0.2–0.3 — Cranelift BE-01, BE-02 (коммит e8b2967)
 - BE-01: причина подтверждена в сгенерированном `assembler.isle` Cranelift 0.132 — только `x64_cmpps_a`/`x64_cmppd_a` принимают `XmmMem128` вместо `XmmMemAligned128`. Без AVX сравниваемые векторные загрузки проходят через пару `bitcast` (регистровый no-op, который x64-лоуеринг не вливает): `keep_compared_loads_in_registers` в `splice-cranelift/src/lower/simd.rs`. Тест `splice-cranelift/tests/sse_unaligned.rs` перезапускает себя с `SPLICE_SIMD=sse` (профиль глобален до Ф3 — после Ф3 перевести на профиль-значение в одном процессе). Апстрим-репро: CLIF `fcmp eq` с `load.f32x4` по адресу +4 без `has_avx` — отправить при наличии доступа (из контейнера нет).
 - BE-02: `fcvt_to_sint_sat.i64x2` на x64 — поэлементно. Тест `splice/tests/conversions.rs`: все допустимые `Cast/Widen/Narrow` × Lancy/Cranelift/Llvm/LlvmManualSimd × build/compile против Rust `as` (NaN, ±inf, −0, границы насыщения). Прогнан при `SPLICE_SIMD=auto|avx2|sse`. Это зачаток харнесса Ф1.5.
+
+### Ф0.4 — HIR-01, HIR-13: scratch и отладочная область при инлайнинге (коммит 5af261a)
+- По Р10(а): `Op::CallScratch { offset, bytes }` (смещение кратно 8), у Rust packet call — собственное смещение пакета в scratch (пакет пишется в ту же память, иначе инлайненный вызов затирал бы scratch вызывающей). Верификатор: `IrError::InvalidScratch`.
+- Инлайнер сдвигает scratch/packet/`DebugStore` вызываемой функции выше собственных областей вызывающей (`Function::scratch_bytes/debug_bytes`); `check_expansion` ограничивает вложенные суммы `u32` (`FrameOverflow`). LIR x64/AArch64 адресуют `scratch_base + offset`.
+- Интерпретатор получил scratch на кадр (только raw-режим), filetest-прогон без буфера идёт через `call_raw`. Синтаксис `.lancy`: `call_scratch OFF BYTES`, `debug_store OFF v`; листинг пакета — `... scratch N`.
+- Тест `lancy/filetests/passes/inline-call-scratch.lancy` (Always/Never → 719, пакетный вызов, debug-область); падает при отключённом сдвиге. Прогнан на x64 и под qemu AArch64 (neon). `memory.rs` (must-alias по смещению) не трогал — корректность не требует, это оптимизация для Ф5.
+
+### Ф0.5 — MAC-02 быстрый фикс
+- `assignment()` применяет то же правило, что `binary()`: составное присваивание runtime-`usize` отвергается. Из-за MAC-01 ядро пока молча откатывается в Rust-импорт, поэтому результат совпадает с Rust; trybuild-сообщение появится, когда Ф7 (Р4) сделает откат ошибкой.
+- **Ф4 обязана заменить** эту заглушку настоящим 64-битным `Index` (Р6) с беззнаковыми checked-операциями и убрать запрет из `assignment()`/`binary()`; тест `language.rs::compound_index_assignment_matches_rust_usize` при этом должен остаться зелёным уже на JIT-пути.
+- Тест сравнивает Lancy/Cranelift/LLVM с Rust-функцией (паника ⇒ ошибка JIT) в debug и release; до фикса падал (`Ok(0)` против `Ok(1)` в release).
