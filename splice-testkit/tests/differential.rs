@@ -7,6 +7,11 @@ use splice::{BufferArg, BufferKind, CallError, Trap};
 use splice_testkit::{Stage, agree};
 use std::rc::Rc;
 
+/// Vector width of the target `agree` builds for.
+fn bytes() -> usize {
+    splice::Target::host().unwrap().vector_bytes()
+}
+
 const EDGE: [i32; 12] = [0, 1, -1, 2, 7, -7, 31, 32, 33, -32, i32::MIN, i32::MAX];
 
 fn simd(b: &mut dyn KernelBuilder, element: Element, op: SimdOp, args: &[Reg]) -> Reg {
@@ -185,7 +190,7 @@ fn kinds(from: Element, to: Element) -> [BufferKind; 2] {
 
 #[test]
 fn float_to_integer_casts_saturate_like_rust() {
-    let n = Element::F32.lanes();
+    let n = Element::F32.lanes(bytes());
     let src: Vec<f32> = [
         f32::NAN,
         f32::INFINITY,
@@ -244,7 +249,7 @@ fn float_to_integer_casts_saturate_like_rust() {
     let expected: Vec<u32> = src.iter().map(|&x| x as u32).collect();
     assert_eq!(seen, [format!("Ok(0) {expected:?}")]);
 
-    let m = Element::F64.lanes();
+    let m = Element::F64.lanes(bytes());
     let src: Vec<f64> = [
         f64::NAN,
         1e19,
@@ -280,7 +285,7 @@ fn float_to_integer_casts_saturate_like_rust() {
 
 #[test]
 fn integer_to_float_casts_round_like_rust() {
-    let m = Element::I64.lanes();
+    let m = Element::I64.lanes(bytes());
     let src: Vec<i64> = [
         i64::MAX,
         i64::MIN,
@@ -313,7 +318,7 @@ fn integer_to_float_casts_round_like_rust() {
     let expected: Vec<f64> = src.iter().map(|&x| x as f64).collect();
     assert_eq!(seen, [format!("Ok(0) {:?}", expected.map_bits())]);
 
-    let n = Element::U32.lanes();
+    let n = Element::U32.lanes(bytes());
     let src: Vec<u32> = [
         u32::MAX,
         0x8000_0001,
@@ -363,7 +368,7 @@ impl Bits for Vec<f64> {
 
 #[test]
 fn float_arithmetic_is_correctly_rounded_on_special_values() {
-    let n = Element::F32.lanes();
+    let n = Element::F32.lanes(bytes());
     let src: Vec<f32> = [0.1f32, -4.0, 1e30, -0.0, 3.0, 16777217.0, 1.0000001, 7.0]
         .into_iter()
         .cycle()
@@ -401,7 +406,7 @@ fn float_arithmetic_is_correctly_rounded_on_special_values() {
 
 #[test]
 fn float_comparisons_follow_ieee_unordered_rules() {
-    let n = Element::F32.lanes();
+    let n = Element::F32.lanes(bytes());
     let src: Vec<f32> = [f32::NAN, 1.0, f32::NAN, 2.0, 1.0, -0.0, 0.0, f32::INFINITY]
         .into_iter()
         .cycle()
@@ -451,7 +456,7 @@ fn float_comparisons_follow_ieee_unordered_rules() {
 
 #[test]
 fn integer_lane_operations_agree_on_boundary_values() {
-    let n = Element::I32.lanes();
+    let n = Element::I32.lanes(bytes());
     let src: Vec<i32> = (0..2 * n as i32)
         .map(|i| {
             [
@@ -554,7 +559,7 @@ fn first_n_masks_saturate_at_both_ends() {
         b.ret(r);
         Ok(())
     });
-    let n = Element::U16.lanes();
+    let n = Element::U16.lanes(bytes());
     let seen = agree(
         "first_n",
         1,
@@ -604,10 +609,10 @@ fn first_n_masks_saturate_at_both_ends() {
     .map(|k: i32| {
         // The count is unsigned; IR booleans are 0 or -1.
         let active = |lanes: usize| (k as u32 as usize).min(lanes);
-        let i64s = Element::I64.lanes();
+        let i64s = Element::I64.lanes(bytes());
         let any = -i32::from(active(i64s) > 0);
         let all = -i32::from(active(i64s) == i64s);
-        let count = active(Element::I32.lanes()) as i32;
+        let count = active(Element::I32.lanes(bytes())) as i32;
         let out: Vec<u16> = (0..n).map(|i| u16::from(i < active(n))).collect();
         format!("Ok({}) {out:?}", any + all + 10 * count)
     })
@@ -617,7 +622,7 @@ fn first_n_masks_saturate_at_both_ends() {
 
 #[test]
 fn compress_expand_and_compress_store_agree_at_buffer_edges() {
-    let n = Element::I32.lanes();
+    let n = Element::I32.lanes(bytes());
     for op in [SimdOp::Compress, SimdOp::Expand] {
         let stage: Stage = Rc::new(move |b| {
             let (zero, one) = (b.constant(0), b.constant(1));
@@ -698,7 +703,7 @@ fn u16_gather_and_scatter_check_indices_at_16_bit_boundaries() {
         b.ret(zero);
         Ok(())
     });
-    let n = Element::U16.lanes();
+    let n = Element::U16.lanes(bytes());
     let kinds = [
         BufferKind::new(Element::U16, false),
         BufferKind::new(Element::U16, false),
@@ -760,7 +765,7 @@ fn partial_vector_accesses_agree_at_negative_and_far_offsets() {
         b.ret(zero);
         Ok(())
     });
-    let n = Element::I64.lanes();
+    let n = Element::I64.lanes(bytes());
     let kinds = [
         BufferKind::new(Element::I64, true),
         BufferKind::new(Element::I64, false),
@@ -807,9 +812,9 @@ fn narrowing_and_widening_agree_on_extreme_lanes() {
         Ok(())
     });
     let (n, m, h) = (
-        Element::I32.lanes(),
-        Element::I64.lanes(),
-        Element::U16.lanes(),
+        Element::I32.lanes(bytes()),
+        Element::I64.lanes(bytes()),
+        Element::U16.lanes(bytes()),
     );
     let kinds = [
         BufferKind::new(Element::I64, false),

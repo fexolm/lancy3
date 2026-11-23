@@ -2,6 +2,11 @@ use splice_core::{Codegen, hir::FunctionBuilder, kernel};
 use splice_text::Text;
 use std::sync::Arc;
 
+/// This machine's `SPLICE_SIMD` target in the mode of this test build.
+fn options() -> splice_core::BuildOptions {
+    splice_core::BuildOptions::host(splice_core::Mode::for_profile(cfg!(debug_assertions))).unwrap()
+}
+
 #[kernel(crate = splice_core)]
 fn stop_early(#[comptime] bail: bool, x: i32) -> i32 {
     if bail {
@@ -209,10 +214,10 @@ fn unrolled_calls_reuse_equal_steps_and_keep_the_runtime_loop()
 
 #[test]
 fn shared_callable_has_one_definition_and_two_uses() -> splice_core::Result<()> {
-    let mut leaf = FunctionBuilder::new(1);
+    let mut leaf = FunctionBuilder::new(options(), 1);
     leaf.ret(leaf.arg(0));
     let leaf = Arc::new(leaf.finish()?);
-    let mut root = FunctionBuilder::new(1);
+    let mut root = FunctionBuilder::new(options(), 1);
     let a = root.call_shared(leaf.clone(), &[root.arg(0)]);
     let b = root.call_shared(leaf, &[a]);
     root.ret(b);

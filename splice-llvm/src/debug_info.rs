@@ -95,6 +95,7 @@ impl ObjectSymbols {
         jit: &Jit,
         source: Option<&Function>,
         kernel_source: Option<&splice_core::frontend::KernelSource>,
+        vector_bytes: usize,
         debug: bool,
     ) -> splice_core::Result<Option<splice_jit::Registration>> {
         let sources = source
@@ -144,6 +145,7 @@ impl ObjectSymbols {
                         address + offset,
                         location.register,
                         i64::from(location.displacement),
+                        vector_bytes,
                     );
                 }
             }

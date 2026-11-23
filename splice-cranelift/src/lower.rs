@@ -15,7 +15,7 @@ use std::sync::Arc;
 
 mod simd;
 
-pub(crate) use simd::keep_compared_loads_in_registers;
+pub(crate) use simd::{Machine, keep_compared_loads_in_registers};
 
 fn packet_stack(
     builder: &mut FunctionBuilder,
@@ -93,12 +93,13 @@ pub(super) fn emit(
     f: &Function,
     is_entry: bool,
     imports: &HashMap<*const Function, FuncRef>,
+    m: simd::Machine,
     debug_bytes: Option<u32>,
 ) {
     let params = parameters(&mut b, f, is_entry);
     let (scalars, pairs) = params.split_at(f.arity());
     let buffers = pairs.as_chunks::<2>().0;
-    let vars = simd::Registers::new(&mut b, f);
+    let vars = simd::Registers::new(&mut b, f, m);
     let var = |r: Reg| vars.get(r)[0];
     for (index, &value) in scalars.iter().enumerate() {
         b.def_var(var(Reg(index as u32)), value);
@@ -125,7 +126,7 @@ pub(super) fn emit(
                     continue;
                 };
                 use splice_core::debug::Value as DebugValue;
-                let mut slots = point.slots(f).peekable();
+                let mut slots = point.slots(f, m.vector_bytes).peekable();
                 if slots.peek().is_none() {
                     // Sequence points themselves occupy no bytes in Cranelift.
                     // Give consecutive empty statements distinct addresses.
@@ -186,7 +187,7 @@ pub(super) fn emit(
                 inst,
                 ref args,
             } => {
-                simd::emit(&mut b, inst, &vars, dst, args, buffers);
+                simd::emit(&mut b, m, inst, &vars, dst, args, buffers);
             }
             Instr::Bin(dst, op, left, right) => {
                 let lhs = b.use_var(var(left));

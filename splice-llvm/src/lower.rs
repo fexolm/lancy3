@@ -3,6 +3,7 @@ mod body;
 mod direct;
 pub(crate) use direct::populate_direct;
 
+use crate::target::Machine;
 use body::Body;
 use inkwell::AddressSpace;
 use inkwell::attributes::{Attribute, AttributeLoc};
@@ -20,14 +21,16 @@ pub(crate) fn populate<'ctx>(
     ctx: &'ctx Context,
     module: &Module<'ctx>,
     root: &Function,
+    machine: Machine,
 ) -> splice_core::Result<()> {
-    populate_mode(ctx, module, root, false)
+    populate_mode(ctx, module, root, machine, false)
 }
 
 pub(crate) fn populate_mode<'ctx>(
     ctx: &'ctx Context,
     module: &Module<'ctx>,
     root: &Function,
+    machine: Machine,
     debug: bool,
 ) -> splice_core::Result<()> {
     let (functions, ids) = root.reachable_functions();
@@ -67,9 +70,12 @@ pub(crate) fn populate_mode<'ctx>(
     let mut static_rust_slice_operands = false;
     for (id, f) in functions.into_iter().enumerate() {
         static_rust_slice_operands |= Body::emit(
-            ctx,
+            body::Unit {
+                ctx,
+                module,
+                machine,
+            },
             &builder,
-            module,
             f,
             declarations[id],
             &callees,

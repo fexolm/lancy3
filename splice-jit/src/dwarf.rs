@@ -87,13 +87,16 @@ fn emit_type(unit: &mut Unit, ty: Type) -> UnitEntryId {
                 dw::DW_ATE_float,
             ),
         },
-        Type::Vector(elem) => {
+        Type::Vector {
+            element: elem,
+            lanes,
+        } => {
             let elem_ty = element(unit, elem);
             let id = unit.add(unit.root(), dw::DW_TAG_array_type);
             unit.get_mut(id).set(dw::DW_AT_type, A::UnitRef(elem_ty));
             let count = unit.add(id, dw::DW_TAG_subrange_type);
             unit.get_mut(count)
-                .set(dw::DW_AT_count, A::Udata(elem.lanes() as u64));
+                .set(dw::DW_AT_count, A::Udata(lanes as u64));
             id
         }
         Type::Slice(elem) => {

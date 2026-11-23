@@ -14,16 +14,13 @@ pub struct FunctionBuilder {
 }
 
 impl FunctionBuilder {
-    pub fn new(arity: usize) -> Self {
-        Self::with_buffers(arity, Vec::new())
+    pub fn new(options: crate::BuildOptions, arity: usize) -> Self {
+        Self::with_buffers(options, arity, Vec::new())
     }
-    pub fn with_buffers(arity: usize, kinds: Vec<BufferKind>) -> Self {
-        Self::with_options(arity, kinds, crate::BuildOptions::default())
-    }
-    pub fn with_options(
+    pub fn with_buffers(
+        options: crate::BuildOptions,
         arity: usize,
         kinds: Vec<BufferKind>,
-        options: crate::BuildOptions,
     ) -> Self {
         Self {
             callees: HashMap::new(),
@@ -199,7 +196,7 @@ impl FunctionBuilder {
         if let Some(callee) = key.as_ref().and_then(|k| self.callees.get(k)).cloned() {
             return Ok(self.emit_call(callee, args, buffers));
         }
-        let mut child = Self::with_options(arity, kinds.to_vec(), self.function.options);
+        let mut child = Self::with_buffers(self.function.options, arity, kinds.to_vec());
         std::mem::swap(&mut self.callees, &mut child.callees);
         let staged = body(&mut child);
         std::mem::swap(&mut self.callees, &mut child.callees);
@@ -241,7 +238,7 @@ impl KernelBuilder for FunctionBuilder {
         FunctionBuilder::rust_call(self, import, args)
     }
     fn debug_enabled(&self) -> bool {
-        self.function.options == crate::BuildOptions::Debug
+        self.function.options.debug()
     }
     fn debug_point(
         &mut self,

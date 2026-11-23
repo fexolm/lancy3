@@ -8,8 +8,13 @@ use splice_core::{
     hir::{Binary, FunctionBuilder},
 };
 
+/// This machine's `SPLICE_SIMD` target in the mode of this test build.
+fn options() -> splice_core::BuildOptions {
+    splice_core::BuildOptions::host(splice_core::Mode::for_profile(cfg!(debug_assertions))).unwrap()
+}
+
 fn increment() -> Function {
-    let mut f = FunctionBuilder::new(1);
+    let mut f = FunctionBuilder::new(options(), 1);
     let one = f.constant(1);
     let result = f.binary(Binary::Add, f.arg(0), one);
     f.ret(result);
@@ -18,7 +23,7 @@ fn increment() -> Function {
 
 fn caller(child: Function, times: usize) -> Function {
     let child = Arc::new(child);
-    let mut f = FunctionBuilder::new(1);
+    let mut f = FunctionBuilder::new(options(), 1);
     let mut value = f.arg(0);
     for _ in 0..times {
         value = f.call_shared(child.clone(), &[value]);
@@ -29,7 +34,7 @@ fn caller(child: Function, times: usize) -> Function {
 
 fn emitted_graph(f: &Function, unique_bodies: usize) -> HashMap<FuncId, Vec<FuncId>> {
     let mut jit = JITModule::new(JITBuilder::new(default_libcall_names()).unwrap());
-    let kernel = KernelModule::lower(&mut jit, f, false).unwrap();
+    let kernel = KernelModule::lower(&mut jit, f, &options().target, false).unwrap();
     assert_eq!(kernel.bodies.len(), unique_bodies);
     let mut graph = HashMap::new();
     kernel
@@ -54,7 +59,7 @@ fn instructions_of_type(f: &ir::Function, opcode: Opcode, ty: Type) -> usize {
 #[test]
 fn branches_use_comparison_bits_and_preserve_comparison_masks() {
     for overwrite in [false, true] {
-        let mut f = FunctionBuilder::new(2);
+        let mut f = FunctionBuilder::new(options(), 2);
         let mask = f.binary(Binary::Lt, f.arg(0), f.arg(1));
         if overwrite {
             f.assign(mask, f.arg(0));
@@ -70,7 +75,7 @@ fn branches_use_comparison_bits_and_preserve_comparison_masks() {
         let f = f.finish().unwrap();
 
         let mut jit = JITModule::new(JITBuilder::new(default_libcall_names()).unwrap());
-        let module = KernelModule::lower(&mut jit, &f, false).unwrap();
+        let module = KernelModule::lower(&mut jit, &f, &options().target, false).unwrap();
         let body = &module.bodies[&module.entry];
         let branch = body
             .layout
@@ -103,7 +108,7 @@ fn branches_use_vector_reduction_bits_and_preserve_scalar_masks() {
         simd::Element,
     };
 
-    let mut f = FunctionBuilder::new(1);
+    let mut f = FunctionBuilder::new(options(), 1);
     let op = |op| Simd {
         element: Element::I32,
         op,
@@ -121,7 +126,7 @@ fn branches_use_vector_reduction_bits_and_preserve_scalar_masks() {
     let f = f.finish().unwrap();
 
     let mut jit = JITModule::new(JITBuilder::new(default_libcall_names()).unwrap());
-    let module = KernelModule::lower(&mut jit, &f, false).unwrap();
+    let module = KernelModule::lower(&mut jit, &f, &options().target, false).unwrap();
     let body = &module.bodies[&module.entry];
     let branch = body
         .layout
@@ -178,8 +183,11 @@ fn packed_chunks_cover_the_vector_and_a_short_store_keeps_its_prefix() {
     };
 
     let e = Element::U16;
-    let mut f =
-        FunctionBuilder::with_buffers(1, vec![BufferKind::new(e, false), BufferKind::new(e, true)]);
+    let mut f = FunctionBuilder::with_buffers(
+        options(),
+        1,
+        vec![BufferKind::new(e, false), BufferKind::new(e, true)],
+    );
     let offset = f.arg(0);
     let mut simd = |op, args: &[_]| f.simd(Simd { element: e, op }, args).unwrap();
     let x = simd(SimdOp::Load(Buffer(0)), &[offset]).unwrap();
@@ -190,18 +198,20 @@ fn packed_chunks_cover_the_vector_and_a_short_store_keeps_its_prefix() {
     let f = f.finish().unwrap();
 
     let mut jit = JITModule::new(JITBuilder::new(default_libcall_names()).unwrap());
-    let module = KernelModule::lower(&mut jit, &f, false).unwrap();
+    let module = KernelModule::lower(&mut jit, &f, &options().target, false).unwrap();
     let body = &module.bodies[&module.entry];
-    let chunks = e.lanes() / 8;
+    let chunks = e.lanes(options().target.vector_bytes()) / 8;
     assert_eq!(instructions_of_type(body, Opcode::Load, I16X8), chunks);
     assert_eq!(instructions_of_type(body, Opcode::Iadd, I16X8), chunks);
     assert_eq!(instructions_of_type(body, Opcode::Store, I16X8), chunks);
 
     let code = Cranelift::compile(&f).unwrap();
-    let source: Vec<_> = (0..=e.lanes()).map(|x| u16::MAX - x as u16).collect();
-    let mut dst = vec![200u16; e.lanes() + 2];
+    let source: Vec<_> = (0..=e.lanes(options().target.vector_bytes()))
+        .map(|x| u16::MAX - x as u16)
+        .collect();
+    let mut dst = vec![200u16; e.lanes(options().target.vector_bytes()) + 2];
     let mut expected = dst.clone();
-    for i in 1..=e.lanes() {
+    for i in 1..=e.lanes(options().target.vector_bytes()) {
         expected[i] = source[i].wrapping_add(1);
     }
     assert_eq!(
@@ -214,7 +224,7 @@ fn packed_chunks_cover_the_vector_and_a_short_store_keeps_its_prefix() {
     assert_eq!(dst, expected);
 
     // Cut the destination inside the second chunk when the host width permits.
-    let limit = 9.min(e.lanes() - 1);
+    let limit = 9.min(e.lanes(options().target.vector_bytes()) - 1);
     dst.fill(200);
     let res = code.call(
         &[0],
@@ -245,8 +255,11 @@ fn masked_contiguous_access_selects_packed_and_ordered_paths() {
     // The only vector memory operations here have runtime masks, so a plain
     // vector load/store in CLIF must come from the masked access fast path.
     let e = Element::U16;
-    let mut f =
-        FunctionBuilder::with_buffers(2, vec![BufferKind::new(e, false), BufferKind::new(e, true)]);
+    let mut f = FunctionBuilder::with_buffers(
+        options(),
+        2,
+        vec![BufferKind::new(e, false), BufferKind::new(e, true)],
+    );
     let offset = f.arg(0);
     let count = f.arg(1);
     let mut simd = |op, args: &[_]| f.simd(Simd { element: e, op }, args).unwrap();
@@ -258,13 +271,13 @@ fn masked_contiguous_access_selects_packed_and_ordered_paths() {
     let f = f.finish().unwrap();
 
     let mut jit = JITModule::new(JITBuilder::new(default_libcall_names()).unwrap());
-    let module = KernelModule::lower(&mut jit, &f, false).unwrap();
+    let module = KernelModule::lower(&mut jit, &f, &options().target, false).unwrap();
     let body = &module.bodies[&module.entry];
     assert!(instructions_of_type(body, Opcode::Load, I16X8) > 0);
     assert!(instructions_of_type(body, Opcode::Store, I16X8) > 0);
 
     let code = Cranelift::compile(&f).unwrap();
-    let width = e.lanes();
+    let width = e.lanes(options().target.vector_bytes());
     let tail = 9.min(width - 1);
     let source: Vec<_> = (0..=width).map(|i| 100 + i as u16).collect();
     for (offset, active, src_len, dst_len) in [
@@ -305,7 +318,7 @@ fn a_full_gather_has_one_bounds_branch_for_all_lanes() {
     }
     let mut jit = JITModule::new(JITBuilder::new(default_libcall_names()).unwrap());
     let ir = first_block::ir().unwrap();
-    let module = KernelModule::lower(&mut jit, &ir, false).unwrap();
+    let module = KernelModule::lower(&mut jit, &ir, &options().target, false).unwrap();
     let entry = &module.bodies[&module.entry];
     let branches = entry
         .layout

@@ -42,13 +42,14 @@ impl Function {
         address: u64,
         register: u16,
         base: i64,
+        vector_bytes: usize,
     ) {
         self.statements.push(Statement {
             address,
             source: point.location,
             register,
             variables: point
-                .slots(function)
+                .slots(function, vector_bytes)
                 .map(|(var, ty, offset)| {
                     (var.name, ty, VariableLocation::Memory(base + offset as i64))
                 })

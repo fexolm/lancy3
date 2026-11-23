@@ -163,18 +163,14 @@ impl dyn KernelBuilder + '_ {
 }
 
 /// Explicitly materialize a verified portable IR for inspection or reuse.
-pub fn materialize(arity: usize, kinds: &[BufferKind], body: Body<'_>) -> crate::Result<Function> {
-    materialize_with_options(arity, kinds, body, crate::BuildOptions::default())
-}
-
-pub fn materialize_with_options(
+pub fn materialize(
     arity: usize,
     kinds: &[BufferKind],
     body: Body<'_>,
     options: crate::BuildOptions,
 ) -> crate::Result<Function> {
     let _span = tracing::debug_span!(target: "splice::compile", "materialize_ir").entered();
-    let mut builder = FunctionBuilder::with_options(arity, kinds.to_vec(), options);
+    let mut builder = FunctionBuilder::with_buffers(options, arity, kinds.to_vec());
     body(&mut builder)?;
     builder.finish()
 }

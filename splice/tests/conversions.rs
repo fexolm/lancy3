@@ -4,7 +4,11 @@
 use splice::frontend::{self, KernelBuilder};
 use splice::hir::{Buffer, Simd, SimdOp};
 use splice::simd::Element;
-use splice::{BufferElement, BufferKind, Codegen, Executable};
+use splice::{BufferElement, BufferKind, BuildOptions, Codegen, Executable, Mode};
+
+fn options() -> BuildOptions {
+    BuildOptions::host(Mode::Release).unwrap()
+}
 
 trait Lane: BufferElement + Copy + std::fmt::Debug {
     fn samples() -> Vec<Self>;
@@ -134,7 +138,7 @@ fn stage(
             Conversion::Cast => (SimdOp::Cast(to), vec![low]),
             Conversion::Widen { high } => (SimdOp::Widen { to, high }, vec![low]),
             Conversion::Narrow => {
-                let next = b.constant(from.lanes() as i32);
+                let next = b.constant(from.lanes(options().target.vector_bytes()) as i32);
                 let high = b.simd(load, &[next])?.unwrap();
                 (SimdOp::Narrow(to), vec![low, high])
             }
@@ -156,11 +160,12 @@ where
 {
     let (from, to) = (F::ELEMENT, T::ELEMENT);
     let kinds = [BufferKind::new(from, false), BufferKind::new(to, true)];
-    let ir = frontend::materialize(0, &kinds, Box::new(stage(from, to, conversion))).unwrap();
+    let ir =
+        frontend::materialize(0, &kinds, Box::new(stage(from, to, conversion)), options()).unwrap();
     let paths = [
         (
             "build",
-            B::build(0, &kinds, Box::new(stage(from, to, conversion))),
+            B::build_with_options(0, &kinds, Box::new(stage(from, to, conversion)), options()),
         ),
         ("compile", B::compile(&ir)),
     ];
@@ -186,7 +191,7 @@ where
 }
 
 fn check<F: Lane + As<T>, T: Lane>(conversion: Conversion) {
-    let lanes = F::ELEMENT.lanes();
+    let lanes = F::ELEMENT.lanes(options().target.vector_bytes());
     let samples = F::samples();
     // Rotate the samples through every lane position across several windows.
     for window in 0..samples.len().div_ceil(lanes).max(1) + 1 {
@@ -257,6 +262,7 @@ fn rejected_conversions_stay_rejected() {
         0,
         &kinds,
         Box::new(stage(Element::F64, Element::I32, Conversion::Cast)),
+        options(),
     );
     assert!(error.is_err());
 }

@@ -33,7 +33,7 @@ macro_rules! each_backend {
 }
 
 use splice::frontend::{self, KernelBuilder};
-use splice::{BufferArg, BufferKind, BuildOptions, Codegen, Executable};
+use splice::{BufferArg, BufferKind, BuildOptions, Codegen, Executable, Mode};
 use std::rc::Rc;
 
 /// A kernel body that can be staged repeatedly.
@@ -68,11 +68,11 @@ pub fn agree(
         let built = if staged {
             B::build_with_options(arity, kinds, body, options)
         } else {
-            frontend::materialize_with_options(arity, kinds, body, options)
+            frontend::materialize(arity, kinds, body, options)
                 .and_then(|f| B::compile_with_options(&f, options))
         };
         let route = if staged { "build" } else { "compile" };
-        let label = format!("{}/{route}/{options:?}", std::any::type_name::<B>());
+        let label = format!("{}/{route}/{:?}", std::any::type_name::<B>(), options.mode);
         let seen = match built {
             Ok(kernel) => observe(&|args, buffers| kernel.call(args, buffers)),
             Err(error) => vec![format!("build error: {error}")],
@@ -80,7 +80,8 @@ pub fn agree(
         (label, seen)
     }
     let mut runs = Vec::new();
-    for options in [BuildOptions::Debug, BuildOptions::Release] {
+    for mode in [Mode::Debug, Mode::Release] {
+        let options = BuildOptions::host(mode).expect("SPLICE_SIMD names a target of this machine");
         for staged in [true, false] {
             each_backend!(B => runs.push(run::<B>(staged, options, arity, kinds, stage, &mut observe)));
         }

@@ -1,4 +1,6 @@
-use splice::{BuildError, BuildOptions, CallError, Codegen, Executable, Trap, hir::Instr, kernel};
+use splice::{
+    BuildError, BuildOptions, CallError, Codegen, Executable, Mode, Trap, hir::Instr, kernel,
+};
 use splice_text::Text;
 use std::{
     ops::Index,
@@ -70,7 +72,7 @@ fn check<B: Codegen<Output: Executable>>() {
     assert!(write_borrowed_plan::ir(&mut borrowed).is_err());
     assert_eq!(borrowed, [7]);
 
-    let options = BuildOptions::Release;
+    let options = BuildOptions::host(Mode::Release).unwrap();
     let ir = chosen::ir_with_options(options, &[]).expect("construct IR without a plan address");
     assert!(
         ir.instructions()

@@ -58,8 +58,17 @@ impl Failure {
     }
 }
 
+/// The module that bodies are emitted into, for one build target.
+#[derive(Clone, Copy)]
+pub(super) struct Unit<'a, 'ctx> {
+    pub ctx: &'ctx Context,
+    pub module: &'a Module<'ctx>,
+    pub machine: crate::target::Machine,
+}
+
 pub(super) struct Body<'a, 'ctx> {
     ctx: &'ctx Context,
+    machine: crate::target::Machine,
     builder: &'a Builder<'ctx>,
     module: &'a Module<'ctx>,
     function: FunctionValue<'ctx>,
@@ -95,20 +104,27 @@ impl<'a, 'ctx> Body<'a, 'ctx> {
     }
 
     pub(super) fn start(
-        ctx: &'ctx Context,
+        unit: Unit<'a, 'ctx>,
         builder: &'a Builder<'ctx>,
-        module: &'a Module<'ctx>,
         function: FunctionValue<'ctx>,
         arity: usize,
         types: impl IntoIterator<Item = ValueType>,
         kinds: &[BufferKind],
     ) -> Built<Self> {
+        let Unit {
+            ctx,
+            module,
+            machine,
+        } = unit;
         builder.position_at_end(ctx.append_basic_block(function, "entry"));
         // Only the entry allocates register slots. LLVM promotes these to SSA,
         // including phi nodes for mutable locals across joins and backedges.
         let registers = types
             .into_iter()
-            .map(|ty| Ok((ty, builder.build_alloca(simd::llvm_type(ctx, ty), "")?)))
+            .map(|ty| {
+                let llvm = simd::llvm_type(ctx, machine.vector_bytes, ty);
+                Ok((ty, builder.build_alloca(llvm, "")?))
+            })
             .collect::<Built<Vec<_>>>()?;
         let mut params = function.get_param_iter();
         let status = params.next().unwrap().into_pointer_value();
@@ -125,6 +141,7 @@ impl<'a, 'ctx> Body<'a, 'ctx> {
             .collect();
         Ok(Self {
             ctx,
+            machine,
             builder,
             module,
             function,
@@ -140,18 +157,17 @@ impl<'a, 'ctx> Body<'a, 'ctx> {
     }
 
     pub(super) fn emit(
-        ctx: &'ctx Context,
+        unit: Unit<'a, 'ctx>,
         builder: &'a Builder<'ctx>,
-        module: &'a Module<'ctx>,
         f: &Function,
         function: FunctionValue<'ctx>,
         callees: &Callees<'_, 'ctx>,
         debug_id: Option<usize>,
     ) -> Built<bool> {
+        let ctx = unit.ctx;
         let mut body = Self::start(
-            ctx,
+            unit,
             builder,
-            module,
             function,
             f.arity(),
             (0..f.register_count()).map(|i| f.reg_type(Reg(i as u32))),
@@ -204,8 +220,10 @@ impl<'a, 'ctx> Body<'a, 'ctx> {
             allocas.position_at_end(entry);
         }
         let id = Reg(self.registers.len() as u32);
-        self.registers
-            .push((ty, allocas.build_alloca(simd::llvm_type(self.ctx, ty), "")?));
+        self.registers.push((
+            ty,
+            allocas.build_alloca(simd::llvm_type(self.ctx, self.machine.vector_bytes, ty), "")?,
+        ));
         Ok(id)
     }
 
@@ -404,9 +422,11 @@ impl<'a, 'ctx> Body<'a, 'ctx> {
     }
     pub(super) fn assign(&self, dst: Reg, src: Reg) -> Built<()> {
         let (ty, ptr) = self.registers[src.0 as usize];
-        let value = self
-            .builder
-            .build_load(simd::llvm_type(self.ctx, ty), ptr, "")?;
+        let value = self.builder.build_load(
+            simd::llvm_type(self.ctx, self.machine.vector_bytes, ty),
+            ptr,
+            "",
+        )?;
         self.builder
             .build_store(self.registers[dst.0 as usize].1, value)?;
         Ok(())

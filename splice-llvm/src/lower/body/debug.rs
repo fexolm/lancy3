@@ -11,7 +11,9 @@ impl<'ctx> Body<'_, 'ctx> {
             .instructions()
             .iter()
             .filter_map(|op| match op {
-                Instr::Debug(point) => Some(point.storage_bytes(function)),
+                Instr::Debug(point) => {
+                    Some(point.storage_bytes(function, self.machine.vector_bytes))
+                }
                 _ => None,
             })
             .max()
@@ -44,14 +46,22 @@ impl<'ctx> Body<'_, 'ctx> {
             store.set_volatile(true).expect("a store can be volatile");
             Ok(())
         };
-        for (var, layout, offset) in point.slots(function) {
+        for (var, layout, offset) in point.slots(function, self.machine.vector_bytes) {
             match var.value {
                 debug::Value::Register(reg, _) => {
                     let (ty, ptr) = self.registers[reg.0 as usize];
-                    let value = b.build_load(simd::llvm_type(self.ctx, ty), ptr, "")?;
+                    let value = b.build_load(
+                        simd::llvm_type(self.ctx, self.machine.vector_bytes, ty),
+                        ptr,
+                        "",
+                    )?;
                     let value = if let ValueType::Mask(element) = ty {
-                        let ty = simd::llvm_type(self.ctx, ValueType::Vector(element.index()))
-                            .into_vector_type();
+                        let ty = simd::llvm_type(
+                            self.ctx,
+                            self.machine.vector_bytes,
+                            ValueType::Vector(element.index()),
+                        )
+                        .into_vector_type();
                         b.build_int_s_extend(value.into_vector_value(), ty, "")?
                             .into()
                     } else if matches!(layout, debug::Type::Scalar(debug::Scalar::Index)) {

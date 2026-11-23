@@ -23,8 +23,8 @@ fn element_type(ctx: &Context, e: Element) -> BasicTypeEnum<'_> {
     }
 }
 
-fn vector_type(ctx: &Context, e: Element) -> VectorType<'_> {
-    vector_type_with_lanes(ctx, e, e.lanes() as u32)
+fn vector_type(ctx: &Context, bytes: usize, e: Element) -> VectorType<'_> {
+    vector_type_with_lanes(ctx, e, e.lanes(bytes) as u32)
 }
 
 fn vector_type_with_lanes(ctx: &Context, e: Element, lanes: u32) -> VectorType<'_> {
@@ -35,11 +35,11 @@ fn vector_type_with_lanes(ctx: &Context, e: Element, lanes: u32) -> VectorType<'
     }
 }
 
-pub(super) fn llvm_type(ctx: &Context, ty: ValueType) -> BasicTypeEnum<'_> {
+pub(super) fn llvm_type(ctx: &Context, bytes: usize, ty: ValueType) -> BasicTypeEnum<'_> {
     match ty {
         ValueType::Scalar => ctx.i32_type().into(),
-        ValueType::Vector(e) => vector_type(ctx, e).into(),
-        ValueType::Mask(e) => ctx.bool_type().vec_type(e.lanes() as u32).into(),
+        ValueType::Vector(e) => vector_type(ctx, bytes, e).into(),
+        ValueType::Mask(e) => ctx.bool_type().vec_type(e.lanes(bytes) as u32).into(),
     }
 }
 
@@ -80,7 +80,7 @@ impl<'ctx> Body<'_, 'ctx> {
         let (ty, ptr) = self.registers[reg.0 as usize];
         Ok(self
             .builder
-            .build_load(llvm_type(self.ctx, ty), ptr, "")?
+            .build_load(llvm_type(self.ctx, self.machine.vector_bytes, ty), ptr, "")?
             .into_vector_value())
     }
 
@@ -96,9 +96,12 @@ impl<'ctx> Body<'_, 'ctx> {
         let arg = |n: usize| self.vector(args[n]);
         let float = e.is_float();
         let value: BasicValueEnum<'ctx> = match inst.op {
-            Lanes => self.int(e.lanes() as i32).into(),
+            Lanes => self.int(e.lanes(self.machine.vector_bytes) as i32).into(),
             SplatScalar | FirstN => {
-                let ty = self.ctx.i32_type().vec_type(e.lanes() as u32);
+                let ty = self
+                    .ctx
+                    .i32_type()
+                    .vec_type(e.lanes(self.machine.vector_bytes) as u32);
                 let first =
                     ir.build_insert_element(ty.get_undef(), self.load(args[0])?, self.int(0), "")?;
                 let splat = ir.build_shuffle_vector(first, ty.get_undef(), ty.const_zero(), "")?;
@@ -119,8 +122,8 @@ impl<'ctx> Body<'_, 'ctx> {
             }
             Splat(_) | Iota => {
                 let int = element_type(self.ctx, e.index()).into_int_type();
-                let mut lanes = Vec::with_capacity(e.lanes());
-                for i in 0..e.lanes() {
+                let mut lanes = Vec::with_capacity(e.lanes(self.machine.vector_bytes));
+                for i in 0..e.lanes(self.machine.vector_bytes) {
                     let val = match inst.op {
                         Splat(bits) => ir.build_bit_cast(
                             int.const_int(bits, false),
@@ -152,13 +155,13 @@ impl<'ctx> Body<'_, 'ctx> {
                 let addr = ir.build_int_add(base, scaled, "")?;
                 let bytes = ir.build_and(
                     ir.build_int_neg(addr, "")?,
-                    self.int((splice_core::simd::vector_bytes() - 1) as i32),
+                    self.int((self.machine.vector_bytes - 1) as i32),
                     "",
                 )?;
                 ir.build_right_shift(bytes, self.int(2), false, "prefix")?
                     .into()
             }
-            Compress | Expand if crate::target::x86_compress(e.lanes()) => {
+            Compress | Expand if self.machine.x86_compress => {
                 let data = arg(0)?;
                 let (name, fallback) = if inst.op == Compress {
                     (
@@ -195,7 +198,7 @@ impl<'ctx> Body<'_, 'ctx> {
                 let fallback = arg(2)?;
                 let mut src = self.int(0);
                 let mut out = fallback;
-                for i in 0..e.lanes() as i32 {
+                for i in 0..e.lanes(self.machine.vector_bytes) as i32 {
                     let pos = self.int(i);
                     let active = ir.build_extract_element(mask, pos, "")?.into_int_value();
                     let fresh = ir.build_extract_element(data, src, "")?.into_int_value();
@@ -212,7 +215,7 @@ impl<'ctx> Body<'_, 'ctx> {
             Swizzle => {
                 let data = arg(0)?;
                 let indices = arg(1)?;
-                let width = e.lanes() as i32;
+                let width = e.lanes(self.machine.vector_bytes) as i32;
                 let mut output = data.get_type().get_undef();
                 for i in 0..width {
                     let pos = self.int(i);
@@ -238,7 +241,10 @@ impl<'ctx> Body<'_, 'ctx> {
             Shr(n) => ir
                 .build_right_shift(
                     arg(0)?,
-                    self.splat(self.int((n & 31) as i32), e.lanes() as u32)?,
+                    self.splat(
+                        self.int((n & 31) as i32),
+                        e.lanes(self.machine.vector_bytes) as u32,
+                    )?,
                     !e.is_unsigned(),
                     "",
                 )?
@@ -264,8 +270,8 @@ impl<'ctx> Body<'_, 'ctx> {
             Cast(to) => self.convert_lanes(arg(0)?, e, to)?.into(),
             Widen { to, high } => {
                 let x = arg(0)?;
-                let start = usize::from(high) * to.lanes();
-                let mask: Vec<_> = (start..start + to.lanes())
+                let start = usize::from(high) * to.lanes(self.machine.vector_bytes);
+                let mask: Vec<_> = (start..start + to.lanes(self.machine.vector_bytes))
                     .map(|i| self.int(i as i32))
                     .collect();
                 let half = ir.build_shuffle_vector(x, x, VectorType::const_vector(&mask), "")?;
@@ -274,13 +280,18 @@ impl<'ctx> Body<'_, 'ctx> {
             Narrow(to) => {
                 let a = self.convert_lanes(arg(0)?, e, to)?;
                 let b = self.convert_lanes(arg(1)?, e, to)?;
-                let mask: Vec<_> = (0..to.lanes()).map(|i| self.int(i as i32)).collect();
+                let mask: Vec<_> = (0..to.lanes(self.machine.vector_bytes))
+                    .map(|i| self.int(i as i32))
+                    .collect();
                 ir.build_shuffle_vector(a, b, VectorType::const_vector(&mask), "")?
                     .into()
             }
             RotateLeft(n) => {
                 let value = arg(0)?;
-                let count = self.splat(self.int((n & 31) as i32), e.lanes() as u32)?;
+                let count = self.splat(
+                    self.int((n & 31) as i32),
+                    e.lanes(self.machine.vector_bytes) as u32,
+                )?;
                 let intrinsic = self.intrinsic("llvm.fshl", &[value.get_type().into()])?;
                 ir.build_call(intrinsic, &[value.into(), value.into(), count.into()], "")?
                     .try_as_basic_value()
@@ -350,19 +361,23 @@ impl<'ctx> Body<'_, 'ctx> {
             Not | MaskNot => ir.build_not(arg(0)?, "")?.into(),
             Select => ir.build_select(arg(0)?, arg(1)?, arg(2)?, "")?,
             Shuffle(order) => {
-                let mask: Vec<_> = (0..e.lanes())
+                let mask: Vec<_> = (0..e.lanes(self.machine.vector_bytes))
                     .map(|i| {
-                        self.ctx
-                            .i32_type()
-                            .const_int(order.index(i, e.lanes()) as u64, false)
+                        self.ctx.i32_type().const_int(
+                            order.index(i, e.lanes(self.machine.vector_bytes)) as u64,
+                            false,
+                        )
                     })
                     .collect();
                 ir.build_shuffle_vector(arg(0)?, arg(1)?, VectorType::const_vector(&mask), "")?
                     .into()
             }
             ExtractWrapping | ReplaceWrapping => {
-                let index =
-                    ir.build_and(self.load(args[1])?, self.int(e.lanes() as i32 - 1), "")?;
+                let index = ir.build_and(
+                    self.load(args[1])?,
+                    self.int(e.lanes(self.machine.vector_bytes) as i32 - 1),
+                    "",
+                )?;
                 if inst.op == ExtractWrapping {
                     ir.build_extract_element(arg(0)?, index, "")?
                 } else {
@@ -372,19 +387,24 @@ impl<'ctx> Body<'_, 'ctx> {
             }
             Last => ir.build_extract_element(
                 arg(0)?,
-                self.ctx.i32_type().const_int((e.lanes() - 1) as u64, false),
+                self.ctx
+                    .i32_type()
+                    .const_int((e.lanes(self.machine.vector_bytes) - 1) as u64, false),
                 "",
             )?,
             PrefixSum => {
                 let mut sums = arg(0)?;
                 let zero = sums.get_type().const_zero();
                 let mut shift = 1;
-                while shift < e.lanes() {
-                    let indices: Vec<_> = (0..e.lanes())
+                while shift < e.lanes(self.machine.vector_bytes) {
+                    let indices: Vec<_> = (0..e.lanes(self.machine.vector_bytes))
                         .map(|i| {
-                            self.ctx
-                                .i32_type()
-                                .const_int(i.checked_sub(shift).unwrap_or(e.lanes()) as u64, false)
+                            self.ctx.i32_type().const_int(
+                                i.checked_sub(shift)
+                                    .unwrap_or(e.lanes(self.machine.vector_bytes))
+                                    as u64,
+                                false,
+                            )
                         })
                         .collect();
                     let low = ir.build_shuffle_vector(
@@ -401,7 +421,11 @@ impl<'ctx> Body<'_, 'ctx> {
             Any | All => {
                 let bits = self
                     .ctx
-                    .custom_width_int_type((e.lanes() as u32).try_into().unwrap())
+                    .custom_width_int_type(
+                        (e.lanes(self.machine.vector_bytes) as u32)
+                            .try_into()
+                            .unwrap(),
+                    )
                     .unwrap();
                 let mask = ir.build_bit_cast(arg(0)?, bits, "")?.into_int_value();
                 let flag = if inst.op == Any {
@@ -519,7 +543,7 @@ impl<'ctx> Body<'_, 'ctx> {
         let e = inst.element;
         let ir = self.builder;
         let el = element_type(self.ctx, e);
-        let ty = vector_type(self.ctx, e);
+        let ty = vector_type(self.ctx, self.machine.vector_bytes, e);
         let count = ty.get_size();
         let wide = self.ctx.i64_type();
         let indexed = matches!(

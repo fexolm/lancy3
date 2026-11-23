@@ -4,6 +4,11 @@ use splice::{
 };
 use splice_text::Text;
 
+/// This machine's `SPLICE_SIMD` target in the mode of this test build.
+fn options() -> splice::BuildOptions {
+    splice::BuildOptions::host(splice::Mode::for_profile(cfg!(debug_assertions))).unwrap()
+}
+
 #[kernel]
 fn add_block(lhs: &[u16], rhs: &[u16], dst: &mut [u16]) -> i32 {
     use splice::simd::Lane;
@@ -1230,7 +1235,8 @@ fn verifier_checks_vector_mask_and_buffer_element_types() {
         hir::{Buffer, FunctionBuilder, Simd, SimdOp},
         simd::Element,
     };
-    let mut b = FunctionBuilder::with_buffers(0, vec![BufferKind::new(Element::F32, false)]);
+    let mut b =
+        FunctionBuilder::with_buffers(options(), 0, vec![BufferKind::new(Element::F32, false)]);
     let offset = b.constant(0);
     let f = b
         .simd(

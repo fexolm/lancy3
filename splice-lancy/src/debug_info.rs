@@ -52,6 +52,7 @@ pub(super) fn publish(
                     start,
                     workspace.0,
                     body.workspace_offset as i64,
+                    code.target().vector_bytes(),
                 );
             }
         }

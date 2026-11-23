@@ -55,6 +55,7 @@ impl<'a> Pending<'a> {
 pub(super) fn publish(
     module: &JITModule,
     pending: Vec<(FuncId, Pending<'_>)>,
+    vector_bytes: usize,
     debug: bool,
 ) -> splice_core::Result<Option<splice_jit::Registration>> {
     use splice_jit::gimli::{AArch64, X86_64};
@@ -87,7 +88,14 @@ pub(super) fn publish(
                 unreachable!("only sequence points bear Splice debug tags")
             };
             let start = address + u64::from(offset);
-            f.statement(info.source, point, start, sp.0, i64::from(base));
+            f.statement(
+                info.source,
+                point,
+                start,
+                sp.0,
+                i64::from(base),
+                vector_bytes,
+            );
         }
         if let (Some(cie), Some(info)) = (cie, info.unwind) {
             frames.add_fde(cie, info.to_fde(Address::Constant(address)));

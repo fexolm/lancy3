@@ -128,7 +128,7 @@ pub struct Point {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Type {
     Scalar(Scalar),
-    Vector(Element),
+    Vector { element: Element, lanes: usize },
     Slice(Element),
     Constant(ConstantType),
 }
@@ -138,7 +138,7 @@ impl Type {
         match self {
             Self::Scalar(Scalar::Index) => 8,
             Self::Scalar(_) => 4,
-            Self::Vector(_) => crate::simd::vector_bytes(),
+            Self::Vector { element, lanes } => element.bytes() * lanes,
             Self::Slice(_) => 16,
             Self::Constant(_) => 0,
         }
@@ -149,15 +149,20 @@ impl Point {
     pub fn slots<'a>(
         &'a self,
         function: &'a Function,
+        vector_bytes: usize,
     ) -> impl Iterator<Item = (Variable, Type, usize)> + 'a {
+        let vector = move |element: Element| Type::Vector {
+            element,
+            lanes: element.lanes(vector_bytes),
+        };
         self.variables
             .iter()
             .filter_map(move |&var| {
                 let ty = match var.value {
                     Value::Register(reg, scalar) => match function.reg_type(reg) {
                         ValueType::Scalar => Type::Scalar(scalar),
-                        ValueType::Vector(element) => Type::Vector(element),
-                        ValueType::Mask(element) => Type::Vector(element.index()),
+                        ValueType::Vector(element) => vector(element),
+                        ValueType::Mask(element) => vector(element.index()),
                     },
                     Value::Slice(buffer) => {
                         Type::Slice(function.buffer_kinds()[buffer.index()].element())
@@ -174,8 +179,9 @@ impl Point {
             })
     }
 
-    pub fn storage_bytes(&self, function: &Function) -> usize {
-        self.slots(function)
+    /// Bytes of the debug workspace for vectors of `vector_bytes`.
+    pub fn storage_bytes(&self, function: &Function, vector_bytes: usize) -> usize {
+        self.slots(function, vector_bytes)
             .last()
             .map_or(0, |(_, ty, offset)| offset + ty.storage_bytes())
     }

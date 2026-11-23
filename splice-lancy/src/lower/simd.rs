@@ -135,13 +135,14 @@ impl Builder<'_> {
                     S::InterleaveLow | S::InterleaveHigh => {
                         let pair = self.vec_op(V::Bin(Binary::Shr, ids, one));
                         let odd = self.vec_op(V::Bin(Binary::And, ids, one));
-                        let width = self.splat_bits(Lane::I32, e.lanes() as u64);
+                        let width = self.splat_bits(Lane::I32, e.lanes(self.vector_bytes) as u64);
                         let base = self.vec_op(V::Bin(Binary::Mul, odd, width));
                         let idx = self.vec_op(V::Bin(Binary::Add, pair, base));
                         if order == S::InterleaveLow {
                             idx
                         } else {
-                            let half = self.splat_bits(Lane::I32, e.lanes() as u64 / 2);
+                            let half =
+                                self.splat_bits(Lane::I32, e.lanes(self.vector_bytes) as u64 / 2);
                             self.vec_op(V::Bin(Binary::Add, idx, half))
                         }
                     }
@@ -173,7 +174,7 @@ impl Builder<'_> {
                 let addr = self.val(Op::Bitcast(Type::U64, ptr));
                 let low = self.val(Op::Cast(Type::I32, addr));
                 let neg = self.val(Op::Unary(Unary::Neg, low));
-                let mask = self.val(Op::Const((splice_core::simd::vector_bytes() - 1) as i32));
+                let mask = self.val(Op::Const((self.vector_bytes - 1) as i32));
                 let bytes = self.val(Op::Bin(Binary::And, neg, mask));
                 let two = self.val(Op::Const(2));
                 return Ok(Some(self.val(Op::Bin(Binary::Shr, bytes, two))));
@@ -196,7 +197,7 @@ impl Builder<'_> {
                 ));
             }
             ExtractWrapping | ReplaceWrapping => {
-                let mask = self.val(Op::Const(e.lanes() as i32 - 1));
+                let mask = self.val(Op::Const(e.lanes(self.vector_bytes) as i32 - 1));
                 let i = self.val(Op::Bin(Binary::And, vs[1], mask));
                 if inst.op == ExtractWrapping {
                     V::ExtractLane(vs[0], i)
@@ -205,14 +206,14 @@ impl Builder<'_> {
                 }
             }
             Last => {
-                let last = self.val(Op::Const(e.lanes() as i32 - 1));
+                let last = self.val(Op::Const(e.lanes(self.vector_bytes) as i32 - 1));
                 V::ExtractLane(vs[0], last)
             }
             PrefixSum => {
                 let indices = self.vec_op(V::Iota(Lane::I32));
                 let mut sums = vs[0];
                 let mut shift = 1;
-                while shift < e.lanes() {
+                while shift < e.lanes(self.vector_bytes) {
                     let offset = self.splat_bits(Lane::I32, shift as u64);
                     let previous = self.vec_op(V::Bin(Binary::Sub, indices, offset));
                     // Negative indices select zero in a two-table Lancy shuffle.

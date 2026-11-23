@@ -1,6 +1,11 @@
 use super::*;
 mod simd;
 
+/// This machine's `SPLICE_SIMD` target in the mode of this test build.
+fn options() -> splice_core::BuildOptions {
+    splice_core::BuildOptions::host(splice_core::Mode::for_profile(cfg!(debug_assertions))).unwrap()
+}
+
 #[test]
 fn context_descriptors_reject_other_signatures_and_slice_operations() {
     use splice_core::{
@@ -39,17 +44,17 @@ fn context_descriptors_reject_other_signatures_and_slice_operations() {
             Ok(())
         };
         assert!(build(1, &KINDS, Box::new(body)).is_err());
-        assert!(splice_core::frontend::materialize(1, &KINDS, Box::new(body)).is_err());
+        assert!(splice_core::frontend::materialize(1, &KINDS, Box::new(body), options()).is_err());
     }
 
     let direct = crate::Lancy::build_with_options(
         1,
         &KINDS,
         Box::new(good),
-        splice_core::BuildOptions::Release,
+        splice_core::BuildOptions::host(splice_core::Mode::Release).unwrap(),
     )
     .unwrap();
-    let ir = splice_core::frontend::materialize(1, &KINDS, Box::new(good)).unwrap();
+    let ir = splice_core::frontend::materialize(1, &KINDS, Box::new(good), options()).unwrap();
     let portable = crate::Lancy::compile(&ir).unwrap();
     for kernel in [direct, portable] {
         let mut unreachable = |_, _, _| panic!("wrong context callback was called");
@@ -119,7 +124,7 @@ fn context_slice_operands_require_valid_nonaliasing_descriptors() {
             "{slices:?}"
         );
         assert_eq!(
-            splice_core::frontend::materialize(0, &kinds, Box::new(body)).is_ok(),
+            splice_core::frontend::materialize(0, &kinds, Box::new(body), options()).is_ok(),
             valid,
             "{slices:?}"
         );
@@ -169,10 +174,11 @@ fn rust_imports_fill_unused_abi_arguments_with_zero_in_both_staging_paths() {
     }
 
     let direct = build(1, &[], Box::new(body)).unwrap();
-    let portable = splice_core::frontend::materialize(1, &[], Box::new(body)).unwrap();
-    for graph in [direct, lower(&portable).unwrap()] {
+    let portable = splice_core::frontend::materialize(1, &[], Box::new(body), options()).unwrap();
+    for graph in [direct, lower(&portable, &options().target).unwrap()] {
         let kernel =
-            lancy::ScalarKernel::compile(&graph, &lancy::CompileOptions::host().unwrap()).unwrap();
+            lancy::ScalarKernel::compile(&graph, &lancy::CompileOptions::new(options().target))
+                .unwrap();
         assert_eq!(kernel.call(&[5]), Ok(13));
         assert_eq!(kernel.call(&[-5]), Ok(-7));
     }
@@ -194,8 +200,9 @@ fn reuses_shared_loads_across_writes_in_both_staging_paths() {
     for input in [BufferKind::Read, BufferKind::Write] {
         let kinds = [input, BufferKind::Write];
         let direct = build(1, &kinds, Box::new(body)).unwrap();
-        let portable = splice_core::frontend::materialize(1, &kinds, Box::new(body)).unwrap();
-        for graph in [direct, lower(&portable).unwrap()] {
+        let portable =
+            splice_core::frontend::materialize(1, &kinds, Box::new(body), options()).unwrap();
+        for graph in [direct, lower(&portable, &options().target).unwrap()] {
             let count = graph
                 .instructions(graph.entry())
                 .filter(|&i| matches!(graph.op(i), Op::Load(..)))
@@ -209,19 +216,19 @@ fn reuses_shared_loads_across_writes_in_both_staging_paths() {
 fn portable_calls_share_one_lowered_body_and_preserve_argument_reassignment() {
     use splice_core::hir::FunctionBuilder;
 
-    let mut leaf = FunctionBuilder::new(1);
+    let mut leaf = FunctionBuilder::new(options(), 1);
     let one = leaf.constant(1);
     let value = leaf.binary(Binary::Add, leaf.arg(0), one);
     leaf.ret(value);
     let leaf = Arc::new(leaf.finish().unwrap());
 
-    let mut caller = FunctionBuilder::new(1);
+    let mut caller = FunctionBuilder::new(options(), 1);
     let arg = caller.arg(0);
     let first = caller.call_shared(Arc::clone(&leaf), &[arg]);
     caller.assign(arg, first);
     let second = caller.call_shared(leaf, &[arg]);
     caller.ret(second);
-    let graph = lower(&caller.finish().unwrap()).unwrap();
+    let graph = lower(&caller.finish().unwrap(), &options().target).unwrap();
     let calls: Vec<_> = graph
         .instructions(graph.entry())
         .filter_map(|i| match graph.op(i) {
@@ -232,7 +239,8 @@ fn portable_calls_share_one_lowered_body_and_preserve_argument_reassignment() {
     assert_eq!(calls.len(), 2);
     assert!(Arc::ptr_eq(calls[0], calls[1]));
     let kernel =
-        lancy::ScalarKernel::compile(&graph, &lancy::CompileOptions::host().unwrap()).unwrap();
+        lancy::ScalarKernel::compile(&graph, &lancy::CompileOptions::new(options().target))
+            .unwrap();
     assert_eq!(kernel.call(&[22]), Ok(24));
 }
 
@@ -262,7 +270,8 @@ fn backedge_swaps_live_names_on_the_selected_edge() {
     )
     .unwrap();
     let kernel =
-        lancy::ScalarKernel::compile(&graph, &lancy::CompileOptions::host().unwrap()).unwrap();
+        lancy::ScalarKernel::compile(&graph, &lancy::CompileOptions::new(options().target))
+            .unwrap();
     for n in 0..10 {
         assert_eq!(
             kernel.call(&[n, 20, 91]),
@@ -294,7 +303,7 @@ fn backward_jump_into_previously_unreferenced_label_is_reachable() {
     )
     .unwrap();
     assert_eq!(
-        lancy::ScalarKernel::compile(&f, &lancy::CompileOptions::host().unwrap())
+        lancy::ScalarKernel::compile(&f, &lancy::CompileOptions::new(options().target))
             .unwrap()
             .call(&[41]),
         Ok(42)
@@ -348,8 +357,14 @@ fn checked_nested_call_preserves_writes_before_failure() {
     )
     .unwrap();
     use splice_core::Executable;
-    let f =
-        crate::LancyKernel::new(graph, 1, &[BufferKind::Read, BufferKind::Write], None).unwrap();
+    let f = crate::LancyKernel::new(
+        graph,
+        &options().target,
+        1,
+        &[BufferKind::Read, BufferKind::Write],
+        None,
+    )
+    .unwrap();
     let mut out = [0];
     let error = f
         .call(
@@ -406,7 +421,7 @@ fn lowered_call_graphs_retain_slice_contracts_for_out_of_line_calls() {
     }
 
     fn out_of_line(ir: splice_core::Function, writable: bool) -> crate::LancyKernel {
-        let root = crate::lower(&ir).unwrap();
+        let root = crate::lower(&ir, &options().target).unwrap();
         let child = root
             .blocks()
             .flat_map(|block| root.instructions(block))

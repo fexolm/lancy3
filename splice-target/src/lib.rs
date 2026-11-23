@@ -226,6 +226,16 @@ impl Target {
     /// Verify the calling thread can execute code generated for this
     /// target. Both x86-64 calling conventions are callable on either OS.
     /// Linux lets each thread change its SVE length independently.
+    /// For code generators whose kernels enter, leave and call Rust through
+    /// the OS's C convention.
+    pub fn check_native_convention(&self) -> Result<(), TargetError> {
+        if self.convention == CallingConvention::native(self.arch()) {
+            Ok(())
+        } else {
+            Err(TargetError::HostCalls(self.convention))
+        }
+    }
+
     pub fn check_execution(&self) -> Result<(), TargetError> {
         if Arch::host() != Some(self.arch()) {
             return Err(TargetError::Foreign(self.arch()));
@@ -247,49 +257,6 @@ impl Target {
             }
         }
         Ok(())
-    }
-}
-
-/// Ф3 bridge for crates that still read the process profile; removed once
-/// the splice backends take their target from `BuildOptions`.
-#[doc(hidden)]
-#[derive(Clone, Copy, Debug)]
-pub struct Simd {
-    pub profile: Profile,
-    pub bytes: usize,
-}
-
-#[doc(hidden)]
-pub fn simd() -> Result<Simd, TargetError> {
-    let target = Target::host()?;
-    let profile = match (Profile::from_env()?, target.arm64()) {
-        (Profile::Auto, Some(features)) if features.sve2 => Profile::Sve2,
-        (Profile::Auto, Some(features)) if features.sve => Profile::Sve,
-        (Profile::Auto, Some(_)) => Profile::Neon,
-        (profile, _) => profile,
-    };
-    Ok(Simd {
-        profile,
-        bytes: target.vector_bytes(),
-    })
-}
-
-#[doc(hidden)]
-pub fn vector_bytes() -> usize {
-    Target::host()
-        .expect("invalid SIMD configuration")
-        .vector_bytes()
-}
-
-#[doc(hidden)]
-impl Simd {
-    pub fn sve_vector_bytes(self) -> Option<usize> {
-        matches!(self.profile, Profile::Sve | Profile::Sve2)
-            .then(thread_sve_bytes)
-            .flatten()
-    }
-    pub fn check_execution(self) -> Result<(), TargetError> {
-        Target::host()?.check_execution()
     }
 }
 

@@ -53,6 +53,7 @@ pub(crate) fn error(
 fn build_module<'ctx>(
     context: &'ctx Context,
     target: &TargetMachine,
+    machine: target::Machine,
     populate: impl FnOnce(&'ctx Context, &Module<'ctx>) -> splice_core::Result<()>,
 ) -> splice_core::Result<Module<'ctx>> {
     let module = context.create_module("splice");
@@ -60,20 +61,16 @@ fn build_module<'ctx>(
     module.set_data_layout(&target.get_target_data().get_data_layout());
     tracing::debug_span!(target: "splice_core::compile", "populate_llvm_ir")
         .in_scope(|| populate(context, &module))?;
-    #[cfg(target_arch = "aarch64")]
-    {
+    if machine.scalable {
         use inkwell::attributes::{Attribute, AttributeLoc};
-        let simd = splice_target::simd()?;
-        if target::scalable(simd) {
-            // LLVM encodes the minimum vscale in the high 32 bits and the
-            // maximum in the low 32. SVE has at most 16 architectural quads.
-            let range = ((simd.bytes as u64 / 16) << 32) | 16;
-            let attr = context
-                .create_enum_attribute(Attribute::get_named_enum_kind_id("vscale_range"), range);
-            for function in module.get_functions() {
-                if !function.as_global_value().is_declaration() {
-                    function.add_attribute(AttributeLoc::Function, attr);
-                }
+        // LLVM encodes the minimum vscale in the high 32 bits and the
+        // maximum in the low 32. SVE has at most 16 architectural quads.
+        let range = ((machine.vector_bytes as u64 / 16) << 32) | 16;
+        let attr =
+            context.create_enum_attribute(Attribute::get_named_enum_kind_id("vscale_range"), range);
+        for function in module.get_functions() {
+            if !function.as_global_value().is_declaration() {
+                function.add_attribute(AttributeLoc::Function, attr);
             }
         }
     }
@@ -83,13 +80,20 @@ fn build_module<'ctx>(
     Ok(module)
 }
 
-/// Print LLVM's verified module before host-target optimization.
-pub fn to_llvm_ir(function: &Function) -> splice_core::Result<String> {
+/// Print LLVM's verified module for `target` before optimization.
+pub fn to_llvm_ir(
+    function: &Function,
+    target: &splice_core::Target,
+) -> splice_core::Result<String> {
     Llvm::version()?;
     let context = Context::create();
-    Ok(build_module(&context, &target::host_machine()?, |ctx, m| {
-        lower::populate(ctx, m, function)
-    })?
+    let machine = target::Machine::new(target);
+    Ok(build_module(
+        &context,
+        &target::machine(target, false)?,
+        machine,
+        |ctx, m| lower::populate(ctx, m, function, machine),
+    )?
     .print_to_string()
     .to_string())
 }
@@ -114,9 +118,9 @@ pub struct LlvmKernel {
     entry: Entry,
     arity: usize,
     buffers: Box<[BufferKind]>,
+    target: splice_core::Target,
     /// Compiled for SVE on a power-of-two vector length; see
     /// `target::scalable`.
-    #[cfg(target_arch = "aarch64")]
     scalable: bool,
 }
 
@@ -124,7 +128,7 @@ impl Codegen for Llvm {
     type Output = LlvmKernel;
 
     fn compile_raw(function: &Function) -> splice_core::Result<Self::Output> {
-        Self::compile_with_options(function, function.options())
+        Self::compile_raw_with_options(function, function.options())
     }
 
     fn compile_raw_with_options(
@@ -132,14 +136,6 @@ impl Codegen for Llvm {
         options: BuildOptions,
     ) -> splice_core::Result<Self::Output> {
         LlvmKernel::from_ir(function, options, true)
-    }
-
-    fn build(
-        arity: usize,
-        buffers: &[BufferKind],
-        body: splice_core::frontend::Body<'_>,
-    ) -> splice_core::Result<Self::Output> {
-        Self::build_with_options(arity, buffers, body, BuildOptions::default())
     }
 
     fn build_with_options(
@@ -156,7 +152,7 @@ impl Codegen for LlvmManualSimd {
     type Output = LlvmKernel;
 
     fn compile_raw(function: &Function) -> splice_core::Result<Self::Output> {
-        Self::compile_with_options(function, function.options())
+        Self::compile_raw_with_options(function, function.options())
     }
 
     fn compile_raw_with_options(
@@ -164,14 +160,6 @@ impl Codegen for LlvmManualSimd {
         options: BuildOptions,
     ) -> splice_core::Result<Self::Output> {
         LlvmKernel::from_ir(function, options, false)
-    }
-
-    fn build(
-        arity: usize,
-        buffers: &[BufferKind],
-        body: splice_core::frontend::Body<'_>,
-    ) -> splice_core::Result<Self::Output> {
-        Self::build_with_options(arity, buffers, body, BuildOptions::default())
     }
 
     fn build_with_options(
@@ -197,8 +185,8 @@ impl LlvmKernel {
             auto_vectorize,
             Some(function),
             options,
-            |ctx, m| {
-                lower::populate_mode(ctx, m, function, options == BuildOptions::Debug)?;
+            |ctx, m, machine| {
+                lower::populate_mode(ctx, m, function, machine, options.debug())?;
                 Ok(function.source())
             },
         )
@@ -211,14 +199,19 @@ impl LlvmKernel {
         options: BuildOptions,
         auto_vectorize: bool,
     ) -> splice_core::Result<Self> {
-        if options == BuildOptions::Debug {
-            let f = splice_core::frontend::materialize_with_options(arity, buffers, body, options)?;
+        if options.debug() {
+            let f = splice_core::frontend::materialize(arity, buffers, body, options)?;
             return Self::from_ir(&f, options, auto_vectorize);
         }
         let _span = tracing::debug_span!(target: "splice_core::compile", "compile", backend = "llvm", input = "staged").entered();
-        Self::compile(arity, buffers, auto_vectorize, None, options, |ctx, m| {
-            lower::populate_direct(ctx, m, arity, buffers, body)
-        })
+        Self::compile(
+            arity,
+            buffers,
+            auto_vectorize,
+            None,
+            options,
+            |ctx, m, machine| lower::populate_direct(ctx, m, machine, arity, buffers, body),
+        )
     }
 
     fn compile(
@@ -230,14 +223,12 @@ impl LlvmKernel {
         populate: impl for<'ctx> FnOnce(
             &'ctx Context,
             &Module<'ctx>,
+            target::Machine,
         ) -> splice_core::Result<
             Option<&'static splice_core::frontend::KernelSource>,
         >,
     ) -> splice_core::Result<Self> {
         Llvm::version()?;
-        // The target machine makes the same choice on this thread.
-        #[cfg(target_arch = "aarch64")]
-        let scalable = target::scalable(splice_target::simd()?);
         let (owner, entry, registration) =
             jit::Jit::compile(auto_vectorize, source, options, populate)?;
         Ok(Self {
@@ -246,20 +237,19 @@ impl LlvmKernel {
             entry,
             arity,
             buffers: buffers.into(),
-            #[cfg(target_arch = "aarch64")]
-            scalable,
+            target: options.target,
+            scalable: target::Machine::new(&options.target).scalable,
         })
     }
 }
 
 impl Executable for LlvmKernel {
     fn call(&self, args: &[i32], buffers: &mut [BufferArg<'_>]) -> Result<i32, CallError> {
-        #[cfg(target_arch = "aarch64")]
-        {
-            let simd = splice_target::simd().expect("compilation validated the selected profile");
-            simd.check_execution()?;
-            if self.scalable && !target::scalable(simd) {
-                return Err(splice_target::TargetError::VectorLengthNotPowerOfTwo.into());
+        // SVE code needs the calling thread's vector length to match.
+        if self.target.sve() {
+            self.target.check_execution()?;
+            if self.scalable && !target::scalable(&self.target) {
+                return Err(splice_core::TargetError::VectorLengthNotPowerOfTwo.into());
             }
         }
         if self.arity != args.len() {
@@ -294,6 +284,10 @@ impl Executable for LlvmKernel {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn options() -> BuildOptions {
+        BuildOptions::host(splice_core::Mode::Release).unwrap()
+    }
     use splice_core::kernel;
 
     #[test]
@@ -325,15 +319,16 @@ mod tests {
             b.ret(value);
             Ok(())
         }
-        let ir = splice_core::frontend::materialize(1, &[], Box::new(staged)).unwrap();
-        let target = target::host_machine().unwrap();
+        let ir = splice_core::frontend::materialize(1, &[], Box::new(staged), options()).unwrap();
+        let machine = target::Machine::new(&options().target);
+        let target = target::machine(&options().target, false).unwrap();
         let ctx = Context::create();
         for direct in [false, true] {
-            let m = build_module(&ctx, &target, |ctx, m| {
+            let m = build_module(&ctx, &target, machine, |ctx, m| {
                 if direct {
-                    lower::populate_direct(ctx, m, 1, &[], Box::new(staged)).map(drop)
+                    lower::populate_direct(ctx, m, machine, 1, &[], Box::new(staged)).map(drop)
                 } else {
-                    lower::populate(ctx, m, &ir)
+                    lower::populate(ctx, m, &ir, machine)
                 }
             })
             .unwrap();
@@ -397,7 +392,7 @@ mod tests {
         ir.push_str("  ret void\n}\n");
 
         let ctx = Context::create();
-        let target = target::host_machine().unwrap();
+        let target = target::machine(&options().target, false).unwrap();
         for auto_vectorize in [true, false] {
             let text = MemoryBuffer::create_from_memory_range_copy(ir.as_bytes(), "vectorization");
             let m = ctx.create_module_from_ir(text).unwrap();
@@ -439,17 +434,18 @@ mod tests {
             b.ret(offset);
             Ok(())
         }
-        let ir = frontend::materialize(1, &kinds, Box::new(stage)).unwrap();
-        let lanes = Element::U16.lanes();
+        let ir = frontend::materialize(1, &kinds, Box::new(stage), options()).unwrap();
+        let lanes = Element::U16.lanes(options().target.vector_bytes());
         let ty = format!("<{lanes} x i16>");
-        let target = target::host_machine().unwrap();
+        let machine = target::Machine::new(&options().target);
+        let target = target::machine(&options().target, false).unwrap();
         let ctx = Context::create();
         for direct in [true, false] {
-            let m = build_module(&ctx, &target, |ctx, m| {
+            let m = build_module(&ctx, &target, machine, |ctx, m| {
                 if direct {
-                    lower::populate_direct(ctx, m, 1, &kinds, Box::new(stage)).map(drop)
+                    lower::populate_direct(ctx, m, machine, 1, &kinds, Box::new(stage)).map(drop)
                 } else {
-                    lower::populate(ctx, m, &ir)
+                    lower::populate(ctx, m, &ir, machine)
                 }
             })
             .unwrap();
@@ -565,16 +561,17 @@ mod tests {
             Some(0)
         }
 
-        let ir = frontend::materialize(1, &kinds, Box::new(stage)).unwrap();
-        let target = target::host_machine().unwrap();
+        let ir = frontend::materialize(1, &kinds, Box::new(stage), options()).unwrap();
+        let machine = target::Machine::new(&options().target);
+        let target = target::machine(&options().target, false).unwrap();
         let ctx = Context::create();
-        let n = Element::I32.lanes();
+        let n = Element::I32.lanes(options().target.vector_bytes());
         for direct in [false, true] {
-            let m = build_module(&ctx, &target, |ctx, m| {
+            let m = build_module(&ctx, &target, machine, |ctx, m| {
                 if direct {
-                    lower::populate_direct(ctx, m, 1, &kinds, Box::new(stage)).map(drop)
+                    lower::populate_direct(ctx, m, machine, 1, &kinds, Box::new(stage)).map(drop)
                 } else {
-                    lower::populate(ctx, m, &ir)
+                    lower::populate(ctx, m, &ir, machine)
                 }
             })
             .unwrap();

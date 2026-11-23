@@ -1,7 +1,6 @@
 //! Generated AArch64 code run against independently computed results.
 use crate::filetests::input;
 use crate::{CallError, Inlining, ScalarKernel, hir::Function};
-use splice_target::Profile;
 
 fn parse(text: &str) -> std::sync::Arc<Function> {
     let lines: input::Lines<'_> = text
@@ -1104,8 +1103,8 @@ fn wide_arithmetic_and_iota_preserve_lane_pairs() {
 
 #[test]
 fn sve_logical_width_and_shorter_thread_are_checked() {
-    let config = splice_target::simd().unwrap();
-    let lanes = config.bytes / 4;
+    let config = crate::test_target::target();
+    let lanes = config.vector_bytes() / 4;
     let f = parse(
         "
         fn main dst:ptr src:ptr -> i32
@@ -1131,7 +1130,7 @@ fn sve_logical_width_and_shorter_thread_are_checked() {
     );
     assert!(output[lanes..].iter().all(|&v| v == -1));
 
-    if config.bytes > 16 && matches!(config.profile, Profile::Sve | Profile::Sve2) {
+    if config.vector_bytes() > 16 && config.sve() {
         std::thread::spawn(move || {
             unsafe extern "C" {
                 fn prctl(option: i32, ...) -> i32;
@@ -1152,7 +1151,7 @@ fn sve_logical_width_and_shorter_thread_are_checked() {
                 result,
                 Err(CallError::Target(
                     splice_target::TargetError::VectorLength {
-                        required: config.bytes,
+                        required: config.vector_bytes(),
                         available: 16
                     }
                 ))

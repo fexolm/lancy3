@@ -1,8 +1,8 @@
-use splice::frontend::{KernelBuilder, materialize_with_options};
+use splice::frontend::{KernelBuilder, materialize};
 use splice::hir::{Buffer, ContextSlice, Instr, RustContextTarget};
 use splice::{
-    BufferArg, BufferKind, BuildOptions, Codegen, ContextArguments, Executable, StaticRustCall,
-    StaticRustSymbol,
+    BufferArg, BufferKind, BuildOptions, Codegen, ContextArguments, Executable, Mode,
+    StaticRustCall, StaticRustSymbol,
 };
 use splice_text::Text;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -29,9 +29,21 @@ fn static_packets_can_have_no_operands() {
     }
 
     fn check<B: Codegen<Output: Executable>>() {
-        let ir = materialize_with_options(0, &[], Box::new(body), BuildOptions::Release).unwrap();
+        let ir = materialize(
+            0,
+            &[],
+            Box::new(body),
+            BuildOptions::host(Mode::Release).unwrap(),
+        )
+        .unwrap();
         for kernel in [
-            B::build_with_options(0, &[], Box::new(body), BuildOptions::Release).unwrap(),
+            B::build_with_options(
+                0,
+                &[],
+                Box::new(body),
+                BuildOptions::host(Mode::Release).unwrap(),
+            )
+            .unwrap(),
             B::compile(&ir).unwrap(),
         ] {
             assert_eq!(kernel.call(&[], &mut []).unwrap(), 19);
@@ -102,11 +114,11 @@ fn forward_slices(builder: &mut dyn KernelBuilder) -> splice::Result<()> {
 
 #[test]
 fn static_packets_keep_nested_slice_borrows_and_effect_order() {
-    let ir = materialize_with_options(
+    let ir = materialize(
         1,
         &PARENT_KINDS,
         Box::new(forward_slices),
-        BuildOptions::Release,
+        BuildOptions::host(Mode::Release).unwrap(),
     )
     .unwrap();
     let child = ir
@@ -123,7 +135,7 @@ fn static_packets_keep_nested_slice_borrows_and_effect_order() {
     )));
     #[cfg(feature = "llvm")]
     {
-        let text = splice_llvm::to_llvm_ir(&ir).unwrap();
+        let text = splice_llvm::to_llvm_ir(&ir, &ir.options().target).unwrap();
         assert!(!text.contains("nocapture") && !text.contains("captures(none)"));
         assert!(text.contains("readonly") && text.contains("noalias"));
     }
@@ -139,7 +151,7 @@ fn static_packets_keep_nested_slice_borrows_and_effect_order() {
                 1,
                 &PARENT_KINDS,
                 Box::new(forward_slices),
-                BuildOptions::Release,
+                BuildOptions::host(Mode::Release).unwrap(),
             )
             .unwrap(),
             B::compile(ir).unwrap(),
@@ -210,10 +222,16 @@ fn invalid_static_packet_operands_are_rejected_before_native_codegen() {
             Ok(())
         };
         assert!(
-            materialize_with_options(1, &kinds, Box::new(body), BuildOptions::Release).is_err()
+            materialize(
+                1,
+                &kinds,
+                Box::new(body),
+                BuildOptions::host(Mode::Release).unwrap()
+            )
+            .is_err()
         );
         splice_testkit::each_backend!(B => assert!(
-            B::build_with_options(1, &kinds, Box::new(body), BuildOptions::Release).is_err()
+            B::build_with_options(1, &kinds, Box::new(body), BuildOptions::host(Mode::Release).unwrap()).is_err()
         ));
     }
 }
@@ -221,13 +239,23 @@ fn invalid_static_packet_operands_are_rejected_before_native_codegen() {
 #[test]
 fn static_rust_adapters_cannot_reinterpret_a_slice_element_type() {
     const KINDS: [BufferKind; 2] = [BufferKind::Read, BufferKind::Write];
-    let ir =
-        materialize_with_options(1, &KINDS, Box::new(modify_child), BuildOptions::Release).unwrap();
+    let ir = materialize(
+        1,
+        &KINDS,
+        Box::new(modify_child),
+        BuildOptions::host(Mode::Release).unwrap(),
+    )
+    .unwrap();
 
     fn check<B: Codegen<Output: Executable>>(ir: &splice::Function) {
         for kernel in [
-            B::build_with_options(1, &KINDS, Box::new(modify_child), BuildOptions::Release)
-                .unwrap(),
+            B::build_with_options(
+                1,
+                &KINDS,
+                Box::new(modify_child),
+                BuildOptions::host(Mode::Release).unwrap(),
+            )
+            .unwrap(),
             B::compile(ir).unwrap(),
         ] {
             let input = [12_i32];

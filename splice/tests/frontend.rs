@@ -1,6 +1,11 @@
 use splice::hir::{Binary, BufferKind, FunctionBuilder, Instr};
 use splice::{BufferArg, CallError, Codegen, Executable, Function, Trap, kernel};
 
+/// This machine's `SPLICE_SIMD` target in the mode of this test build.
+fn options() -> splice::BuildOptions {
+    splice::BuildOptions::host(splice::Mode::for_profile(cfg!(debug_assertions))).unwrap()
+}
+
 // A backend used only to inspect the IR handed off by build().
 struct Inspect(Function);
 
@@ -158,10 +163,11 @@ fn slice_parameters_expose_their_alias_contract() {
             panic!("expected direct staging")
         }
 
-        fn build(
+        fn build_with_options(
             _: usize,
             kinds: &[BufferKind],
             _: splice::frontend::Body<'_>,
+            _: splice::BuildOptions,
         ) -> splice::Result<Self::Output> {
             Ok(kinds.to_vec())
         }
@@ -315,7 +321,7 @@ fn slice_kernel_compiles_the_complete_loop() {
 #[test]
 fn verification_rechecks_a_loop_after_a_delayed_predecessor() {
     let build = |initialize_delayed_arm| {
-        let mut b = FunctionBuilder::new(2);
+        let mut b = FunctionBuilder::new(options(), 2);
         for _ in 0..64 {
             b.local();
         }
@@ -373,7 +379,7 @@ fn verification_rechecks_a_loop_after_a_delayed_predecessor() {
 #[test]
 fn verification_resolves_jumps_even_in_unreachable_code() {
     let body = || {
-        let mut b = FunctionBuilder::new(1);
+        let mut b = FunctionBuilder::new(options(), 1);
         b.ret(b.arg(0));
         b
     };
@@ -421,7 +427,12 @@ mod directly_staged {
         fn compile_raw(_: &Function) -> splice::Result<Self> {
             panic!("direct build materialized portable IR")
         }
-        fn build(arity: usize, kinds: &[BufferKind], body: Body<'_>) -> splice::Result<Self> {
+        fn build_with_options(
+            arity: usize,
+            kinds: &[BufferKind],
+            body: Body<'_>,
+            _: splice::BuildOptions,
+        ) -> splice::Result<Self> {
             assert!(kinds.is_empty());
             let mut builder = Self {
                 args: arity,

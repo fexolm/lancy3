@@ -1,7 +1,6 @@
 use super::{Llvm, build_module, jit, lower, target};
 use inkwell::{context::Context, targets::FileType};
-use splice_core::{Codegen, kernel, simd::Lane};
-use splice_target::{Profile, simd};
+use splice_core::{Codegen, Target, kernel, simd::Lane};
 
 #[kernel(crate = splice_core)]
 fn xor_three(a: &[i32], b: &[i32], c: &[i32], out: &mut [i32]) -> i32 {
@@ -14,36 +13,37 @@ fn xor_three(a: &[i32], b: &[i32], c: &[i32], out: &mut [i32]) -> i32 {
 
 #[test]
 fn emits_aarch64_simd_and_preserves_the_logical_width() {
-    let config = simd().unwrap();
+    let config = Target::host().unwrap();
     let ir = xor_three::ir().unwrap();
-    let target = target::host_machine().unwrap();
+    let machine = target::Machine::new(&config);
+    let target = target::machine(&config, false).unwrap();
     let context = Context::create();
-    let module = build_module(&context, &target, |ctx, m| lower::populate(ctx, m, &ir)).unwrap();
+    let module = build_module(&context, &target, machine, |ctx, m| {
+        lower::populate(ctx, m, &ir, machine)
+    })
+    .unwrap();
     jit::optimize(&module, &target, true).unwrap();
     let assembly = target
         .write_to_memory_buffer(&module, FileType::Assembly)
         .unwrap();
     let assembly = std::str::from_utf8(assembly.as_slice()).unwrap();
-    match config.profile {
-        Profile::Sve | Profile::Sve2 if config.bytes >= 32 && target::scalable(config) => {
+    if config.sve() && config.vector_bytes() >= 32 {
+        if target::scalable(&config) {
             assert!(assembly.contains("ld1w\t{ z"), "{assembly}");
             assert!(assembly.contains("st1w\t{ z"), "{assembly}");
             assert_eq!(
                 assembly.contains("eor3\tz"),
-                config.profile == Profile::Sve2,
+                config.arm64().unwrap().sve2,
                 "{assembly}"
             );
-        }
-        Profile::Sve | Profile::Sve2 if config.bytes >= 32 => {
+        } else {
             // A non-power-of-two vector length gets NEON code.
             assert!(assembly.contains("eor\tv"), "{assembly}");
             assert!(!assembly.contains("\tz"), "{assembly}");
         }
-        Profile::Neon => {
-            assert!(assembly.contains("eor\tv"), "{assembly}");
-            assert!(!assembly.contains("eor3\tz"), "{assembly}");
-        }
-        _ => {}
+    } else if !config.sve() {
+        assert!(assembly.contains("eor\tv"), "{assembly}");
+        assert!(!assembly.contains("eor3\tz"), "{assembly}");
     }
 
     let n = Lane::<i32>::lanes();
@@ -76,8 +76,8 @@ fn emits_aarch64_simd_and_preserves_the_logical_width() {
 
 #[test]
 fn rejects_a_shorter_sve_thread_before_writing() {
-    let config = simd().unwrap();
-    if !matches!(config.profile, Profile::Sve | Profile::Sve2) || config.bytes == 16 {
+    let config = Target::host().unwrap();
+    if !config.sve() || config.vector_bytes() == 16 {
         return;
     }
     let kernel = xor_three::build::<Llvm>(xor_three::BuildArgs {}).unwrap();
@@ -88,7 +88,7 @@ fn rejects_a_shorter_sve_thread_before_writing() {
         // only this test thread. Variadic arguments are unsigned long.
         let vl = unsafe { libc::prctl(PR_SVE_SET_VL, 16usize, 0usize, 0usize, 0usize) };
         assert_eq!(vl, 16);
-        let n = config.bytes / 4;
+        let n = config.vector_bytes() / 4;
         let input = vec![10; n];
         let mut out = vec![77; n];
         let result = kernel.call(xor_three::CallArgs {
@@ -121,8 +121,8 @@ fn set_sve_vl(bytes: usize) -> Option<()> {
 
 #[test]
 fn sve_code_is_only_generated_and_run_at_power_of_two_vector_lengths() {
-    let config = simd().unwrap();
-    if !matches!(config.profile, Profile::Sve | Profile::Sve2) || config.bytes != 32 {
+    let config = Target::host().unwrap();
+    if !config.sve() || config.vector_bytes() != 32 {
         return;
     }
     let build = |vl| {

@@ -268,7 +268,7 @@ mod tests {
             .unwrap_or(0);
         Function {
             source: None,
-            options: crate::BuildOptions::default(),
+            options: crate::BuildOptions::host(crate::Mode::Release).unwrap(),
             arity,
             buffer_kinds,
             needs_status: false,

@@ -23,6 +23,7 @@ use std::{
 
 struct Graph<'a, 'ctx> {
     ctx: &'ctx Context,
+    machine: crate::target::Machine,
     module: &'a Module<'ctx>,
     count: Cell<usize>,
     source: Cell<Option<&'static KernelSource>>,
@@ -74,10 +75,14 @@ impl<'ctx> Graph<'_, 'ctx> {
         stage: StagedBody<'_>,
     ) -> splice_core::Result<bool> {
         let builder = self.ctx.create_builder();
+        let unit = body::Unit {
+            ctx: self.ctx,
+            module: self.module,
+            machine: self.machine,
+        };
         let native = Body::start(
-            self.ctx,
+            unit,
             &builder,
-            self.module,
             function,
             arity,
             std::iter::repeat_n(ValueType::Scalar, arity),
@@ -113,12 +118,14 @@ impl<'ctx> Graph<'_, 'ctx> {
 pub(crate) fn populate_direct<'ctx>(
     ctx: &'ctx Context,
     module: &Module<'ctx>,
+    machine: crate::target::Machine,
     arity: usize,
     kinds: &[BufferKind],
     stage: StagedBody<'_>,
 ) -> splice_core::Result<Option<&'static KernelSource>> {
     let graph = Graph {
         ctx,
+        machine,
         module,
         count: Cell::new(0),
         source: Cell::new(None),

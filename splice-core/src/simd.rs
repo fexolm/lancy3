@@ -25,8 +25,17 @@ pub enum Element {
     F64,
 }
 
+/// Width of the reference `Lane<T>` that runs a kernel as ordinary Rust: the
+/// default target of this machine (`SPLICE_SIMD`). Compiled kernels use the
+/// width of their `BuildOptions::target` instead.
+///
+/// # Panics
+/// If `SPLICE_SIMD` names a profile this machine cannot run.
 pub fn vector_bytes() -> usize {
-    splice_target::vector_bytes()
+    match splice_target::Target::host() {
+        Ok(target) => target.vector_bytes(),
+        Err(error) => panic!("invalid SPLICE_SIMD configuration: {error}"),
+    }
 }
 
 impl Element {
@@ -37,8 +46,9 @@ impl Element {
             Self::I64 | Self::F64 => 8,
         }
     }
-    pub fn lanes(self) -> usize {
-        vector_bytes() / self.bytes()
+    /// Lanes in a vector of `vector_bytes`.
+    pub const fn lanes(self, vector_bytes: usize) -> usize {
+        vector_bytes / self.bytes()
     }
     pub const fn index(self) -> Self {
         match self {
@@ -196,7 +206,7 @@ mask_binary!(BitXor, bitxor);
 
 impl<T: LaneElement> Lane<T> {
     pub fn lanes() -> usize {
-        T::ELEMENT.lanes()
+        T::ELEMENT.lanes(vector_bytes())
     }
     /// Activate the first min(count, lanes()) lanes. Useful for the last partial block.
     pub fn first_n(count: usize) -> Mask<T> {

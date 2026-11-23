@@ -1,4 +1,4 @@
-use splice::{BuildOptions, Codegen, kernel};
+use splice::{BuildOptions, Codegen, Mode, kernel};
 use splice_text::Text;
 use std::collections::BTreeSet;
 use std::fmt::{Debug, Write};
@@ -60,7 +60,7 @@ fn staged_and_portable_compilation_report_their_nested_stages() {
     let closed = Closed::default();
     let subscriber = tracing_subscriber::registry().with(closed.clone());
     tracing::subscriber::with_default(subscriber, || {
-        let options = BuildOptions::Release;
+        let options = BuildOptions::host(Mode::Release).unwrap();
         let ir = increment::ir_with_options(options).unwrap();
         splice_testkit::each_backend!(B => {
             for kernel in [

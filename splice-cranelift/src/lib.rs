@@ -23,11 +23,13 @@ use std::sync::Mutex;
 /// Compile a specialized kernel or a portable Splice function with Cranelift.
 pub struct Cranelift;
 
-fn builder(debug: bool) -> Result<JITBuilder> {
+/// Cranelift settings for the build target. Every ISA extension comes from
+/// the target, so a profile selects the same instructions on every machine.
+fn builder(target: &splice_core::Target, debug: bool) -> Result<JITBuilder> {
     use cranelift_codegen::settings::{self, Configurable};
-    use splice_target::Profile;
 
-    let simd = splice_target::simd()?;
+    target.check_execution()?;
+    target.check_native_convention()?;
     let mut flags = settings::builder();
     for (name, value) in [
         ("opt_level", if debug { "none" } else { "speed" }),
@@ -45,40 +47,44 @@ fn builder(debug: bool) -> Result<JITBuilder> {
             .set(name, value)
             .map_err(|e| splice_core::BuildError::backend("cranelift", e))?;
     }
-    let auto = simd.profile == Profile::Auto;
-    let isa = cranelift_native::builder_with_options(auto)
+    let mut isa = cranelift_native::builder_with_options(false)
         .map_err(splice_core::BuildError::unsupported)?;
-    #[cfg(target_arch = "x86_64")]
-    let isa = {
-        let mut isa = isa;
-        let profile = simd.profile;
-        // Cranelift has no AVX10 setting. Enable only instructions that it
-        // models and the OS reports under their legacy feature names.
-        for (enabled, flag) in [
-            (is_x86_feature_detected!("ssse3"), "has_ssse3"),
-            (is_x86_feature_detected!("sse4.1"), "has_sse41"),
-            (is_x86_feature_detected!("sse4.2"), "has_sse42"),
-            (
-                profile != Profile::Sse && is_x86_feature_detected!("avx"),
-                "has_avx",
-            ),
-            (
-                profile != Profile::Sse && is_x86_feature_detected!("avx2"),
-                "has_avx2",
-            ),
-            (profile == Profile::Avx512, "has_avx512f"),
-        ] {
-            if !auto && enabled {
-                isa.enable(flag)
-                    .map_err(|e| splice_core::BuildError::backend("cranelift", e))?;
-            }
+    for (flag, enabled) in isa_flags(target) {
+        if enabled {
+            isa.enable(flag)
+                .map_err(|e| splice_core::BuildError::backend("cranelift", e))?;
         }
-        isa
-    };
+    }
     let isa = isa
         .finish(settings::Flags::new(flags))
         .map_err(|e| splice_core::BuildError::backend("cranelift", e))?;
     Ok(JITBuilder::with_isa(isa, default_libcall_names()))
+}
+
+/// The Cranelift ISA settings for a target. Cranelift has no AVX10 or SVE
+/// settings; it uses 128-bit vectors on AArch64.
+fn isa_flags(target: &splice_core::Target) -> Vec<(&'static str, bool)> {
+    let Some(isa) = target.x86() else {
+        return Vec::new();
+    };
+    vec![
+        ("has_sse3", isa.sse3),
+        ("has_ssse3", isa.ssse3),
+        ("has_sse41", isa.sse41),
+        ("has_sse42", isa.sse42),
+        ("has_popcnt", isa.popcnt),
+        ("has_lzcnt", isa.lzcnt),
+        ("has_bmi1", isa.bmi1),
+        ("has_bmi2", isa.bmi2),
+        ("has_avx", isa.avx),
+        ("has_avx2", isa.avx2),
+        ("has_fma", isa.fma),
+        ("has_avx512f", isa.avx512f),
+        ("has_avx512vl", isa.vl),
+        ("has_avx512dq", isa.dq),
+        ("has_avx512bitalg", isa.bitalg),
+        ("has_avx512vbmi", isa.vbmi),
+    ]
 }
 
 #[repr(C)]
@@ -118,18 +124,7 @@ impl Codegen for Cranelift {
     type Output = CraneliftKernel;
 
     fn compile_raw(function: &Function) -> Result<CraneliftKernel> {
-        Self::compile_with_options(function, function.options())
-    }
-
-    fn build_with_options(
-        arity: usize,
-        kinds: &[BufferKind],
-        body: splice_core::frontend::Body<'_>,
-        options: BuildOptions,
-    ) -> Result<CraneliftKernel> {
-        Self::compile(&splice_core::frontend::materialize_with_options(
-            arity, kinds, body, options,
-        )?)
+        Self::compile_raw_with_options(function, function.options())
     }
 
     fn compile_raw_with_options(
@@ -137,11 +132,12 @@ impl Codegen for Cranelift {
         options: BuildOptions,
     ) -> Result<CraneliftKernel> {
         let _span = tracing::debug_span!(target: "splice_core::compile", "compile", backend = "cranelift", input = "portable").entered();
-        let debug = options == BuildOptions::Debug;
+        let debug = options.debug();
+        let target = options.target;
         splice_jit::prepare_perf_map();
-        let mut memory = CodeMemory(Some(JITModule::new(builder(debug)?)));
+        let mut memory = CodeMemory(Some(JITModule::new(builder(&target, debug)?)));
         let module = memory.0.as_mut().unwrap();
-        let mut kernel = module::KernelModule::lower(module, function, debug)?;
+        let mut kernel = module::KernelModule::lower(module, function, &target, debug)?;
         let id = kernel.entry;
         let sources = std::mem::take(&mut kernel.functions);
         let mut symbols = Vec::new();
@@ -166,7 +162,7 @@ impl Codegen for Cranelift {
             },
         )?;
         let address = module.get_finalized_function(id);
-        let registration = debug_info::publish(module, symbols, debug)?;
+        let registration = debug_info::publish(module, symbols, target.vector_bytes(), debug)?;
         // SAFETY: KernelModule declares the entry with the host C calling convention,
         // two pointer parameters and an i64 return. The kernel owns its module.
         let entry = unsafe { std::mem::transmute::<*const u8, Entry>(address) };
@@ -208,5 +204,42 @@ impl Executable for CraneliftKernel {
         decode_status(status)
             .map(|word| word as i32)
             .map_err(CallError::from)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::isa_flags;
+    use splice_core::{Target, target::Profile};
+
+    fn enabled(profile: Profile) -> Vec<&'static str> {
+        let target = Target::from_profile(profile).unwrap();
+        isa_flags(&target)
+            .into_iter()
+            .filter_map(|(flag, on)| on.then_some(flag))
+            .collect()
+    }
+
+    #[test]
+    fn fixed_profiles_select_the_same_cranelift_isa_on_every_machine() {
+        assert!(enabled(Profile::Sse).is_empty());
+        let v3 = [
+            "has_sse3",
+            "has_ssse3",
+            "has_sse41",
+            "has_sse42",
+            "has_popcnt",
+            "has_lzcnt",
+            "has_bmi1",
+            "has_bmi2",
+            "has_avx",
+            "has_avx2",
+            "has_fma",
+        ];
+        assert_eq!(enabled(Profile::Avx2), v3);
+        let mut v4 = v3.to_vec();
+        v4.extend(["has_avx512f", "has_avx512vl", "has_avx512dq"]);
+        assert_eq!(enabled(Profile::Avx512), v4);
+        assert!(enabled(Profile::Neon).is_empty());
     }
 }

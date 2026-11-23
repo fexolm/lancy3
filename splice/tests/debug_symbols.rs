@@ -1,5 +1,5 @@
 use splice::{
-    BuildOptions, CallError, Codegen, Executable, Trap, debug, hir::Instr, kernel, simd::Lane,
+    BuildOptions, CallError, Codegen, Executable, Mode, Trap, debug, hir::Instr, kernel, simd::Lane,
 };
 
 #[kernel]
@@ -43,12 +43,12 @@ fn irrefutable_pattern(#[comptime] plan: Option<std::convert::Infallible>, flag:
 }
 
 fn exercise<B: Codegen<Output: Executable>>() {
-    let debug = BuildOptions::Debug;
+    let debug = BuildOptions::host(Mode::Debug).unwrap();
     let ir = test_kernel::ir_with_options(debug).unwrap();
     for kernel in [
         test_kernel::build_with_options::<B>(debug, test_kernel::BuildArgs {}).unwrap(),
         B::compile(&ir).unwrap(),
-        B::compile_with_options(&ir, BuildOptions::Release).unwrap(),
+        B::compile_with_options(&ir, BuildOptions::host(Mode::Release).unwrap()).unwrap(),
     ] {
         let mut buf = [0, 0];
         assert_eq!(
@@ -83,9 +83,9 @@ fn staging_preserves_names_types_and_locations_in_debug_only() {
     let default_ir = test_kernel::ir().unwrap();
     assert_eq!(
         default_ir.options(),
-        BuildOptions::for_profile(cfg!(debug_assertions))
+        BuildOptions::host(Mode::for_profile(cfg!(debug_assertions))).unwrap()
     );
-    let ir = test_kernel::ir_with_options(BuildOptions::Debug).unwrap();
+    let ir = test_kernel::ir_with_options(BuildOptions::host(Mode::Debug).unwrap()).unwrap();
     let points: Vec<_> = ir
         .instructions()
         .iter()
@@ -100,8 +100,8 @@ fn staging_preserves_names_types_and_locations_in_debug_only() {
             .all(|p| p.location.file.ends_with("debug_symbols.rs") && p.location.line > 10)
     );
     assert!(points.iter().any(|p| {
-        p.slots(&ir)
-            .any(|(var, ty, _)| var.name == "lanes" && matches!(ty, debug::Type::Vector(_)))
+        p.slots(&ir, ir.options().target.vector_bytes())
+            .any(|(var, ty, _)| var.name == "lanes" && matches!(ty, debug::Type::Vector { .. }))
     }));
     assert!(
         points
@@ -119,7 +119,7 @@ fn staging_preserves_names_types_and_locations_in_debug_only() {
     assert!(points.iter().any(|p| p.variables.iter().any(|v| {
         v.name == "step" && matches!(v.value, debug::Value::Constant(Some(value)) if value.parts() == (debug::ConstantType::Signed(4), 1))
     })));
-    let release = test_kernel::ir_with_options(BuildOptions::Release).unwrap();
+    let release = test_kernel::ir_with_options(BuildOptions::host(Mode::Release).unwrap()).unwrap();
     assert!(
         release
             .instructions()
@@ -130,8 +130,9 @@ fn staging_preserves_names_types_and_locations_in_debug_only() {
 
 #[test]
 fn selected_match_patterns_and_guards_have_their_own_source_points() {
-    irrefutable_pattern::ir_with_options(BuildOptions::Debug, None).unwrap();
-    let ir = pattern_scopes::ir_with_options(BuildOptions::Debug, Some(9)).unwrap();
+    irrefutable_pattern::ir_with_options(BuildOptions::host(Mode::Debug).unwrap(), None).unwrap();
+    let ir =
+        pattern_scopes::ir_with_options(BuildOptions::host(Mode::Debug).unwrap(), Some(9)).unwrap();
     let locations: std::collections::BTreeSet<_> = ir.instructions().iter().filter_map(|inst| {
         let Instr::Debug(point) = inst else { return None; };
         point.variables.iter().any(|var| {
@@ -184,10 +185,8 @@ fn observe_partially_assigned(
 }
 
 fn exercise_partial<B: Codegen<Output: Executable>>() {
-    let options = BuildOptions::Debug;
-    let ir =
-        splice::frontend::materialize_with_options(1, &[], Box::new(partially_assigned), options)
-            .unwrap();
+    let options = BuildOptions::host(Mode::Debug).unwrap();
+    let ir = splice::frontend::materialize(1, &[], Box::new(partially_assigned), options).unwrap();
     assert!(
         ir.instructions()
             .iter()
@@ -201,7 +200,10 @@ fn exercise_partial<B: Codegen<Output: Executable>>() {
             assert_eq!(kernel.call(&[flag], &mut []), Ok(flag));
         }
     }
-    for options in [BuildOptions::Debug, BuildOptions::Release] {
+    for options in [
+        BuildOptions::host(Mode::Debug).unwrap(),
+        BuildOptions::host(Mode::Release).unwrap(),
+    ] {
         assert!(B::build_with_options(1, &[], Box::new(partially_returned), options).is_err());
     }
 }
@@ -226,7 +228,7 @@ fn gdb_shows_runtime_bools_as_rust_bools() {
     const CHILD: &str = "SPLICE_GDB_BOOL_CHILD";
     if std::env::var_os(CHILD).is_some() {
         fn run<B: Codegen<Output: Executable>>() {
-            let options = BuildOptions::Debug;
+            let options = BuildOptions::host(Mode::Debug).unwrap();
             let code = flagged::build_with_options::<B>(options, flagged::BuildArgs {}).unwrap();
             assert_eq!(code.call(flagged::CallArgs { x: 4 }), Ok(8));
         }

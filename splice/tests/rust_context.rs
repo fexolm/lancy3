@@ -426,7 +426,7 @@ fn opaque_context_operations_receive_all_scalar_words() {
     assert_eq!(shapes, [(4, 0), (3, 1)]);
     #[cfg(feature = "llvm")]
     {
-        let llvm = splice_llvm::to_llvm_ir(ir.as_inner()).unwrap();
+        let llvm = splice_llvm::to_llvm_ir(ir.as_inner(), &ir.as_inner().options().target).unwrap();
         assert_eq!(llvm.matches("rust_context_packet = alloca").count(), 1);
     }
 

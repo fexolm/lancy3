@@ -3,13 +3,18 @@ use splice_core::{BufferArg, CallError, Codegen, Executable, Trap};
 use splice_llvm::Llvm;
 use std::sync::Arc;
 
+/// This machine's `SPLICE_SIMD` target in the mode of this test build.
+fn options() -> splice_core::BuildOptions {
+    splice_core::BuildOptions::host(splice_core::Mode::for_profile(cfg!(debug_assertions))).unwrap()
+}
+
 #[test]
 fn all_binary_ops_match_splice_at_signed_boundaries() {
     use Binary::*;
     let ops = [
         Add, Sub, Mul, And, Or, Xor, Eq, Ne, Lt, Le, Gt, Ge, Shl, Shr, Min, Max, Div, Rem,
     ];
-    let mut b = FunctionBuilder::new(3);
+    let mut b = FunctionBuilder::new(options(), 3);
     let (kind, left, right) = (b.arg(0), b.arg(1), b.arg(2));
     for (i, &op) in ops.iter().enumerate() {
         let id = b.constant(i as i32);
@@ -40,7 +45,8 @@ fn all_binary_ops_match_splice_at_signed_boundaries() {
 
 #[test]
 fn checked_calls_remap_buffers_and_stop_after_the_first_fault() {
-    let mut child = FunctionBuilder::with_buffers(2, vec![BufferKind::Write, BufferKind::Read]);
+    let mut child =
+        FunctionBuilder::with_buffers(options(), 2, vec![BufferKind::Write, BufferKind::Read]);
     let zero = child.constant(0);
     let one = child.constant(1);
     let mark = child.constant(42);
@@ -51,7 +57,8 @@ fn checked_calls_remap_buffers_and_stop_after_the_first_fault() {
     let length = child.buffer_len(Buffer(1));
     child.ret(length);
 
-    let mut parent = FunctionBuilder::with_buffers(2, vec![BufferKind::Read, BufferKind::Write]);
+    let mut parent =
+        FunctionBuilder::with_buffers(options(), 2, vec![BufferKind::Read, BufferKind::Write]);
     let length = parent
         .call_with_buffers(
             child.finish().unwrap(),
@@ -92,13 +99,13 @@ fn checked_calls_remap_buffers_and_stop_after_the_first_fault() {
 
 #[test]
 fn shared_callees_loops_and_unreachable_tails_form_valid_llvm_blocks() {
-    let mut step = FunctionBuilder::new(1);
+    let mut step = FunctionBuilder::new(options(), 1);
     let one = step.constant(1);
     let next = step.binary(Binary::Add, step.arg(0), one);
     step.ret(next);
     let step = Arc::new(step.finish().unwrap());
 
-    let mut b = FunctionBuilder::new(1);
+    let mut b = FunctionBuilder::new(options(), 1);
     let i = b.constant(0);
     let (head, body, done, orphan) = (b.label(), b.label(), b.label(), b.label());
     b.mark(head);
@@ -119,7 +126,7 @@ fn shared_callees_loops_and_unreachable_tails_form_valid_llvm_blocks() {
     b.mark(tail);
     b.constant(11);
     let f = b.finish().unwrap();
-    let ir = splice_llvm::to_llvm_ir(&f).unwrap();
+    let ir = splice_llvm::to_llvm_ir(&f, &f.options().target).unwrap();
     assert_eq!(ir.matches("define internal fastcc i32 @kernel").count(), 2);
     let code = Llvm::compile(&f).unwrap();
     for (limit, result) in [(-2, 0), (0, 0), (1, 2), (17, 18), (72, 72)] {
@@ -165,8 +172,8 @@ fn masked_f64_gather_checks_active_indices_at_full_i64_width() {
         b.ret(zero);
         Ok(())
     }
-    let ir = frontend::materialize(0, &kinds, Box::new(stage)).unwrap();
-    let n = Element::F64.lanes();
+    let ir = frontend::materialize(0, &kinds, Box::new(stage), options()).unwrap();
+    let n = Element::F64.lanes(options().target.vector_bytes());
     for kernel in [
         Llvm::build(0, &kinds, Box::new(stage)).unwrap(),
         Llvm::compile(&ir).unwrap(),
@@ -208,27 +215,32 @@ fn i32_gather_keeps_dword_indices_and_native_compaction() {
         words.compress(keep).store(out, 0);
         keep.count()
     }
-    let ir = splice_llvm::to_llvm_ir(&compact::ir().unwrap()).unwrap();
-    let width = Lane::<i32>::lanes();
-    assert!(
-        ir.lines()
-            .any(|line| line.contains("getelementptr i32, ptr")
-                && line.contains(&format!("<{width} x i32>")))
-    );
-    #[cfg(target_arch = "x86_64")]
-    let native = match splice_target::simd().unwrap().profile {
-        splice_target::Profile::Auto => {
-            is_x86_feature_detected!("avx512f")
-                && (width == 16 || is_x86_feature_detected!("avx512vl"))
-        }
-        splice_target::Profile::Avx512 | splice_target::Profile::Avx10 => true,
-        _ => false,
-    };
-    #[cfg(not(target_arch = "x86_64"))]
-    let native = false;
-    if native {
-        assert!(ir.contains("@llvm.x86.avx512.mask.compress"));
-    } else {
-        assert!(ir.contains("@llvm.experimental.vector.compress"));
+    // One portable function, listed for several targets in one process.
+    let ir = compact::ir().unwrap();
+    let targets: Vec<_> = splice_core::target::Profile::ALL
+        .iter()
+        .filter_map(|&profile| splice_core::Target::from_profile(profile).ok())
+        .filter(|target| target.arch() == splice_core::Target::host().unwrap().arch())
+        .collect();
+    assert!(targets.len() > 1);
+    for target in targets {
+        let listing = splice_llvm::to_llvm_ir(&ir, &target).unwrap();
+        let width = target.vector_bytes() / 4;
+        assert!(
+            listing
+                .lines()
+                .any(|line| line.contains("getelementptr i32, ptr")
+                    && line.contains(&format!("<{width} x i32>"))),
+            "{target:?}"
+        );
+        let native = target
+            .x86()
+            .is_some_and(|isa| isa.avx10 > 0 || isa.avx512f && (width == 16 || isa.vl));
+        let intrinsic = if native {
+            "@llvm.x86.avx512.mask.compress"
+        } else {
+            "@llvm.experimental.vector.compress"
+        };
+        assert!(listing.contains(intrinsic), "{target:?}");
     }
 }

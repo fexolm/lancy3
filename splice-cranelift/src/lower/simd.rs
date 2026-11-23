@@ -18,6 +18,26 @@ use splice_core::{
 
 const CHUNK_BYTES: usize = 16;
 
+/// What lowering needs from the build target.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Machine {
+    pub(crate) vector_bytes: usize,
+    /// SSSE3 `pshufb`, which zeroes lanes whose control byte has its high bit set.
+    pshufb: bool,
+}
+
+impl Machine {
+    pub(crate) fn new(target: &splice_core::Target) -> Self {
+        Self {
+            vector_bytes: target.vector_bytes(),
+            pshufb: target.x86().is_some_and(|isa| isa.ssse3),
+        }
+    }
+    fn chunks(self) -> usize {
+        self.vector_bytes / CHUNK_BYTES
+    }
+}
+
 fn chunk_type(element: Element) -> Type {
     match element {
         Element::U16 => I16X8,
@@ -34,21 +54,15 @@ pub(super) struct Registers {
 }
 
 impl Registers {
-    pub(super) fn new(b: &mut FunctionBuilder, f: &Function) -> Self {
+    pub(super) fn new(b: &mut FunctionBuilder, f: &Function, m: Machine) -> Self {
         let mut starts = Vec::with_capacity(f.register_count() + 1);
         let mut vars = Vec::with_capacity(f.register_count());
         for index in 0..f.register_count() {
             starts.push(vars.len());
             let (ty, count) = match f.reg_type(Reg(index as u32)) {
                 ValueType::Scalar => (I32, 1),
-                ValueType::Vector(e) => (
-                    chunk_type(e),
-                    splice_core::simd::vector_bytes() / CHUNK_BYTES,
-                ),
-                ValueType::Mask(e) => (
-                    chunk_type(e.index()),
-                    splice_core::simd::vector_bytes() / CHUNK_BYTES,
-                ),
+                ValueType::Vector(e) => (chunk_type(e), m.chunks()),
+                ValueType::Mask(e) => (chunk_type(e.index()), m.chunks()),
             };
             vars.extend((0..count).map(|_| b.declare_var(ty)));
         }
@@ -84,6 +98,7 @@ fn lane_constant(
 
 pub(super) fn emit(
     b: &mut FunctionBuilder,
+    m: Machine,
     inst: Simd,
     vars: &Registers,
     dst: Option<Reg>,
@@ -119,6 +134,7 @@ pub(super) fn emit(
                 Address::Contiguous(b.ins().uextend(I64, inputs[0][0]))
             };
             let access = Memory {
+                m,
                 data,
                 len: b.ins().uextend(I64, len),
                 element,
@@ -134,14 +150,12 @@ pub(super) fn emit(
             let scaled = b.ins().ishl_imm(inputs[0][0], 2);
             let addr = b.ins().iadd(base, scaled);
             let neg = b.ins().ineg(addr);
-            let bytes = b
-                .ins()
-                .band_imm(neg, (splice_core::simd::vector_bytes() - 1) as i64);
+            let bytes = b.ins().band_imm(neg, (m.vector_bytes - 1) as i64);
             vec![b.ins().ushr_imm(bytes, 2)]
         }
-        Swizzle => swizzle_words(b, &inputs[0], &inputs[1], byte_order),
-        Expand => expand_words(b, &inputs, byte_order),
-        Compress => compress_words(b, &inputs[0], &inputs[1], byte_order),
+        Swizzle => swizzle_words(b, m, &inputs[0], &inputs[1], byte_order),
+        Expand => expand_words(b, m, &inputs, byte_order),
+        Compress => compress_words(b, m, &inputs[0], &inputs[1], byte_order),
         CompressStore(buf) => {
             let [data, len] = buffers[buf.index()];
             let len = b.ins().uextend(I64, len);
@@ -188,17 +202,22 @@ pub(super) fn emit(
             }
             vec![total]
         }
-        Widen { to, high } => {
-            convert_width(b, element, to, &inputs[0], usize::from(high) * to.lanes())
-        }
+        Widen { to, high } => convert_width(
+            b,
+            m,
+            element,
+            to,
+            &inputs[0],
+            usize::from(high) * to.lanes(m.vector_bytes),
+        ),
         Narrow(to) => {
             let sources: Vec<_> = inputs.iter().flatten().copied().collect();
-            convert_width(b, element, to, &sources, 0)
+            convert_width(b, m, element, to, &sources, 0)
         }
-        Lanes => vec![b.ins().iconst(I32, element.lanes() as i64)],
+        Lanes => vec![b.ins().iconst(I32, element.lanes(m.vector_bytes) as i64)],
         FirstN => {
             // Clamp the full unsigned index before narrowing it to a mask lane.
-            let width = b.ins().iconst(I32, element.lanes() as i64);
+            let width = b.ins().iconst(I32, element.lanes(m.vector_bytes) as i64);
             let count = b.ins().umin(inputs[0][0], width);
             let ty = chunk_type(element.index());
             let count = match element.bytes() {
@@ -207,7 +226,7 @@ pub(super) fn emit(
                 _ => count,
             };
             let limit = b.ins().splat(ty, count);
-            (0..splice_core::simd::vector_bytes() / CHUNK_BYTES)
+            (0..m.chunks())
                 .map(|part| {
                     let indices = lane_constant(b, element.index(), part, |i| i as u64);
                     b.ins().icmp(IntCC::SignedLessThan, indices, limit)
@@ -216,10 +235,10 @@ pub(super) fn emit(
         }
         SplatScalar => {
             let chunk = b.ins().splat(chunk_type(element), inputs[0][0]);
-            vec![chunk; splice_core::simd::vector_bytes() / CHUNK_BYTES]
+            vec![chunk; m.chunks()]
         }
         Shuffle(order) => {
-            let n = element.lanes();
+            let n = element.lanes(m.vector_bytes);
             let chunks: Vec<_> = inputs.iter().flatten().copied().collect();
             (0..n / 4)
                 .map(|part| {
@@ -247,7 +266,7 @@ pub(super) fn emit(
         }
         ExtractWrapping | ReplaceWrapping => {
             use cranelift_codegen::ir::{StackSlotData, StackSlotKind};
-            let bytes = splice_core::simd::vector_bytes();
+            let bytes = m.vector_bytes;
             let slot = b.create_sized_stack_slot(StackSlotData::new(
                 StackSlotKind::ExplicitSlot,
                 bytes as u32,
@@ -317,7 +336,7 @@ pub(super) fn emit(
             }
             vec![b.ins().bmask(I32, combined.unwrap())]
         }
-        _ => (0..splice_core::simd::vector_bytes() / CHUNK_BYTES)
+        _ => (0..m.chunks())
             .map(|i| packed(b, inst, &inputs, i))
             .collect(),
     };
@@ -334,6 +353,7 @@ pub(super) fn emit(
 /// chunk for each output lane and OR the zero-filled partial results.
 fn swizzle_words(
     b: &mut FunctionBuilder,
+    m: Machine,
     parts: &[Value],
     indices: &[Value],
     order: MemFlags,
@@ -361,7 +381,7 @@ fn swizzle_words(
                 let id = lane_constant(b, Element::I32, 0, |_| part as u64);
                 let valid = b.ins().icmp(IntCC::Equal, owner, id);
                 let source = b.ins().bitcast(I8X16, order, source);
-                let shuffled = shuffle_bytes(b, source, selector);
+                let shuffled = shuffle_bytes(b, m, source, selector);
                 let words = b.ins().bitcast(I32X4, order, shuffled);
                 let active = b.ins().band(words, valid);
                 result = b.ins().bor(result, active);
@@ -373,9 +393,8 @@ fn swizzle_words(
 
 // Our control bytes are either in 0..16 or have their high bit set.
 // PSHUFB implements these cases directly; CLIF swizzle also handles 16..127.
-fn shuffle_bytes(b: &mut FunctionBuilder, bytes: Value, selector: Value) -> Value {
-    #[cfg(target_arch = "x86_64")]
-    if std::is_x86_feature_detected!("ssse3") {
+fn shuffle_bytes(b: &mut FunctionBuilder, m: Machine, bytes: Value, selector: Value) -> Value {
+    if m.pshufb {
         return b.ins().x86_pshufb(bytes, selector);
     }
     b.ins().swizzle(bytes, selector)
@@ -413,7 +432,12 @@ const fn shuffle_controls(expand: bool) -> [[u8; 16]; 16] {
     table
 }
 
-fn expand_words(b: &mut FunctionBuilder, inputs: &[Vec<Value>], order: MemFlags) -> Vec<Value> {
+fn expand_words(
+    b: &mut FunctionBuilder,
+    m: Machine,
+    inputs: &[Vec<Value>],
+    order: MemFlags,
+) -> Vec<Value> {
     use cranelift_codegen::ir::{StackSlotData, StackSlotKind};
     let slot = b.create_sized_stack_slot(StackSlotData::new(
         StackSlotKind::ExplicitSlot,
@@ -435,7 +459,7 @@ fn expand_words(b: &mut FunctionBuilder, inputs: &[Vec<Value>], order: MemFlags)
             let control = b.ins().load(I8X16, MemFlags::new(), ptr, 0);
             // Each previous chunk consumed at most 16 bytes of the stack slot.
             let bytes = b.ins().load(I8X16, MemFlags::new(), src, 0);
-            let expanded = shuffle_bytes(b, bytes, control);
+            let expanded = shuffle_bytes(b, m, bytes, control);
             let values = b.ins().bitcast(I32X4, order, expanded);
             let count = b.ins().popcnt(bits);
             let length = b.ins().ishl_imm(count, 2);
@@ -447,6 +471,7 @@ fn expand_words(b: &mut FunctionBuilder, inputs: &[Vec<Value>], order: MemFlags)
 
 fn compress_words(
     b: &mut FunctionBuilder,
+    m: Machine,
     parts: &[Value],
     masks: &[Value],
     order: MemFlags,
@@ -469,7 +494,7 @@ fn compress_words(
         let ptr = b.ins().iadd(table, off);
         let control = b.ins().load(I8X16, MemFlags::new(), ptr, 0);
         let bytes = b.ins().bitcast(I8X16, order, data);
-        let compact = shuffle_bytes(b, bytes, control);
+        let compact = shuffle_bytes(b, m, bytes, control);
         // At most four words per previous chunk precede this 16-byte store.
         b.ins().store(MemFlags::new(), compact, dest, 0);
         let count = b.ins().popcnt(bits);
@@ -595,6 +620,7 @@ fn convert(b: &mut FunctionBuilder, from: Element, to: Element, ty: Type, x: Val
 
 fn convert_width(
     b: &mut FunctionBuilder,
+    machine: Machine,
     from: Element,
     to: Element,
     sources: &[Value],
@@ -603,7 +629,7 @@ fn convert_width(
     let out = chunk_type(to);
     let n = CHUNK_BYTES / from.bytes();
     let m = CHUNK_BYTES / to.bytes();
-    (0..to.lanes() / m)
+    (0..to.lanes(machine.vector_bytes) / m)
         .map(|part| {
             let mut lane = |i| {
                 let source = start + part * m + i;
@@ -630,6 +656,7 @@ enum Address<'a> {
 }
 
 struct Memory<'a> {
+    m: Machine,
     data: Value,
     len: Value,
     element: Element,
@@ -660,7 +687,9 @@ impl Memory<'_> {
             Address::Contiguous(start) => start,
         };
         // Widen before addition so even an invalid i32 start cannot wrap into the slice.
-        let end = b.ins().iadd_imm(start, self.element.lanes() as i64);
+        let end = b
+            .ins()
+            .iadd_imm(start, self.element.lanes(self.m.vector_bytes) as i64);
         let invalid = b.ins().icmp(IntCC::UnsignedGreaterThan, end, self.len);
         if let Some(mask) = self.mask {
             // The common case covers the whole vector. When it crosses the
@@ -695,7 +724,7 @@ impl Memory<'_> {
         self.guard(b, invalid);
         let base = self.pointer(b, start);
         let mut out = Vec::new();
-        for part in 0..splice_core::simd::vector_bytes() / CHUNK_BYTES {
+        for part in 0..self.m.chunks() {
             let offset = (part * CHUNK_BYTES) as i32;
             if let Some(values) = self.values {
                 b.ins().store(MemFlags::new(), values[part], base, offset);
@@ -874,7 +903,7 @@ impl Memory<'_> {
         })
     }
     fn ordered(&self, b: &mut FunctionBuilder, check_lanes: bool) -> Vec<Value> {
-        (0..splice_core::simd::vector_bytes() / CHUNK_BYTES)
+        (0..self.m.chunks())
             .filter_map(|part| {
                 let value = self.initial(b, part);
                 self.ordered_part(b, part, value, check_lanes)

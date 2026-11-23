@@ -7,24 +7,25 @@ use std::{collections::HashMap, sync::Arc};
 /// construction as direct Splice staging. Preserve shared callee identities.
 /// Raw invocation of the result must uphold Splice's slice contract:
 /// immutable buffers may overlap and writable buffers have exclusive access.
-pub fn lower(root: &Function) -> splice_core::Result<hir::Function> {
-    lower_mode(root, None)
+pub fn lower(root: &Function, target: &splice_core::Target) -> splice_core::Result<hir::Function> {
+    lower_mode(root, target.vector_bytes(), None)
 }
 
 pub(crate) type DebugSources<'a> = Vec<(&'a Function, Option<&'a splice_core::debug::Point>)>;
 
 pub(crate) fn lower_debug<'a>(
     root: &'a Function,
+    target: &splice_core::Target,
     sources: &mut DebugSources<'a>,
 ) -> splice_core::Result<hir::Function> {
-    lower_mode(root, Some(sources))
+    lower_mode(root, target.vector_bytes(), Some(sources))
 }
 
 fn lower_mode<'a>(
     root: &'a Function,
+    vector_bytes: usize,
     mut sources: Option<&mut DebugSources<'a>>,
 ) -> splice_core::Result<hir::Function> {
-    splice_target::simd()?;
     let mut callees = HashMap::new();
     let mut pending = vec![(root, false)];
     while let Some((f, visited)) = pending.pop() {
@@ -41,7 +42,7 @@ fn lower_mode<'a>(
             }
             continue;
         }
-        let graph = lower_body(f, &callees, sources.as_deref_mut())?;
+        let graph = lower_body(f, &callees, vector_bytes, sources.as_deref_mut())?;
         if std::ptr::eq(f, root) {
             return Ok(graph);
         }
@@ -53,9 +54,10 @@ fn lower_mode<'a>(
 fn lower_body<'a>(
     function: &'a Function,
     callees: &HashMap<*const Function, Arc<hir::Function>>,
+    vector_bytes: usize,
     mut sources: Option<&mut DebugSources<'a>>,
 ) -> splice_core::Result<hir::Function> {
-    let mut b = Builder::new(function.arity(), function.buffer_kinds())?;
+    let mut b = Builder::new(function.arity(), function.buffer_kinds(), vector_bytes)?;
     b.types = (0..function.register_count())
         .map(|i| function.reg_type(splice_core::hir::Reg(i as u32)))
         .collect();
@@ -73,7 +75,7 @@ fn lower_body<'a>(
                 let (Some(block), Some(sources)) = (b.current, &mut sources) else {
                     continue;
                 };
-                for (var, ty, offset) in point.slots(function) {
+                for (var, ty, offset) in point.slots(function, vector_bytes) {
                     let offset = u32::try_from(offset).map_err(|_| {
                         splice_core::BuildError::unsupported("debug frame too large")
                     })?;

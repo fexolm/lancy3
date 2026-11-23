@@ -221,7 +221,12 @@ fn invalid_arguments_are_rejected_before_staging_or_reusing_a_callee()
         Ok(())
     }
     let kinds = [BufferKind::Read, BufferKind::Write];
-    let ir = splice::frontend::materialize(1, &kinds, Box::new(stage))?;
+    let ir = splice::frontend::materialize(
+        1,
+        &kinds,
+        Box::new(stage),
+        splice::BuildOptions::host(splice::Mode::Release)?,
+    )?;
     splice_testkit::each_backend!(B => {
         for code in [
             Box::new(B::build(1, &kinds, Box::new(stage))?) as Box<dyn Executable>,

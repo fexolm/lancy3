@@ -54,23 +54,28 @@ pub(crate) fn build(
     kinds: &[BufferKind],
     body: Body<'_>,
 ) -> splice_core::Result<Function> {
-    build_with_source(arity, kinds, body).map(|(function, _)| function)
+    let bytes = splice_core::Target::host()?.vector_bytes();
+    build_with_source(arity, kinds, body, bytes).map(|(function, _)| function)
 }
 
 pub(crate) fn build_with_source(
     arity: usize,
     kinds: &[BufferKind],
     body: Body<'_>,
+    vector_bytes: usize,
 ) -> splice_core::Result<(Function, Option<&'static KernelSource>)> {
-    splice_target::simd()?;
-    let mut builder = Builder::new(arity, kinds)?;
+    let mut builder = Builder::new(arity, kinds, vector_bytes)?;
     body(&mut builder)?;
     let source = builder.source;
     Ok((builder.seal()?, source))
 }
 
 impl<'a> Builder<'a> {
-    fn new(arity: usize, kinds: &'a [BufferKind]) -> splice_core::Result<Self> {
+    fn new(
+        arity: usize,
+        kinds: &'a [BufferKind],
+        vector_bytes: usize,
+    ) -> splice_core::Result<Self> {
         let count = u32::try_from(arity)
             .map_err(|_| splice_core::BuildError::unsupported("too many kernel parameters"))?;
         if count == u32::MAX {
@@ -111,6 +116,7 @@ impl<'a> Builder<'a> {
             callees: HashMap::new(),
             arity,
             kinds,
+            vector_bytes,
             blocks,
             current: Some(entry),
             types: vec![ValueType::Scalar; arity],
@@ -161,6 +167,8 @@ struct Builder<'a> {
     callees: HashMap<Specialization, Arc<Function>>,
     arity: usize,
     kinds: &'a [BufferKind],
+    /// Width of the target's vectors; fixes lane counts and alignment.
+    vector_bytes: usize,
     blocks: DenseMap<Block, State>,
     current: Option<Block>,
     types: Vec<ValueType>,
@@ -545,7 +553,7 @@ impl Builder<'_> {
         let callee = if let Some(hit) = key.as_ref().and_then(|k| self.callees.get(k)) {
             hit.clone()
         } else {
-            let mut child = Builder::new(arity, kinds)?;
+            let mut child = Builder::new(arity, kinds, self.vector_bytes)?;
             std::mem::swap(&mut child.callees, &mut self.callees);
             let staged = body(&mut child);
             std::mem::swap(&mut child.callees, &mut self.callees);

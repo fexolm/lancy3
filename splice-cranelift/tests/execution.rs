@@ -3,6 +3,11 @@ use splice_core::{BufferArg, CallError, Codegen, Executable, Trap, kernel};
 use splice_cranelift::Cranelift;
 use std::sync::Arc;
 
+/// This machine's `SPLICE_SIMD` target in the mode of this test build.
+fn options() -> splice_core::BuildOptions {
+    splice_core::BuildOptions::host(splice_core::Mode::for_profile(cfg!(debug_assertions))).unwrap()
+}
+
 #[kernel(crate = splice_core)]
 fn update(out: &mut [i32], row: i32, values: &[i32], divisor: i32, #[comptime] bias: i32) -> i32 {
     out[row as usize] = bias;
@@ -124,7 +129,7 @@ fn every_binary_operation_matches_splice_on_signed_boundaries() {
     for op in [
         Add, Sub, Mul, Div, Rem, And, Or, Xor, Eq, Ne, Lt, Le, Gt, Ge, Shl, Shr, Min, Max,
     ] {
-        let mut f = FunctionBuilder::new(2);
+        let mut f = FunctionBuilder::new(options(), 2);
         let result = f.binary(op, f.arg(0), f.arg(1));
         f.ret(result);
         let kernel = Cranelift::compile(&f.finish().unwrap()).unwrap();
@@ -162,9 +167,9 @@ fn negative_and_past_end_indices_stop_before_the_first_store() {
 #[test]
 fn unrepresentable_callee_signature_returns_a_build_error() {
     let count = usize::from(u16::MAX) + 2;
-    let mut callee = FunctionBuilder::new(count);
+    let mut callee = FunctionBuilder::new(options(), count);
     callee.ret(callee.arg(0));
-    let mut root = FunctionBuilder::new(1);
+    let mut root = FunctionBuilder::new(options(), 1);
     let value = root.call(callee.finish().unwrap(), &vec![root.arg(0); count]);
     root.ret(value);
     let result = Cranelift::compile(&root.finish().unwrap());
@@ -175,12 +180,12 @@ fn unrepresentable_callee_signature_returns_a_build_error() {
 
 #[test]
 fn shared_callees_stack_arguments_and_backedges_outlive_the_ir() {
-    let mut child = FunctionBuilder::new(8);
+    let mut child = FunctionBuilder::new(options(), 8);
     let next = child.binary(Binary::Add, child.arg(0), child.arg(7));
     child.ret(next);
     let child = Arc::new(child.finish().unwrap());
 
-    let mut f = FunctionBuilder::new(1);
+    let mut f = FunctionBuilder::new(options(), 1);
     let limit = f.arg(0);
     let counter = f.constant(0);
     let zero = f.constant(0);
@@ -222,6 +227,7 @@ fn masked_f64_memory_keeps_global_lane_order_across_chunks() {
     };
 
     let mut f = FunctionBuilder::with_buffers(
+        options(),
         0,
         vec![
             BufferKind::new(F64, false),
@@ -255,7 +261,9 @@ fn masked_f64_memory_keeps_global_lane_order_across_chunks() {
     f.ret(result);
     let code = Cranelift::compile(&f.finish().unwrap()).unwrap();
 
-    let mut data: Vec<_> = (0..F64.lanes()).map(|i| (i + 1) as f64).collect();
+    let mut data: Vec<_> = (0..F64.lanes(options().target.vector_bytes()))
+        .map(|i| (i + 1) as f64)
+        .collect();
     let mut indices = vec![1; data.len()];
     data[1] = f64::NAN;
     indices[1] = i64::MAX;

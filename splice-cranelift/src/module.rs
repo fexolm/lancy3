@@ -64,6 +64,7 @@ impl<'a> KernelModule<'a> {
     pub fn lower(
         module: &mut JITModule,
         root: &'a Function,
+        target: &splice_core::Target,
         debug: bool,
     ) -> splice_core::Result<Self> {
         let _span =
@@ -76,7 +77,8 @@ impl<'a> KernelModule<'a> {
         let mut functions = HashMap::new();
         let track_sources = debug || profile;
         let mut builder_ctx = FunctionBuilderContext::new();
-        let legacy_sse = cfg!(target_arch = "x86_64") && !has_isa_flag(module, "has_avx");
+        let machine = lower::Machine::new(target);
+        let legacy_sse = target.x86().is_some_and(|isa| !isa.avx);
         while let Some((f, id)) = pending.pop() {
             if track_sources {
                 functions.insert(id, f);
@@ -113,7 +115,9 @@ impl<'a> KernelModule<'a> {
                 f.instructions()
                     .iter()
                     .filter_map(|inst| match inst {
-                        Instr::Debug(point) => Some(point.storage_bytes(f).max(1)),
+                        Instr::Debug(point) => {
+                            Some(point.storage_bytes(f, machine.vector_bytes).max(1))
+                        }
                         _ => None,
                     })
                     .max()
@@ -133,6 +137,7 @@ impl<'a> KernelModule<'a> {
                 f,
                 id == entry,
                 &imports,
+                machine,
                 debug_bytes,
             );
             if legacy_sse {
@@ -246,12 +251,4 @@ impl Inline for KernelInliner<'_> {
             visit_callee: true,
         }
     }
-}
-
-fn has_isa_flag(module: &JITModule, name: &str) -> bool {
-    module
-        .isa()
-        .isa_flags()
-        .iter()
-        .any(|flag| flag.name == name && flag.as_bool() == Some(true))
 }

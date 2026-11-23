@@ -30,17 +30,6 @@ pub struct Text;
 impl Codegen for Text {
     type Output = String;
 
-    fn build_with_options(
-        arity: usize,
-        kinds: &[splice_core::BufferKind],
-        body: splice_core::frontend::Body<'_>,
-        options: splice_core::BuildOptions,
-    ) -> splice_core::Result<Self::Output> {
-        Self::compile(&splice_core::frontend::materialize_with_options(
-            arity, kinds, body, options,
-        )?)
-    }
-
     fn compile_raw(root: &Function) -> splice_core::Result<String> {
         let _span =
             tracing::debug_span!(target: "splice_core::compile", "render_text_ir").entered();

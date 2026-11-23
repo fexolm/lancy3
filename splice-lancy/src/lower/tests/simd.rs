@@ -10,10 +10,10 @@ fn both(
     kinds: &[BufferKind],
     stage: fn(&mut dyn KernelBuilder) -> splice_core::Result<()>,
 ) -> [hir::Function; 2] {
-    let ir = splice_core::frontend::materialize(arity, kinds, Box::new(stage)).unwrap();
+    let ir = splice_core::frontend::materialize(arity, kinds, Box::new(stage), options()).unwrap();
     [
         build(arity, kinds, Box::new(stage)).unwrap(),
-        lower(&ir).unwrap(),
+        lower(&ir, &options().target).unwrap(),
     ]
 }
 
@@ -86,8 +86,8 @@ fn packed_load_and_store_have_an_ordered_short_store_exit() {
             ops.iter()
                 .any(|op| matches!(op, Op::Simd(V::MaskedStore { .. })))
         );
-        let kernel = crate::LancyKernel::new(graph, 1, &kinds, None).unwrap();
-        let lanes = Element::U16.lanes();
+        let kernel = crate::LancyKernel::new(graph, &options().target, 1, &kinds, None).unwrap();
+        let lanes = Element::U16.lanes(options().target.vector_bytes());
         assert_eq!(
             lanes * 2,
             splice_target::Target::host().unwrap().vector_bytes()
@@ -127,8 +127,8 @@ fn scatter_addresses_unsigned_u16_and_stops_at_the_first_active_error() {
         b.ret(zero);
         Ok(())
     }) {
-        let kernel = crate::LancyKernel::new(graph, 0, &kinds, None).unwrap();
-        let mut indices = vec![0; Element::U16.lanes()];
+        let kernel = crate::LancyKernel::new(graph, &options().target, 0, &kinds, None).unwrap();
+        let mut indices = vec![0; Element::U16.lanes(options().target.vector_bytes())];
         indices[..4].copy_from_slice(&[32768, 32768, 65535, 1]);
         for n in [65535, 65536] {
             let mut dst = vec![99; n];
@@ -165,7 +165,7 @@ fn masked_contiguous_store_never_wraps_an_invalid_offset_to_zero() {
         b.ret(b.arg(0));
         Ok(())
     }) {
-        let kernel = crate::LancyKernel::new(graph, 1, &kinds, None).unwrap();
+        let kernel = crate::LancyKernel::new(graph, &options().target, 1, &kinds, None).unwrap();
         let mut dst = [8, 9];
         let result = kernel.call(&[-1], &mut [BufferArg::WriteU16(&mut dst)]);
         assert_eq!(
@@ -209,9 +209,9 @@ fn vectors_and_masks_keep_their_element_type_across_a_join() {
             .collect();
         assert!(params.contains(&hir::Type::Vector(hir::Lane::F64)));
         assert!(params.contains(&hir::Type::Vector(hir::Lane::I64)));
-        let kernel = crate::LancyKernel::new(graph, 1, &kinds, None).unwrap();
+        let kernel = crate::LancyKernel::new(graph, &options().target, 1, &kinds, None).unwrap();
         for (input, expected) in [(1, 1.25), (0, 3.0)] {
-            let mut dst = vec![3.0; Element::F64.lanes()];
+            let mut dst = vec![3.0; Element::F64.lanes(options().target.vector_bytes())];
             assert_eq!(
                 kernel.call(&[input], &mut [BufferArg::WriteF64(&mut dst)]),
                 Ok(0)

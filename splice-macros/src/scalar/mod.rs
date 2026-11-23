@@ -564,7 +564,8 @@ pub(super) fn expand(root: Path, native: &mut ItemFn) -> Result<TokenStream> {
                 -> ::core::result::Result<#root::TypedKernel<#signature, <#backend as #root::Codegen>::Output>, #root::BuildError> #where_
             {
                 build_with_options::<#backend #(, #args)*>(
-                    #root::BuildOptions::for_profile(::core::cfg!(debug_assertions)), __splice_args,
+                    #root::BuildOptions::host(#root::Mode::for_profile(::core::cfg!(debug_assertions)))?,
+                    __splice_args,
                 )
             }
             #vis fn build_with_options #compile_generics (
@@ -581,14 +582,17 @@ pub(super) fn expand(root: Path, native: &mut ItemFn) -> Result<TokenStream> {
             #vis fn ir #generic (#host_decls)
                 -> ::core::result::Result<#root::TypedIr<#signature>, #root::BuildError> #where_
             {
-                ir_with_options #fish (#root::BuildOptions::for_profile(::core::cfg!(debug_assertions)), #(#host_names,)*)
+                ir_with_options #fish (
+                    #root::BuildOptions::host(#root::Mode::for_profile(::core::cfg!(debug_assertions)))?,
+                    #(#host_names,)*
+                )
             }
             #vis fn ir_with_options #generic (__splice_options: #root::BuildOptions, #host_decls)
                 -> ::core::result::Result<#root::TypedIr<#signature>, #root::BuildError> #where_
             {
                 #root::build_boundary(move || {
                     #setup
-                    #root::frontend::materialize_with_options(
+                    #root::frontend::materialize(
                         #arity, __splice_kinds, __splice_body, __splice_options,
                     ).map(#root::TypedIr::new)
                 })

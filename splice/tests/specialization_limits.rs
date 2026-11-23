@@ -1,4 +1,4 @@
-use splice::{BuildOptions, Codegen, Executable, kernel};
+use splice::{BuildOptions, Codegen, Executable, Mode, kernel};
 use splice_lancy::Lancy;
 use std::{
     cell::Cell,
@@ -73,7 +73,7 @@ fn opaque_in_host_loop(#[comptime] iterations: i32) -> i32 {
 }
 
 fn check_limits<B: Codegen<Output: Executable>>() {
-    let options = BuildOptions::Release;
+    let options = BuildOptions::host(Mode::Release).unwrap();
     let bad = count_by_twos::BuildArgs { target: 1 };
     assert!(count_by_twos::build_with_options::<B>(options, bad).is_err());
     assert!(count_by_twos::ir(1).is_err());
