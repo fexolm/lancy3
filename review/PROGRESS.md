@@ -134,3 +134,4 @@
 - `--no-default-features`: `cargo check -p splice-kernel`; `cargo bench … -- --test` — в `features`.
 - Проверки: `cargo +1.94.1 xtask ci` локально зелёный (lint, workspace release, features, doc, static-llvm). Windows исполняется впервые — результат по CI.
 - Первый debug-прогон в CI нашёл два теста `splice-lancy/tests/staging.rs`, рассчитанных только на release: `ir()` берёт `BuildOptions::default()`, который в debug проверяет переполнение (`CheckedAdd`/`CheckedMul`, решение SPL-03). Ожидания теперь зависят от `cfg!(debug_assertions)`; `xtask test` идёт с `--no-fail-fast`, чтобы падения не прятали друг друга. Локальный debug-прогон воркспейса других расхождений не дал.
+- CI на 3df2b4a: Windows release зелёный с первого раза (LLVM 19.1.7 через `install-llvm-action`, включая `cargo test -p lancy`); статическая линковка на раннере требовала `libPolly.a` (Ubuntu называет Polly в `llvm-config --link-static`) — в джобу добавлен `libpolly-19-dev`.
