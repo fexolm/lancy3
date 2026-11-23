@@ -124,3 +124,7 @@
 - BE-15: закрыт дифференциальным тестом; матрица профилей в CI — в Ф1.6. `assert_lowered` не вводился (отклонение 1.1).
 - Закрыто: SPL-02, SPL-03, SPL-14, SPL-15, SPL-17(trybuild), SPL-18, MAC-17, CORE-14, BE-15.
 - Проверки: fmt, clippy 1.94.1, `cargo test --workspace --release`.
+
+### Ф1.6 — CI и сборка (в работе; коммиты 02905d3, d9e17f7)
+- SPL-07: библиотека `splice-core` называется `splice_core`; бэкенды пишут `splice_core::` и `#[kernel(crate = splice_core)]`; `KernelType` получил тот же `#[splice(crate = path)]`, что `ComptimeKey` (общий разбор, trybuild на неизвестную/повторную опцию, тест в `splice-lancy/tests/staging.rs`). Доктесты языка перенесены в фасад: в ядре они падали бы на отсутствии `splice`, а не на проверяемом свойстве. `RUSTDOCFLAGS=-D warnings cargo doc --workspace --no-deps` чистый.
+- SPL-08: у `splice-kernel` нет dev-зависимости от `splice-llvm`; LLVM в тестах/примерах — через опциональную зависимость фасада под `llvm`, бенчмарк сравнения — `required-features = ["llvm"]`. `each_backend!` раскрывает LLVM по фиче вызывающего крейта; `splice-testkit` по умолчанию включает `splice-kernel/llvm`, поэтому `cargo test --workspace` гоняет все бэкенды, а `cargo test -p splice-kernel` работает без LLVM (Lancy + Cranelift). Ручные пары Lancy/LLVM в тестах заменены на `each_backend!` (+Cranelift, +LlvmManualSimd). Тесты `cranelift`/`llvm` фасада исполняются в `--workspace` и `--all-features`.
