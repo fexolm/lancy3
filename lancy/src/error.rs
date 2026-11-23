@@ -36,6 +36,20 @@ pub enum CompileError {
     },
 }
 
+impl CompileError {
+    /// A target size limit that the smaller body compiled without inlining
+    /// can stay within.
+    pub(crate) fn is_size_limit(&self) -> bool {
+        matches!(
+            self,
+            Self::FunctionTooLarge
+                | Self::BranchOutOfRange { .. }
+                | Self::WorkspaceTooLarge { .. }
+                | Self::FrameOverflow
+        )
+    }
+}
+
 /// Failure to invoke a kernel, or a trap raised during its execution.
 #[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
 pub enum CallError {

@@ -73,8 +73,8 @@ pub(crate) fn optimize_and_lower<T>(
                 emit(body)
             });
         match expanded {
-            // Lowering can also run out of virtual registers or branch range.
-            Err(CompileError::FunctionTooLarge | CompileError::BranchOutOfRange { .. }) => {}
+            // Inlining or lowering the expanded body can exceed a size limit.
+            Err(error) if error.is_size_limit() => {}
             other => return other,
         }
     }

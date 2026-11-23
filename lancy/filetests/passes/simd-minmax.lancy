@@ -84,3 +84,19 @@ fn main -> i32
 @opt check: Binary(Lt)
 @opt check: Ternary(Select)
 @run -> 0x7fc12345
+---
+# A select on a compare mask whose arms are not the compared values still
+# gets the ordinary rules: equal arms make it a copy.
+fn main x:i32 y:i32 -> i32
+  a = simd.splat x
+  b = simd.splat y
+  zero = const 0
+  less = simd.lt a b
+  same = simd.select less b b
+  result = simd.extract same zero
+  ret result
+@source check: Ternary(Select)
+@opt not: Ternary(Select)
+@opt check: ret
+@run 1 2 -> 2
+@run 2 1 -> 1

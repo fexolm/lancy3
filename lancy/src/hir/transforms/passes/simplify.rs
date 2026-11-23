@@ -122,14 +122,16 @@ fn simplify_with_cfg(
                         let yes = aliases[yes];
                         let no = aliases[no];
                         let select_min = if (yes, no) == (x, y) {
-                            left_is_min
+                            Some(left_is_min)
                         } else if (yes, no) == (y, x) {
-                            !left_is_min
+                            Some(!left_is_min)
                         } else {
-                            return Some(op);
+                            None
                         };
-                        let kind = if select_min { Binary::Min } else { Binary::Max };
-                        return Some(Op::Simd(Simd::Bin(kind, yes, no)));
+                        if let Some(select_min) = select_min {
+                            let kind = if select_min { Binary::Min } else { Binary::Max };
+                            return Some(Op::Simd(Simd::Bin(kind, yes, no)));
+                        }
                     }
                 }
                 _ => {}

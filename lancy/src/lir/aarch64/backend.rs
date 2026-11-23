@@ -784,7 +784,12 @@ fn emit_compiled(module: &Module<Compiled>, config: Simd, debug: bool) -> Result
                     InstOrEdit::Edit(&Edit::Move { from, to }) => out.edit(from, to)?,
                     InstOrEdit::Inst(i) => {
                         let inst = machine.body.insts()[i.index()];
-                        if debug && let Inst::DebugPoint(id) = inst {
+                        // A debug point gets its own address for the line
+                        // table; release code emits nothing.
+                        if let Inst::DebugPoint(id) = inst {
+                            if !debug {
+                                continue;
+                            }
                             points.push((id, out.a.words.len() as u64 * 4));
                         }
                         out.inst(

@@ -264,3 +264,25 @@ fn jit_agrees_with_rust_on_forward_edges_and_shared_returns() {
         }
     }
 }
+
+#[test]
+fn release_code_drops_debug_points() {
+    let build = |points: u32| {
+        let mut f = Function::scalar(1);
+        let entry = f.entry();
+        let mut value = f.params(entry)[0];
+        for id in 0..points {
+            f.append(entry, Op::DebugPoint(id));
+        }
+        let three = f.append(entry, Op::Const(3)).unwrap();
+        value = f.append(entry, Op::Bin(Binary::Mul, value, three)).unwrap();
+        for id in 0..points {
+            f.append(entry, Op::DebugPoint(points + id));
+        }
+        f.set_terminator(entry, Terminator::Return(value));
+        ScalarKernel::compile(&f).unwrap()
+    };
+    let (plain, marked) = (build(0), build(32));
+    assert_eq!(marked.call(&[7]), Ok(21));
+    assert_eq!(marked.code_size(), plain.code_size());
+}

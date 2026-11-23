@@ -930,12 +930,13 @@ impl Emitter<'_> {
                 ptr(r11 + (disp(frame.debug_base) + offset as i32)),
                 reg(0),
             ),
-            Inst::DebugPoint(id) => {
-                if self.debug {
-                    self.points.push((id, position(a)?));
-                }
+            // A debug point gets its own address for the line table; release
+            // code emits nothing.
+            Inst::DebugPoint(id) if self.debug => {
+                self.points.push((id, position(a)?));
                 a.nop()
             }
+            Inst::DebugPoint(_) => Ok(()),
             Inst::StoreArg(i, ty, _) => store(a, ty, slot(frame.slots + CHILD_ARGS + i), reg(0)),
             Inst::CallScratch(offset, ..) => {
                 a.lea(q(0), ptr(r11 + (disp(frame.scratch_base) + offset as i32)))
