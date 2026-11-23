@@ -40,6 +40,15 @@ fn offset(#[comptime] enabled: bool, #[comptime] curve: Curve, input: i32) -> i3
     input + coefficient
 }
 
+/// `ir()` takes the default build options, which check overflow in debug.
+fn checked(release: Binary, debug: Binary) -> Binary {
+    if cfg!(debug_assertions) {
+        debug
+    } else {
+        release
+    }
+}
+
 fn check_function(ir: &Function, expected_offset: i32) {
     // Apart from moves, labels and a return, the entire specialization
     // must be one embedded coefficient and a single runtime addition.
@@ -56,7 +65,7 @@ fn check_function(ir: &Function, expected_offset: i32) {
         }
     }
     assert_eq!(constants, [expected_offset]);
-    assert_eq!(arithmetic, [Binary::Add]);
+    assert_eq!(arithmetic, [checked(Binary::Add, Binary::CheckedAdd)]);
 }
 
 #[test]
@@ -181,12 +190,9 @@ fn a_const_kernel_can_be_evaluated_and_called_in_the_same_specialization() {
             .iter()
             .any(|i| matches!(i, Instr::Const(_, KNOWN_WEIGHT)))
     );
-    assert!(
-        calls[0]
-            .instructions()
-            .iter()
-            .any(|i| matches!(i, Instr::Bin(_, Binary::Mul, ..)))
-    );
+    assert!(calls[0].instructions().iter().any(
+        |i| matches!(i, Instr::Bin(_, op, ..) if *op == checked(Binary::Mul, Binary::CheckedMul))
+    ));
     let native = evaluate_both::build::<Lancy>(evaluate_both::BuildArgs { known: 4 }).unwrap();
     for x in [-7, 0, 11] {
         assert_eq!(

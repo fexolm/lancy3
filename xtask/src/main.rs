@@ -197,7 +197,7 @@ fn lint() -> Result {
 }
 
 fn test(debug: bool, target: &[String]) -> Result {
-    let mut command = cargo(&["test", "--workspace"]);
+    let mut command = cargo(&["test", "--workspace", "--no-fail-fast"]);
     if !debug {
         command.arg("--release");
     }
