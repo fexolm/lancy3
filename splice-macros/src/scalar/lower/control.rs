@@ -4,7 +4,7 @@ use proc_macro2::TokenStream;
 use quote::ToTokens;
 use syn::spanned::Spanned;
 use syn::visit::Visit;
-use syn::{Block, Error, Expr, Lit, Pat, Result};
+use syn::{Block, Expr, Lit, Pat, Result};
 
 impl Lower<'_> {
     pub(super) fn staged_loop(
@@ -505,7 +505,8 @@ impl Lower<'_> {
                         None => upper,
                     })
                 }
-                pred.ok_or_else(|| Error::new_spanned(r, "expected a range endpoint"))
+                // syn parses an endpoint-free `..` as `Pat::Rest`.
+                Ok(pred.expect("a range pattern has an endpoint"))
             }
             _ => err(
                 p,

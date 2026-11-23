@@ -1,0 +1,134 @@
+// Diagnostics of #[kernel] on impls, traits, methods and derives.
+use splice::{ComptimeKey, KernelType, kernel};
+
+pub struct Counter;
+
+#[kernel(rust)]
+impl Counter {
+    fn get(&self) -> i32 {
+        0
+    }
+}
+
+pub struct Nested;
+#[kernel]
+impl Nested {
+    #[kernel]
+    fn twice(x: i32) -> i32 {
+        x * 2
+    }
+}
+
+pub struct Wide;
+#[kernel]
+impl Wide {
+    fn method_param(x: i64) -> i32 {
+        x as i32
+    }
+}
+
+pub struct Tuple;
+#[kernel]
+impl Tuple {
+    fn tuple_param(#[comptime] (a, b): (i32, i32)) -> i32 {
+        a + b
+    }
+}
+
+pub struct State;
+pub struct Contextual;
+#[kernel]
+impl Contextual {
+    fn context_param(state: &mut State) -> i32 {
+        0
+    }
+}
+
+pub struct Asynchronous;
+#[kernel]
+impl Asynchronous {
+    async fn later() -> i32 {
+        0
+    }
+}
+
+pub struct Plain;
+impl Plain {
+    #[kernel]
+    fn get(&self) -> i32 {
+        0
+    }
+}
+
+pub trait PlainTrait {
+    #[kernel]
+    fn get(&self) -> i32;
+}
+
+#[kernel]
+pub trait Lanes {
+    fn sum(x: splice::simd::Lane<i32>) -> i32;
+}
+
+pub struct Marked;
+#[kernel]
+impl Marked {
+    fn marked(#[inline] x: i32) -> i32 {
+        x
+    }
+}
+
+pub struct Doubly;
+#[kernel]
+impl Doubly {
+    fn doubly(#[comptime] #[comptime] n: i32, x: i32) -> i32 {
+        n + x
+    }
+}
+
+pub struct Argument;
+#[kernel]
+impl Argument {
+    fn with_argument(#[comptime(1)] n: i32, x: i32) -> i32 {
+        n + x
+    }
+}
+
+pub struct Unnamed;
+#[kernel]
+impl Unnamed {
+    #[intrinsic("")]
+    fn empty_name(x: i32) -> i32 {
+        x
+    }
+}
+
+pub struct Twice;
+#[kernel]
+impl Twice {
+    #[intrinsic("a")]
+    #[intrinsic("b")]
+    fn two_names(x: i32) -> i32 {
+        x
+    }
+}
+
+#[kernel]
+pub trait Shape {
+    fn area(x: i64) -> i32;
+}
+
+#[kernel]
+struct NotAFunction;
+
+#[derive(KernelType)]
+enum NotAStruct {
+    A,
+}
+
+#[derive(ComptimeKey)]
+union Bits {
+    a: u32,
+}
+
+fn main() {}

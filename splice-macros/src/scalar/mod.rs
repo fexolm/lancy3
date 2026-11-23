@@ -52,16 +52,8 @@ pub(super) fn expand(root: Path, native: &mut ItemFn) -> Result<TokenStream> {
         .iter()
         .filter_map(|a| configuration(&a.meta).transpose())
         .collect::<Result<Vec<_>>>()?;
-    if sig.asyncness.is_some()
-        || sig.unsafety.is_some()
-        || sig.abi.is_some()
-        || sig.variadic.is_some()
-    {
-        return Err(Error::new_spanned(
-            sig,
-            "expected an ordinary kernel function",
-        ));
-    }
+    // `declaration::signature` has rejected async, unsafe, extern and
+    // variadic signatures.
     let unit = syn::parse_quote!(());
     let ty = match &sig.output {
         ReturnType::Default => &unit,
@@ -687,7 +679,7 @@ fn context_slice_types(
 
 fn parameter<'a>(arg: &'a FnArg, types: &[&Ident], name: Ident) -> Result<abi::Parameter<'a>> {
     let FnArg::Typed(arg) = arg else {
-        return Err(Error::new_spanned(arg, "kernel methods are unsupported"));
+        unreachable!("callers pass a method receiver separately")
     };
     let mutable = matches!(&*arg.pat, Pat::Ident(pat) if pat.mutability.is_some());
     let binding = match arg.attrs.as_slice() {
