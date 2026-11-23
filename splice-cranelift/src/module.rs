@@ -69,6 +69,7 @@ impl<'a> KernelModule<'a> {
         let mut functions = HashMap::new();
         let track_sources = debug || profile;
         let mut builder_ctx = FunctionBuilderContext::new();
+        let legacy_sse = cfg!(target_arch = "x86_64") && !has_isa_flag(module, "has_avx");
         while let Some((f, id)) = pending.pop() {
             if track_sources {
                 functions.insert(id, f);
@@ -123,6 +124,9 @@ impl<'a> KernelModule<'a> {
                 &imports,
                 debug_bytes,
             );
+            if legacy_sse {
+                lower::keep_compared_loads_in_registers(&mut ctx.func);
+            }
             // Context::inline requires legalized and valid callee bodies.
             ctx.legalize(module.isa()).map_err(|e| e.to_string())?;
             ctx.verify(module.isa()).map_err(|e| e.to_string())?;
@@ -229,4 +233,12 @@ impl Inline for KernelInliner<'_> {
             visit_callee: true,
         }
     }
+}
+
+fn has_isa_flag(module: &JITModule, name: &str) -> bool {
+    module
+        .isa()
+        .isa_flags()
+        .iter()
+        .any(|flag| flag.name == name && flag.as_bool() == Some(true))
 }

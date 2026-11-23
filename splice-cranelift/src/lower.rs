@@ -14,6 +14,8 @@ use std::sync::Arc;
 
 mod simd;
 
+pub(crate) use simd::keep_compared_loads_in_registers;
+
 fn packet_stack(
     builder: &mut FunctionBuilder,
     scratch: &mut Option<StackSlot>,

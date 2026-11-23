@@ -570,6 +570,17 @@ fn convert(b: &mut FunctionBuilder, from: Element, to: Element, ty: Type, x: Val
         (true, true) => b.ins().fdemote(ty, x),
         (false, true) if from.is_unsigned() => b.ins().fcvt_from_uint(ty, x),
         (false, true) => b.ins().fcvt_from_sint(ty, x),
+        // The x64 backend lowers saturating float-to-int conversions only
+        // into 32-bit lanes (BE-02); convert 64-bit lanes one at a time.
+        (true, false) if cfg!(target_arch = "x86_64") && ty.is_vector() && ty.lane_bits() == 64 => {
+            let lanes: Vec<_> = (0..ty.lane_count() as u8)
+                .map(|i| {
+                    let lane = b.ins().extractlane(x, i);
+                    convert(b, from, to, ty.lane_type(), lane)
+                })
+                .collect();
+            gather_lanes(b, ty, &lanes)
+        }
         (true, false) if to.is_unsigned() => b.ins().fcvt_to_uint_sat(ty, x),
         (true, false) => b.ins().fcvt_to_sint_sat(ty, x),
         (false, false) if from.bytes() > to.bytes() => b.ins().ireduce(ty, x),
@@ -596,13 +607,17 @@ fn convert_width(
                 convert(b, from, to, out.lane_type(), x)
             };
             let lanes: Vec<_> = (0..m).map(&mut lane).collect();
-            let mut result = b.ins().splat(out, lanes[0]);
-            for (i, &value) in lanes.iter().enumerate().skip(1) {
-                result = b.ins().insertlane(result, value, i as u8);
-            }
-            result
+            gather_lanes(b, out, &lanes)
         })
         .collect()
+}
+
+fn gather_lanes(b: &mut FunctionBuilder, ty: Type, lanes: &[Value]) -> Value {
+    let mut result = b.ins().splat(ty, lanes[0]);
+    for (i, &value) in lanes.iter().enumerate().skip(1) {
+        result = b.ins().insertlane(result, value, i as u8);
+    }
+    result
 }
 
 enum Address<'a> {
@@ -926,5 +941,34 @@ impl Memory<'_> {
             }
         }
         value
+    }
+}
+
+/// Cranelift 0.132 folds a vector load into the memory operand of legacy-SSE
+/// `cmpps`/`cmppd` without requiring 16-byte alignment, so an unaligned slice
+/// load faults (BE-01). Every other legacy-SSE form copies such a load to a
+/// register first. Without AVX, route compared loads through a vector bitcast,
+/// a register no-op that the x64 lowering cannot fold.
+pub(crate) fn keep_compared_loads_in_registers(func: &mut cranelift_codegen::ir::Function) {
+    use cranelift_codegen::cursor::{Cursor, FuncCursor};
+    use cranelift_codegen::ir::{InstructionData, Opcode, ValueDef};
+    let order = MemFlags::new().with_endianness(cranelift_codegen::ir::Endianness::Little);
+    let mut pos = FuncCursor::new(func);
+    while pos.next_block().is_some() {
+        while let Some(inst) = pos.next_inst() {
+            let InstructionData::FloatCompare { args, .. } = pos.func.dfg.insts[inst] else {
+                continue;
+            };
+            for (operand, value) in args.into_iter().enumerate() {
+                let ty = pos.func.dfg.value_type(value);
+                let loaded = matches!(pos.func.dfg.value_def(value),
+                    ValueDef::Result(def, _) if pos.func.dfg.insts[def].opcode() == Opcode::Load);
+                if ty.is_vector() && loaded {
+                    let bits = pos.ins().bitcast(ty.as_int(), order, value);
+                    let copy = pos.ins().bitcast(ty, order, bits);
+                    pos.func.dfg.inst_args_mut(inst)[operand] = copy;
+                }
+            }
+        }
     }
 }
