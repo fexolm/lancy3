@@ -58,10 +58,14 @@ fn builder(target: &splice_core::Target, debug: bool) -> Result<JITBuilder> {
     let isa = isa
         .finish(settings::Flags::new(flags))
         .map_err(|e| splice_core::BuildError::backend("cranelift", e))?;
-    let mut builder = JITBuilder::with_isa(isa, default_libcall_names());
+    let builder = JITBuilder::with_isa(isa, default_libcall_names());
     // Without SSSE3, Cranelift lowers byte shuffles to this libcall.
     #[cfg(target_arch = "x86_64")]
-    builder.symbol("__cranelift_x86_pshufb", x86_pshufb as *const u8);
+    let builder = {
+        let mut builder = builder;
+        builder.symbol("__cranelift_x86_pshufb", x86_pshufb as *const u8);
+        builder
+    };
     Ok(builder)
 }
 
