@@ -10,6 +10,7 @@ pub(in crate::lir::x64) mod rearrange;
 type Result = std::result::Result<(), IcedError>;
 #[derive(Clone, Copy, Debug)]
 pub(in crate::lir::x64) enum Recipe {
+    /// AVX-512F without BW: small-lane integer operations run as two AVX2 halves.
     Halves,
     Int(integer::Rule),
     Float(float::Rule),
@@ -77,19 +78,11 @@ fn emit_halves(v: &mut Vector, native: Native, r: &[usize], temps: &[usize]) -> 
         half.emit_allocated(v.a, &regs[..inputs.len() + 1], inner, v.pool)
     };
     for (&src, &tmp) in inputs.iter().zip(held) {
-        if v.width == 32 {
-            v.a.vextractf128(XMM[tmp], YMM[src], 1)?;
-        } else {
-            v.a.vextracti64x4(YMM[tmp], ZMM[src], 1)?;
-        }
+        v.a.vextracti64x4(YMM[tmp], ZMM[src], 1)?;
     }
     emit_part(v, &held[..inputs.len()], high)?;
     emit_part(v, inputs, *d)?;
-    if v.width == 32 {
-        v.a.vinsertf128(YMM[*d], YMM[*d], XMM[high], 1)
-    } else {
-        v.a.vinserti64x4(ZMM[*d], ZMM[*d], YMM[high], 1)
-    }
+    v.a.vinserti64x4(ZMM[*d], ZMM[*d], YMM[high], 1)
 }
 
 struct Vector<'a> {
@@ -160,11 +153,7 @@ impl Vector<'_> {
     fn ones(&mut self, d: usize) -> Result {
         match self.width {
             64 => self.a.vpternlogd(ZMM[d], ZMM[d], ZMM[d], 0xff),
-            32 if self.cpu.isa.avx2 => self.a.vpcmpeqd(YMM[d], YMM[d], YMM[d]),
-            32 => {
-                self.a.pcmpeqd(XMM[d], XMM[d])?;
-                self.a.vinsertf128(YMM[d], YMM[d], XMM[d], 1)
-            }
+            32 => self.a.vpcmpeqd(YMM[d], YMM[d], YMM[d]),
             _ => self.a.pcmpeqd(XMM[d], XMM[d]),
         }
     }

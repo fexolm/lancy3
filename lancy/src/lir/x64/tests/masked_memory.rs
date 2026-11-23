@@ -234,13 +234,6 @@ fn masked_memory_uses_signed_lane_bits_and_only_available_isa() {
     };
     for cpu in [
         sse2,
-        Cpu {
-            isa: X86Features {
-                avx2: false,
-                ..avx2.isa
-            },
-            ..avx2
-        },
         avx2,
         avx512f,
         avx512bw,

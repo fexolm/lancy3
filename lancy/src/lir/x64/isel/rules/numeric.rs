@@ -12,7 +12,7 @@ impl Rules<'_> {
         if let Op::Simd(kind @ (Simd::Compress(value, mask) | Simd::Expand(value, mask))) = op
             && self.ty(value).lane().unwrap().bytes() == 4
             && !crate::lir::x64::inst::simd::evex(self.cpu)
-            && (self.cpu.bytes == 16 || self.cpu.bytes == 32 && self.cpu.isa.avx2)
+            && self.cpu.bytes <= 32
         {
             return Ok(Inst::CompactLookup(
                 matches!(kind, Simd::Expand(..)),

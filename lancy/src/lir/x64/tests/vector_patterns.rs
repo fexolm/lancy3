@@ -996,7 +996,6 @@ fn selected_rearrangements_respect_feature_subsets_and_smaller_register_widths()
         },
         ..ssse3
     };
-    let avx = Cpu { bytes: 32, ..sse41 };
     let vbmi2_only = Cpu {
         isa: X86Features {
             vbmi2: true,
@@ -1019,7 +1018,7 @@ fn selected_rearrangements_respect_feature_subsets_and_smaller_register_widths()
         },
     });
     for cpu in [
-        sse2, ssse3, sse41, avx, avx2, foundation, extended, vbmi2_only, vbmi,
+        sse2, ssse3, sse41, avx2, foundation, extended, vbmi2_only, vbmi,
     ]
     .into_iter()
     .chain(avx10)

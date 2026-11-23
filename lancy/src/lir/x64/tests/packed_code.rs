@@ -28,6 +28,7 @@ pub(super) fn profiles() -> [Cpu; 4] {
     let avx2 = Cpu {
         bytes: 32,
         isa: X86Features {
+            avx: true,
             avx2: true,
             ssse3: true,
             sse41: true,
@@ -35,7 +36,13 @@ pub(super) fn profiles() -> [Cpu; 4] {
             ..sse2.isa
         },
     };
-    let foundation = Cpu { bytes: 64, ..avx2 };
+    let foundation = Cpu {
+        bytes: 64,
+        isa: X86Features {
+            avx512f: true,
+            ..avx2.isa
+        },
+    };
     let extended = Cpu {
         isa: X86Features {
             bw: true,

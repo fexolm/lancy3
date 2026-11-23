@@ -18,8 +18,7 @@ impl Recipe {
                 let lane = input.lane()?;
                 if lane.float()
                     || lane.bytes() > 8
-                    || !(c.bytes == 32 && !c.isa.avx2
-                        || c.bytes == 64 && !c.isa.bw && lane.bytes() < 4 && c.isa.avx2)
+                    || !(c.bytes == 64 && !c.isa.bw && lane.bytes() < 4)
                 {
                     return None;
                 }

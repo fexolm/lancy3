@@ -233,17 +233,6 @@ fn packed_arithmetic_and_ordering_obey_each_isa_and_operand_alias() {
 }
 
 #[test]
-fn avx1_without_avx2_computes_both_sse_halves() {
-    let avx = Cpu {
-        bytes: 32,
-        ..profiles()[0]
-    };
-    for lane in INTS {
-        arithmetic_and_ordering(avx, lane);
-    }
-}
-
-#[test]
 fn avx512f_without_bw_computes_byte_and_word_lanes_in_both_halves() {
     let foundation = profiles()[2];
     for lane in [Lane::I8, Lane::U8, Lane::I16, Lane::U16] {

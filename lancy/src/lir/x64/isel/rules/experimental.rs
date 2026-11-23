@@ -10,7 +10,6 @@ impl Rules<'_> {
     pub(super) fn experimental_numeric(&mut self, op: Op) -> Result<Option<Inst>, CompileError> {
         if let Op::Simd(Simd::Shuffle(x, y, indices)) = op
             && self.ty(x).lane().unwrap().bytes() == 4
-            && (self.cpu.bytes != 32 || self.cpu.isa.avx2)
             && let Some(Op::Simd(Simd::Splat(index))) = self.ctx.defining_op(indices)
             && let Some(index) = self.ctx.constant(index)
             && let Ok(index) = u8::try_from(index)
@@ -23,7 +22,7 @@ impl Rules<'_> {
         }
         // VEX and EVEX accept unaligned packed memory operands. Keep the load
         // at the same point in the effect order by covering adjacent loads only.
-        if self.cpu.bytes == 64 || self.cpu.bytes == 32 && self.cpu.isa.avx2 {
+        if self.cpu.bytes >= 32 {
             match op {
                 Op::Simd(Simd::Bin(
                     kind @ (Binary::Add | Binary::And | Binary::Or | Binary::Xor),
@@ -68,7 +67,7 @@ impl Rules<'_> {
         let lane = self.ty(v).lane().unwrap();
         let supported = match self.cpu.bytes {
             16 => lane.bytes() <= 4 || lane.bytes() == 8 && self.cpu.isa.sse41,
-            32 => self.cpu.isa.avx2 && lane.bytes() <= 8,
+            32 => lane.bytes() <= 8,
             64 => matches!(lane.bytes(), 4 | 8) || (lane.bytes() < 4 && self.cpu.isa.bw),
             _ => false,
         };

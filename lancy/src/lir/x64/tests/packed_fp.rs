@@ -136,18 +136,18 @@ fn run_profiles(from: Lane, to: Lane, op: Action, run_cases: impl Fn(usize, &dyn
 
     let (action, input, output) = (op, Type::Vector(from), Type::Vector(to));
     let [sse2, avx2, foundation, extended] = profiles();
-    let avx1 = Cpu { bytes: 32, ..sse2 };
-    let mut targets = vec![sse2, avx1, avx2, foundation, extended];
+    let mut targets = vec![sse2, avx2, foundation, extended];
     if matches!(op, Action::Cast) {
         targets.extend(avx10_1_profiles());
     }
     if matches!(from, Lane::F16) || matches!(to, Lane::F16) {
         targets.push(Cpu {
             isa: X86Features {
+                avx: true,
                 f16c: true,
-                ..avx1.isa
+                ..sse2.isa
             },
-            ..avx1
+            ..sse2
         });
     }
     if matches!(from, Lane::BF16) || matches!(to, Lane::BF16) {

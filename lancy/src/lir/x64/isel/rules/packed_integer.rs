@@ -17,7 +17,7 @@ impl Rules<'_> {
             return None;
         };
         let lane = self.ty(src).lane()?;
-        if !matches!(lane, Lane::I32 | Lane::U32) || (self.cpu.bytes == 32 && !self.cpu.isa.avx2) {
+        if !matches!(lane, Lane::I32 | Lane::U32) {
             return None;
         }
         let Op::Simd(Simd::Splat(scalar)) = self.ctx.defining_op(count)? else {
@@ -41,11 +41,7 @@ impl Rule {
         if matches!(action, Action::Ternary(Ternary::BitSelect)) {
             return Some(Self::BitSelect);
         }
-        if lane.float()
-            || n > 8
-            || c.bytes == 32 && !c.isa.avx2
-            || c.bytes == 64 && n < 4 && !c.isa.bw
-        {
+        if lane.float() || n > 8 || c.bytes == 64 && n < 4 && !c.isa.bw {
             return None;
         }
         Some(match action {

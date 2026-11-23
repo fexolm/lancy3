@@ -50,15 +50,12 @@ impl Native {
                 );
             return supported.then_some(direct);
         }
-        let int = packed
-            && (bytes != 32 || cpu.isa.avx2)
-            && (bytes != 64 || lane.bytes() >= 4 || cpu.isa.bw);
+        let int = packed && (bytes != 64 || lane.bytes() >= 4 || cpu.isa.bw);
         let supported = match action {
             Action::Splat => {
                 lane.bytes() <= 8
                     && match bytes {
-                        16 => true,
-                        32 => cpu.isa.avx2,
+                        16 | 32 => true,
                         64 => lane.bytes() >= 4 || cpu.isa.bw,
                         _ => false,
                     }
@@ -160,7 +157,7 @@ fn supports_mask_op(action: Action, lane_bytes: usize, cpu: Cpu) -> bool {
         Action::AllTrue => cpu.bytes == 64 && (lane_bytes == 4 || signs),
         Action::Ternary(Ternary::Select) => match cpu.bytes {
             16 => lane_bytes <= 8,
-            32 => lane_bytes <= 8 && (cpu.isa.avx2 || lane_bytes >= 4),
+            32 => lane_bytes <= 8,
             _ => signs,
         },
         _ => false,

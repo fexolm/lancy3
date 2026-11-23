@@ -58,7 +58,6 @@ impl Rules<'_> {
         // AVX2 gather needs a scratch vector for its destructive mask.
         let temp = if self.cpu.bytes == 32
             && self.cpu.isa.avx10 == 0
-            && self.cpu.isa.avx2
             && address.indices.is_some()
             && dst.is_some()
             && matches!(ty.lane().unwrap().bytes(), 4 | 8)
@@ -72,9 +71,7 @@ impl Rules<'_> {
         } else {
             VectorMask::Lanes(self.input(mask))
         };
-        let vex = self.cpu.bytes == 32
-            && matches!(size, 4 | 8)
-            && (indices.is_none() || self.cpu.isa.avx2);
+        let vex = self.cpu.bytes == 32 && matches!(size, 4 | 8);
         let zero = dst.is_some()
             && (evex || vex)
             && matches!(self.ctx.defining_op(value), Some(Op::Simd(Simd::Splat(x))) if

@@ -247,16 +247,15 @@ fn integer_conversions_respect_avx512_subsets_and_avx10_vector_length() {
 #[test]
 fn widen_and_narrow_use_legal_packed_instructions_at_the_available_width() {
     let [sse2, avx2, foundation, extended] = profiles();
-    let avx1 = Cpu { bytes: 32, ..sse2 };
     for cpu in [
         sse2,
-        avx1,
         Cpu {
             isa: X86Features {
+                avx: true,
                 f16c: true,
-                ..avx1.isa
+                ..sse2.isa
             },
-            ..avx1
+            ..sse2
         },
         avx2,
         foundation,

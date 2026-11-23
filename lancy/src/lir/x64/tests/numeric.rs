@@ -269,15 +269,21 @@ fn instruction_encodings_require_their_exact_isa() {
             ..X86Features::default()
         },
     };
-    let avx = Cpu { bytes: 32, ..base };
     let avx2 = Cpu {
+        bytes: 32,
         isa: X86Features {
+            avx: true,
             avx2: true,
-            ..avx.isa
+            ..base.isa
         },
-        ..avx
     };
-    let avx512 = Cpu { bytes: 64, ..avx2 };
+    let avx512 = Cpu {
+        bytes: 64,
+        isa: X86Features {
+            avx512f: true,
+            ..avx2.isa
+        },
+    };
     let vector = Type::Vector;
     let encode = |features, action, input, output, regs: &[usize]| {
         let op = Native::select(action, input, output, features)?;
@@ -295,10 +301,9 @@ fn instruction_encodings_require_their_exact_isa() {
         Some(Code::Paddd_xmm_xmmm128)
     );
     assert_eq!(
-        binary(avx, Lane::F32, Binary::Add),
+        binary(avx2, Lane::F32, Binary::Add),
         Some(Code::VEX_Vaddps_ymm_ymm_ymmm256)
     );
-    assert!(binary(avx, Lane::I32, Binary::Add).is_some());
     assert_eq!(
         binary(avx2, Lane::I32, Binary::Add),
         Some(Code::VEX_Vpaddd_ymm_ymm_ymmm256)

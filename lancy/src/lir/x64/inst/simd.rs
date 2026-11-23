@@ -137,9 +137,8 @@ impl Native {
                 return match self.bytes {
                     64 => a.vpternlogd(ZMM[dst], ZMM[src], ZMM[src], 0x33),
                     32 => {
-                        a.pcmpeqd(XMM[scratch], XMM[scratch])?;
-                        a.vinsertf128(YMM[scratch], YMM[scratch], XMM[scratch], 1)?;
-                        a.vxorps(YMM[dst], YMM[src], YMM[scratch])
+                        a.vpcmpeqd(YMM[scratch], YMM[scratch], YMM[scratch])?;
+                        a.vpxor(YMM[dst], YMM[src], YMM[scratch])
                     }
                     _ => {
                         a.pcmpeqd(XMM[scratch], XMM[scratch])?;
@@ -971,9 +970,7 @@ impl MaskedMemory {
             unreachable!("comparison masks require 512-bit EVEX memory instructions")
         };
         if width == 32 && matches!(size, 4 | 8) {
-            if let (Some(i), Some(d)) = (index, dst)
-                && cpu.isa.avx2
-            {
+            if let (Some(i), Some(d)) = (index, dst) {
                 // AVX2 clears enabled mask lanes as the gather completes. Regalloc
                 // provides a distinct temporary for that destructive operand.
                 let m = temp.expect("AVX2 gather mask temporary");
