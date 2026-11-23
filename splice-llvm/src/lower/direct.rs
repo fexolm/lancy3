@@ -93,7 +93,6 @@ impl<'ctx> Graph<'_, 'ctx> {
             arity,
             kinds,
             flow: Flow::new(),
-            literal: None,
             error: None,
         };
         stage(&mut direct)?;
@@ -144,7 +143,6 @@ struct Direct<'a, 'ctx> {
     arity: usize,
     kinds: &'a [BufferKind],
     flow: Flow,
-    literal: Option<(Reg, bool)>,
     // Infallible frontend operations defer errors to the enclosing build.
     error: Option<String>,
 }
@@ -173,7 +171,6 @@ impl<'a, 'ctx> Direct<'a, 'ctx> {
         dst: Option<Reg>,
         generate: impl FnOnce(&mut Body<'a, 'ctx>) -> Result<(), BuilderError>,
     ) {
-        self.literal = None;
         if self.error.is_some() {
             return;
         }
@@ -280,9 +277,7 @@ impl KernelBuilder for Direct<'_, '_> {
         Ok(dst)
     }
     fn constant(&mut self, n: i32) -> Reg {
-        let r = self.result(&[], |ir, d| ir.constant(d, n));
-        self.literal = Some((r, n != 0));
-        r
+        self.result(&[], |ir, d| ir.constant(d, n))
     }
     fn buffer_len(&mut self, b: Buffer) -> Reg {
         self.buffer(b, false);
@@ -297,9 +292,6 @@ impl KernelBuilder for Direct<'_, '_> {
         self.emit(&[index, value], None, |ir| {
             ir.write_element(b, index, value)
         });
-    }
-    fn immediate_condition(&self, r: Reg) -> Option<bool> {
-        self.literal.filter(|&(v, _)| v == r).map(|(_, n)| n)
     }
     fn binary(&mut self, op: Binary, a: Reg, b: Reg) -> Reg {
         self.result(&[a, b], |ir, d| ir.arithmetic(d, op, a, b))
@@ -329,7 +321,6 @@ impl KernelBuilder for Direct<'_, '_> {
         if self.flow.current.is_some() {
             self.jump(l);
         }
-        self.literal = None;
         if let Err(err) = self.flow.begin(l) {
             self.error = Some(err);
         } else {

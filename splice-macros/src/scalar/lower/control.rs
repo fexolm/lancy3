@@ -123,14 +123,37 @@ impl Lower<'_> {
         at: impl ToTokens,
     ) -> Result<Value> {
         let host = matches!(cond.stage, Stage::Literal(Scalar::Bool) | Stage::Host);
-        let stage = self.join([&yes, &no], !host, &at)?;
+        let mut stage = self.join([&yes, &no], !host, &at)?;
         if host {
+            // A known condition selects one arm during specialization, so a
+            // scalar result is known exactly when that arm is: a Word.
+            if let Stage::Reg(t @ (Scalar::Int | Scalar::Bool)) = stage
+                && yes.stage != Stage::Never
+                && no.stage != Stage::Never
+            {
+                stage = Stage::Word(t);
+            }
             let yes = self.host_arm(yes, stage, &at)?;
             let no = self.host_arm(no, stage, &at)?;
             return Ok(Value::new(stage, emit!(if #cond {#yes}else{#no})));
         }
 
-        let test = self.reg(cond, Scalar::Bool, &at)?;
+        // A mixed-stage condition is a Word: known when its declaration is
+        // resolved during specialization, otherwise a register to branch on.
+        let root = self.root;
+        let (word, known) = if matches!(cond.stage, Stage::Word(_)) {
+            let code = cond.code;
+            (
+                emit!(let __splice_word = #code;),
+                emit!(#root::frontend::scalar::RunArg::known(&__splice_word).map(|value| value != 0)),
+            )
+        } else {
+            let test = self.reg(cond, Scalar::Bool, &at)?;
+            (
+                emit!(let __splice_word = #test;),
+                emit!(::core::option::Option::<bool>::None),
+            )
+        };
         let inner = self.nested_region();
         let yes_code = inner.delimit(self.write_arm(yes, stage, &at)?);
         let no_code = inner.delimit(self.write_arm(no, stage, &at)?);
@@ -138,12 +161,15 @@ impl Lower<'_> {
         Ok(Value::new(
             stage,
             emit!({
-                let __splice_cond = #test;
+                #word
+                let __splice_known_condition: ::core::option::Option<bool> = #known;
                 #init
                 let (__splice_yes, __splice_no, __splice_join) =
                     (__splice_builder.label(), __splice_builder.label(), __splice_builder.label());
-                let __splice_known_condition = __splice_builder.immediate_condition(__splice_cond);
-                if __splice_known_condition.is_none() { __splice_builder.branch(__splice_cond, __splice_yes, __splice_no); }
+                if __splice_known_condition.is_none() {
+                    let __splice_cond = #root::frontend::scalar::RunArg::reg(__splice_word, __splice_builder);
+                    __splice_builder.branch(__splice_cond, __splice_yes, __splice_no);
+                }
                 if __splice_known_condition != ::core::option::Option::Some(false) { __splice_builder.mark(__splice_yes); #yes_code; }
                 if __splice_known_condition != ::core::option::Option::Some(true) { __splice_builder.mark(__splice_no); #no_code; }
                 __splice_builder.mark(__splice_join); #result

@@ -120,22 +120,6 @@ impl FunctionBuilder {
         });
     }
 
-    /// A mixed-stage condition may just have materialized its known arm.
-    /// Looking at the preceding instruction is valid even for mutable registers:
-    /// no label can transfer control between that definition and this use.
-    #[doc(hidden)]
-    pub fn immediate_condition(&self, reg: Reg) -> Option<bool> {
-        match self
-            .function
-            .code
-            .iter()
-            .rev()
-            .find(|op| !matches!(op, Instr::Debug(_)))?
-        {
-            Instr::Const(dst, value) if *dst == reg => Some(*value != 0),
-            _ => None,
-        }
-    }
     pub fn binary(&mut self, op: Binary, a: Reg, b: Reg) -> Reg {
         self.emit_value(|dst| Instr::Bin(dst, op, a, b))
     }
@@ -295,9 +279,6 @@ impl KernelBuilder for FunctionBuilder {
         jump(label: Label);
         branch(cond: Reg, yes: Label, no: Label);
         ret(value: Reg);
-    }
-    fn immediate_condition(&self, reg: Reg) -> Option<bool> {
-        self.immediate_condition(reg)
     }
     fn trap_bounds(&mut self) -> crate::Result<()> {
         self.function.code.push(Instr::TrapBounds);

@@ -450,9 +450,6 @@ mod directly_staged {
         fn store(&mut self, _: Buffer, _: Reg, _: Reg) {
             unreachable!()
         }
-        fn immediate_condition(&self, _: Reg) -> Option<bool> {
-            None
-        }
         fn binary(&mut self, _: Binary, _: Reg, _: Reg) -> Reg {
             self.local()
         }

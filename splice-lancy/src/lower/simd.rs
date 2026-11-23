@@ -46,7 +46,6 @@ impl Builder<'_> {
             })
             .collect::<Result<Vec<_>, _>>()?;
         inst.validate(&types, self.kinds)?;
-        self.immediate = None;
         if self.current.is_none() {
             return Ok(None);
         }

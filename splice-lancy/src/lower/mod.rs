@@ -111,7 +111,6 @@ impl<'a> Builder<'a> {
             types: vec![ValueType::Scalar; arity],
             demands: Vec::new(),
             labels: Vec::new(),
-            immediate: None,
             error: None,
             has_shared_i32: kinds.contains(&BufferKind::Read),
             constants: HashMap::new(),
@@ -160,7 +159,6 @@ struct Builder<'a> {
     types: Vec<ValueType>,
     demands: Vec<(Block, Reg)>,
     labels: Vec<Destination>,
-    immediate: Option<(Reg, bool)>,
     error: Option<String>,
     has_shared_i32: bool,
     constants: HashMap<Value, i32>,
@@ -255,14 +253,12 @@ impl Builder<'_> {
         self.parameter(b, r)
     }
     fn result(&mut self, op: Op) -> Reg {
-        self.immediate = None;
         let r = self.local();
         self.define(r, op);
         r
     }
 
     fn arithmetic(&mut self, dst: Reg, op: Binary, lhs: Reg, rhs: Reg) {
-        self.immediate = None;
         let (a, b) = (self.scalar(lhs), self.scalar(rhs));
         let Some(block) = self.current else {
             return;
@@ -351,7 +347,6 @@ impl Builder<'_> {
         args: &[Reg],
     ) -> splice::Result<()> {
         splice::hir::check_rust_packet_call(import, args.iter().map(|&arg| self.reg_type(arg)))?;
-        self.immediate = None;
         self.shared_loads.clear();
         if self.current.is_some() {
             let args: Vec<_> = args.iter().map(|&arg| self.scalar(arg)).collect();
@@ -395,7 +390,6 @@ impl Builder<'_> {
                 [context, operation, a, b],
             )
         } else {
-            self.immediate = None;
             self.shared_loads.clear();
             let layout = ContextArguments::packet_layout(args.len() as u32, slices.len() as u32)
                 .expect("validated packet size");
@@ -462,7 +456,6 @@ impl Builder<'_> {
             _ => unreachable!("validated Rust import arity"),
         };
         let (a, b) = (self.scalar(a), self.scalar(b));
-        self.immediate = None;
         self.shared_loads.clear();
         [a, b]
     }
@@ -513,7 +506,6 @@ impl Builder<'_> {
         })
     }
     fn end(&mut self, exit: Exit) {
-        self.immediate = None;
         if let Some(b) = self.current.take() {
             self.blocks[b].exit = Some(exit);
             self.constants.clear();
@@ -551,9 +543,7 @@ impl KernelBuilder for Builder<'_> {
         Ok(dst)
     }
     fn constant(&mut self, n: i32) -> Reg {
-        let r = self.result(Op::Const(n));
-        self.immediate = Some((r, n != 0));
-        r
+        self.result(Op::Const(n))
     }
     fn buffer_len(&mut self, buffer: Buffer) -> Reg {
         if self
@@ -569,7 +559,6 @@ impl KernelBuilder for Builder<'_> {
     }
     fn load(&mut self, buffer: Buffer, index: Reg) -> Reg {
         let index = self.scalar(index);
-        self.immediate = None;
         let dst = self.local();
         self.define_load(dst, buffer, index);
         dst
@@ -577,13 +566,9 @@ impl KernelBuilder for Builder<'_> {
     fn store(&mut self, buffer: Buffer, index: Reg, value: Reg) {
         let (index, value) = (self.scalar(index), self.scalar(value));
         let addr = self.address(buffer, index, true);
-        self.immediate = None;
         if let Some(b) = self.current {
             self.graph.append(b, Op::Store(addr, value));
         }
-    }
-    fn immediate_condition(&self, reg: Reg) -> Option<bool> {
-        self.immediate.filter(|(r, _)| *r == reg).map(|(_, v)| v)
     }
     fn binary(&mut self, op: Binary, a: Reg, b: Reg) -> Reg {
         let dst = self.local();
@@ -596,7 +581,6 @@ impl KernelBuilder for Builder<'_> {
             self.expect_type(src, ty);
         }
         let v = self.read(src);
-        self.immediate = None;
         if let Some(b) = self.current {
             self.blocks[b].defs.insert(dst, v);
         }

@@ -1233,3 +1233,71 @@ fn compound_index_assignment_matches_rust_usize() {
     check::<Cranelift>();
     check::<Llvm>();
 }
+
+mod staged_conditions {
+    use splice::kernel;
+
+    #[kernel]
+    pub(super) fn identity(a: i32) -> i32 {
+        a
+    }
+
+    // CORE-04: whether `identity(k) > 0` is known is the frontend's Word,
+    // not a peephole over the backend's last emitted instruction.
+    #[kernel]
+    pub(super) fn known(#[comptime] k: i32, x: i32) -> i32 {
+        if identity(k) > 0 { x + 1 } else { x - 1 }
+    }
+
+    #[kernel]
+    pub(super) fn unknown(x: i32) -> i32 {
+        if identity(x) > 0 { x + 1 } else { x - 1 }
+    }
+}
+
+#[test]
+fn mixed_stage_conditions_fold_in_the_frontend_on_every_path() {
+    use splice::hir::Instr;
+    use staged_conditions::{known, unknown};
+
+    fn check<B: Codegen<Output: Executable>>() {
+        for k in [-3, 0, 4] {
+            let direct = known::build::<B>(known::BuildArgs { k }).unwrap();
+            let portable = B::compile(&known::ir(k).unwrap()).unwrap();
+            for code in [&direct, &portable] {
+                for x in [-5, 0, 9] {
+                    assert_eq!(code.call(known::CallArgs { x }), Ok(known(k, x)));
+                }
+            }
+        }
+        let direct = unknown::build::<B>(unknown::BuildArgs {}).unwrap();
+        let portable = B::compile(&unknown::ir().unwrap()).unwrap();
+        for code in [&direct, &portable] {
+            for x in [-5, 0, 9] {
+                assert_eq!(code.call(unknown::CallArgs { x }), Ok(unknown(x)));
+            }
+        }
+    }
+    check::<Lancy>();
+    check::<Cranelift>();
+    check::<Llvm>();
+
+    // The listing shows the structure that the backends compile: a known
+    // condition keeps one arm and no branch, an unknown one branches. The
+    // direct build and the portable IR agree.
+    let branches = |ir: &splice::Function| {
+        ir.instructions()
+            .iter()
+            .any(|op| matches!(op, Instr::Branch { .. }))
+    };
+    for k in [-3, 4] {
+        let ir = known::ir(k).unwrap();
+        assert!(!branches(&ir));
+        let direct = known::build::<Text>(known::BuildArgs { k }).unwrap();
+        assert_eq!(direct.to_string(), Text::compile(&ir).unwrap().to_string());
+    }
+    let ir = unknown::ir().unwrap();
+    assert!(branches(&ir));
+    let direct = unknown::build::<Text>(unknown::BuildArgs {}).unwrap();
+    assert_eq!(direct.to_string(), Text::compile(&ir).unwrap().to_string());
+}

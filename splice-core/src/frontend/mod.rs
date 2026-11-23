@@ -56,7 +56,6 @@ pub trait KernelBuilder {
     fn buffer_len(&mut self, buffer: Buffer) -> Reg;
     fn load(&mut self, buffer: Buffer, index: Reg) -> Reg;
     fn store(&mut self, buffer: Buffer, index: Reg, value: Reg);
-    fn immediate_condition(&self, reg: Reg) -> Option<bool>;
     fn binary(&mut self, op: Binary, a: Reg, b: Reg) -> Reg;
     fn assign(&mut self, dst: Reg, src: Reg);
     fn label(&mut self) -> Label;
