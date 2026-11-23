@@ -73,16 +73,21 @@ fn collection_computed_by_the_application_can_specialize_a_kernel() {
             .iter()
             .any(|i| matches!(i, Instr::Const(_, 7)))
     );
+    // Builds follow Rust's profile: debug builds check overflow.
+    let add = if cfg!(debug_assertions) {
+        Binary::CheckedAdd
+    } else {
+        Binary::Add
+    };
     assert!(ir.instructions().iter().all(|i| matches!(
         i,
         Instr::Debug(_)
             | Instr::Const(..)
-            | Instr::Bin(_, Binary::Add, ..)
             | Instr::Copy(..)
             | Instr::Label(_)
             | Instr::Jump(_)
             | Instr::Return(_)
-    )));
+    ) || matches!(i, Instr::Bin(_, op, ..) if *op == add)));
     let source = staged_weights::print(bias).unwrap();
     assert!(
         source.contains("fn staged_weights(value: i32) -> i32 {\n    value + 7\n}"),

@@ -143,6 +143,19 @@ fn sve_bytes(profile: Profile) -> Option<usize> {
 }
 
 impl Simd {
+    /// The calling thread's SVE vector length in bytes, when this profile
+    /// selects SVE and the CPU and OS provide it.
+    pub fn sve_vector_bytes(self) -> Option<usize> {
+        #[cfg(all(target_arch = "aarch64", target_os = "linux"))]
+        {
+            thread_sve_bytes(self.profile)
+        }
+        #[cfg(not(all(target_arch = "aarch64", target_os = "linux")))]
+        {
+            None
+        }
+    }
+
     /// Verify the current thread can execute code generated for this width.
     /// Linux lets each thread change its SVE length independently.
     pub fn check_execution(self) -> Result<(), String> {

@@ -25,7 +25,7 @@ fn emits_aarch64_simd_and_preserves_the_logical_width() {
         .unwrap();
     let assembly = std::str::from_utf8(assembly.as_slice()).unwrap();
     match config.profile {
-        Profile::Sve | Profile::Sve2 if config.bytes >= 32 => {
+        Profile::Sve | Profile::Sve2 if config.bytes >= 32 && target::scalable(config) => {
             assert!(assembly.contains("ld1w\t{ z"), "{assembly}");
             assert!(assembly.contains("st1w\t{ z"), "{assembly}");
             assert_eq!(
@@ -33,6 +33,11 @@ fn emits_aarch64_simd_and_preserves_the_logical_width() {
                 config.profile == Profile::Sve2,
                 "{assembly}"
             );
+        }
+        Profile::Sve | Profile::Sve2 if config.bytes >= 32 => {
+            // A non-power-of-two vector length gets NEON code.
+            assert!(assembly.contains("eor\tv"), "{assembly}");
+            assert!(!assembly.contains("\tz"), "{assembly}");
         }
         Profile::Neon => {
             assert!(assembly.contains("eor\tv"), "{assembly}");
@@ -102,4 +107,61 @@ fn rejects_a_shorter_sve_thread_before_writing() {
     })
     .join()
     .unwrap();
+}
+
+/// Set this thread's SVE vector length; `None` when the CPU lacks it.
+fn set_sve_vl(bytes: usize) -> Option<()> {
+    // Linux uapi/linux/prctl.h.
+    const PR_SVE_SET_VL: libc::c_int = 50;
+    // SAFETY: PR_SVE_SET_VL takes a byte count, no pointers, and affects
+    // only the calling thread. Variadic arguments are unsigned long.
+    let vl = unsafe { libc::prctl(PR_SVE_SET_VL, bytes, 0usize, 0usize, 0usize) };
+    (vl == bytes as libc::c_int).then_some(())
+}
+
+#[test]
+fn sve_code_is_only_generated_and_run_at_power_of_two_vector_lengths() {
+    let config = simd().unwrap();
+    if !matches!(config.profile, Profile::Sve | Profile::Sve2) || config.bytes != 32 {
+        return;
+    }
+    let build = |vl| {
+        std::thread::spawn(move || {
+            set_sve_vl(vl)?;
+            Some(xor_three::build::<Llvm>(xor_three::BuildArgs {}).unwrap())
+        })
+        .join()
+        .unwrap()
+    };
+    let (Some(sve), Some(neon)) = (build(32), build(48)) else {
+        return;
+    };
+    let input: Vec<i32> = (0..16).collect();
+    let call = |kernel: &splice::TypedKernel<_, crate::LlvmKernel>, vl| {
+        std::thread::scope(|scope| {
+            scope
+                .spawn(|| {
+                    set_sve_vl(vl).unwrap();
+                    let mut out = vec![77; 16];
+                    let result = kernel.call(xor_three::CallArgs {
+                        a: &input,
+                        b: &input,
+                        c: &input,
+                        out: &mut out,
+                    });
+                    (result.map_err(|error| error.to_string()), out)
+                })
+                .join()
+                .unwrap()
+        })
+    };
+    let mut expected = input.clone();
+    expected[8..].fill(77);
+    for vl in [32, 48] {
+        assert_eq!(call(&neon, vl), (Ok(8), expected.clone()));
+    }
+    assert_eq!(call(&sve, 32), (Ok(8), expected));
+    let (result, out) = call(&sve, 48);
+    assert!(result.unwrap_err().contains("power-of-two"));
+    assert_eq!(out, vec![77; 16]);
 }

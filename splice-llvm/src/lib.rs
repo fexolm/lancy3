@@ -53,9 +53,8 @@ fn build_module<'ctx>(
     #[cfg(target_arch = "aarch64")]
     {
         use inkwell::attributes::{Attribute, AttributeLoc};
-        use splice_target::Profile;
         let simd = splice_target::simd()?;
-        if matches!(simd.profile, Profile::Sve | Profile::Sve2) {
+        if target::scalable(simd) {
             // LLVM encodes the minimum vscale in the high 32 bits and the
             // maximum in the low 32. SVE has at most 16 architectural quads.
             let range = ((simd.bytes as u64 / 16) << 32) | 16;
@@ -105,6 +104,10 @@ pub struct LlvmKernel {
     entry: Entry,
     arity: usize,
     buffers: Box<[BufferKind]>,
+    /// Compiled for SVE on a power-of-two vector length; see
+    /// `target::scalable`.
+    #[cfg(target_arch = "aarch64")]
+    scalable: bool,
 }
 
 impl Codegen for Llvm {
@@ -223,6 +226,9 @@ impl LlvmKernel {
         >,
     ) -> splice::Result<Self> {
         Llvm::version()?;
+        // The target machine makes the same choice on this thread.
+        #[cfg(target_arch = "aarch64")]
+        let scalable = target::scalable(splice_target::simd()?);
         let (owner, entry, registration) =
             jit::Jit::compile(auto_vectorize, source, options, populate)?;
         Ok(Self {
@@ -231,6 +237,8 @@ impl LlvmKernel {
             entry,
             arity,
             buffers: buffers.into(),
+            #[cfg(target_arch = "aarch64")]
+            scalable,
         })
     }
 }
@@ -238,7 +246,13 @@ impl LlvmKernel {
 impl Executable for LlvmKernel {
     fn call(&self, args: &[i32], buffers: &mut [BufferArg<'_>]) -> Result<i32, String> {
         #[cfg(target_arch = "aarch64")]
-        splice_target::simd()?.check_execution()?;
+        {
+            let simd = splice_target::simd()?;
+            simd.check_execution()?;
+            if self.scalable && !target::scalable(simd) {
+                return Err("LLVM SVE code requires a power-of-two SVE vector length".into());
+            }
+        }
         if self.arity != args.len() {
             return Err(format!(
                 "expected {} scalar arguments, got {}",

@@ -1,7 +1,7 @@
 //! LLVM target selection shared by IR lowering and native code generation.
 use inkwell::OptimizationLevel;
 use inkwell::targets::{CodeModel, InitializationConfig, RelocMode, Target, TargetMachine};
-use splice_target::Profile;
+use splice_target::{Profile, Simd};
 use std::sync::Once;
 
 pub(crate) fn host_machine() -> Result<TargetMachine, String> {
@@ -46,6 +46,7 @@ pub(crate) fn host_machine_with_debug(debug: bool) -> Result<TargetMachine, Stri
                     _ => return Err("LLVM requires at least 256-bit AVX10 support".into()),
                 },
                 Profile::Neon => "+neon",
+                Profile::Sve | Profile::Sve2 if !scalable(simd) => "+neon",
                 Profile::Sve => "+neon,+sve",
                 Profile::Sve2 => "+neon,+sve,+sve2",
                 Profile::Auto => unreachable!(),
@@ -72,6 +73,14 @@ pub(crate) fn host_machine_with_debug(debug: bool) -> Result<TargetMachine, Stri
             CodeModel::JITDefault,
         )
         .ok_or_else(|| "LLVM failed to create the host target machine".into())
+}
+
+/// Whether SVE code generation is sound on the calling thread. LLVM's
+/// AArch64 backend assumes vscale is a power of two, so a thread with, say,
+/// a 48-byte vector length gets fixed-length NEON code for the profile width.
+pub(crate) fn scalable(simd: Simd) -> bool {
+    matches!(simd.profile, Profile::Sve | Profile::Sve2)
+        && simd.sve_vector_bytes().is_some_and(usize::is_power_of_two)
 }
 
 /// Keep target-specific intrinsics in sync with the actual codegen profile.
