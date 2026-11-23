@@ -61,6 +61,14 @@ fn build_module<'ctx>(
     module.set_data_layout(&target.get_target_data().get_data_layout());
     tracing::debug_span!(target: "splice_core::compile", "populate_llvm_ir")
         .in_scope(|| populate(context, &module))?;
+    // The feature string fixes the instructions; schedule them for this CPU.
+    let tune = TargetMachine::get_host_cpu_name();
+    let tune = context.create_string_attribute("tune-cpu", &tune.to_string_lossy());
+    for function in module.get_functions() {
+        if !function.as_global_value().is_declaration() {
+            function.add_attribute(inkwell::attributes::AttributeLoc::Function, tune);
+        }
+    }
     if machine.scalable {
         use inkwell::attributes::{Attribute, AttributeLoc};
         // LLVM encodes the minimum vscale in the high 32 bits and the

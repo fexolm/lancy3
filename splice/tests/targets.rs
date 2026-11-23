@@ -113,3 +113,34 @@ fn backends_without_the_convention_reject_it() {
         );
     }
 }
+
+#[kernel]
+fn reversed(src: &[i32], indices: &[i32], out: &mut [i32]) -> i32 {
+    let values = Lane::<i32>::load(src, 0);
+    values.swizzle(Lane::load(indices, 0)).store(out, 0);
+    0
+}
+
+/// Byte shuffles without SSSE3 become a Cranelift libcall that the JIT must
+/// resolve; SSE2 targets exercise it on every x86-64 machine.
+#[test]
+fn swizzle_runs_on_every_runnable_profile() {
+    for target in runnable() {
+        let lanes = target.vector_bytes() / 4;
+        let src: Vec<i32> = (0..lanes as i32).map(|i| 10 * i).collect();
+        let indices: Vec<i32> = (0..lanes as i32).rev().collect();
+        let expected: Vec<i32> = src.iter().rev().copied().collect();
+        splice_testkit::each_backend!(B => {
+            let options = BuildOptions::new(Mode::Release, target);
+            let kernel = reversed::build_with_options::<B>(options, reversed::BuildArgs {}).unwrap();
+            let mut out = vec![0; lanes];
+            let result = kernel.call(reversed::CallArgs {
+                src: &src,
+                indices: &indices,
+                out: &mut out,
+            });
+            assert_eq!(result, Ok(0), "{} {target:?}", std::any::type_name::<B>());
+            assert_eq!(out, expected, "{} {target:?}", std::any::type_name::<B>());
+        });
+    }
+}

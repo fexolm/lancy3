@@ -58,7 +58,41 @@ fn builder(target: &splice_core::Target, debug: bool) -> Result<JITBuilder> {
     let isa = isa
         .finish(settings::Flags::new(flags))
         .map_err(|e| splice_core::BuildError::backend("cranelift", e))?;
-    Ok(JITBuilder::with_isa(isa, default_libcall_names()))
+    let mut builder = JITBuilder::with_isa(isa, default_libcall_names());
+    // Without SSSE3, Cranelift lowers byte shuffles to this libcall.
+    #[cfg(target_arch = "x86_64")]
+    builder.symbol("__cranelift_x86_pshufb", x86_pshufb as *const u8);
+    Ok(builder)
+}
+
+/// `pshufb` for SSE2 targets: a control byte with its high bit set selects
+/// zero, otherwise its low four bits select a source byte. Cranelift passes
+/// 128-bit vectors like the C convention of this OS.
+#[cfg(target_arch = "x86_64")]
+#[expect(
+    improper_ctypes_definitions,
+    reason = "Cranelift passes I8X16 libcall operands as the C ABI passes __m128i"
+)]
+extern "C" fn x86_pshufb(
+    bytes: std::arch::x86_64::__m128i,
+    control: std::arch::x86_64::__m128i,
+) -> std::arch::x86_64::__m128i {
+    // SAFETY: both types are 16 plain bytes.
+    let (bytes, control) = unsafe {
+        (
+            std::mem::transmute::<std::arch::x86_64::__m128i, [u8; 16]>(bytes),
+            std::mem::transmute::<std::arch::x86_64::__m128i, [u8; 16]>(control),
+        )
+    };
+    let shuffled = control.map(|c| {
+        if c & 0x80 == 0 {
+            bytes[usize::from(c & 15)]
+        } else {
+            0
+        }
+    });
+    // SAFETY: as above.
+    unsafe { std::mem::transmute::<[u8; 16], std::arch::x86_64::__m128i>(shuffled) }
 }
 
 /// The Cranelift ISA settings for a target. Cranelift has no AVX10 or SVE
