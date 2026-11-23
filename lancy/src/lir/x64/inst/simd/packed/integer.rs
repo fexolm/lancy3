@@ -14,7 +14,8 @@ pub(in crate::lir::x64) fn shift_dword_bits(
         a,
         width: cpu.bytes,
         cpu,
-        pool: None,
+        // Immediate shifts and rotates load no constants.
+        pool: &mut Vec::new(),
     };
     match kind {
         B::Shl => immediate!(v, dst, src, count, pslld, vpslld),

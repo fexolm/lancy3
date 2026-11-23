@@ -91,8 +91,7 @@ pub(super) fn body(op: simd::Native, regs: &[usize]) -> (Vec<u8>, usize) {
         .take(op.temporaries())
         .collect();
     assert_eq!(temps.len(), op.temporaries());
-    op.emit_allocated(&mut a, regs, &temps, Some(&mut pool))
-        .unwrap();
+    op.emit_allocated(&mut a, regs, &temps, &mut pool).unwrap();
     let data_len: usize = pool.iter().map(|(_, _, n)| n).sum();
     if !pool.is_empty() {
         let done = a.create_label();

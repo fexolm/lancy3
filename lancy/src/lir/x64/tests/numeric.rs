@@ -238,7 +238,7 @@ fn instruction_encodings_require_their_exact_isa() {
         hir::operation::Action,
         lir::x64::{Features, inst::simd::Native},
     };
-    use iced_x86::{Code, Decoder, DecoderOptions, code_asm::CodeAssembler};
+    use iced_x86::{Code, Decoder, DecoderOptions};
     let base = Features {
         bytes: 16,
         avx2: false,
@@ -264,9 +264,7 @@ fn instruction_encodings_require_their_exact_isa() {
     let vector = Type::Vector;
     let encode = |features, action, input, output, regs: &[usize]| {
         let op = Native::select(action, input, output, features)?;
-        let mut a = CodeAssembler::new(64).unwrap();
-        op.emit(&mut a, regs).unwrap();
-        Some(a.assemble(0).unwrap())
+        Some(super::packed_code::body(op, regs).0)
     };
     let binary = |cpu, l, op| {
         encode(cpu, Action::Binary(op), vector(l), vector(l), &[1, 2, 1]).map(|bytes| {

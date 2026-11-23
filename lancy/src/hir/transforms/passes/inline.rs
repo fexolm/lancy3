@@ -56,6 +56,7 @@ pub(crate) fn inline_all(
         // A callee can loop forever. Its call continuation, and even other
         // caller blocks dominated by the call, then become unreachable.
         body.prune_unreachable()?;
+        super::checkpoint(&body, "inline");
         if id == module.call_graph.root() {
             return Ok(body);
         }

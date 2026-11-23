@@ -143,3 +143,50 @@ fn remove_dominated_checks_but_keep_sibling_checks_and_unused_trapping_math() {
         assert_eq!(kernel.call(&[cond, 0, 1]), Err(CallError::DivisionByZero));
     }
 }
+
+/// The closed form of `sum(start..bound)` halves the trip count as unsigned:
+/// a signed `<` loop runs up to `u32::MAX` times when `start` is negative.
+#[test]
+fn recurrence_closed_form_holds_for_trip_counts_past_i32_max() {
+    let text = "fn main start:i32 bound:i32 -> i32
+  one = const 1
+  zero = const 0
+  jump head start zero
+block head i:i32 acc:i32
+  more = lt i bound
+  br more body | done acc
+block body
+  next_i = add i one
+  next_acc = add acc i
+  jump head next_i next_acc
+block done out:i32
+  ret out";
+    let lines: Vec<_> = text.lines().enumerate().collect();
+    let f = crate::filetests::input::parse(&lines).unwrap();
+    let mut optimized = (*f).clone();
+    simplify(&mut optimized).unwrap();
+    assert!(
+        optimized
+            .blocks()
+            .all(|b| !matches!(optimized.terminator(b), Terminator::Branch { .. })),
+        "the loop must be replaced by its closed form"
+    );
+    let kernel = ScalarKernel::compile(&f).unwrap();
+    for (start, bound) in [
+        (i32::MIN, i32::MAX),
+        (i32::MIN, 0),
+        (-1, i32::MAX),
+        (i32::MIN + 1, i32::MAX),
+        (-3, 4),
+        (5, 5),
+        (7, -7),
+    ] {
+        let trip = (i128::from(bound) - i128::from(start)).max(0);
+        let sum = trip * i128::from(start) + trip * (trip - 1) / 2;
+        assert_eq!(
+            kernel.call(&[start, bound]),
+            Ok(sum as i32),
+            "sum({start}..{bound})"
+        );
+    }
+}

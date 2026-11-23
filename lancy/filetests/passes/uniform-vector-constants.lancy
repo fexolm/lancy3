@@ -1,0 +1,49 @@
+# SCCP tracks uniform vectors: a splat of a constant, a same-width lane
+# bitcast and an integer comparison mask fold, and the known mask selects.
+fn main x:i32 -> i32
+  seven = const 7
+  sevens = simd.splat seven
+  unsigned = simd.bitcast u32 sevens
+  back = simd.bitcast i32 unsigned
+  same = simd.eq back sevens
+  xs = simd.splat x
+  zero = const 0
+  zeros = simd.splat zero
+  chosen = simd.select same xs zeros
+  result = simd.extract chosen zero
+  ret result
+@source check: Binary(Eq)
+@opt not: Binary(Eq)
+@opt not: Ternary(Select)
+@opt check: ret
+@run 5 -> 5
+@run -9 -> -9
+
+---
+
+# Counterexample: lanes of a bitcast to a narrower lane are not the uniform
+# value, and a float comparison has no integer fact. Both must remain.
+fn main x:i32 -> i32
+  big = const 65537
+  bigs = simd.splat big
+  halves = simd.bitcast i16 bigs
+  ones = simd.splat x
+  narrow = simd.bitcast i16 ones
+  same = simd.eq halves narrow
+  zero = const 0
+  lanes = simd.extract same zero
+  wide = cast i32 lanes
+  one = literal f32 3f800000
+  ones_f = simd.splat one
+  fx = cast f32 x
+  xs_f = simd.splat fx
+  near = simd.eq ones_f xs_f
+  as_int = simd.bitcast i32 near
+  first = simd.extract as_int zero
+  result = add wide first
+  ret result
+@opt check: Binary(Eq)
+@opt check: Binary(Eq)
+@run 65537 -> -1
+@run 1 -> -2
+@run 2 -> 0

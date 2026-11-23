@@ -36,7 +36,7 @@ impl Recipe {
         native: Native,
         regs: &[usize],
         temps: &[usize],
-        pool: Option<&mut emit::Constants>,
+        pool: &mut emit::Constants,
     ) -> Result {
         let Native {
             action,
@@ -74,7 +74,7 @@ fn emit_halves(v: &mut Vector, native: Native, r: &[usize], temps: &[usize]) -> 
             regs[0] = dest;
         }
         regs[inputs.len()] = dest;
-        half.emit_allocated(v.a, &regs[..inputs.len() + 1], inner, v.pool.as_deref_mut())
+        half.emit_allocated(v.a, &regs[..inputs.len() + 1], inner, v.pool)
     };
     for (&src, &tmp) in inputs.iter().zip(held) {
         if v.width == 32 {
@@ -96,7 +96,7 @@ struct Vector<'a> {
     a: &'a mut CodeAssembler,
     width: usize,
     cpu: Features,
-    pool: Option<&'a mut emit::Constants>,
+    pool: &'a mut emit::Constants,
 }
 
 // SSE2 encodes a destructive first operand. Preserve any live second operand
@@ -188,30 +188,18 @@ impl Vector<'_> {
         if word == u64::MAX {
             return self.ones(d);
         }
-        if let Some(pool) = self.pool.as_deref_mut() {
-            let label = if let Some((label, ..)) = pool
-                .iter()
-                .find(|(_, b, n)| *n == self.width && *b == bytes)
-            {
-                *label
-            } else {
-                let label = self.a.create_label();
-                pool.push((label, bytes, self.width));
-                label
-            };
-            return load(self.a, d, ptr(label), self.width);
-        }
-        self.a.mov(r10, word)?;
-        self.a.movq(XMM[d], r10)?;
-        match self.width {
-            64 => self.a.vpbroadcastq(ZMM[d], XMM[d]),
-            32 if self.cpu.avx2 => self.a.vpbroadcastq(YMM[d], XMM[d]),
-            32 => {
-                self.a.punpcklqdq(XMM[d], XMM[d])?;
-                self.a.vinsertf128(YMM[d], YMM[d], XMM[d], 1)
-            }
-            _ => self.a.punpcklqdq(XMM[d], XMM[d]),
-        }
+        let label = if let Some((label, ..)) = self
+            .pool
+            .iter()
+            .find(|(_, b, n)| *n == self.width && *b == bytes)
+        {
+            *label
+        } else {
+            let label = self.a.create_label();
+            self.pool.push((label, bytes, self.width));
+            label
+        };
+        load(self.a, d, ptr(label), self.width)
     }
     fn sign_mask(&mut self, size: usize, src: usize) -> Result {
         mask_from_signs(self.a, self.cpu, size, src)

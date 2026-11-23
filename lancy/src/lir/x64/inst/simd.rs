@@ -83,37 +83,12 @@ impl Native {
                 && matches!(self.action, Action::Binary(_)))
     }
 
-    #[cfg(test)]
-    pub fn emit(self, a: &mut CodeAssembler, regs: &[usize]) -> Result<(), IcedError> {
-        let mut free = (0..16).filter(|r| *r != super::SCRATCH && !regs.contains(r));
-        let mut args = regs.to_vec();
-        let last = args.len() - 1;
-        // Standalone instruction tests can request an aliased output. Production
-        // allocation reserves a separate result throughout compound sequences.
-        let alias = self.separate_output() && regs[..last].contains(&regs[last]);
-        if alias {
-            args[last] = free.next().unwrap();
-        }
-        let temp: Vec<_> = free.take(self.temporaries()).collect();
-        self.emit_allocated(a, &args, &temp, None)?;
-        if alias {
-            if matches!(self.output, Type::Vector(_)) {
-                copy(a, regs[last], args[last], self.bytes)?;
-            } else if super::class(self.output) == regalloc2::RegClass::Vector {
-                a.movaps(XMM[regs[last]], XMM[args[last]])?;
-            } else {
-                a.mov(emit::R64[regs[last]], emit::R64[args[last]])?;
-            }
-        }
-        Ok(())
-    }
-
     pub fn emit_allocated(
         self,
         a: &mut CodeAssembler,
         regs: &[usize],
         temp: &[usize],
-        pool: Option<&mut emit::Constants>,
+        pool: &mut emit::Constants,
     ) -> Result<(), IcedError> {
         if let Some(recipe) = self.recipe {
             return recipe.emit(a, self, regs, temp, pool);

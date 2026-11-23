@@ -479,7 +479,7 @@ impl Emitter<'_> {
                 }
                 let (operands, temps) =
                     regs[..allocs.len()].split_at(allocs.len() - native.temporaries());
-                native.emit_allocated(a, operands, temps, Some(self.constants))
+                native.emit_allocated(a, operands, temps, self.constants)
             }
             Inst::ExtractLane(lane, _, _, index) => simd::packed::rearrange::extract_lane(
                 a,

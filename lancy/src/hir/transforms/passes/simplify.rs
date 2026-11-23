@@ -9,7 +9,7 @@ use crate::module::{FunctionIds, Module};
 use crate::support::slotmap::DenseMap;
 use std::{collections::HashMap, sync::Arc};
 
-use super::{dead, facts::Facts, local_cfg, loops, memory, sccp};
+use super::{checkpoint, dead, facts::Facts, local_cfg, loops, memory, sccp};
 
 fn entry_literal(
     f: &mut Function,
@@ -226,11 +226,13 @@ fn simplify_with_cfg(
     } else {
         None
     };
+    checkpoint(f, "sccp and local_cfg");
     let cfg = rebuilt.as_ref().unwrap_or(cfg);
     let verified_dom = verified_dom.filter(|_| rebuilt.is_none());
     let computed_dom = verified_dom.is_none().then(|| DomTree::compute(cfg));
     let dom = verified_dom.or(computed_dom.as_ref()).unwrap();
     let updated = loops::run(f, cfg, dom)?;
+    checkpoint(f, "loops");
     let (cfg, dom) = updated
         .rebuilt
         .as_ref()
@@ -244,9 +246,13 @@ fn simplify_with_cfg(
         facts.forward_acyclic_params(f, cfg);
     }
     super::bounds::remove_full_packet_checks(f, cfg, dom, &facts, &mut bounds);
+    checkpoint(f, "bounds");
     remove_redundant_checks(f, dom);
+    checkpoint(f, "redundant checks");
     memory::optimize(f, cfg, dom, &mut facts, bounds.as_ref());
+    checkpoint(f, "memory");
     dead::eliminate(f, cfg, &facts);
+    checkpoint(f, "dead");
     Ok(())
 }
 

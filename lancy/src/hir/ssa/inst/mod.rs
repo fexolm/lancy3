@@ -108,7 +108,10 @@ pub enum Binary {
     Ge,
     Shl,
     Shr,
+    /// For floats, IEEE 754-2019 minimumNumber: a NaN operand (quiet or
+    /// signaling) yields the other operand, and -0 is below +0.
     Min,
+    /// For floats, IEEE 754-2019 maximumNumber, with the rules of `Min`.
     Max,
     Ordered,
     Unordered,

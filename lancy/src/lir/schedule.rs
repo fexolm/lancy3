@@ -4,6 +4,8 @@ use regalloc2::{Block, Function as _, Inst, Operand, OperandConstraint, OperandK
 use std::{cmp::Reverse, ops::Range};
 
 mod liveness;
+#[cfg(test)]
+mod tests;
 use liveness::Liveness;
 
 const WINDOW: usize = 64;

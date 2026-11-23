@@ -1912,3 +1912,75 @@ impl Form {
         Ok((bits, None))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::logical_immediate;
+    use std::collections::HashSet;
+
+    /// DecodeBitMasks from the Arm ARM, for an independent reference.
+    fn decode(n: u32, immr: u32, imms: u32, width: u32) -> Option<u64> {
+        let combined = (n << 6) | (!imms & 0x3f);
+        let len = combined.checked_ilog2()?;
+        if (1 << len) > width {
+            return None;
+        }
+        let size = 1u32 << len;
+        let levels = size - 1;
+        let s = imms & levels;
+        let r = immr & levels;
+        if s == levels {
+            return None;
+        }
+        let mask = u64::MAX >> (64 - size);
+        let run = u64::MAX >> (63 - s);
+        let element = ((run >> r) | (run << ((size - r) % size))) & mask;
+        let element = if r == 0 { run & mask } else { element };
+        Some((u64::MAX >> (64 - width)) / mask * element)
+    }
+
+    #[test]
+    fn logical_immediates_round_trip_through_every_encoding() {
+        for width in [32, 64] {
+            let mut encodable = HashSet::new();
+            for n in 0..=u32::from(width == 64) {
+                for immr in 0..64 {
+                    for imms in 0..64 {
+                        if (width == 32 && immr >= 32) || decode(n, immr, imms, width).is_none() {
+                            continue;
+                        }
+                        let value = decode(n, immr, imms, width).unwrap();
+                        encodable.insert(value);
+                        let fields = logical_immediate(value, width)
+                            .unwrap_or_else(|| panic!("{value:#x} is encodable at {width}"));
+                        assert_eq!(
+                            decode(
+                                fields >> 22 & 1,
+                                fields >> 16 & 0x3f,
+                                fields >> 10 & 0x3f,
+                                width
+                            ),
+                            Some(value),
+                            "{value:#x} at {width} encodes as {fields:#x}"
+                        );
+                    }
+                }
+            }
+            assert_eq!(encodable.len(), if width == 64 { 5334 } else { 1302 });
+            let mut state = 0x2545_f491_4f6c_dd1du64;
+            for _ in 0..100_000 {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                for value in [state, state & 0xffff_0000, state >> 40, !(state >> 3)] {
+                    let value = value & (u64::MAX >> (64 - width));
+                    assert_eq!(
+                        logical_immediate(value, width).is_some(),
+                        encodable.contains(&value),
+                        "{value:#x} at {width}"
+                    );
+                }
+            }
+        }
+    }
+}
