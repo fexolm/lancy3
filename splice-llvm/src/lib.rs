@@ -361,6 +361,62 @@ mod tests {
     }
 
     #[test]
+    fn manual_simd_keeps_the_rest_of_o3_including_memcpy_idioms() {
+        use inkwell::{memory_buffer::MemoryBuffer, targets::FileType, values::AnyValue};
+
+        let ir = "
+            define void @copy(ptr noalias %src, ptr noalias %dst) {
+            entry:
+              br label %loop
+            loop:
+              %i = phi i64 [0, %entry], [%next, %loop]
+              %from = getelementptr inbounds i32, ptr %src, i64 %i
+              %to = getelementptr inbounds i32, ptr %dst, i64 %i
+              %x = load i32, ptr %from, align 4
+              store i32 %x, ptr %to, align 4
+              %next = add nuw i64 %i, 1
+              %done = icmp eq i64 %next, 16
+              br i1 %done, label %exit, label %loop
+            exit:
+              ret void
+            }
+            define <4 x float> @scale(<4 x float> %x) {
+              %y = fmul <4 x float> %x, <float 2.0, float 2.0, float 2.0, float 2.0>
+              ret <4 x float> %y
+            }";
+        let ctx = Context::create();
+        let target = target::machine(&options().target, false).unwrap();
+        for auto_vectorize in [true, false] {
+            let text = MemoryBuffer::create_from_memory_range_copy(ir.as_bytes(), "idioms");
+            let m = ctx.create_module_from_ir(text).unwrap();
+            m.set_triple(&target.get_triple());
+            m.set_data_layout(&target.get_target_data().get_data_layout());
+            jit::optimize(&m, &target, auto_vectorize).unwrap();
+            let copy = m
+                .get_function("copy")
+                .unwrap()
+                .print_to_string()
+                .to_string();
+            // Loop idiom recognition turns the loop into memcpy, which
+            // instruction combining expands to one wide load and store.
+            assert!(!copy.contains("br "), "{copy}");
+            assert!(
+                copy.contains("load <16 x i32>") || copy.contains("llvm.memcpy"),
+                "{copy}"
+            );
+            // Explicit vector arithmetic stays a vector instruction.
+            let asm = target
+                .write_to_memory_buffer(&m, FileType::Assembly)
+                .unwrap();
+            let asm = std::str::from_utf8(asm.as_slice()).unwrap();
+            #[cfg(target_arch = "x86_64")]
+            assert!(asm.contains("mulps") || asm.contains("addps"), "{asm}");
+            #[cfg(target_arch = "aarch64")]
+            assert!(asm.contains("fmul\tv") || asm.contains("fadd\tv"), "{asm}");
+        }
+    }
+
+    #[test]
     fn manual_simd_disables_loop_vectorization_and_slp() {
         use inkwell::{memory_buffer::MemoryBuffer, values::AnyValue};
 

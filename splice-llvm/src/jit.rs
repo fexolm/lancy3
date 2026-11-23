@@ -1,5 +1,4 @@
 use crate::{Entry, build_module};
-use inkwell::attributes::{Attribute, AttributeLoc};
 use inkwell::context::Context;
 use inkwell::llvm_sys::error::{
     LLVMConsumeError, LLVMDisposeErrorMessage, LLVMErrorRef, LLVMGetErrorMessage,
@@ -133,6 +132,33 @@ impl Jit {
     }
 }
 
+/// LLVM 19's `default<O3>` for this architecture, as
+/// `opt -mtriple=<arch>-unknown-linux-gnu -passes='default<O3>' -print-pipeline-passes`
+/// prints it. `LLVMRunPasses` ignores the vectorization fields of
+/// `PassBuilderOptions` for `default<O3>`, so manual SIMD spells it out.
+#[cfg(target_arch = "x86_64")]
+const O3: &str = include_str!("pipeline/o3-x86_64.txt");
+#[cfg(target_arch = "aarch64")]
+const O3: &str = include_str!("pipeline/o3-aarch64.txt");
+
+/// O3 with the loop vectorizer limited to loops that request it (Splice
+/// emits none) and without the SLP vectorizer. Every other pass and the
+/// target's code generation, including explicit vector and floating-point
+/// operations, are those of `default<O3>`.
+fn manual_simd_pipeline() -> &'static str {
+    static PIPELINE: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+        const LOOP: &str = "loop-vectorize<no-interleave-forced-only;no-vectorize-forced-only;>";
+        let o3 = O3.trim();
+        assert!(o3.contains(LOOP) && o3.contains(",slp-vectorizer,"));
+        o3.replace(
+            LOOP,
+            "loop-vectorize<interleave-forced-only;vectorize-forced-only;>",
+        )
+        .replace(",slp-vectorizer,", ",")
+    });
+    &PIPELINE
+}
+
 /// Both lowering paths finish defining all private callees before the module inliner runs.
 pub(crate) fn optimize(
     module: &Module<'_>,
@@ -142,31 +168,14 @@ pub(crate) fn optimize(
     let _span =
         tracing::debug_span!(target: "splice_core::compile", "optimize_llvm_ir", auto_vectorize)
             .entered();
-    let run = || {
-        module
-            .run_passes("default<O3>", target, PassBuilderOptions::create())
-            .map_err(crate::error)
+    let pipeline = if auto_vectorize {
+        "default<O3>"
+    } else {
+        manual_simd_pipeline()
     };
-    if auto_vectorize {
-        return run();
-    }
-
-    // The default<O3> alias resets both vectorization options. Both passes
-    // honor noimplicitfloat. Remove it before codegen so the target can
-    // legalize and select explicit SIMD and floating-point operations normally.
-    let kind = Attribute::get_named_enum_kind_id("noimplicitfloat");
-    let attr = module.get_context().create_enum_attribute(kind, 0);
-    for function in module.get_functions() {
-        if !function.as_global_value().is_declaration() {
-            function.add_attribute(AttributeLoc::Function, attr);
-        }
-    }
-    let result = run();
-    // O3 may inline and delete functions, so iterate over the surviving ones.
-    for function in module.get_functions() {
-        function.remove_enum_attribute(AttributeLoc::Function, kind);
-    }
-    result
+    module
+        .run_passes(pipeline, target, PassBuilderOptions::create())
+        .map_err(crate::error)
 }
 
 unsafe fn check(error: LLVMErrorRef) -> splice_core::Result<()> {
