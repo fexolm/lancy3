@@ -170,3 +170,131 @@ fn operator_overflow_respects_the_rust_profile_in_both_compilation_paths() {
         check_arithmetic::<Cranelift>(options);
     }
 }
+
+// MAC-03: faulting host arithmetic on any integer type is deferred to the
+// point where the kernel reaches it, and `comptime!` reports it as an error.
+#[kernel]
+fn host_div(#[comptime] d: usize, flag: i32) -> i32 {
+    if flag != 0 { (12 / d) as i32 } else { 0 }
+}
+
+#[kernel]
+fn host_wide(#[comptime] a: i64, #[comptime] shift: u32, flag: i32) -> i32 {
+    if flag == 1 {
+        (a + 1) as i32
+    } else if flag == 2 {
+        (1u64 << shift) as i32
+    } else if flag == 3 {
+        (-a) as i32
+    } else if flag == 4 {
+        (a / -1) as i32
+    } else {
+        0
+    }
+}
+
+#[kernel]
+fn comptime_wide(#[comptime] a: i64, flag: i32) -> i32 {
+    if flag != 0 {
+        comptime!((a * 2) as i32)
+    } else {
+        0
+    }
+}
+
+thread_local! {
+    static PANICS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Run `f` and report whether it panicked on this thread, even if the panic
+/// was caught inside `f`. A build must not panic: under `panic = "abort"`
+/// that would end the process.
+fn panics<T>(f: impl FnOnce() -> T) -> (T, bool) {
+    static HOOK: std::sync::Once = std::sync::Once::new();
+    HOOK.call_once(|| {
+        let previous = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            PANICS.with(|n| n.set(n.get() + 1));
+            previous(info);
+        }));
+    });
+    let before = PANICS.with(|n| n.get());
+    let value = f();
+    (value, PANICS.with(|n| n.get()) != before)
+}
+
+fn native(f: impl FnOnce() -> i32) -> Result<i32, String> {
+    catch_unwind(AssertUnwindSafe(f)).map_err(|e| {
+        let message = e
+            .downcast_ref::<&str>()
+            .map(|s| s.to_string())
+            .or_else(|| e.downcast_ref::<String>().cloned())
+            .unwrap_or_default();
+        if message.contains("divide by zero") {
+            "kernel integer division by zero".to_owned()
+        } else if message.contains("divide with overflow") {
+            "kernel signed division overflow".to_owned()
+        } else {
+            "kernel integer arithmetic overflow".to_owned()
+        }
+    })
+}
+
+fn check_host_faults<B: Codegen<Output: Executable>>(options: BuildOptions) {
+    let (codes, panicked) = panics(|| {
+        [
+            host_div::build_with_options::<B>(options, host_div::BuildArgs { d: 0 }).unwrap(),
+            B::compile(&host_div::ir_with_options(options, 0).unwrap()).unwrap(),
+        ]
+    });
+    assert!(!panicked, "building host_div panicked");
+    for code in &codes {
+        for flag in [0, 1] {
+            let actual = code
+                .call(host_div::CallArgs { flag })
+                .map_err(|e| e.to_string());
+            assert_eq!(actual, native(|| host_div(0, flag)), "host_div flag {flag}");
+        }
+    }
+
+    for (a, shift) in [(i64::MAX, 70), (i64::MIN, 64), (5, 3)] {
+        let (codes, panicked) = panics(|| {
+            [
+                host_wide::build_with_options::<B>(options, host_wide::BuildArgs { a, shift })
+                    .unwrap(),
+                B::compile(&host_wide::ir_with_options(options, a, shift).unwrap()).unwrap(),
+            ]
+        });
+        assert!(!panicked, "building host_wide({a}, {shift}) panicked");
+        for code in &codes {
+            for flag in 0..=4 {
+                let actual = code
+                    .call(host_wide::CallArgs { flag })
+                    .map_err(|e| e.to_string());
+                let expected = native(|| host_wide(a, shift, flag));
+                assert_eq!(actual, expected, "host_wide({a}, {shift}) flag {flag}");
+            }
+        }
+    }
+
+    for a in [i64::MAX, 7] {
+        let checks = native(|| comptime_wide(a, 1)).is_err();
+        let (direct, panicked) = panics(|| {
+            comptime_wide::build_with_options::<B>(options, comptime_wide::BuildArgs { a })
+        });
+        assert!(!panicked, "comptime! panicked for {a}");
+        assert_eq!(direct.is_err(), checks, "comptime_wide({a})");
+        let (ir, panicked) = panics(|| comptime_wide::ir_with_options(options, a));
+        assert!(!panicked, "comptime! panicked for {a}");
+        assert_eq!(ir.is_err(), checks, "comptime_wide({a}) ir");
+    }
+}
+
+#[test]
+fn host_arithmetic_faults_are_deferred_for_every_integer_type() {
+    for options in [BuildOptions::Release, BuildOptions::Debug] {
+        check_host_faults::<Lancy>(options);
+        check_host_faults::<Llvm>(options);
+        check_host_faults::<Cranelift>(options);
+    }
+}

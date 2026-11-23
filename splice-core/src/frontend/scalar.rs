@@ -151,39 +151,174 @@ impl RunArg for Host<i32> {
     }
 }
 
-// Method lookup on &operands selects the i32 implementation (including
-// borrowed operands). Other host types use their own Rust operator.
-trait HostI32 {
-    fn integer(&self) -> i32;
+/// A host integer operation on which Rust panics (or would panic with
+/// overflow checks). Kernels defer it: staged code traps when the operation
+/// is reached, and `comptime!` returns the message as a build error.
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum HostFault {
+    DivisionByZero,
+    DivisionOverflow,
+    Overflow,
 }
-impl HostI32 for i32 {
-    fn integer(&self) -> i32 {
-        *self
+
+impl HostFault {
+    /// An i32 kernel operation that traps with the same error.
+    pub fn kernel_operation(self) -> (Binary, i32, i32) {
+        match self {
+            Self::DivisionByZero => (Binary::Div, 0, 0),
+            Self::DivisionOverflow => (Binary::Div, i32::MIN, -1),
+            Self::Overflow => (Binary::CheckedAdd, i32::MAX, 1),
+        }
+    }
+
+    pub fn message(self) -> &'static str {
+        match self {
+            Self::DivisionByZero => "kernel integer division by zero",
+            Self::DivisionOverflow => "kernel signed division overflow",
+            Self::Overflow => "kernel integer arithmetic overflow",
+        }
     }
 }
-impl<T: HostI32> HostI32 for &T {
-    fn integer(&self) -> i32 {
-        (**self).integer()
+
+/// A primitive integer. Generated host code borrows its operands, so
+/// references forward to the referenced integer.
+#[doc(hidden)]
+pub trait HostInteger {
+    type Int: Copy;
+    fn int(&self) -> Self::Int;
+    /// The Rust shift amount: Rust rejects a negative or too large one.
+    fn shift_amount(&self) -> Option<u32>;
+    fn arithmetic_fault(lhs: Self::Int, op: Binary, rhs: Self::Int) -> Option<HostFault>;
+    fn shift_fault(lhs: Self::Int, op: Binary, amount: Option<u32>) -> Option<HostFault>;
+    fn negation_fault(value: Self::Int) -> Option<HostFault>;
+}
+
+macro_rules! host_integer {
+    ($($ty:ty),*) => {$(
+        impl HostInteger for $ty {
+            type Int = $ty;
+            fn int(&self) -> $ty {
+                *self
+            }
+            fn shift_amount(&self) -> Option<u32> {
+                u32::try_from(*self).ok()
+            }
+            fn arithmetic_fault(lhs: $ty, op: Binary, rhs: $ty) -> Option<HostFault> {
+                let ok = match op {
+                    Binary::CheckedAdd => lhs.checked_add(rhs).is_some(),
+                    Binary::CheckedSub => lhs.checked_sub(rhs).is_some(),
+                    Binary::CheckedMul => lhs.checked_mul(rhs).is_some(),
+                    Binary::Div | Binary::Rem if rhs == 0 => {
+                        return Some(HostFault::DivisionByZero);
+                    }
+                    Binary::Div | Binary::Rem => {
+                        return lhs.checked_div(rhs).is_none().then_some(HostFault::DivisionOverflow);
+                    }
+                    _ => true,
+                };
+                (!ok).then_some(HostFault::Overflow)
+            }
+            fn shift_fault(lhs: $ty, op: Binary, amount: Option<u32>) -> Option<HostFault> {
+                let shifted = amount.and_then(|n| match op {
+                    Binary::CheckedShl => lhs.checked_shl(n),
+                    _ => lhs.checked_shr(n),
+                });
+                shifted.is_none().then_some(HostFault::Overflow)
+            }
+            fn negation_fault(value: $ty) -> Option<HostFault> {
+                (0 as $ty).checked_sub(value).is_none().then_some(HostFault::Overflow)
+            }
+        }
+    )*};
+}
+host_integer!(
+    i8, i16, i32, i64, i128, isize, u8, u16, u32, u64, u128, usize
+);
+
+impl<T: HostInteger> HostInteger for &T {
+    type Int = T::Int;
+    fn int(&self) -> T::Int {
+        (**self).int()
+    }
+    fn shift_amount(&self) -> Option<u32> {
+        (**self).shift_amount()
+    }
+    fn arithmetic_fault(lhs: T::Int, op: Binary, rhs: T::Int) -> Option<HostFault> {
+        T::arithmetic_fault(lhs, op, rhs)
+    }
+    fn shift_fault(lhs: T::Int, op: Binary, amount: Option<u32>) -> Option<HostFault> {
+        T::shift_fault(lhs, op, amount)
+    }
+    fn negation_fault(value: T::Int) -> Option<HostFault> {
+        T::negation_fault(value)
     }
 }
-impl<T: HostI32> HostI32 for &mut T {
-    fn integer(&self) -> i32 {
-        (**self).integer()
+impl<T: HostInteger> HostInteger for &mut T {
+    type Int = T::Int;
+    fn int(&self) -> T::Int {
+        (**self).int()
+    }
+    fn shift_amount(&self) -> Option<u32> {
+        (**self).shift_amount()
+    }
+    fn arithmetic_fault(lhs: T::Int, op: Binary, rhs: T::Int) -> Option<HostFault> {
+        T::arithmetic_fault(lhs, op, rhs)
+    }
+    fn shift_fault(lhs: T::Int, op: Binary, amount: Option<u32>) -> Option<HostFault> {
+        T::shift_fault(lhs, op, amount)
+    }
+    fn negation_fault(value: T::Int) -> Option<HostFault> {
+        T::negation_fault(value)
+    }
+}
+
+// Generated code calls these on `&(lhs, rhs)` or `&(value,)`. Method lookup picks
+// the integer implementation when one applies and otherwise autorefs once
+// more to the catch-all, which leaves floats and user types to their own
+// operators.
+
+#[doc(hidden)]
+pub trait HostArithmetic {
+    fn arithmetic_fault(self, op: Binary) -> Option<HostFault>;
+}
+impl<L: HostInteger, R: HostInteger<Int = L::Int>> HostArithmetic for &(L, R) {
+    fn arithmetic_fault(self, op: Binary) -> Option<HostFault> {
+        L::arithmetic_fault(self.0.int(), op, self.1.int())
+    }
+}
+impl<L, R> HostArithmetic for &&(L, R) {
+    fn arithmetic_fault(self, _: Binary) -> Option<HostFault> {
+        None
     }
 }
 
 #[doc(hidden)]
-pub trait ArithmeticGuard {
-    fn faulting_i32_arithmetic(self, op: Binary) -> Option<(i32, i32)>;
+pub trait HostShift {
+    fn shift_fault(self, op: Binary) -> Option<HostFault>;
 }
-impl<L: HostI32, R: HostI32> ArithmeticGuard for &(L, R) {
-    fn faulting_i32_arithmetic(self, op: Binary) -> Option<(i32, i32)> {
-        let (lhs, rhs) = (self.0.integer(), self.1.integer());
-        op.checked_eval(lhs, rhs).is_none().then_some((lhs, rhs))
+impl<L: HostInteger, R: HostInteger> HostShift for &(L, R) {
+    fn shift_fault(self, op: Binary) -> Option<HostFault> {
+        L::shift_fault(self.0.int(), op, self.1.shift_amount())
     }
 }
-impl<L, R> ArithmeticGuard for &&(L, R) {
-    fn faulting_i32_arithmetic(self, _: Binary) -> Option<(i32, i32)> {
+impl<L, R> HostShift for &&(L, R) {
+    fn shift_fault(self, _: Binary) -> Option<HostFault> {
+        None
+    }
+}
+
+#[doc(hidden)]
+pub trait HostNegation {
+    fn negation_fault(self) -> Option<HostFault>;
+}
+impl<T: HostInteger> HostNegation for &(T,) {
+    fn negation_fault(self) -> Option<HostFault> {
+        T::negation_fault(self.0.int())
+    }
+}
+impl<T> HostNegation for &&(T,) {
+    fn negation_fault(self) -> Option<HostFault> {
         None
     }
 }

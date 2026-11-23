@@ -215,19 +215,31 @@ impl Lower<'_> {
             Expr::Unary(u) => {
                 let value = primitive(visit(&u.expr)?);
                 let op = &u.op;
-                emit!(#op (#value))
+                let check = matches!(op, syn::UnOp::Neg(_)).then(|| {
+                    let checks = super::host::fault_checks(false);
+                    emit! {
+                        use #support::frontend::scalar::HostNegation as _;
+                        if #checks && let Some(fault) = (&(&value,)).negation_fault() {
+                            return Err(fault.message().into());
+                        }
+                    }
+                });
+                emit!({ let value = #value; #check #op value })
             }
             Expr::Binary(b) => {
                 let op = &b.op;
                 let rhs = primitive(visit(&b.right)?);
-                if super::super::compound_op(op).is_some() {
+                if let Some(kind) = super::super::compound_op(op) {
                     if matches!(&*b.left,Expr::Path(p) if p.path.get_ident().is_some_and(|n|locals.contains(&n.to_string())))
                     {
                         let lhs = &b.left;
+                        let check = comptime_fault(support, kind, emit!(&(&#lhs, &right)));
                         emit!({
                             use #support::frontend::evaluation::{CheckPrimitive as _, Operand};
                             (&Operand::of(&#lhs)).check()?;
-                            #lhs #op #rhs;
+                            let right = #rhs;
+                            #check
+                            #lhs #op right;
                         })
                     } else {
                         rejected()
@@ -236,7 +248,12 @@ impl Lower<'_> {
                     let lhs = primitive(visit(&b.left)?);
                     match op {
                         BinOp::And(_) | BinOp::Or(_) => emit!((#lhs) #op (#rhs)),
-                        _ => emit!({ let left=#lhs; let right=#rhs; left #op right }),
+                        _ => {
+                            let check = super::host::operator_kind(op).and_then(|kind| {
+                                comptime_fault(support, kind, emit!(&(&left, &right)))
+                            });
+                            emit!({ let left=#lhs; let right=#rhs; #check left #op right })
+                        }
                     }
                 }
             }
@@ -714,4 +731,17 @@ pub(crate) fn uses_stage_requirements(block: &syn::Block) -> bool {
     let mut uses = StageSensitive(false);
     uses.visit_block(block);
     uses.0
+}
+
+/// Return a build error instead of panicking when host operator `kind` faults
+/// on `operands` inside `comptime!`.
+fn comptime_fault(support: &syn::Path, kind: &str, operands: TokenStream) -> Option<TokenStream> {
+    let (guard, division) = super::host::operator_fault(support, kind, operands)?;
+    let checks = super::host::fault_checks(division);
+    Some(emit! {
+        use #support::frontend::scalar::{HostArithmetic as _, HostShift as _};
+        if #checks && let Some(fault) = #guard {
+            return Err(fault.message().into());
+        }
+    })
 }

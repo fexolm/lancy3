@@ -97,12 +97,9 @@ impl<T> TryLiteral for &&Literal<'_, T> {
     }
 }
 
-pub fn division_fault(divisor: i32) -> String {
-    if divisor == 0 {
-        r#"panic!("kernel integer division by zero")"#.to_owned()
-    } else {
-        r#"panic!("kernel signed division overflow")"#.to_owned()
-    }
+/// Rust source that panics like the kernel trap for `fault`.
+pub fn fault_panic(fault: super::scalar::HostFault) -> String {
+    format!("panic!({:?})", fault.message())
 }
 
 pub fn function(

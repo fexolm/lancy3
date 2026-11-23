@@ -6,7 +6,7 @@ use quote::ToTokens;
 use std::collections::HashMap;
 use syn::visit::Visit;
 use syn::visit_mut::VisitMut;
-use syn::{BinOp, Block, Error, Expr, Result, UnOp};
+use syn::{BinOp, Block, Error, Expr, Path, Result, UnOp};
 
 struct HostCheck<'a> {
     names: &'a HashMap<String, Binding>,
@@ -438,18 +438,14 @@ impl Lower<'_> {
         kind: &str,
     ) -> TokenStream {
         let root = self.root;
-        let arithmetic = match kind {
-            "Div" | "Rem" => Some(kind),
-            _ => super::checked_operator(kind),
-        }
-        .map(|checked| self.host_arithmetic_check(checked, emit!(&(&*place, &operand))));
+        let check = self.host_operator_check(kind, emit!(&(&*place, &operand)));
         emit!({
             use #root::frontend::evaluation::{CheckPrimitive as _, Operand};
             let operand = #right;
             let place = &mut #left;
             (&Operand::of(place)).check()?;
             (&Operand::of(&operand)).check()?;
-            #arithmetic
+            #check
             *place #op operand;
         })
     }
@@ -461,7 +457,7 @@ impl Lower<'_> {
         rhs: impl ToTokens,
     ) -> TokenStream {
         let root = self.root;
-        let operation = match op {
+        let kind = match op {
             BinOp::Eq(_)
             | BinOp::Ne(_)
             | BinOp::Lt(_)
@@ -478,17 +474,9 @@ impl Lower<'_> {
                 });
             }
             BinOp::And(_) | BinOp::Or(_) => return emit!((#lhs) #op (#rhs)),
-            BinOp::Add(_) => "CheckedAdd",
-            BinOp::Sub(_) => "CheckedSub",
-            BinOp::Mul(_) => "CheckedMul",
-            BinOp::Shl(_) => "CheckedShl",
-            BinOp::Shr(_) => "CheckedShr",
-            BinOp::Div(_) => "Div",
-            BinOp::Rem(_) => "Rem",
-            _ => "",
+            _ => operator_kind(op),
         };
-        let check = (!operation.is_empty())
-            .then(|| self.host_arithmetic_check(operation, emit!(&operands)));
+        let check = kind.and_then(|kind| self.host_operator_check(kind, emit!(&operands)));
         emit!({
             let operands = (#lhs, #rhs);
             use #root::frontend::evaluation::{CheckPrimitive as _, Operand};
@@ -501,7 +489,7 @@ impl Lower<'_> {
 
     pub(super) fn host_negation(&self, value: impl ToTokens) -> TokenStream {
         let root = self.root;
-        let check = self.host_arithmetic_check("CheckedSub", emit!(&(0_i32, &operand)));
+        let check = self.host_fault_check(emit!((&(&operand,)).negation_fault()), false);
         emit!({
             let operand = #value;
             use #root::frontend::evaluation::{CheckPrimitive as _, Operand};
@@ -511,39 +499,85 @@ impl Lower<'_> {
         })
     }
 
-    pub(super) fn host_arithmetic_check(&self, op: &str, operands: TokenStream) -> TokenStream {
+    /// Defer the fault of host operator `kind` (`Add`, `Div`, `Shl`, ...) on
+    /// `operands`, a reference to the operand pair.
+    fn host_operator_check(&self, kind: &str, operands: TokenStream) -> Option<TokenStream> {
+        let (guard, division) = operator_fault(self.root, kind, operands)?;
+        Some(self.host_fault_check(guard, division))
+    }
+
+    /// Evaluate `guard`, an `Option<HostFault>`, and on a fault leave the
+    /// region so that the kernel traps when it reaches this point. Overflow
+    /// faults follow the crate's overflow-check mode; division always faults.
+    pub(super) fn host_fault_check(&self, guard: TokenStream, division: bool) -> TokenStream {
         let (root, region) = (self.root, self.region());
-        let operation = Ident::new(op, proc_macro2::Span::call_site());
-        let division = matches!(op, "Div" | "Rem");
-        let checks = if division {
-            emit!(true)
-        } else {
-            crate::overflow::enabled()
-        };
+        let checks = fault_checks(division);
         let fault = if let Some(label) = &self.source_fault {
-            let panic = if division {
-                emit!(#root::frontend::source::division_fault(z))
-            } else {
-                emit!(r#"panic!("kernel integer arithmetic overflow")"#.to_owned())
-            };
             emit! {
                 __splice_source.transfer = Some(#root::frontend::source::Transfer::Return);
-                break #label (#panic);
+                break #label (#root::frontend::source::fault_panic(fault));
             }
         } else {
             emit! {
+                let (operation, a, z) = fault.kernel_operation();
                 let (a, z) = (__splice_builder.constant(a), __splice_builder.constant(z));
-                let fault = __splice_builder.binary(#root::hir::Binary::#operation, a, z);
+                let fault = __splice_builder.binary(operation, a, z);
                 __splice_builder.ret(fault);
                 break #region;
             }
         };
         emit! {
-            use #root::frontend::scalar::ArithmeticGuard as _;
-            if #checks && let Some((a, z)) = (#operands).faulting_i32_arithmetic(#root::hir::Binary::#operation) {
-                let _ = (a, z);
+            use #root::frontend::scalar::{HostArithmetic as _, HostNegation as _, HostShift as _};
+            if #checks && let Some(fault) = #guard {
                 #fault
             }
         }
+    }
+}
+
+/// The name of a binary operator that can fault on host integers.
+pub(super) fn operator_kind(op: &BinOp) -> Option<&'static str> {
+    Some(match op {
+        BinOp::Add(_) => "Add",
+        BinOp::Sub(_) => "Sub",
+        BinOp::Mul(_) => "Mul",
+        BinOp::Div(_) => "Div",
+        BinOp::Rem(_) => "Rem",
+        BinOp::Shl(_) => "Shl",
+        BinOp::Shr(_) => "Shr",
+        _ => return None,
+    })
+}
+
+/// An `Option<HostFault>` expression for host operator `kind` (`Add`, `Div`,
+/// `Shl`, ...) on `operands`, a reference to the operand pair, and whether the
+/// operator divides. `None` when the operator cannot fault.
+pub(super) fn operator_fault(
+    root: &Path,
+    kind: &str,
+    operands: TokenStream,
+) -> Option<(TokenStream, bool)> {
+    let division = matches!(kind, "Div" | "Rem");
+    let op = if division {
+        kind
+    } else {
+        super::checked_operator(kind)?
+    };
+    let op = Ident::new(op, proc_macro2::Span::call_site());
+    let guard = if matches!(kind, "Shl" | "Shr") {
+        emit!((#operands).shift_fault(#root::hir::Binary::#op))
+    } else {
+        emit!((#operands).arithmetic_fault(#root::hir::Binary::#op))
+    };
+    Some((guard, division))
+}
+
+/// Whether to evaluate a fault guard: overflow follows the crate's
+/// overflow-check mode, while division faults in every mode.
+pub(super) fn fault_checks(division: bool) -> TokenStream {
+    if division {
+        emit!(true)
+    } else {
+        crate::overflow::enabled()
     }
 }
