@@ -21,14 +21,46 @@ pub struct Descriptor {
 
 static LOCK: Mutex<()> = Mutex::new(());
 
-// MSVC puts regular symbols in a PDB. Export the two hooks so debuggers can
-// find them through the PE symbol table as well.
+// LLVM defines the same two symbols (`JITLoaderGDB.cpp`,
+// `GDBRegistrationListener.cpp`). On ELF the definitions below are weak: a
+// statically linked LLVM supplies the strong ones and the process has a single
+// descriptor, which LLVM never writes as long as ORC's GDB listener stays off.
+// Splice registers every object itself, under LOCK.
+#[cfg(not(windows))]
+std::arch::global_asm!(
+    ".pushsection .data.__jit_debug_descriptor,\"aw\",%progbits",
+    ".weak __jit_debug_descriptor",
+    ".type __jit_debug_descriptor,%object",
+    ".size __jit_debug_descriptor,24",
+    ".balign 8",
+    "__jit_debug_descriptor:",
+    ".long 1, 0",
+    ".quad 0, 0",
+    ".popsection",
+    ".pushsection .text.__jit_debug_register_code,\"ax\",%progbits",
+    ".weak __jit_debug_register_code",
+    ".type __jit_debug_register_code,%function",
+    "__jit_debug_register_code:",
+    "ret",
+    ".popsection",
+);
+
+#[cfg(not(windows))]
+unsafe extern "C" {
+    static mut __jit_debug_descriptor: Descriptor;
+    safe fn __jit_debug_register_code();
+}
+
+// LLVM is a DLL on Windows, so its copies stay private to it. MSVC puts
+// regular symbols in a PDB: export the two hooks so debuggers can find them
+// through the PE symbol table as well.
 #[cfg(all(windows, target_env = "msvc"))]
 #[used]
 #[unsafe(link_section = ".drectve")]
 static EXPORTS: [u8; b" /EXPORT:__jit_debug_register_code /EXPORT:__jit_debug_descriptor,DATA "
     .len()] = *b" /EXPORT:__jit_debug_register_code /EXPORT:__jit_debug_descriptor,DATA ";
 
+#[cfg(windows)]
 #[unsafe(no_mangle)]
 pub static mut __jit_debug_descriptor: Descriptor = Descriptor {
     version: 1,
@@ -37,6 +69,7 @@ pub static mut __jit_debug_descriptor: Descriptor = Descriptor {
     first: null_mut(),
 };
 
+#[cfg(windows)]
 #[unsafe(no_mangle)]
 #[inline(never)]
 pub extern "C" fn __jit_debug_register_code() {

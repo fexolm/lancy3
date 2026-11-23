@@ -6,6 +6,10 @@ rust-version = "1.94"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/fexolm/lancy3"
 description = "Native debug symbol registration for the Splice JIT backends"
+# The GDB JIT interface is one process-wide list: Cargo rejects a graph with
+# two versions of this crate.
+links = "splice_jit_gdb"
+build = "build.rs"
 
 [dependencies]
 gimli = { version = "0.33", default-features = false, features = ["write", "std"] }

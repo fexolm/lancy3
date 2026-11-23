@@ -87,6 +87,11 @@ impl Jit {
 
     /// Inkwell owns the module, optimizer and object generation. Its llvm-sys
     /// bindings expose the ORC object linker and executable mapping lifetime.
+    ///
+    /// Never enable ORC's GDB debug support or registration listener here:
+    /// `splice-jit` owns the process-wide `__jit_debug_descriptor`, which is
+    /// LLVM's own definition when LLVM is linked statically, and registers
+    /// symbols under a lock that LLVM does not take.
     fn link(object: MemoryBuffer<'static>) -> Result<Self, String> {
         unsafe {
             let mut raw = null_mut();
