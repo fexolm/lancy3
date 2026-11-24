@@ -194,7 +194,7 @@ impl Lower<'_> {
         let want = want.base();
         let bits = match (v.stage, want) {
             (Stage::Word(_), _) => {
-                return Ok(emit!(#root::frontend::scalar::RunArg::reg(#v,__splice_builder)));
+                return Ok(emit!(#root::frontend::scalar::RunArg::reg(#v,__splice_builder)?));
             }
             (Stage::Reg(t), _)
                 if t.base() == want
@@ -240,7 +240,7 @@ impl Lower<'_> {
                 );
             }
         };
-        Ok(emit!({let __splice_word = #bits; __splice_builder.constant(__splice_word)}))
+        Ok(emit!({let __splice_word = #bits; __splice_builder.constant(__splice_word)?}))
     }
     fn operand(&self, expr: &Expr, kind: Scalar) -> Result<TokenStream> {
         let value = self.expr_with_hint(expr, Some(kind))?;
@@ -278,7 +278,7 @@ impl Lower<'_> {
     fn bin(&self, op: &str, x: TokenStream, y: TokenStream) -> TokenStream {
         let root = self.root;
         let op = Ident::new(op, proc_macro2::Span::call_site());
-        emit!({let (a,z)=(#x,#y); __splice_builder.binary(#root::hir::Binary::#op,a,z)})
+        emit!({let (a,z)=(#x,#y); __splice_builder.binary(#root::hir::Binary::#op,a,z)?})
     }
     fn operator_bin(&self, op: &str, x: TokenStream, y: TokenStream) -> TokenStream {
         let Some(checked) = checked_operator(op) else {
@@ -297,7 +297,7 @@ impl Lower<'_> {
                     } else {
                         #root::hir::Binary::#op
                     };
-                    __splice_builder.binary(op, a, b)
+                    __splice_builder.binary(op, a, b)?
                 })
             }
         }
@@ -364,7 +364,7 @@ impl Lower<'_> {
             Some(Binding::Reg(t, true)) => {
                 // A later operand can assign this variable. Snapshot its value
                 // at the Rust evaluation point before constructing the RHS.
-                Value::new(Stage::Reg(t), emit!(__splice_builder.copy(#p)))
+                Value::new(Stage::Reg(t), emit!(__splice_builder.copy(#p)?))
             }
             Some(Binding::Reg(t, false)) => Value::new(Stage::Reg(t), p),
             Some(Binding::Word(t)) => Value::new(Stage::Word(t), p),
@@ -393,14 +393,14 @@ impl Lower<'_> {
 
     fn return_value(&self, value: Value, at: impl ToTokens) -> Result<TokenStream> {
         let value = if self.unit_result && value.stage == Stage::Unit {
-            emit!({#value; __splice_builder.constant(0)})
+            emit!({#value; __splice_builder.constant(0)?})
         } else {
             self.reg(value, self.result_type, at)?
         };
         Ok(emit!({
             let __splice_value = #value;
-            __splice_builder.assign(__splice_result, __splice_value);
-            __splice_builder.jump(__splice_return_label);
+            __splice_builder.assign(__splice_result, __splice_value)?;
+            __splice_builder.jump(__splice_return_label)?;
         }))
     }
 
@@ -477,7 +477,7 @@ impl Lower<'_> {
         });
         emit! {
             if __splice_wants_debug {
-                __splice_builder.debug_point(#location, &[#(#variables),*]);
+                __splice_builder.debug_point(#location, &[#(#variables),*])?;
             }
         }
     }
@@ -602,7 +602,7 @@ impl Lower<'_> {
             }
             let mut rhs = self.reg(value, scalar, &init.expr)?;
             if mutable {
-                rhs = emit!({let value=#rhs;__splice_builder.copy(value)});
+                rhs = emit!({let value=#rhs;__splice_builder.copy(value)?});
             }
             (
                 Binding::Reg(if mutable { scalar.base() } else { scalar }, mutable),
@@ -710,9 +710,9 @@ impl Lower<'_> {
                 }
                 let code = match op {
                     UnOp::Neg(_) if t != Scalar::Bool => {
-                        self.operator_bin("Sub", emit!(__splice_builder.constant(0)), v.code)
+                        self.operator_bin("Sub", emit!(__splice_builder.constant(0)?), v.code)
                     }
-                    UnOp::Not(_) => self.bin("Xor", v.code, emit!(__splice_builder.constant(-1))),
+                    UnOp::Not(_) => self.bin("Xor", v.code, emit!(__splice_builder.constant(-1)?)),
                     _ => return err(x, "unsupported runtime unary operator"),
                 };
                 Ok(Value::new(Stage::Reg(t.base()), code))
@@ -788,7 +788,7 @@ impl Lower<'_> {
             rhs
         };
         Ok(Value::unit(
-            emit!({let __splice_assigned_value=#code; __splice_builder.assign(#left,__splice_assigned_value);}),
+            emit!({let __splice_assigned_value=#code; __splice_builder.assign(#left,__splice_assigned_value)?;}),
         ))
     }
     fn binary(&self, x: &syn::ExprBinary, hint: Option<Scalar>) -> Result<Value> {
@@ -857,8 +857,8 @@ impl Lower<'_> {
         let mut rhs = self.reg(right, input, &x.right)?;
         if index && !matches!(op, Eq(_) | Ne(_)) {
             // Flip the sign bit to compare register-width indices as unsigned.
-            lhs = self.bin("Xor", lhs, emit!(__splice_builder.constant(i32::MIN)));
-            rhs = self.bin("Xor", rhs, emit!(__splice_builder.constant(i32::MIN)));
+            lhs = self.bin("Xor", lhs, emit!(__splice_builder.constant(i32::MIN)?));
+            rhs = self.bin("Xor", rhs, emit!(__splice_builder.constant(i32::MIN)?));
         }
         Ok(Value::new(
             Stage::Reg(output),

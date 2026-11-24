@@ -1,3 +1,4 @@
+use splice_core::frontend::{KernelBuilder, Signature};
 use splice_core::hir::{Binary, Buffer, BufferKind, FunctionBuilder};
 use splice_core::{BufferArg, CallError, Codegen, Executable, Trap};
 use splice_llvm::Llvm;
@@ -14,19 +15,19 @@ fn all_binary_ops_match_splice_at_signed_boundaries() {
     let ops = [
         Add, Sub, Mul, And, Or, Xor, Eq, Ne, Lt, Le, Gt, Ge, Shl, Shr, Min, Max, Div, Rem,
     ];
-    let mut b = FunctionBuilder::new(options(), 3);
-    let (kind, left, right) = (b.arg(0), b.arg(1), b.arg(2));
+    let mut b = FunctionBuilder::new(options(), Signature::new(3, &[]));
+    let (kind, left, right) = (b.arg(0).unwrap(), b.arg(1).unwrap(), b.arg(2).unwrap());
     for (i, &op) in ops.iter().enumerate() {
-        let id = b.constant(i as i32);
-        let chosen = b.binary(Eq, kind, id);
-        let (yes, next) = (b.label(), b.label());
-        b.branch(chosen, yes, next);
-        b.mark(yes);
-        let result = b.binary(op, left, right);
-        b.ret(result);
-        b.mark(next);
+        let id = b.constant(i as i32).unwrap();
+        let chosen = b.binary(Eq, kind, id).unwrap();
+        let (yes, next) = (b.label().unwrap(), b.label().unwrap());
+        b.branch(chosen, yes, next).unwrap();
+        b.mark(yes).unwrap();
+        let result = b.binary(op, left, right).unwrap();
+        b.ret(result).unwrap();
+        b.mark(next).unwrap();
     }
-    b.ret(kind);
+    b.ret(kind).unwrap();
     let code = Llvm::compile(&b.finish().unwrap()).unwrap();
     let cases = [i32::MIN, -35, -1, 0, 1, 31, 32, i32::MAX];
     for (i, &op) in ops.iter().enumerate() {
@@ -45,30 +46,37 @@ fn all_binary_ops_match_splice_at_signed_boundaries() {
 
 #[test]
 fn checked_calls_remap_buffers_and_stop_after_the_first_fault() {
-    let mut child =
-        FunctionBuilder::with_buffers(options(), 2, vec![BufferKind::Write, BufferKind::Read]);
-    let zero = child.constant(0);
-    let one = child.constant(1);
-    let mark = child.constant(42);
-    child.store(Buffer(0), zero, mark);
-    let value = child.load(Buffer(1), child.arg(0));
-    let quotient = child.binary(Binary::Div, value, child.arg(1));
-    child.store(Buffer(0), one, quotient);
-    let length = child.buffer_len(Buffer(1));
-    child.ret(length);
+    let mut child = FunctionBuilder::new(
+        options(),
+        Signature::new(2, &[BufferKind::Write, BufferKind::Read]),
+    );
+    let zero = child.constant(0).unwrap();
+    let one = child.constant(1).unwrap();
+    let mark = child.constant(42).unwrap();
+    child.store(Buffer(0), zero, mark).unwrap();
+    let value = child.load(Buffer(1), child.arg(0).unwrap()).unwrap();
+    let quotient = child
+        .binary(Binary::Div, value, child.arg(1).unwrap())
+        .unwrap();
+    child.store(Buffer(0), one, quotient).unwrap();
+    let length = child.buffer_len(Buffer(1)).unwrap();
+    child.ret(length).unwrap();
 
-    let mut parent =
-        FunctionBuilder::with_buffers(options(), 2, vec![BufferKind::Read, BufferKind::Write]);
+    let mut parent = FunctionBuilder::new(
+        options(),
+        Signature::new(2, &[BufferKind::Read, BufferKind::Write]),
+    );
+    let child = Arc::new(child.finish().unwrap());
     let length = parent
-        .call_with_buffers(
-            child.finish().unwrap(),
-            &[parent.arg(0), parent.arg(1)],
+        .call_function(
+            &child,
+            &[parent.arg(0).unwrap(), parent.arg(1).unwrap()],
             &[Buffer(1), Buffer(0)],
         )
         .unwrap();
-    let two = parent.constant(2);
-    parent.store(Buffer(1), two, length);
-    parent.ret(length);
+    let two = parent.constant(2).unwrap();
+    parent.store(Buffer(1), two, length).unwrap();
+    parent.ret(length).unwrap();
     let code = Llvm::compile(&parent.finish().unwrap()).unwrap();
 
     for (index, divisor, expected) in [
@@ -99,32 +107,37 @@ fn checked_calls_remap_buffers_and_stop_after_the_first_fault() {
 
 #[test]
 fn shared_callees_loops_and_unreachable_tails_form_valid_llvm_blocks() {
-    let mut step = FunctionBuilder::new(options(), 1);
-    let one = step.constant(1);
-    let next = step.binary(Binary::Add, step.arg(0), one);
-    step.ret(next);
+    let mut step = FunctionBuilder::new(options(), Signature::new(1, &[]));
+    let one = step.constant(1).unwrap();
+    let next = step.binary(Binary::Add, step.arg(0).unwrap(), one).unwrap();
+    step.ret(next).unwrap();
     let step = Arc::new(step.finish().unwrap());
 
-    let mut b = FunctionBuilder::new(options(), 1);
-    let i = b.constant(0);
-    let (head, body, done, orphan) = (b.label(), b.label(), b.label(), b.label());
-    b.mark(head);
-    let more = b.binary(Binary::Lt, i, b.arg(0));
-    b.branch(more, body, done);
-    b.mark(body);
-    let a = b.call_shared(Arc::clone(&step), &[i]);
-    let z = b.call_shared(step, &[a]);
-    b.assign(i, z);
-    b.jump(head);
-    b.mark(done);
-    b.ret(i);
+    let mut b = FunctionBuilder::new(options(), Signature::new(1, &[]));
+    let i = b.constant(0).unwrap();
+    let (head, body, done, orphan) = (
+        b.label().unwrap(),
+        b.label().unwrap(),
+        b.label().unwrap(),
+        b.label().unwrap(),
+    );
+    b.mark(head).unwrap();
+    let more = b.binary(Binary::Lt, i, b.arg(0).unwrap()).unwrap();
+    b.branch(more, body, done).unwrap();
+    b.mark(body).unwrap();
+    let a = b.call_function(&step, &[i], &[]).unwrap();
+    let z = b.call_function(&step, &[a], &[]).unwrap();
+    b.assign(i, z).unwrap();
+    b.jump(head).unwrap();
+    b.mark(done).unwrap();
+    b.ret(i).unwrap();
     // A verified function may have unreachable operations after a terminator,
     // adjacent labels and a dead tail without an explicit return.
-    b.constant(33);
-    b.mark(orphan);
-    let tail = b.label();
-    b.mark(tail);
-    b.constant(11);
+    b.constant(33).unwrap();
+    b.mark(orphan).unwrap();
+    let tail = b.label().unwrap();
+    b.mark(tail).unwrap();
+    b.constant(11).unwrap();
     let f = b.finish().unwrap();
     let ir = splice_llvm::to_llvm_ir(&f, &f.options().target).unwrap();
     assert_eq!(ir.matches("define internal fastcc i32 @kernel").count(), 2);
@@ -147,7 +160,7 @@ fn masked_f64_gather_checks_active_indices_at_full_i64_width() {
         BufferKind::new(Element::F64, true),
     ];
     fn stage(b: &mut dyn KernelBuilder) -> splice_core::Result<()> {
-        let zero = b.constant(0);
+        let zero = b.constant(0)?;
         let i64op = |op| Simd {
             element: Element::I64,
             op,
@@ -169,13 +182,13 @@ fn masked_f64_gather_checks_active_indices_at_full_i64_width() {
             )?
             .unwrap();
         b.simd(f64op(SimdOp::Store(Buffer(2))), &[zero, selected])?;
-        b.ret(zero);
+        b.ret(zero)?;
         Ok(())
     }
-    let ir = frontend::materialize(0, &kinds, Box::new(stage), options()).unwrap();
+    let ir = frontend::materialize(Signature::new(0, &kinds), Box::new(stage), options()).unwrap();
     let n = Element::F64.lanes(options().target.vector_bytes());
     for kernel in [
-        Llvm::build(0, &kinds, Box::new(stage)).unwrap(),
+        Llvm::build_with_options(Signature::new(0, &kinds), Box::new(stage), options()).unwrap(),
         Llvm::compile(&ir).unwrap(),
     ] {
         let src = [-17.0];

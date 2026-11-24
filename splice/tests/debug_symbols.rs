@@ -1,3 +1,5 @@
+use splice::frontend::Signature;
+use splice::hir::ValueType;
 use splice::{
     BuildOptions, CallError, Codegen, Executable, Mode, Trap, debug, hir::Instr, kernel, simd::Lane,
 };
@@ -100,8 +102,10 @@ fn staging_preserves_names_types_and_locations_in_debug_only() {
             .all(|p| p.location.file.ends_with("debug_symbols.rs") && p.location.line > 10)
     );
     assert!(points.iter().any(|p| {
-        p.slots(&ir, ir.options().target.vector_bytes())
-            .any(|(var, ty, _)| var.name == "lanes" && matches!(ty, debug::Type::Vector { .. }))
+        p.function_slots(&ir, ir.options().target.vector_bytes())
+            .any(|slot| {
+                slot.variable.name == "lanes" && matches!(slot.ty, debug::Type::Vector { .. })
+            })
     }));
     assert!(
         points
@@ -160,15 +164,15 @@ fn observe_partially_assigned(
     b: &mut dyn splice::frontend::KernelBuilder,
     use_value: bool,
 ) -> splice::Result<()> {
-    let flag = b.arg(0);
-    let value = b.local();
-    let (assign, join) = (b.label(), b.label());
-    b.branch(flag, assign, join);
-    b.mark(assign);
-    let five = b.constant(5);
-    b.assign(value, five);
-    b.jump(join);
-    b.mark(join);
+    let flag = b.arg(0)?;
+    let value = b.local(ValueType::Scalar)?;
+    let (assign, join) = (b.label()?, b.label()?);
+    b.branch(flag, assign, join)?;
+    b.mark(assign)?;
+    let five = b.constant(5)?;
+    b.assign(value, five)?;
+    b.jump(join)?;
+    b.mark(join)?;
     let location = debug::Location {
         file: file!(),
         directory: env!("CARGO_MANIFEST_DIR"),
@@ -179,21 +183,31 @@ fn observe_partially_assigned(
         name: "value",
         value: debug::Value::Register(value, debug::Scalar::I32),
     }];
-    b.debug_point(location, &variables);
-    b.ret(if use_value { value } else { flag });
+    b.debug_point(location, &variables)?;
+    b.ret(if use_value { value } else { flag })?;
     Ok(())
 }
 
 fn exercise_partial<B: Codegen<Output: Executable>>() {
     let options = BuildOptions::host(Mode::Debug).unwrap();
-    let ir = splice::frontend::materialize(1, &[], Box::new(partially_assigned), options).unwrap();
+    let ir = splice::frontend::materialize(
+        Signature::new(1, &[]),
+        Box::new(partially_assigned),
+        options,
+    )
+    .unwrap();
     assert!(
         ir.instructions()
             .iter()
             .any(|op| matches!(op, Instr::Debug(_)))
     );
     for kernel in [
-        B::build_with_options(1, &[], Box::new(partially_assigned), options).unwrap(),
+        B::build_with_options(
+            Signature::new(1, &[]),
+            Box::new(partially_assigned),
+            options,
+        )
+        .unwrap(),
         B::compile(&ir).unwrap(),
     ] {
         for flag in [0, 3] {
@@ -204,7 +218,14 @@ fn exercise_partial<B: Codegen<Output: Executable>>() {
         BuildOptions::host(Mode::Debug).unwrap(),
         BuildOptions::host(Mode::Release).unwrap(),
     ] {
-        assert!(B::build_with_options(1, &[], Box::new(partially_returned), options).is_err());
+        assert!(
+            B::build_with_options(
+                Signature::new(1, &[]),
+                Box::new(partially_returned),
+                options
+            )
+            .is_err()
+        );
     }
 }
 

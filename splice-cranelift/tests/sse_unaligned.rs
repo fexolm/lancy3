@@ -1,7 +1,7 @@
 //! BE-01: without AVX, Cranelift 0.132 folds an unaligned vector load into a
 //! legacy-SSE `cmpps`/`cmppd` memory operand, which faults unless the address
 //! is 16-byte aligned.
-use splice_core::frontend::{self, KernelBuilder};
+use splice_core::frontend::{self, KernelBuilder, Signature};
 use splice_core::hir::{Buffer, Simd, SimdOp};
 use splice_core::simd::Element;
 use splice_core::target::Profile;
@@ -15,8 +15,8 @@ fn shifted_compare(
     bytes: usize,
 ) -> impl Fn(&mut dyn KernelBuilder) -> splice_core::Result<()> {
     move |b| {
-        let zero = b.constant(0);
-        let one = b.constant(1);
+        let zero = b.constant(0)?;
+        let one = b.constant(1)?;
         let load = SimdOp::Load(Buffer(0));
         let x = b.simd(Simd { element, op: load }, &[zero])?.unwrap();
         let y = b.simd(Simd { element, op: load }, &[one])?.unwrap();
@@ -45,7 +45,7 @@ fn shifted_compare(
                 &[mask],
             )?
         };
-        b.ret(result.unwrap());
+        b.ret(result.unwrap())?;
         Ok(())
     }
 }
@@ -62,9 +62,9 @@ fn check_shifted_compares(options: BuildOptions) {
             -1 // `Any` returns a true scalar mask.
         };
         let stage = || Box::new(shifted_compare(element, bytes));
-        let ir = frontend::materialize(0, &kinds, stage(), options).unwrap();
+        let ir = frontend::materialize(Signature::new(0, &kinds), stage(), options).unwrap();
         for code in [
-            Cranelift::build_with_options(0, &kinds, stage(), options).unwrap(),
+            Cranelift::build_with_options(Signature::new(0, &kinds), stage(), options).unwrap(),
             Cranelift::compile(&ir).unwrap(),
         ] {
             let result = match element {

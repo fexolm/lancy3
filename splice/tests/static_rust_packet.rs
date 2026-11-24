@@ -1,4 +1,4 @@
-use splice::frontend::{KernelBuilder, materialize};
+use splice::frontend::{KernelBuilder, Signature, materialize};
 use splice::hir::{Buffer, ContextSlice, Instr, RustContextTarget};
 use splice::{
     BufferArg, BufferKind, BuildOptions, Codegen, ContextArguments, Executable, Mode,
@@ -24,22 +24,20 @@ static EMPTY: StaticRustSymbol = StaticRustSymbol::of::<Empty>("empty");
 fn static_packets_can_have_no_operands() {
     fn body(builder: &mut dyn KernelBuilder) -> splice::Result<()> {
         let result = builder.rust_static_call(&EMPTY, &[], &[])?;
-        builder.ret(result);
+        builder.ret(result)?;
         Ok(())
     }
 
     fn check<B: Codegen<Output: Executable>>() {
         let ir = materialize(
-            0,
-            &[],
+            Signature::new(0, &[]),
             Box::new(body),
             BuildOptions::host(Mode::Release).unwrap(),
         )
         .unwrap();
         for kernel in [
             B::build_with_options(
-                0,
-                &[],
+                Signature::new(0, &[]),
                 Box::new(body),
                 BuildOptions::host(Mode::Release).unwrap(),
             )
@@ -89,34 +87,32 @@ const fn view(buffer: u32, writable: bool) -> ContextSlice {
 
 fn modify_child(builder: &mut dyn KernelBuilder) -> splice::Result<()> {
     let result =
-        builder.rust_static_call(&MODIFY, &[builder.arg(0)], &[SHARED_INPUT, MUTABLE_OUTPUT])?;
-    builder.ret(result);
+        builder.rust_static_call(&MODIFY, &[builder.arg(0)?], &[SHARED_INPUT, MUTABLE_OUTPUT])?;
+    builder.ret(result)?;
     Ok(())
 }
 
 fn forward_slices(builder: &mut dyn KernelBuilder) -> splice::Result<()> {
-    let first = builder.constant(0);
-    let marker = builder.constant(91);
-    builder.store(Buffer(0), first, marker);
+    let first = builder.constant(0)?;
+    let marker = builder.constant(91)?;
+    builder.store(Buffer(0), first, marker)?;
     let result = builder.call_kernel(
-        1,
-        &CHILD_KINDS,
-        &[builder.arg(0)],
+        Signature::new(1, &CHILD_KINDS),
+        &[builder.arg(0)?],
         &[Buffer(1), Buffer(0)],
         Box::new(modify_child),
     )?;
-    let one = builder.constant(1);
-    let next = builder.binary(splice::hir::Binary::Add, result, one);
-    builder.store(Buffer(0), first, next);
-    builder.ret(result);
+    let one = builder.constant(1)?;
+    let next = builder.binary(splice::hir::Binary::Add, result, one)?;
+    builder.store(Buffer(0), first, next)?;
+    builder.ret(result)?;
     Ok(())
 }
 
 #[test]
 fn static_packets_keep_nested_slice_borrows_and_effect_order() {
     let ir = materialize(
-        1,
-        &PARENT_KINDS,
+        Signature::new(1, &PARENT_KINDS),
         Box::new(forward_slices),
         BuildOptions::host(Mode::Release).unwrap(),
     )
@@ -148,8 +144,7 @@ fn static_packets_keep_nested_slice_borrows_and_effect_order() {
     fn check<B: Codegen<Output: Executable>>(ir: &splice::Function) {
         for kernel in [
             B::build_with_options(
-                1,
-                &PARENT_KINDS,
+                Signature::new(1, &PARENT_KINDS),
                 Box::new(forward_slices),
                 BuildOptions::host(Mode::Release).unwrap(),
             )
@@ -209,29 +204,28 @@ fn invalid_static_packet_operands_are_rejected_before_native_codegen() {
     let cases: [Invalid; 7] = [
         |b| b.rust_static_call(&OVERSIZE, &[], &[]),
         |b| b.rust_static_call(&MODIFY, &[], &[SHARED_INPUT, MUTABLE_OUTPUT]),
-        |b| b.rust_static_call(&MODIFY, &[b.arg(0)], &[MUTABLE_OUTPUT]),
-        |b| b.rust_static_call(&MODIFY, &[b.arg(0)], &[SHARED_INPUT, view(3, true)]),
-        |b| b.rust_static_call(&MODIFY, &[b.arg(0)], &[view(2, false), MUTABLE_OUTPUT]),
-        |b| b.rust_static_call(&MODIFY, &[b.arg(0)], &[SHARED_INPUT, view(0, true)]),
-        |b| b.rust_static_call(&MODIFY, &[b.arg(0)], &[view(1, false), MUTABLE_OUTPUT]),
+        |b| b.rust_static_call(&MODIFY, &[b.arg(0)?], &[MUTABLE_OUTPUT]),
+        |b| b.rust_static_call(&MODIFY, &[b.arg(0)?], &[SHARED_INPUT, view(3, true)]),
+        |b| b.rust_static_call(&MODIFY, &[b.arg(0)?], &[view(2, false), MUTABLE_OUTPUT]),
+        |b| b.rust_static_call(&MODIFY, &[b.arg(0)?], &[SHARED_INPUT, view(0, true)]),
+        |b| b.rust_static_call(&MODIFY, &[b.arg(0)?], &[view(1, false), MUTABLE_OUTPUT]),
     ];
     for bad in cases {
         let body = move |builder: &mut dyn KernelBuilder| {
             let result = bad(builder)?;
-            builder.ret(result);
+            builder.ret(result)?;
             Ok(())
         };
         assert!(
             materialize(
-                1,
-                &kinds,
+                Signature::new(1, &kinds),
                 Box::new(body),
                 BuildOptions::host(Mode::Release).unwrap()
             )
             .is_err()
         );
         splice_testkit::each_backend!(B => assert!(
-            B::build_with_options(1, &kinds, Box::new(body), BuildOptions::host(Mode::Release).unwrap()).is_err()
+            B::build_with_options(Signature::new(1, &kinds), Box::new(body), BuildOptions::host(Mode::Release).unwrap()).is_err()
         ));
     }
 }
@@ -240,8 +234,7 @@ fn invalid_static_packet_operands_are_rejected_before_native_codegen() {
 fn static_rust_adapters_cannot_reinterpret_a_slice_element_type() {
     const KINDS: [BufferKind; 2] = [BufferKind::Read, BufferKind::Write];
     let ir = materialize(
-        1,
-        &KINDS,
+        Signature::new(1, &KINDS),
         Box::new(modify_child),
         BuildOptions::host(Mode::Release).unwrap(),
     )
@@ -250,8 +243,7 @@ fn static_rust_adapters_cannot_reinterpret_a_slice_element_type() {
     fn check<B: Codegen<Output: Executable>>(ir: &splice::Function) {
         for kernel in [
             B::build_with_options(
-                1,
-                &KINDS,
+                Signature::new(1, &KINDS),
                 Box::new(modify_child),
                 BuildOptions::host(Mode::Release).unwrap(),
             )

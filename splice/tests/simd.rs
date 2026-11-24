@@ -1232,31 +1232,50 @@ fn floating_division_and_unordered_comparison() {
 fn verifier_checks_vector_mask_and_buffer_element_types() {
     use splice::{
         BufferKind,
-        hir::{Buffer, FunctionBuilder, Simd, SimdOp},
+        frontend::{KernelBuilder, Signature, materialize},
+        hir::{Buffer, Reg, Simd, SimdOp},
         simd::Element,
     };
-    let mut b =
-        FunctionBuilder::with_buffers(options(), 0, vec![BufferKind::new(Element::F32, false)]);
-    let offset = b.constant(0);
-    let f = b
-        .simd(
-            Simd {
-                element: Element::F32,
-                op: SimdOp::Load(Buffer(0)),
-            },
-            &[offset],
+    const KINDS: [BufferKind; 1] = [BufferKind::new(Element::F32, false)];
+    /// An operation built from the offset and the loaded vector.
+    type Operation = fn(Reg, Reg) -> (Element, SimdOp, Vec<Reg>);
+    let stage = |bad: Option<Operation>| {
+        materialize(
+            Signature::new(0, &KINDS),
+            Box::new(move |b: &mut dyn KernelBuilder| {
+                let offset = b.constant(0)?;
+                let f = b
+                    .simd(
+                        Simd {
+                            element: Element::F32,
+                            op: SimdOp::Load(Buffer(0)),
+                        },
+                        &[offset],
+                    )?
+                    .unwrap();
+                if let Some(bad) = bad {
+                    let (element, op, args) = bad(offset, f);
+                    b.simd(Simd { element, op }, &args)?;
+                }
+                let zero = b.constant(0)?;
+                b.ret(zero)
+            }),
+            options(),
         )
-        .unwrap()
-        .unwrap();
-    for (element, op, args) in [
-        (Element::F64, SimdOp::Load(Buffer(0)), vec![offset]),
-        (Element::F32, SimdOp::Any, vec![f]),
-        (Element::F32, SimdOp::Store(Buffer(0)), vec![offset, f]),
-    ] {
-        assert!(b.simd(Simd { element, op }, &args).is_err());
+    };
+    assert!(stage(None).is_ok());
+    let cases: [Operation; 4] = [
+        |offset, _| (Element::F64, SimdOp::Load(Buffer(0)), vec![offset]),
+        |_, f| (Element::F32, SimdOp::Any, vec![f]),
+        |offset, f| (Element::F32, SimdOp::Store(Buffer(0)), vec![offset, f]),
+        |_, f| (Element::F32, SimdOp::Store(Buffer(0)), vec![f, f]),
+    ];
+    for bad in cases {
+        assert!(matches!(
+            stage(Some(bad)),
+            Err(splice::BuildError::Verify { .. })
+        ));
     }
-    b.ret(f);
-    assert!(b.finish().is_err());
 }
 
 #[kernel]

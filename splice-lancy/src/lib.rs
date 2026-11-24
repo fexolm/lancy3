@@ -2,72 +2,41 @@
 mod debug_info;
 mod lower;
 
-use lancy::{CompileError, ScalarKernel};
+use lancy::ScalarKernel;
 pub use lower::lower;
+use splice_core::frontend::{Body, Signature};
 use splice_core::{
-    BufferArg, BuildOptions, CallError, Codegen, Executable, Function, SignatureError, Trap,
+    Backend, BufferArg, BuildOptions, CallError, Executable, Function, SignatureError, Trap,
 };
 
 /// Compile Splice kernels through Lancy's SSA HIR and host backend.
 pub struct Lancy;
 
-impl Codegen for Lancy {
+impl Backend for Lancy {
     type Output = LancyKernel;
 
-    fn build_with_options(
-        arity: usize,
-        kinds: &[splice_core::BufferKind],
-        body: splice_core::frontend::Body<'_>,
+    fn stage(
+        signature: Signature<'_>,
+        body: Body<'_>,
         options: BuildOptions,
     ) -> splice_core::Result<Self::Output> {
-        if options.debug() {
-            return Self::compile(&splice_core::frontend::materialize(
-                arity, kinds, body, options,
-            )?);
-        }
         let _span = tracing::debug_span!(target: "splice_core::compile", "compile", backend = "lancy", input = "staged").entered();
-        let (hir, source) = tracing::debug_span!(target: "splice_core::compile", "stage_lancy_hir")
-            .in_scope(|| {
-                lower::build_with_source(arity, kinds, body, options.target.vector_bytes())
-            })?;
-        LancyKernel::new(hir, &options.target, arity, kinds, source)
-            .map_err(|e| splice_core::BuildError::backend("lancy", e))
+        LancyKernel::compile(signature, options, |vector_bytes, debug| {
+            tracing::debug_span!(target: "splice_core::compile", "stage_lancy_hir")
+                .in_scope(|| lower::stage(signature, body, vector_bytes, debug))
+        })
     }
 
-    fn compile_raw(function: &Function) -> splice_core::Result<Self::Output> {
-        Self::compile_raw_with_options(function, function.options())
-    }
-
-    fn compile_raw_with_options(
+    fn compile_function(
         function: &Function,
         options: BuildOptions,
     ) -> splice_core::Result<Self::Output> {
         let _span = tracing::debug_span!(target: "splice_core::compile", "compile", backend = "lancy", input = "portable").entered();
-        let target = options.target;
-        if options.debug() {
-            let mut sources = Vec::new();
-            let hir = lower::lower_debug(function, &target, &mut sources)?;
-            let code =
-                ScalarKernel::compile(&hir, &lancy::CompileOptions::new(target).with_debug())
-                    .map_err(|e| splice_core::BuildError::backend("lancy", e))?;
-            let registration = debug_info::publish(&code, &sources)?;
-            return Ok(LancyKernel {
-                _debug: Some(registration),
-                code,
-                arity: function.arity(),
-                slices: function.buffer_kinds().into(),
-            });
-        }
-        let hir = tracing::debug_span!(target: "splice_core::compile", "lower_lancy_hir")
-            .in_scope(|| lower(function, &target))?;
-        LancyKernel::new(
-            hir,
-            &target,
-            function.arity(),
-            function.buffer_kinds(),
-            function.source(),
-        )
-        .map_err(|e| splice_core::BuildError::backend("lancy", e))
+        LancyKernel::compile(function.signature(), options, |vector_bytes, debug| {
+            let graph = tracing::debug_span!(target: "splice_core::compile", "lower_lancy_hir")
+                .in_scope(|| lower::lower_with(function, vector_bytes, debug))?;
+            Ok((graph, function.source()))
+        })
     }
 }
 
@@ -79,27 +48,46 @@ pub struct LancyKernel {
 }
 
 impl LancyKernel {
-    fn new(
-        function: lancy::hir::Function,
-        target: &splice_core::Target,
-        arity: usize,
-        kinds: &[splice_core::BufferKind],
-        source: Option<&splice_core::frontend::KernelSource>,
-    ) -> Result<Self, CompileError> {
-        let code = ScalarKernel::compile(&function, &lancy::CompileOptions::new(*target))?;
-        if splice_jit::perf_enabled() {
-            splice_jit::profile(&[splice_jit::Function {
-                name: debug_info::name(source),
-                address: code.code_address() as u64,
-                size: code.code_size() as u64,
-                statements: Vec::new(),
-            }]);
+    /// Lower with `lower`, which records the source points of a debug build.
+    fn compile(
+        signature: Signature<'_>,
+        options: BuildOptions,
+        lower: impl FnOnce(
+            usize,
+            Option<&mut Vec<lower::DebugSource>>,
+        ) -> splice_core::Result<(
+            lancy::hir::Function,
+            Option<&'static splice_core::frontend::KernelSource>,
+        )>,
+    ) -> splice_core::Result<Self> {
+        let target = options.target;
+        let mut sources = Vec::new();
+        let debug = options.debug();
+        let (hir, source) = lower(target.vector_bytes(), debug.then_some(&mut sources))?;
+        let mut compile_options = lancy::CompileOptions::new(target);
+        if debug {
+            compile_options = compile_options.with_debug();
         }
+        let code = ScalarKernel::compile(&hir, &compile_options)
+            .map_err(|e| splice_core::BuildError::backend("lancy", e))?;
+        let registration = if debug {
+            Some(debug_info::publish(&code, &sources)?)
+        } else {
+            if splice_jit::perf_enabled() {
+                splice_jit::profile(&[splice_jit::Function {
+                    name: debug_info::name(source),
+                    address: code.code_address() as u64,
+                    size: code.code_size() as u64,
+                    statements: Vec::new(),
+                }]);
+            }
+            None
+        };
         Ok(Self {
-            _debug: None,
+            _debug: registration,
             code,
-            arity,
-            slices: kinds.into(),
+            arity: signature.arity,
+            slices: signature.buffers.into(),
         })
     }
 }

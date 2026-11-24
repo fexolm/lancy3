@@ -41,8 +41,8 @@ fn every_scalar_binary_matches_checked_eval() {
         CheckedSub, CheckedMul, CheckedShl, CheckedShr, Min, Max,
     ] {
         let stage: Stage = Rc::new(move |b| {
-            let r = b.binary(op, b.arg(0), b.arg(1));
-            b.ret(r);
+            let r = b.binary(op, b.arg(0)?, b.arg(1)?)?;
+            b.ret(r)?;
             Ok(())
         });
         let seen = agree(&format!("{op:?}"), 2, &[], &stage, |call| {
@@ -89,42 +89,44 @@ fn every_backend_reports_the_same_typed_trap() {
     // trap(kind, value): 0 bounds, 1 division by zero, 2 division overflow,
     // 3 overflow, 4 Rust import; otherwise value through the import.
     let stage: Stage = Rc::new(|b| {
-        let kind = b.arg(0);
-        let value = b.arg(1);
-        let exits: Vec<_> = (0..5).map(|_| b.label()).collect();
+        let kind = b.arg(0)?;
+        let value = b.arg(1)?;
+        let exits = (0..5)
+            .map(|_| b.label())
+            .collect::<splice::Result<Vec<_>>>()?;
         for (case, &exit) in exits.iter().enumerate() {
-            let next = b.label();
-            let k = b.constant(case as i32);
-            let hit = b.binary(Binary::Eq, kind, k);
-            b.branch(hit, exit, next);
-            b.mark(next);
+            let next = b.label()?;
+            let k = b.constant(case as i32)?;
+            let hit = b.binary(Binary::Eq, kind, k)?;
+            b.branch(hit, exit, next)?;
+            b.mark(next)?;
         }
         let import = splice::hir::RustCall {
             symbol: &IMPORT,
             arity: 2,
         };
-        let zero = b.constant(0);
+        let zero = b.constant(0)?;
         let passed = b.rust_call(import, &[value, zero])?;
-        b.ret(passed);
+        b.ret(passed)?;
         let operations = [
             (Binary::Div, 1, 0),
             (Binary::Rem, i32::MIN, -1),
             (Binary::CheckedMul, i32::MAX, 2),
         ];
-        b.mark(exits[0]);
-        let read = b.load(Buffer(0), value);
-        b.ret(read);
+        b.mark(exits[0])?;
+        let read = b.load(Buffer(0), value)?;
+        b.ret(read)?;
         for (&exit, (op, x, y)) in exits[1..4].iter().zip(&operations) {
-            b.mark(exit);
-            let (x, y) = (b.constant(*x), b.constant(*y));
-            let r = b.binary(*op, x, y);
-            b.ret(r);
+            b.mark(exit)?;
+            let (x, y) = (b.constant(*x)?, b.constant(*y)?);
+            let r = b.binary(*op, x, y)?;
+            b.ret(r)?;
         }
-        b.mark(exits[4]);
-        let hundred = b.constant(100);
-        let fail = b.binary(Binary::Sub, value, hundred);
+        b.mark(exits[4])?;
+        let hundred = b.constant(100)?;
+        let fail = b.binary(Binary::Sub, value, hundred)?;
         let r = b.rust_call(import, &[value, fail])?;
-        b.ret(r);
+        b.ret(r)?;
         Ok(())
     });
     let cases = [
@@ -171,15 +173,15 @@ fn every_backend_reports_the_same_typed_trap() {
 /// `op`, store the result as `to`.
 fn unary(from: Element, to: Element, op: SimdOp, extra: usize) -> Stage {
     Rc::new(move |b| {
-        let zero = b.constant(0);
+        let zero = b.constant(0)?;
         let mut args = vec![load(b, from, 0, zero)];
         for i in 0..extra {
-            let at = b.arg(i);
+            let at = b.arg(i)?;
             args.push(load(b, from, 0, at));
         }
         let r = simd(b, from, op, &args);
         store(b, to, 1, zero, r);
-        b.ret(zero);
+        b.ret(zero)?;
         Ok(())
     })
 }
@@ -422,7 +424,7 @@ fn float_comparisons_follow_ieee_unordered_rules() {
         (Ge, f32::ge),
     ] {
         let stage: Stage = Rc::new(move |b| {
-            let (zero, one) = (b.constant(0), b.constant(1));
+            let (zero, one) = (b.constant(0)?, b.constant(1)?);
             let x = load(b, Element::F32, 0, zero);
             let y = load(b, Element::F32, 0, one);
             let m = simd(b, Element::F32, op, &[x, y]);
@@ -430,7 +432,7 @@ fn float_comparisons_follow_ieee_unordered_rules() {
             let no = simd(b, Element::F32, Splat(0), &[]);
             let s = simd(b, Element::F32, Select, &[m, yes, no]);
             store(b, Element::F32, 1, zero, s);
-            b.ret(zero);
+            b.ret(zero)?;
             Ok(())
         });
         let seen = agree(
@@ -540,23 +542,23 @@ fn integer_lane_operations_agree_on_boundary_values() {
 fn first_n_masks_saturate_at_both_ends() {
     use SimdOp::*;
     let stage: Stage = Rc::new(|b| {
-        let k = b.arg(0);
+        let k = b.arg(0)?;
         let m = simd(b, Element::U16, FirstN, &[k]);
         let ones = simd(b, Element::U16, Splat(1), &[]);
         let zeros = simd(b, Element::U16, Splat(0), &[]);
         let s = simd(b, Element::U16, Select, &[m, ones, zeros]);
-        let zero = b.constant(0);
+        let zero = b.constant(0)?;
         store(b, Element::U16, 0, zero, s);
         let m = simd(b, Element::I64, FirstN, &[k]);
         let any = simd(b, Element::I64, Any, &[m]);
         let all = simd(b, Element::I64, All, &[m]);
-        let r = b.binary(Binary::Add, any, all);
+        let r = b.binary(Binary::Add, any, all)?;
         let m = simd(b, Element::I32, FirstN, &[k]);
         let count = simd(b, Element::I32, Count, &[m]);
-        let ten = b.constant(10);
-        let count = b.binary(Binary::Mul, count, ten);
-        let r = b.binary(Binary::Add, r, count);
-        b.ret(r);
+        let ten = b.constant(10)?;
+        let count = b.binary(Binary::Mul, count, ten)?;
+        let r = b.binary(Binary::Add, r, count)?;
+        b.ret(r)?;
         Ok(())
     });
     let n = Element::U16.lanes(bytes());
@@ -625,7 +627,7 @@ fn compress_expand_and_compress_store_agree_at_buffer_edges() {
     let n = Element::I32.lanes(bytes());
     for op in [SimdOp::Compress, SimdOp::Expand] {
         let stage: Stage = Rc::new(move |b| {
-            let (zero, one) = (b.constant(0), b.constant(1));
+            let (zero, one) = (b.constant(0)?, b.constant(1)?);
             let e = Element::I32;
             let x = load(b, e, 0, zero);
             let flags = load(b, e, 1, zero);
@@ -638,7 +640,7 @@ fn compress_expand_and_compress_store_agree_at_buffer_edges() {
                 simd(b, e, op, &[x, m, fallback])
             };
             store(b, e, 2, zero, r);
-            let at = b.arg(0);
+            let at = b.arg(0)?;
             b.simd(
                 Simd {
                     element: e,
@@ -646,7 +648,7 @@ fn compress_expand_and_compress_store_agree_at_buffer_edges() {
                 },
                 &[at, m, x],
             )?;
-            b.ret(zero);
+            b.ret(zero)?;
             Ok(())
         });
         let x: Vec<i32> = (100..100 + n as i32 + 1).collect();
@@ -688,7 +690,7 @@ fn compress_expand_and_compress_store_agree_at_buffer_edges() {
 #[test]
 fn u16_gather_and_scatter_check_indices_at_16_bit_boundaries() {
     let stage: Stage = Rc::new(|b| {
-        let zero = b.constant(0);
+        let zero = b.constant(0)?;
         let e = Element::U16;
         let index = load(b, e, 0, zero);
         let g = simd(b, e, SimdOp::Gather(Buffer(1)), &[index]);
@@ -700,7 +702,7 @@ fn u16_gather_and_scatter_check_indices_at_16_bit_boundaries() {
             },
             &[index, g],
         )?;
-        b.ret(zero);
+        b.ret(zero)?;
         Ok(())
     });
     let n = Element::U16.lanes(bytes());
@@ -754,15 +756,15 @@ fn u16_gather_and_scatter_check_indices_at_16_bit_boundaries() {
 fn partial_vector_accesses_agree_at_negative_and_far_offsets() {
     let stage: Stage = Rc::new(|b| {
         let e = Element::I64;
-        let zero = b.constant(0);
+        let zero = b.constant(0)?;
         let x = simd(b, e, SimdOp::Iota, &[]);
-        let k = b.arg(1);
+        let k = b.arg(1)?;
         let m = simd(b, e, SimdOp::FirstN, &[k]);
-        let at = b.arg(0);
+        let at = b.arg(0)?;
         let l = simd(b, e, SimdOp::LoadSelect(Buffer(1)), &[at, m, x]);
         store(b, e, 0, zero, l);
         store(b, e, 0, at, x);
-        b.ret(zero);
+        b.ret(zero)?;
         Ok(())
     });
     let n = Element::I64.lanes(bytes());
@@ -790,7 +792,7 @@ fn partial_vector_accesses_agree_at_negative_and_far_offsets() {
 #[test]
 fn narrowing_and_widening_agree_on_extreme_lanes() {
     let stage: Stage = Rc::new(|b| {
-        let (zero, one) = (b.constant(0), b.constant(1));
+        let (zero, one) = (b.constant(0)?, b.constant(1)?);
         let x = load(b, Element::I64, 0, zero);
         let y = load(b, Element::I64, 0, one);
         let narrow = simd(b, Element::I64, SimdOp::Narrow(Element::I32), &[x, y]);
@@ -808,7 +810,7 @@ fn narrowing_and_widening_agree_on_extreme_lanes() {
         };
         let hi = simd(b, Element::I32, high, &[narrow]);
         store(b, Element::I64, 4, zero, hi);
-        b.ret(zero);
+        b.ret(zero)?;
         Ok(())
     });
     let (n, m, h) = (
@@ -841,4 +843,79 @@ fn narrowing_and_widening_agree_on_extreme_lanes() {
         );
         vec![format!("{r:?} {a:?} {c:?} {d:?}")]
     });
+}
+
+/// Each body breaks one verifier rule. Staging it directly on any backend
+/// reports the same `BuildError::Verify`, with the same instruction, as
+/// materializing portable IR: both routes run the one streaming verifier.
+#[test]
+fn every_build_route_reports_the_same_verify_error() {
+    use splice::frontend::{self, Signature};
+    use splice::hir::{Label, ValueType};
+    use splice::{BuildError, BuildOptions, Codegen, Mode};
+    type Body = fn(&mut dyn KernelBuilder) -> splice::Result<()>;
+    const KINDS: [BufferKind; 1] = [BufferKind::Read];
+    let bodies: [(&str, Body); 10] = [
+        ("uninitialized", |b| {
+            let value = b.local(ValueType::Scalar)?;
+            b.ret(value)
+        }),
+        ("uninitialized on one path", |b| {
+            let value = b.local(ValueType::Scalar)?;
+            let (set, join) = (b.label()?, b.label()?);
+            b.branch(b.arg(0)?, set, join)?;
+            b.mark(set)?;
+            b.assign(value, b.arg(0)?)?;
+            b.jump(join)?;
+            b.mark(join)?;
+            b.ret(value)
+        }),
+        ("undefined label", |b| {
+            let label = b.label()?;
+            b.jump(label)
+        }),
+        ("invalid label", |b| b.jump(Label(7))),
+        ("duplicate label", |b| {
+            let label = b.label()?;
+            b.mark(label)?;
+            b.mark(label)?;
+            b.ret(b.arg(0)?)
+        }),
+        ("invalid register", |b| b.ret(Reg(99))),
+        ("invalid parameter", |b| b.ret(b.arg(3)?)),
+        ("read-only store", |b| {
+            let zero = b.constant(0)?;
+            b.store(Buffer(0), zero, zero)?;
+            b.ret(zero)
+        }),
+        ("invalid buffer", |b| {
+            let len = b.buffer_len(Buffer(1))?;
+            b.ret(len)
+        }),
+        ("falls off the end", |b| {
+            b.constant(1)?;
+            Ok(())
+        }),
+    ];
+    let options = BuildOptions::host(Mode::Release).unwrap();
+    let signature = Signature::new(1, &KINDS);
+    for (name, body) in bodies {
+        let expected = frontend::materialize(signature, Box::new(body), options).unwrap_err();
+        assert!(
+            matches!(expected, BuildError::Verify { .. }),
+            "{name}: {expected}"
+        );
+        splice_testkit::each_backend!(B => {
+            let error = B::build_with_options(signature, Box::new(body), options)
+                .err()
+                .unwrap();
+            assert!(matches!(error, BuildError::Verify { .. }), "{name}: {error}");
+            assert_eq!(
+                error.to_string(),
+                expected.to_string(),
+                "{name} on {}",
+                std::any::type_name::<B>()
+            );
+        });
+    }
 }

@@ -188,7 +188,7 @@ pub(crate) fn trait_defaults(
         };
         items.push(adapter);
         emit! {
-            let args = [#(#support::RunArg::reg(#args, __splice_builder)),*];
+            let args = [#(#support::RunArg::reg(#args, __splice_builder)?),*];
             #call
         }
     } else {

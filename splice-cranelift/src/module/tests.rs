@@ -3,6 +3,7 @@ use crate::Cranelift;
 use cranelift_codegen::ir::{Opcode, Type};
 use cranelift_jit::JITBuilder;
 use cranelift_module::default_libcall_names;
+use splice_core::frontend::{KernelBuilder, Signature};
 use splice_core::{
     CallError, Codegen, Executable, Trap,
     hir::{Binary, FunctionBuilder},
@@ -14,21 +15,21 @@ fn options() -> splice_core::BuildOptions {
 }
 
 fn increment() -> Function {
-    let mut f = FunctionBuilder::new(options(), 1);
-    let one = f.constant(1);
-    let result = f.binary(Binary::Add, f.arg(0), one);
-    f.ret(result);
+    let mut f = FunctionBuilder::new(options(), Signature::new(1, &[]));
+    let one = f.constant(1).unwrap();
+    let result = f.binary(Binary::Add, f.arg(0).unwrap(), one).unwrap();
+    f.ret(result).unwrap();
     f.finish().unwrap()
 }
 
 fn caller(child: Function, times: usize) -> Function {
     let child = Arc::new(child);
-    let mut f = FunctionBuilder::new(options(), 1);
-    let mut value = f.arg(0);
+    let mut f = FunctionBuilder::new(options(), Signature::new(1, &[]));
+    let mut value = f.arg(0).unwrap();
     for _ in 0..times {
-        value = f.call_shared(child.clone(), &[value]);
+        value = f.call_function(&child, &[value], &[]).unwrap();
     }
-    f.ret(value);
+    f.ret(value).unwrap();
     f.finish().unwrap()
 }
 
@@ -59,19 +60,21 @@ fn instructions_of_type(f: &ir::Function, opcode: Opcode, ty: Type) -> usize {
 #[test]
 fn branches_use_comparison_bits_and_preserve_comparison_masks() {
     for overwrite in [false, true] {
-        let mut f = FunctionBuilder::new(options(), 2);
-        let mask = f.binary(Binary::Lt, f.arg(0), f.arg(1));
+        let mut f = FunctionBuilder::new(options(), Signature::new(2, &[]));
+        let mask = f
+            .binary(Binary::Lt, f.arg(0).unwrap(), f.arg(1).unwrap())
+            .unwrap();
         if overwrite {
-            f.assign(mask, f.arg(0));
+            f.assign(mask, f.arg(0).unwrap()).unwrap();
         }
-        let yes = f.label();
-        let no = f.label();
-        f.branch(mask, yes, no);
-        f.mark(yes);
-        f.ret(mask);
-        f.mark(no);
-        let fallback = f.constant(7);
-        f.ret(fallback);
+        let yes = f.label().unwrap();
+        let no = f.label().unwrap();
+        f.branch(mask, yes, no).unwrap();
+        f.mark(yes).unwrap();
+        f.ret(mask).unwrap();
+        f.mark(no).unwrap();
+        let fallback = f.constant(7).unwrap();
+        f.ret(fallback).unwrap();
         let f = f.finish().unwrap();
 
         let mut jit = JITModule::new(JITBuilder::new(default_libcall_names()).unwrap());
@@ -108,21 +111,24 @@ fn branches_use_vector_reduction_bits_and_preserve_scalar_masks() {
         simd::Element,
     };
 
-    let mut f = FunctionBuilder::new(options(), 1);
+    let mut f = FunctionBuilder::new(options(), Signature::new(1, &[]));
     let op = |op| Simd {
         element: Element::I32,
         op,
     };
-    let vector_mask = f.simd(op(SimdOp::FirstN), &[f.arg(0)]).unwrap().unwrap();
+    let vector_mask = f
+        .simd(op(SimdOp::FirstN), &[f.arg(0).unwrap()])
+        .unwrap()
+        .unwrap();
     let mask = f.simd(op(SimdOp::Any), &[vector_mask]).unwrap().unwrap();
-    let yes = f.label();
-    let no = f.label();
-    f.branch(mask, yes, no);
-    f.mark(yes);
-    f.ret(mask);
-    f.mark(no);
-    let fallback = f.constant(7);
-    f.ret(fallback);
+    let yes = f.label().unwrap();
+    let no = f.label().unwrap();
+    f.branch(mask, yes, no).unwrap();
+    f.mark(yes).unwrap();
+    f.ret(mask).unwrap();
+    f.mark(no).unwrap();
+    let fallback = f.constant(7).unwrap();
+    f.ret(fallback).unwrap();
     let f = f.finish().unwrap();
 
     let mut jit = JITModule::new(JITBuilder::new(default_libcall_names()).unwrap());
@@ -183,18 +189,17 @@ fn packed_chunks_cover_the_vector_and_a_short_store_keeps_its_prefix() {
     };
 
     let e = Element::U16;
-    let mut f = FunctionBuilder::with_buffers(
+    let mut f = FunctionBuilder::new(
         options(),
-        1,
-        vec![BufferKind::new(e, false), BufferKind::new(e, true)],
+        Signature::new(1, &[BufferKind::new(e, false), BufferKind::new(e, true)]),
     );
-    let offset = f.arg(0);
+    let offset = f.arg(0).unwrap();
     let mut simd = |op, args: &[_]| f.simd(Simd { element: e, op }, args).unwrap();
     let x = simd(SimdOp::Load(Buffer(0)), &[offset]).unwrap();
     let one = simd(SimdOp::Splat(1), &[]).unwrap();
     let sum = simd(SimdOp::Add, &[x, one]).unwrap();
     simd(SimdOp::Store(Buffer(1)), &[offset, sum]);
-    f.ret(offset);
+    f.ret(offset).unwrap();
     let f = f.finish().unwrap();
 
     let mut jit = JITModule::new(JITBuilder::new(default_libcall_names()).unwrap());
@@ -255,19 +260,18 @@ fn masked_contiguous_access_selects_packed_and_ordered_paths() {
     // The only vector memory operations here have runtime masks, so a plain
     // vector load/store in CLIF must come from the masked access fast path.
     let e = Element::U16;
-    let mut f = FunctionBuilder::with_buffers(
+    let mut f = FunctionBuilder::new(
         options(),
-        2,
-        vec![BufferKind::new(e, false), BufferKind::new(e, true)],
+        Signature::new(2, &[BufferKind::new(e, false), BufferKind::new(e, true)]),
     );
-    let offset = f.arg(0);
-    let count = f.arg(1);
+    let offset = f.arg(0).unwrap();
+    let count = f.arg(1).unwrap();
     let mut simd = |op, args: &[_]| f.simd(Simd { element: e, op }, args).unwrap();
     let mask = simd(SimdOp::FirstN, &[count]).unwrap();
     let zero = simd(SimdOp::Splat(0), &[]).unwrap();
     let v = simd(SimdOp::LoadSelect(Buffer(0)), &[offset, mask, zero]).unwrap();
     simd(SimdOp::StoreSelect(Buffer(1)), &[offset, mask, v]);
-    f.ret(count);
+    f.ret(count).unwrap();
     let f = f.finish().unwrap();
 
     let mut jit = JITModule::new(JITBuilder::new(default_libcall_names()).unwrap());

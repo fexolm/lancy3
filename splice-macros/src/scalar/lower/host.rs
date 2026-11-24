@@ -523,9 +523,9 @@ impl Lower<'_> {
         } else {
             emit! {
                 let (operation, a, z) = fault.kernel_operation();
-                let (a, z) = (__splice_builder.constant(a), __splice_builder.constant(z));
-                let fault = __splice_builder.binary(operation, a, z);
-                __splice_builder.ret(fault);
+                let (a, z) = (__splice_builder.constant(a)?, __splice_builder.constant(z)?);
+                let fault = __splice_builder.binary(operation, a, z)?;
+                __splice_builder.ret(fault)?;
                 break #region;
             }
         };

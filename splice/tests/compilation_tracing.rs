@@ -85,7 +85,15 @@ fn staged_and_portable_compilation_report_their_nested_stages() {
         ("staged", "stage_lancy_hir"),
         ("portable", "lower_lancy_hir"),
     ] {
-        let root = format!("compile{{backend=\"lancy\",input=\"{input}\"}}");
+        // Every build, staged or not, runs inside the shared `build` span.
+        let within = |backend: &str| match input {
+            "staged" => format!("build{{backend=\"{backend}\"}} / "),
+            _ => String::new(),
+        };
+        let root = format!(
+            "{}compile{{backend=\"lancy\",input=\"{input}\"}}",
+            within("splice_lancy::Lancy")
+        );
         expected.push(format!("{root} / {frontend}"));
         for stage in ["verify_lancy_hir", "install_code"] {
             expected.push(format!("{root} / {jit} / {stage}"));
@@ -102,19 +110,23 @@ fn staged_and_portable_compilation_report_their_nested_stages() {
                 "{root} / {jit} / optimize_and_lower_lancy / {stage}"
             ));
         }
-        let root = format!("compile{{backend=\"llvm\",input=\"{input}\"}}");
-        for stage in [
-            "populate_llvm_ir",
-            "verify_llvm_ir",
-            "optimize_llvm_ir{auto_vectorize=true}",
-            "optimize_llvm_ir{auto_vectorize=false}",
-            "emit_llvm_object",
-            "link_llvm_object",
-        ]
-        .into_iter()
-        .filter(|_| cfg!(feature = "llvm"))
+        for (backend, auto_vectorize) in [("Llvm", true), ("LlvmManualSimd", false)]
+            .into_iter()
+            .filter(|_| cfg!(feature = "llvm"))
         {
-            expected.push(format!("{root} / {stage}"));
+            let root = format!(
+                "{}compile{{backend=\"llvm\",input=\"{input}\"}}",
+                within(&format!("splice_llvm::{backend}"))
+            );
+            for stage in [
+                "populate_llvm_ir",
+                "verify_llvm_ir",
+                &format!("optimize_llvm_ir{{auto_vectorize={auto_vectorize}}}"),
+                "emit_llvm_object",
+                "link_llvm_object",
+            ] {
+                expected.push(format!("{root} / {stage}"));
+            }
         }
     }
     for stage in [

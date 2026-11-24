@@ -1,6 +1,12 @@
 use super::*;
 mod simd;
 
+/// Stage `body` directly with the host vector width, as `Lancy::stage` does.
+fn build(signature: Signature<'_>, body: Body<'_>) -> splice_core::Result<Function> {
+    let body = splice_core::validate::validated(signature, body);
+    stage(signature, body, options().target.vector_bytes(), None).map(|(function, _)| function)
+}
+
 /// This machine's `SPLICE_SIMD` target in the mode of this test build.
 fn options() -> splice_core::BuildOptions {
     splice_core::BuildOptions::host(splice_core::Mode::for_profile(cfg!(debug_assertions))).unwrap()
@@ -18,8 +24,8 @@ fn context_descriptors_reject_other_signatures_and_slice_operations() {
 
     fn good(b: &mut dyn KernelBuilder) -> splice_core::Result<()> {
         let operation = ContextFrame::root(&FIRST).child(0)?.operation(0)?;
-        let result = b.rust_context_call(Buffer(0), operation, &[b.arg(0)])?;
-        b.ret(result);
+        let result = b.rust_context_call(Buffer(0), operation, &[b.arg(0)?], &[])?;
+        b.ret(result)?;
         Ok(())
     }
 
@@ -31,30 +37,38 @@ fn context_descriptors_reject_other_signatures_and_slice_operations() {
 
     type Invalid = fn(&mut dyn KernelBuilder) -> splice_core::Result<Reg>;
     let invalid: [Invalid; 5] = [
-        |b| b.rust_context_call(Buffer(0), 2, &[b.arg(0)]),
-        |b| b.rust_context_call(Buffer(0), 0, &[]),
-        |b| b.rust_context_call(Buffer(1), 0, &[b.arg(0)]),
-        |b| Ok(b.load(Buffer(0), b.arg(0))),
-        |b| Ok(b.buffer_len(Buffer(0))),
+        |b| b.rust_context_call(Buffer(0), 2, &[b.arg(0)?], &[]),
+        |b| b.rust_context_call(Buffer(0), 0, &[], &[]),
+        |b| b.rust_context_call(Buffer(1), 0, &[b.arg(0)?], &[]),
+        |b| b.load(Buffer(0), b.arg(0)?),
+        |b| b.buffer_len(Buffer(0)),
     ];
     for bad in invalid {
         let body = |b: &mut dyn KernelBuilder| {
             let result = bad(b)?;
-            b.ret(result);
+            b.ret(result)?;
             Ok(())
         };
-        assert!(build(1, &KINDS, Box::new(body)).is_err());
-        assert!(splice_core::frontend::materialize(1, &KINDS, Box::new(body), options()).is_err());
+        assert!(build(Signature::new(1, &KINDS), Box::new(body)).is_err());
+        assert!(
+            splice_core::frontend::materialize(
+                Signature::new(1, &KINDS),
+                Box::new(body),
+                options()
+            )
+            .is_err()
+        );
     }
 
     let direct = crate::Lancy::build_with_options(
-        1,
-        &KINDS,
+        Signature::new(1, &KINDS),
         Box::new(good),
         splice_core::BuildOptions::host(splice_core::Mode::Release).unwrap(),
     )
     .unwrap();
-    let ir = splice_core::frontend::materialize(1, &KINDS, Box::new(good), options()).unwrap();
+    let ir =
+        splice_core::frontend::materialize(Signature::new(1, &KINDS), Box::new(good), options())
+            .unwrap();
     let portable = crate::Lancy::compile(&ir).unwrap();
     for kernel in [direct, portable] {
         let mut unreachable = |_, _, _| panic!("wrong context callback was called");
@@ -114,17 +128,22 @@ fn context_slice_operands_require_valid_nonaliasing_descriptors() {
     ];
     for &(slices, valid) in cases {
         let body = |builder: &mut dyn KernelBuilder| {
-            let result = builder.rust_context_call_with_slices(Buffer(0), 0, &[], slices)?;
-            builder.ret(result);
+            let result = builder.rust_context_call(Buffer(0), 0, &[], slices)?;
+            builder.ret(result)?;
             Ok(())
         };
         assert_eq!(
-            build(0, &kinds, Box::new(body)).is_ok(),
+            build(Signature::new(0, &kinds), Box::new(body)).is_ok(),
             valid,
             "{slices:?}"
         );
         assert_eq!(
-            splice_core::frontend::materialize(0, &kinds, Box::new(body), options()).is_ok(),
+            splice_core::frontend::materialize(
+                Signature::new(0, &kinds),
+                Box::new(body),
+                options()
+            )
+            .is_ok(),
             valid,
             "{slices:?}"
         );
@@ -166,15 +185,17 @@ fn rust_imports_fill_unused_abi_arguments_with_zero_in_both_staging_paths() {
                 },
                 arity: 1,
             },
-            &[b.arg(0)],
+            &[b.arg(0)?],
         )?;
-        let total = b.binary(Binary::Add, three, double);
-        b.ret(total);
+        let total = b.binary(Binary::Add, three, double)?;
+        b.ret(total)?;
         Ok(())
     }
 
-    let direct = build(1, &[], Box::new(body)).unwrap();
-    let portable = splice_core::frontend::materialize(1, &[], Box::new(body), options()).unwrap();
+    let direct = build(Signature::new(1, &[]), Box::new(body)).unwrap();
+    let portable =
+        splice_core::frontend::materialize(Signature::new(1, &[]), Box::new(body), options())
+            .unwrap();
     for graph in [direct, lower(&portable, &options().target).unwrap()] {
         let kernel =
             lancy::ScalarKernel::compile(&graph, &lancy::CompileOptions::new(options().target))
@@ -187,21 +208,25 @@ fn rust_imports_fill_unused_abi_arguments_with_zero_in_both_staging_paths() {
 #[test]
 fn reuses_shared_loads_across_writes_in_both_staging_paths() {
     fn body(b: &mut dyn KernelBuilder) -> splice_core::Result<()> {
-        let zero = b.constant(0);
-        let before = b.load(Buffer(0), zero);
-        b.store(Buffer(1), b.arg(0), before);
-        let zero = b.constant(0);
-        let after = b.load(Buffer(0), zero);
-        let sum = b.binary(Binary::Add, before, after);
-        b.ret(sum);
+        let zero = b.constant(0)?;
+        let before = b.load(Buffer(0), zero)?;
+        b.store(Buffer(1), b.arg(0)?, before)?;
+        let zero = b.constant(0)?;
+        let after = b.load(Buffer(0), zero)?;
+        let sum = b.binary(Binary::Add, before, after)?;
+        b.ret(sum)?;
         Ok(())
     }
 
     for input in [BufferKind::Read, BufferKind::Write] {
         let kinds = [input, BufferKind::Write];
-        let direct = build(1, &kinds, Box::new(body)).unwrap();
-        let portable =
-            splice_core::frontend::materialize(1, &kinds, Box::new(body), options()).unwrap();
+        let direct = build(Signature::new(1, &kinds), Box::new(body)).unwrap();
+        let portable = splice_core::frontend::materialize(
+            Signature::new(1, &kinds),
+            Box::new(body),
+            options(),
+        )
+        .unwrap();
         for graph in [direct, lower(&portable, &options().target).unwrap()] {
             let count = graph
                 .instructions(graph.entry())
@@ -216,18 +241,18 @@ fn reuses_shared_loads_across_writes_in_both_staging_paths() {
 fn portable_calls_share_one_lowered_body_and_preserve_argument_reassignment() {
     use splice_core::hir::FunctionBuilder;
 
-    let mut leaf = FunctionBuilder::new(options(), 1);
-    let one = leaf.constant(1);
-    let value = leaf.binary(Binary::Add, leaf.arg(0), one);
-    leaf.ret(value);
+    let mut leaf = FunctionBuilder::new(options(), Signature::new(1, &[]));
+    let one = leaf.constant(1).unwrap();
+    let value = leaf.binary(Binary::Add, leaf.arg(0).unwrap(), one).unwrap();
+    leaf.ret(value).unwrap();
     let leaf = Arc::new(leaf.finish().unwrap());
 
-    let mut caller = FunctionBuilder::new(options(), 1);
-    let arg = caller.arg(0);
-    let first = caller.call_shared(Arc::clone(&leaf), &[arg]);
-    caller.assign(arg, first);
-    let second = caller.call_shared(leaf, &[arg]);
-    caller.ret(second);
+    let mut caller = FunctionBuilder::new(options(), Signature::new(1, &[]));
+    let arg = caller.arg(0).unwrap();
+    let first = caller.call_function(&leaf, &[arg], &[]).unwrap();
+    caller.assign(arg, first).unwrap();
+    let second = caller.call_function(&leaf, &[arg], &[]).unwrap();
+    caller.ret(second).unwrap();
     let graph = lower(&caller.finish().unwrap(), &options().target).unwrap();
     let calls: Vec<_> = graph
         .instructions(graph.entry())
@@ -247,24 +272,23 @@ fn portable_calls_share_one_lowered_body_and_preserve_argument_reassignment() {
 #[test]
 fn backedge_swaps_live_names_on_the_selected_edge() {
     let graph = build(
-        3,
-        &[],
+        Signature::new(3, &[]),
         Box::new(|b| {
-            let (n, x, y) = (b.arg(0), b.arg(1), b.arg(2));
-            let (head, body, exit) = (b.label(), b.label(), b.label());
-            b.mark(head);
-            b.branch(n, body, exit);
-            b.mark(body);
-            let saved = b.local();
-            b.assign(saved, x);
-            b.assign(x, y);
-            b.assign(y, saved);
-            let one = b.constant(1);
-            let next = b.binary(Binary::Sub, n, one);
-            b.assign(n, next);
-            b.jump(head);
-            b.mark(exit);
-            b.ret(x);
+            let (n, x, y) = (b.arg(0)?, b.arg(1)?, b.arg(2)?);
+            let (head, body, exit) = (b.label()?, b.label()?, b.label()?);
+            b.mark(head)?;
+            b.branch(n, body, exit)?;
+            b.mark(body)?;
+            let saved = b.local(ValueType::Scalar)?;
+            b.assign(saved, x)?;
+            b.assign(x, y)?;
+            b.assign(y, saved)?;
+            let one = b.constant(1)?;
+            let next = b.binary(Binary::Sub, n, one)?;
+            b.assign(n, next)?;
+            b.jump(head)?;
+            b.mark(exit)?;
+            b.ret(x)?;
             Ok(())
         }),
     )
@@ -283,21 +307,20 @@ fn backedge_swaps_live_names_on_the_selected_edge() {
 #[test]
 fn backward_jump_into_previously_unreferenced_label_is_reachable() {
     let f = build(
-        1,
-        &[],
+        Signature::new(1, &[]),
         Box::new(|b| {
-            let (early, late, dead) = (b.label(), b.label(), b.label());
-            let _unused = b.label();
-            b.jump(late);
-            b.mark(early);
-            let one = b.constant(1);
-            let v = b.binary(Binary::Add, one, b.arg(0));
-            b.ret(v);
-            b.mark(dead);
-            let uninitialized = b.local();
-            b.ret(uninitialized);
-            b.mark(late);
-            b.jump(early);
+            let (early, late, dead) = (b.label()?, b.label()?, b.label()?);
+            let _unused = b.label()?;
+            b.jump(late)?;
+            b.mark(early)?;
+            let one = b.constant(1)?;
+            let v = b.binary(Binary::Add, one, b.arg(0)?)?;
+            b.ret(v)?;
+            b.mark(dead)?;
+            let uninitialized = b.local(ValueType::Scalar)?;
+            b.ret(uninitialized)?;
+            b.mark(late)?;
+            b.jump(early)?;
             Ok(())
         }),
     )
@@ -313,17 +336,16 @@ fn backward_jump_into_previously_unreferenced_label_is_reachable() {
 #[test]
 fn reads_require_a_definition_on_every_reachable_edge() {
     let result = build(
-        1,
-        &[],
+        Signature::new(1, &[]),
         Box::new(|b| {
-            let (yes, join) = (b.label(), b.label());
-            let local = b.local();
-            b.branch(b.arg(0), yes, join);
-            b.mark(yes);
-            let val = b.constant(7);
-            b.assign(local, val);
-            b.mark(join);
-            b.ret(local);
+            let (yes, join) = (b.label()?, b.label()?);
+            let local = b.local(ValueType::Scalar)?;
+            b.branch(b.arg(0)?, yes, join)?;
+            b.mark(yes)?;
+            let val = b.constant(7)?;
+            b.assign(local, val)?;
+            b.mark(join)?;
+            b.ret(local)?;
             Ok(())
         }),
     );
@@ -335,34 +357,30 @@ fn reads_require_a_definition_on_every_reachable_edge() {
 #[test]
 fn checked_nested_call_preserves_writes_before_failure() {
     let graph = build(
-        1,
-        &[BufferKind::Read, BufferKind::Write],
+        Signature::new(1, &[BufferKind::Read, BufferKind::Write]),
         Box::new(|b| {
             let x = b.call_kernel(
-                1,
-                &[BufferKind::Write],
-                &[b.arg(0)],
+                Signature::new(1, &[BufferKind::Write]),
+                &[b.arg(0)?],
                 &[Buffer(1)],
                 Box::new(|c| {
-                    let zero = c.constant(0);
-                    c.store(Buffer(0), zero, c.arg(0));
-                    let x = c.binary(Binary::Div, c.arg(0), zero);
-                    c.ret(x);
+                    let zero = c.constant(0)?;
+                    c.store(Buffer(0), zero, c.arg(0)?)?;
+                    let x = c.binary(Binary::Div, c.arg(0)?, zero)?;
+                    c.ret(x)?;
                     Ok(())
                 }),
             )?;
-            b.ret(x);
+            b.ret(x)?;
             Ok(())
         }),
     )
     .unwrap();
     use splice_core::Executable;
-    let f = crate::LancyKernel::new(
-        graph,
-        &options().target,
-        1,
-        &[BufferKind::Read, BufferKind::Write],
-        None,
+    let f = crate::LancyKernel::compile(
+        Signature::new(1, &[BufferKind::Read, BufferKind::Write]),
+        splice_core::BuildOptions::host(splice_core::Mode::Release).unwrap(),
+        |_, _| Ok((graph, None)),
     )
     .unwrap();
     let mut out = [0];
@@ -485,11 +503,10 @@ fn lowered_call_graphs_retain_slice_contracts_for_out_of_line_calls() {
 #[test]
 fn rejects_undefined_labels_and_aliased_writable_arguments() {
     let undefined = build(
-        0,
-        &[],
+        Signature::new(0, &[]),
         Box::new(|b| {
-            let missing = b.label();
-            b.jump(missing);
+            let missing = b.label()?;
+            b.jump(missing)?;
             Ok(())
         }),
     );
@@ -497,21 +514,19 @@ fn rejects_undefined_labels_and_aliased_writable_arguments() {
         matches!(undefined.unwrap_err(), splice_core::BuildError::Verify { reason, .. } if reason.contains("undefined"))
     );
     let alias = build(
-        0,
-        &[BufferKind::Write],
+        Signature::new(0, &[BufferKind::Write]),
         Box::new(|b| {
             let value = b.call_kernel(
-                0,
-                &[BufferKind::Write, BufferKind::Read],
+                Signature::new(0, &[BufferKind::Write, BufferKind::Read]),
                 &[],
                 &[Buffer(0), Buffer(0)],
                 Box::new(|c| {
-                    let n = c.constant(0);
-                    c.ret(n);
+                    let n = c.constant(0)?;
+                    c.ret(n)?;
                     Ok(())
                 }),
             )?;
-            b.ret(value);
+            b.ret(value)?;
             Ok(())
         }),
     );

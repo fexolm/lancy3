@@ -1,250 +1,27 @@
-//! Resolve labels, check calls and register indices, and verify definite initialization.
+//! Verify a portable function by replaying it through the one verifier.
 
-use super::{Function, Instr, Label, ValueType};
-use crate::simd::Element;
-use std::collections::VecDeque;
+use super::{Function, Instr};
 
 impl Function {
     pub(super) fn verify(mut self) -> crate::Result<Self> {
         if self.register_count() > u32::MAX as usize {
             return Err(crate::BuildError::verify("too many registers"));
         }
-        if self.buffer_kinds.len() > u32::MAX as usize {
-            return Err(crate::BuildError::verify("too many buffer parameters"));
-        }
-        if self.code.is_empty() {
-            return Err(crate::BuildError::verify("empty scalar function"));
-        }
-        let mut targets = vec![None; self.labels];
-        let mut starts = Vec::new();
-        let mut new_block = true;
-        for (i, op) in self.code.iter().enumerate() {
-            if new_block || matches!(op, Instr::Label(_)) {
-                starts.push(i);
-            }
-            new_block = op.terminates();
-            if let Instr::Label(l) = op {
-                let slot = targets
-                    .get_mut(l.0 as usize)
-                    .ok_or_else(|| crate::BuildError::verify("invalid label index"))?;
-                if slot.replace(starts.len() - 1).is_some() {
-                    return Err(crate::BuildError::verify(format!("duplicate label {l:?}")));
-                }
-            }
-            if let Instr::Call {
-                dst,
-                function,
-                args,
-                buffers,
-            } = op
-            {
-                super::check_call(
-                    function.arity(),
-                    function.buffer_kinds(),
-                    args.iter().map(|&r| self.checked_reg_type(r)),
-                    &self.buffer_kinds,
-                    buffers,
-                )
-                .map_err(|e| e.at(i))?;
-                if self.checked_reg_type(*dst) != Some(ValueType::Scalar) {
-                    return Err(crate::BuildError::verify_at(
-                        i,
-                        "invalid result register for call",
-                    ));
-                }
-                continue;
-            }
-            if op
-                .reads()
-                .chain(op.written())
-                .any(|r| r.0 as usize >= self.register_count())
-            {
-                return Err(crate::BuildError::verify_at(i, "invalid register"));
-            }
-            match op {
-                Instr::RustContextCall {
-                    dst,
-                    target,
-                    args,
-                    slices,
-                } => {
-                    super::check_rust_context_call(
-                        &self.buffer_kinds,
-                        *target,
-                        args.iter().map(|&r| self.checked_reg_type(r)),
-                        slices,
-                    )?;
-                    if self.reg_type(*dst) != ValueType::Scalar {
-                        return Err(crate::BuildError::verify(
-                            "invalid Rust context operation result type",
-                        ));
-                    }
-                }
-                Instr::RustCall { dst, import, args } => {
-                    import.validate(args.iter().map(|&reg| self.checked_reg_type(reg)))?;
-                    if self.reg_type(*dst) != ValueType::Scalar {
-                        return Err(crate::BuildError::verify("invalid Rust import result type"));
-                    }
-                }
-                Instr::RustPacketCall { dst, import, args } => {
-                    super::check_rust_packet_call(
-                        import,
-                        args.iter().map(|&reg| self.checked_reg_type(reg)),
-                    )?;
-                    if self.reg_type(*dst) != ValueType::Scalar {
-                        return Err(crate::BuildError::verify("invalid Rust import result type"));
-                    }
-                }
-                Instr::Debug(point) => {
-                    let location = point.location;
-                    if location.file.is_empty()
-                        || location.directory.is_empty()
-                        || location.file.contains('\0')
-                        || location.directory.contains('\0')
-                        || location.line == 0
-                    {
-                        return Err(crate::BuildError::verify_at(
-                            i,
-                            "invalid debug source location",
-                        ));
-                    }
-                    if point.variables.iter().any(|var| {
-                        matches!(var.value, crate::debug::Value::Slice(buffer)
-                            if self.buffer_kinds.get(buffer.index()).is_none_or(|kind| kind.context_signature().is_some()))
-                    }) {
-                        return Err(crate::BuildError::verify_at(i, "invalid debug buffer"));
-                    }
-                }
-                Instr::Simd { dst, inst, args } => {
-                    let types: Vec<_> = args.iter().map(|&r| self.reg_type(r)).collect();
-                    inst.validate(&types, &self.buffer_kinds)?;
-                    if dst.map(|r| self.reg_type(r)) != inst.output() {
-                        return Err(crate::BuildError::verify("invalid SIMD result type"));
-                    }
-                }
-                Instr::Copy(d, s) if self.reg_type(*d) != self.reg_type(*s) => {
-                    return Err(crate::BuildError::verify("register copy type mismatch"));
-                }
-                Instr::Copy(..) => {}
-                _ if op
-                    .reads()
-                    .chain(op.written())
-                    .any(|r| self.reg_type(r) != ValueType::Scalar) =>
-                {
-                    return Err(crate::BuildError::verify("expected a scalar register"));
-                }
-                _ => {}
-            }
-            if let Instr::BufferLen { buffer, .. }
-            | Instr::Load { buffer, .. }
-            | Instr::Store { buffer, .. } = op
-            {
-                let kind = self
-                    .buffer_kinds
-                    .get(buffer.index())
-                    .ok_or_else(|| crate::BuildError::verify_at(i, "invalid buffer"))?;
-                if kind.context_signature().is_some() {
-                    return Err(crate::BuildError::verify(
-                        "slice memory operation cannot use Rust context",
-                    ));
-                }
-                if !matches!(op, Instr::BufferLen { .. }) && kind.element() != Element::I32 {
-                    return Err(crate::BuildError::verify(
-                        "scalar element access requires an i32 buffer",
-                    ));
-                }
-                if matches!(op, Instr::Store { .. }) && !kind.writable() {
-                    return Err(crate::BuildError::verify_at(i, "store to read-only buffer"));
-                }
-            }
-        }
-        starts.push(self.code.len());
-        check_initialization(&self, &starts, &targets)?;
+        let mut sink = crate::validate::Sink::new(self.signature(), self.options.debug());
+        let mut validating = crate::validate::Validating::new(&mut sink, self.signature())?;
+        super::replay(&self, &mut validating)?;
+        validating.finish()?;
         self.needs_status = self.code.iter().any(Instr::may_trap);
         Ok(self)
     }
 }
 
-/// Forward must-analysis. A register at a join must have been assigned on
-/// every reachable incoming edge, including edges from loop back to header.
-fn check_initialization(
-    f: &Function,
-    starts: &[usize],
-    targets: &[Option<usize>],
-) -> crate::Result<()> {
-    let target = |l: Label| {
-        targets
-            .get(l.0 as usize)
-            .copied()
-            .flatten()
-            .ok_or_else(|| crate::BuildError::verify(format!("undefined label {l:?}")))
-    };
-    // Resolve every edge, including jumps in unreachable blocks. Fallthrough
-    // past the last block is an error only if execution can reach it.
-    let mut edges = Vec::with_capacity(starts.len() - 1);
-    for (block, &end) in starts.iter().skip(1).enumerate() {
-        edges.push(match f.code[end - 1] {
-            Instr::Return(_) | Instr::TrapBounds => [None, None],
-            Instr::Branch { yes, no, .. } => [Some(target(yes)?), Some(target(no)?)],
-            Instr::Jump(l) => [Some(target(l)?), None],
-            _ => [Some(block + 1), None],
-        });
-    }
-    let mut entry = vec![0u64; f.register_count().div_ceil(64)];
-    for r in 0..f.arity {
-        entry[r / 64] |= 1 << (r % 64);
-    }
-    let mut states = vec![None; edges.len()];
-    states[0] = Some(entry);
-    let mut queue = VecDeque::from([0]);
-    let mut bits = Vec::new();
-    while let Some(block) = queue.pop_front() {
-        bits.clone_from(states[block].as_ref().unwrap());
-        for pc in starts[block]..starts[block + 1] {
-            let op = &f.code[pc];
-            if let Some(r) = op
-                .operands()
-                .find(|r| bits[r.0 as usize / 64] & (1 << (r.0 % 64)) == 0)
-            {
-                return Err(crate::BuildError::verify_at(
-                    pc,
-                    format!("uninitialized {r:?}"),
-                ));
-            }
-            if let Some(r) = op.written() {
-                bits[r.0 as usize / 64] |= 1 << (r.0 % 64);
-            }
-        }
-        for next in edges[block].into_iter().flatten() {
-            if next == edges.len() {
-                return Err(crate::BuildError::verify(
-                    "reachable path falls off the end of the function",
-                ));
-            }
-            if let Some(existing) = &mut states[next] {
-                let mut changed = false;
-                for (a, b) in existing.iter_mut().zip(&bits) {
-                    let common = *a & b;
-                    changed |= *a != common;
-                    *a = common;
-                }
-                if changed {
-                    queue.push_back(next);
-                }
-            } else {
-                states[next] = Some(bits.clone());
-                queue.push_back(next);
-            }
-        }
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
-    use super::super::{Binary, Buffer, BufferKind, Reg, Simd, SimdOp};
+    use super::super::{Binary, Buffer, BufferKind, Label, Reg, Simd, SimdOp, ValueType};
     use super::*;
     use crate::debug::{Location, Point, Value, Variable};
+    use crate::simd::Element;
     use std::sync::Arc;
 
     const R0: Reg = Reg(0);
@@ -268,7 +45,7 @@ mod tests {
             .unwrap_or(0);
         Function {
             source: None,
-            options: crate::BuildOptions::host(crate::Mode::Release).unwrap(),
+            options: crate::BuildOptions::host(crate::Mode::Debug).unwrap(),
             arity,
             buffer_kinds,
             needs_status: false,
@@ -338,12 +115,15 @@ mod tests {
 
     #[test]
     fn structural_errors() {
-        assert_eq!(error(0, vec![], vec![], vec![]), "empty scalar function");
+        assert_eq!(
+            error(0, vec![], vec![], vec![]),
+            "reachable path falls off the end of the function"
+        );
         let mut bad_label = function(1, vec![], vec![], vec![Instr::Label(L0), Instr::Return(R0)]);
         bad_label.labels = 0;
         assert_eq!(
             reason(bad_label.verify().unwrap_err()),
-            "invalid label index"
+            "invalid label index at instruction 0"
         );
         assert_eq!(
             error(
@@ -352,7 +132,7 @@ mod tests {
                 vec![],
                 vec![Instr::Label(L0), Instr::Label(L0), Instr::Return(R0)]
             ),
-            "duplicate label Label(0)"
+            "duplicate label Label(0) at instruction 1"
         );
         assert_eq!(
             error(
@@ -361,7 +141,7 @@ mod tests {
                 vec![],
                 vec![Instr::Jump(Label(1)), Instr::Label(L0)]
             ),
-            "undefined label Label(1)"
+            "undefined label Label(1) at instruction 0"
         );
         assert_eq!(
             error(1, vec![], vec![], vec![Instr::Const(R0, 1)]),
@@ -383,11 +163,11 @@ mod tests {
                 vec![vector],
                 vec![Instr::Copy(R1, R0), Instr::Return(R0)]
             ),
-            "register copy type mismatch"
+            "register copy type mismatch at instruction 0"
         );
         assert_eq!(
             error(1, vec![], vec![vector], vec![Instr::Return(R1)]),
-            "expected a scalar register"
+            "expected a scalar register at instruction 0"
         );
         assert_eq!(
             error(
@@ -406,7 +186,7 @@ mod tests {
                     Instr::Return(R0),
                 ]
             ),
-            "invalid SIMD result type"
+            "result register type mismatch at instruction 0"
         );
         assert_eq!(
             error(
@@ -465,7 +245,7 @@ mod tests {
                 vec![],
                 vec![call(R1, vec![R0]), Instr::Return(R0)]
             ),
-            "invalid result register for call at instruction 0"
+            "invalid result register at instruction 0"
         );
     }
 
@@ -535,7 +315,7 @@ mod tests {
                 vec![],
                 vec![load, Instr::Return(R0)]
             ),
-            "scalar element access requires an i32 buffer"
+            "scalar element access requires an i32 buffer at instruction 0"
         );
         assert_eq!(
             error(

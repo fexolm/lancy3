@@ -1,3 +1,4 @@
+use splice::frontend::Signature;
 use splice::{Codegen, ComptimeKey, Executable, kernel};
 use splice_text::Text;
 
@@ -123,8 +124,8 @@ fn retry(root: &mut dyn splice::frontend::KernelBuilder) -> splice::Result<()> {
                 &[],
                 &[],
                 Box::new(|c| {
-                    let value = c.constant(17);
-                    c.ret(value);
+                    let value = c.constant(17)?;
+                    c.ret(value)?;
                     Ok(())
                 }),
             )?;
@@ -145,17 +146,17 @@ fn retry(root: &mut dyn splice::frontend::KernelBuilder) -> splice::Result<()> {
                 &[],
                 Box::new(|_| panic!("restaged a completed callee")),
             )?;
-            b.ret(reused);
+            b.ret(reused)?;
             Ok(())
         }),
     )?;
-    root.ret(result);
+    root.ret(result)?;
     Ok(())
 }
 #[test]
 fn a_failed_body_can_be_retried_and_its_completed_children_reused() {
     splice_testkit::each_backend!(B => {
-        let code = B::build(0, &[], Box::new(retry)).unwrap();
+        let code = B::build_with_options(Signature::new(0, &[]), Box::new(retry), splice::BuildOptions::host(splice::Mode::Release).unwrap()).unwrap();
         assert_eq!(code.call(&[], &mut []), Ok(17));
     });
 }
@@ -170,15 +171,15 @@ fn invalid_arguments_are_rejected_before_staging_or_reusing_a_callee()
 
     fn stage(root: &mut dyn KernelBuilder) -> splice::Result<()> {
         struct Child;
-        let arg = root.arg(0);
-        let vector = root.typed_local(ValueType::Vector(Element::I32));
-        let mask = root.typed_local(ValueType::Mask(Element::I32));
+        let arg = root.arg(0)?;
+        let vector = root.local(ValueType::Vector(Element::I32))?;
+        let mask = root.local(ValueType::Mask(Element::I32))?;
         fn unexpected(_: &mut dyn KernelBuilder) -> splice::Result<()> {
             panic!("staged an invalid call")
         }
         for args in [&[][..], &[Reg(u32::MAX)], &[vector], &[mask]] {
             assert!(
-                root.call_kernel(1, &[], args, &[], Box::new(unexpected))
+                root.call_kernel(Signature::new(1, &[]), args, &[], Box::new(unexpected))
                     .is_err()
             );
         }
@@ -194,8 +195,13 @@ fn invalid_arguments_are_rejected_before_staging_or_reusing_a_callee()
             ),
         ] {
             assert!(
-                root.call_kernel(1, kinds, &[arg], buffers, Box::new(unexpected))
-                    .is_err()
+                root.call_kernel(
+                    Signature::new(1, kinds),
+                    &[arg],
+                    buffers,
+                    Box::new(unexpected)
+                )
+                .is_err()
             );
         }
         let key = || Specialization::new::<Child>(1, &[BufferKind::Read, BufferKind::Read]);
@@ -209,7 +215,7 @@ fn invalid_arguments_are_rejected_before_staging_or_reusing_a_callee()
             &[arg],
             &shared,
             Box::new(|child| {
-                child.ret(child.arg(0));
+                child.ret(child.arg(0)?)?;
                 Ok(())
             }),
         )?;
@@ -217,19 +223,18 @@ fn invalid_arguments_are_rejected_before_staging_or_reusing_a_callee()
             root.call_specialized(key(), &[mask], &shared, Box::new(unexpected))
                 .is_err()
         );
-        root.ret(result);
+        root.ret(result)?;
         Ok(())
     }
     let kinds = [BufferKind::Read, BufferKind::Write];
     let ir = splice::frontend::materialize(
-        1,
-        &kinds,
+        Signature::new(1, &kinds),
         Box::new(stage),
         splice::BuildOptions::host(splice::Mode::Release)?,
     )?;
     splice_testkit::each_backend!(B => {
         for code in [
-            Box::new(B::build(1, &kinds, Box::new(stage))?) as Box<dyn Executable>,
+            Box::new(B::build_with_options(Signature::new(1, &kinds), Box::new(stage), splice::BuildOptions::host(splice::Mode::Release).unwrap())?) as Box<dyn Executable>,
             Box::new(B::compile(&ir)?),
         ] {
             assert_eq!(

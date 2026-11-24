@@ -207,13 +207,13 @@ pub(crate) fn publish(
             #(let #host_args = #support::KnownArg::require(#host_args)?;)*
             #(#debug_arguments)*
             let __splice_known: [::core::option::Option<i32>; #arity] = [#(#support::RunArg::known(&#scalar_args)),*];
-            #(let #scalar_args = #support::RunArg::reg(#scalar_args, __splice_builder);)*
+            #(let #scalar_args = #support::RunArg::reg(#scalar_args, __splice_builder)?;)*
             let __splice_inputs: &[(#hir::Reg, ::core::option::Option<i32>)] = &[#((#scalar_args, __splice_known[#indices])),*];
-            #(let #mutable_args = __splice_builder.copy(#mutable_args);)*
-            let __splice_result = __splice_builder.typed_local(#value_type);
-            let __splice_return_label = __splice_builder.label();
+            #(let #mutable_args = __splice_builder.copy(#mutable_args)?;)*
+            let __splice_result = __splice_builder.local(#value_type)?;
+            let __splice_return_label = __splice_builder.label()?;
             #code
-            __splice_builder.mark(__splice_return_label);
+            __splice_builder.mark(__splice_return_label)?;
             ::core::result::Result::Ok(__splice_result)
         }
     };

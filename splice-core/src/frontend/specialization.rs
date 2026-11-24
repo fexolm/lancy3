@@ -30,8 +30,8 @@ impl Specialization {
             values: Vec::new(),
         }
     }
-    pub fn signature(&self) -> (usize, &'static [crate::BufferKind]) {
-        (self.arity, self.kinds)
+    pub fn signature(&self) -> super::Signature<'static> {
+        super::Signature::new(self.arity, self.kinds)
     }
 }
 

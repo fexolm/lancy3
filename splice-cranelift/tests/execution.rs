@@ -1,3 +1,4 @@
+use splice_core::frontend::{KernelBuilder, Signature};
 use splice_core::hir::{Binary, FunctionBuilder};
 use splice_core::{BufferArg, CallError, Codegen, Executable, Trap, kernel};
 use splice_cranelift::Cranelift;
@@ -129,9 +130,9 @@ fn every_binary_operation_matches_splice_on_signed_boundaries() {
     for op in [
         Add, Sub, Mul, Div, Rem, And, Or, Xor, Eq, Ne, Lt, Le, Gt, Ge, Shl, Shr, Min, Max,
     ] {
-        let mut f = FunctionBuilder::new(options(), 2);
-        let result = f.binary(op, f.arg(0), f.arg(1));
-        f.ret(result);
+        let mut f = FunctionBuilder::new(options(), Signature::new(2, &[]));
+        let result = f.binary(op, f.arg(0).unwrap(), f.arg(1).unwrap()).unwrap();
+        f.ret(result).unwrap();
         let kernel = Cranelift::compile(&f.finish().unwrap()).unwrap();
         for a in cases {
             for b in cases {
@@ -167,11 +168,14 @@ fn negative_and_past_end_indices_stop_before_the_first_store() {
 #[test]
 fn unrepresentable_callee_signature_returns_a_build_error() {
     let count = usize::from(u16::MAX) + 2;
-    let mut callee = FunctionBuilder::new(options(), count);
-    callee.ret(callee.arg(0));
-    let mut root = FunctionBuilder::new(options(), 1);
-    let value = root.call(callee.finish().unwrap(), &vec![root.arg(0); count]);
-    root.ret(value);
+    let mut callee = FunctionBuilder::new(options(), Signature::new(count, &[]));
+    callee.ret(callee.arg(0).unwrap()).unwrap();
+    let mut root = FunctionBuilder::new(options(), Signature::new(1, &[]));
+    let callee = Arc::new(callee.finish().unwrap());
+    let value = root
+        .call_function(&callee, &vec![root.arg(0).unwrap(); count], &[])
+        .unwrap();
+    root.ret(value).unwrap();
     let result = Cranelift::compile(&root.finish().unwrap());
     assert!(
         matches!(result.err().unwrap(), splice_core::BuildError::Unsupported(feature) if feature.contains("too many parameters"))
@@ -180,34 +184,36 @@ fn unrepresentable_callee_signature_returns_a_build_error() {
 
 #[test]
 fn shared_callees_stack_arguments_and_backedges_outlive_the_ir() {
-    let mut child = FunctionBuilder::new(options(), 8);
-    let next = child.binary(Binary::Add, child.arg(0), child.arg(7));
-    child.ret(next);
+    let mut child = FunctionBuilder::new(options(), Signature::new(8, &[]));
+    let next = child
+        .binary(Binary::Add, child.arg(0).unwrap(), child.arg(7).unwrap())
+        .unwrap();
+    child.ret(next).unwrap();
     let child = Arc::new(child.finish().unwrap());
 
-    let mut f = FunctionBuilder::new(options(), 1);
-    let limit = f.arg(0);
-    let counter = f.constant(0);
-    let zero = f.constant(0);
-    let one = f.constant(1);
-    let (head, body, done) = (f.label(), f.label(), f.label());
-    f.mark(head);
-    let more = f.binary(Binary::Lt, counter, limit);
-    f.branch(more, body, done);
-    f.mark(body);
+    let mut f = FunctionBuilder::new(options(), Signature::new(1, &[]));
+    let limit = f.arg(0).unwrap();
+    let counter = f.constant(0).unwrap();
+    let zero = f.constant(0).unwrap();
+    let one = f.constant(1).unwrap();
+    let (head, body, done) = (f.label().unwrap(), f.label().unwrap(), f.label().unwrap());
+    f.mark(head).unwrap();
+    let more = f.binary(Binary::Lt, counter, limit).unwrap();
+    f.branch(more, body, done).unwrap();
+    f.mark(body).unwrap();
     for _ in 0..2 {
         let mut args = [zero; 8];
         args[0] = counter;
         args[7] = one;
-        let step = f.call_shared(child.clone(), &args);
-        f.assign(counter, step);
+        let step = f.call_function(&child, &args, &[]).unwrap();
+        f.assign(counter, step).unwrap();
     }
-    f.jump(head);
-    f.mark(done);
-    f.ret(counter);
-    let orphan = f.label();
-    f.mark(orphan);
-    f.constant(99); // verified, unreachable fallthrough
+    f.jump(head).unwrap();
+    f.mark(done).unwrap();
+    f.ret(counter).unwrap();
+    let orphan = f.label().unwrap();
+    f.mark(orphan).unwrap();
+    f.constant(99).unwrap(); // verified, unreachable fallthrough
 
     let code = Cranelift::compile(&f.finish().unwrap()).unwrap();
     std::thread::scope(|scope| {
@@ -226,17 +232,19 @@ fn masked_f64_memory_keeps_global_lane_order_across_chunks() {
         simd::Element::{F64, I64},
     };
 
-    let mut f = FunctionBuilder::with_buffers(
+    let mut f = FunctionBuilder::new(
         options(),
-        0,
-        vec![
-            BufferKind::new(F64, false),
-            BufferKind::new(I64, false),
-            BufferKind::new(F64, false),
-            BufferKind::new(F64, true),
-        ],
+        Signature::new(
+            0,
+            &[
+                BufferKind::new(F64, false),
+                BufferKind::new(I64, false),
+                BufferKind::new(F64, false),
+                BufferKind::new(F64, true),
+            ],
+        ),
     );
-    let offset = f.constant(0);
+    let offset = f.constant(0).unwrap();
     let mut simd = |element, op, args: &[_]| f.simd(Simd { element, op }, args).unwrap();
     let data = simd(F64, SimdOp::Load(Buffer(0)), &[offset]).unwrap();
     let indices = simd(I64, SimdOp::Load(Buffer(1)), &[offset]).unwrap();
@@ -257,8 +265,8 @@ fn masked_f64_memory_keeps_global_lane_order_across_chunks() {
     );
     let any = simd(F64, SimdOp::Any, &[active]).unwrap();
     let all = simd(F64, SimdOp::All, &[active]).unwrap();
-    let result = f.binary(Binary::Add, any, all);
-    f.ret(result);
+    let result = f.binary(Binary::Add, any, all).unwrap();
+    f.ret(result).unwrap();
     let code = Cranelift::compile(&f.finish().unwrap()).unwrap();
 
     let mut data: Vec<_> = (0..F64.lanes(options().target.vector_bytes()))

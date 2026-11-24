@@ -14,7 +14,7 @@ mod module;
 use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{Module, default_libcall_names};
 use splice_core::{
-    BufferArg, BufferKind, BuildOptions, CallError, Codegen, Executable, Function, Result,
+    Backend, BufferArg, BufferKind, BuildOptions, CallError, Executable, Function, Result,
     SignatureError,
 };
 use splice_target::abi::decode_status;
@@ -158,17 +158,10 @@ pub struct CraneliftKernel {
     buffers: Box<[BufferKind]>,
 }
 
-impl Codegen for Cranelift {
+impl Backend for Cranelift {
     type Output = CraneliftKernel;
 
-    fn compile_raw(function: &Function) -> Result<CraneliftKernel> {
-        Self::compile_raw_with_options(function, function.options())
-    }
-
-    fn compile_raw_with_options(
-        function: &Function,
-        options: BuildOptions,
-    ) -> Result<CraneliftKernel> {
+    fn compile_function(function: &Function, options: BuildOptions) -> Result<CraneliftKernel> {
         let _span = tracing::debug_span!(target: "splice_core::compile", "compile", backend = "cranelift", input = "portable").entered();
         let debug = options.debug();
         let target = options.target;

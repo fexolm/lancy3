@@ -1,7 +1,7 @@
 //! Every lane conversion the verifier accepts, on every backend and both build
 //! paths, against Rust `as` on boundary inputs (NaN, infinities, signed zero,
 //! saturation edges and wrapping integers).
-use splice::frontend::{self, KernelBuilder};
+use splice::frontend::{self, KernelBuilder, Signature};
 use splice::hir::{Buffer, Simd, SimdOp};
 use splice::simd::Element;
 use splice::{BufferElement, BufferKind, BuildOptions, Codegen, Executable, Mode};
@@ -132,13 +132,13 @@ fn stage(
             element: from,
             op: SimdOp::Load(Buffer(0)),
         };
-        let zero = b.constant(0);
+        let zero = b.constant(0)?;
         let low = b.simd(load, &[zero])?.unwrap();
         let (op, args) = match conversion {
             Conversion::Cast => (SimdOp::Cast(to), vec![low]),
             Conversion::Widen { high } => (SimdOp::Widen { to, high }, vec![low]),
             Conversion::Narrow => {
-                let next = b.constant(from.lanes(options().target.vector_bytes()) as i32);
+                let next = b.constant(from.lanes(options().target.vector_bytes()) as i32)?;
                 let high = b.simd(load, &[next])?.unwrap();
                 (SimdOp::Narrow(to), vec![low, high])
             }
@@ -149,7 +149,7 @@ fn stage(
             op: SimdOp::Store(Buffer(1)),
         };
         b.simd(store, &[zero, converted])?;
-        b.ret(zero);
+        b.ret(zero)?;
         Ok(())
     }
 }
@@ -160,12 +160,20 @@ where
 {
     let (from, to) = (F::ELEMENT, T::ELEMENT);
     let kinds = [BufferKind::new(from, false), BufferKind::new(to, true)];
-    let ir =
-        frontend::materialize(0, &kinds, Box::new(stage(from, to, conversion)), options()).unwrap();
+    let ir = frontend::materialize(
+        Signature::new(0, &kinds),
+        Box::new(stage(from, to, conversion)),
+        options(),
+    )
+    .unwrap();
     let paths = [
         (
             "build",
-            B::build_with_options(0, &kinds, Box::new(stage(from, to, conversion)), options()),
+            B::build_with_options(
+                Signature::new(0, &kinds),
+                Box::new(stage(from, to, conversion)),
+                options(),
+            ),
         ),
         ("compile", B::compile(&ir)),
     ];
@@ -259,8 +267,7 @@ fn rejected_conversions_stay_rejected() {
         BufferKind::new(Element::I32, true),
     ];
     let error = frontend::materialize(
-        0,
-        &kinds,
+        Signature::new(0, &kinds),
         Box::new(stage(Element::F64, Element::I32, Conversion::Cast)),
         options(),
     );
