@@ -19,7 +19,7 @@ fn emits_aarch64_simd_and_preserves_the_logical_width() {
     let target = target::machine(&config, false).unwrap();
     let context = Context::create();
     let module = build_module(&context, &target, machine, |ctx, m| {
-        lower::populate(ctx, m, &ir, machine)
+        lower::populate_function(ctx, m, machine, &ir, false).map(drop)
     })
     .unwrap();
     jit::optimize(&module, &target, true).unwrap();
