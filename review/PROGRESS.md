@@ -203,7 +203,7 @@
 - Полный `cargo +1.94.1 xtask ci` локально зелёный; GitHub CI на 7eb9e2b зелёный по lint/test/profile (x86 и ARM, Windows).
 - Отложено: HIR-23 (ширина указателя из цели) — в Ф5 вместе с типами HIR; SPL-05 (перемер таблиц README) — Ф9; `lancy::CompileOptions::host()` оставлен как внешний умолчательный вход Lancy.
 
-### Ф4.2–4.3 — один верификатор, общий `replay`, `Backend`/`Codegen` (коммит см. ниже)
+### Ф4.2–4.3 — один верификатор, общий `replay`, `Backend`/`Codegen` (коммит c09ccb4)
 - Закрыто: CORE-06, CORE-07, CORE-08, SPL-20, CORE-20 (сентинел `Reg(u32::MAX)`). Порядок изменён: 4.2+4.3 сделаны до 4.1, чтобы `ScalarType` (4.1) трогал по одному понижению в каждом бэкенде, а не по два.
 - `KernelBuilder`: все методы возвращают `Result`; `local(ty)` вместо `local()`/`typed_local()`, `arg()` — `Result`, `debug_point` — `Result`, `rust_context_call(context, op, args, slices)` вместо варианта `_with_slices`, `call_kernel(Signature, …)`, новый `call_function(&Arc<Function>, args, buffers)` (по умолчанию — `replay`). `frontend::Signature { arity, buffers }` — одно значение вместо пары `(arity, kinds)` во всём API (`materialize`, `build_with_options`, `FunctionBuilder::new`; `with_buffers` удалён).
 - `splice_core::validate::Validating` — единственный потоковый верификатор: типы, регистры, буферы, метки, вызовы — на каждой операции; definite initialization (битсеты по скелету CFG) и «путь доходит до конца функции» — в `finish()`. Ошибка — `verify_at(pc)`, где `pc` совпадает с индексом инструкции `FunctionBuilder`. `Function::verify` = `replay` в `Validating<Sink>`. Дубли удалены: `splice-lancy/src/lower/portable.rs`, `splice-llvm/src/lower/direct/flow.rs`, проверки в `seal.rs` (теперь инварианты — `panic!`), `Instr::reads/operands`.
