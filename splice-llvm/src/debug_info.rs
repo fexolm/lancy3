@@ -1,6 +1,5 @@
 use crate::jit::Jit;
 use inkwell::memory_buffer::MemoryBuffer;
-use splice_core::{Function, hir::Instr};
 use splice_jit::gimli::write::FrameTable;
 use std::ffi::CString;
 
@@ -93,23 +92,16 @@ impl ObjectSymbols {
     pub fn publish(
         self,
         jit: &Jit,
-        source: Option<&Function>,
-        kernel_source: Option<&splice_core::frontend::KernelSource>,
-        vector_bytes: usize,
+        staged: &crate::lower::Staged,
         debug: bool,
     ) -> splice_core::Result<Option<splice_jit::Registration>> {
-        let sources = source
-            .filter(|_| debug)
-            .map(|source| source.reachable_functions().0);
         let mut functions = Vec::with_capacity(self.functions.len());
         for native in self.functions {
             let address = jit.lookup(&native.name)?;
-            let f = native
-                .source_id
-                .and_then(|id| sources.as_ref()?.get(id).copied());
+            let f = native.source_id.and_then(|id| staged.functions.get(id));
             let name = f
-                .and_then(Function::source)
-                .or(kernel_source)
+                .and_then(|f| f.source)
+                .or(staged.source)
                 .map_or("kernel", |src| src.name);
             let name = if f.is_some() || !debug {
                 format!("splice_jit::{name}")
@@ -134,18 +126,17 @@ impl ObjectSymbols {
                             native.size
                         )));
                     }
-                    let Some(Instr::Debug(point)) = f.instructions().get(location.index) else {
+                    let Some((point, slots)) = f.points.get(location.index) else {
                         return Err(crate::error(
                             "LLVM label does not correspond to a Splice source point",
                         ));
                     };
                     function.statement(
-                        f,
                         point,
+                        slots.iter().copied(),
                         address + offset,
                         location.register,
                         i64::from(location.displacement),
-                        vector_bytes,
                     );
                 }
             }

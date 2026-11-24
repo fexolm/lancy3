@@ -15,8 +15,8 @@ fn shifted_compare(
     bytes: usize,
 ) -> impl Fn(&mut dyn KernelBuilder) -> splice_core::Result<()> {
     move |b| {
-        let zero = b.constant(0);
-        let one = b.constant(1);
+        let zero = b.constant(0)?;
+        let one = b.constant(1)?;
         let load = SimdOp::Load(Buffer(0));
         let x = b.simd(Simd { element, op: load }, &[zero])?.unwrap();
         let y = b.simd(Simd { element, op: load }, &[one])?.unwrap();
@@ -45,7 +45,7 @@ fn shifted_compare(
                 &[mask],
             )?
         };
-        b.ret(result.unwrap());
+        b.ret(result.unwrap())?;
         Ok(())
     }
 }

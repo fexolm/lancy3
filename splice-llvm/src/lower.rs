@@ -1,104 +1,18 @@
-//! Lower a verified Splice call graph using Inkwell's typed builder.
+//! Lower Splice kernels using Inkwell's typed builder.
 mod body;
 mod direct;
-pub(crate) use direct::populate_direct;
+pub(crate) use direct::{Staged, populate, populate_function};
 
-use crate::target::Machine;
-use body::Body;
 use inkwell::AddressSpace;
 use inkwell::attributes::{Attribute, AttributeLoc};
 use inkwell::builder::{Builder, BuilderError};
 use inkwell::context::Context;
 use inkwell::module::{Linkage, Module};
 use inkwell::values::{BasicMetadataValueEnum, FunctionValue, IntValue};
-use splice_core::Function;
 use splice_core::hir::BufferKind;
 
 // Only internal kernel functions use the fast calling convention.
 const FAST_CALL: u32 = inkwell::llvm_sys::LLVMCallConv::LLVMFastCallConv as u32;
-
-pub(crate) fn populate<'ctx>(
-    ctx: &'ctx Context,
-    module: &Module<'ctx>,
-    root: &Function,
-    machine: Machine,
-) -> splice_core::Result<()> {
-    populate_mode(ctx, module, root, machine, false)
-}
-
-pub(crate) fn populate_mode<'ctx>(
-    ctx: &'ctx Context,
-    module: &Module<'ctx>,
-    root: &Function,
-    machine: Machine,
-    debug: bool,
-) -> splice_core::Result<()> {
-    let (functions, ids) = root.reachable_functions();
-    if debug
-        && (u32::try_from(functions.len()).is_err()
-            || functions
-                .iter()
-                .any(|f| u32::try_from(f.instructions().len()).is_err()))
-    {
-        return Err(splice_core::BuildError::unsupported(
-            "too many LLVM source points",
-        ));
-    }
-
-    let mut declarations = Vec::with_capacity(functions.len());
-    for (id, f) in functions.iter().enumerate() {
-        let function = declare(ctx, module, f.arity(), f.buffer_kinds(), id)?;
-        if debug {
-            function.set_linkage(Linkage::External);
-        }
-        declarations.push(function);
-    }
-    let builder = ctx.create_builder();
-    let callees = body::Callees {
-        ids: &ids,
-        declarations: &declarations,
-    };
-    emit_entry(
-        ctx,
-        module,
-        &builder,
-        root.arity(),
-        root.buffer_kinds().len(),
-        declarations[0],
-    )
-    .map_err(crate::error)?;
-    let mut static_rust_slice_operands = false;
-    for (id, f) in functions.into_iter().enumerate() {
-        static_rust_slice_operands |= Body::emit(
-            body::Unit {
-                ctx,
-                module,
-                machine,
-            },
-            &builder,
-            f,
-            declarations[id],
-            &callees,
-            debug.then_some(id),
-        )
-        .map_err(crate::error)?;
-    }
-    if static_rust_slice_operands {
-        permit_buffer_capture(module);
-    }
-    if debug {
-        let preserve_frame = ctx.create_string_attribute("frame-pointer", "all");
-        for f in module.get_functions() {
-            f.add_attribute(AttributeLoc::Function, preserve_frame);
-            #[cfg(target_os = "linux")]
-            f.add_attribute(
-                AttributeLoc::Function,
-                ctx.create_enum_attribute(Attribute::get_named_enum_kind_id("uwtable"), 2),
-            );
-        }
-    }
-    Ok(())
-}
 
 fn declare<'ctx>(
     ctx: &'ctx Context,

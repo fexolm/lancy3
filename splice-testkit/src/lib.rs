@@ -66,9 +66,9 @@ pub fn agree(
             Box::new(move |b: &mut dyn KernelBuilder| stage(b))
         };
         let built = if staged {
-            B::build_with_options(arity, kinds, body, options)
+            B::build_with_options(frontend::Signature::new(arity, kinds), body, options)
         } else {
-            frontend::materialize(arity, kinds, body, options)
+            frontend::materialize(frontend::Signature::new(arity, kinds), body, options)
                 .and_then(|f| B::compile_with_options(&f, options))
         };
         let route = if staged { "build" } else { "compile" };

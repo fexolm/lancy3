@@ -20,17 +20,21 @@
 #![forbid(unsafe_code)]
 
 use splice_core::hir::{Binary, Buffer, Instr, Reg};
-use splice_core::{Codegen, Function};
+use splice_core::{Backend, Function};
 use std::fmt::{self, Write};
 use std::sync::Arc;
 
 /// A backend whose output is a deterministic listing of the specialized call graph.
 pub struct Text;
 
-impl Codegen for Text {
+impl Backend for Text {
     type Output = String;
 
-    fn compile_raw(root: &Function) -> splice_core::Result<String> {
+    /// The listing does not depend on the mode or the target.
+    fn compile_function(
+        root: &Function,
+        _: splice_core::BuildOptions,
+    ) -> splice_core::Result<String> {
         let _span =
             tracing::debug_span!(target: "splice_core::compile", "render_text_ir").entered();
         let mut output = String::new();

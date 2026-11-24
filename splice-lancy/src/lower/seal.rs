@@ -7,31 +7,31 @@ impl Builder<'_> {
     /// All predecessors are known now. Walk backwards through single-entry
     /// blocks, path-compressing live-through names. A merge gets a parameter
     /// immediately to break cycles, and its incoming operands join the worklist.
-    /// A path without an assignment is an error for a required value; a value
-    /// that only source points observe gets a zero placeholder instead.
+    /// Validation guarantees an assignment on every path to a required value;
+    /// a value that only source points observe gets a zero placeholder instead.
     fn reaching(
         &mut self,
         start: Block,
         r: Reg,
         required: bool,
         preds: &DenseMap<Block, Vec<Block>>,
-    ) -> splice_core::Result<Value> {
-        let unassigned =
-            || splice_core::BuildError::verify(format!("uninitialized {r:?} on path to {start:?}"));
+    ) -> Value {
         let mut path = Vec::new();
         let mut b = start;
         let value = loop {
             if let Some(&v) = self.blocks[b].defs.get(&r) {
                 if required {
                     if self.unassigned.contains(&v) {
-                        return Err(unassigned());
+                        panic!("validated kernels assign {r:?} on every path to {start:?}");
                     }
                     self.require(v);
                 }
                 break v;
             }
             match preds[b].as_slice() {
-                [] if required => return Err(unassigned()),
+                [] if required => {
+                    panic!("validated kernels assign {r:?} on every path to {start:?}")
+                }
                 [] => {
                     let zero = self.graph.append(b, Op::Const(0)).unwrap();
                     self.unassigned.insert(zero);
@@ -48,16 +48,10 @@ impl Builder<'_> {
         for b in path {
             self.blocks[b].defs.insert(r, value);
         }
-        Ok(value)
+        value
     }
 
     pub(super) fn seal(mut self) -> splice_core::Result<Function> {
-        if let Some(error) = self.error {
-            return Err(error);
-        }
-        if self.labels.iter().any(|l| l.block.is_some() && !l.marked) {
-            return Err(splice_core::BuildError::verify("undefined kernel label"));
-        }
         let mut pending = vec![self.graph.entry()];
         let mut live = DenseMap::filled(self.blocks.len(), false);
         let mut preds = DenseMap::from_fn(self.blocks.len(), |_| Vec::new());
@@ -65,9 +59,9 @@ impl Builder<'_> {
             if std::mem::replace(&mut live[b], true) {
                 continue;
             }
-            let term = self.blocks[b].exit.ok_or_else(|| {
-                splice_core::BuildError::verify("reachable kernel path falls off the end")
-            })?;
+            let term = self.blocks[b]
+                .exit
+                .expect("validated kernels end every reachable path");
             for next in term.successors() {
                 if preds[next].last() != Some(&b) {
                     preds[next].push(b);
@@ -78,7 +72,7 @@ impl Builder<'_> {
         while let Some(demand) = self.demands.pop() {
             if live[demand.block] {
                 for &pred in &preds[demand.block] {
-                    self.reaching(pred, demand.reg, demand.required, &preds)?;
+                    self.reaching(pred, demand.reg, demand.required, &preds);
                 }
             }
         }

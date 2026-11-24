@@ -126,14 +126,19 @@ pub(super) fn emit(
                     continue;
                 };
                 use splice_core::debug::Value as DebugValue;
-                let mut slots = point.slots(f, m.vector_bytes).peekable();
+                let mut slots = point.function_slots(f, m.vector_bytes).peekable();
                 if slots.peek().is_none() {
                     // Sequence points themselves occupy no bytes in Cranelift.
                     // Give consecutive empty statements distinct addresses.
                     let zero = b.ins().iconst(I8, 0);
                     b.ins().stack_store(zero, slot, 0);
                 }
-                for (var, ty, offset) in slots {
+                for splice_core::debug::Slot {
+                    variable: var,
+                    ty,
+                    offset,
+                } in slots
+                {
                     let offset = offset as i32;
                     match var.value {
                         DebugValue::Register(reg, _) => {

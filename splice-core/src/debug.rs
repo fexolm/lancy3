@@ -1,6 +1,6 @@
 //! Source-level metadata supplied by the frontend to native code generators.
 
-use crate::hir::{Buffer, Function, Reg, ValueType};
+use crate::hir::{Buffer, BufferKind, Function, Reg, ValueType};
 use crate::simd::Element;
 
 #[derive(Clone, Copy, Debug)]
@@ -16,15 +16,6 @@ pub enum Value {
     Register(Reg, Scalar),
     Slice(Buffer),
     Constant(Option<Constant>),
-}
-
-impl Value {
-    pub(crate) fn register(self) -> Option<Reg> {
-        match self {
-            Self::Register(reg, _) => Some(reg),
-            Self::Slice(_) | Self::Constant(_) => None,
-        }
-    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -145,44 +136,71 @@ impl Type {
     }
 }
 
+/// Where a source point saves one of its runtime variables.
+#[derive(Clone, Copy, Debug)]
+pub struct Slot {
+    pub variable: Variable,
+    pub ty: Type,
+    /// Byte offset in the point's debug workspace.
+    pub offset: usize,
+}
+
 impl Point {
+    /// The runtime variables this point saves, for registers of the given
+    /// types and vectors of `vector_bytes`.
     pub fn slots<'a>(
         &'a self,
-        function: &'a Function,
+        reg_type: impl Fn(Reg) -> ValueType + 'a,
+        buffers: &'a [BufferKind],
         vector_bytes: usize,
-    ) -> impl Iterator<Item = (Variable, Type, usize)> + 'a {
+    ) -> impl Iterator<Item = Slot> + 'a {
         let vector = move |element: Element| Type::Vector {
             element,
             lanes: element.lanes(vector_bytes),
         };
         self.variables
             .iter()
-            .filter_map(move |&var| {
-                let ty = match var.value {
-                    Value::Register(reg, scalar) => match function.reg_type(reg) {
+            .filter_map(move |&variable| {
+                let ty = match variable.value {
+                    Value::Register(reg, scalar) => match reg_type(reg) {
                         ValueType::Scalar => Type::Scalar(scalar),
                         ValueType::Vector(element) => vector(element),
                         ValueType::Mask(element) => vector(element.index()),
                     },
-                    Value::Slice(buffer) => {
-                        Type::Slice(function.buffer_kinds()[buffer.index()].element())
-                    }
+                    Value::Slice(buffer) => Type::Slice(buffers[buffer.index()].element()),
                     Value::Constant(_) => return None,
                 };
-                Some((var, ty))
+                Some((variable, ty))
             })
-            .scan(0usize, |offset, (var, ty)| {
+            .scan(0usize, |offset, (variable, ty)| {
                 let bytes = ty.storage_bytes();
                 let start = offset.next_multiple_of(bytes.min(8));
                 *offset = start + bytes;
-                Some((var, ty, start))
+                Some(Slot {
+                    variable,
+                    ty,
+                    offset: start,
+                })
             })
+    }
+
+    /// The slots of this point in a portable function.
+    pub fn function_slots<'a>(
+        &'a self,
+        function: &'a Function,
+        vector_bytes: usize,
+    ) -> impl Iterator<Item = Slot> + 'a {
+        self.slots(
+            |r| function.reg_type(r),
+            function.buffer_kinds(),
+            vector_bytes,
+        )
     }
 
     /// Bytes of the debug workspace for vectors of `vector_bytes`.
     pub fn storage_bytes(&self, function: &Function, vector_bytes: usize) -> usize {
-        self.slots(function, vector_bytes)
+        self.function_slots(function, vector_bytes)
             .last()
-            .map_or(0, |(_, ty, offset)| offset + ty.storage_bytes())
+            .map_or(0, |slot| slot.offset + slot.ty.storage_bytes())
     }
 }

@@ -17,8 +17,9 @@ mod target;
 mod aarch64_tests;
 
 use inkwell::{context::Context, module::Module, targets::TargetMachine};
+use splice_core::frontend::Signature;
 use splice_core::{
-    BufferArg, BufferKind, BuildOptions, CallError, Codegen, Executable, Function, SignatureError,
+    Backend, BufferArg, BufferKind, BuildOptions, CallError, Executable, Function, SignatureError,
     Trap,
 };
 
@@ -100,7 +101,7 @@ pub fn to_llvm_ir(
         &context,
         &target::machine(target, false)?,
         machine,
-        |ctx, m| lower::populate(ctx, m, function, machine),
+        |ctx, m| lower::populate_function(ctx, m, machine, function, false).map(drop),
     )?
     .print_to_string()
     .to_string())
@@ -132,51 +133,41 @@ pub struct LlvmKernel {
     scalable: bool,
 }
 
-impl Codegen for Llvm {
+impl Backend for Llvm {
     type Output = LlvmKernel;
 
-    fn compile_raw(function: &Function) -> splice_core::Result<Self::Output> {
-        Self::compile_raw_with_options(function, function.options())
-    }
-
-    fn compile_raw_with_options(
+    fn compile_function(
         function: &Function,
         options: BuildOptions,
     ) -> splice_core::Result<Self::Output> {
         LlvmKernel::from_ir(function, options, true)
     }
 
-    fn build_with_options(
-        arity: usize,
-        buffers: &[BufferKind],
+    fn stage(
+        signature: Signature<'_>,
         body: splice_core::frontend::Body<'_>,
         options: BuildOptions,
     ) -> splice_core::Result<Self::Output> {
-        LlvmKernel::from_body(arity, buffers, body, options, true)
+        LlvmKernel::from_body(signature, body, options, true)
     }
 }
 
-impl Codegen for LlvmManualSimd {
+impl Backend for LlvmManualSimd {
     type Output = LlvmKernel;
 
-    fn compile_raw(function: &Function) -> splice_core::Result<Self::Output> {
-        Self::compile_raw_with_options(function, function.options())
-    }
-
-    fn compile_raw_with_options(
+    fn compile_function(
         function: &Function,
         options: BuildOptions,
     ) -> splice_core::Result<Self::Output> {
         LlvmKernel::from_ir(function, options, false)
     }
 
-    fn build_with_options(
-        arity: usize,
-        buffers: &[BufferKind],
+    fn stage(
+        signature: Signature<'_>,
         body: splice_core::frontend::Body<'_>,
         options: BuildOptions,
     ) -> splice_core::Result<Self::Output> {
-        LlvmKernel::from_body(arity, buffers, body, options, false)
+        LlvmKernel::from_body(signature, body, options, false)
     }
 }
 
@@ -188,63 +179,45 @@ impl LlvmKernel {
     ) -> splice_core::Result<Self> {
         let _span = tracing::debug_span!(target: "splice_core::compile", "compile", backend = "llvm", input = "portable").entered();
         Self::compile(
-            function.arity(),
-            function.buffer_kinds(),
+            function.signature(),
             auto_vectorize,
-            Some(function),
             options,
             |ctx, m, machine| {
-                lower::populate_mode(ctx, m, function, machine, options.debug())?;
-                Ok(function.source())
+                lower::populate_function(ctx, m, machine, function, options.debug())
             },
         )
     }
 
     fn from_body(
-        arity: usize,
-        buffers: &[BufferKind],
+        signature: Signature<'_>,
         body: splice_core::frontend::Body<'_>,
         options: BuildOptions,
         auto_vectorize: bool,
     ) -> splice_core::Result<Self> {
-        if options.debug() {
-            let f = splice_core::frontend::materialize(arity, buffers, body, options)?;
-            return Self::from_ir(&f, options, auto_vectorize);
-        }
         let _span = tracing::debug_span!(target: "splice_core::compile", "compile", backend = "llvm", input = "staged").entered();
-        Self::compile(
-            arity,
-            buffers,
-            auto_vectorize,
-            None,
-            options,
-            |ctx, m, machine| lower::populate_direct(ctx, m, machine, arity, buffers, body),
-        )
+        Self::compile(signature, auto_vectorize, options, |ctx, m, machine| {
+            lower::populate(ctx, m, machine, signature, body, options.debug())
+        })
     }
 
     fn compile(
-        arity: usize,
-        buffers: &[BufferKind],
+        signature: Signature<'_>,
         auto_vectorize: bool,
-        source: Option<&Function>,
         options: BuildOptions,
         populate: impl for<'ctx> FnOnce(
             &'ctx Context,
             &Module<'ctx>,
             target::Machine,
-        ) -> splice_core::Result<
-            Option<&'static splice_core::frontend::KernelSource>,
-        >,
+        ) -> splice_core::Result<lower::Staged>,
     ) -> splice_core::Result<Self> {
         Llvm::version()?;
-        let (owner, entry, registration) =
-            jit::Jit::compile(auto_vectorize, source, options, populate)?;
+        let (owner, entry, registration) = jit::Jit::compile(auto_vectorize, options, populate)?;
         Ok(Self {
             _debug: registration,
             _owner: owner,
             entry,
-            arity,
-            buffers: buffers.into(),
+            arity: signature.arity,
+            buffers: signature.buffers.into(),
             target: options.target,
             scalable: target::Machine::new(&options.target).scalable,
         })
@@ -305,26 +278,26 @@ mod tests {
             let value = b.call_kernel(
                 1,
                 &[],
-                &[b.arg(0)],
+                &[b.arg(0)?],
                 &[],
                 Box::new(|child| {
                     let value = child.call_kernel(
                         1,
                         &[],
-                        &[child.arg(0)],
+                        &[child.arg(0)?],
                         &[],
                         Box::new(|leaf| {
-                            let one = leaf.constant(1);
-                            let value = leaf.binary(Binary::Add, leaf.arg(0), one);
-                            leaf.ret(value);
+                            let one = leaf.constant(1)?;
+                            let value = leaf.binary(Binary::Add, leaf.arg(0), one)?;
+                            leaf.ret(value)?;
                             Ok(())
                         }),
                     )?;
-                    child.ret(value);
+                    child.ret(value)?;
                     Ok(())
                 }),
             )?;
-            b.ret(value);
+            b.ret(value)?;
             Ok(())
         }
         let ir = splice_core::frontend::materialize(1, &[], Box::new(staged), options()).unwrap();
@@ -486,7 +459,7 @@ mod tests {
             BufferKind::new(Element::U16, true),
         ];
         fn stage(b: &mut dyn KernelBuilder) -> splice_core::Result<()> {
-            let offset = b.arg(0);
+            let offset = b.arg(0)?;
             let op = |op| Simd {
                 element: Element::U16,
                 op,
@@ -495,7 +468,7 @@ mod tests {
             let one = b.simd(op(SimdOp::Splat(1)), &[])?.unwrap();
             let sum = b.simd(op(SimdOp::Add), &[one, value])?.unwrap();
             b.simd(op(SimdOp::Store(Buffer(1))), &[offset, sum])?;
-            b.ret(offset);
+            b.ret(offset)?;
             Ok(())
         }
         let ir = frontend::materialize(1, &kinds, Box::new(stage), options()).unwrap();
@@ -572,8 +545,8 @@ mod tests {
                 element: Element::I32,
                 op,
             };
-            let base = b.arg(0);
-            let zero = b.constant(0);
+            let base = b.arg(0)?;
+            let zero = b.constant(0)?;
             let indices = b.simd(op(SimdOp::Load(Buffer(0))), &[zero])?.unwrap();
             let flags = b.simd(op(SimdOp::Load(Buffer(1))), &[zero])?.unwrap();
             let zeros = b.simd(op(SimdOp::Splat(0)), &[])?.unwrap();
@@ -597,7 +570,7 @@ mod tests {
                 op(SimdOp::ScatterSelect(Buffer(4))),
                 &[indices, mask, distinct],
             )?;
-            b.ret(zero);
+            b.ret(zero)?;
             Ok(())
         }
         fn reference(

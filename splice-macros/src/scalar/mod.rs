@@ -251,10 +251,10 @@ pub(super) fn expand(root: Path, native: &mut ItemFn) -> Result<TokenStream> {
             }
             Binding::Reg(_, mutable) => {
                 let index = reg_names.len();
-                inline_args.push(emit!(__splice_builder.arg(#index)));
+                inline_args.push(emit!(__splice_builder.arg(#index)?));
                 reg_names.push(id);
                 if mutable {
-                    copy_mutable.push(emit!(let #id = __splice_builder.copy(#id);));
+                    copy_mutable.push(emit!(let #id = __splice_builder.copy(#id)?;));
                 }
                 emit!(#id: impl #support::RunArg)
             }
@@ -286,7 +286,7 @@ pub(super) fn expand(root: Path, native: &mut ItemFn) -> Result<TokenStream> {
     let arity = reg_names.len();
     let host_decls = emit!(#(#host_names: #host_types,)*);
     let outer_host_decls = emit!(#(#host_names: #outer_host_types,)*);
-    let unpack = emit!(#(let #reg_names = #support::RunArg::reg(#reg_names, __splice_builder);)*);
+    let unpack = emit!(#(let #reg_names = #support::RunArg::reg(#reg_names, __splice_builder)?;)*);
     let mut lowered_block = native.block.clone();
     lowered_block.stmts.splice(0..0, pattern_decls);
     let flow = flow::analyze(&lowered_block, &bindings);
@@ -475,7 +475,7 @@ pub(super) fn expand(root: Path, native: &mut ItemFn) -> Result<TokenStream> {
             let __splice_body: #frontend::Body<'_> = #callback;
             match __splice_key {
                 ::core::option::Option::Some(key) => __splice_builder.call_specialized(key, &[#(#reg_names),*], &[#(#buffer_names),*], __splice_body),
-                ::core::option::Option::None => __splice_builder.call_kernel(#arity, #kinds, &[#(#reg_names),*], &[#(#buffer_names),*], __splice_body),
+                ::core::option::Option::None => __splice_builder.call_kernel(#frontend::Signature::new(#arity, #kinds), &[#(#reg_names),*], &[#(#buffer_names),*], __splice_body),
             }
         }
     };
@@ -484,7 +484,7 @@ pub(super) fn expand(root: Path, native: &mut ItemFn) -> Result<TokenStream> {
             fn __stage_body #generic (#host_decls __splice_builder: &mut #factory) -> #root::Result<()> #where_ {
                 #source
                 let output = __SpliceDefinition::__splice_inline #fish (#(#inline_args,)* #root_context_args __splice_builder)?;
-                __splice_builder.ret(output);
+                __splice_builder.ret(output)?;
                 ::core::result::Result::Ok(())
             }
             #[doc(hidden)]
@@ -519,7 +519,7 @@ pub(super) fn expand(root: Path, native: &mut ItemFn) -> Result<TokenStream> {
             let __splice_body: #frontend::Body<'_> = ::std::boxed::Box::new(move |__splice_builder| {
                 #source
                 let output = __SpliceDefinition::__splice_inline #fish (#(#inline_args,)* #root_context_args __splice_builder)?;
-                __splice_builder.ret(output);
+                __splice_builder.ret(output)?;
                 ::core::result::Result::Ok(())
             });
             let __splice_kinds = &__splice_kinds;
@@ -561,7 +561,7 @@ pub(super) fn expand(root: Path, native: &mut ItemFn) -> Result<TokenStream> {
             struct __SpliceIdentity;
 
             #vis fn build #compile_generics (__splice_args: #build_type)
-                -> ::core::result::Result<#root::TypedKernel<#signature, <#backend as #root::Codegen>::Output>, #root::BuildError> #where_
+                -> ::core::result::Result<#root::TypedKernel<#signature, <#backend as #root::Backend>::Output>, #root::BuildError> #where_
             {
                 build_with_options::<#backend #(, #args)*>(
                     #root::BuildOptions::host(#root::Mode::for_profile(::core::cfg!(debug_assertions)))?,
@@ -570,12 +570,12 @@ pub(super) fn expand(root: Path, native: &mut ItemFn) -> Result<TokenStream> {
             }
             #vis fn build_with_options #compile_generics (
                 __splice_options: #root::BuildOptions, __splice_args: #build_type,
-            ) -> ::core::result::Result<#root::TypedKernel<#signature, <#backend as #root::Codegen>::Output>, #root::BuildError> #where_ {
+            ) -> ::core::result::Result<#root::TypedKernel<#signature, <#backend as #root::Backend>::Output>, #root::BuildError> #where_ {
                 #root::build_boundary(move || {
                     let BuildArgs { #(#host_names,)* } = __splice_args;
                     #setup
                     <#backend as #root::Codegen>::build_with_options(
-                        #arity, __splice_kinds, __splice_body, __splice_options,
+                        #root::frontend::Signature::new(#arity, __splice_kinds), __splice_body, __splice_options,
                     ).map(#root::TypedKernel::new)
                 })
             }
@@ -593,7 +593,7 @@ pub(super) fn expand(root: Path, native: &mut ItemFn) -> Result<TokenStream> {
                 #root::build_boundary(move || {
                     #setup
                     #root::frontend::materialize(
-                        #arity, __splice_kinds, __splice_body, __splice_options,
+                        #root::frontend::Signature::new(#arity, __splice_kinds), __splice_body, __splice_options,
                     ).map(#root::TypedIr::new)
                 })
             }
@@ -645,10 +645,10 @@ pub(super) fn expand(root: Path, native: &mut ItemFn) -> Result<TokenStream> {
                 #(#copy_mutable)*
                 #(#mutable_host)*
                 #(#debug_arguments)*
-                let __splice_result = __splice_builder.typed_local(#result_value_type);
-                let __splice_return_label = __splice_builder.label();
+                let __splice_result = __splice_builder.local(#result_value_type)?;
+                let __splice_return_label = __splice_builder.label()?;
                 #code
-                __splice_builder.mark(__splice_return_label);
+                __splice_builder.mark(__splice_return_label)?;
                 ::core::result::Result::Ok(__splice_result)
             }
         }

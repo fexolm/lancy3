@@ -1,5 +1,5 @@
 //! Bounds-checked slice operations over one scalable Lancy vector.
-use super::{Builder, KernelBuilder};
+use super::Builder;
 use lancy::hir::{Binary, Lane, Op, Scale, Simd as V, Ternary, Type, Unary, Value, VectorAddress};
 use splice_core::{
     hir::{Reg, Simd, SimdOp, ValueType},
@@ -40,15 +40,6 @@ impl Builder<'_> {
         args: &[Reg],
     ) -> splice_core::Result<Option<Value>> {
         use SimdOp::*;
-        let types = args
-            .iter()
-            .map(|r| {
-                self.types.get(r.0 as usize).copied().ok_or_else(|| {
-                    splice_core::BuildError::verify(format!("invalid SIMD register {r:?}"))
-                })
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        inst.validate(&types, self.kinds)?;
         if self.current.is_none() {
             return Ok(None);
         }
@@ -60,11 +51,11 @@ impl Builder<'_> {
             SimdOp::FirstN => {
                 // Splice indices occupy an unsigned 32-bit word. Clamp at this
                 // width before converting the limit to a narrower lane.
-                let count = self.val(Op::Bitcast(Type::U32, vs[0]));
+                let count = self.value(Op::Bitcast(Type::U32, vs[0]));
                 let width = self.vec_op(V::LaneCount(lane(e)));
-                let width = self.val(Op::Bitcast(Type::U32, width));
-                let count = self.val(Op::Bin(Binary::Min, count, width));
-                let count = self.val(Op::Bitcast(Type::I32, count));
+                let width = self.value(Op::Bitcast(Type::U32, width));
+                let count = self.value(Op::Bin(Binary::Min, count, width));
+                let count = self.value(Op::Bitcast(Type::I32, count));
                 return Ok(Some(self.first_lanes(e, count)));
             }
             SimdOp::SplatScalar => V::Splat(vs[0]),
@@ -80,7 +71,7 @@ impl Builder<'_> {
             },
             Narrow(to) => V::Narrow(lane(to), vs[0], vs[1]),
             Splat(bits) => {
-                let x = self.val(Op::Literal(lane(e), bits.into()));
+                let x = self.value(Op::Literal(lane(e), bits.into()));
                 V::Splat(x)
             }
             Load(b) | Store(b) | LoadSelect(b) | StoreSelect(b) | Gather(b) | GatherSelect(b)
@@ -97,7 +88,7 @@ impl Builder<'_> {
                     inst.op,
                     LoadSelect(_) | StoreSelect(_) | GatherSelect(_) | ScatterSelect(_)
                 );
-                let (base, len) = self.slice(b, write);
+                let (base, len) = self.slice(b);
                 let result = if !indexed && !masked {
                     self.contiguous(e, base, len, vs[0], vs.get(1).copied())
                 } else {
@@ -169,18 +160,18 @@ impl Builder<'_> {
                 V::Shuffle(vs[0], zero, vs[1])
             }
             AlignmentPrefix(b) => {
-                let (base, _) = self.slice(b, false);
-                let ptr = self.val(Op::PtrOffset(base, vs[0], Scale::Four));
-                let addr = self.val(Op::Bitcast(Type::U64, ptr));
-                let low = self.val(Op::Cast(Type::I32, addr));
-                let neg = self.val(Op::Unary(Unary::Neg, low));
-                let mask = self.val(Op::Const((self.vector_bytes - 1) as i32));
-                let bytes = self.val(Op::Bin(Binary::And, neg, mask));
-                let two = self.val(Op::Const(2));
-                return Ok(Some(self.val(Op::Bin(Binary::Shr, bytes, two))));
+                let (base, _) = self.slice(b);
+                let ptr = self.value(Op::PtrOffset(base, vs[0], Scale::Four));
+                let addr = self.value(Op::Bitcast(Type::U64, ptr));
+                let low = self.value(Op::Cast(Type::I32, addr));
+                let neg = self.value(Op::Unary(Unary::Neg, low));
+                let mask = self.value(Op::Const((self.vector_bytes - 1) as i32));
+                let bytes = self.value(Op::Bin(Binary::And, neg, mask));
+                let two = self.value(Op::Const(2));
+                return Ok(Some(self.value(Op::Bin(Binary::Shr, bytes, two))));
             }
             CompressStore(b) => {
-                let (base, len) = self.slice(b, true);
+                let (base, len) = self.slice(b);
                 let data = self.vec_op(V::Compress(vs[2], vs[1]));
                 let count = self.mask_count(vs[1]);
                 let selected = self.first_lanes(e, count);
@@ -197,8 +188,8 @@ impl Builder<'_> {
                 ));
             }
             ExtractWrapping | ReplaceWrapping => {
-                let mask = self.val(Op::Const(e.lanes(self.vector_bytes) as i32 - 1));
-                let i = self.val(Op::Bin(Binary::And, vs[1], mask));
+                let mask = self.value(Op::Const(e.lanes(self.vector_bytes) as i32 - 1));
+                let i = self.value(Op::Bin(Binary::And, vs[1], mask));
                 if inst.op == ExtractWrapping {
                     V::ExtractLane(vs[0], i)
                 } else {
@@ -206,7 +197,7 @@ impl Builder<'_> {
                 }
             }
             Last => {
-                let last = self.val(Op::Const(e.lanes(self.vector_bytes) as i32 - 1));
+                let last = self.value(Op::Const(e.lanes(self.vector_bytes) as i32 - 1));
                 V::ExtractLane(vs[0], last)
             }
             PrefixSum => {
@@ -260,19 +251,11 @@ impl Builder<'_> {
         }
     }
 
-    fn effect(&mut self, op: Op) {
-        self.graph.append(self.current.unwrap(), op);
-    }
-    fn val(&mut self, op: Op) -> Value {
-        self.graph
-            .append(self.current.unwrap(), op)
-            .expect("operation defines a value")
-    }
     fn vec_op(&mut self, op: V) -> Value {
-        self.val(Op::Simd(op))
+        self.value(Op::Simd(op))
     }
     fn splat_bits(&mut self, ty: Lane, bits: u64) -> Value {
-        let x = self.val(Op::Literal(ty, bits.into()));
+        let x = self.value(Op::Literal(ty, bits.into()));
         self.vec_op(V::Splat(x))
     }
     fn splat_index(&mut self, e: Element, x: Value) -> Value {
@@ -280,7 +263,7 @@ impl Builder<'_> {
         let x = if ty == Type::I32 {
             x
         } else {
-            self.val(Op::Cast(ty, x))
+            self.value(Op::Cast(ty, x))
         };
         self.vec_op(V::Splat(x))
     }
@@ -306,18 +289,17 @@ impl Builder<'_> {
         value: Option<Value>,
     ) -> Option<Value> {
         self.effect(Op::BoundsCheck(offset, len));
-        let ptr = self.val(Op::PtrOffset(base, offset, stride(e)));
+        let ptr = self.value(Op::PtrOffset(base, offset, stride(e)));
         let count = self.vec_op(V::LaneCount(lane(e)));
-        let remaining = self.val(Op::Bin(Binary::Sub, len, offset));
+        let remaining = self.value(Op::Bin(Binary::Sub, len, offset));
         if let Some(value) = value {
-            let full = self.val(Op::Bin(Binary::Ge, remaining, count));
-            let (yes, short, join) = (self.label(), self.label(), self.label());
-            let (t, f) = (self.target(yes), self.target(short));
-            self.end(super::Exit::Branch(full, t, f));
-            self.mark(yes);
+            let full = self.value(Op::Bin(Binary::Ge, remaining, count));
+            let (yes, short, join) = (self.block(), self.block(), self.block());
+            self.end(super::Exit::Branch(full, yes, short));
+            self.begin(yes);
             self.effect(Op::Simd(V::Store(ptr, value)));
-            self.jump(join);
-            self.mark(short);
+            self.end(super::Exit::Jump(join));
+            self.begin(short);
             let prefix = self.first_lanes(e, remaining);
             Access { write: true, value }.emit(
                 self,
@@ -328,11 +310,11 @@ impl Builder<'_> {
                 prefix,
             );
             self.effect(Op::BoundsCheck(len, len));
-            self.mark(join);
+            self.begin(join);
             None
         } else {
-            let one = self.val(Op::Const(1));
-            let last = self.val(Op::Bin(Binary::Sub, count, one));
+            let one = self.value(Op::Const(1));
+            let last = self.value(Op::Bin(Binary::Sub, count, one));
             self.effect(Op::BoundsCheck(last, remaining));
             Some(self.vec_op(V::Load(lane(e), ptr)))
         }
@@ -347,17 +329,17 @@ impl Builder<'_> {
         active: Value,
         access: Access,
     ) -> Option<Value> {
-        let zero = self.val(Op::Const(0));
-        let nonnegative = self.val(Op::Bin(Binary::Ge, offset, zero));
-        let left = self.val(Op::Bin(Binary::Sub, len, offset));
-        let left = self.val(Op::Bin(Binary::And, left, nonnegative));
-        let left = self.val(Op::Bin(Binary::Max, left, zero));
+        let zero = self.value(Op::Const(0));
+        let nonnegative = self.value(Op::Bin(Binary::Ge, offset, zero));
+        let left = self.value(Op::Bin(Binary::Sub, len, offset));
+        let left = self.value(Op::Bin(Binary::And, left, nonnegative));
+        let left = self.value(Op::Bin(Binary::Max, left, zero));
         let width = self.vec_op(V::LaneCount(lane(e)));
-        let count = self.val(Op::Bin(Binary::Min, left, width));
+        let count = self.value(Op::Bin(Binary::Min, left, width));
         let valid = self.first_lanes(e, count);
         let enabled = self.vec_op(V::Bin(Binary::And, active, valid));
         let bad = self.vec_op(V::Bin(Binary::Xor, active, enabled));
-        let ptr = self.val(Op::PtrOffset(base, offset, stride(e)));
+        let ptr = self.value(Op::PtrOffset(base, offset, stride(e)));
         // All invalid contiguous lanes are a suffix. The mask suppresses every
         // out-of-bounds address, even when the slice is empty.
         let result = access.emit(
@@ -374,7 +356,7 @@ impl Builder<'_> {
 
     fn check_mask(&mut self, bad: Value) {
         let fail = self.vec_op(V::AnyTrue(bad));
-        let one = self.val(Op::Const(1));
+        let one = self.value(Op::Const(1));
         // A true Lancy comparison is all ones, which fails unsigned bounds.
         self.effect(Op::BoundsCheck(fail, one));
     }
@@ -393,13 +375,13 @@ impl Builder<'_> {
         let (invalid, address) = if idx == Lane::U16 {
             // For longer slices every u16 fits, including 65535. Rebase unsigned
             // offsets around 32768 because Lancy's gather uses signed indices.
-            let max = self.val(Op::Const(i32::from(u16::MAX)));
-            let short = self.val(Op::Bin(Binary::Le, len, max));
+            let max = self.value(Op::Const(i32::from(u16::MAX)));
+            let short = self.value(Op::Bin(Binary::Le, len, max));
             let short = self.splat_index(e, short);
             let over = self.vec_op(V::Bin(Binary::Ge, indices, limit));
             let invalid = self.vec_op(V::Bin(Binary::And, over, short));
-            let half = self.val(Op::Const(1 << 15));
-            let centered = self.val(Op::PtrOffset(base, half, Scale::Two));
+            let half = self.value(Op::Const(1 << 15));
+            let centered = self.value(Op::PtrOffset(base, half, Scale::Two));
             let sign = self.splat_bits(idx, 1 << 15);
             let biased = self.vec_op(V::Bin(Binary::Xor, indices, sign));
             let offsets = self.vec_op(V::Bitcast(Lane::I16, biased));

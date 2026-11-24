@@ -24,7 +24,7 @@ static EMPTY: StaticRustSymbol = StaticRustSymbol::of::<Empty>("empty");
 fn static_packets_can_have_no_operands() {
     fn body(builder: &mut dyn KernelBuilder) -> splice::Result<()> {
         let result = builder.rust_static_call(&EMPTY, &[], &[])?;
-        builder.ret(result);
+        builder.ret(result)?;
         Ok(())
     }
 
@@ -89,26 +89,26 @@ const fn view(buffer: u32, writable: bool) -> ContextSlice {
 
 fn modify_child(builder: &mut dyn KernelBuilder) -> splice::Result<()> {
     let result =
-        builder.rust_static_call(&MODIFY, &[builder.arg(0)], &[SHARED_INPUT, MUTABLE_OUTPUT])?;
-    builder.ret(result);
+        builder.rust_static_call(&MODIFY, &[builder.arg(0)?], &[SHARED_INPUT, MUTABLE_OUTPUT])?;
+    builder.ret(result)?;
     Ok(())
 }
 
 fn forward_slices(builder: &mut dyn KernelBuilder) -> splice::Result<()> {
-    let first = builder.constant(0);
-    let marker = builder.constant(91);
-    builder.store(Buffer(0), first, marker);
+    let first = builder.constant(0)?;
+    let marker = builder.constant(91)?;
+    builder.store(Buffer(0), first, marker)?;
     let result = builder.call_kernel(
         1,
         &CHILD_KINDS,
-        &[builder.arg(0)],
+        &[builder.arg(0)?],
         &[Buffer(1), Buffer(0)],
         Box::new(modify_child),
     )?;
-    let one = builder.constant(1);
-    let next = builder.binary(splice::hir::Binary::Add, result, one);
-    builder.store(Buffer(0), first, next);
-    builder.ret(result);
+    let one = builder.constant(1)?;
+    let next = builder.binary(splice::hir::Binary::Add, result, one)?;
+    builder.store(Buffer(0), first, next)?;
+    builder.ret(result)?;
     Ok(())
 }
 
@@ -209,16 +209,16 @@ fn invalid_static_packet_operands_are_rejected_before_native_codegen() {
     let cases: [Invalid; 7] = [
         |b| b.rust_static_call(&OVERSIZE, &[], &[]),
         |b| b.rust_static_call(&MODIFY, &[], &[SHARED_INPUT, MUTABLE_OUTPUT]),
-        |b| b.rust_static_call(&MODIFY, &[b.arg(0)], &[MUTABLE_OUTPUT]),
-        |b| b.rust_static_call(&MODIFY, &[b.arg(0)], &[SHARED_INPUT, view(3, true)]),
-        |b| b.rust_static_call(&MODIFY, &[b.arg(0)], &[view(2, false), MUTABLE_OUTPUT]),
-        |b| b.rust_static_call(&MODIFY, &[b.arg(0)], &[SHARED_INPUT, view(0, true)]),
-        |b| b.rust_static_call(&MODIFY, &[b.arg(0)], &[view(1, false), MUTABLE_OUTPUT]),
+        |b| b.rust_static_call(&MODIFY, &[b.arg(0)?], &[MUTABLE_OUTPUT]),
+        |b| b.rust_static_call(&MODIFY, &[b.arg(0)?], &[SHARED_INPUT, view(3, true)]),
+        |b| b.rust_static_call(&MODIFY, &[b.arg(0)?], &[view(2, false), MUTABLE_OUTPUT]),
+        |b| b.rust_static_call(&MODIFY, &[b.arg(0)?], &[SHARED_INPUT, view(0, true)]),
+        |b| b.rust_static_call(&MODIFY, &[b.arg(0)?], &[view(1, false), MUTABLE_OUTPUT]),
     ];
     for bad in cases {
         let body = move |builder: &mut dyn KernelBuilder| {
             let result = bad(builder)?;
-            builder.ret(result);
+            builder.ret(result)?;
             Ok(())
         };
         assert!(

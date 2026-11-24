@@ -68,7 +68,7 @@ impl<T: RunArg + Copy> Materialize for &Operand<T> {
     }
 
     fn materialize(self, builder: &mut dyn KernelBuilder) -> crate::Result<Reg> {
-        Ok(self.0.reg(builder))
+        self.0.reg(builder)
     }
 }
 impl<T> Materialize for &&Operand<T> {

@@ -40,15 +40,12 @@ impl Drop for Jit {
 impl Jit {
     pub fn compile(
         auto_vectorize: bool,
-        source: Option<&splice_core::Function>,
         options: splice_core::BuildOptions,
         populate: impl for<'ctx> FnOnce(
             &'ctx Context,
             &Module<'ctx>,
             crate::target::Machine,
-        ) -> splice_core::Result<
-            Option<&'static splice_core::frontend::KernelSource>,
-        >,
+        ) -> splice_core::Result<crate::lower::Staged>,
     ) -> splice_core::Result<(Self, Entry, Option<splice_jit::Registration>)> {
         options.target.check_execution()?;
         options.target.check_native_convention()?;
@@ -57,9 +54,9 @@ impl Jit {
         let target = tracing::debug_span!(target: "splice_core::compile", "llvm_target")
             .in_scope(|| crate::target::machine(&options.target, debug))?;
         let context = Context::create();
-        let mut kernel_source = None;
+        let mut staged = crate::lower::Staged::default();
         let module = build_module(&context, &target, machine, |context, module| {
-            kernel_source = populate(context, module, machine)?;
+            staged = populate(context, module, machine)?;
             Ok(())
         })?;
         if !debug {
@@ -77,7 +74,7 @@ impl Jit {
             .in_scope(|| Self::link(object))?;
         let address = jit.lookup(c"splice_entry")?;
         let registration = info
-            .map(|info| info.publish(&jit, source, kernel_source, machine.vector_bytes, debug))
+            .map(|info| info.publish(&jit, &staged, debug))
             .transpose()?
             .flatten();
         // SAFETY: The lowerer declares the entry with the host C ABI. It

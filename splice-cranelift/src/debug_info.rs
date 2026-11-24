@@ -89,12 +89,11 @@ pub(super) fn publish(
             };
             let start = address + u64::from(offset);
             f.statement(
-                info.source,
                 point,
+                point.function_slots(info.source, vector_bytes),
                 start,
                 sp.0,
                 i64::from(base),
-                vector_bytes,
             );
         }
         if let (Some(cie), Some(info)) = (cie, info.unwind) {
