@@ -157,7 +157,7 @@ fn static_packets_keep_nested_slice_borrows_and_effect_order() {
                 kernel
                     .call(
                         &[5],
-                        &mut [BufferArg::Write(&mut short), BufferArg::ReadU16(&input)]
+                        &mut [BufferArg::write(&mut short), BufferArg::read::<u16>(&input)]
                     )
                     .is_err()
             );
@@ -169,7 +169,10 @@ fn static_packets_keep_nested_slice_borrows_and_effect_order() {
                 kernel
                     .call(
                         &[-10],
-                        &mut [BufferArg::Write(&mut output), BufferArg::ReadU16(&input)]
+                        &mut [
+                            BufferArg::write(&mut output),
+                            BufferArg::read::<u16>(&input)
+                        ]
                     )
                     .unwrap(),
                 -3
@@ -256,7 +259,7 @@ fn static_rust_adapters_cannot_reinterpret_a_slice_element_type() {
                 kernel
                     .call(
                         &[3],
-                        &mut [BufferArg::Read(&input), BufferArg::Write(&mut output)]
+                        &mut [BufferArg::read(&input), BufferArg::write(&mut output)]
                     )
                     .is_err()
             );

@@ -27,9 +27,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let count = kernel.call(
         &[2, 3, 4],
         &mut [
-            BufferArg::Read(&a),
-            BufferArg::Read(&b),
-            BufferArg::Write(&mut c),
+            BufferArg::read(&a),
+            BufferArg::read(&b),
+            BufferArg::write(&mut c),
         ],
     )?;
     assert_eq!(count, 8);
@@ -131,9 +131,9 @@ mod tests {
                     .call(
                         &dims,
                         &mut [
-                            BufferArg::Read(&a),
-                            BufferArg::Read(&b),
-                            BufferArg::Write(&mut dst),
+                            BufferArg::read(&a),
+                            BufferArg::read(&b),
+                            BufferArg::write(&mut dst),
                         ],
                     )
                     .unwrap();
@@ -156,9 +156,9 @@ mod tests {
                     .call(
                         &dims,
                         &mut [
-                            BufferArg::Read(&[3]),
-                            BufferArg::Read(&[4]),
-                            BufferArg::Write(&mut out),
+                            BufferArg::read::<i32>(&[3]),
+                            BufferArg::read::<i32>(&[4]),
+                            BufferArg::write(&mut out),
                         ],
                     )
                     .unwrap();

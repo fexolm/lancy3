@@ -240,7 +240,7 @@ fn invalid_arguments_are_rejected_before_staging_or_reusing_a_callee()
             assert_eq!(
                 code.call(
                     &[37],
-                    &mut [BufferArg::Read(&[]), BufferArg::Write(&mut [])]
+                    &mut [BufferArg::read::<i32>(&[]), BufferArg::write::<i32>(&mut [])]
                 )?,
                 37
             );

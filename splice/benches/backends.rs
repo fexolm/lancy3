@@ -196,9 +196,9 @@ fn projection(c: &mut Criterion) {
             let count = kernel.call(
                 &[],
                 &mut [
-                    BufferArg::Read(&prices),
-                    BufferArg::Read(&quantities),
-                    BufferArg::Write(dst),
+                    BufferArg::read(&prices),
+                    BufferArg::read(&quantities),
+                    BufferArg::write(dst),
                 ],
             )?;
             usize::try_from(count).map_err(|_| "negative projection length".into())
@@ -302,9 +302,9 @@ fn simd_matmul(c: &mut Criterion) {
             let written = kernel.call(
                 &[M as i32, K as i32, N as i32],
                 &mut [
-                    BufferArg::Read(&a),
-                    BufferArg::Read(&b),
-                    BufferArg::Write(dst),
+                    BufferArg::read(&a),
+                    BufferArg::read(&b),
+                    BufferArg::write(dst),
                 ],
             )?;
             usize::try_from(written).map_err(|_| "invalid matrix dimensions".into())
@@ -331,9 +331,9 @@ fn simd_hash_lookup(c: &mut Criterion) {
             let written = kernel.call(
                 &[],
                 &mut [
-                    BufferArg::Read(&table),
-                    BufferArg::Read(&queries),
-                    BufferArg::Write(dst),
+                    BufferArg::read(&table),
+                    BufferArg::read(&queries),
+                    BufferArg::write(dst),
                 ],
             )?;
             usize::try_from(written).map_err(|_| "invalid hash table".into())

@@ -83,10 +83,10 @@ impl Catalog {
         let rows = code.call(
             &[],
             &mut [
-                BufferArg::Read(self.offsets()),
-                BufferArg::Read(self.data()),
-                BufferArg::Write(workspace),
-                BufferArg::Write(state),
+                BufferArg::read(self.offsets()),
+                BufferArg::read(self.data()),
+                BufferArg::write(workspace),
+                BufferArg::write(state),
             ],
         )?;
         if rows < 0 {

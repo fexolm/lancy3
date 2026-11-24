@@ -37,9 +37,9 @@ fn delta_handles_first_value_and_rejects_a_truncated_block_before_writing() {
                 .call(
                     &[i32::MIN],
                     &mut [
-                        BufferArg::Read(minima),
-                        BufferArg::Read(packed),
-                        BufferArg::Write(out),
+                        BufferArg::read(minima),
+                        BufferArg::read(packed),
+                        BufferArg::write(out),
                     ],
                 )
                 .unwrap()
@@ -78,8 +78,8 @@ fn csv_preserves_the_written_prefix_on_invalid_value() {
                 .call(
                     &[],
                     &mut [
-                        BufferArg::Read(&records),
-                        BufferArg::Write(&mut out[..capacity]),
+                        BufferArg::read(&records),
+                        BufferArg::write(&mut out[..capacity]),
                     ],
                 )
                 .unwrap();
@@ -116,9 +116,9 @@ fn requantize_rounds_signed_ties_and_clips_per_channel() {
                 .call(
                     &[],
                     &mut [
-                        BufferArg::Read(&accum),
-                        BufferArg::Read(residual),
-                        BufferArg::Write(&mut out),
+                        BufferArg::read(&accum),
+                        BufferArg::read(residual),
+                        BufferArg::write(&mut out),
                     ],
                 )
                 .unwrap();
@@ -145,9 +145,9 @@ fn biquad_starts_with_zero_state_on_every_call() {
             kernel.call(
                 &[],
                 &mut [
-                    BufferArg::Read(&pcm),
-                    BufferArg::Write(&mut out),
-                    BufferArg::Write(&mut state[..1]),
+                    BufferArg::read(&pcm),
+                    BufferArg::write(&mut out),
+                    BufferArg::write(&mut state[..1]),
                 ]
             ),
             Ok(-1),
@@ -160,9 +160,9 @@ fn biquad_starts_with_zero_state_on_every_call() {
                 .call(
                     &[],
                     &mut [
-                        BufferArg::Read(&pcm),
-                        BufferArg::Write(&mut out[..capacity]),
-                        BufferArg::Write(&mut state),
+                        BufferArg::read(&pcm),
+                        BufferArg::write(&mut out[..capacity]),
+                        BufferArg::write(&mut state),
                     ],
                 )
                 .unwrap();
@@ -202,8 +202,8 @@ fn yuv_converts_known_colors_across_packets_and_tail() {
             .call(
                 &[],
                 &mut [
-                    BufferArg::Read(&pixels),
-                    BufferArg::Write(&mut out[..count - 1]),
+                    BufferArg::read(&pixels),
+                    BufferArg::write(&mut out[..count - 1]),
                 ],
             )
             .unwrap();
@@ -215,7 +215,7 @@ fn yuv_converts_known_colors_across_packets_and_tail() {
             let written = kernel
                 .call(
                     &[],
-                    &mut [BufferArg::Read(&pixels[..len]), BufferArg::Write(&mut out)],
+                    &mut [BufferArg::read(&pixels[..len]), BufferArg::write(&mut out)],
                 )
                 .unwrap();
             assert_eq!(written, len as i32, "{name} at {len}");
@@ -238,14 +238,14 @@ fn integral_image_keeps_both_planes_separate_and_checks_capacity() {
         let short = kernel
             .call(
                 &[3, 2],
-                &mut [BufferArg::Read(&pixels), BufferArg::Write(&mut out[..11])],
+                &mut [BufferArg::read(&pixels), BufferArg::write(&mut out[..11])],
             )
             .unwrap();
         assert_eq!((short, out), (-1, [SENTINEL; 13]), "{name}");
         let written = kernel
             .call(
                 &[3, 2],
-                &mut [BufferArg::Read(&pixels), BufferArg::Write(&mut out)],
+                &mut [BufferArg::read(&pixels), BufferArg::write(&mut out)],
             )
             .unwrap();
         assert_eq!(
@@ -267,14 +267,14 @@ fn murmur_hash_matches_a_known_key_and_rejects_incomplete_columns() {
         let short = kernel
             .call(
                 &[0],
-                &mut [BufferArg::Read(&key[..7]), BufferArg::Write(&mut out)],
+                &mut [BufferArg::read(&key[..7]), BufferArg::write(&mut out)],
             )
             .unwrap();
         assert_eq!((short, out), (-1, [SENTINEL; 2]), "{name}");
         let written = kernel
             .call(
                 &[0],
-                &mut [BufferArg::Read(&key), BufferArg::Write(&mut out)],
+                &mut [BufferArg::read(&key), BufferArg::write(&mut out)],
             )
             .unwrap();
         assert_eq!(
@@ -298,9 +298,9 @@ fn rgb16_remap_supports_unsigned_indices_and_stops_on_an_invalid_plane() {
             .call(
                 &[],
                 &mut [
-                    BufferArg::ReadU16(&src),
-                    BufferArg::ReadU16(&map),
-                    BufferArg::WriteU16(&mut out),
+                    BufferArg::read::<u16>(&src),
+                    BufferArg::read::<u16>(&map),
+                    BufferArg::write::<u16>(&mut out),
                 ],
             )
             .unwrap();
@@ -311,9 +311,9 @@ fn rgb16_remap_supports_unsigned_indices_and_stops_on_an_invalid_plane() {
         let result = kernel.call(
             &[],
             &mut [
-                BufferArg::ReadU16(&src[..65535]),
-                BufferArg::ReadU16(&map),
-                BufferArg::WriteU16(&mut out),
+                BufferArg::read::<u16>(&src[..65535]),
+                BufferArg::read::<u16>(&map),
+                BufferArg::write::<u16>(&mut out),
             ],
         );
         assert!(result.is_err(), "{name}");
@@ -326,9 +326,9 @@ fn rgb16_remap_supports_unsigned_indices_and_stops_on_an_invalid_plane() {
         let result = kernel.call(
             &[],
             &mut [
-                BufferArg::ReadU16(&src[..65535]),
-                BufferArg::ReadU16(&map),
-                BufferArg::WriteU16(&mut out),
+                BufferArg::read::<u16>(&src[..65535]),
+                BufferArg::read::<u16>(&map),
+                BufferArg::write::<u16>(&mut out),
             ],
         );
         assert!(result.is_err(), "{name}");

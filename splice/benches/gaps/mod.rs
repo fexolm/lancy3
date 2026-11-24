@@ -186,7 +186,7 @@ fn run_unary<S>(
         expected: &|| expected,
         equal: <[i32]>::eq,
         run: |kernel: &dyn Executable, out: &mut [i32]| {
-            let count = kernel.call(&[], &mut [BufferArg::Read(input), BufferArg::Write(out)])?;
+            let count = kernel.call(&[], &mut [BufferArg::read(input), BufferArg::write(out)])?;
             usize::try_from(count).map_err(|_| "invalid benchmark buffers".into())
         },
     }
@@ -271,9 +271,9 @@ pub(super) fn compare(c: &mut Criterion) {
                 let count = kernel.call(
                     &[],
                     &mut [
-                        BufferArg::Read(&samples),
-                        BufferArg::Read(&coefficients),
-                        BufferArg::Write(out),
+                        BufferArg::read(&samples),
+                        BufferArg::read(&coefficients),
+                        BufferArg::write(out),
                     ],
                 )?;
                 usize::try_from(count).map_err(|_| "invalid calibration buffers".into())

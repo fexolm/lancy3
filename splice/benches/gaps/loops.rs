@@ -71,10 +71,10 @@ fn compare_kernel<S>(
             let count = kernel.call(
                 &[],
                 &mut [
-                    BufferArg::Read(src),
-                    BufferArg::Read(rows),
-                    BufferArg::Read(cols),
-                    BufferArg::Write(out),
+                    BufferArg::read(src),
+                    BufferArg::read(rows),
+                    BufferArg::read(cols),
+                    BufferArg::write(out),
                 ],
             )?;
             usize::try_from(count).map_err(|_| "invalid loop benchmark buffers".into())

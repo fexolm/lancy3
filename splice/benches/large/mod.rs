@@ -63,9 +63,9 @@ fn parquet_delta(c: &mut Criterion) {
             let count = kernel.call(
                 &[FIRST],
                 &mut [
-                    BufferArg::Read(&minima),
-                    BufferArg::Read(&packed),
-                    BufferArg::Write(out),
+                    BufferArg::read(&minima),
+                    BufferArg::read(&packed),
+                    BufferArg::write(out),
                 ],
             )?;
             usize::try_from(count).map_err(|_| "invalid delta page buffers".into())
@@ -109,7 +109,7 @@ fn decimal_csv(c: &mut Criterion) {
         equal: <[i32]>::eq,
         run: |kernel: &dyn Executable, out: &mut [i32]| {
             let count =
-                kernel.call(&[], &mut [BufferArg::Read(&records), BufferArg::Write(out)])?;
+                kernel.call(&[], &mut [BufferArg::read(&records), BufferArg::write(out)])?;
             usize::try_from(count).map_err(|_| "invalid CSV export buffers or value".into())
         },
     }
@@ -157,9 +157,9 @@ fn per_channel_requantize(c: &mut Criterion) {
             let count = kernel.call(
                 &[],
                 &mut [
-                    BufferArg::Read(&accum),
-                    BufferArg::Read(&residual),
-                    BufferArg::Write(out),
+                    BufferArg::read(&accum),
+                    BufferArg::read(&residual),
+                    BufferArg::write(out),
                 ],
             )?;
             usize::try_from(count).map_err(|_| "invalid requantization buffers".into())
@@ -231,9 +231,9 @@ fn audio_low_pass(c: &mut Criterion) {
             let count = kernel.call(
                 &[],
                 &mut [
-                    BufferArg::Read(&pcm),
-                    BufferArg::Write(out),
-                    BufferArg::Write(state),
+                    BufferArg::read(&pcm),
+                    BufferArg::write(out),
+                    BufferArg::write(state),
                 ],
             )?;
             usize::try_from(count).map_err(|_| "invalid audio filter buffers".into())

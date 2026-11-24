@@ -40,9 +40,9 @@ fn partial_columns_have_the_same_store_order_through_both_splice_entry_points() 
             let result = code.as_inner().call(
                 &[],
                 &mut [
-                    BufferArg::Read(&values),
-                    BufferArg::Write(&mut unused),
-                    BufferArg::Write(&mut out),
+                    BufferArg::read(&values),
+                    BufferArg::write(&mut unused),
+                    BufferArg::write(&mut out),
                 ],
             );
             if short < n {
@@ -74,14 +74,14 @@ fn checks_the_full_signature_before_the_first_store() {
         .into_inner();
     let value = [4; 8];
     let mut out = [17; 8];
-    assert!(code.call(&[], &mut [BufferArg::Write(&mut out)]).is_err());
+    assert!(code.call(&[], &mut [BufferArg::write(&mut out)]).is_err());
     assert!(
         code.call(
             &[],
             &mut [
-                BufferArg::Read(&value),
-                BufferArg::Read(&value),
-                BufferArg::Read(&out),
+                BufferArg::read(&value),
+                BufferArg::read(&value),
+                BufferArg::read(&out),
             ]
         )
         .is_err()
@@ -90,9 +90,9 @@ fn checks_the_full_signature_before_the_first_store() {
         code.call(
             &[0],
             &mut [
-                BufferArg::Read(&value),
-                BufferArg::Read(&value),
-                BufferArg::Write(&mut out),
+                BufferArg::read(&value),
+                BufferArg::read(&value),
+                BufferArg::write(&mut out),
             ]
         )
         .is_err()

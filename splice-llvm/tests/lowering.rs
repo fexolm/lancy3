@@ -88,8 +88,8 @@ fn checked_calls_remap_buffers_and_stop_after_the_first_fault() {
     ] {
         let mut output = [0; 3];
         let mut buffers = [
-            BufferArg::Read(&[8, i32::MIN]),
-            BufferArg::Write(&mut output),
+            BufferArg::read::<i32>(&[8, i32::MIN]),
+            BufferArg::write(&mut output),
         ];
         let result = code.call(&[index, divisor], &mut buffers);
         match expected {

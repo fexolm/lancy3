@@ -77,14 +77,17 @@ fn entry_points_check_buffer_signatures_before_executing() {
     let mut out = [8];
     assert!(
         kernel
-            .call(&[], &mut [BufferArg::Read(&[5]), BufferArg::Read(&out)])
+            .call(
+                &[],
+                &mut [BufferArg::read::<i32>(&[5]), BufferArg::read(&out)]
+            )
             .is_err()
     );
     assert_eq!(
         kernel
             .call(
                 &[],
-                &mut [BufferArg::Read(&[5]), BufferArg::Write(&mut out)]
+                &mut [BufferArg::read::<i32>(&[5]), BufferArg::write(&mut out)]
             )
             .unwrap(),
         1

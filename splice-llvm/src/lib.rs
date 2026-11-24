@@ -675,11 +675,11 @@ mod tests {
                 let actual = native.call(
                     &[base],
                     &mut [
-                        BufferArg::Read(&indices),
-                        BufferArg::Read(&flags),
-                        BufferArg::Read(&src),
-                        BufferArg::Write(&mut mid[1..=mid_len]),
-                        BufferArg::Write(&mut dst[1..=dst_len]),
+                        BufferArg::read(&indices),
+                        BufferArg::read(&flags),
+                        BufferArg::read(&src),
+                        BufferArg::write(&mut mid[1..=mid_len]),
+                        BufferArg::write(&mut dst[1..=dst_len]),
                     ],
                 );
                 assert_eq!(actual, expected.ok_or(CallError::Trap(Trap::Bounds)));

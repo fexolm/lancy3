@@ -334,12 +334,12 @@ fn demo_plan() -> Plan {
 
 fn demo_columns() -> [BufferArg<'static>; 6] {
     [
-        BufferArg::ReadI64(&[10, 10, 20, 30, 20]),
-        BufferArg::Read(&[3, 1, 4, 2, 5]),
-        BufferArg::ReadF32(&[0.1, 0.0, 0.3, 0.0, 0.2]),
-        BufferArg::ReadI64(&[10, 10, 20]),
-        BufferArg::ReadU16(&[100, 120, 250]),
-        BufferArg::ReadF64(&[4.9, 4.0, 4.7]),
+        BufferArg::read::<i64>(&[10, 10, 20, 30, 20]),
+        BufferArg::read::<i32>(&[3, 1, 4, 2, 5]),
+        BufferArg::read::<f32>(&[0.1, 0.0, 0.3, 0.0, 0.2]),
+        BufferArg::read::<i64>(&[10, 10, 20]),
+        BufferArg::read::<u16>(&[100, 120, 250]),
+        BufferArg::read::<f64>(&[4.9, 4.0, 4.7]),
     ]
 }
 
@@ -427,8 +427,8 @@ fn mixed_schema_specializes_the_same_operators_for_different_elements()
     );
 
     let mut columns = demo_columns();
-    columns[0] = BufferArg::ReadF64(&[10.0, 10.0, 20.0, f64::NAN, 20.0]);
-    columns[3] = BufferArg::ReadF64(&[10.0, 10.0, 20.0]);
+    columns[0] = BufferArg::read(&[10.0, 10.0, 20.0, f64::NAN, 20.0]);
+    columns[3] = BufferArg::read(&[10.0, 10.0, 20.0]);
     plan.predicates[2].val = Literal::F64(10.0);
     let schema = Schema::from_batch(&columns);
     let rust = query::print(&schema, &plan)?;

@@ -406,7 +406,7 @@ impl fmt::Debug for RuntimeContext<'_> {
 
 /// # Safety
 /// `raw` must hold the live, exclusive [`RuntimeContext`] borrow provided by
-/// the verified invocation's `BufferArg::Context`. It may not be retained.
+/// the verified invocation's `BufferArg::context`. It may not be retained.
 pub unsafe extern "C" fn invoke_runtime_context(
     raw: *mut u8,
     operation: u32,

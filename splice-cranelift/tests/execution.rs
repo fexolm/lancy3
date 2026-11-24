@@ -88,7 +88,7 @@ fn staged_and_portable_calls_keep_writes_up_to_the_first_fault() {
         assert_eq!(
             code.call(
                 &[],
-                &mut [BufferArg::Read(&values), BufferArg::Write(&mut out)]
+                &mut [BufferArg::read(&values), BufferArg::write(&mut out)]
             ),
             Err(Scalars {
                 expected: 1,
@@ -97,7 +97,7 @@ fn staged_and_portable_calls_keep_writes_up_to_the_first_fault() {
             .into())
         );
         assert_eq!(
-            code.call(&[1], &mut [BufferArg::Write(&mut out)]),
+            code.call(&[1], &mut [BufferArg::write(&mut out)]),
             Err(Buffers {
                 expected: 2,
                 actual: 1
@@ -105,13 +105,13 @@ fn staged_and_portable_calls_keep_writes_up_to_the_first_fault() {
             .into())
         );
         assert_eq!(
-            code.call(&[1], &mut [BufferArg::Read(&values), BufferArg::Read(&out)]),
+            code.call(&[1], &mut [BufferArg::read(&values), BufferArg::read(&out)]),
             Err(ReadOnly { buffer: 1 }.into())
         );
         assert_eq!(
             code.call(
                 &[1],
-                &mut [BufferArg::from(&[1.0f32][..]), BufferArg::Write(&mut out)]
+                &mut [BufferArg::from(&[1.0f32][..]), BufferArg::write(&mut out)]
             ),
             Err(splice_core::SignatureError::Element {
                 buffer: 0,

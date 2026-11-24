@@ -313,7 +313,7 @@ fn slice_kernel_compiles_the_complete_loop() {
     assert!(
         splice::validate_buffers(
             batch.buffer_kinds(),
-            &[BufferArg::Read(&input), BufferArg::Read(&input)]
+            &[BufferArg::read(&input), BufferArg::read(&input)]
         )
         .is_err()
     );

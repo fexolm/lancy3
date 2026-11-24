@@ -43,7 +43,7 @@ fn yuv_to_rgba(c: &mut Criterion) {
         expected: &|| &expected,
         equal: <[i32]>::eq,
         run: |kernel: &dyn Executable, out: &mut [i32]| {
-            let count = kernel.call(&[], &mut [BufferArg::Read(&pixels), BufferArg::Write(out)])?;
+            let count = kernel.call(&[], &mut [BufferArg::read(&pixels), BufferArg::write(out)])?;
             usize::try_from(count).map_err(|_| "invalid RGBA output buffer".into())
         },
     }
@@ -87,7 +87,7 @@ fn integral_moments(c: &mut Criterion) {
         run: |kernel: &dyn Executable, out: &mut [i32]| {
             let count = kernel.call(
                 &[WIDTH as i32, HEIGHT as i32],
-                &mut [BufferArg::Read(&pixels), BufferArg::Write(out)],
+                &mut [BufferArg::read(&pixels), BufferArg::write(out)],
             )?;
             usize::try_from(count).map_err(|_| "invalid integral image dimensions".into())
         },
@@ -133,7 +133,7 @@ fn hash_keys(c: &mut Criterion) {
         run: |kernel: &dyn Executable, out: &mut [i32]| {
             let count = kernel.call(
                 &[SEED],
-                &mut [BufferArg::Read(&keys), BufferArg::Write(out)],
+                &mut [BufferArg::read(&keys), BufferArg::write(out)],
             )?;
             usize::try_from(count).map_err(|_| "invalid hash buffers".into())
         },
@@ -181,9 +181,9 @@ fn remap_rgb16(c: &mut Criterion) {
             let count = kernel.call(
                 &[],
                 &mut [
-                    BufferArg::ReadU16(&source),
-                    BufferArg::ReadU16(&map),
-                    BufferArg::WriteU16(out),
+                    BufferArg::read::<u16>(&source),
+                    BufferArg::read::<u16>(&map),
+                    BufferArg::write::<u16>(out),
                 ],
             )?;
             usize::try_from(count).map_err(|_| "invalid RGB16 remap buffers".into())

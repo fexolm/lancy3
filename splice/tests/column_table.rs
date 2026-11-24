@@ -78,7 +78,10 @@ fn float_column_matches_the_rust_filter_including_nan_and_tail()
     ) -> Result<(), Box<dyn std::error::Error>> {
         for values in [&[][..], &[f32::NAN, 0.0, -1.0], &[2.5, f32::NAN]] {
             let expected = i32::from(values.iter().any(|&x| x >= 2.5));
-            let columns = [BufferArg::Read(&[99]), BufferArg::ReadF32(values)];
+            let columns = [
+                BufferArg::read::<i32>(&[99]),
+                BufferArg::read::<f32>(values),
+            ];
             assert_eq!(query(schema, plan, &mut [], &columns), expected);
             assert_eq!(
                 code.call(query::CallArgs {
@@ -133,9 +136,9 @@ fn check<E: Executable>(
     for values in [[-4, 7, 8, 3], [7, -1, 10, 22]] {
         let mut expected = [0; 4];
         let pair = if slot == 0 {
-            [BufferArg::Read(&values), BufferArg::ReadF64(&aux)]
+            [BufferArg::read(&values), BufferArg::read::<f64>(&aux)]
         } else {
-            [BufferArg::ReadF64(&aux), BufferArg::Read(&values)]
+            [BufferArg::read::<f64>(&aux), BufferArg::read(&values)]
         };
         let count = query(schema, plan, &mut expected, &pair);
         let mut actual = [0; 4];
@@ -152,16 +155,16 @@ fn check<E: Executable>(
     assert!(
         code.call(query::CallArgs {
             out: &mut out,
-            columns: &[BufferArg::ReadF64(&aux), BufferArg::ReadF64(&aux)],
+            columns: &[BufferArg::read::<f64>(&aux), BufferArg::read::<f64>(&aux)],
         })
         .is_err()
     );
     assert_eq!(out, [0]);
     let values = [100, 101];
     let columns = if slot == 0 {
-        [BufferArg::Read(&values), BufferArg::ReadF64(&aux)]
+        [BufferArg::read(&values), BufferArg::read::<f64>(&aux)]
     } else {
-        [BufferArg::ReadF64(&aux), BufferArg::Read(&values)]
+        [BufferArg::read::<f64>(&aux), BufferArg::read(&values)]
     };
     assert!(
         code.call(query::CallArgs {

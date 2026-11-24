@@ -194,15 +194,15 @@ pub(super) fn generate(
     let (_, _, invoke_where) = invoke_generics.split_for_impl();
     let buffers = written_buffers.iter().map(|(name, ty, elem)| {
         if elem.is_none() {
-            return emit!(#root::BufferArg::Context(&mut __splice_runtime_context));
+            return emit!(#root::BufferArg::context(&mut __splice_runtime_context));
         }
         let Type::Reference(reference) = ty else {
             unreachable!("buffer parameters are references")
         };
         if reference.mutability.is_some() {
-            emit!(#root::BufferElement::write_arg(self.#name))
+            emit!(#root::BufferArg::write(self.#name))
         } else {
-            emit!(#root::BufferElement::read_arg(self.#name))
+            emit!(#root::BufferArg::read(self.#name))
         }
     });
     let context_setup = context.zip(context_param).map(|(context, parameter)| {
@@ -219,7 +219,13 @@ pub(super) fn generate(
     let buffers = if let Some(columns) = columns {
         emit! {
             let mut __splice_buffers = ::std::vec![#(#buffers),*];
-            __splice_buffers.extend(self.#columns.iter().map(#root::BufferArg::as_read_only));
+            let __splice_fixed = __splice_buffers.len();
+            for (__splice_index, __splice_column) in self.#columns.iter().enumerate() {
+                // A context is not a column: report it at its position.
+                __splice_buffers.push(__splice_column.as_read_only().ok_or(
+                    #root::SignatureError::Context { buffer: __splice_fixed + __splice_index },
+                )?);
+            }
         }
     } else {
         emit!(let mut __splice_buffers = [#(#buffers),*];)

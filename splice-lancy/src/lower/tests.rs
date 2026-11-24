@@ -75,13 +75,13 @@ fn context_descriptors_reject_other_signatures_and_slice_operations() {
         let mut wrong = RuntimeContext::new(&SECOND, &mut unreachable);
         assert!(
             kernel
-                .call(&[7], &mut [BufferArg::Context(&mut wrong)])
+                .call(&[7], &mut [BufferArg::context(&mut wrong)])
                 .is_err()
         );
         let mut slice = [0];
         assert!(
             kernel
-                .call(&[7], &mut [BufferArg::Write(&mut slice)])
+                .call(&[7], &mut [BufferArg::write(&mut slice)])
                 .is_err()
         );
 
@@ -95,7 +95,7 @@ fn context_descriptors_reject_other_signatures_and_slice_operations() {
         let mut context = RuntimeContext::new(&FIRST, &mut invoke);
         assert_eq!(
             kernel
-                .call(&[7], &mut [BufferArg::Context(&mut context)])
+                .call(&[7], &mut [BufferArg::context(&mut context)])
                 .unwrap(),
             10
         );
@@ -388,8 +388,8 @@ fn checked_nested_call_preserves_writes_before_failure() {
         .call(
             &[27],
             &mut [
-                splice_core::BufferArg::Read(&[]),
-                splice_core::BufferArg::Write(&mut out),
+                splice_core::BufferArg::read::<i32>(&[]),
+                splice_core::BufferArg::write(&mut out),
             ],
         )
         .unwrap_err();
@@ -475,12 +475,15 @@ fn lowered_call_graphs_retain_slice_contracts_for_out_of_line_calls() {
                 .unwrap()
                 .into_inner(),
         ] {
-            assert_eq!(kernel.call(&[3], &mut [BufferArg::Read(&[7])]), Ok(21));
             assert_eq!(
-                kernel.call(&[0], &mut [BufferArg::Read(&[])]),
+                kernel.call(&[3], &mut [BufferArg::read::<i32>(&[7])]),
+                Ok(21)
+            );
+            assert_eq!(
+                kernel.call(&[0], &mut [BufferArg::read::<i32>(&[])]),
                 Ok(if guard { -1 } else { 0 })
             );
-            let empty = kernel.call(&[1], &mut [BufferArg::Read(&[])]);
+            let empty = kernel.call(&[1], &mut [BufferArg::read::<i32>(&[])]);
             if guard {
                 assert_eq!(empty, Ok(-1));
             } else {
@@ -495,7 +498,7 @@ fn lowered_call_graphs_retain_slice_contracts_for_out_of_line_calls() {
             .into_inner(),
     ] {
         let mut xs = [7];
-        assert_eq!(kernel.call(&[2], &mut [BufferArg::Write(&mut xs)]), Ok(15));
+        assert_eq!(kernel.call(&[2], &mut [BufferArg::write(&mut xs)]), Ok(15));
         assert_eq!(xs, [9]);
     }
 }

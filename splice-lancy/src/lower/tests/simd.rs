@@ -110,8 +110,8 @@ fn packed_load_and_store_have_an_ordered_short_store_exit() {
             let result = kernel.call(
                 &[1],
                 &mut [
-                    BufferArg::ReadU16(&src),
-                    BufferArg::WriteU16(&mut dst[..len]),
+                    BufferArg::read::<u16>(&src),
+                    BufferArg::write::<u16>(&mut dst[..len]),
                 ],
             );
             assert_eq!(result.is_ok(), len > lanes, "len={len}");
@@ -150,7 +150,10 @@ fn scatter_addresses_unsigned_u16_and_stops_at_the_first_active_error() {
             let mut dst = vec![99; n];
             let result = kernel.call(
                 &[],
-                &mut [BufferArg::ReadU16(&indices), BufferArg::WriteU16(&mut dst)],
+                &mut [
+                    BufferArg::read::<u16>(&indices),
+                    BufferArg::write::<u16>(&mut dst),
+                ],
             );
             let mut expected = vec![99; n];
             let ok = indices.iter().enumerate().all(|(i, &idx)| {
@@ -188,7 +191,7 @@ fn masked_contiguous_store_never_wraps_an_invalid_offset_to_zero() {
         )
         .unwrap();
         let mut dst = [8, 9];
-        let result = kernel.call(&[-1], &mut [BufferArg::WriteU16(&mut dst)]);
+        let result = kernel.call(&[-1], &mut [BufferArg::write::<u16>(&mut dst)]);
         assert_eq!(
             result.unwrap_err(),
             splice_core::CallError::Trap(splice_core::Trap::Bounds)
@@ -239,7 +242,7 @@ fn vectors_and_masks_keep_their_element_type_across_a_join() {
         for (input, expected) in [(1, 1.25), (0, 3.0)] {
             let mut dst = vec![3.0; Element::F64.lanes(options().target.vector_bytes())];
             assert_eq!(
-                kernel.call(&[input], &mut [BufferArg::WriteF64(&mut dst)]),
+                kernel.call(&[input], &mut [BufferArg::write::<f64>(&mut dst)]),
                 Ok(0)
             );
             assert!(dst.iter().all(|&x| x == expected));

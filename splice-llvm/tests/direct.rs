@@ -99,13 +99,13 @@ fn nested_bodies_keep_their_llvm_insertion_points_and_propagate_faults() {
     .unwrap();
     let mut data = [0, 73];
     assert_eq!(
-        kernel.call(&[1], &mut [BufferArg::Write(&mut data)]),
+        kernel.call(&[1], &mut [BufferArg::write(&mut data)]),
         Ok(73)
     );
     assert_eq!(data[0], 73);
     assert!(
         kernel
-            .call(&[2], &mut [BufferArg::Write(&mut data)])
+            .call(&[2], &mut [BufferArg::write(&mut data)])
             .is_err()
     );
     assert_eq!(data[0], 20);

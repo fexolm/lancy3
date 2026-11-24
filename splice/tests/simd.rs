@@ -295,10 +295,10 @@ fn signed_vector_min_max_stay_explicit_and_preserve_lane_order() {
         let result = kernel.call(
             &[],
             &mut [
-                BufferArg::Read(&lhs),
-                BufferArg::Read(&rhs),
-                BufferArg::Write(&mut mins),
-                BufferArg::Write(&mut maxs),
+                BufferArg::read(&lhs),
+                BufferArg::read(&rhs),
+                BufferArg::write(&mut mins),
+                BufferArg::write(&mut maxs),
             ],
         );
         assert_eq!(result, Ok(lanes as i32));
@@ -351,7 +351,7 @@ fn vector_rotate_wraps_the_count_and_rotates_signed_lane_bits() {
             let mut out = vec![23; lanes + 1];
             let result = kernel.call(
                 &[],
-                &mut [BufferArg::Read(&source), BufferArg::Write(&mut out)],
+                &mut [BufferArg::read(&source), BufferArg::write(&mut out)],
             );
             assert_eq!(result, Ok(lanes as i32));
             assert_eq!(out[..lanes], expected, "rotation count {count}");
@@ -744,7 +744,7 @@ fn scalable_add_wraps_at_u16_and_preserves_prefix_on_short_store() {
                 &mut [
                     (&a[..]).into(),
                     (&b[..]).into(),
-                    BufferArg::Write(&mut wrong)
+                    BufferArg::write(&mut wrong)
                 ]
             )
             .is_err()
@@ -1053,7 +1053,7 @@ fn inactive_gather_retains_each_fallback_lane() {
             k.call(
                 &[17],
                 &mut [
-                    BufferArg::Read(&[11]),
+                    BufferArg::read::<i32>(&[11]),
                     (&ids[..]).into(),
                     (&mask[..]).into(),
                     (&mut out[..]).into()
