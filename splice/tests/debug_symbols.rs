@@ -160,15 +160,15 @@ fn observe_partially_assigned(
     b: &mut dyn splice::frontend::KernelBuilder,
     use_value: bool,
 ) -> splice::Result<()> {
-    let flag = b.arg(0);
-    let value = b.local();
-    let (assign, join) = (b.label(), b.label());
-    b.branch(flag, assign, join);
-    b.mark(assign);
-    let five = b.constant(5);
-    b.assign(value, five);
-    b.jump(join);
-    b.mark(join);
+    let flag = b.arg(0)?;
+    let value = b.local(ValueType::Scalar)?;
+    let (assign, join) = (b.label()?, b.label()?);
+    b.branch(flag, assign, join)?;
+    b.mark(assign)?;
+    let five = b.constant(5)?;
+    b.assign(value, five)?;
+    b.jump(join)?;
+    b.mark(join)?;
     let location = debug::Location {
         file: file!(),
         directory: env!("CARGO_MANIFEST_DIR"),
@@ -180,7 +180,7 @@ fn observe_partially_assigned(
         value: debug::Value::Register(value, debug::Scalar::I32),
     }];
     b.debug_point(location, &variables);
-    b.ret(if use_value { value } else { flag });
+    b.ret(if use_value { value } else { flag })?;
     Ok(())
 }
 

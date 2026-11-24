@@ -9,6 +9,7 @@ pub mod frontend;
 pub mod hir;
 mod imports;
 pub mod simd;
+pub mod validate;
 #[doc(hidden)]
 pub use imports::ImportInvocation;
 pub use imports::{ImportArgs, ImportTarget, LinkedImport, RustImport};
@@ -96,48 +97,53 @@ impl BuildOptions {
     }
 }
 
-/// Generate a backend-specific output from a specialized kernel.
-pub trait Codegen: Sized {
+/// A code generator. A backend compiles a verified portable function, and
+/// may stage kernel bodies directly into its own builder instead of
+/// recording them first. Kernels reach both through [`Codegen`].
+pub trait Backend: Sized {
     /// The value produced by a successful build.
     type Output;
-    fn compile_raw(function: &Function) -> Result<Self::Output>;
+    /// Compile a verified portable function. Source points are available
+    /// when the function was staged in debug mode.
+    fn compile_function(function: &Function, options: BuildOptions) -> Result<Self::Output>;
+    /// Stage `body` with `options`. The body checks its own operations
+    /// (see [`validate::Validating`]), so the backend's builder receives
+    /// only valid ones. By default the body is recorded as a portable
+    /// function and compiled.
+    fn stage(
+        signature: frontend::Signature<'_>,
+        body: frontend::Body<'_>,
+        options: BuildOptions,
+    ) -> Result<Self::Output> {
+        Self::compile_function(&frontend::record(signature, body, options)?, options)
+    }
+}
+
+/// Build kernels with a [`Backend`]: compile a portable function, or stage
+/// a kernel body. Every backend gets the same, validated, operations.
+pub trait Codegen: Backend {
     fn compile<I: CompileInput<Self>>(input: &I) -> std::result::Result<I::Output, I::Error> {
         input.compile_with(None)
     }
-    /// Override the code generation mode. Source points are available when
-    /// the portable IR was staged in debug mode.
+    /// Override the code generation mode or target of a portable function.
     fn compile_with_options<I: CompileInput<Self>>(
         input: &I,
         options: BuildOptions,
     ) -> std::result::Result<I::Output, I::Error> {
         input.compile_with(Some(options))
     }
-    /// Backends whose output depends on neither the mode nor the target,
-    /// such as listings, may keep this default.
-    fn compile_raw_with_options(
-        function: &Function,
-        _options: BuildOptions,
-    ) -> Result<Self::Output> {
-        Self::compile_raw(function)
-    }
-    /// Stage for the default target of this machine (`SPLICE_SIMD`) in the
-    /// mode of `splice-core`'s own build.
-    fn build(arity: usize, kinds: &[BufferKind], body: frontend::Body<'_>) -> Result<Self::Output> {
-        let options = BuildOptions::host(Mode::for_profile(cfg!(debug_assertions)))?;
-        Self::build_with_options(arity, kinds, body, options)
-    }
-    /// By default, verify a portable function and pass it to the backend.
-    /// Native backends may consume the operation stream directly.
+    /// Stage a kernel body directly.
     fn build_with_options(
-        arity: usize,
-        kinds: &[BufferKind],
+        signature: frontend::Signature<'_>,
         body: frontend::Body<'_>,
         options: BuildOptions,
     ) -> Result<Self::Output> {
         let _span = tracing::debug_span!(target: "splice::compile", "build", backend = std::any::type_name::<Self>()).entered();
-        Self::compile(&frontend::materialize(arity, kinds, body, options)?)
+        Self::stage(signature, validate::validated(signature, body), options)
     }
 }
+
+impl<B: Backend> Codegen for B {}
 
 /// The portable calling convention. Scalars and slices have separate
 /// argument lists, each following declaration order. An error stops execution;

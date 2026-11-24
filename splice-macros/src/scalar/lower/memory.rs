@@ -70,13 +70,13 @@ impl Lower<'_> {
             && m.args.is_empty()
             && matches!(receiver.stage, Stage::Buffer(_))
         {
-            let length = emit!({let buffer=#receiver; __splice_builder.buffer_len(buffer)});
+            let length = emit!({let buffer=#receiver; __splice_builder.buffer_len(buffer)?});
             return Ok(if m.method == "len" {
                 Value::new(Stage::Reg(Scalar::Length), length)
             } else {
                 Value::new(
                     Stage::Reg(Scalar::Bool),
-                    self.bin("Eq", length, emit!(__splice_builder.constant(0))),
+                    self.bin("Eq", length, emit!(__splice_builder.constant(0)?)),
                 )
             });
         }
@@ -125,7 +125,7 @@ impl Lower<'_> {
                 let value = self.reg(receiver, Scalar::Int, &m.receiver)?;
                 return Ok(Value::new(
                     Stage::Reg(Scalar::Int),
-                    self.bin("Sub", emit!(__splice_builder.constant(0)), value),
+                    self.bin("Sub", emit!(__splice_builder.constant(0)?), value),
                 ));
             }
             if matches!(
@@ -211,7 +211,7 @@ impl Lower<'_> {
             }
             Stage::Reg(Scalar::Bool) | Stage::Word(Scalar::Bool) => {
                 let bits = self.reg(value, Scalar::Bool, cast)?;
-                self.bin("And", bits, emit!(__splice_builder.constant(1)))
+                self.bin("And", bits, emit!(__splice_builder.constant(1)?))
             }
             _ => return err(cast, "expected an integer or boolean to cast"),
         };
@@ -253,7 +253,7 @@ impl Lower<'_> {
         // Every host index above i32::MAX is out of bounds for a runtime
         // slice. Keep the fault on the executed path, even for a literal.
         let offset = if matches!(value.stage, Stage::Host | Stage::Literal(Scalar::Int)) {
-            emit!({let i: usize = #value; __splice_builder.constant(i32::try_from(i).unwrap_or(-1))})
+            emit!({let i: usize = #value; __splice_builder.constant(i32::try_from(i).unwrap_or(-1))?})
         } else {
             self.reg(value, Scalar::Index, &index.index)?
         };
@@ -289,7 +289,7 @@ impl Lower<'_> {
             Stage::Reg(Scalar::Int),
             emit!({
                 let (buffer, __splice_index) = (#slice, #offset);
-                __splice_builder.load(buffer, __splice_index)
+                __splice_builder.load(buffer, __splice_index)?
             }),
         ))
     }
@@ -341,7 +341,7 @@ impl Lower<'_> {
         let combine = op.map(|(op, _)| {
             let combined = self.operator_bin(
                 op,
-                emit!(__splice_builder.load(buffer, __splice_index)),
+                emit!(__splice_builder.load(buffer, __splice_index)?),
                 emit!(__splice_value),
             );
             emit!(let __splice_value=#combined;)
@@ -352,7 +352,7 @@ impl Lower<'_> {
             let __splice_value = #value;
             let (buffer, __splice_index) = (#slice, #offset);
             #combine
-            __splice_builder.store(buffer, __splice_index, __splice_value);
+            __splice_builder.store(buffer, __splice_index, __splice_value)?;
         })))
     }
 }

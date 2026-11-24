@@ -132,13 +132,13 @@ fn stage(
             element: from,
             op: SimdOp::Load(Buffer(0)),
         };
-        let zero = b.constant(0);
+        let zero = b.constant(0)?;
         let low = b.simd(load, &[zero])?.unwrap();
         let (op, args) = match conversion {
             Conversion::Cast => (SimdOp::Cast(to), vec![low]),
             Conversion::Widen { high } => (SimdOp::Widen { to, high }, vec![low]),
             Conversion::Narrow => {
-                let next = b.constant(from.lanes(options().target.vector_bytes()) as i32);
+                let next = b.constant(from.lanes(options().target.vector_bytes()) as i32)?;
                 let high = b.simd(load, &[next])?.unwrap();
                 (SimdOp::Narrow(to), vec![low, high])
             }
@@ -149,7 +149,7 @@ fn stage(
             op: SimdOp::Store(Buffer(1)),
         };
         b.simd(store, &[zero, converted])?;
-        b.ret(zero);
+        b.ret(zero)?;
         Ok(())
     }
 }

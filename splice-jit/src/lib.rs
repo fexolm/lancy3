@@ -35,23 +35,28 @@ pub struct Function {
 }
 
 impl Function {
+    /// A source point whose runtime variables were saved in `slots`, at
+    /// `base` bytes from `register`.
     pub fn statement(
         &mut self,
-        function: &splice_core::Function,
         point: &splice_core::debug::Point,
+        slots: impl IntoIterator<Item = splice_core::debug::Slot>,
         address: u64,
         register: u16,
         base: i64,
-        vector_bytes: usize,
     ) {
         self.statements.push(Statement {
             address,
             source: point.location,
             register,
-            variables: point
-                .slots(function, vector_bytes)
-                .map(|(var, ty, offset)| {
-                    (var.name, ty, VariableLocation::Memory(base + offset as i64))
+            variables: slots
+                .into_iter()
+                .map(|slot| {
+                    (
+                        slot.variable.name,
+                        slot.ty,
+                        VariableLocation::Memory(base + slot.offset as i64),
+                    )
                 })
                 .chain(point.variables.iter().filter_map(|var| match var.value {
                     splice_core::debug::Value::Constant(Some(value)) => {

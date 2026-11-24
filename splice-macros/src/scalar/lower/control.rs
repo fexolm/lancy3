@@ -32,7 +32,7 @@ impl Lower<'_> {
             return match to {
                 Stage::Reg(t) => {
                     let ty = t.value_type(self.root, self.types);
-                    Ok(emit!({#code; __splice_builder.typed_local(#ty)}))
+                    Ok(emit!({#code; __splice_builder.local(#ty)?}))
                 }
                 Stage::Never | Stage::Unit => Ok(code),
                 _ => err(at, "an early kernel return must merge with a scalar result"),
@@ -108,11 +108,11 @@ impl Lower<'_> {
             let value = self.reg(v, t, at)?;
             Ok(emit!({
                 let __splice_value = #value;
-                __splice_builder.assign(__splice_branch_result, __splice_value);
-                __splice_builder.jump(__splice_join);
+                __splice_builder.assign(__splice_branch_result, __splice_value)?;
+                __splice_builder.jump(__splice_join)?;
             }))
         } else {
-            Ok(emit!({#v; __splice_builder.jump(__splice_join);}))
+            Ok(emit!({#v; __splice_builder.jump(__splice_join)?;}))
         }
     }
     pub(super) fn choice(
@@ -165,14 +165,14 @@ impl Lower<'_> {
                 let __splice_known_condition: ::core::option::Option<bool> = #known;
                 #init
                 let (__splice_yes, __splice_no, __splice_join) =
-                    (__splice_builder.label(), __splice_builder.label(), __splice_builder.label());
+                    (__splice_builder.label()?, __splice_builder.label()?, __splice_builder.label()?);
                 if __splice_known_condition.is_none() {
-                    let __splice_cond = #root::frontend::scalar::RunArg::reg(__splice_word, __splice_builder);
-                    __splice_builder.branch(__splice_cond, __splice_yes, __splice_no);
+                    let __splice_cond = #root::frontend::scalar::RunArg::reg(__splice_word, __splice_builder)?;
+                    __splice_builder.branch(__splice_cond, __splice_yes, __splice_no)?;
                 }
-                if __splice_known_condition != ::core::option::Option::Some(false) { __splice_builder.mark(__splice_yes); #yes_code; }
-                if __splice_known_condition != ::core::option::Option::Some(true) { __splice_builder.mark(__splice_no); #no_code; }
-                __splice_builder.mark(__splice_join); #result
+                if __splice_known_condition != ::core::option::Option::Some(false) { __splice_builder.mark(__splice_yes)?; #yes_code; }
+                if __splice_known_condition != ::core::option::Option::Some(true) { __splice_builder.mark(__splice_no)?; #no_code; }
+                __splice_builder.mark(__splice_join)?; #result
             }),
         ))
     }
@@ -189,7 +189,7 @@ impl Lower<'_> {
         let region = self.region();
         Ok(Value::new(
             Stage::Never,
-            emit!({#record __splice_builder.jump(#target); break #region;}),
+            emit!({#record __splice_builder.jump(#target)?; break #region;}),
         ))
     }
     pub(super) fn loop_expr(&self, cond: Option<&Expr>, body: &Block) -> Result<Value> {
@@ -198,19 +198,19 @@ impl Lower<'_> {
         let test = if let Some(e) = cond {
             let reg = scope.operand(e, Scalar::Bool)?;
             let point = scope.debug_point(e.span());
-            emit!({#point let __splice_cond = #reg; __splice_builder.branch_if_false(__splice_cond, __splice_loop_end);})
+            emit!({#point let __splice_cond = #reg; __splice_builder.branch_if_false(__splice_cond, __splice_loop_end)?;})
         } else {
             emit!()
         };
         let body_code = scope.block(body)?.code;
         let contents =
-            scope.delimit(emit!(#test #body_code; __splice_builder.jump(__splice_loop_next);));
+            scope.delimit(emit!(#test #body_code; __splice_builder.jump(__splice_loop_next)?;));
         let code = emit!({
-            let (__splice_loop_next, __splice_loop_end) = (__splice_builder.label(), __splice_builder.label());
-            __splice_builder.jump(__splice_loop_next);
-            __splice_builder.mark(__splice_loop_next);
+            let (__splice_loop_next, __splice_loop_end) = (__splice_builder.label()?, __splice_builder.label()?);
+            __splice_builder.jump(__splice_loop_next)?;
+            __splice_builder.mark(__splice_loop_next)?;
             #contents
-            __splice_builder.mark(__splice_loop_end);
+            __splice_builder.mark(__splice_loop_end)?;
         });
         let stage = if cond.is_none() && !contains_break(body) {
             Stage::Never
@@ -237,9 +237,9 @@ impl Lower<'_> {
                 span = proc_macro2::Span::mixed_site()
             );
             let setup = emit!(let buffer = #slice;
-                let __splice_start = __splice_builder.constant(0);
-                let __splice_limit = __splice_builder.buffer_len(buffer););
-            let read = emit!(let #id = __splice_builder.load(buffer, #index););
+                let __splice_start = __splice_builder.constant(0)?;
+                let __splice_limit = __splice_builder.buffer_len(buffer)?;);
+            let read = emit!(let #id = __splice_builder.load(buffer, #index)?;);
             return self.counted_loop(f, binding, Scalar::Int, &index, setup, read);
         };
         let (Some(start), Some(stop)) = (&range.start, &range.end) else {
@@ -306,26 +306,26 @@ impl Lower<'_> {
         let point = scope.debug_point(f.for_token.span);
         let body = scope.block(&f.body)?.code;
         let root = self.root;
-        let contents = scope.delimit(emit!(#body; __splice_builder.jump(__splice_loop_next);));
+        let contents = scope.delimit(emit!(#body; __splice_builder.jump(__splice_loop_next)?;));
         Ok(Value::unit(emit!({
             #setup
-            let #index = __splice_builder.copy(__splice_start);
+            let #index = __splice_builder.copy(__splice_start)?;
             let (__splice_for_head, __splice_for_body, __splice_loop_next, __splice_loop_end) =
-                (__splice_builder.label(), __splice_builder.label(), __splice_builder.label(), __splice_builder.label());
-            __splice_builder.jump(__splice_for_head);
-            __splice_builder.mark(__splice_for_head);
-            let __splice_cond = __splice_builder.binary(#root::hir::Binary::Lt, #index, __splice_limit);
-            __splice_builder.branch(__splice_cond, __splice_for_body, __splice_loop_end);
-            __splice_builder.mark(__splice_for_body);
+                (__splice_builder.label()?, __splice_builder.label()?, __splice_builder.label()?, __splice_builder.label()?);
+            __splice_builder.jump(__splice_for_head)?;
+            __splice_builder.mark(__splice_for_head)?;
+            let __splice_cond = __splice_builder.binary(#root::hir::Binary::Lt, #index, __splice_limit)?;
+            __splice_builder.branch(__splice_cond, __splice_for_body, __splice_loop_end)?;
+            __splice_builder.mark(__splice_for_body)?;
             #read
             #point
             #contents
-            __splice_builder.mark(__splice_loop_next);
-            let __splice_one = __splice_builder.constant(1);
-            let __splice_next = __splice_builder.binary(#root::hir::Binary::Add, #index, __splice_one);
-            __splice_builder.assign(#index, __splice_next);
-            __splice_builder.jump(__splice_for_head);
-            __splice_builder.mark(__splice_loop_end);
+            __splice_builder.mark(__splice_loop_next)?;
+            let __splice_one = __splice_builder.constant(1)?;
+            let __splice_next = __splice_builder.binary(#root::hir::Binary::Add, #index, __splice_one)?;
+            __splice_builder.assign(#index, __splice_next)?;
+            __splice_builder.jump(__splice_for_head)?;
+            __splice_builder.mark(__splice_loop_end)?;
         })))
     }
     fn unroll(&self, f: &syn::ExprForLoop) -> Result<Value> {
@@ -353,19 +353,19 @@ impl Lower<'_> {
         let iteration = scope.delimit(emit!(#body; #fallthrough));
         let region = self.region();
         Ok(Value::unit(emit!({
-            let __splice_loop_end = __splice_builder.label();
+            let __splice_loop_end = __splice_builder.label()?;
             let mut __splice_reaches_end = false;
             let mut __splice_reaches_next = true;
             for #pat in #iterable {
                 #step
-                let __splice_loop_next = __splice_builder.label();
+                let __splice_loop_next = __splice_builder.label()?;
                 __splice_reaches_next = false;
                 #captures
                 #iteration
-                __splice_builder.mark(__splice_loop_next);
+                __splice_builder.mark(__splice_loop_next)?;
                 if !__splice_reaches_next { break; }
             }
-            __splice_builder.mark(__splice_loop_end);
+            __splice_builder.mark(__splice_loop_end)?;
             if !__splice_reaches_next && !__splice_reaches_end { break #region; }
         })))
     }
@@ -395,7 +395,7 @@ impl Lower<'_> {
                 Some((_, g)) => {
                     let test = scope.operand(g, Scalar::Bool)?;
                     let point = scope.debug_point(g.span());
-                    emit!({#point let passed = #test; __splice_builder.branch_if_false(passed, __splice_next_arm);})
+                    emit!({#point let passed = #test; __splice_builder.branch_if_false(passed, __splice_next_arm)?;})
                 }
                 None => emit!(),
             };
@@ -433,13 +433,13 @@ impl Lower<'_> {
                 emit!()
             } else {
                 let pred = self.pattern(&arm.pat, t)?;
-                emit!({let matched = #pred; __splice_builder.branch_if_false(matched, __splice_next_arm);})
+                emit!({let matched = #pred; __splice_builder.branch_if_false(matched, __splice_next_arm)?;})
             };
             let contents = scope.delimit(emit!(#guard #point #write;));
             body.extend(emit!({
-                let __splice_next_arm = __splice_builder.label();
+                let __splice_next_arm = __splice_builder.label()?;
                 #pattern #contents
-                __splice_builder.mark(__splice_next_arm);
+                __splice_builder.mark(__splice_next_arm)?;
             }));
         }
         let (init, result) = result_slot(stage, self);
@@ -448,9 +448,9 @@ impl Lower<'_> {
             emit!({
                 let __splice_subject = #test;
                 #init
-                let __splice_join = __splice_builder.label();
+                let __splice_join = __splice_builder.label()?;
                 #body
-                __splice_builder.mark(__splice_join);
+                __splice_builder.mark(__splice_join)?;
                 #result
             }),
         ))
@@ -460,10 +460,10 @@ impl Lower<'_> {
             Pat::Lit(l) => {
                 let lit = match (&l.lit, t) {
                     (Lit::Int(_), Scalar::Int | Scalar::Inferred) => {
-                        emit!(__splice_builder.constant(#l))
+                        emit!(__splice_builder.constant(#l)?)
                     }
                     (Lit::Bool(_), Scalar::Bool | Scalar::Inferred) => {
-                        emit!(__splice_builder.constant(-i32::from(#l)))
+                        emit!(__splice_builder.constant(-i32::from(#l))?)
                     }
                     _ => return err(l, "pattern type differs from match subject"),
                 };
@@ -490,7 +490,7 @@ impl Lower<'_> {
                     pred = Some(self.bin(
                         "Ge",
                         emit!(__splice_subject),
-                        emit!(__splice_builder.constant(#v)),
+                        emit!(__splice_builder.constant(#v)?),
                     ));
                 }
                 if let Some(stop) = &r.end {
@@ -498,7 +498,7 @@ impl Lower<'_> {
                     let upper = self.bin(
                         cmp,
                         emit!(__splice_subject),
-                        emit!(__splice_builder.constant(#v)),
+                        emit!(__splice_builder.constant(#v)?),
                     );
                     pred = Some(match pred {
                         Some(lower) => self.bin("And", lower, upper),
@@ -520,7 +520,7 @@ fn result_slot(stage: Stage, lower: &Lower<'_>) -> (TokenStream, TokenStream) {
     if let Stage::Reg(t) = stage {
         let ty = t.value_type(lower.root, lower.types);
         (
-            emit!(let __splice_branch_result = __splice_builder.typed_local(#ty);),
+            emit!(let __splice_branch_result = __splice_builder.local(#ty)?;),
             emit!(__splice_branch_result),
         )
     } else {

@@ -1,5 +1,6 @@
 use splice::hir::{Binary, BufferKind, FunctionBuilder, Instr};
-use splice::{BufferArg, CallError, Codegen, Executable, Function, Trap, kernel};
+use splice::frontend::Signature;
+use splice::{Backend, BufferArg, CallError, Codegen, Executable, Function, Trap, kernel};
 
 /// This machine's `SPLICE_SIMD` target in the mode of this test build.
 fn options() -> splice::BuildOptions {
@@ -9,10 +10,10 @@ fn options() -> splice::BuildOptions {
 // A backend used only to inspect the IR handed off by build().
 struct Inspect(Function);
 
-impl Codegen for Inspect {
+impl Backend for Inspect {
     type Output = Self;
 
-    fn compile_raw(f: &Function) -> splice::Result<Self> {
+    fn compile_function(f: &Function, _: splice::BuildOptions) -> splice::Result<Self> {
         Ok(Self(f.clone()))
     }
 }
@@ -23,7 +24,7 @@ fn oversized_signature_is_rejected_by_the_portable_builder() {
         usize::MAX,
         &[],
         Box::new(|b| {
-            b.ret(b.arg(0));
+            b.ret(b.arg(0))?;
             Ok(())
         }),
     );
@@ -156,20 +157,19 @@ fn overlapping_reads(left: &[i32], right: &[i32], out: &mut [i32]) -> i32 {
 #[test]
 fn slice_parameters_expose_their_alias_contract() {
     struct InspectKinds;
-    impl Codegen for InspectKinds {
+    impl Backend for InspectKinds {
         type Output = Vec<BufferKind>;
 
-        fn compile_raw(_: &Function) -> splice::Result<Self::Output> {
+        fn compile_function(_: &Function, _: splice::BuildOptions) -> splice::Result<Self::Output> {
             panic!("expected direct staging")
         }
 
-        fn build_with_options(
-            _: usize,
-            kinds: &[BufferKind],
+        fn stage(
+            signature: Signature<'_>,
             _: splice::frontend::Body<'_>,
             _: splice::BuildOptions,
         ) -> splice::Result<Self::Output> {
-            Ok(kinds.to_vec())
+            Ok(signature.buffers.to_vec())
         }
     }
 
@@ -323,42 +323,42 @@ fn verification_rechecks_a_loop_after_a_delayed_predecessor() {
     let build = |initialize_delayed_arm| {
         let mut b = FunctionBuilder::new(options(), 2);
         for _ in 0..64 {
-            b.local();
+            b.local(ValueType::Scalar)?;
         }
-        let value = b.local();
-        let fast = b.label();
-        let delayed = b.label();
-        let delayed_tail = b.label();
-        let head = b.label();
-        let step = b.label();
-        let done = b.label();
-        b.branch(b.arg(0), fast, delayed);
+        let value = b.local(ValueType::Scalar)?;
+        let fast = b.label()?;
+        let delayed = b.label()?;
+        let delayed_tail = b.label()?;
+        let head = b.label()?;
+        let step = b.label()?;
+        let done = b.label()?;
+        b.branch(b.arg(0), fast, delayed)?;
 
-        b.mark(fast);
-        let seven = b.constant(7);
-        b.assign(value, seven);
-        b.jump(head);
-        b.mark(delayed);
-        b.jump(delayed_tail);
-        b.mark(delayed_tail);
+        b.mark(fast)?;
+        let seven = b.constant(7)?;
+        b.assign(value, seven)?;
+        b.jump(head)?;
+        b.mark(delayed)?;
+        b.jump(delayed_tail)?;
+        b.mark(delayed_tail)?;
         if initialize_delayed_arm {
-            let eleven = b.constant(11);
-            b.assign(value, eleven);
+            let eleven = b.constant(11)?;
+            b.assign(value, eleven)?;
         }
-        b.jump(head);
+        b.jump(head)?;
 
         // The fast arm reaches the header before the delayed predecessor.
-        b.mark(head);
-        b.branch(b.arg(1), step, done);
-        b.mark(step);
-        let one = b.constant(1);
-        let incremented = b.binary(Binary::Add, value, one);
-        let remaining = b.binary(Binary::Sub, b.arg(1), one);
-        b.assign(value, incremented);
-        b.assign(b.arg(1), remaining);
-        b.jump(head);
-        b.mark(done);
-        b.ret(value);
+        b.mark(head)?;
+        b.branch(b.arg(1), step, done)?;
+        b.mark(step)?;
+        let one = b.constant(1)?;
+        let incremented = b.binary(Binary::Add, value, one)?;
+        let remaining = b.binary(Binary::Sub, b.arg(1), one)?;
+        b.assign(value, incremented)?;
+        b.assign(b.arg(1), remaining)?;
+        b.jump(head)?;
+        b.mark(done)?;
+        b.ret(value)?;
         b.finish()
     };
 
@@ -380,7 +380,7 @@ fn verification_rechecks_a_loop_after_a_delayed_predecessor() {
 fn verification_resolves_jumps_even_in_unreachable_code() {
     let body = || {
         let mut b = FunctionBuilder::new(options(), 1);
-        b.ret(b.arg(0));
+        b.ret(b.arg(0))?;
         b
     };
     let mut dead_tail = body();
@@ -399,7 +399,7 @@ fn verification_resolves_jumps_even_in_unreachable_code() {
 mod directly_staged {
     use super::*;
     use splice::frontend::{Body, KernelBuilder};
-    use splice::hir::{Buffer, Label, Reg};
+    use splice::hir::{Buffer, Label, Reg, ValueType};
     struct Config<'a>(&'a i32);
 
     #[kernel]
@@ -422,21 +422,19 @@ mod directly_staged {
         bodies: usize,
         constants: Vec<i32>,
     }
-    impl Codegen for Trace {
+    impl Backend for Trace {
         type Output = Self;
-        fn compile_raw(_: &Function) -> splice::Result<Self> {
+        fn compile_function(_: &Function, _: splice::BuildOptions) -> splice::Result<Self> {
             panic!("direct build materialized portable IR")
         }
-        fn build_with_options(
-            arity: usize,
-            kinds: &[BufferKind],
+        fn stage(
+            signature: Signature<'_>,
             body: Body<'_>,
             _: splice::BuildOptions,
         ) -> splice::Result<Self> {
-            assert!(kinds.is_empty());
+            assert!(signature.buffers.is_empty());
             let mut builder = Self {
-                args: arity,
-                next_reg: arity as u32,
+                next_reg: signature.arity as u32,
                 bodies: 1,
                 ..Self::default()
             };
@@ -445,57 +443,61 @@ mod directly_staged {
         }
     }
     impl KernelBuilder for Trace {
-        fn arg(&self, index: usize) -> Reg {
-            assert!(index < self.args);
-            Reg(index as u32)
+        fn reg_type(&self, _: Reg) -> Option<ValueType> {
+            None
         }
-        fn local(&mut self) -> Reg {
+        fn local(&mut self, _: ValueType) -> splice::Result<Reg> {
             let r = Reg(self.next_reg);
             self.next_reg += 1;
-            r
+            Ok(r)
         }
-        fn constant(&mut self, n: i32) -> Reg {
+        fn constant(&mut self, n: i32) -> splice::Result<Reg> {
             self.constants.push(n);
-            self.local()
+            self.local(ValueType::Scalar)
         }
-        fn buffer_len(&mut self, _: Buffer) -> Reg {
+        fn buffer_len(&mut self, _: Buffer) -> splice::Result<Reg> {
             unreachable!()
         }
-        fn load(&mut self, _: Buffer, _: Reg) -> Reg {
+        fn load(&mut self, _: Buffer, _: Reg) -> splice::Result<Reg> {
             unreachable!()
         }
-        fn store(&mut self, _: Buffer, _: Reg, _: Reg) {
+        fn store(&mut self, _: Buffer, _: Reg, _: Reg) -> splice::Result<()> {
             unreachable!()
         }
-        fn binary(&mut self, _: Binary, _: Reg, _: Reg) -> Reg {
-            self.local()
+        fn binary(&mut self, _: Binary, _: Reg, _: Reg) -> splice::Result<Reg> {
+            self.local(ValueType::Scalar)
         }
-        fn assign(&mut self, _: Reg, _: Reg) {}
-        fn label(&mut self) -> Label {
+        fn assign(&mut self, _: Reg, _: Reg) -> splice::Result<()> {
+            Ok(())
+        }
+        fn label(&mut self) -> splice::Result<Label> {
             let l = Label(self.next_label);
             self.next_label += 1;
-            l
+            Ok(l)
         }
-        fn mark(&mut self, _: Label) {}
-        fn jump(&mut self, _: Label) {}
-        fn branch(&mut self, _: Reg, _: Label, _: Label) {
+        fn mark(&mut self, _: Label) -> splice::Result<()> {
+            Ok(())
+        }
+        fn jump(&mut self, _: Label) -> splice::Result<()> {
+            Ok(())
+        }
+        fn branch(&mut self, _: Reg, _: Label, _: Label) -> splice::Result<()> {
             unreachable!("comptime condition must be staged")
         }
-        fn ret(&mut self, _: Reg) {}
+        fn ret(&mut self, _: Reg) -> splice::Result<()> {
+            Ok(())
+        }
         fn call_kernel(
             &mut self,
-            arity: usize,
-            kinds: &[BufferKind],
-            args: &[Reg],
-            buffers: &[Buffer],
+            signature: Signature<'_>,
+            _: &[Reg],
+            _: &[Buffer],
             body: Body<'_>,
         ) -> splice::Result<Reg> {
-            assert_eq!(args.len(), arity);
-            assert_eq!(buffers.len(), kinds.len());
-            let child = Self::build(arity, kinds, body)?;
+            let child = Self::stage(signature, body, options())?;
             self.bodies += child.bodies;
             self.constants.extend(child.constants);
-            Ok(self.local())
+            self.local(ValueType::Scalar)
         }
     }
     #[test]

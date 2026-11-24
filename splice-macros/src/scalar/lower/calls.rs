@@ -201,7 +201,7 @@ impl Lower<'_> {
             let ordinary = self.import_result(p, &bound, cast, None);
             let kernel = staged_call(&bound);
             let boolean = if cast.is_some() {
-                self.bin("And", kernel.clone(), emit!(__splice_builder.constant(1)))
+                self.bin("And", kernel.clone(), emit!(__splice_builder.constant(1)?))
             } else {
                 kernel.clone()
             };

@@ -4,6 +4,7 @@
 
 mod buffer;
 mod builder;
+mod replay;
 mod simd;
 mod verify;
 pub use simd::{Simd, SimdOp, ValueType};
@@ -12,6 +13,7 @@ pub use buffer::{
     Buffer, BufferArg, BufferElement, BufferKind, check_forwarding, validate_buffers,
 };
 pub use builder::FunctionBuilder;
+pub use replay::replay;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -307,39 +309,6 @@ impl Instr {
             Self::Simd { inst, .. } => inst.op.may_trap(),
             _ => false,
         }
-    }
-
-    /// Registers the instruction reads, including those a source point saves.
-    fn reads(&self) -> impl Iterator<Item = Reg> + '_ {
-        let variables = match self {
-            Self::Debug(point) => point.variables.as_ref(),
-            _ => &[],
-        };
-        self.operands()
-            .chain(variables.iter().filter_map(|var| var.value.register()))
-    }
-
-    /// Registers whose values the instruction uses. A source point only
-    /// observes its variables, which need not be assigned on every path.
-    fn operands(&self) -> impl Iterator<Item = Reg> + '_ {
-        use std::slice::from_ref;
-        let (first, rest): (_, &[Reg]) = match self {
-            Self::Copy(_, r)
-            | Self::Return(r)
-            | Self::Branch { cond: r, .. }
-            | Self::Load { index: r, .. } => (None, from_ref(r)),
-            Self::Bin(_, _, a, b)
-            | Self::Store {
-                index: a, value: b, ..
-            } => (Some(*a), from_ref(b)),
-            Self::Call { args, .. }
-            | Self::RustCall { args, .. }
-            | Self::RustPacketCall { args, .. }
-            | Self::RustContextCall { args, .. }
-            | Self::Simd { args, .. } => (None, args),
-            _ => (None, &[]),
-        };
-        first.into_iter().chain(rest.iter().copied())
     }
 
     fn written(&self) -> Option<Reg> {

@@ -1,4 +1,4 @@
-use crate::lower::DebugSources;
+use crate::lower::DebugSource;
 use lancy::ScalarKernel;
 use splice_jit::gimli::write::{
     Address, CallFrameInstruction as Cfi, CommonInformationEntry, Expression,
@@ -13,7 +13,7 @@ pub(super) fn name(source: Option<&splice_core::frontend::KernelSource>) -> Stri
 
 pub(super) fn publish(
     code: &ScalarKernel,
-    sources: &DebugSources<'_>,
+    sources: &[DebugSource],
 ) -> splice_core::Result<splice_jit::Registration> {
     let mut frames = FrameTable::default();
     let (sp, ra, workspace) = if cfg!(target_arch = "x86_64") {
@@ -34,25 +34,23 @@ pub(super) fn publish(
     let address = code.code_address() as u64;
     let mut functions = Vec::new();
     for body in code.debug_functions() {
-        let &(source, _) = sources
+        let marker = sources
             .get(body.points[0].0 as usize)
             .expect("debug body marker");
         let mut function = splice_jit::Function {
-            name: name(source.source()),
+            name: name(marker.function),
             address: address + body.start,
             size: body.end - body.start,
             statements: Vec::new(),
         };
         for &(id, at) in &body.points {
-            if let Some(point) = sources[id as usize].1 {
-                let start = address + at;
+            if let Some((point, slots)) = &sources[id as usize].point {
                 function.statement(
-                    source,
                     point,
-                    start,
+                    slots.iter().copied(),
+                    address + at,
                     workspace.0,
                     body.workspace_offset as i64,
-                    code.target().vector_bytes(),
                 );
             }
         }

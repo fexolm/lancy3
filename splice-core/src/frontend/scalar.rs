@@ -31,11 +31,11 @@ pub trait RunArg {
     fn known(&self) -> Option<i32> {
         None
     }
-    fn reg(self, builder: &mut dyn KernelBuilder) -> Reg;
+    fn reg(self, builder: &mut dyn KernelBuilder) -> crate::Result<Reg>;
 }
 impl RunArg for Reg {
-    fn reg(self, _: &mut dyn KernelBuilder) -> Reg {
-        self
+    fn reg(self, _: &mut dyn KernelBuilder) -> crate::Result<Reg> {
+        Ok(self)
     }
 }
 /// A word whose stage becomes known when the selected declaration is resolved.
@@ -52,14 +52,14 @@ impl Word {
             .and_then(|(_, known)| *known)
             .map_or(Self::Runtime(reg), Self::Known)
     }
-    pub fn binary(self, op: Binary, rhs: Self, b: &mut dyn KernelBuilder) -> Self {
+    pub fn binary(self, op: Binary, rhs: Self, b: &mut dyn KernelBuilder) -> crate::Result<Self> {
         if let (Self::Known(a), Self::Known(z)) = (self, rhs)
             && let Ok(value) = op.checked_eval(a, z)
         {
-            return Self::Known(value);
+            return Ok(Self::Known(value));
         }
-        let (a, z) = (self.reg(b), rhs.reg(b));
-        Self::Runtime(b.binary(op, a, z))
+        let (a, z) = (self.reg(b)?, rhs.reg(b)?);
+        Ok(Self::Runtime(b.binary(op, a, z)?))
     }
 }
 
@@ -77,7 +77,7 @@ pub fn aggregate<T, const N: usize>(
     }
     if fields.iter().any(|field| matches!(field, Word::Runtime(_))) {
         for field in &mut fields {
-            *field = Word::Runtime(field.reg(builder));
+            *field = Word::Runtime(field.reg(builder)?);
         }
     }
     Ok(fields)
@@ -102,10 +102,10 @@ impl RunArg for Word {
             Self::Runtime(_) => None,
         }
     }
-    fn reg(self, b: &mut dyn KernelBuilder) -> Reg {
+    fn reg(self, b: &mut dyn KernelBuilder) -> crate::Result<Reg> {
         match self {
             Self::Known(x) => b.constant(x),
-            Self::Runtime(r) => r,
+            Self::Runtime(r) => Ok(r),
         }
     }
 }
@@ -144,7 +144,7 @@ impl RunArg for Host<bool> {
     fn known(&self) -> Option<i32> {
         Some(-i32::from(self.0))
     }
-    fn reg(self, b: &mut dyn KernelBuilder) -> Reg {
+    fn reg(self, b: &mut dyn KernelBuilder) -> crate::Result<Reg> {
         b.constant(-i32::from(self.0))
     }
 }
@@ -152,7 +152,7 @@ impl RunArg for Host<i32> {
     fn known(&self) -> Option<i32> {
         Some(self.0)
     }
-    fn reg(self, b: &mut dyn KernelBuilder) -> Reg {
+    fn reg(self, b: &mut dyn KernelBuilder) -> crate::Result<Reg> {
         b.constant(self.0)
     }
 }

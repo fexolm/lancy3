@@ -168,10 +168,10 @@ fn negative_and_past_end_indices_stop_before_the_first_store() {
 fn unrepresentable_callee_signature_returns_a_build_error() {
     let count = usize::from(u16::MAX) + 2;
     let mut callee = FunctionBuilder::new(options(), count);
-    callee.ret(callee.arg(0));
+    callee.ret(callee.arg(0))?;
     let mut root = FunctionBuilder::new(options(), 1);
-    let value = root.call(callee.finish().unwrap(), &vec![root.arg(0); count]);
-    root.ret(value);
+    let value = root.call(callee.finish().unwrap(), &vec![root.arg(0)?; count]);
+    root.ret(value)?;
     let result = Cranelift::compile(&root.finish().unwrap());
     assert!(
         matches!(result.err().unwrap(), splice_core::BuildError::Unsupported(feature) if feature.contains("too many parameters"))
@@ -181,8 +181,8 @@ fn unrepresentable_callee_signature_returns_a_build_error() {
 #[test]
 fn shared_callees_stack_arguments_and_backedges_outlive_the_ir() {
     let mut child = FunctionBuilder::new(options(), 8);
-    let next = child.binary(Binary::Add, child.arg(0), child.arg(7));
-    child.ret(next);
+    let next = child.binary(Binary::Add, child.arg(0), child.arg(7))?;
+    child.ret(next)?;
     let child = Arc::new(child.finish().unwrap());
 
     let mut f = FunctionBuilder::new(options(), 1);

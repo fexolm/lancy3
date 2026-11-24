@@ -94,10 +94,7 @@ impl<B: Codegen> CompileInput<B> for Function {
     type Output = B::Output;
     type Error = BuildError;
     fn compile_with(&self, options: Option<BuildOptions>) -> crate::Result<B::Output> {
-        match options {
-            Some(options) => B::compile_raw_with_options(self, options),
-            None => B::compile_raw(self),
-        }
+        B::compile_function(self, options.unwrap_or(self.options()))
     }
 }
 impl<S, B: Codegen> CompileInput<B> for TypedIr<S> {

@@ -77,7 +77,7 @@ impl Lower<'_> {
             Stage::Word(kind),
             emit!({
                 let (left,right)=(#left,#right);
-                left.binary(#op,right,__splice_builder)
+                left.binary(#op,right,__splice_builder)?
             }),
         ))
     }

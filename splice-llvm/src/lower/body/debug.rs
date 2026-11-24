@@ -1,43 +1,32 @@
 use super::{Body, Built, simd};
-use inkwell::values::{BasicValueEnum, PointerValue};
-use splice_core::{
-    Function, debug,
-    hir::{Instr, ValueType},
-};
+use inkwell::builder::Builder;
+use inkwell::values::BasicValueEnum;
+use splice_core::{debug, hir::ValueType};
 
 impl<'ctx> Body<'_, 'ctx> {
-    pub(super) fn debug_frame(&self, function: &Function) -> Built<PointerValue<'ctx>> {
-        let size = function
-            .instructions()
-            .iter()
-            .filter_map(|op| match op {
-                Instr::Debug(point) => {
-                    Some(point.storage_bytes(function, self.machine.vector_bytes))
-                }
-                _ => None,
-            })
-            .max()
-            .unwrap_or(0)
-            .max(1);
-        let size = self.ctx.i64_type().const_int(size as u64, false);
-        Ok(self
-            .builder
-            .build_array_alloca(self.ctx.i8_type(), size, "debug_values")?)
-    }
-
-    pub(super) fn debug_point(
+    /// Save the runtime variables of source point `ordinal` of function `id`
+    /// in a snapshot of their own, and mark the point with a stack map record.
+    pub(in crate::lower) fn debug_point(
         &self,
-        function: &Function,
-        point: &debug::Point,
-        frame: PointerValue<'ctx>,
+        allocas: &Builder<'ctx>,
+        slots: &[debug::Slot],
         id: usize,
-        index: usize,
+        ordinal: usize,
     ) -> Built<()> {
+        let size = slots
+            .last()
+            .map_or(0, |slot| slot.offset + slot.ty.storage_bytes())
+            .max(1);
+        self.position_in_entry(allocas);
+        let frame = allocas.build_array_alloca(
+            self.ctx.i8_type(),
+            self.ctx.i64_type().const_int(size as u64, false),
+            "debug_values",
+        )?;
         let b = self.builder;
         let save = |offset: usize, value: BasicValueEnum<'ctx>| -> Built<()> {
             let offset = self.ctx.i64_type().const_int(offset as u64, false);
-            // SAFETY: debug_frame reserves at least the largest verified
-            // point layout. The store fits in that allocation.
+            // SAFETY: the snapshot holds every slot of this point.
             let dst = unsafe { b.build_in_bounds_gep(self.ctx.i8_type(), frame, &[offset], "")? };
             let store = b.build_store(dst, value)?;
             store
@@ -46,8 +35,8 @@ impl<'ctx> Body<'_, 'ctx> {
             store.set_volatile(true).expect("a store can be volatile");
             Ok(())
         };
-        for (var, layout, offset) in point.slots(function, self.machine.vector_bytes) {
-            match var.value {
+        for slot in slots {
+            match slot.variable.value {
                 debug::Value::Register(reg, _) => {
                     let (ty, ptr) = self.registers[reg.0 as usize];
                     let value = b.build_load(
@@ -64,21 +53,21 @@ impl<'ctx> Body<'_, 'ctx> {
                         .into_vector_type();
                         b.build_int_s_extend(value.into_vector_value(), ty, "")?
                             .into()
-                    } else if matches!(layout, debug::Type::Scalar(debug::Scalar::Index)) {
+                    } else if matches!(slot.ty, debug::Type::Scalar(debug::Scalar::Index)) {
                         b.build_int_s_extend(value.into_int_value(), self.ctx.i64_type(), "")?
                             .into()
-                    } else if matches!(layout, debug::Type::Scalar(debug::Scalar::Bool)) {
+                    } else if matches!(slot.ty, debug::Type::Scalar(debug::Scalar::Bool)) {
                         // A DWARF bool is one byte holding 0 or 1.
                         b.build_and(value.into_int_value(), self.int(1), "")?.into()
                     } else {
                         value
                     };
-                    save(offset, value)?;
+                    save(slot.offset, value)?;
                 }
                 debug::Value::Slice(buffer) => {
                     let slice = self.slices[buffer.index()];
-                    save(offset, slice.data.into())?;
-                    save(offset + 8, slice.len.into())?;
+                    save(slot.offset, slice.data.into())?;
+                    save(slot.offset + 8, slice.len.into())?;
                 }
                 debug::Value::Constant(_) => unreachable!("only runtime values have slots"),
             }
@@ -89,7 +78,7 @@ impl<'ctx> Body<'_, 'ctx> {
         let id = self
             .ctx
             .i64_type()
-            .const_int((id as u64) << 32 | index as u64, false);
+            .const_int((id as u64) << 32 | ordinal as u64, false);
         let shadow = self
             .ctx
             .i32_type()

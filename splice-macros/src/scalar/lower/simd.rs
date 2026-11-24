@@ -198,7 +198,7 @@ impl Lower<'_> {
     fn offset(&self, v: Value, at: &Expr) -> Result<TokenStream> {
         if v.stage.is_host() {
             Ok(
-                emit!({let index:usize=#v; __splice_builder.constant(i32::try_from(index).unwrap_or(-1))}),
+                emit!({let index:usize=#v; __splice_builder.constant(i32::try_from(index).unwrap_or(-1))?}),
             )
         } else {
             self.reg(v, Scalar::Index, at)
@@ -310,7 +310,7 @@ impl Lower<'_> {
                         // Alignment depends only on low address bits, including for
                         // host offsets above the range representable by a JIT index.
                         let offset = if index.stage.is_host() {
-                            emit!({let index:usize=#index; __splice_builder.constant(index as i32)})
+                            emit!({let index:usize=#index; __splice_builder.constant(index as i32)?})
                         } else {
                             self.reg(index, Scalar::Index, &c.args[1])?
                         };

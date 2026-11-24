@@ -9,11 +9,9 @@ use inkwell::types::BasicTypeEnum;
 use inkwell::values::{BasicMetadataValueEnum, BasicValue, FunctionValue, IntValue, PointerValue};
 use inkwell::{IntPredicate, module::Module};
 use splice_core::hir::{
-    Binary, Buffer, BufferKind, ContextSlice, Instr, Label, Reg, RustContextTarget, ValueType,
+    Binary, Buffer, BufferKind, ContextSlice, Label, Reg, RustContextTarget, ValueType,
 };
-use splice_core::{ContextArguments, Function, Trap};
-use std::collections::HashMap;
-use std::sync::Arc;
+use splice_core::{ContextArguments, Trap};
 
 type Built<T> = Result<T, Error>;
 
@@ -25,11 +23,6 @@ pub(super) enum Error {
     /// The loaded LLVM does not provide this intrinsic for these types.
     #[error("LLVM does not provide {0}")]
     MissingIntrinsic(&'static str),
-}
-
-pub(super) struct Callees<'a, 'ctx> {
-    pub ids: &'a HashMap<*const Function, usize>,
-    pub declarations: &'a [FunctionValue<'ctx>],
 }
 
 #[derive(Clone, Copy)]
@@ -156,69 +149,23 @@ impl<'a, 'ctx> Body<'a, 'ctx> {
         })
     }
 
-    pub(super) fn emit(
-        unit: Unit<'a, 'ctx>,
-        builder: &'a Builder<'ctx>,
-        f: &Function,
-        function: FunctionValue<'ctx>,
-        callees: &Callees<'_, 'ctx>,
-        debug_id: Option<usize>,
-    ) -> Built<bool> {
-        let ctx = unit.ctx;
-        let mut body = Self::start(
-            unit,
-            builder,
-            function,
-            f.arity(),
-            (0..f.register_count()).map(|i| f.reg_type(Reg(i as u32))),
-            f.buffer_kinds(),
-        )?;
-        // A builder may allocate label IDs without marking or using them.
-        body.labels.resize(f.label_count(), None);
-        for op in f.instructions() {
-            if let Instr::Label(l) = op {
-                body.labels[l.0 as usize] = Some(ctx.append_basic_block(function, ""));
-            }
-        }
-        let mut open = true;
-        let snapshot = debug_id.map(|_| body.debug_frame(f)).transpose()?;
-        for (index, inst) in f.instructions().iter().enumerate() {
-            if let Instr::Label(l) = inst {
-                let block = body.block(*l);
-                if open {
-                    builder.build_unconditional_branch(block)?;
-                }
-                builder.position_at_end(block);
-                open = true;
-            } else if open && let Instr::Debug(point) = inst {
-                if let (Some(id), Some(snapshot)) = (debug_id, snapshot) {
-                    body.debug_point(f, point, snapshot, id, index)?;
-                }
-            } else if open {
-                body.instruction(inst, callees)?;
-                open = !inst.terminates();
-            }
-        }
-        // A dead block at the end of verified HIR may lack a terminator.
-        if open {
-            builder.build_unreachable()?;
-        }
-        Ok(body.static_rust_slice_operands())
-    }
-
     fn block(&self, label: Label) -> BasicBlock<'ctx> {
         self.labels[label.0 as usize].expect("verified jump target")
     }
 
-    pub(super) fn new_local(&mut self, allocas: &Builder<'ctx>, ty: ValueType) -> Built<Reg> {
-        // A second builder can insert slots in the entry even while emitting
-        // code for a loop or a guarded continuation in a different block.
+    /// A second builder can insert slots in the entry even while emitting
+    /// code for a loop or a guarded continuation in a different block.
+    fn position_in_entry(&self, allocas: &Builder<'ctx>) {
         let entry = self.function.get_first_basic_block().unwrap();
         if let Some(first) = entry.get_first_instruction() {
             allocas.position_before(&first);
         } else {
             allocas.position_at_end(entry);
         }
+    }
+
+    pub(super) fn new_local(&mut self, allocas: &Builder<'ctx>, ty: ValueType) -> Built<Reg> {
+        self.position_in_entry(allocas);
         let id = Reg(self.registers.len() as u32);
         self.registers.push((
             ty,
@@ -726,60 +673,6 @@ impl<'a, 'ctx> Body<'a, 'ctx> {
             self.builder
                 .build_int_truncate(value, self.ctx.i32_type(), "")?,
         )
-    }
-
-    fn instruction(&mut self, inst: &Instr, callees: &Callees<'_, 'ctx>) -> Built<()> {
-        match *inst {
-            Instr::Debug(_) => unreachable!("debug metadata is lowered at source points"),
-            Instr::Simd {
-                dst,
-                inst,
-                ref args,
-            } => self.simd(dst, inst, args),
-            Instr::Const(d, n) => self.constant(d, n),
-            Instr::Copy(d, v) => self.assign(d, v),
-            Instr::Bin(d, op, a, b) => self.arithmetic(d, op, a, b),
-            Instr::BufferLen { dst, buffer } => self.length(dst, buffer),
-            Instr::Load { dst, buffer, index } => self.read_element(dst, buffer, index),
-            Instr::Store {
-                buffer,
-                index,
-                value,
-            } => self.write_element(buffer, index, value),
-            Instr::Jump(l) => self.jump(l),
-            Instr::Branch { cond, yes, no } => self.branch(cond, yes, no),
-            Instr::Return(v) => self.ret(v),
-            Instr::TrapBounds => self.trap_bounds(),
-            Instr::RustCall {
-                dst,
-                import,
-                ref args,
-            } => self.rust_call(dst, import, args),
-            Instr::RustPacketCall {
-                dst,
-                import,
-                ref args,
-            } => self.rust_packet_call(dst, import, args),
-            Instr::RustContextCall {
-                dst,
-                target,
-                ref args,
-                ref slices,
-            } => self.rust_context_call(dst, target, args, slices),
-            Instr::Call {
-                dst,
-                ref function,
-                ref args,
-                ref buffers,
-            } => self.call_function(
-                dst,
-                callees.declarations[callees.ids[&Arc::as_ptr(function)]],
-                function.needs_status(),
-                args,
-                buffers,
-            ),
-            Instr::Label(_) => unreachable!("handled at block boundary"),
-        }
     }
 }
 

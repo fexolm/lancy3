@@ -284,7 +284,7 @@ fn expand(root: &Path, mut function: ItemFn, checks: Vec<Check>) -> Result<Token
     build_generics
         .make_where_clause()
         .predicates
-        .push(syn::parse_quote!(<__SpliceBackend as #root::Codegen>::Output: #root::ImportTarget));
+        .push(syn::parse_quote!(<__SpliceBackend as #root::Backend>::Output: #root::ImportTarget));
     let (build_decls, _, build_where) = build_generics.split_for_impl();
     let args: Vec<_> = sig
         .generics
@@ -296,7 +296,7 @@ fn expand(root: &Path, mut function: ItemFn, checks: Vec<Check>) -> Result<Token
             _ => None,
         })
         .collect();
-    let mut output_type = emit!(<<__SpliceBackend as #root::Codegen>::Output as #root::ImportTarget>::Linked<#marker, #environment_type>);
+    let mut output_type = emit!(<<__SpliceBackend as #root::Backend>::Output as #root::ImportTarget>::Linked<#marker, #environment_type>);
     let invocation = if opaque_result {
         output_type = emit!(OpaqueKernel<#output_type>);
         opaque::Interface {

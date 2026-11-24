@@ -1237,7 +1237,7 @@ fn verifier_checks_vector_mask_and_buffer_element_types() {
     };
     let mut b =
         FunctionBuilder::with_buffers(options(), 0, vec![BufferKind::new(Element::F32, false)]);
-    let offset = b.constant(0);
+    let offset = b.constant(0)?;
     let f = b
         .simd(
             Simd {
@@ -1255,7 +1255,7 @@ fn verifier_checks_vector_mask_and_buffer_element_types() {
     ] {
         assert!(b.simd(Simd { element, op }, &args).is_err());
     }
-    b.ret(f);
+    b.ret(f)?;
     assert!(b.finish().is_err());
 }
 

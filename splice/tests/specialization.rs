@@ -145,11 +145,11 @@ fn retry(root: &mut dyn splice::frontend::KernelBuilder) -> splice::Result<()> {
                 &[],
                 Box::new(|_| panic!("restaged a completed callee")),
             )?;
-            b.ret(reused);
+            b.ret(reused)?;
             Ok(())
         }),
     )?;
-    root.ret(result);
+    root.ret(result)?;
     Ok(())
 }
 #[test]
@@ -170,9 +170,9 @@ fn invalid_arguments_are_rejected_before_staging_or_reusing_a_callee()
 
     fn stage(root: &mut dyn KernelBuilder) -> splice::Result<()> {
         struct Child;
-        let arg = root.arg(0);
-        let vector = root.typed_local(ValueType::Vector(Element::I32));
-        let mask = root.typed_local(ValueType::Mask(Element::I32));
+        let arg = root.arg(0)?;
+        let vector = root.local(ValueType::Vector(Element::I32))?;
+        let mask = root.local(ValueType::Mask(Element::I32))?;
         fn unexpected(_: &mut dyn KernelBuilder) -> splice::Result<()> {
             panic!("staged an invalid call")
         }
@@ -209,7 +209,7 @@ fn invalid_arguments_are_rejected_before_staging_or_reusing_a_callee()
             &[arg],
             &shared,
             Box::new(|child| {
-                child.ret(child.arg(0));
+                child.ret(child.arg(0))?;
                 Ok(())
             }),
         )?;
@@ -217,7 +217,7 @@ fn invalid_arguments_are_rejected_before_staging_or_reusing_a_callee()
             root.call_specialized(key(), &[mask], &shared, Box::new(unexpected))
                 .is_err()
         );
-        root.ret(result);
+        root.ret(result)?;
         Ok(())
     }
     let kinds = [BufferKind::Read, BufferKind::Write];
