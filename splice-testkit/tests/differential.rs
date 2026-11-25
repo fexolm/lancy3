@@ -307,6 +307,60 @@ fn every_scalar_type_passes_into_and_out_of_the_entry_at_its_position() {
     }
 }
 
+/// The shared call path describes up to 8 slices on the stack and more on
+/// the heap, and Lancy packs up to 32 words on the stack: each slice and
+/// the scalar must arrive at its position on every side of both limits.
+#[test]
+fn every_slice_count_reaches_the_kernel_at_its_position() {
+    for count in [0, 1, 8, 9, 15, 16, 17] {
+        let kinds = vec![BufferKind::new(Element::I32, count % 2 == 0); count];
+        let kinds: &'static [BufferKind] = Box::leak(kinds.into_boxed_slice());
+        let stage: Stage = Rc::new(move |b| {
+            // `arg(0) + Σ (i + 1)·xs_i[i]`, stored in the last writable slice.
+            let mut total = b.arg(0)?;
+            for i in 0..count {
+                let at = b.constant(Constant::from(i))?;
+                let x = b.load(Buffer(i as u32), at)?;
+                let weight = b.constant(Constant::from(i as i32 + 1))?;
+                let x = b.binary(Binary::Mul, x, weight)?;
+                total = b.binary(Binary::Add, total, x)?;
+            }
+            if let Some(last) = (0..count).rev().find(|i| kinds[*i].writable()) {
+                let at = b.constant(Constant::from(0usize))?;
+                b.store(Buffer(last as u32), at, total)?;
+            }
+            b.ret(total)
+        });
+        let data: Vec<Vec<i32>> = (0..count)
+            .map(|i| (0..count as i32).map(|k| 10 * i as i32 + k).collect())
+            .collect();
+        let seen = agree(
+            &format!("{count} slices"),
+            Signature::new(&[ScalarType::I32], ScalarType::I32, kinds),
+            &stage,
+            |call| {
+                let mut data = data.clone();
+                let mut buffers: Vec<BufferArg<'_>> = data
+                    .iter_mut()
+                    .zip(kinds)
+                    .map(|(xs, kind)| {
+                        if kind.writable() {
+                            BufferArg::write(xs.as_mut_slice())
+                        } else {
+                            BufferArg::read(xs.as_slice())
+                        }
+                    })
+                    .collect();
+                let result = show_word(ScalarType::I32, call(&[7], &mut buffers));
+                drop(buffers);
+                vec![result, format!("{data:?}")]
+            },
+        );
+        let total = (0..count).fold(7i32, |t, i| t + (i as i32 + 1) * data[i][i]);
+        assert_eq!(seen[0], show(Constant::from(total)), "{count} slices");
+    }
+}
+
 /// Two parameters of one type combine natively into a result of that type
 /// (`Add`, or `Xor` for `bool`), against `checked_eval`.
 #[test]

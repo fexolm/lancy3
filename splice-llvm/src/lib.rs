@@ -17,10 +17,9 @@ mod target;
 mod aarch64_tests;
 
 use inkwell::{context::Context, module::Module, targets::TargetMachine};
+use splice_core::call::{Entry, Interface, SliceDescriptor, enter_native};
 use splice_core::frontend::Signature;
-use splice_core::{
-    Backend, BufferArg, BufferKind, BuildOptions, CallError, Executable, Function, Trap,
-};
+use splice_core::{Backend, BuildOptions, CallError, Executable, Function};
 
 /// In-process LLVM code generator.
 pub struct Llvm;
@@ -106,30 +105,12 @@ pub fn to_llvm_ir(
     .to_string())
 }
 
-#[repr(C)]
-struct Descriptor {
-    data: *mut u8,
-    len: usize,
-}
-
-const _: () = {
-    assert!(std::mem::offset_of!(Descriptor, len) == 8);
-    assert!(std::mem::size_of::<Descriptor>() == 16);
-};
-
-type Entry = unsafe extern "C" fn(*const u64, *const Descriptor, *mut u32) -> u64;
-
 /// Owns the LLVM session and the executable kernel it compiled.
 pub struct LlvmKernel {
     _debug: Option<splice_jit::Registration>,
     _owner: jit::Jit,
     entry: Entry,
-    params: Box<[splice_core::hir::ScalarType]>,
-    buffers: Box<[BufferKind]>,
-    target: splice_core::Target,
-    /// Compiled for SVE on a power-of-two vector length; see
-    /// `target::scalable`.
-    scalable: bool,
+    interface: Interface,
 }
 
 impl Backend for Llvm {
@@ -213,43 +194,27 @@ impl LlvmKernel {
             _debug: registration,
             _owner: owner,
             entry,
-            params: signature.params.into(),
-            buffers: signature.buffers.into(),
-            target: options.target,
-            scalable: target::Machine::new(&options.target).scalable,
+            // Code compiled for SVE on a power-of-two vector length uses
+            // scalable vectors; see `target::scalable`.
+            interface: Interface::new(signature).with_thread_vector_length(
+                options.target,
+                target::Machine::new(&options.target).scalable,
+            ),
         })
     }
 }
 
-impl Executable for LlvmKernel {
-    fn call(&self, args: &[u64], buffers: &mut [BufferArg<'_>]) -> Result<u64, CallError> {
-        // SVE code needs the calling thread's vector length to match.
-        if self.target.sve() {
-            self.target.check_execution()?;
-            if self.scalable && !target::scalable(&self.target) {
-                return Err(splice_core::TargetError::VectorLengthNotPowerOfTwo.into());
-            }
-        }
-        splice_core::validate_scalars(&self.params, args)?;
-        splice_core::validate_buffers(&self.buffers, buffers)?;
-        let descriptors: Vec<_> = buffers
-            .iter_mut()
-            .map(|buffer| Descriptor {
-                data: buffer.data(),
-                len: buffer.len(),
-            })
-            .collect();
-        let mut status = 0;
+// SAFETY: `entry` is the code ORC compiled for `interface`, alive as long
+// as `_owner`.
+unsafe impl Executable for LlvmKernel {
+    fn interface(&self) -> &Interface {
+        &self.interface
+    }
+
+    unsafe fn enter(&self, words: &[u64], slices: &[SliceDescriptor]) -> Result<u64, CallError> {
         // SAFETY: the target emits the host C ABI (Windows x64, SysV x64 or
-        // AAPCS64). ORC owns the code for this borrow. Descriptors refer to
-        // live slices or exclusively borrowed Rust contexts. Lowering checks
-        // permissions, element indices, and context descriptor kinds.
-        let result = unsafe { (self.entry)(args.as_ptr(), descriptors.as_ptr(), &mut status) };
-        match status {
-            0 => Ok(result),
-            // Native code stores only trap codes.
-            code => Err(Trap::from_code(code).unwrap_or(Trap::Abi).into()),
-        }
+        // AAPCS64), and the caller's contract covers the arrays.
+        unsafe { enter_native(self.entry, words, slices) }
     }
 }
 
@@ -257,7 +222,7 @@ impl Executable for LlvmKernel {
 mod tests {
     use super::*;
     use splice_core::hir::{Constant, ScalarType};
-    use splice_core::{Codegen, KernelScalar};
+    use splice_core::{BufferArg, BufferKind, Codegen, KernelScalar, Trap};
 
     fn options() -> BuildOptions {
         BuildOptions::host(splice_core::Mode::Release).unwrap()

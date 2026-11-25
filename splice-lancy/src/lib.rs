@@ -4,9 +4,9 @@ mod lower;
 
 use lancy::ScalarKernel;
 pub use lower::lower;
+use splice_core::call::{Interface, SliceDescriptor};
 use splice_core::frontend::{Body, Signature};
-use splice_core::hir::{Constant, ScalarType};
-use splice_core::{Backend, BufferArg, BuildOptions, CallError, Executable, Function, Trap};
+use splice_core::{Backend, BuildOptions, CallError, Executable, Function, Trap};
 
 /// Compile Splice kernels through Lancy's SSA HIR and host backend.
 pub struct Lancy;
@@ -42,9 +42,7 @@ impl Backend for Lancy {
 pub struct LancyKernel {
     _debug: Option<splice_jit::Registration>,
     code: ScalarKernel,
-    params: Box<[ScalarType]>,
-    result: ScalarType,
-    slices: Box<[splice_core::BufferKind]>,
+    interface: Interface,
 }
 
 impl LancyKernel {
@@ -86,36 +84,47 @@ impl LancyKernel {
         Ok(Self {
             _debug: registration,
             code,
-            params: signature.params.into(),
-            result: signature.result,
-            slices: signature.buffers.into(),
+            interface: Interface::new(signature),
         })
     }
 }
 
-impl Executable for LancyKernel {
-    fn call(&self, args: &[u64], buffers: &mut [BufferArg<'_>]) -> Result<u64, CallError> {
-        splice_core::validate_scalars(&self.params, args)?;
-        splice_core::validate_buffers(&self.slices, buffers)?;
-        // Lancy reads a narrow scalar from the low bits of its word and may
-        // leave the high bits of a narrow result undefined.
-        let result = |word| Constant::new(self.result, word).bits();
-        if self.slices.is_empty() && !self.code.requires_raw_call() {
+/// Words of a call whose arguments Lancy receives on the stack.
+const INLINE_WORDS: usize = 32;
+
+// SAFETY: `enter` runs the code compiled for `interface`, and Lancy checks
+// the calling thread's target itself.
+unsafe impl Executable for LancyKernel {
+    fn interface(&self) -> &Interface {
+        &self.interface
+    }
+
+    unsafe fn enter(&self, words: &[u64], slices: &[SliceDescriptor]) -> Result<u64, CallError> {
+        if slices.is_empty() && !self.code.requires_raw_call() {
             let mut word = [0];
-            self.code.call_words(args, &mut word).map_err(call_error)?;
-            return Ok(result(word[0]));
+            self.code.call_words(words, &mut word).map_err(call_error)?;
+            return Ok(word[0]);
         }
-        let mut words = Vec::with_capacity(args.len() + 2 * buffers.len());
-        words.extend_from_slice(args);
-        for slice in buffers {
-            words.extend([slice.data() as u64, slice.len() as u64]);
+        // Lancy takes the scalars followed by each slice's address and length.
+        let count = words.len() + 2 * slices.len();
+        let mut inline = [0; INLINE_WORDS];
+        let mut heap = Vec::new();
+        let packed = if count <= INLINE_WORDS {
+            &mut inline[..count]
+        } else {
+            heap.resize(count, 0);
+            &mut heap[..]
+        };
+        let (scalars, pairs) = packed.split_at_mut(words.len());
+        scalars.copy_from_slice(words);
+        for (pair, slice) in pairs.as_chunks_mut::<2>().0.iter_mut().zip(slices) {
+            *pair = [slice.data as u64, slice.len];
         }
-        // SAFETY: The validated descriptors supply live slices and exclusive
-        // Rust contexts. Both Splice lowering paths check permissions and use
-        // native call scratch only for initialized, shape-checked packets.
-        unsafe { self.code.call_raw(&words) }
-            .map(result)
-            .map_err(call_error)
+        // SAFETY: the caller's contract: the descriptors supply live slices
+        // and exclusive Rust contexts. Both Splice lowering paths check
+        // permissions and use native call scratch only for initialized,
+        // shape-checked packets.
+        unsafe { self.code.call_raw(packed) }.map_err(call_error)
     }
 }
 

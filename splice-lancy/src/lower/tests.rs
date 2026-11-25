@@ -510,9 +510,7 @@ fn lowered_call_graphs_retain_slice_contracts_for_out_of_line_calls() {
                     .with_inlining(Inlining::Never),
             )
             .unwrap(),
-            params: ir.params().into(),
-            result: ir.result(),
-            slices: ir.buffer_kinds().into(),
+            interface: splice_core::call::Interface::new(ir.signature()),
         }
     }
     for guard in [false, true] {

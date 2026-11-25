@@ -1,4 +1,3 @@
-use crate::Descriptor;
 use cranelift_codegen::ir::{
     DebugTag, FuncRef, InstBuilder, MemFlags, StackSlot, StackSlotData, StackSlotKind, TrapCode,
     Type, Value,
@@ -8,6 +7,7 @@ use cranelift_codegen::ir::{
 };
 use cranelift_frontend::{FunctionBuilder, Variable};
 use splice_core::Trap;
+use splice_core::call::SliceDescriptor;
 use splice_core::hir::{
     Binary, Constant, ContextSlice, Instr, Reg, RustContextTarget, ScalarType, ValueType,
 };
@@ -125,8 +125,8 @@ fn parameters(
     }
     let [scalars, descriptors, result] = b.block_params(entry).try_into().unwrap();
     let mut params = Vec::new();
-    // Executable::call checks both array lengths and every word, and
-    // constructs repr(C) descriptors. A word holds its value in the low
+    // `Executable::call` checks both array lengths and every word, and
+    // constructs the descriptors. A word holds its value in the low
     // bytes (the hosts are little-endian), so it loads at the value's type.
     let flags = MemFlags::trusted();
     for (i, &ty) in f.params().iter().enumerate() {
@@ -136,14 +136,15 @@ fn parameters(
     for i in 0..f.buffer_kinds().len() {
         let addr = b
             .ins()
-            .iadd_imm(descriptors, (i * size_of::<Descriptor>()) as i64);
+            .iadd_imm(descriptors, (i * size_of::<SliceDescriptor>()) as i64);
         params.push(
             b.ins()
-                .load(I64, flags, addr, offset_of!(Descriptor, data) as i32),
+                .load(I64, flags, addr, offset_of!(SliceDescriptor, data) as i32),
         );
+        // A length is at most `i32::MAX`: its low half, on little-endian hosts.
         params.push(
             b.ins()
-                .load(I32, flags, addr, offset_of!(Descriptor, len) as i32),
+                .load(I32, flags, addr, offset_of!(SliceDescriptor, len) as i32),
         );
     }
     // The caller zeroes the result word, so storing the value at its type

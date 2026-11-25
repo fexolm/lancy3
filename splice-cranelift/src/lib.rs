@@ -13,11 +13,8 @@ mod module;
 
 use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{Module, default_libcall_names};
-use splice_core::{
-    Backend, BufferArg, BufferKind, BuildOptions, CallError, Executable, Function, Result,
-    hir::ScalarType,
-};
-use splice_target::abi::decode_status;
+use splice_core::call::{Entry, Interface, SliceDescriptor, enter_native};
+use splice_core::{Backend, BuildOptions, CallError, Executable, Function, Result};
 use std::sync::Mutex;
 
 /// Compile a specialized kernel or a portable Splice function with Cranelift.
@@ -125,17 +122,6 @@ fn isa_flags(target: &splice_core::Target) -> Vec<(&'static str, bool)> {
     ]
 }
 
-#[repr(C)]
-struct Descriptor {
-    data: *mut u8,
-    len: i32,
-}
-
-/// Every function returns a status (see [`splice_core::Trap::status`]), so a callee's
-/// status forwards through any number of calls without losing a result. The
-/// entry writes its result word to the third argument.
-type Entry = unsafe extern "C" fn(*const u64, *const Descriptor, *mut u64) -> i64;
-
 struct CodeMemory(Option<JITModule>);
 
 impl Drop for CodeMemory {
@@ -155,8 +141,7 @@ pub struct CraneliftKernel {
     // Concurrent calls use the immutable machine code without taking a lock.
     _memory: Mutex<CodeMemory>,
     entry: Entry,
-    params: Box<[ScalarType]>,
-    buffers: Box<[BufferKind]>,
+    interface: Interface,
 }
 
 impl Backend for Cranelift {
@@ -195,43 +180,35 @@ impl Backend for Cranelift {
         )?;
         let address = module.get_finalized_function(id);
         let registration = debug_info::publish(module, symbols, target.vector_bytes(), debug)?;
-        // SAFETY: KernelModule declares the entry with the host C calling convention,
-        // three pointer parameters and an i64 return. The kernel owns its module.
+        // SAFETY: KernelModule declares the entry with the host C calling
+        // convention, three pointer parameters and an i64 status return
+        // (`splice_core::call::Entry`). The kernel owns its module.
         let entry = unsafe { std::mem::transmute::<*const u8, Entry>(address) };
         Ok(CraneliftKernel {
             _debug: registration,
             _memory: Mutex::new(memory),
             entry,
-            params: function.params().into(),
-            buffers: function.buffer_kinds().into(),
+            interface: Interface::new(function.signature()),
         })
     }
 }
 
-impl Executable for CraneliftKernel {
-    fn call(
+// SAFETY: `entry` is the code compiled for `interface`, alive as long as
+// `_memory`. Every function returns a status (see `Trap::status`), so a
+// callee's status forwards through any number of calls.
+unsafe impl Executable for CraneliftKernel {
+    fn interface(&self) -> &Interface {
+        &self.interface
+    }
+
+    unsafe fn enter(
         &self,
-        args: &[u64],
-        buffers: &mut [BufferArg<'_>],
+        words: &[u64],
+        slices: &[SliceDescriptor],
     ) -> std::result::Result<u64, CallError> {
-        splice_core::validate_scalars(&self.params, args)?;
-        splice_core::validate_buffers(&self.buffers, buffers)?;
-        let descriptors: Vec<_> = buffers
-            .iter_mut()
-            .map(|buffer| Descriptor {
-                len: buffer.len() as i32,
-                data: buffer.data(),
-            })
-            .collect();
-        // SAFETY: The signature check covers both input arrays, and their
-        // buffers and Rust contexts stay borrowed throughout the call. Verified
-        // HIR checks descriptor kinds and permissions, and lowering guards indices.
-        // The entry writes at most the 8 bytes of the local result word.
-        let mut result = 0;
-        let status = unsafe { (self.entry)(args.as_ptr(), descriptors.as_ptr(), &mut result) };
-        decode_status(status)
-            .map(|_| result)
-            .map_err(CallError::from)
+        // SAFETY: the caller's contract covers both arrays; the entry writes
+        // at most the result word.
+        unsafe { enter_native(self.entry, words, slices) }
     }
 }
 

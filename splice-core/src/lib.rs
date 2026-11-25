@@ -4,6 +4,9 @@
 
 extern crate self as splice;
 
+#[allow(unsafe_code)]
+pub mod call;
+pub use call::Executable;
 pub mod debug;
 pub mod frontend;
 pub mod hir;
@@ -146,40 +149,6 @@ pub trait Codegen: Backend {
 
 impl<B: Backend> Codegen for B {}
 
-/// [`Executable::call`] passes `i32` words: the entry's scalars must fit one.
-/// The portable calling convention. Scalars and slices have separate
-/// argument lists, each following declaration order. Each scalar argument
-/// and the result is one word holding the value's [`Constant::bits`]: see
-/// [`KernelScalar`] for the encoding. An error stops execution; completed
-/// stores remain visible to the caller.
-pub trait Executable {
-    fn call(
-        &self,
-        args: &[u64],
-        buffers: &mut [BufferArg<'_>],
-    ) -> std::result::Result<u64, CallError>;
-}
-
-impl<E: Executable + ?Sized> Executable for &E {
-    fn call(
-        &self,
-        args: &[u64],
-        buffers: &mut [BufferArg<'_>],
-    ) -> std::result::Result<u64, CallError> {
-        (**self).call(args, buffers)
-    }
-}
-
-impl<E: Executable + ?Sized> Executable for Box<E> {
-    fn call(
-        &self,
-        args: &[u64],
-        buffers: &mut [BufferArg<'_>],
-    ) -> std::result::Result<u64, CallError> {
-        (**self).call(args, buffers)
-    }
-}
-
 /// A Rust type of a kernel scalar and its ABI word: the value's bits in the
 /// low `TYPE.bits()` bits and zero above (`bool` is 0 or 1, a float its IEEE
 /// bit pattern).
@@ -216,6 +185,7 @@ kernel_scalar! {
 /// Check scalar words against the parameter types before a call: every
 /// backend reads a word at its type's width, so a word with bits above its
 /// value would mean different values to different backends.
+#[inline]
 pub fn validate_scalars(
     params: &[ScalarType],
     args: &[u64],

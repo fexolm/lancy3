@@ -186,6 +186,7 @@ impl BufferArg<'_> {
 }
 
 /// Check arity, mutability and representable slice lengths before entering native code.
+#[inline]
 pub fn validate_buffers(
     kinds: &[BufferKind],
     args: &[BufferArg<'_>],

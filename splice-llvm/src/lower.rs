@@ -98,7 +98,11 @@ fn emit_entry<'ctx>(
     let mut params = entry.get_param_iter();
     let scalars = params.next().unwrap().into_pointer_value();
     let descriptors = params.next().unwrap().into_pointer_value();
-    let status = params.next().unwrap();
+    let result_word = params.next().unwrap().into_pointer_value();
+    // Kernel functions store a trap code through the status pointer.
+    let i32_ty = ctx.i32_type();
+    let status = b.build_alloca(i32_ty, "status")?;
+    b.build_store(status, i32_ty.const_zero())?;
     let mut args = vec![status.into()];
     for (i, &ty) in signature.params.iter().enumerate() {
         let index = i64_ty.const_int(i as u64, false);
@@ -118,7 +122,13 @@ fn emit_entry<'ctx>(
         args.push(b.build_load(i64_ty, len, "")?.into());
     }
     let result = call(b, root, &args)?;
-    b.build_return(Some(&to_word(ctx, b, result, signature.result)?))?;
+    b.build_store(result_word, to_word(ctx, b, result, signature.result)?)?;
+    // The status of `splice_core::call::Entry`: the trap code in the upper
+    // word (see `Trap::status`).
+    let code = b.build_load(i32_ty, status, "")?.into_int_value();
+    let code = b.build_int_z_extend(code, i64_ty, "")?;
+    let status = b.build_left_shift(code, i64_ty.const_int(32, false), "")?;
+    b.build_return(Some(&status))?;
     Ok(())
 }
 

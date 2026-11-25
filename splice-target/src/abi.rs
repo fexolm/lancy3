@@ -85,6 +85,7 @@ impl std::error::Error for Trap {}
 
 /// The result word of a successful status, or its trap. An unknown code
 /// can only come from a broken native caller and reads as [`Trap::Abi`].
+#[inline]
 pub const fn decode_status(status: i64) -> Result<u32, Trap> {
     let code = (status as u64 >> 32) as u32;
     if code == 0 {
