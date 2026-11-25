@@ -9,7 +9,7 @@ use inkwell::{
 };
 use splice_core::Trap;
 use splice_core::{
-    hir::{Reg, ScalarType, Simd, SimdOp, ValueType},
+    hir::{Access, Reg, ScalarType, Simd, SimdOp, ValueType},
     simd::Element,
 };
 
@@ -562,7 +562,6 @@ impl<'ctx> Body<'_, 'ctx> {
         inst: Simd,
         args: &[Reg],
     ) -> Built<Option<VectorValue<'ctx>>> {
-        use SimdOp::*;
         use inkwell::values::BasicMetadataValueEnum;
         let e = inst.element;
         let ir = self.builder;
@@ -570,18 +569,9 @@ impl<'ctx> Body<'_, 'ctx> {
         let ty = vector_type(self.ctx, self.machine.vector_bytes, e);
         let count = ty.get_size();
         let wide = self.ctx.i64_type();
-        let indexed = matches!(
-            inst.op,
-            Gather(_) | GatherSelect(_) | Scatter(_) | ScatterSelect(_)
-        );
-        let masked = matches!(
-            inst.op,
-            LoadSelect(_) | StoreSelect(_) | GatherSelect(_) | ScatterSelect(_)
-        );
-        let store = matches!(
-            inst.op,
-            Store(_) | StoreSelect(_) | Scatter(_) | ScatterSelect(_)
-        );
+        let memory = inst.op.info().memory.expect("a vector memory operation");
+        let (indexed, masked) = (memory.indexed, memory.masked);
+        let store = memory.access == Access::Write;
         let active = if masked {
             self.vector(args[1])?
         } else {

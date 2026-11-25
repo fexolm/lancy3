@@ -47,15 +47,8 @@ impl Builder<'_> {
         }
         let mut vs: Vec<_> = args.iter().map(|&r| self.read(r)).collect();
         let e = inst.element;
-        if matches!(
-            inst.op,
-            Load(_)
-                | Store(_)
-                | LoadSelect(_)
-                | StoreSelect(_)
-                | CompressStore(_)
-                | AlignmentPrefix(_)
-        ) {
+        let memory = inst.op.info().memory;
+        if memory.is_some_and(|memory| !memory.indexed) {
             // A memory offset, in bounds only below a slice length.
             vs[0] = self.index32(vs[0]);
         }
@@ -104,18 +97,9 @@ impl Builder<'_> {
             }
             Load(b) | Store(b) | LoadSelect(b) | StoreSelect(b) | Gather(b) | GatherSelect(b)
             | Scatter(b) | ScatterSelect(b) => {
-                let write = matches!(
-                    inst.op,
-                    Store(_) | StoreSelect(_) | Scatter(_) | ScatterSelect(_)
-                );
-                let indexed = matches!(
-                    inst.op,
-                    Gather(_) | GatherSelect(_) | Scatter(_) | ScatterSelect(_)
-                );
-                let masked = matches!(
-                    inst.op,
-                    LoadSelect(_) | StoreSelect(_) | GatherSelect(_) | ScatterSelect(_)
-                );
+                let memory = memory.expect("a vector memory operation");
+                let write = memory.access == splice_core::hir::Access::Write;
+                let (indexed, masked) = (memory.indexed, memory.masked);
                 let (base, len) = self.slice(b);
                 let result = if !indexed && !masked {
                     self.contiguous(e, base, len, vs[0], vs.get(1).copied())

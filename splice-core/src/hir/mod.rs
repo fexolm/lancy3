@@ -8,7 +8,7 @@ mod replay;
 mod simd;
 mod types;
 mod verify;
-pub use simd::{Simd, SimdOp, ValueType};
+pub use simd::{Access, Elements, Memory, OpInfo, Simd, SimdOp, Slot, ValueType};
 pub use types::{Constant, ScalarType};
 
 pub use buffer::{

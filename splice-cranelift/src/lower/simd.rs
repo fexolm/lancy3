@@ -124,18 +124,9 @@ pub(super) fn emit(
         Load(buf) | Store(buf) | LoadSelect(buf) | StoreSelect(buf) | Gather(buf)
         | GatherSelect(buf) | Scatter(buf) | ScatterSelect(buf) => {
             let [data, len] = buffers[buf.index()];
-            let indexed = matches!(
-                inst.op,
-                Gather(_) | GatherSelect(_) | Scatter(_) | ScatterSelect(_)
-            );
-            let masked = matches!(
-                inst.op,
-                LoadSelect(_) | StoreSelect(_) | GatherSelect(_) | ScatterSelect(_)
-            );
-            let write = matches!(
-                inst.op,
-                Store(_) | StoreSelect(_) | Scatter(_) | ScatterSelect(_)
-            );
+            let memory = inst.op.info().memory.expect("a vector memory operation");
+            let (indexed, masked) = (memory.indexed, memory.masked);
+            let write = memory.access == splice_core::hir::Access::Write;
             let address = if indexed {
                 Address::Indexed(&inputs[0])
             } else {
