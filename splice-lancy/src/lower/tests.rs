@@ -717,3 +717,35 @@ fn index_guard_on_a_slice_length_compares_the_i32_length() {
     assert_eq!(lhs, len);
     assert_eq!(graph.value_type(rhs), hir::Type::I32);
 }
+
+/// An `Index` that reaches a block through a parameter keeps its `i32`
+/// form: the load in the join indexes with that form instead of clamping
+/// the 64-bit parameter again (`simd_matmul` paid a `min` + `cast` per use).
+#[test]
+fn index_parameters_carry_their_i32_form_across_blocks() {
+    fn body(b: &mut dyn KernelBuilder) -> splice_core::Result<()> {
+        let index = b.cast(b.arg(0)?, ScalarType::Index)?;
+        let zero = b.constant(Constant::from(0))?;
+        let positive = b.binary(Binary::Gt, b.arg(0)?, zero)?;
+        let (left, right, join) = (b.label()?, b.label()?, b.label()?);
+        b.branch(positive, left, right)?;
+        b.mark(left)?;
+        b.jump(join)?;
+        b.mark(right)?;
+        b.jump(join)?;
+        b.mark(join)?;
+        let value = b.load(Buffer(0), index)?;
+        b.ret(value)
+    }
+    let graph = build(
+        Signature::new(&[ScalarType::I32], ScalarType::I32, &[BufferKind::Read]),
+        Box::new(body),
+    )
+    .unwrap();
+    let clamps = graph
+        .blocks()
+        .flat_map(|b| graph.instructions(b))
+        .filter(|&i| matches!(graph.op(i), Op::Bin(hir::Binary::Min, ..)))
+        .count();
+    assert_eq!(clamps, 0, "{graph}");
+}

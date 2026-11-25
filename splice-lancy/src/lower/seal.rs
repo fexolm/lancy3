@@ -80,16 +80,19 @@ impl Builder<'_> {
             if !reachable {
                 continue;
             }
-            let state = &self.blocks[block];
+            let exit = self.blocks[block].exit.unwrap();
             let mut edge = |target: Block| {
-                let args: Vec<_> = self.blocks[target]
-                    .incoming
-                    .iter()
-                    .map(|r| state.defs[r])
+                let incoming = self.blocks[target].incoming.clone();
+                let args: Vec<_> = incoming
+                    .into_iter()
+                    .map(|(r, narrow)| {
+                        let v = self.blocks[block].defs[&r];
+                        if narrow { self.index32_in(block, v) } else { v }
+                    })
                     .collect();
                 self.graph.add_edge(target, &args)
             };
-            let term = match state.exit.unwrap() {
+            let term = match exit {
                 Exit::Jump(b) => Terminator::Jump(edge(b)),
                 Exit::Branch(cond, yes, no) => Terminator::Branch {
                     cond,

@@ -263,7 +263,9 @@ impl Exit {
 #[derive(Default)]
 struct State {
     defs: HashMap<Reg, Value>,
-    incoming: Vec<Reg>,
+    /// The register of each parameter, and whether the parameter is the
+    /// `index32` form of the register's `Index` (see `Narrow::Bounded`).
+    incoming: Vec<(Reg, bool)>,
     exit: Option<Exit>,
 }
 
@@ -323,6 +325,11 @@ enum Narrow {
         nonnegative: bool,
     },
     Constant(u64),
+    /// An `i32` that `index32` may stand for the `Index`: equal to it when
+    /// it is in bounds of a slice, out of bounds when it is not. A block
+    /// parameter of an `Index` has one as its own parameter, so the narrow
+    /// form survives control flow.
+    Bounded(Value),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
@@ -343,16 +350,24 @@ impl Builder<'_> {
     /// `i32::MAX` clamps to it. An `Index` that sign-extends an `i32` is out
     /// of bounds exactly when the `i32` is negative or too large.
     fn index32(&mut self, index: Value) -> Value {
-        match self.indices.get(&index) {
-            Some(&Narrow::Extends { value, .. }) => return value,
-            Some(&Narrow::Constant(bits)) => {
-                return self.const32(bits.min(i32::MAX as u64) as i32);
-            }
-            None => {}
+        if let Some(&Narrow::Constant(bits)) = self.indices.get(&index) {
+            return self.const32(bits.min(i32::MAX as u64) as i32);
         }
-        let max = self.value(Op::Literal(hir::Lane::Usize, i32::MAX as u128));
-        let clamped = self.value(Op::Bin(hir::Binary::Min, index, max));
-        self.value(Op::Cast(hir::Type::I32, clamped))
+        let block = self.current.expect("open block");
+        self.index32_in(block, index)
+    }
+    /// [`Self::index32`] at the end of `block`.
+    fn index32_in(&mut self, block: Block, index: Value) -> Value {
+        let mut append = |op| self.graph.append(block, op).expect("an index32 operation");
+        match self.indices.get(&index).copied() {
+            Some(Narrow::Extends { value, .. } | Narrow::Bounded(value)) => value,
+            Some(Narrow::Constant(bits)) => append(Op::Const(bits.min(i32::MAX as u64) as i32)),
+            None => {
+                let max = append(Op::Literal(hir::Lane::Usize, i32::MAX as u128));
+                let clamped = append(Op::Bin(hir::Binary::Min, index, max));
+                append(Op::Cast(hir::Type::I32, clamped))
+            }
+        }
     }
     fn const32(&mut self, n: i32) -> Value {
         let v = self.value(Op::Const(n));
@@ -365,6 +380,7 @@ impl Builder<'_> {
     fn exact32(&mut self, index: Value) -> Option<(Value, bool)> {
         match *self.indices.get(&index)? {
             Narrow::Extends { value, nonnegative } => Some((value, nonnegative)),
+            Narrow::Bounded(_) => None,
             Narrow::Constant(bits) => {
                 let n = i32::try_from(bits).ok()?;
                 Some((self.const32(n), true))
@@ -377,8 +393,11 @@ impl Builder<'_> {
     /// comparison is exact; it is signed when both sides are nonnegative.
     fn compare32(&mut self, kind: hir::Binary, a: Value, b: Value) -> Option<Value> {
         // Check both before `exact32` materializes a constant.
-        let exact =
-            |n: Narrow| !matches!(n, Narrow::Constant(bits) if i32::try_from(bits).is_err());
+        let exact = |n: Narrow| match n {
+            Narrow::Extends { .. } => true,
+            Narrow::Constant(bits) => i32::try_from(bits).is_ok(),
+            Narrow::Bounded(_) => false,
+        };
         if !exact(*self.indices.get(&a)?) || !exact(*self.indices.get(&b)?) {
             return None;
         }
@@ -410,8 +429,14 @@ impl Builder<'_> {
         let ty = self.types[r.0 as usize];
         let v = self.graph.append_typed_param(block, simd::native_type(ty));
         let state = &mut self.blocks[block];
-        state.incoming.push(r);
+        state.incoming.push((r, false));
         state.defs.insert(r, v);
+        if ty == ValueType::Scalar(ScalarType::Index) {
+            // Unused, it is removed with the dead parameters.
+            let narrow = self.graph.append_typed_param(block, hir::Type::I32);
+            self.blocks[block].incoming.push((r, true));
+            self.indices.insert(v, Narrow::Bounded(narrow));
+        }
         if !required {
             self.observed.insert(v, (block, r));
         }
