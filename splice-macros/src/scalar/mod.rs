@@ -330,7 +330,7 @@ pub(super) fn expand(root: Path, native: &mut ItemFn) -> Result<TokenStream> {
     let debug_arguments = host_names.iter().map(|id| lower.capture_constant(id));
     let source_support = emit!(#root::frontend::source);
     let source_body = if context.is_some() {
-        emit!(return ::core::result::Result::Err(#root::BuildError::staging("Rust context kernels can be inspected through the Text backend"));)
+        emit!(return ::core::result::Result::Err(#root::BuildError::staging("a Rust context kernel cannot be printed as Rust; inspect its portable IR with `ir()`"));)
     } else {
         match lower.source_body(&lowered_block) {
             Ok(body) => emit!(let __splice_printed = #body;),
@@ -583,7 +583,7 @@ pub(super) fn expand(root: Path, native: &mut ItemFn) -> Result<TokenStream> {
                     #setup
                     <#backend as #root::Codegen>::build_with_options(
                         #root::frontend::Signature::new(#params, #result, __splice_kinds), __splice_body, __splice_options,
-                    ).map(#root::TypedKernel::new)
+                    ).map(|output| #root::TypedKernel::new(output, Signature(::core::marker::PhantomData)))
                 })
             }
             #vis fn ir #generic (#host_decls)
@@ -601,7 +601,7 @@ pub(super) fn expand(root: Path, native: &mut ItemFn) -> Result<TokenStream> {
                     #setup
                     #root::frontend::materialize(
                         #root::frontend::Signature::new(#params, #result, __splice_kinds), __splice_body, __splice_options,
-                    ).map(#root::TypedIr::new)
+                    ).map(|function| #root::TypedIr::new(function, Signature(::core::marker::PhantomData)))
                 })
             }
             #inner_call

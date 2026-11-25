@@ -10,7 +10,7 @@ pub trait ComptimeKey {
 
 /// A cache key lives within one kernel build. Equality checks the full argument
 /// sequence even if two keys land in the same hash bucket.
-#[derive(Debug, Hash, PartialEq, Eq)]
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
 pub struct Specialization {
     declaration: TypeId,
     signature: super::Signature<'static>,

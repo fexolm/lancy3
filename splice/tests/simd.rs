@@ -1,9 +1,8 @@
-use splice::hir::{Constant, ScalarType};
+use splice::hir::{Buffer, Constant, ScalarType, Simd, SimdOp};
 use splice::{
-    BufferArg, BuildError, CallError, Codegen, Executable, Trap, TypedKernel, kernel,
-    simd::{Lane, Mask},
+    BufferArg, BufferKind, BuildError, CallError, Codegen, Executable, Trap, TypedKernel, kernel,
+    simd::{Element, Lane, Mask},
 };
-use splice_text::Text;
 
 /// This machine's `SPLICE_SIMD` target in the mode of this test build.
 fn options() -> splice::BuildOptions {
@@ -714,22 +713,28 @@ fn scalable_add_wraps_at_u16_and_preserves_prefix_on_short_store() {
     assert_eq!(add_block(&a, &b, &mut native), w as i32);
     assert_eq!(native, expected);
     let ir = add_block::ir().unwrap();
-    let text = Text::compile(&ir).unwrap();
     assert_eq!(
-        text.as_inner(),
-        add_block::build::<Text>(add_block::BuildArgs {})
-            .unwrap()
-            .as_inner()
+        ir.buffer_kinds(),
+        [
+            BufferKind::new(Element::U16, false),
+            BufferKind::new(Element::U16, false),
+            BufferKind::new(Element::U16, true)
+        ]
     );
-    for part in [
-        "lhs: &[u16]",
-        "dst: &mut [u16]",
-        "simd.load.u16",
-        "simd.add.u16",
-        "simd.store.u16",
-        "simd.lanes.u16",
+    let ops = splice_testkit::simd_ops(&ir);
+    for op in [
+        SimdOp::Load(Buffer(0)),
+        SimdOp::Add,
+        SimdOp::Store(Buffer(2)),
+        SimdOp::Lanes,
     ] {
-        assert!(text.contains(part), "{text}");
+        assert!(
+            ops.contains(&Simd {
+                element: Element::U16,
+                op
+            }),
+            "{ops:?}"
+        );
     }
     for k in compile_all!(add_block) {
         for len in [w + 2, w + 1, w, 1, 0] {
@@ -1576,9 +1581,13 @@ fn register_refill_and_wrapping_lane_index_match_across_backends() {
             }
         }
     }
-    let listing = refill_lanes::build::<Text>(refill_lanes::BuildArgs {}).unwrap();
-    for op in ["expand", "extract_wrapping", "replace_wrapping"] {
-        assert!(listing.contains(op));
+    let ops = splice_testkit::simd_ops(&refill_lanes::ir().unwrap());
+    for op in [
+        SimdOp::Expand,
+        SimdOp::ExtractWrapping,
+        SimdOp::ReplaceWrapping,
+    ] {
+        assert!(ops.iter().any(|simd| simd.op == op), "{ops:?}");
     }
 }
 

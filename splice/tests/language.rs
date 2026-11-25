@@ -1,7 +1,6 @@
 use splice::simd::Lane;
 use splice::{BuildError, Codegen, Executable, kernel};
 use splice_lancy::Lancy;
-use splice_text::Text;
 use std::cell::Cell;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -772,9 +771,6 @@ fn iterating_a_runtime_slice_lowers_to_a_loop_and_handles_an_empty_input() {
             .iter()
             .any(|op| matches!(op, Instr::Load { .. }))
     );
-    let listing = Text::compile(&ir).unwrap();
-    assert!(listing.contains("xs["), "{listing}");
-    assert!(listing.contains("goto L"), "{listing}");
     let printed = sum_items::print().unwrap();
     assert!(
         printed.contains(" in xs") && printed.contains("wrapping_add"),
@@ -1184,9 +1180,8 @@ fn mixed_stage_conditions_fold_in_the_frontend_on_every_path() {
     }
     splice_testkit::each_backend!(B => check::<B>());
 
-    // The listing shows the structure that the backends compile: a known
-    // condition keeps one arm and no branch, an unknown one branches. The
-    // direct build and the portable IR agree.
+    // The portable IR shows the structure that the backends compile: a known
+    // condition keeps one arm and no branch, an unknown one branches.
     let branches = |ir: &splice::Function| {
         ir.instructions()
             .iter()
@@ -1195,13 +1190,9 @@ fn mixed_stage_conditions_fold_in_the_frontend_on_every_path() {
     for k in [-3, 4] {
         let ir = known::ir(k).unwrap();
         assert!(!branches(&ir));
-        let direct = known::build::<Text>(known::BuildArgs { k }).unwrap();
-        assert_eq!(direct.to_string(), Text::compile(&ir).unwrap().to_string());
     }
     let ir = unknown::ir().unwrap();
     assert!(branches(&ir));
-    let direct = unknown::build::<Text>(unknown::BuildArgs {}).unwrap();
-    assert_eq!(direct.to_string(), Text::compile(&ir).unwrap().to_string());
 }
 
 mod index_arithmetic {

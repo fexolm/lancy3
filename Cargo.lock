@@ -968,7 +968,6 @@ dependencies = [
  "splice-llvm",
  "splice-test-traits",
  "splice-testkit",
- "splice-text",
  "tracing",
  "tracing-subscriber",
  "trybuild",
@@ -1026,14 +1025,6 @@ version = "0.0.0"
 dependencies = [
  "splice-kernel",
  "splice-target",
-]
-
-[[package]]
-name = "splice-text"
-version = "0.1.0"
-dependencies = [
- "splice-core",
- "tracing",
 ]
 
 [[package]]

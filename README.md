@@ -9,16 +9,16 @@
 splice-kernel = "0.1"
 ```
 
-В коде используйте `splice::{kernel, Lancy}`. Для других бэкендов включите features `cranelift`, `llvm` или `text`, например `splice-kernel = { version = "0.1", features = ["cranelift"] }`. Чтобы отключить Lancy, укажите `default-features = false`. LLVM требует установленную версию, указанную ниже. Для самостоятельного использования Lancy добавьте `lancy = "0.1"`.
+В коде используйте `splice::{kernel, Lancy}`. Для других бэкендов включите features `cranelift` или `llvm`, например `splice-kernel = { version = "0.1", features = ["cranelift"] }`. Чтобы отключить Lancy, укажите `default-features = false`. LLVM требует установленную версию, указанную ниже. Для самостоятельного использования Lancy добавьте `lancy = "0.1"`.
 
-Для первого выпуска публикуйте пакеты по порядку, дожидаясь появления каждого в индексе crates.io: `splice-target`, `splice-macros`, `lancy`, `splice-core`, `splice-jit`, `splice-lancy`, `splice-cranelift`, `splice-llvm`, `splice-text`, затем `splice-kernel`. Перед публикацией каждого пакета выполните `cargo publish -p ИМЯ --dry-run`, затем `cargo publish -p ИМЯ`.
+Для первого выпуска публикуйте пакеты по порядку, дожидаясь появления каждого в индексе crates.io: `splice-target`, `splice-macros`, `lancy`, `splice-core`, `splice-jit`, `splice-lancy`, `splice-cranelift`, `splice-llvm`, затем `splice-kernel`. Перед публикацией каждого пакета выполните `cargo publish -p ИМЯ --dry-run`, затем `cargo publish -p ИМЯ`.
 
 Проект распространяется по выбору пользователя на условиях MIT или Apache-2.0.
 
 Splice — язык для CPU-ядер, которые специализируются по данным приложения после его запуска. Функция с атрибутом `#[kernel]` сохраняет обычный вызов Rust. Макрос также создаёт фабрику JIT-кода. Параметр типа `B` у фабрики выбирает компилятор ядра.
 
 ```rust
-use splice::{kernel, Cranelift, Lancy, Llvm, Text};
+use splice::{kernel, Cranelift, Lancy, Llvm};
 
 enum Price { Retail, Wholesale(i32) }
 
@@ -35,8 +35,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let fast_build = total::build::<Lancy>(total::BuildArgs { plan: &plan })?;
     let cranelift = total::build::<Cranelift>(total::BuildArgs { plan: &plan })?;
     let llvm = total::build::<Llvm>(total::BuildArgs { plan: &plan })?;
-    let listing = total::build::<Text>(total::BuildArgs { plan: &plan })?;
-    print!("{listing}");
+    print!("{}", total::print(&plan)?);
     assert_eq!(fast_build.call(total::CallArgs { price: 10, qty: 4 })?, 28);
     assert_eq!(cranelift.call(total::CallArgs { price: 10, qty: 4 })?, 28);
     assert_eq!(llvm.call(total::CallArgs { price: 10, qty: 4 })?, 28);
@@ -48,11 +47,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 В пределах одной сборки вложенные вызовы делят тело по объявлению функции, её параметрам типа и значениям `const`- и `#[comptime]`-аргументов. Обычная функция без параметров специализации строится один раз. Для чисел, строк и срезов ключ учитывает содержимое. Для своих структур и перечислений можно добавить `#[derive(splice::ComptimeKey)]`, а для параметра типа — ограничение `T: splice::ComptimeKey`. Аргументы с состоянием, для которых ключ не задан, сохраняют отдельный обход тела при каждом вызове.
 
-`build::<Text>` возвращает текст функции после специализации. В примере сигнатура содержит только `price` и `qty`, а скидка 3 появляется в теле перед умножением. В листинге сохраняются имена параметров, операции со срезами и вызовы. Повторные вызовы одной специализации ссылаются на одно определение. Переходы между метками показывают оставшиеся runtime-ветвления и циклы. Листинг отражает семантику Splice до оптимизаций машинного бэкенда.
+`total::ir(&plan)?` возвращает переносимый IR после специализации: `splice::Function` с инструкциями `splice::hir::Instr`. В примере сигнатура содержит только `price` и `qty`, а скидка 3 появляется в теле константой перед умножением. Повторные вызовы одной специализации ссылаются на одно тело (`Instr::Call` с общим `Arc<Function>`). IR отражает семантику Splice до оптимизаций машинного бэкенда.
 
 `kernel_name::print(...)` выполняет специализацию по тем же аргументам и возвращает Rust-код до построения IR. Входы `#[comptime]` исчезают из сигнатуры, а runtime-условия и циклы сохраняют форму Rust. Напечатанный код использует обычные операции Rust, включая `Lane` для SIMD. Побочные эффекты обычной Rust-функции происходят в `call`, когда выполнение доходит до вызова. Для вывода во время подготовки плана приложение может вызвать `println!` перед передачей `BuildArgs`.
 
-Свободная функция `total` объявляет структуры `total::BuildArgs` и `total::CallArgs`. Фабрика принимает аргументы специализации по именам. У исполняемого ядра метод `call` принимает именованные аргументы запуска. Ошибки сборки и вызова имеют типы `splice::BuildError` и `splice::CallError`. Вариант `let ir = total::ir(&plan)?;` принимает аргументы специализации позиционно. Вызов `Lancy::compile(&ir)?`, `Cranelift::compile(&ir)?` или `Llvm::compile(&ir)?` сохраняет тип аргументов запуска. Для доступа к листингу как к строке результат `Text` можно вывести через `Display` или вызвать `into_inner()`. [Спецификация языка](docs/splice-language.md)
+Свободная функция `total` объявляет структуры `total::BuildArgs` и `total::CallArgs`. Фабрика принимает аргументы специализации по именам. У исполняемого ядра метод `call` принимает именованные аргументы запуска. Ошибки сборки и вызова имеют типы `splice::BuildError` и `splice::CallError`. Вариант `let ir = total::ir(&plan)?;` принимает аргументы специализации позиционно. Вызов `Lancy::compile(&ir)?`, `Cranelift::compile(&ir)?` или `Llvm::compile(&ir)?` сохраняет тип аргументов запуска. [Спецификация языка](docs/splice-language.md)
 
 При вложенном вызове Rust получает срезы в порядке аргументов. Повторная передача общего среза и повторное заимствование `&mut [T]` сохраняют обычные правила Rust. Если вызов завершился паникой, выполненные перед ней записи видны через исходный буфер.
 
@@ -66,7 +65,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 | [splice-lancy](splice-lancy/src/lib.rs) | Переводит поток операций Splice или готовую переносимую функцию в SSA HIR и вызывает JIT Lancy. |
 | [splice-cranelift](splice-cranelift/src/lib.rs) | Собирает CLIF всех функций кернела в одном модуле. Инлайнер Cranelift может встроить каждое тело один раз и расходует на дополнительные копии бюджет, равный исходному числу инструкций модуля. JIT компилирует точку входа и оставшиеся вызываемые функции с `opt_level=speed`. |
 | [splice-llvm](splice-llvm/src/lib.rs) | Помещает точку входа и все внутренние функции кернела в один LLVM-модуль через Inkwell. Запускает `default<O3>` для всего модуля и устанавливает машинный код через ORC LLJIT. `to_llvm_ir(&ir)` печатает модуль до оптимизации. |
-| [splice-text](splice-text/src/lib.rs) | Печатает специализированную функцию и её вызываемые функции. Доступен через feature `text` пакета `splice-kernel`. |
 | [lancy](lancy/README.md) | Самостоятельный x64-бэкенд. Проверяет SSA HIR, строит LIR, распределяет регистры и устанавливает машинный код. |
 
 Скалярные аргументы `i32` и типизированные срезы передаются двумя списками с сохранением порядка внутри каждого списка. Все три компилятора поддерживают вызовы других ядер, циклы, ранний возврат, проверяемые обращения к срезам и целочисленное деление. Обработка колонок выражается обычным циклом над срезами.
@@ -112,7 +110,6 @@ cargo run -p splice-kernel --release --example schema_plan -- rust
 cargo run -p splice-kernel --release --example sql_plan -- lancy
 cargo run -p splice-kernel --release --example sql_plan -- cranelift
 cargo run -p splice-kernel --release --features llvm --example sql_plan -- llvm
-cargo run -p splice-kernel --release --example sql_plan -- text
 cargo run -p splice-kernel --release --example sql_plan -- rust
 cargo xtask bench sql_plan
 cargo test -p splice-kernel --release --example sql_plan --test simd

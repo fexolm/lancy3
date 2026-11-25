@@ -17,7 +17,7 @@ pub use buffer::{
 pub use builder::FunctionBuilder;
 pub use replay::replay;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -397,25 +397,23 @@ impl Function {
         self.needs_status
     }
 
-    /// Number reachable bodies in first-use, breadth-first order, with the root at zero.
-    /// Multiple calls to the same shared body receive one number.
-    pub fn reachable_functions(&self) -> (Vec<&Self>, HashMap<*const Self, usize>) {
+    /// This function and the bodies it calls, directly or not, in first-use
+    /// breadth-first order. A body shared by several calls appears once.
+    pub fn reachable_functions(&self) -> Vec<&Self> {
         let mut functions = vec![self];
-        let mut ids = HashMap::from([(std::ptr::from_ref(self), 0)]);
+        let mut seen = HashSet::from([std::ptr::from_ref(self)]);
         let mut i = 0;
         while i < functions.len() {
             for inst in functions[i].instructions() {
-                if let Instr::Call { function, .. } = inst {
-                    ids.entry(Arc::as_ptr(function)).or_insert_with(|| {
-                        let id = functions.len();
-                        functions.push(function);
-                        id
-                    });
+                if let Instr::Call { function, .. } = inst
+                    && seen.insert(Arc::as_ptr(function))
+                {
+                    functions.push(function);
                 }
             }
             i += 1;
         }
-        (functions, ids)
+        functions
     }
 
     pub fn instructions(&self) -> &[Instr] {

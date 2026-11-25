@@ -1,5 +1,4 @@
 use splice::{BuildOptions, Codegen, Mode, kernel};
-use splice_text::Text;
 use std::collections::BTreeSet;
 use std::fmt::{Debug, Write};
 use std::sync::{Arc, Mutex};
@@ -70,7 +69,6 @@ fn staged_and_portable_compilation_report_their_nested_stages() {
                 assert_eq!(kernel.call(increment::CallArgs { value: 41 }), Ok(42));
             }
         });
-        assert!(Text::compile(&ir).unwrap().starts_with("fn increment("));
     });
     let closed: BTreeSet<String> = closed
         .0
@@ -79,7 +77,7 @@ fn staged_and_portable_compilation_report_their_nested_stages() {
         .iter()
         .map(|p| p.join(" / "))
         .collect();
-    let mut expected = vec!["materialize_ir".to_owned(), "render_text_ir".to_owned()];
+    let mut expected = vec!["materialize_ir".to_owned()];
     let jit = "lancy_jit{inlining=Always,debug=false}";
     for (input, frontend) in [
         ("staged", "stage_lancy_hir"),

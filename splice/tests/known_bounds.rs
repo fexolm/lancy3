@@ -1,7 +1,6 @@
 use splice::{
     BuildError, BuildOptions, CallError, Codegen, Executable, Mode, Trap, hir::Instr, kernel,
 };
-use splice_text::Text;
 use std::{
     ops::Index,
     sync::atomic::{AtomicUsize, Ordering},
@@ -146,10 +145,8 @@ fn known_indices_only_fault_on_the_reached_execution_path() {
     splice_testkit::each_backend!(B => check::<B>());
     let ir = chosen::ir(&[]).unwrap();
     assert!(
-        Text::compile(&ir)
-            .unwrap()
-            .as_inner()
-            .contains("trap bounds")
+        splice_testkit::instructions(&ir)
+            .any(|instruction| matches!(instruction, Instr::TrapBounds))
     );
     let source = chosen::print(&[]).unwrap();
     assert!(

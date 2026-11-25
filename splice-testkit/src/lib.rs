@@ -33,8 +33,28 @@ macro_rules! each_backend {
 }
 
 use splice::frontend::{self, KernelBuilder};
-use splice::{BufferArg, BuildOptions, Codegen, Executable, KernelScalar, Mode};
+use splice::hir::{Instr, Simd};
+use splice::{BufferArg, BuildOptions, Codegen, Executable, Function, KernelScalar, Mode};
 use std::rc::Rc;
+
+/// Every instruction of `function` and of the functions it calls, each
+/// shared body once: tests assert what staging produced on these.
+pub fn instructions(function: &Function) -> impl Iterator<Item = &Instr> {
+    function
+        .reachable_functions()
+        .into_iter()
+        .flat_map(Function::instructions)
+}
+
+/// The SIMD operations of `function` and its callees, in order.
+pub fn simd_ops(function: &Function) -> Vec<Simd> {
+    instructions(function)
+        .filter_map(|instruction| match instruction {
+            Instr::Simd { inst, .. } => Some(*inst),
+            _ => None,
+        })
+        .collect()
+}
 
 /// Call a kernel whose scalar parameters and result are all `i32`, as most
 /// tests' kernels are.

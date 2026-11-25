@@ -60,32 +60,18 @@ impl<S, E> LinkedImport<S, E> {
     }
 }
 
-pub trait ImportTarget {
-    type Linked<S, E>;
-    fn link<S, E>(import: &RustImport<S, E>) -> Result<Self::Linked<S, E>, BuildError>;
-}
-impl<K: Executable> ImportTarget for K {
-    type Linked<S, E> = LinkedImport<S, E>;
-    fn link<S, E>(import: &RustImport<S, E>) -> Result<Self::Linked<S, E>, BuildError> {
-        Ok(LinkedImport {
-            environment: Arc::clone(&import.environment),
-            signature: PhantomData,
-        })
-    }
-}
-impl ImportTarget for String {
-    type Linked<S, E> = String;
-    fn link<S, E>(import: &RustImport<S, E>) -> Result<String, BuildError> {
-        Ok(format!("rust import {}\n", import.name))
-    }
-}
+/// A Rust import runs in Rust with every backend: linking it keeps its
+/// environment for the kernels that call it.
 impl<S, E, B: Codegen> CompileInput<B> for RustImport<S, E>
 where
-    B::Output: ImportTarget,
+    B::Output: Executable,
 {
-    type Output = <B::Output as ImportTarget>::Linked<S, E>;
+    type Output = LinkedImport<S, E>;
     type Error = BuildError;
     fn compile_with(&self, _options: Option<BuildOptions>) -> Result<Self::Output, BuildError> {
-        B::Output::link(self)
+        Ok(LinkedImport {
+            environment: Arc::clone(&self.environment),
+            signature: PhantomData,
+        })
     }
 }

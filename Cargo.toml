@@ -1,5 +1,5 @@
 [workspace]
-members = ["lancy", "splice", "splice-core", "splice-macros", "splice-target", "splice-lancy", "splice-llvm", "splice-cranelift", "splice-text", "splice-jit", "splice-testkit", "xtask"]
+members = ["lancy", "splice", "splice-core", "splice-macros", "splice-target", "splice-lancy", "splice-llvm", "splice-cranelift", "splice-jit", "splice-testkit", "xtask"]
 exclude = ["tests/fixtures/trait-provider"]
 resolver = "3"
 

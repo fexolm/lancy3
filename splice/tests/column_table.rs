@@ -1,9 +1,18 @@
+use splice::Function;
+use splice::hir::{Constant, Instr, SimdOp};
 use splice::{
     BufferArg, BufferKind, Codegen, Executable, TypedKernel, kernel,
     simd::{Element, Lane},
 };
 use splice_lancy::Lancy;
-use splice_text::Text;
+
+/// Whether staging left a call to the kernel function `name`.
+fn calls(function: &Function, name: &str) -> bool {
+    splice_testkit::instructions(function).any(|instruction| {
+        matches!(instruction, Instr::Call { function, .. }
+            if function.source().is_some_and(|source| source.name == name))
+    })
+}
 
 enum Expr {
     Ge { col: usize, val: i32 },
@@ -98,12 +107,12 @@ fn float_column_matches_the_rust_filter_including_nan_and_tail()
         expr: Expr::GeFloat { col: 1, val: 2.5 },
     };
     let ir = query::ir(&schema, &plan)?;
-    let listing = query::build::<Text>(query::BuildArgs {
-        schema: &schema,
-        plan: &plan,
-    })?;
-    assert!(listing.contains("simd.ge.f32"));
-    assert!(!listing.contains("filter_ge"));
+    assert!(
+        splice_testkit::simd_ops(&ir)
+            .iter()
+            .any(|simd| simd.op == SimdOp::Ge && simd.element == Element::F32)
+    );
+    assert!(!calls(&ir, "filter_ge"));
     let rust = query::print(&schema, &plan)?;
     assert!(rust.contains("fn query(out: &mut [i32], columns:"));
     assert!(rust.contains("2.5"));
@@ -188,20 +197,14 @@ fn sql_specialization_reads_the_selected_column_from_each_batch()
             expr: Expr::Ge { col: slot, val },
         };
         let ir = query::ir(&schema, &plan)?;
-        let listing = query::build::<Text>(query::BuildArgs {
-            schema: &schema,
-            plan: &plan,
-        })?;
-        assert_eq!(listing.as_inner(), Text::compile(&ir)?.as_inner());
-        assert!(listing.contains(&format!(" = {val}i32\n")), "{listing}");
-        assert!(listing.contains("filter_ge"));
         assert!(
-            !query::build::<Text>(query::BuildArgs {
-                schema: &schema,
-                plan: &Plan::Empty
-            })?
-            .contains("filter_ge")
+            splice_testkit::instructions(&ir).any(|instruction| matches!(
+                instruction, Instr::Const(_, constant) if *constant == Constant::from(val)
+            )),
+            "{ir:?}"
         );
+        assert!(calls(&ir, "filter_ge"));
+        assert!(!calls(&*query::ir(&schema, &Plan::Empty)?, "filter_ge"));
         splice_testkit::each_backend!(B => {
             check(
                 query::build::<B>(query::BuildArgs {

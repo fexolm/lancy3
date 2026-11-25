@@ -20,8 +20,11 @@ impl<S> fmt::Debug for TypedIr<S> {
     }
 }
 impl<S> TypedIr<S> {
+    /// Give `function` the declaration's argument types. `S` is a kernel's
+    /// `Signature` marker: only the kernel's own module can construct one,
+    /// so the IR of one kernel cannot be retyped as another's.
     #[doc(hidden)]
-    pub fn new(function: Function) -> Self {
+    pub fn new(function: Function, _: S) -> Self {
         Self {
             function,
             signature: PhantomData,
@@ -52,8 +55,14 @@ impl<S, K: fmt::Debug> fmt::Debug for TypedKernel<S, K> {
     }
 }
 impl<S, K> TypedKernel<S, K> {
+    /// Give `output` the declaration's call interface; `S` seals it as
+    /// [`TypedIr::new`] does.
     #[doc(hidden)]
-    pub fn new(output: K) -> Self {
+    pub fn new(output: K, _: S) -> Self {
+        Self::retyped(output)
+    }
+    /// The output of compiling a [`TypedIr<S>`] keeps its declaration.
+    fn retyped(output: K) -> Self {
         Self {
             output,
             signature: PhantomData,
@@ -78,11 +87,6 @@ impl<S, K> Deref for TypedKernel<S, K> {
         &self.output
     }
 }
-impl<S, K: fmt::Display> fmt::Display for TypedKernel<S, K> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.output.fmt(f)
-    }
-}
 
 pub trait CompileInput<B: Codegen> {
     type Output;
@@ -103,7 +107,7 @@ impl<S, B: Codegen> CompileInput<B> for TypedIr<S> {
     fn compile_with(&self, options: Option<BuildOptions>) -> Result<Self::Output, BuildError> {
         build_boundary(|| {
             <Function as CompileInput<B>>::compile_with(&self.function, options)
-                .map(TypedKernel::new)
+                .map(TypedKernel::retyped)
         })
     }
 }

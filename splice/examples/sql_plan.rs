@@ -6,7 +6,6 @@ use splice_cranelift::Cranelift;
 use splice_lancy::Lancy;
 #[cfg(feature = "llvm")]
 use splice_llvm::Llvm;
-use splice_text::Text;
 
 #[cfg(test)]
 #[path = "relational/tests.rs"]
@@ -37,23 +36,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             })?
             .into_inner(),
         ),
-        Some("text") => {
-            print!(
-                "{}",
-                query::build::<Text>(query::BuildArgs {
-                    program: &plan.prepare()
-                })?
-            );
-            Ok(())
-        }
         Some("rust") => {
             print!("{}", query::print(&plan.prepare())?);
             Ok(())
         }
-        Some(other) => Err(format!(
-            "unknown backend {other}; choose lancy, cranelift, llvm, text or rust"
-        )
-        .into()),
+        Some(other) => {
+            Err(format!("unknown backend {other}; choose lancy, cranelift, llvm or rust").into())
+        }
     }
 }
 

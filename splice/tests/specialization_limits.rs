@@ -48,6 +48,40 @@ fn recursive(#[comptime] depth: i32, value: i32) -> i32 {
 }
 
 #[kernel]
+fn ping(#[comptime] step: i32, value: i32) -> i32 {
+    if value > 0 {
+        pong(step, value - step)
+    } else {
+        value
+    }
+}
+
+#[kernel]
+fn pong(#[comptime] step: i32, value: i32) -> i32 {
+    ping(step, value)
+}
+
+/// CORE-21: a call that needs the specialization it is part of could only
+/// be staged by expanding it forever. It is reported as recursion on the
+/// first repeated call, not after 64 nested expansions.
+#[test]
+fn recursion_with_the_same_specialization_is_reported_as_recursion() {
+    fn check<B: Codegen>() {
+        let error = ping::build::<B>(ping::BuildArgs { step: 1 })
+            .err()
+            .expect("recursive specialization must fail");
+        assert!(error.to_string().contains("calls itself"), "{error}");
+    }
+    splice_testkit::each_backend!(B => check::<B>());
+    let error = ping::ir(1).unwrap_err();
+    assert!(error.to_string().contains("calls itself"), "{error}");
+    assert_eq!(ping(1, 3), 0);
+    // A recursion that changes its arguments ends after 64 expansions.
+    let error = recursive::ir(100).unwrap_err();
+    assert!(error.to_string().contains("64 nested"), "{error}");
+}
+
+#[kernel]
 fn runtime_loop(n: i32) -> i32 {
     let mut i = 0;
     while i < n {

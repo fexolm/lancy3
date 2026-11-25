@@ -12,7 +12,7 @@ pub mod simd;
 pub mod validate;
 #[doc(hidden)]
 pub use imports::ImportInvocation;
-pub use imports::{ImportArgs, ImportTarget, LinkedImport, RustImport};
+pub use imports::{ImportArgs, LinkedImport, RustImport};
 #[allow(unsafe_code)]
 mod runtime_context;
 #[doc(hidden)]

@@ -5,7 +5,6 @@ use splice::{
     BufferArg, BufferKind, BuildOptions, Codegen, ContextArguments, Executable, Mode,
     StaticRustCall, StaticRustSymbol,
 };
-use splice_text::Text;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 struct Empty;
@@ -136,11 +135,6 @@ fn static_packets_keep_nested_slice_borrows_and_effect_order() {
         assert!(!text.contains("nocapture") && !text.contains("captures(none)"));
         assert!(text.contains("readonly") && text.contains("noalias"));
     }
-    let text = Text::compile(&ir).unwrap();
-    assert!(
-        text.lines().any(|line| line.contains("rust modify(")
-            && line.ends_with("borrows buffer 0, mut buffer 1"))
-    );
 
     fn check<B: Codegen<Output: Executable>>(ir: &splice::Function) {
         for kernel in [

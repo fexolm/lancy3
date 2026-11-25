@@ -1,4 +1,4 @@
-use splice::hir::{Instr, RustContextTarget};
+use splice::hir::{Buffer, Instr, RustContextTarget};
 use splice::{CallError, Codegen, Executable, Trap, TypedIr, kernel};
 use std::collections::HashSet;
 use std::ops::AddAssign;
@@ -333,11 +333,7 @@ fn native_and_rust_operations_reborrow_the_same_writable_slice_in_order() {
     assert!(first.writable && !tag.writable && !left.writable && !right.writable);
     assert_eq!(first.buffer, left.buffer);
     assert_eq!(left, right);
-
-    use splice_text::Text;
-    let formatted = Text::compile(&ir).unwrap();
-    assert!(formatted.contains("borrows mut buffer 3, buffer 2"));
-    assert!(formatted.contains("borrows buffer 3, buffer 3"));
+    assert_eq!((first.buffer, tag.buffer), (Buffer(3), Buffer(2)));
 
     fn check<B: Codegen<Output: Executable>>(ir: &TypedIr<writable_opaque_slice::Signature>) {
         for code in [

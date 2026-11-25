@@ -7,6 +7,7 @@ use crate::hir::{
     RustContextTarget, RustPacketSymbol, ScalarType, Simd, ValueType,
 };
 use crate::{BuildError, Result};
+use std::cell::RefCell;
 use std::collections::{HashSet, VecDeque};
 use std::sync::Arc;
 
@@ -548,6 +549,7 @@ impl KernelBuilder for Validating<'_> {
     ) -> Result<Reg> {
         let signature = key.signature();
         self.call_arguments(signature, args, buffers)?;
+        let _staging = Staging::enter(&key)?;
         let r = self
             .inner
             .call_specialized(key, args, buffers, validated(signature, body))?;
@@ -562,6 +564,37 @@ impl KernelBuilder for Validating<'_> {
         self.call_arguments(function.signature(), args, buffers)?;
         let r = self.inner.call_function(function, args, buffers)?;
         Ok(self.value(args, r, ValueType::Scalar(function.result())))
+    }
+}
+
+thread_local! {
+    /// The specializations whose bodies are being staged on this thread,
+    /// outermost first.
+    static STAGING: RefCell<Vec<Specialization>> = const { RefCell::new(Vec::new()) };
+}
+
+/// A specialization being staged. A call that needs the same one again
+/// can only be staged by recursing forever: the IR has no recursive calls.
+struct Staging;
+
+impl Staging {
+    fn enter(key: &Specialization) -> Result<Self> {
+        STAGING.with_borrow_mut(|staging| {
+            if staging.contains(key) {
+                return Err(BuildError::staging(
+                    "a kernel calls itself with the same specialization arguments; \
+                     recursion must change a #[comptime] argument and end at specialization",
+                ));
+            }
+            staging.push(key.clone());
+            Ok(Self)
+        })
+    }
+}
+
+impl Drop for Staging {
+    fn drop(&mut self) {
+        STAGING.with_borrow_mut(Vec::pop);
     }
 }
 

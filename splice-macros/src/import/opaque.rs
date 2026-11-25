@@ -78,8 +78,8 @@ impl Interface<'_> {
             #vis struct OpaqueKernel<K>(K);
 
             impl<S, E, B: #root::Codegen> #root::CompileInput<B> for __SpliceOpaqueIr<S, E>
-            where B::Output: #root::ImportTarget {
-                type Output = OpaqueKernel<<B::Output as #root::ImportTarget>::Linked<S, E>>;
+            where B::Output: #root::Executable {
+                type Output = OpaqueKernel<#root::LinkedImport<S, E>>;
                 type Error = #root::BuildError;
 
                 fn compile_with(&self, options: ::core::option::Option<#root::BuildOptions>)

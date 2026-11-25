@@ -42,8 +42,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 mod tests {
     use super::*;
     use splice::KernelScalar;
+    use splice::hir::{Simd, SimdOp};
+    use splice::simd::Element;
     use splice::{Codegen, simd::Lane};
-    use splice_text::Text;
 
     fn check(
         kernels: &[Box<dyn Executable>],
@@ -139,20 +140,16 @@ mod tests {
 
     #[test]
     fn lookup_ir_uses_masked_gather_and_pack_arithmetic() {
-        let listing = lookup::build::<Text>(lookup::BuildArgs {}).unwrap();
-        assert_eq!(
-            listing.as_inner(),
-            Text::compile(&lookup::ir().unwrap()).unwrap().as_inner()
-        );
-        for op in [
-            "simd.load_select.i32",
-            "simd.mul.i32",
-            "simd.gather_select.i32",
-            "simd.any.i32",
-            "simd.mask_and.i32",
-            "simd.store_select.i32",
-        ] {
-            assert!(listing.contains(op), "{op} missing from {listing}");
-        }
+        let ops = splice_testkit::simd_ops(&lookup::ir().unwrap());
+        let has = |op: fn(&SimdOp) -> bool| {
+            ops.iter()
+                .any(|&Simd { element, op: o }| element == Element::I32 && op(&o))
+        };
+        assert!(has(|op| matches!(op, SimdOp::LoadSelect(_))), "{ops:?}");
+        assert!(has(|op| *op == SimdOp::Mul), "{ops:?}");
+        assert!(has(|op| matches!(op, SimdOp::GatherSelect(_))), "{ops:?}");
+        assert!(has(|op| *op == SimdOp::Any), "{ops:?}");
+        assert!(has(|op| *op == SimdOp::MaskAnd), "{ops:?}");
+        assert!(has(|op| matches!(op, SimdOp::StoreSelect(_))), "{ops:?}");
     }
 }

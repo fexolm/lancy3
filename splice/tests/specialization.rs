@@ -1,7 +1,19 @@
 use splice::frontend::Signature;
-use splice::hir::{Constant, ScalarType};
-use splice::{Codegen, ComptimeKey, Executable, kernel};
-use splice_text::Text;
+use splice::hir::{Constant, Instr, ScalarType};
+use splice::{Codegen, ComptimeKey, Executable, Function, kernel};
+
+/// Distinct bodies of the kernel function `name` in the call graph of
+/// `root`, and calls to them.
+fn bodies_and_calls(root: &Function, name: &str) -> (usize, usize) {
+    let named = |f: &Function| f.source().is_some_and(|source| source.name == name);
+    let bodies = root.reachable_functions();
+    let calls = splice_testkit::instructions(root)
+        .filter(
+            |instruction| matches!(instruction, Instr::Call { function, .. } if named(function)),
+        )
+        .count();
+    (bodies.into_iter().filter(|f| named(f)).count(), calls)
+}
 
 #[derive(ComptimeKey)]
 enum Mode<'a> {
@@ -54,17 +66,8 @@ fn repeated_values_skip_staging_across_parents_and_keep_all_calls() {
     splice_testkit::each_backend!(B => check_direct::<B>(&modes, expected));
 
     let ir = chain::ir(&modes).unwrap();
-    let listing = Text::compile(&ir).unwrap();
-    assert_eq!(listing.matches("fn apply.").count(), 4);
-    assert_eq!(listing.matches(" = apply.").count(), 5);
-    assert_eq!(listing.matches("fn increment.").count(), 1);
-    assert_eq!(listing.matches(" = increment.").count(), 5);
-    assert_eq!(
-        chain::build::<Text>(chain::BuildArgs { modes: &modes })
-            .unwrap()
-            .as_inner(),
-        listing.as_inner()
-    );
+    assert_eq!(bodies_and_calls(&ir, "apply"), (4, 5));
+    assert_eq!(bodies_and_calls(&ir, "increment"), (1, 5));
     let args = || chain::CallArgs { x: 12 };
     splice_testkit::each_backend!(B => {
         assert_eq!(B::compile(&ir).unwrap().call(args()), Ok(expected));
@@ -98,11 +101,9 @@ fn instances(x: i32) -> i32 {
 }
 #[test]
 fn type_and_const_arguments_distinguish_monomorphizations() {
-    let listing = instances::build::<Text>(instances::BuildArgs {}).unwrap();
-    assert_eq!(listing.matches("fn affine.").count(), 3);
-    assert_eq!(listing.matches(" = affine.").count(), 4);
-    let expected = instances(3);
     let ir = instances::ir().unwrap();
+    assert_eq!(bodies_and_calls(&ir, "affine"), (3, 4));
+    let expected = instances(3);
     splice_testkit::each_backend!(B => {
         let direct = instances::build::<B>(instances::BuildArgs {}).unwrap();
         for code in [direct, B::compile(&ir).unwrap()] {
@@ -285,7 +286,7 @@ fn two_buffers(left: &mut [i32], right: &mut [i32], d: i32) -> i32 {
 fn shared_fallible_body_observes_each_calls_buffers_and_arguments()
 -> Result<(), Box<dyn std::error::Error>> {
     let ir = two_buffers::ir()?;
-    assert_eq!(Text::compile(&ir)?.matches("fn store_ratio.").count(), 1);
+    assert_eq!(bodies_and_calls(&ir, "store_ratio"), (1, 2));
     fn check<B: Codegen<Output: Executable>>(
         ir: &splice::TypedIr<two_buffers::Signature>,
     ) -> Result<(), Box<dyn std::error::Error>> {

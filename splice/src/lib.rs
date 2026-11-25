@@ -12,6 +12,18 @@
 //! }
 //! ```
 //!
+//! Only a kernel's own module can give a build its call interface: the
+//! output of `second` cannot be retyped as `first`'s.
+//! ```compile_fail,E0603
+//! use splice::{Lancy, TypedKernel, kernel};
+//! #[kernel]
+//! fn first(x: i32) -> i32 { x }
+//! #[kernel]
+//! fn second(x: i32) -> i32 { -x }
+//! let code = second::build::<Lancy>(second::BuildArgs {}).unwrap().into_inner();
+//! let _ = TypedKernel::new(code, first::Signature(std::marker::PhantomData));
+//! ```
+//!
 //! Publish associated functions by marking their enclosing block.
 //! ```
 //! struct Plan;
@@ -53,5 +65,3 @@ pub use splice_cranelift::Cranelift;
 pub use splice_lancy::Lancy;
 #[cfg(feature = "llvm")]
 pub use splice_llvm::{Llvm, LlvmManualSimd};
-#[cfg(feature = "text")]
-pub use splice_text::Text;
