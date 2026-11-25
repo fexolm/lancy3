@@ -1,3 +1,6 @@
+# A guard `remaining >= k` with a constant k proves the checks of the first k
+# elements, like a guard on a lane count. Counterexamples: a different
+# remaining length, and a constant that is not a full packet at every width.
 fn main n:i32 i:i32 -> i32
   four = const 4
   last = const 3

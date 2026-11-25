@@ -274,15 +274,15 @@ impl Bounds {
             if cfg.predecessors(enough) == [block]
                 && let Some(count) = Count::of(f, facts, low)
             {
-                let any_length =
-                    matches!(count, Count::Lanes(_)) || cfg!(feature = "experimental-simd");
-                if any_length || declared {
-                    let key = remaining(f, facts, high);
-                    if any_length || f.is_slice_length(key.0) {
-                        let scope = dom.scope(enough);
-                        packets.record(key, 2 * scope.start..2 * scope.end, count.into());
-                    }
-                }
+                // `high >= count` with a positive count holds for fixed and
+                // lane counts alike; `Count::at_most` compares them at every
+                // supported vector width.
+                let scope = dom.scope(enough);
+                packets.record(
+                    remaining(f, facts, high),
+                    2 * scope.start..2 * scope.end,
+                    count.into(),
+                );
             }
         }
         Self {
@@ -356,7 +356,6 @@ pub(super) fn remove_full_packet_checks(
         for inst in f.instructions(block) {
             if let Op::BoundsCheck(i, n) = *f.op(inst)
                 && let Some(count) = last_lane(f, facts, i)
-                && (matches!(count, Count::Lanes(_)) || cfg!(feature = "experimental-simd"))
                 && bounds
                     .get_or_insert_with(|| Bounds::new(f, cfg, dom, facts, &[]))
                     .packets

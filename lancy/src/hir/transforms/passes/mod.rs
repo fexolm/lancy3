@@ -8,6 +8,7 @@ mod inline;
 mod local_cfg;
 mod loops;
 mod memory;
+mod pipeline;
 mod prune;
 mod sccp;
 mod simplify;

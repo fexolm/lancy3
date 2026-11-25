@@ -1,5 +1,6 @@
 use super::bounds::{Bounds, Count, at_least};
 use super::facts::Facts;
+use super::pipeline::{Analyses, Preserved};
 use crate::hir::transforms::{ControlFlowGraph, DomTree, NaturalLoops};
 use crate::hir::{
     Binary, Block, Function, IrError, MAX_VECTOR_BYTES, Op, Simd, Terminator, Type, Unary, Value,
@@ -17,38 +18,31 @@ enum Rewrite {
     Unswitched,
 }
 
-#[derive(Default)]
-pub(super) struct LoopResult {
-    pub(super) rebuilt: Option<(ControlFlowGraph, DomTree)>,
-    pub(super) analysis: Option<(Facts, Bounds)>,
-}
-
-pub(super) fn run(
-    f: &mut Function,
-    initial_cfg: &ControlFlowGraph,
-    initial_dom: &DomTree,
-) -> Result<LoopResult, IrError> {
-    let mut result = LoopResult::default();
+/// Loop transformations to a fixed point. Each round that changes a loop
+/// refreshes the graph; the facts and bounds of the last round are kept for
+/// the passes after this one.
+pub(super) fn run(f: &mut Function, analyses: &mut Analyses<'_>) -> Result<Preserved, IrError> {
     let mut allow_unswitch = true;
     loop {
-        let (cfg, dom) = result
-            .rebuilt
-            .as_ref()
-            .map_or((initial_cfg, initial_dom), |(cfg, dom)| (cfg, dom));
+        let (cfg, dom) = analyses.graph(f)?;
         if !cfg.has_cycle() {
-            return Ok(result);
+            return Ok(Preserved::All);
         }
-        match simplify_loops(f, cfg, dom, allow_unswitch, &mut result.analysis) {
-            Rewrite::None => return Ok(result),
+        let mut analysis = None;
+        match simplify_loops(f, cfg, dom, allow_unswitch, &mut analysis) {
+            Rewrite::None => {
+                if let Some((facts, bounds)) = analysis {
+                    analyses.keep(facts, bounds);
+                }
+                return Ok(Preserved::All);
+            }
             Rewrite::Reduced => {}
             // One round of specialization avoids cloning the same loop for
             // every combination of invariant predicates.
             Rewrite::Unswitched => allow_unswitch = false,
         }
         f.prune_unreachable()?;
-        let cfg = ControlFlowGraph::compute(f)?;
-        let dom = DomTree::compute(&cfg);
-        result.rebuilt = Some((cfg, dom));
+        analyses.invalidate(Preserved::Nothing);
     }
 }
 
