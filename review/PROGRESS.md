@@ -364,3 +364,10 @@
 - Тесты: `rust_calls_verify_operand_types` (каждый операнд неверного типа отвергается; верный вызов исполняется интерпретатором и JIT); `passes/rust-call-memory.lancy` (бывший `rust-import-memory`: вызов портит память, независимые вызовы, записи пакета не удаляются, коды ловушек входа) и пакетный случай `inline-call-scratch.lancy` переписаны на одну операцию.
 - Проверки: `cargo +1.94.1 xtask ci --quick` зелёный; clippy `-D warnings` для `aarch64-unknown-linux-gnu` и `x86_64-pc-windows-msvc` (lancy, splice-lancy, splice-core, splice-cranelift); lancy и splice-lancy под qemu (SVE VL32, `sve=off`) зелёные.
 - Дальше: 5.6 (`hir::text`), HIR-15, 64-битные границы, сужение `Index`-параметров (simd_matmul), BE-07.
+
+### Ф5.6 — текстовый HIR (коммит 4e0c857)
+- Закрыто: LNC-07 (HIR-часть).
+- `lancy/src/hir/text.rs`: `Display for Function` (сначала вызываемые функции `f0…`, затем `main`; у каждого результата печатается тип) и `parse(text, rust_functions)`; по одной таблице имён на перечисление (полосы, `Binary`, `Unary`, `Ternary`, шаги). Синтаксис: `fn name(x:i32) -> t`, `block b(v:t)`, `jump b(args)`, `br c b1(..) | b2(..)`, `call f(args)`, `slice p n read4` (вместо позиционного `slices 0 …`), векторные операции без префикса `simd.` (`load vec.f32 p`, `cast vec.i32 x`), `debug_point N`. `filetests/input.rs` и Debug-листинг HIR удалены: `@source/@inline/@opt` печатают тот же текст, на котором пишутся фикстуры. `Function::slice_params()` добавлен для печати.
+- Миграция всех 125 фикстур и IR-строк Rust-тестов — скриптом (проверки теперь называют операции так, как они печатаются: `= div`, `vec.i32 = add`, `block b1(v4:i32)`); ни одна проверка не ослаблена, все этапы по-прежнему достигаются.
+- Тесты: каждая фикстура — исходный текст читается обратно в себя, оптимизированная функция читается обратно и печатается так же (roundtrip на всех фикстурах); `printed_text_reads_back_as_the_same_function`, `a_named_result_type_must_be_the_operation_type`.
+- Проверки: `cargo +1.94.1 xtask ci --quick` зелёный; clippy aarch64 и lancy под qemu (SVE VL32) зелёные.
