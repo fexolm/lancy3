@@ -1,4 +1,4 @@
-use splice::hir::{Buffer, Instr, RustContextTarget};
+use splice::hir::{Buffer, Instr, RustTarget};
 use splice::{CallError, Codegen, Executable, Trap, TypedIr, kernel};
 use std::collections::HashSet;
 use std::ops::AddAssign;
@@ -271,7 +271,7 @@ fn nested_opaque_operations_use_the_callers_reordered_shared_slices() {
     assert!(
         instructions
             .iter()
-            .any(|op| matches!(op, Instr::RustContextCall { .. }))
+            .any(|op| matches!(op, Instr::RustCall { .. }))
     );
     assert!(
         instructions
@@ -323,7 +323,7 @@ fn native_and_rust_operations_reborrow_the_same_writable_slice_in_order() {
     let borrows = instructions
         .iter()
         .filter_map(|instruction| match instruction {
-            Instr::RustContextCall { slices, .. } => Some(slices.as_slice()),
+            Instr::RustCall { slices, .. } => Some(slices.as_slice()),
             _ => None,
         })
         .collect::<Vec<_>>();
@@ -381,7 +381,7 @@ fn nested_slice_descriptors_preserve_inferred_element_types() {
     assert_eq!(
         ir.instructions()
             .iter()
-            .filter(|op| matches!(op, Instr::RustContextCall { slices, .. } if slices.len() == 1))
+            .filter(|op| matches!(op, Instr::RustCall { slices, .. } if slices.len() == 1))
             .count(),
         2
     );
@@ -415,7 +415,7 @@ fn opaque_context_operations_receive_all_scalar_words() {
         .instructions()
         .iter()
         .filter_map(|instruction| match instruction {
-            Instr::RustContextCall { args, slices, .. } => Some((args.len(), slices.len())),
+            Instr::RustCall { args, slices, .. } => Some((args.len(), slices.len())),
             _ => None,
         })
         .collect::<Vec<_>>();
@@ -423,7 +423,13 @@ fn opaque_context_operations_receive_all_scalar_words() {
     #[cfg(feature = "llvm")]
     {
         let llvm = splice_llvm::to_llvm_ir(ir.as_inner(), &ir.as_inner().options().target).unwrap();
-        assert_eq!(llvm.matches("rust_context_packet = alloca").count(), 1);
+        // Each call has a fixed-size packet slot in the entry block.
+        let packets = llvm
+            .lines()
+            .filter(|line| line.contains("%rust_packet") && line.contains(" = alloca ["))
+            .count();
+        assert_eq!(packets, 2);
+        assert!(!llvm.contains("alloca i64, i64"));
     }
 
     fn check<B: Codegen<Output: Executable>>(ir: &TypedIr<wide_context_pipeline::Signature>) {
@@ -485,7 +491,7 @@ fn rust_context_operations_surround_a_native_fault_and_keep_their_effects() {
     let calls: Vec<_> = code
         .iter()
         .enumerate()
-        .filter_map(|(index, op)| matches!(op, Instr::RustContextCall { .. }).then_some(index))
+        .filter_map(|(index, op)| matches!(op, Instr::RustCall { .. }).then_some(index))
         .collect();
     let [add_count, complete] = calls.as_slice() else {
         panic!("expected two Rust context calls, got {calls:?}");
@@ -580,8 +586,8 @@ fn published_methods_share_the_receivers_context_without_confusing_their_operati
     let operations: HashSet<_> = instructions
         .iter()
         .filter_map(|op| match op {
-            Instr::RustContextCall {
-                target: RustContextTarget::Borrowed { operation, .. },
+            Instr::RustCall {
+                target: RustTarget::Context { operation, .. },
                 ..
             } => Some(*operation),
             _ => None,
@@ -631,8 +637,8 @@ fn published_free_functions_share_the_enclosing_context() {
         .iter()
         .enumerate()
         .filter_map(|(index, op)| match op {
-            Instr::RustContextCall {
-                target: RustContextTarget::Borrowed { operation, .. },
+            Instr::RustCall {
+                target: RustTarget::Context { operation, .. },
                 ..
             } => {
                 assert!(seen.insert(*operation), "calls need distinct operation IDs");
@@ -751,7 +757,7 @@ fn published_and_ordinary_methods_preserve_shared_slice_arguments() {
     assert!(
         instructions
             .iter()
-            .any(|op| matches!(op, Instr::RustContextCall { .. }))
+            .any(|op| matches!(op, Instr::RustCall { .. }))
     );
 
     fn check<B: Codegen<Output: Executable>>(ir: &TypedIr<single_published::Signature>) {

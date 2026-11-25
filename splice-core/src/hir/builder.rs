@@ -1,6 +1,6 @@
 use super::{
-    Binary, Buffer, Constant, ContextSlice, Function, Instr, Label, Reg, RustContextTarget,
-    ScalarType, Simd, ValueType,
+    Binary, Buffer, Constant, ContextSlice, Function, Instr, Label, Reg, ScalarType, Simd,
+    ValueType,
 };
 use crate::frontend::{Body, KernelBuilder, KernelSource, Signature, Specialization};
 use std::collections::HashMap;
@@ -193,47 +193,15 @@ impl KernelBuilder for FunctionBuilder {
     fn trap_bounds(&mut self) -> crate::Result<()> {
         self.push(Instr::TrapBounds)
     }
-    fn rust_call(&mut self, import: super::RustCall, args: &[Reg]) -> crate::Result<Reg> {
+    fn rust_call(
+        &mut self,
+        target: super::RustTarget,
+        args: &[Reg],
+        slices: &[ContextSlice],
+    ) -> crate::Result<Reg> {
         self.scalar(ScalarType::I32, |dst| Instr::RustCall {
             dst,
-            import,
-            args: args.to_vec(),
-        })
-    }
-    fn rust_packet_call(
-        &mut self,
-        import: &'static super::RustPacketSymbol,
-        args: &[Reg],
-    ) -> crate::Result<Reg> {
-        self.scalar(ScalarType::I32, |dst| Instr::RustPacketCall {
-            dst,
-            import,
-            args: args.to_vec(),
-        })
-    }
-    fn rust_context_call(
-        &mut self,
-        context: Buffer,
-        operation: u32,
-        args: &[Reg],
-        slices: &[ContextSlice],
-    ) -> crate::Result<Reg> {
-        self.scalar(ScalarType::I32, |dst| Instr::RustContextCall {
-            dst,
-            target: RustContextTarget::Borrowed { context, operation },
-            args: args.to_vec(),
-            slices: slices.to_vec(),
-        })
-    }
-    fn rust_static_call(
-        &mut self,
-        symbol: &'static crate::StaticRustSymbol,
-        args: &[Reg],
-        slices: &[ContextSlice],
-    ) -> crate::Result<Reg> {
-        self.scalar(ScalarType::I32, |dst| Instr::RustContextCall {
-            dst,
-            target: RustContextTarget::Static(symbol),
+            target,
             args: args.to_vec(),
             slices: slices.to_vec(),
         })

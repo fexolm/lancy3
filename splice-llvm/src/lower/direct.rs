@@ -17,8 +17,7 @@ use splice_core::{
     debug::{Location, Point, Slot, Variable},
     frontend::{Body as StagedBody, KernelBuilder, KernelSource, Signature, Specialization},
     hir::{
-        Binary, Buffer, Constant, ContextSlice, Label, Reg, RustContextTarget, ScalarType, Simd,
-        ValueType,
+        Binary, Buffer, Constant, ContextSlice, Label, Reg, RustTarget, ScalarType, Simd, ValueType,
     },
 };
 
@@ -375,40 +374,12 @@ impl KernelBuilder for Direct<'_, '_> {
     }
     fn rust_call(
         &mut self,
-        import: splice_core::hir::RustCall,
-        args: &[Reg],
-    ) -> splice_core::Result<Reg> {
-        self.result(WORD, |ir, dst| ir.rust_call(dst, import, args))
-    }
-    fn rust_packet_call(
-        &mut self,
-        import: &'static splice_core::hir::RustPacketSymbol,
-        args: &[Reg],
-    ) -> splice_core::Result<Reg> {
-        self.result(WORD, |ir, dst| ir.rust_packet_call(dst, import, args))
-    }
-    fn rust_context_call(
-        &mut self,
-        context: Buffer,
-        operation: u32,
+        target: RustTarget,
         args: &[Reg],
         slices: &[ContextSlice],
     ) -> splice_core::Result<Reg> {
-        let target = RustContextTarget::Borrowed { context, operation };
-        self.result(WORD, |ir, dst| {
-            ir.rust_context_call(dst, target, args, slices)
-        })
-    }
-    fn rust_static_call(
-        &mut self,
-        symbol: &'static splice_core::StaticRustSymbol,
-        args: &[Reg],
-        slices: &[ContextSlice],
-    ) -> splice_core::Result<Reg> {
-        let target = RustContextTarget::Static(symbol);
-        self.result(WORD, |ir, dst| {
-            ir.rust_context_call(dst, target, args, slices)
-        })
+        let plan = target.plan(self.kinds, args.len(), slices);
+        self.result(WORD, |ir, dst| ir.rust_call(dst, plan, args))
     }
     fn call_kernel(
         &mut self,

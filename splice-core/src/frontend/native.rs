@@ -2,7 +2,7 @@
 //! and its argument types before the specialization factory runs.
 use super::{
     KernelBuilder,
-    scalar::{ImportWord, RunArg, invoke_import},
+    scalar::{ImportWord, RunArg},
 };
 use crate::hir::Reg;
 
@@ -25,35 +25,6 @@ pub struct MapResult<F>(pub F);
 impl<R, F: Fn(R) -> i32> ProjectResult<R> for MapResult<F> {
     fn project(&self, result: R) -> i32 {
         (self.0)(result)
-    }
-}
-
-pub trait ScalarAdapter {
-    fn supported(self) -> bool;
-    fn invoke(self, a: i32, b: i32) -> i64;
-}
-
-macro_rules! adapter {
-    (($a:ident, $b:ident), $($arg:ident = $word:ident),*) => {
-        impl<R, P: ProjectResult<R>, $($arg: ImportWord),*> ScalarAdapter for &Candidate<fn($($arg),*) -> R, P> {
-            fn supported(self) -> bool { true }
-            #[allow(unused_variables)]
-            fn invoke(self, $a: i32, $b: i32) -> i64 {
-                invoke_import(|| self.1.project((self.0)($($arg::decode($word)),*)))
-            }
-        }
-    }
-}
-adapter!((a, b),);
-adapter!((a, b), A = a);
-adapter!((a, b), A = a, B = b);
-
-impl<F, P> ScalarAdapter for &&Candidate<F, P> {
-    fn supported(self) -> bool {
-        false
-    }
-    fn invoke(self, _: i32, _: i32) -> i64 {
-        splice_target::abi::Trap::Abi.status()
     }
 }
 

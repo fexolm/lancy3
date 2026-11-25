@@ -107,46 +107,17 @@ pub trait KernelBuilder {
             "this builder does not support an explicit bounds trap",
         ))
     }
+    /// Run Rust code at this point of the kernel: a static function or an
+    /// operation of a Rust context argument, on `i32` words and slices.
     #[doc(hidden)]
-    fn rust_context_call(
+    fn rust_call(
         &mut self,
-        _context: Buffer,
-        _operation: u32,
-        _args: &[Reg],
-        _slices: &[ContextSlice],
-    ) -> crate::Result<Reg> {
-        Err(crate::BuildError::unsupported(
-            "this builder does not support Rust context operations",
-        ))
-    }
-    #[doc(hidden)]
-    fn rust_static_call(
-        &mut self,
-        symbol: &'static crate::StaticRustSymbol,
+        target: crate::hir::RustTarget,
         _args: &[Reg],
         _slices: &[ContextSlice],
     ) -> crate::Result<Reg> {
         Err(crate::BuildError::staging(format!(
-            "backend cannot link Rust operation {}",
-            symbol.name()
-        )))
-    }
-    /// Emit a typed, effectful Rust operation at this point in the function.
-    fn rust_call(&mut self, import: crate::hir::RustCall, _args: &[Reg]) -> crate::Result<Reg> {
-        Err(crate::BuildError::staging(format!(
-            "backend cannot link Rust import {}",
-            import.symbol.name
-        )))
-    }
-    #[doc(hidden)]
-    fn rust_packet_call(
-        &mut self,
-        import: &'static crate::hir::RustPacketSymbol,
-        _args: &[Reg],
-    ) -> crate::Result<Reg> {
-        Err(crate::BuildError::staging(format!(
-            "backend cannot link Rust import {}",
-            import.name
+            "backend cannot link Rust code {target:?}"
         )))
     }
     /// Stage `body` as a nested kernel and call it.

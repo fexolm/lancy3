@@ -526,7 +526,7 @@ fn trait_and_impl_publication_follow_an_imported_trait_alias() {
         assert!(
             ir.instructions()
                 .iter()
-                .any(|op| matches!(op, Instr::RustPacketCall { args, .. } if args.len() == 3))
+                .any(|op| matches!(op, Instr::RustCall { args, .. } if args.len() == 3))
         );
         let direct = runtime_wide::build::<B>(runtime_wide::BuildArgs { offset: 3 }).unwrap();
         let portable = B::compile(&ir).unwrap();

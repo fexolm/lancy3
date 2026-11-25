@@ -84,8 +84,8 @@ impl Lower<'_> {
                 }
             }
             let words = [#(#scalar::RunArg::word(#words, __splice_builder)?),*];
-            __splice_builder.rust_static_call(
-                const { &#root::StaticRustSymbol::of::<__SpliceScope #params>(::core::stringify!(#name)) },
+            __splice_builder.rust_call(
+                #root::hir::RustTarget::Static(const { &#root::StaticRustSymbol::of::<__SpliceScope #params>(::core::stringify!(#name)) }),
                 &words, &[#(#slices),*]
             )?
         }))

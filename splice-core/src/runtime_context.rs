@@ -231,35 +231,19 @@ impl Hash for ContextSignature {
     }
 }
 
+/// The Rust side of a kernel's context operations for one call: native
+/// code passes every operation's words and slices in a packet.
 pub struct RuntimeContext<'a> {
     signature: &'static ContextSignature,
-    invoke: Dispatcher<'a>,
-}
-
-enum Dispatcher<'a> {
-    Scalars(&'a mut dyn FnMut(u32, i32, i32) -> i32),
-    Packet(&'a mut dyn FnMut(u32, ContextArguments<'_>) -> i32),
+    invoke: &'a mut dyn FnMut(u32, ContextArguments<'_>) -> i32,
 }
 
 impl<'a> RuntimeContext<'a> {
     pub fn new(
         signature: &'static ContextSignature,
-        invoke: &'a mut dyn FnMut(u32, i32, i32) -> i32,
-    ) -> Self {
-        Self {
-            signature,
-            invoke: Dispatcher::Scalars(invoke),
-        }
-    }
-
-    pub fn new_packet(
-        signature: &'static ContextSignature,
         invoke: &'a mut dyn FnMut(u32, ContextArguments<'_>) -> i32,
     ) -> Self {
-        Self {
-            signature,
-            invoke: Dispatcher::Packet(invoke),
-        }
+        Self { signature, invoke }
     }
 
     pub fn signature(&self) -> &'static ContextSignature {
@@ -294,23 +278,52 @@ pub trait StaticRustCall {
     fn invoke(arguments: ContextArguments<'_>) -> i32;
 }
 
-/// The packet shape and entry point for one statically selected Rust operation.
+/// The native entry of every Rust call: `entry(target, operation, packet, 0)`.
+/// `target` is the [`RuntimeContext`] of a context operation, or the
+/// [`StaticRustSymbol`] of a static one. It returns a status (see
+/// [`Trap::status`]) whose result word is the operation's `i32` result.
+/// The last operand is unused.
+pub type RustEntry = unsafe extern "C" fn(*mut u8, u32, *const u8, i32) -> i64;
+
+/// A Rust operation selected when the kernel is staged, with its packet shape.
 #[derive(Debug)]
 pub struct StaticRustSymbol {
     name: &'static str,
     words: u32,
     slices: u32,
-    entry: unsafe extern "C" fn(*mut u8, u32, *const u8, i32) -> i64,
+    invoke: fn(ContextArguments<'_>) -> i32,
 }
 
 impl StaticRustSymbol {
-    pub const fn of<F: StaticRustCall>(name: &'static str) -> Self {
+    /// # Panics
+    /// If the packet of `words` and `slices` does not fit `i32`, which is a
+    /// compile error in a constant.
+    ///
+    /// ```compile_fail,E0080
+    /// # use splice_core::{ContextArguments, StaticRustSymbol};
+    /// fn never(_: ContextArguments<'_>) -> i32 { 0 }
+    /// static OVERSIZE: StaticRustSymbol = StaticRustSymbol::new("oversize", u32::MAX, 0, never);
+    /// ```
+    pub const fn new(
+        name: &'static str,
+        words: u32,
+        slices: u32,
+        invoke: fn(ContextArguments<'_>) -> i32,
+    ) -> Self {
+        assert!(
+            ContextArguments::packet_layout(words, slices).is_some(),
+            "Rust operation packet exceeds i32::MAX bytes"
+        );
         Self {
             name,
-            words: F::WORDS,
-            slices: F::SLICES,
-            entry: invoke_static_rust_packet::<F>,
+            words,
+            slices,
+            invoke,
         }
+    }
+
+    pub const fn of<F: StaticRustCall>(name: &'static str) -> Self {
+        Self::new(name, F::WORDS, F::SLICES, F::invoke)
     }
 
     pub fn name(&self) -> &'static str {
@@ -319,14 +332,6 @@ impl StaticRustSymbol {
 
     pub fn shape(&self) -> (u32, u32) {
         (self.words, self.slices)
-    }
-
-    /// The entry requires live, aligned packet storage initialized according to
-    /// this symbol's shape. Each view must refer to an initialized, live slice.
-    /// Writable views must be exclusive and disjoint from every other view.
-    /// The context and operation arguments of the native ABI are unused.
-    pub fn entry(&self) -> unsafe extern "C" fn(*mut u8, u32, *const u8, i32) -> i64 {
-        self.entry
     }
 }
 
@@ -404,111 +409,90 @@ impl fmt::Debug for RuntimeContext<'_> {
     }
 }
 
+/// The [`RustEntry`] of a context operation.
+///
 /// # Safety
 /// `raw` must hold the live, exclusive [`RuntimeContext`] borrow provided by
-/// the verified invocation's `BufferArg::context`. It may not be retained.
-pub unsafe extern "C" fn invoke_runtime_context(
+/// the verified invocation's `BufferArg::context`. `packet` points to
+/// aligned, initialized native call workspace for this operation. Its
+/// descriptors must point to validated live slices. Every descriptor tagged
+/// writable must grant exclusive access and be disjoint from the other views.
+/// Neither pointer nor the temporary borrows may be retained.
+pub unsafe extern "C" fn invoke_context(
     raw: *mut u8,
     operation: u32,
-    a: i32,
-    b: i32,
+    packet: *const u8,
+    _unused: i32,
 ) -> i64 {
     // SAFETY: The backend verifies the context descriptor and borrows it for
     // this synchronous call. Every context, regardless of the captured Rust
     // types, contains the same erased Rust dispatcher representation.
     let context = unsafe { &mut *raw.cast::<RuntimeContext<'_>>() };
-    let Some((words @ 0..=2, 0)) = context.signature.shape(operation) else {
+    let Some((words, slices)) = context.signature.shape(operation) else {
         return Trap::Abi.status();
     };
-    let scalars = [a, b];
-    invoke(
-        context,
-        operation,
-        ContextArguments {
-            words: &scalars[..words],
-            slices: [].iter(),
-        },
-    )
-}
-
-/// # Safety
-/// `raw` must hold the live, exclusive Rust context token. `packet` points
-/// to aligned, initialized native call workspace for this operation. Its
-/// descriptors must point to validated live slices. Every descriptor tagged
-/// writable must grant exclusive access and be disjoint from the other views.
-/// Neither pointer nor the temporary borrows may be retained.
-pub unsafe extern "C" fn invoke_packet_runtime_context(
-    raw: *mut u8,
-    operation: u32,
-    packet: *const u8,
-    _unused: i32,
-) -> i64 {
-    // SAFETY: the native caller supplies both the context and the correctly
-    // sized, aligned packet under the contract above.
-    let context = unsafe { &mut *raw.cast::<RuntimeContext<'_>>() };
-    let Some((words, count)) = context.signature.shape(operation) else {
-        return Trap::Abi.status();
-    };
-    if (words <= 2 && count == 0) || !matches!(context.invoke, Dispatcher::Packet(_)) {
-        return Trap::Abi.status();
-    }
     // SAFETY: the native caller supplies initialized, disjoint views and the
     // validated context signature gives the exact packet shape.
-    unsafe {
-        with_packet(packet, words as u32, count, |args| {
-            invoke(context, operation, args)
+    rust_entry(|| {
+        (context.invoke)(operation, unsafe {
+            arguments(packet, words as u32, slices)
         })
-    }
+    })
 }
 
-unsafe extern "C" fn invoke_static_rust_packet<F: StaticRustCall>(
-    _raw: *mut u8,
+/// Bytes before the operands of a static operation's packet: the address of
+/// its [`StaticRustSymbol`].
+pub const STATIC_HEADER: u32 = 8;
+
+/// The [`RustEntry`] of a static operation. Its packet starts with the
+/// address of the [`StaticRustSymbol`]; the operands follow at
+/// [`STATIC_HEADER`] in the layout of [`ContextArguments`].
+///
+/// # Safety
+/// `packet` holds the address of the live symbol the call was verified
+/// against, followed by its operands, as for [`invoke_context`].
+pub unsafe extern "C" fn invoke_static(
+    _receiver: *mut u8,
     _operation: u32,
     packet: *const u8,
     _unused: i32,
 ) -> i64 {
-    // SAFETY: the symbol pairs this entry with F's exact shape. The checked
-    // native caller supplies live, aligned, initialized packet storage and
-    // the verified slice views for the duration of this call.
-    unsafe {
-        with_packet(packet, F::WORDS, F::SLICES, |args| {
-            rust_entry(|| F::invoke(args))
+    // SAFETY: native lowering stores the static descriptor's address at the
+    // start of the aligned packet.
+    let symbol = unsafe { &*packet.cast::<*const StaticRustSymbol>().read() };
+    // SAFETY: the checked native caller supplies live, aligned, initialized
+    // operands of the symbol's shape and the verified slice views for the
+    // duration of this call.
+    rust_entry(|| {
+        (symbol.invoke)(unsafe {
+            arguments(
+                packet.add(STATIC_HEADER as usize),
+                symbol.words,
+                symbol.slices,
+            )
         })
-    }
+    })
 }
 
-// The native caller must provide a live, aligned packet of the given shape.
-// Its buffers must satisfy the aliasing contract of ContextArguments.
-unsafe fn with_packet(
-    packet: *const u8,
-    words: u32,
-    count: u32,
-    call: impl FnOnce(ContextArguments<'_>) -> i64,
-) -> i64 {
-    let Some(layout) = ContextArguments::packet_layout(words, count) else {
-        return Trap::Abi.status();
-    };
-    // SAFETY: the verified packet contains initialized words and exactly
-    // count descriptors at the checked aligned byte offset.
-    let args = unsafe {
-        let descriptors = packet.add(layout.slices_at as usize).cast();
+/// The operands of a packet of `words` and `slices`. The arguments are
+/// built where the operation is called: passing them by value through
+/// further frames costs a store-forwarding stall on every call.
+///
+/// # Safety
+/// `packet` is a live, aligned packet of that shape, whose views satisfy
+/// the aliasing contract of [`ContextArguments`]. Every caller's shape was
+/// checked to fit `i32` when its symbol or signature was built.
+#[inline(always)]
+unsafe fn arguments<'a>(packet: *const u8, words: u32, slices: u32) -> ContextArguments<'a> {
+    let slices_at = (words as usize * 4).next_multiple_of(8);
+    // SAFETY: the caller's contract.
+    unsafe {
         ContextArguments {
             words: std::slice::from_raw_parts(packet.cast::<i32>(), words as usize),
-            slices: std::slice::from_raw_parts(descriptors, count as usize).iter(),
+            slices: std::slice::from_raw_parts(packet.add(slices_at).cast(), slices as usize)
+                .iter(),
         }
-    };
-    call(args)
-}
-
-fn invoke(context: &mut RuntimeContext<'_>, operation: u32, args: ContextArguments<'_>) -> i64 {
-    rust_entry(|| match &mut context.invoke {
-        Dispatcher::Scalars(invoke) => invoke(
-            operation,
-            args.words.first().copied().unwrap_or(0),
-            args.words.get(1).copied().unwrap_or(0),
-        ),
-        Dispatcher::Packet(invoke) => invoke(operation, args),
-    })
+    }
 }
 
 #[cfg(test)]

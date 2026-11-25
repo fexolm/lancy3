@@ -564,27 +564,21 @@ fn every_scalar_cast_folds_a_constant_like_rust_as() {
     }
 }
 
-/// A Rust import that returns `value` for `fail == 0`, panics for the
-/// `RustPanic` code and otherwise reports `fail` as its trap code.
-extern "C" fn import(value: i32, fail: i32) -> i64 {
-    match Trap::from_code(fail as u32) {
-        None => i64::from(value as u32),
-        Some(Trap::RustPanic) => {
-            splice_target::abi::rust_entry(|| panic!("import failed on {value}"))
-        }
-        Some(trap) => trap.status(),
-    }
+/// A Rust import that returns `value` for `fail == 0` and panics otherwise.
+/// A panic is the only trap Rust code reports: every call goes through the
+/// packet entry, which owns the status.
+fn import(args: splice::ContextArguments<'_>) -> i32 {
+    let (value, fail) = (args.word(0), args.word(1));
+    assert!(fail == 0, "import failed on {value}");
+    value
 }
 
-static IMPORT: splice::hir::RustSymbol = splice::hir::RustSymbol {
-    name: "import",
-    resolve: || import,
-};
+static IMPORT: splice::StaticRustSymbol = splice::StaticRustSymbol::new("import", 2, 0, import);
 
 #[test]
 fn every_backend_reports_the_same_typed_trap() {
     // trap(kind, value): 0 bounds, 1 division by zero, 2 division overflow,
-    // 3 overflow, 4 Rust import; otherwise value through the import.
+    // 3 overflow, 4 Rust panic; otherwise value through the import.
     let stage: Stage = Rc::new(|b| {
         let kind = b.arg(0)?;
         let value = b.arg(1)?;
@@ -598,12 +592,9 @@ fn every_backend_reports_the_same_typed_trap() {
             b.branch(hit, exit, next)?;
             b.mark(next)?;
         }
-        let import = splice::hir::RustCall {
-            symbol: &IMPORT,
-            arity: 2,
-        };
+        let import = splice::hir::RustTarget::Static(&IMPORT);
         let zero = b.constant(Constant::from(0))?;
-        let passed = b.rust_call(import, &[value, zero])?;
+        let passed = b.rust_call(import, &[value, zero], &[])?;
         b.ret(passed)?;
         let operations = [
             (Binary::Div, 1, 0),
@@ -626,7 +617,7 @@ fn every_backend_reports_the_same_typed_trap() {
         b.mark(exits[4])?;
         let hundred = b.constant(Constant::from(100))?;
         let fail = b.binary(Binary::Sub, value, hundred)?;
-        let r = b.rust_call(import, &[value, fail])?;
+        let r = b.rust_call(import, &[value, fail], &[])?;
         b.ret(r)?;
         Ok(())
     });
@@ -637,8 +628,6 @@ fn every_backend_reports_the_same_typed_trap() {
         (2, 0),
         (3, 0),
         (4, 105),
-        (4, 106),
-        (4, 104),
         (4, 100),
         (9, 7),
     ];
@@ -666,8 +655,6 @@ fn every_backend_reports_the_same_typed_trap() {
         Err(CallError::Trap(Trap::DivisionOverflow)),
         Err(CallError::Trap(Trap::Overflow)),
         Err(CallError::RustPanic("import failed on 105".into())),
-        Err(CallError::Trap(Trap::Abi)),
-        Err(CallError::Trap(Trap::Overflow)),
         Ok(100),
         Ok(7),
     ]

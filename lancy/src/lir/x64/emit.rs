@@ -997,7 +997,7 @@ impl Emitter<'_> {
                         a.mov(symbol, std::ptr::from_ref(import) as u64)?;
                         a.lea(words, ptr(r11 + (disp(frame.scratch_base) + offset as i32)))?;
                         a.mov(count, u64::from(import.arity))?;
-                        splice_target::abi::invoke_packet_import as *const () as usize
+                        crate::hir::invoke_packet_import as *const () as usize
                     }
                     Inst::RustContextCall(import, ..) => import.address(),
                     _ => unreachable!(),

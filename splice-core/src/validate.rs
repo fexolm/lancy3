@@ -3,8 +3,8 @@
 //! portable function is verified (which replays it through this check).
 use crate::frontend::{Body, KernelBuilder, KernelSource, Signature, Specialization};
 use crate::hir::{
-    Binary, Buffer, BufferKind, Constant, ContextSlice, Function, Label, Reg, RustCall,
-    RustContextTarget, RustPacketSymbol, ScalarType, Simd, ValueType,
+    Binary, Buffer, BufferKind, Constant, ContextSlice, Function, Label, Reg, RustTarget,
+    ScalarType, Simd, ValueType,
 };
 use crate::{BuildError, Result};
 use std::cell::RefCell;
@@ -477,54 +477,15 @@ impl KernelBuilder for Validating<'_> {
         self.close(&[], Exit::Return);
         Ok(())
     }
-    fn rust_context_call(
+    fn rust_call(
         &mut self,
-        context: Buffer,
-        operation: u32,
+        target: RustTarget,
         args: &[Reg],
         slices: &[ContextSlice],
     ) -> Result<Reg> {
         let types = self.rust_operands(args);
-        self.at(crate::hir::check_rust_context_call(
-            self.kinds,
-            RustContextTarget::Borrowed { context, operation },
-            types.into_iter(),
-            slices,
-        ))?;
-        let r = self
-            .inner
-            .rust_context_call(context, operation, args, slices)?;
-        Ok(self.value(args, r, WORD))
-    }
-    fn rust_static_call(
-        &mut self,
-        symbol: &'static crate::StaticRustSymbol,
-        args: &[Reg],
-        slices: &[ContextSlice],
-    ) -> Result<Reg> {
-        let types = self.rust_operands(args);
-        self.at(crate::hir::check_rust_context_call(
-            self.kinds,
-            RustContextTarget::Static(symbol),
-            types.into_iter(),
-            slices,
-        ))?;
-        let r = self.inner.rust_static_call(symbol, args, slices)?;
-        Ok(self.value(args, r, WORD))
-    }
-    fn rust_call(&mut self, import: RustCall, args: &[Reg]) -> Result<Reg> {
-        let types = self.rust_operands(args);
-        self.at(import.validate(types.into_iter()))?;
-        let r = self.inner.rust_call(import, args)?;
-        Ok(self.value(args, r, WORD))
-    }
-    fn rust_packet_call(&mut self, import: &'static RustPacketSymbol, args: &[Reg]) -> Result<Reg> {
-        let types = self.rust_operands(args);
-        self.at(crate::hir::check_rust_packet_call(
-            import,
-            types.into_iter(),
-        ))?;
-        let r = self.inner.rust_packet_call(import, args)?;
+        self.at(target.check(self.kinds, types.into_iter(), slices))?;
+        let r = self.inner.rust_call(target, args, slices)?;
         Ok(self.value(args, r, WORD))
     }
     fn call_kernel(
@@ -677,27 +638,7 @@ impl KernelBuilder for Sink {
     fn trap_bounds(&mut self) -> Result<()> {
         Ok(())
     }
-    fn rust_context_call(
-        &mut self,
-        _: Buffer,
-        _: u32,
-        _: &[Reg],
-        _: &[ContextSlice],
-    ) -> Result<Reg> {
-        self.next()
-    }
-    fn rust_static_call(
-        &mut self,
-        _: &'static crate::StaticRustSymbol,
-        _: &[Reg],
-        _: &[ContextSlice],
-    ) -> Result<Reg> {
-        self.next()
-    }
-    fn rust_call(&mut self, _: RustCall, _: &[Reg]) -> Result<Reg> {
-        self.next()
-    }
-    fn rust_packet_call(&mut self, _: &'static RustPacketSymbol, _: &[Reg]) -> Result<Reg> {
+    fn rust_call(&mut self, _: RustTarget, _: &[Reg], _: &[ContextSlice]) -> Result<Reg> {
         self.next()
     }
     fn call_kernel(

@@ -541,9 +541,3 @@ impl ImportWord for () {
         0i32.into()
     }
 }
-
-/// The generated adapter calls this inside its C entry point. Unwinding
-/// finishes inside Rust before control returns to the native kernel.
-pub fn invoke_import<R: ImportWord>(call: impl FnOnce() -> R) -> i64 {
-    splice_target::abi::rust_entry(|| call().encode())
-}

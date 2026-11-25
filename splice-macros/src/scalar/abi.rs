@@ -209,7 +209,7 @@ pub(super) fn generate(
             let mut __splice_dispatch = |__splice_operation: u32, __splice_arguments: #root::ContextArguments<'_>| -> i32 {
                 #invoke
             };
-            let mut __splice_runtime_context = #root::RuntimeContext::new_packet(&__SPLICE_CONTEXT_SIGNATURE, &mut __splice_dispatch);
+            let mut __splice_runtime_context = #root::RuntimeContext::new(&__SPLICE_CONTEXT_SIGNATURE, &mut __splice_dispatch);
         }
     });
     let buffers = if let Some(columns) = columns {

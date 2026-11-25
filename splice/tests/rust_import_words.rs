@@ -34,13 +34,16 @@ fn call_four(output: &mut [i32], a: i32, positive: bool, b: i32, c: i32) -> i32 
 #[test]
 fn a_wide_scalar_rust_import_preserves_native_stores_and_effects() {
     let ir = call_four::ir().unwrap();
-    use splice::hir::Instr;
+    use splice::hir::{Instr, RustTarget};
     let imports = ir
         .instructions()
         .iter()
         .filter_map(|op| match op {
-            Instr::RustCall { import, args, .. } => Some((import.symbol.name, args.len())),
-            Instr::RustPacketCall { import, args, .. } => Some((import.name, args.len())),
+            Instr::RustCall {
+                target: RustTarget::Static(symbol),
+                args,
+                ..
+            } => Some((symbol.name(), args.len())),
             _ => None,
         })
         .collect::<Vec<_>>();

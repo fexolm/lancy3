@@ -220,29 +220,14 @@ impl<'f, 'b> Replay<'f, 'b> {
                     self.b.ret(value)?;
                 }
                 Instr::TrapBounds => self.b.trap_bounds()?,
-                Instr::RustCall { dst, import, args } => {
-                    let args = self.regs(args)?;
-                    self.define(*dst, |b| b.rust_call(*import, &args))?;
-                }
-                Instr::RustPacketCall { dst, import, args } => {
-                    let args = self.regs(args)?;
-                    self.define(*dst, |b| b.rust_packet_call(import, &args))?;
-                }
-                Instr::RustContextCall {
+                Instr::RustCall {
                     dst,
                     target,
                     args,
                     slices,
                 } => {
                     let args = self.regs(args)?;
-                    self.define(*dst, |b| match *target {
-                        super::RustContextTarget::Borrowed { context, operation } => {
-                            b.rust_context_call(context, operation, &args, slices)
-                        }
-                        super::RustContextTarget::Static(symbol) => {
-                            b.rust_static_call(symbol, &args, slices)
-                        }
-                    })?;
+                    self.define(*dst, |b| b.rust_call(*target, &args, slices))?;
                 }
                 Instr::Call {
                     dst,

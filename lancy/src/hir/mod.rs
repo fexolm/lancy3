@@ -13,4 +13,5 @@ pub use error::IrError;
 pub use ssa::{
     Binary, Block, Call, Edge, Function, Inst, Lane, Op, PacketCall, RustContextImport, RustImport,
     RustPacketImport, Scale, Simd, Terminator, Ternary, Type, Unary, Value, VectorAddress,
+    invoke_packet_import,
 };

@@ -764,7 +764,7 @@ fn iterating_a_runtime_slice_lowers_to_a_loop_and_handles_an_empty_input() {
     assert!(
         !ir.instructions()
             .iter()
-            .any(|op| matches!(op, Instr::RustContextCall { .. }))
+            .any(|op| matches!(op, Instr::RustCall { .. }))
     );
     assert!(
         ir.instructions()
@@ -1246,10 +1246,11 @@ fn compound_index_assignment_matches_rust_usize() {
         decrement_len::ir().unwrap().into_inner(),
         double_len::ir().unwrap().into_inner(),
     ] {
-        assert!(!ir.instructions().iter().any(|i| matches!(
-            i,
-            splice::hir::Instr::RustCall { .. } | splice::hir::Instr::RustPacketCall { .. }
-        )));
+        assert!(
+            !ir.instructions()
+                .iter()
+                .any(|i| matches!(i, splice::hir::Instr::RustCall { .. }))
+        );
     }
 
     fn check<B: Codegen<Output: Executable>>() {

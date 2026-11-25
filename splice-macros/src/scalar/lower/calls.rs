@@ -294,50 +294,37 @@ impl Lower<'_> {
         if uses_self.0 {
             return emit!(::core::result::Result::Err::<#root::hir::Reg,#root::BuildError>(#root::BuildError::staging("unpublished Self method requires its owning Rust context"))?);
         }
-        let (adapter, call) = if arity <= 2 {
-            (
-                emit! {
-                    use #root::frontend::native::ScalarAdapter as _;
-                    extern "C" fn adapter #generics (a:i32,b:i32)->i64 #where_clause {
-                        use #root::frontend::native::ScalarAdapter as _;
-                        (&#candidate).invoke(a,b)
-                    }
-                },
-                emit! {
-                    __splice_builder.rust_call(#root::hir::RustCall {
-                        symbol: &#root::hir::RustSymbol {name:stringify!(#path), resolve: || adapter #fish}, arity:#arity as u8,
-                    },&operands)?
-                },
-            )
-        } else {
-            let indices = 0..arity;
-            let word = emit!(#root::frontend::scalar::ImportWord);
-            (
-                emit! {
-                    trait __SplicePacketAdapter {
-                        fn supported(self) -> bool;
-                        fn invoke(self, words: &[i32]) -> i32;
-                    }
-                    impl<#(#slots: #word,)* R, P: #native::ProjectResult<R>> __SplicePacketAdapter for &#native::Candidate<fn(#(#slots),*) -> R, P> {
-                        fn supported(self) -> bool { true }
-                        fn invoke(self, words: &[i32]) -> i32 {
-                            #native::ProjectResult::project(&self.1, (self.0)(#(<#slots as #word>::decode(words[#indices])),*))
-                        }
-                    }
-                    impl<F, P> __SplicePacketAdapter for &&#native::Candidate<F, P> {
-                        fn supported(self) -> bool { false }
-                        fn invoke(self, _: &[i32]) -> i32 { ::core::unreachable!("verified scalar packet adapter") }
-                    }
-                    fn adapter #generics (words: &[i32]) -> i32 #where_clause {
-                        (&#candidate).invoke(words)
-                    }
-                },
-                emit! {
-                    __splice_builder.rust_packet_call(&#root::hir::RustPacketSymbol {
-                        name: ::core::stringify!(#path), arity: #arity as u32, resolve: || adapter #fish,
-                    }, &operands)?
-                },
-            )
+        let indices = 0..arity;
+        let word = emit!(#root::frontend::scalar::ImportWord);
+        let words = arity as u32;
+        let adapter = emit! {
+            trait __SplicePacketAdapter {
+                fn supported(self) -> bool;
+                fn invoke(self, args: #root::ContextArguments<'_>) -> i32;
+            }
+            impl<#(#slots: #word,)* R, P: #native::ProjectResult<R>> __SplicePacketAdapter for &#native::Candidate<fn(#(#slots),*) -> R, P> {
+                fn supported(self) -> bool { true }
+                #[allow(unused_variables)]
+                fn invoke(self, args: #root::ContextArguments<'_>) -> i32 {
+                    #native::ProjectResult::project(&self.1, (self.0)(#(<#slots as #word>::decode(args.word(#indices))),*))
+                }
+            }
+            impl<F, P> __SplicePacketAdapter for &&#native::Candidate<F, P> {
+                fn supported(self) -> bool { false }
+                fn invoke(self, _: #root::ContextArguments<'_>) -> i32 { ::core::unreachable!("verified scalar packet adapter") }
+            }
+            fn adapter #generics (args: #root::ContextArguments<'_>) -> i32 #where_clause {
+                (&#candidate).invoke(args)
+            }
+        };
+        let call = emit! {
+            __splice_builder.rust_call(
+                #root::hir::RustTarget::Static(const {
+                    &#root::StaticRustSymbol::new(::core::stringify!(#path), #words, 0, adapter #fish)
+                }),
+                &operands,
+                &[],
+            )?
         };
         let operands = if let Some((shape, needs_stages)) = stage_checks {
             let indices: Vec<_> = (0..arity).map(syn::Index::from).collect();

@@ -142,48 +142,24 @@ pub(crate) fn trait_defaults(
             })
             .collect();
         let func = (!generic_args.is_empty()).then(|| emit!(::<#(#generic_args),*>));
-        let native_call = |words: &[TokenStream]| {
-            let args = words
-                .iter()
-                .map(|word| emit!(#support::ImportWord::decode(#word)));
-            emit!(<Self as #trait_owner>::#name #func (#(#args),*))
+        let words = (0..arity).map(|index| emit!(#support::ImportWord::decode(args.word(#index))));
+        let adapter = emit! {
+            #[doc(hidden)]
+            #[allow(unused_variables)]
+            fn #adapter_name #generics (args: #root::ContextArguments<'_>) -> i32 #where_ {
+                #support::ImportWord::encode(<Self as #trait_owner>::#name #func (#(#words),*))
+            }
         };
-        let (adapter, call) = if arity <= 2 {
-            let native = native_call(&[emit!(left), emit!(right)][..arity]);
-            (
-                emit! {
-                    #[doc(hidden)]
-                    #[allow(unused_variables)]
-                    extern "C" fn #adapter_name #generics (left: i32, right: i32) -> i64 #where_ {
-                        #support::invoke_import(|| #native)
-                    }
-                },
-                emit! {
-                    __splice_builder.rust_call(#hir::RustCall {
-                        symbol: &#hir::RustSymbol {name: ::core::stringify!(#name), resolve: || <Self as #trait_owner>::#adapter_name #func},
-                        arity: #arity as u8,
-                    }, &args)
-                },
-            )
-        } else {
-            let words = (0..arity)
-                .map(|index| emit!(words[#index]))
-                .collect::<Vec<_>>();
-            let native = native_call(&words);
-            (
-                emit! {
-                    #[doc(hidden)]
-                    fn #adapter_name #generics (words: &[i32]) -> i32 #where_ {
-                        #support::ImportWord::encode(#native)
-                    }
-                },
-                emit! {
-                    __splice_builder.rust_packet_call(&#hir::RustPacketSymbol {
-                        name: ::core::stringify!(#name),
-                        arity: #arity as u32,
-                        resolve: || <Self as #trait_owner>::#adapter_name #func,
-                    }, &args)
-                },
+        let arity = arity as u32;
+        let call = emit! {
+            __splice_builder.rust_call(
+                #hir::RustTarget::Static(const {
+                    &#root::StaticRustSymbol::new(
+                        ::core::stringify!(#name), #arity, 0, <Self as #trait_owner>::#adapter_name #func,
+                    )
+                }),
+                &args,
+                &[],
             )
         };
         items.push(adapter);

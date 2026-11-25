@@ -1,4 +1,5 @@
 mod numeric;
+mod rust_import;
 mod simd;
 use super::{Call, Edge, PacketCall};
 pub use numeric::{Lane, Ternary, Type, Unary};
@@ -16,7 +17,7 @@ pub enum Scale {
     Eight = 3,
 }
 
-pub use splice_target::abi::{RustPacketSymbol as RustPacketImport, RustSymbol as RustImport};
+pub use rust_import::{RustImport, RustPacketImport, invoke_packet_import};
 
 /// Checked-context dispatcher. Raw callers must supply the context token
 /// expected by the dispatcher as its first argument.

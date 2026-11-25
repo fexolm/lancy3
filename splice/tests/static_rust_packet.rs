@@ -1,5 +1,5 @@
 use splice::frontend::{KernelBuilder, Signature, materialize};
-use splice::hir::{Buffer, ContextSlice, Instr, RustContextTarget};
+use splice::hir::{Buffer, ContextSlice, Instr, RustTarget};
 use splice::hir::{Constant, ScalarType};
 use splice::{
     BufferArg, BufferKind, BuildOptions, Codegen, ContextArguments, Executable, Mode,
@@ -23,7 +23,7 @@ static EMPTY: StaticRustSymbol = StaticRustSymbol::of::<Empty>("empty");
 #[test]
 fn static_packets_can_have_no_operands() {
     fn body(builder: &mut dyn KernelBuilder) -> splice::Result<()> {
-        let result = builder.rust_static_call(&EMPTY, &[], &[])?;
+        let result = builder.rust_call(RustTarget::Static(&EMPTY), &[], &[])?;
         builder.ret(result)?;
         Ok(())
     }
@@ -86,8 +86,11 @@ const fn view(buffer: u32, writable: bool) -> ContextSlice {
 }
 
 fn modify_child(builder: &mut dyn KernelBuilder) -> splice::Result<()> {
-    let result =
-        builder.rust_static_call(&MODIFY, &[builder.arg(0)?], &[SHARED_INPUT, MUTABLE_OUTPUT])?;
+    let result = builder.rust_call(
+        RustTarget::Static(&MODIFY),
+        &[builder.arg(0)?],
+        &[SHARED_INPUT, MUTABLE_OUTPUT],
+    )?;
     builder.ret(result)?;
     Ok(())
 }
@@ -126,7 +129,7 @@ fn static_packets_keep_nested_slice_borrows_and_effect_order() {
         })
         .unwrap();
     assert!(child.instructions().iter().any(|op| matches!(op,
-        Instr::RustContextCall { target: RustContextTarget::Static(symbol), slices, .. }
+        Instr::RustCall { target: RustTarget::Static(symbol), slices, .. }
         if symbol.name() == "modify" && slices == &[SHARED_INPUT, MUTABLE_OUTPUT]
     )));
     #[cfg(feature = "llvm")]
@@ -182,16 +185,6 @@ fn static_packets_keep_nested_slice_borrows_and_effect_order() {
 #[test]
 fn invalid_static_packet_operands_are_rejected_before_native_codegen() {
     use splice::hir::Reg;
-    struct Oversize;
-    impl StaticRustCall for Oversize {
-        const WORDS: u32 = u32::MAX;
-        const SLICES: u32 = 0;
-
-        fn invoke(_: ContextArguments<'_>) -> i32 {
-            unreachable!("invalid packet layout must be rejected during the build")
-        }
-    }
-    static OVERSIZE: StaticRustSymbol = StaticRustSymbol::of::<Oversize>("oversize");
     static EMPTY_CONTEXT: splice::ContextSignature = splice::ContextSignature::new(&[]);
     let kinds = [
         CHILD_KINDS[0],
@@ -199,14 +192,43 @@ fn invalid_static_packet_operands_are_rejected_before_native_codegen() {
         BufferKind::context(&EMPTY_CONTEXT),
     ];
     type Invalid = fn(&mut dyn KernelBuilder) -> splice::Result<Reg>;
-    let cases: [Invalid; 7] = [
-        |b| b.rust_static_call(&OVERSIZE, &[], &[]),
-        |b| b.rust_static_call(&MODIFY, &[], &[SHARED_INPUT, MUTABLE_OUTPUT]),
-        |b| b.rust_static_call(&MODIFY, &[b.arg(0)?], &[MUTABLE_OUTPUT]),
-        |b| b.rust_static_call(&MODIFY, &[b.arg(0)?], &[SHARED_INPUT, view(3, true)]),
-        |b| b.rust_static_call(&MODIFY, &[b.arg(0)?], &[view(2, false), MUTABLE_OUTPUT]),
-        |b| b.rust_static_call(&MODIFY, &[b.arg(0)?], &[SHARED_INPUT, view(0, true)]),
-        |b| b.rust_static_call(&MODIFY, &[b.arg(0)?], &[view(1, false), MUTABLE_OUTPUT]),
+    let cases: [Invalid; 6] = [
+        |b| {
+            b.rust_call(
+                RustTarget::Static(&MODIFY),
+                &[],
+                &[SHARED_INPUT, MUTABLE_OUTPUT],
+            )
+        },
+        |b| b.rust_call(RustTarget::Static(&MODIFY), &[b.arg(0)?], &[MUTABLE_OUTPUT]),
+        |b| {
+            b.rust_call(
+                RustTarget::Static(&MODIFY),
+                &[b.arg(0)?],
+                &[SHARED_INPUT, view(3, true)],
+            )
+        },
+        |b| {
+            b.rust_call(
+                RustTarget::Static(&MODIFY),
+                &[b.arg(0)?],
+                &[view(2, false), MUTABLE_OUTPUT],
+            )
+        },
+        |b| {
+            b.rust_call(
+                RustTarget::Static(&MODIFY),
+                &[b.arg(0)?],
+                &[SHARED_INPUT, view(0, true)],
+            )
+        },
+        |b| {
+            b.rust_call(
+                RustTarget::Static(&MODIFY),
+                &[b.arg(0)?],
+                &[view(1, false), MUTABLE_OUTPUT],
+            )
+        },
     ];
     for bad in cases {
         let body = move |builder: &mut dyn KernelBuilder| {

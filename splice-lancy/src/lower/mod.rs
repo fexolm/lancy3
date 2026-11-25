@@ -9,11 +9,11 @@ mod tests;
 use lancy::hir::{self, Block, Function, Op, Value};
 use lancy::support::slotmap::DenseMap;
 use splice_core::{
-    BufferKind, ContextArguments, StaticRustSymbol,
+    BufferKind,
     frontend::{Body, KernelBuilder, KernelSource, Signature, Specialization},
     hir::{
-        Binary, Buffer, Constant, ContextSlice, Label, Reg, RustCall, RustContextTarget,
-        RustPacketSymbol, ScalarType, Simd, ValueType,
+        Binary, Buffer, Constant, ContextSlice, Label, PacketStore, PacketValue, Reg, RustTarget,
+        ScalarType, Simd, ValueType,
     },
 };
 use std::{
@@ -606,84 +606,6 @@ impl Builder<'_> {
         Ok(dst)
     }
 
-    fn context_call(
-        &mut self,
-        target: RustContextTarget,
-        args: &[Reg],
-        slices: &[ContextSlice],
-    ) -> splice_core::Result<Reg> {
-        let dst = self.local(WORD)?;
-        if !self.reachable() {
-            return Ok(dst);
-        }
-        let (context, operation) = match target {
-            RustContextTarget::Borrowed { context, operation } => {
-                (Some(self.slice(context).0), operation)
-            }
-            RustContextTarget::Static(_) => (None, 0),
-        };
-        let operation = self.value(Op::Const(operation as i32));
-        let (import, args) = if let Some(context) = context
-            && slices.is_empty()
-            && args.len() <= 2
-        {
-            let [a, b] = self.rust_operands(args);
-            (
-                hir::RustContextImport::Scalars(splice_core::invoke_runtime_context),
-                [context, operation, a, b],
-            )
-        } else {
-            self.shared_loads.clear();
-            let layout = ContextArguments::packet_layout(args.len() as u32, slices.len() as u32)
-                .expect("validated packet size");
-            let packet = self.value(Op::CallScratch {
-                offset: 0,
-                bytes: layout.bytes.max(8),
-            });
-            let store = |b: &mut Self, offset, value| {
-                let offset = b.value(Op::Const(offset as i32));
-                let ptr = b.value(Op::PtrOffset(packet, offset, hir::Scale::One));
-                b.effect(Op::Store(ptr, value));
-            };
-            for (index, &reg) in args.iter().enumerate() {
-                let value = self.read(reg);
-                store(self, index as u32 * 4, value);
-            }
-            for (index, &ContextSlice { buffer, writable }) in slices.iter().enumerate() {
-                let (ptr, len) = self.slice(buffer);
-                let tag = ContextArguments::view_tag(self.kinds[buffer.index()].element(), writable)
-                    as i32;
-                let tag = self.value(Op::Const(tag));
-                let offset = layout.slices_at + index as u32 * ContextArguments::SLICE_BYTES;
-                store(self, offset, ptr);
-                store(self, offset + ContextArguments::LENGTH_OFFSET, len);
-                store(self, offset + ContextArguments::ELEMENT_OFFSET, tag);
-            }
-            let zero = self.value(Op::Const(0));
-            let entry = match target {
-                RustContextTarget::Borrowed { .. } => splice_core::invoke_packet_runtime_context,
-                RustContextTarget::Static(symbol) => symbol.entry(),
-            };
-            // The static entry reads only the packet (arg 2). Reuse its live
-            // pointer for the unused context slot in the native ABI.
-            (
-                hir::RustContextImport::Packet(entry),
-                [context.unwrap_or(packet), operation, packet, zero],
-            )
-        };
-        self.define(dst, Op::RustContextCall(import, args));
-        Ok(dst)
-    }
-
-    /// The two ABI words of a scalar Rust call. Unused words are zero.
-    fn rust_operands(&mut self, args: &[Reg]) -> [Value; 2] {
-        let mut words = [None; 2];
-        for (word, &arg) in words.iter_mut().zip(args) {
-            *word = Some(self.read(arg));
-        }
-        self.shared_loads.clear();
-        words.map(|word| word.unwrap_or_else(|| self.value(Op::Const(0))))
-    }
     fn staged_call(
         &mut self,
         signature: Signature<'_>,
@@ -920,48 +842,68 @@ impl KernelBuilder for Builder<'_> {
         }
         Ok(())
     }
-    fn rust_call(&mut self, import: RustCall, args: &[Reg]) -> splice_core::Result<Reg> {
-        let dst = self.local(WORD)?;
-        if self.reachable() {
-            let [a, b] = self.rust_operands(args);
-            self.define(dst, Op::RustCall(import.symbol, a, b));
-        }
-        Ok(dst)
-    }
-    fn rust_packet_call(
+    /// A Rust call as [`RustTarget::plan`] lays it out: the operands go to
+    /// a call-scratch packet and the native entry receives its address.
+    fn rust_call(
         &mut self,
-        import: &'static RustPacketSymbol,
-        args: &[Reg],
-    ) -> splice_core::Result<Reg> {
-        let dst = self.local(WORD)?;
-        if self.reachable() {
-            self.shared_loads.clear();
-            let args: Vec<_> = args.iter().map(|&arg| self.read(arg)).collect();
-            let call = self.graph.add_packet_call(import, 0, &args);
-            self.define(dst, Op::RustPacketCall(call));
-        }
-        Ok(dst)
-    }
-    fn rust_context_call(
-        &mut self,
-        context: Buffer,
-        operation: u32,
+        target: RustTarget,
         args: &[Reg],
         slices: &[ContextSlice],
     ) -> splice_core::Result<Reg> {
-        self.context_call(
-            RustContextTarget::Borrowed { context, operation },
-            args,
-            slices,
-        )
-    }
-    fn rust_static_call(
-        &mut self,
-        symbol: &'static StaticRustSymbol,
-        args: &[Reg],
-        slices: &[ContextSlice],
-    ) -> splice_core::Result<Reg> {
-        self.context_call(RustContextTarget::Static(symbol), args, slices)
+        let dst = self.local(WORD)?;
+        if !self.reachable() {
+            return Ok(dst);
+        }
+        let plan = target.plan(self.kinds, args.len(), slices);
+        // The callee may write any borrowed slice.
+        self.shared_loads.clear();
+        let packet = self.value(Op::CallScratch {
+            offset: 0,
+            bytes: plan.bytes,
+        });
+        let store = |b: &mut Self, at: u32, value| {
+            let offset = b.value(Op::Const(at as i32));
+            let ptr = b.value(Op::PtrOffset(packet, offset, hir::Scale::One));
+            b.effect(Op::Store(ptr, value));
+        };
+        for PacketStore { at, value } in plan.stores {
+            match value {
+                PacketValue::Word(n) => {
+                    let word = self.read(args[n]);
+                    store(self, at, word);
+                }
+                PacketValue::Data(buffer) => {
+                    let ptr = self.slice(buffer).0;
+                    store(self, at, ptr);
+                }
+                PacketValue::Length(buffer) => {
+                    let len = self.slice(buffer).1;
+                    store(self, at, len);
+                }
+                PacketValue::Tag(tag) => {
+                    let tag = self.value(Op::Const(tag as i32));
+                    store(self, at, tag);
+                }
+                PacketValue::Symbol(address) => {
+                    let address = self.value(Op::Literal(hir::Lane::U64, address as u128));
+                    store(self, at, address);
+                }
+            }
+        }
+        let receiver = match plan.context {
+            Some(context) => self.slice(context).0,
+            None => packet,
+        };
+        let operation = self.value(Op::Const(plan.operation as i32));
+        let zero = self.value(Op::Const(0));
+        self.define(
+            dst,
+            Op::RustContextCall(
+                hir::RustContextImport::Packet(plan.entry),
+                [receiver, operation, packet, zero],
+            ),
+        );
+        Ok(dst)
     }
     fn call_kernel(
         &mut self,

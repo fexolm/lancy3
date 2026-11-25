@@ -601,7 +601,7 @@ impl Emitter<'_> {
                         let packet = self.frame.scratch_base + offset as usize;
                         self.a.addr(R::X1, R::X19, packet)?;
                         self.a.imm(R::X2, u64::from(import.arity))?;
-                        splice_target::abi::invoke_packet_import as *const () as usize
+                        crate::hir::invoke_packet_import as *const () as usize
                     }
                     Inst::RustContextCall(import, ..) => import.address(),
                     _ => unreachable!(),

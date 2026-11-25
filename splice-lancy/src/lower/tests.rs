@@ -26,7 +26,14 @@ fn context_descriptors_reject_other_signatures_and_slice_operations() {
 
     fn good(b: &mut dyn KernelBuilder) -> splice_core::Result<()> {
         let operation = ContextFrame::root(&FIRST).child(0)?.operation(0)?;
-        let result = b.rust_context_call(Buffer(0), operation, &[b.arg(0)?], &[])?;
+        let result = b.rust_call(
+            RustTarget::Context {
+                buffer: Buffer(0),
+                operation,
+            },
+            &[b.arg(0)?],
+            &[],
+        )?;
         b.ret(result)?;
         Ok(())
     }
@@ -39,9 +46,36 @@ fn context_descriptors_reject_other_signatures_and_slice_operations() {
 
     type Invalid = fn(&mut dyn KernelBuilder) -> splice_core::Result<Reg>;
     let invalid: [Invalid; 5] = [
-        |b| b.rust_context_call(Buffer(0), 2, &[b.arg(0)?], &[]),
-        |b| b.rust_context_call(Buffer(0), 0, &[], &[]),
-        |b| b.rust_context_call(Buffer(1), 0, &[b.arg(0)?], &[]),
+        |b| {
+            b.rust_call(
+                RustTarget::Context {
+                    buffer: Buffer(0),
+                    operation: 2,
+                },
+                &[b.arg(0)?],
+                &[],
+            )
+        },
+        |b| {
+            b.rust_call(
+                RustTarget::Context {
+                    buffer: Buffer(0),
+                    operation: 0,
+                },
+                &[],
+                &[],
+            )
+        },
+        |b| {
+            b.rust_call(
+                RustTarget::Context {
+                    buffer: Buffer(1),
+                    operation: 0,
+                },
+                &[b.arg(0)?],
+                &[],
+            )
+        },
         |b| b.load(Buffer(0), b.arg(0)?),
         |b| b.buffer_len(Buffer(0)),
     ];
@@ -82,7 +116,8 @@ fn context_descriptors_reject_other_signatures_and_slice_operations() {
     .unwrap();
     let portable = crate::Lancy::compile(&ir).unwrap();
     for kernel in [direct, portable] {
-        let mut unreachable = |_, _, _| panic!("wrong context callback was called");
+        let mut unreachable =
+            |_, _: splice_core::ContextArguments<'_>| panic!("wrong context callback was called");
         let mut wrong = RuntimeContext::new(&SECOND, &mut unreachable);
         assert!(
             kernel
@@ -97,10 +132,10 @@ fn context_descriptors_reject_other_signatures_and_slice_operations() {
         );
 
         let (mut value, mut calls) = (3, 0);
-        let mut invoke = |ordinal, word: i32, padding| {
-            assert_eq!((ordinal, padding), (1, 0));
+        let mut invoke = |ordinal, args: splice_core::ContextArguments<'_>| {
+            assert_eq!(ordinal, 1);
             calls += 1;
-            value += word;
+            value += args.word(0);
             value
         };
         let mut context = RuntimeContext::new(&FIRST, &mut invoke);
@@ -139,7 +174,14 @@ fn context_slice_operands_require_valid_nonaliasing_descriptors() {
     ];
     for &(slices, valid) in cases {
         let body = |builder: &mut dyn KernelBuilder| {
-            let result = builder.rust_context_call(Buffer(0), 0, &[], slices)?;
+            let result = builder.rust_call(
+                RustTarget::Context {
+                    buffer: Buffer(0),
+                    operation: 0,
+                },
+                &[],
+                slices,
+            )?;
             builder.ret(result)?;
             Ok(())
         };
@@ -166,64 +208,32 @@ fn context_slice_operands_require_valid_nonaliasing_descriptors() {
 }
 
 #[test]
-fn rust_imports_fill_unused_abi_arguments_with_zero_in_both_staging_paths() {
-    extern "C" fn three(a: i32, b: i32) -> i64 {
-        if (a, b) == (0, 0) {
-            3
-        } else {
-            splice_core::Trap::Abi.status()
-        }
-    }
-    extern "C" fn double(a: i32, b: i32) -> i64 {
-        if b == 0 {
-            i64::from(a.wrapping_mul(2) as u32)
-        } else {
-            splice_core::Trap::Abi.status()
-        }
-    }
+fn static_rust_packets_carry_words_in_order_in_both_staging_paths() {
+    use splice_core::StaticRustSymbol;
+    static THREE: StaticRustSymbol = StaticRustSymbol::new("three", 0, 0, |_| 3);
+    static DIGITS: StaticRustSymbol = StaticRustSymbol::new("digits", 3, 0, |args| {
+        (0..3).fold(0, |n, i| n * 10 + args.word(i))
+    });
     fn body(b: &mut dyn KernelBuilder) -> splice_core::Result<()> {
-        let three = b.rust_call(
-            RustCall {
-                symbol: &splice_core::hir::RustSymbol {
-                    name: "three",
-                    resolve: || three,
-                },
-                arity: 0,
-            },
-            &[],
-        )?;
-        let double = b.rust_call(
-            RustCall {
-                symbol: &splice_core::hir::RustSymbol {
-                    name: "double",
-                    resolve: || double,
-                },
-                arity: 1,
-            },
-            &[b.arg(0)?],
-        )?;
-        let total = b.binary(Binary::Add, three, double)?;
+        let three = b.rust_call(RustTarget::Static(&THREE), &[], &[])?;
+        let (one, two) = (
+            b.constant(Constant::from(1))?,
+            b.constant(Constant::from(2))?,
+        );
+        let digits = b.rust_call(RustTarget::Static(&DIGITS), &[one, two, b.arg(0)?], &[])?;
+        let total = b.binary(Binary::Add, three, digits)?;
         b.ret(total)?;
         Ok(())
     }
 
-    let direct = build(
-        Signature::new(&[ScalarType::I32; 1], ScalarType::I32, &[]),
-        Box::new(body),
-    )
-    .unwrap();
-    let portable = splice_core::frontend::materialize(
-        Signature::new(&[ScalarType::I32; 1], ScalarType::I32, &[]),
-        Box::new(body),
-        options(),
-    )
-    .unwrap();
-    for graph in [direct, lower(&portable, &options().target).unwrap()] {
-        let kernel =
-            lancy::ScalarKernel::compile(&graph, &lancy::CompileOptions::new(options().target))
-                .unwrap();
-        assert_eq!(kernel.call(&[5]), Ok(13));
-        assert_eq!(kernel.call(&[-5]), Ok(-7));
+    use splice_core::{Codegen, Executable};
+    let signature = Signature::new(&[ScalarType::I32; 1], ScalarType::I32, &[]);
+    let direct = crate::Lancy::build_with_options(signature, Box::new(body), options()).unwrap();
+    let ir = splice_core::frontend::materialize(signature, Box::new(body), options()).unwrap();
+    let portable = crate::Lancy::compile(&ir).unwrap();
+    for kernel in [direct, portable] {
+        assert_eq!(kernel.call(&[5], &mut []), Ok(128));
+        assert_eq!(kernel.call(&[-5_i32 as u32 as u64], &mut []), Ok(118));
     }
 }
 

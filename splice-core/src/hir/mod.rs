@@ -5,6 +5,7 @@
 mod buffer;
 mod builder;
 mod replay;
+mod rust_call;
 mod simd;
 mod types;
 mod verify;
@@ -16,8 +17,9 @@ pub use buffer::{
 };
 pub use builder::FunctionBuilder;
 pub use replay::replay;
+pub use rust_call::{PacketStore, PacketValue, RustCallPlan, RustTarget};
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::sync::Arc;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -30,12 +32,6 @@ pub struct Label(pub u32);
 pub struct ContextSlice {
     pub buffer: Buffer,
     pub writable: bool,
-}
-
-#[derive(Clone, Copy, Debug)]
-pub enum RustContextTarget {
-    Borrowed { context: Buffer, operation: u32 },
-    Static(&'static crate::StaticRustSymbol),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -80,126 +76,6 @@ impl Binary {
     }
 }
 
-pub use splice_target::abi::{RustPacketSymbol, RustSymbol};
-
-/// The operands of a Rust call are `i32` ABI words and it returns one.
-const WORD: Option<ValueType> = Some(ValueType::Scalar(ScalarType::I32));
-
-/// A scalar symbol and the number of its ABI words in use.
-#[derive(Clone, Copy, Debug)]
-pub struct RustCall {
-    pub symbol: &'static RustSymbol,
-    pub arity: u8,
-}
-impl RustCall {
-    pub fn validate(
-        &self,
-        args: impl ExactSizeIterator<Item = Option<ValueType>>,
-    ) -> crate::Result<()> {
-        if self.arity > 2 || args.len() != usize::from(self.arity) {
-            return Err(crate::BuildError::verify(format!(
-                "incompatible arity for Rust import {}",
-                self.symbol.name
-            )));
-        }
-        if args.into_iter().any(|ty| ty != WORD) {
-            return Err(crate::BuildError::verify(format!(
-                "expected i32 operands for Rust import {}",
-                self.symbol.name
-            )));
-        }
-        Ok(())
-    }
-}
-
-pub fn check_rust_packet_call(
-    symbol: &RustPacketSymbol,
-    args: impl ExactSizeIterator<Item = Option<ValueType>>,
-) -> crate::Result<()> {
-    if symbol.packet_bytes().is_none() || args.len() != symbol.arity as usize {
-        return Err(crate::BuildError::verify(format!(
-            "incompatible arity for Rust import {}",
-            symbol.name
-        )));
-    }
-    let args: Vec<_> = args.collect();
-    if args.iter().any(|&ty| ty != WORD) {
-        return Err(crate::BuildError::verify(format!(
-            "expected i32 operands for Rust import {}, got {args:?}",
-            symbol.name
-        )));
-    }
-    Ok(())
-}
-
-#[doc(hidden)]
-pub fn check_rust_context_call(
-    kinds: &[BufferKind],
-    target: RustContextTarget,
-    args: impl ExactSizeIterator<Item = Option<ValueType>>,
-    slices: &[ContextSlice],
-) -> crate::Result<()> {
-    let (arity, borrows) = match target {
-        RustContextTarget::Borrowed { context, operation } => {
-            let signature = kinds
-                .get(context.index())
-                .and_then(|kind| kind.context_signature())
-                .ok_or_else(|| crate::BuildError::verify("expected a Rust context descriptor"))?;
-            signature
-                .shape(operation)
-                .ok_or_else(|| crate::BuildError::verify("unknown Rust context operation"))?
-        }
-        RustContextTarget::Static(symbol) => {
-            let (words, borrows) = symbol.shape();
-            if crate::ContextArguments::packet_layout(words, borrows).is_none() {
-                return Err(crate::BuildError::verify(
-                    "invalid static Rust operation packet layout",
-                ));
-            }
-            (words as usize, borrows)
-        }
-    };
-    if args.len() != arity {
-        return Err(crate::BuildError::verify(
-            "incompatible Rust context operation arity",
-        ));
-    }
-    if args.into_iter().any(|ty| ty != WORD) {
-        return Err(crate::BuildError::verify(
-            "expected i32 operands for Rust context operation",
-        ));
-    }
-    if slices.len() != borrows as usize {
-        return Err(crate::BuildError::verify(
-            "incompatible Rust context operation slice arity",
-        ));
-    }
-    let mut seen = HashMap::new();
-    for &ContextSlice { buffer, writable } in slices {
-        let kind = kinds
-            .get(buffer.index())
-            .filter(|kind| kind.context_signature().is_none())
-            .ok_or_else(|| {
-                crate::BuildError::verify("expected slice operands for Rust context operation")
-            })?;
-        if writable && !kind.writable() {
-            return Err(crate::BuildError::verify(
-                "Rust context operation requires a writable slice",
-            ));
-        }
-        if slices.len() > 1
-            && seen
-                .insert(buffer, writable)
-                .is_some_and(|prior| prior || writable)
-        {
-            return Err(crate::BuildError::verify(
-                "writable Rust slice operand aliases another operand",
-            ));
-        }
-    }
-    Ok(())
-}
-
 #[derive(Clone, Debug)]
 pub enum Instr {
     Debug(crate::debug::Point),
@@ -239,19 +115,10 @@ pub enum Instr {
     },
     Return(Reg),
     TrapBounds,
+    /// Run Rust code on `args` words and `slices`; `dst` is its `i32` word.
     RustCall {
         dst: Reg,
-        import: RustCall,
-        args: Vec<Reg>,
-    },
-    RustPacketCall {
-        dst: Reg,
-        import: &'static RustPacketSymbol,
-        args: Vec<Reg>,
-    },
-    RustContextCall {
-        dst: Reg,
-        target: RustContextTarget,
+        target: RustTarget,
         args: Vec<Reg>,
         slices: Vec<ContextSlice>,
     },
@@ -274,12 +141,9 @@ impl Instr {
     fn may_trap(&self) -> bool {
         match self {
             Self::Bin(_, op, ..) => op.may_trap(),
-            Self::Load { .. }
-            | Self::Store { .. }
-            | Self::RustCall { .. }
-            | Self::RustPacketCall { .. }
-            | Self::RustContextCall { .. }
-            | Self::TrapBounds => true,
+            Self::Load { .. } | Self::Store { .. } | Self::RustCall { .. } | Self::TrapBounds => {
+                true
+            }
             Self::Call { function, .. } => function.needs_status(),
             Self::Simd { inst, .. } => inst.op.may_trap(),
             _ => false,
@@ -296,9 +160,7 @@ impl Instr {
             | Self::BufferLen { dst, .. }
             | Self::Load { dst, .. }
             | Self::Call { dst, .. }
-            | Self::RustCall { dst, .. }
-            | Self::RustPacketCall { dst, .. }
-            | Self::RustContextCall { dst, .. } => Some(*dst),
+            | Self::RustCall { dst, .. } => Some(*dst),
             _ => None,
         }
     }

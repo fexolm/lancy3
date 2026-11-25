@@ -337,12 +337,12 @@ impl Context {
         if slices.is_empty() {
             return Ok(emit!({
                 let arguments = [#(#operands),*];
-                __splice_builder.rust_context_call(#buffer, __splice_context_frame.operation(#ordinal)?, &arguments, &[])?
+                __splice_builder.rust_call(#root::hir::RustTarget::Context { buffer: #buffer, operation: __splice_context_frame.operation(#ordinal)? }, &arguments, &[])?
             }));
         }
         Ok(emit!({
             let arguments = [#(#operands),*];
-            __splice_builder.rust_context_call(#buffer, __splice_context_frame.operation(#ordinal)?, &arguments, &[#(#slices),*])?
+            __splice_builder.rust_call(#root::hir::RustTarget::Context { buffer: #buffer, operation: __splice_context_frame.operation(#ordinal)? }, &arguments, &[#(#slices),*])?
         }))
     }
 

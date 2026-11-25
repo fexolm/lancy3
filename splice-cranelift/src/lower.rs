@@ -1,17 +1,16 @@
 use cranelift_codegen::ir::{
-    DebugTag, FuncRef, InstBuilder, MemFlags, StackSlot, StackSlotData, StackSlotKind, TrapCode,
-    Type, Value,
+    DebugTag, FuncRef, InstBuilder, MemFlags, StackSlotData, StackSlotKind, TrapCode, Type, Value,
     condcodes::{FloatCC, IntCC},
     immediates::{Ieee32, Ieee64},
     types::{F32, F64, I8, I32, I64},
 };
-use cranelift_frontend::{FunctionBuilder, Variable};
+use cranelift_frontend::FunctionBuilder;
+use splice_core::Function;
 use splice_core::Trap;
 use splice_core::call::SliceDescriptor;
 use splice_core::hir::{
-    Binary, Constant, ContextSlice, Instr, Reg, RustContextTarget, ScalarType, ValueType,
+    Binary, Constant, Instr, PacketStore, PacketValue, Reg, ScalarType, ValueType,
 };
-use splice_core::{ContextArguments, Function};
 use std::collections::HashMap;
 use std::mem::{offset_of, size_of};
 use std::sync::Arc;
@@ -19,30 +18,6 @@ use std::sync::Arc;
 mod simd;
 
 pub(crate) use simd::{Machine, keep_compared_loads_in_registers};
-
-fn packet_stack(
-    builder: &mut FunctionBuilder,
-    scratch: &mut Option<StackSlot>,
-    bytes: u32,
-) -> StackSlot {
-    let slot = *scratch.get_or_insert_with(|| {
-        builder.create_sized_stack_slot(StackSlotData::new(StackSlotKind::ExplicitSlot, bytes, 3))
-    });
-    let slot_data = &mut builder.func.sized_stack_slots[slot];
-    slot_data.size = slot_data.size.max(bytes);
-    slot
-}
-
-fn packet_words(
-    builder: &mut FunctionBuilder,
-    scratch: StackSlot,
-    args: impl Iterator<Item = Variable>,
-) {
-    for (index, arg) in args.enumerate() {
-        let word = builder.use_var(arg);
-        builder.ins().stack_store(word, scratch, index as i32 * 4);
-    }
-}
 
 /// The CLIF type of a scalar register. A `Bool` is an `I8` holding 0 or 1.
 pub(crate) fn scalar_type(ty: ScalarType) -> Type {
@@ -172,7 +147,24 @@ pub(super) fn emit(
     let snapshots = debug_bytes.map(|bytes| {
         b.create_sized_stack_slot(StackSlotData::new(StackSlotKind::ExplicitSlot, bytes, 3))
     });
-    let mut rust_scratch = None;
+    // One slot holds the packet of every Rust call: each call is
+    // synchronous, so the next one can reuse it.
+    let packet_bytes = f
+        .instructions()
+        .iter()
+        .filter_map(|op| match op {
+            Instr::RustCall {
+                target,
+                args,
+                slices,
+                ..
+            } => Some(target.plan(f.buffer_kinds(), args.len(), slices).bytes),
+            _ => None,
+        })
+        .max();
+    let packet = packet_bytes.map(|bytes| {
+        b.create_sized_stack_slot(StackSlotData::new(StackSlotKind::ExplicitSlot, bytes, 3))
+    });
     let mut open = true;
     for (index, op) in f.instructions().iter().enumerate() {
         match *op {
@@ -281,136 +273,39 @@ pub(super) fn emit(
             }
             Instr::RustCall {
                 dst,
-                import,
-                ref args,
-            } => {
-                use cranelift_codegen::ir::{AbiParam, Signature};
-                // KernelModule uses the target ISA's system calling convention.
-                // The signature here matches ScalarEntry on Windows and Unix.
-                let mut signature = Signature::new(b.func.signature.call_conv);
-                signature.params.extend([AbiParam::new(I32); 2]);
-                signature.returns.push(AbiParam::new(I64));
-                let sig = b.import_signature(signature);
-                let zero = b.ins().iconst(I32, 0);
-                let mut words = [zero; 2];
-                for (out, &arg) in words.iter_mut().zip(args) {
-                    *out = b.use_var(var(arg));
-                }
-                let address = b
-                    .ins()
-                    .iconst(I64, (import.symbol.resolve)() as usize as i64);
-                let call = b.ins().call_indirect(sig, address, &words);
-                let packed = b.inst_results(call)[0];
-                forward_status(&mut b, packed);
-                let value = b.ins().ireduce(I32, packed);
-                b.def_var(var(dst), value);
-            }
-            Instr::RustPacketCall {
-                dst,
-                import,
-                ref args,
-            } => {
-                use cranelift_codegen::ir::{AbiParam, Signature};
-                let mut signature = Signature::new(b.func.signature.call_conv);
-                signature.params.extend([
-                    AbiParam::new(I64),
-                    AbiParam::new(I64),
-                    AbiParam::new(I32),
-                ]);
-                signature.returns.push(AbiParam::new(I64));
-                let sig = b.import_signature(signature);
-                let scratch = packet_stack(
-                    &mut b,
-                    &mut rust_scratch,
-                    import.packet_bytes().expect("verified Rust packet"),
-                );
-                packet_words(&mut b, scratch, args.iter().copied().map(var));
-                let symbol = b.ins().iconst(I64, std::ptr::from_ref(import) as i64);
-                let words = b.ins().stack_addr(I64, scratch, 0);
-                let count = b.ins().iconst(I32, i64::from(import.arity));
-                let address = b.ins().iconst(
-                    I64,
-                    splice_target::abi::invoke_packet_import as *const () as usize as i64,
-                );
-                let call = b.ins().call_indirect(sig, address, &[symbol, words, count]);
-                let packed = b.inst_results(call)[0];
-                forward_status(&mut b, packed);
-                let value = b.ins().ireduce(I32, packed);
-                b.def_var(var(dst), value);
-            }
-            Instr::RustContextCall {
-                dst,
                 target,
                 ref args,
                 ref slices,
             } => {
                 use cranelift_codegen::ir::{AbiParam, Signature};
-                let (data, operation) = match target {
-                    RustContextTarget::Borrowed { context, operation } => {
-                        (Some(buffers[context.index()][0]), operation)
-                    }
-                    RustContextTarget::Static(_) => (None, 0),
-                };
-                let ptr = I64;
+                let plan = target.plan(f.buffer_kinds(), args.len(), slices);
+                let packet = packet.expect("a Rust call has a packet slot");
+                for PacketStore { at, value } in plan.stores {
+                    let value = match value {
+                        PacketValue::Word(n) => b.use_var(var(args[n])),
+                        PacketValue::Data(buffer) => buffers[buffer.index()][0],
+                        PacketValue::Length(buffer) => buffers[buffer.index()][1],
+                        PacketValue::Tag(tag) => b.ins().iconst(I32, i64::from(tag)),
+                        PacketValue::Symbol(address) => b.ins().iconst(I64, address as i64),
+                    };
+                    b.ins().stack_store(value, packet, at as i32);
+                }
+                let address = b.ins().stack_addr(I64, packet, 0);
+                let receiver = plan
+                    .context
+                    .map_or(address, |context| buffers[context.index()][0]);
+                let operation = b.ins().iconst(I32, i64::from(plan.operation));
+                let zero = b.ins().iconst(I32, 0);
                 let mut signature = Signature::new(b.func.signature.call_conv);
                 signature
                     .params
-                    .extend([AbiParam::new(ptr), AbiParam::new(I32)]);
-                let zero = b.ins().iconst(I32, 0);
-                let operation = b.ins().iconst(I32, i64::from(operation));
-                let (entry, words) = if let Some(data) = data
-                    && args.len() <= 2
-                    && slices.is_empty()
-                {
-                    let mut words = [data, operation, zero, zero];
-                    for (out, &arg) in words[2..].iter_mut().zip(args) {
-                        *out = b.use_var(var(arg));
-                    }
-                    signature.params.extend([AbiParam::new(I32); 2]);
-                    (splice_core::invoke_runtime_context as *const (), words)
-                } else {
-                    signature
-                        .params
-                        .extend([AbiParam::new(ptr), AbiParam::new(I32)]);
-                    let layout =
-                        ContextArguments::packet_layout(args.len() as u32, slices.len() as u32)
-                            .expect("validated packet size");
-                    let scratch = packet_stack(&mut b, &mut rust_scratch, layout.bytes.max(8));
-                    packet_words(&mut b, scratch, args.iter().copied().map(var));
-                    for (i, &ContextSlice { buffer, writable }) in slices.iter().enumerate() {
-                        let offset =
-                            (layout.slices_at + i as u32 * ContextArguments::SLICE_BYTES) as i32;
-                        let [data, len] = buffers[buffer.index()];
-                        let element = f.buffer_kinds()[buffer.index()].element();
-                        let tag = b.ins().iconst(
-                            I32,
-                            i64::from(ContextArguments::view_tag(element, writable)),
-                        );
-                        b.ins().stack_store(data, scratch, offset);
-                        b.ins().stack_store(
-                            len,
-                            scratch,
-                            offset + ContextArguments::LENGTH_OFFSET as i32,
-                        );
-                        b.ins().stack_store(
-                            tag,
-                            scratch,
-                            offset + ContextArguments::ELEMENT_OFFSET as i32,
-                        );
-                    }
-                    let packet = b.ins().stack_addr(ptr, scratch, 0);
-                    let entry = match target {
-                        RustContextTarget::Borrowed { .. } => {
-                            splice_core::invoke_packet_runtime_context as *const ()
-                        }
-                        RustContextTarget::Static(symbol) => symbol.entry() as *const (),
-                    };
-                    (entry, [data.unwrap_or(packet), operation, packet, zero])
-                };
+                    .extend([I64, I32, I64, I32].map(AbiParam::new));
                 signature.returns.push(AbiParam::new(I64));
                 let sig = b.import_signature(signature);
-                let address = b.ins().iconst(ptr, entry as usize as i64);
-                let call = b.ins().call_indirect(sig, address, &words);
+                let entry = b.ins().iconst(I64, plan.entry as usize as i64);
+                let call = b
+                    .ins()
+                    .call_indirect(sig, entry, &[receiver, operation, address, zero]);
                 let packed = b.inst_results(call)[0];
                 forward_status(&mut b, packed);
                 let value = b.ins().ireduce(I32, packed);
