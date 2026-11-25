@@ -12,6 +12,6 @@ pub(crate) use splice_target::{MAX_VECTOR_BYTES, MIN_VECTOR_BYTES};
 pub use error::IrError;
 pub use ssa::{
     Access, Binary, Block, Call, Edge, Effects, Function, Inst, Lane, Op, PacketCall,
-    RustContextImport, RustImport, RustPacketImport, Scale, Simd, Terminator, Ternary, TrapKind,
-    Type, Unary, Value, VectorAddress, invoke_packet_import,
+    RustContextImport, RustImport, RustPacketImport, Scale, Simd, SliceParam, Terminator, Ternary,
+    TrapKind, Type, Unary, Value, VectorAddress, invoke_packet_import,
 };

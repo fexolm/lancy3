@@ -134,8 +134,8 @@ fn in_slice(
         return None;
     }
     let address = location.address;
-    let (len, element, _) = f.slice_param(address.base)?;
-    let element = u64::from(element);
+    let slice = f.slice_param(address.base)?;
+    let (len, element) = (slice.len, u64::from(slice.element));
     let byte_width = location.ty.bytes(MAX_VECTOR_BYTES) as u64;
     let (index, count) = if let Some((index, scale)) = address.index {
         let stride = 1u64 << scale as u8;

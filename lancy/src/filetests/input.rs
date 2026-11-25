@@ -1,6 +1,7 @@
 //! Small, test-only spelling of Lancy SSA. Build the same Function as the frontend.
 use crate::hir::{
-    Binary, Block, Edge, Function, Lane, Op, Scale, Simd, Terminator, Ternary, Type, Unary, Value,
+    Binary, Block, Edge, Function, Lane, Op, Scale, Simd, SliceParam, Terminator, Ternary, Type,
+    Unary, Value,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -445,7 +446,22 @@ fn body<'a>(
                     _ => Err(format!("line {line}: invalid slice layout {entry}")),
                 })
                 .collect::<Result<Box<_>>>()?;
-            f.set_slice_params(first, slices);
+            let params = f.params(f.entry());
+            let slices = slices
+                .iter()
+                .enumerate()
+                .map(|(i, &(element, writable))| {
+                    let pair = first + 2 * i;
+                    Ok(SliceParam {
+                        ptr: *params.get(pair).ok_or("slice past the parameters")?,
+                        len: *params.get(pair + 1).ok_or("slice past the parameters")?,
+                        element,
+                        writable,
+                    })
+                })
+                .collect::<Result<Vec<_>>>()?;
+            f.set_slice_params(slices)
+                .map_err(|error| ParseError::Invalid(format!("line {line}: "), error))?;
         } else {
             if ended {
                 return Err(format!("line {line}: instruction after terminator").into());

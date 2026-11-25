@@ -288,7 +288,7 @@ fn counted_loop(
         Binary::Le => Some((b, a, false)),
         _ => None,
     }
-    .filter(|&(i, _, _)| f.params(header).binary_search(&facts.root(i)).is_ok());
+    .filter(|&(i, _, _)| f.param_index(header, facts.root(i)).is_some());
     let (iv, bound, body_on_true, packet) = if let Some((iv, bound, yes)) = strict {
         (iv, bound, yes, None)
     } else {
@@ -310,7 +310,7 @@ fn counted_loop(
     };
     let iv = facts.root(iv);
     let bound = facts.available(bound, preheader, dom)?;
-    let index = f.params(header).binary_search(&iv).ok()?;
+    let index = f.param_index(header, iv)?;
     if f.value_type(iv) != Type::I32
         || !loops.contains(header, f.edge(body).0)
         || loops.contains(header, f.edge(exit).0)

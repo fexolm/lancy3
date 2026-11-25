@@ -103,8 +103,21 @@ pub struct Function {
     packets: DenseMap<PacketCall, PacketData>,
     operands: Vec<Value>,
     types: DenseMap<Value, Type>,
-    slice_base: usize,
-    slices: Box<[(u8, bool)]>,
+    slices: Vec<SliceParam>,
+    /// The position in `slices` of each pointer and length parameter.
+    slice_of: DenseMap<Value, Option<u32>>,
+}
+
+/// A slice that the caller passes as a pointer and an `i32` length entry
+/// parameter, with `element` bytes per element. This is part of the raw call
+/// contract: `len` elements are initialized, writable bytes are exclusively
+/// borrowed, and shared bytes stay immutable throughout the call.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SliceParam {
+    pub ptr: Value,
+    pub len: Value,
+    pub element: u8,
+    pub writable: bool,
 }
 
 impl Function {
@@ -129,8 +142,8 @@ impl Function {
             packets: DenseMap::new(),
             operands: Vec::new(),
             types: DenseMap::with_capacity(arity),
-            slice_base: arity,
-            slices: Box::new([]),
+            slices: Vec::new(),
+            slice_of: DenseMap::new(),
         };
         let entry = f.create_block();
         for ty in params {
@@ -152,41 +165,45 @@ impl Function {
         self.types[value]
     }
 
-    /// Declare consecutive (pointer, i32 length) parameters as initialized
-    /// slices, given the (element byte width, writable) pair for each.
-    /// This is part of the raw call contract. Writable bytes are exclusively
-    /// borrowed and shared bytes stay immutable throughout the call.
-    ///
-    /// # Panics
-    ///
-    /// If the parameters from `first` are not `(Ptr, I32)` pairs, one per
-    /// slice, or an element width is not 2, 4 or 8 bytes.
-    pub fn set_slice_params(&mut self, first: usize, slices: Box<[(u8, bool)]>) {
-        let params = &self.param_types()[first..first + 2 * slices.len()];
-        assert!(
-            params
-                .chunks_exact(2)
-                .all(|pair| pair == [Type::Ptr, Type::I32])
-        );
-        assert!(slices.iter().all(|&(bytes, _)| matches!(bytes, 2 | 4 | 8)));
-        self.slice_base = first;
+    /// Declare the slice parameters of the raw call contract (see
+    /// [`SliceParam`]). Each is a distinct `(Ptr, I32)` pair of entry
+    /// parameters, with elements of 2, 4 or 8 bytes: the element widths of
+    /// the buffers Lancy's bounds proofs model. A rejected declaration
+    /// leaves the previous one.
+    pub fn set_slice_params(&mut self, slices: Vec<SliceParam>) -> Result<(), IrError> {
+        let entry = self.params(self.entry());
+        let mut slice_of = DenseMap::filled(self.value_count(), None);
+        for (i, slice) in slices.iter().enumerate() {
+            let is_param = |v: Value, ty| entry.contains(&v) && self.types[v] == ty;
+            if !is_param(slice.ptr, Type::Ptr)
+                || !is_param(slice.len, Type::I32)
+                || !matches!(slice.element, 2 | 4 | 8)
+                || slice_of[slice.ptr].is_some()
+                || slice_of[slice.len].is_some()
+            {
+                return Err(IrError::InvalidSliceParam { slice: *slice });
+            }
+            slice_of[slice.ptr] = Some(i as u32);
+            slice_of[slice.len] = Some(i as u32);
+        }
         self.slices = slices;
+        self.slice_of = slice_of;
+        Ok(())
     }
 
     pub(crate) fn copy_slice_params(&mut self, source: &Self) {
-        self.slice_base = source.slice_base;
         self.slices.clone_from(&source.slices);
+        self.slice_of.clone_from(&source.slice_of);
     }
 
-    /// For a declared slice pointer, return its length parameter, element byte width
-    /// and whether the caller grants exclusive writable access.
-    pub fn slice_param(&self, ptr: Value) -> Option<(Value, u8, bool)> {
-        let offset = ptr.index().checked_sub(self.slice_base)?;
-        if !offset.is_multiple_of(2) {
-            return None;
-        }
-        let &(bytes, writable) = self.slices.get(offset / 2)?;
-        Some((Value::from_index(ptr.index() + 1), bytes, writable))
+    fn slice(&self, value: Value) -> Option<&SliceParam> {
+        let index = (*self.slice_of.get(value)?)?;
+        Some(&self.slices[index as usize])
+    }
+
+    /// The declared slice whose pointer is `ptr`.
+    pub fn slice_param(&self, ptr: Value) -> Option<SliceParam> {
+        self.slice(ptr).filter(|slice| slice.ptr == ptr).copied()
     }
 
     pub(in crate::hir) fn has_slice_params(&self) -> bool {
@@ -194,15 +211,11 @@ impl Function {
     }
 
     pub(in crate::hir) fn has_disjoint_slice_params(&self) -> bool {
-        self.slices.len() > 1 && self.slices.iter().any(|&(_, writable)| writable)
+        self.slices.len() > 1 && self.slices.iter().any(|slice| slice.writable)
     }
 
     pub(in crate::hir) fn is_slice_length(&self, value: Value) -> bool {
-        value
-            .index()
-            .checked_sub(1)
-            .and_then(|index| self.slice_param(Value::from_index(index)))
-            .is_some_and(|(len, _, _)| len == value)
+        self.slice(value).is_some_and(|slice| slice.len == value)
     }
 
     /// Replace an operation without verifying the function: the passes'
@@ -232,7 +245,7 @@ impl Function {
             && self
                 .slice_param(a)
                 .zip(self.slice_param(b))
-                .is_some_and(|((_, _, write_a), (_, _, write_b))| write_a || write_b)
+                .is_some_and(|(a, b)| a.writable || b.writable)
     }
     pub fn entry(&self) -> Block {
         Block::from_index(0)
@@ -249,6 +262,11 @@ impl Function {
     }
     pub fn params(&self, b: Block) -> &[Value] {
         &self.blocks[b].params
+    }
+    /// The column of `value` among the parameters of `b`. Blocks have few
+    /// parameters, and their IDs need not be in any order.
+    pub fn param_index(&self, b: Block, value: Value) -> Option<usize> {
+        self.params(b).iter().position(|&param| param == value)
     }
     pub fn instructions(&self, b: Block) -> impl Iterator<Item = Inst> + '_ {
         let mut cursor = self.blocks[b].first;
@@ -293,25 +311,41 @@ impl Function {
         (block, &self.operands[args.range()])
     }
 
+    /// Operands held by the arena, and those that live edge, call and
+    /// packet records reference.
+    #[cfg(test)]
+    pub(crate) fn operand_arena(&self) -> (usize, usize) {
+        let edges = self
+            .blocks()
+            .flat_map(|b| self.terminator(b).edges())
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .map(|e| self.edge(e).1.len());
+        let calls = self.insts.values().map(|inst| match inst.op {
+            Op::Call(call) => self.call(call).1.len(),
+            Op::RustPacketCall(packet) => self.packet_call(packet).2.len(),
+            _ => 0,
+        });
+        (self.operands.len(), edges.chain(calls).sum())
+    }
+
     pub(in crate::hir) fn edge_count(&self) -> usize {
         self.edges.len()
     }
 
     /// Filter non-entry parameters and the corresponding column of every edge.
+    /// Filter non-entry parameters and the corresponding column of every edge.
     pub(in crate::hir) fn retain_block_params(&mut self, keep: impl Fn(Value) -> bool) {
-        // Include retired edges only when their spans still describe current parameters.
-        // An edge can be referenced by multiple terminators, so compact each record once.
+        // After compaction a live edge record's arguments match its target's
+        // parameters. A record shared by several terminators is filtered once.
+        self.compact();
         let entry = self.entry();
         for (target, span) in self.edges.values_mut() {
-            if *target == entry {
+            if *target == Block::INVALID || *target == entry {
                 continue;
             }
-            let Some(block) = self.blocks.get(*target) else {
-                continue;
-            };
-            if span.len as usize != block.params.len() {
-                continue;
-            }
+            debug_assert_eq!(span.len as usize, self.blocks[*target].params.len());
+            let block = &self.blocks[*target];
             let args = &mut self.operands[span.range()];
             let mut kept = 0;
             for (i, &param) in block.params.iter().enumerate() {
@@ -326,6 +360,55 @@ impl Function {
             block.params.retain(|&p| keep(p));
         }
     }
+
+    /// Rebuild the operand arena from the edge, call and packet records
+    /// that a terminator or instruction references. Unreferenced edge
+    /// records are retired: their target becomes `Block::INVALID` and their
+    /// arguments empty. Every ID stays valid, so analyses that name edges
+    /// remain usable.
+    pub(in crate::hir) fn compact(&mut self) {
+        let old = std::mem::take(&mut self.operands);
+        let mut referenced = DenseMap::filled(self.edges.len(), false);
+        for block in self.blocks.values() {
+            for edge in block.term.into_iter().flat_map(Terminator::edges) {
+                referenced[edge] = true;
+            }
+        }
+        for (edge, (target, span)) in self.edges.iter_mut() {
+            if referenced[edge] {
+                *span = Span::append(&mut self.operands, &old[span.range()]);
+            } else {
+                *target = Block::INVALID;
+                *span = Span { start: 0, len: 0 };
+            }
+        }
+        let mut calls = DenseMap::filled(self.calls.len(), false);
+        let mut packets = DenseMap::filled(self.packets.len(), false);
+        for inst in self.insts.values() {
+            match inst.op {
+                Op::Call(call) => calls[call] = true,
+                Op::RustPacketCall(packet) => packets[packet] = true,
+                _ => {}
+            }
+        }
+        for (call, data) in self.calls.iter_mut() {
+            let live = if calls[call] {
+                &old[data.args.range()]
+            } else {
+                &[]
+            };
+            data.args = Span::append(&mut self.operands, live);
+        }
+        for (packet, data) in self.packets.iter_mut() {
+            let live = if packets[packet] {
+                &old[data.args.range()]
+            } else {
+                &[]
+            };
+            data.args = Span::append(&mut self.operands, live);
+        }
+    }
+
     pub(in crate::hir) fn call_site(&self, call: Call) -> Option<(&Arc<Function>, &[Value])> {
         let data = self.calls.get(call)?;
         Some((&data.callee, &self.operands[data.args.range()]))
@@ -549,7 +632,8 @@ impl Function {
             inst.op.map_operands(map);
         }
         for v in &mut self.operands {
-            // Unreferenced call/edge records can hold speculative operands.
+            // Unreferenced call/edge records can hold values created after
+            // `aliases`.
             if let Some(&alias) = aliases.get(*v) {
                 *v = alias;
             }
@@ -778,10 +862,10 @@ impl Function {
                 .ok_or(InterpretError::Unsupported(
                     "a pointer that is not a run buffer",
                 ))?;
-            if let Some((len, bytes, _)) = self.slice_param(params[i]) {
-                let len = params.iter().position(|&param| param == len).unwrap();
+            if let Some(slice) = self.slice_param(params[i]) {
+                let len = params.iter().position(|&param| param == slice.len).unwrap();
                 let len = word(len) as u32 as i32;
-                if len < 0 || len as usize > buffers[buffer].len() / usize::from(bytes) {
+                if len < 0 || len as usize > buffers[buffer].len() / usize::from(slice.element) {
                     return Err(InterpretError::OutOfBuffer {
                         buffer,
                         offset: buffers[buffer].len() as u64,

@@ -148,14 +148,20 @@ impl<'a> Builder<'a> {
         let mut graph = Function::new(&params, scalar_type(result));
         // BufferArg enforces these borrows at entry; call-site validation
         // preserves them when a nested kernel receives forwarded buffers.
-        graph.set_slice_params(
-            arity,
-            kinds
-                .iter()
-                .map(|kind| (kind.element().bytes() as u8, kind.writable()))
-                .collect(),
-        );
         let entry = graph.entry();
+        let buffers = graph.params(entry)[arity..].chunks_exact(2);
+        let slices = buffers
+            .zip(kinds)
+            .map(|(pair, kind)| hir::SliceParam {
+                ptr: pair[0],
+                len: pair[1],
+                element: kind.element().bytes() as u8,
+                writable: kind.writable(),
+            })
+            .collect();
+        graph
+            .set_slice_params(slices)
+            .expect("buffer parameters are (Ptr, I32) pairs");
         let mut first = State::default();
         for (i, &ty) in scalars.iter().enumerate() {
             let mut v = graph.params(entry)[i];

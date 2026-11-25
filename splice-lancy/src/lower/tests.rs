@@ -509,7 +509,15 @@ fn lowered_call_graphs_retain_slice_contracts_for_out_of_line_calls() {
         for function in [&root, child] {
             let [scalar, ptr, len] = function.params(function.entry()).try_into().unwrap();
             assert_eq!(function.slice_param(scalar), None);
-            assert_eq!(function.slice_param(ptr), Some((len, 4, writable)));
+            assert_eq!(
+                function.slice_param(ptr),
+                Some(hir::SliceParam {
+                    ptr,
+                    len,
+                    element: 4,
+                    writable
+                })
+            );
         }
         let code = ScalarKernel::compile(
             &root,

@@ -67,6 +67,7 @@ impl Effects {
 
     /// No effect at all: the operation can be removed when unused, moved or
     /// evaluated speculatively.
+    #[inline]
     pub fn is_none(self) -> bool {
         self == Self::NONE
     }
@@ -99,6 +100,7 @@ impl Op {
 
     /// Whether the operation defines a value. Fixed by the operation alone,
     /// independently of operand types.
+    #[inline]
     pub fn has_result(self) -> bool {
         !matches!(
             self,
@@ -112,6 +114,7 @@ impl Op {
     }
 
     /// Effects of a verified operation in `f`.
+    #[inline]
     pub(crate) fn effects(self, f: &Function) -> Effects {
         match self {
             Self::Bin(Binary::Div | Binary::Rem, a, _)
@@ -153,6 +156,7 @@ impl Op {
     }
 
     /// The memory a verified load or store in `f` accesses.
+    #[inline]
     pub(crate) fn access(self, f: &Function) -> Option<Access> {
         let plain = |address, ty, value, write| Access {
             address,

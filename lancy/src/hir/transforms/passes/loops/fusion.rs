@@ -87,9 +87,9 @@ impl Body {
                 if !width.at_most(counted.step) {
                     return None;
                 }
-                let in_slice = f.slice_param(base).is_some_and(|(len, element, _)| {
-                    stride <= usize::from(element)
-                        && bounds.loop_covers(f, facts, dom, counted, len, width)
+                let in_slice = f.slice_param(base).is_some_and(|slice| {
+                    stride <= usize::from(slice.element)
+                        && bounds.loop_covers(f, facts, dom, counted, slice.len, width)
                 });
                 if let Some(entry) = memory.iter_mut().find(|entry| entry.base == base) {
                     if entry.scale != scale {

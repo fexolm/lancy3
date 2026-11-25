@@ -181,6 +181,9 @@ pub(super) fn optimize(f: &mut Function, mut analyses: Analyses<'_>) -> Result<(
         analyses.invalidate(preserved);
         checkpoint(f, pass.name);
     }
+    // Structural passes retire edges, calls and packets; drop them before
+    // the function is verified and lowered again.
+    f.compact();
     Ok(())
 }
 

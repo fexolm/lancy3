@@ -203,3 +203,45 @@ block done out:i32
         );
     }
 }
+
+/// Unswitching clones a loop and abandons the edges of the original; after
+/// the pipeline the operand arena holds only the arguments that live edges
+/// and calls use.
+#[test]
+fn optimized_functions_keep_no_retired_operands() {
+    let text = "fn main n:i32 mode:i32 -> i32
+  z = const 0
+  one = const 1
+  jump head z z
+block head i:i32 acc:i32
+  more = lt i n
+  br more choose | done
+block choose
+  br mode yes | no
+block yes
+  total = add acc one
+  jump latch total
+block no
+  other = sub acc one
+  jump latch other
+block latch sum:i32
+  next = add i one
+  jump head next sum
+block done
+  ret acc";
+    let lines: Vec<_> = text.lines().enumerate().collect();
+    let f = crate::filetests::input::parse(&lines).unwrap();
+    let mut optimized = (*f).clone();
+    simplify(&mut optimized).unwrap();
+    let (arena, live) = optimized.operand_arena();
+    assert_eq!(arena, live);
+    assert!(
+        optimized.blocks().count() > f.blocks().count(),
+        "unswitched"
+    );
+    let kernel = ScalarKernel::compile(&f, &crate::test_target::options()).unwrap();
+    for (n, mode) in [(0, 0), (3, 1), (3, 0), (-2, 1)] {
+        let expected = if mode != 0 { n.max(0) } else { -n.max(0) };
+        assert_eq!(kernel.call(&[n, mode]), Ok(expected));
+    }
+}

@@ -115,7 +115,7 @@ impl Analysis<'_> {
         if let Some(value) = self.facts.available(value, self.info.preheader, self.dom) {
             return Some(Series::invariant(self.term(Expr::Available(value))?));
         }
-        if let Ok(index) = self.f.params(self.info.header).binary_search(&value) {
+        if let Some(index) = self.f.param_index(self.info.header, value) {
             let initial = self.series(self.initial[index])?;
             if initial.varies() {
                 return None;

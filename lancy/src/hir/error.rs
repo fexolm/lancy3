@@ -1,4 +1,4 @@
-use super::{Block, Call, Edge, Inst, Lane, Type, Value};
+use super::{Block, Call, Edge, Inst, Lane, Type, Value, ssa::SliceParam};
 use thiserror::Error;
 
 /// A structural, typing or dominance error in an SSA function or an attempted edit.
@@ -69,6 +69,9 @@ pub enum IrError {
     /// their lane. See `Op::literal`.
     #[error("non-canonical literal in {inst:?}: {bits:#x} as {lane:?}")]
     NonCanonicalLiteral { inst: Inst, lane: Lane, bits: u128 },
+    /// See `Function::set_slice_params`.
+    #[error("invalid slice parameter {slice:?}")]
+    InvalidSliceParam { slice: SliceParam },
     #[error("{inst:?} defines no value")]
     NoResult { inst: Inst },
     #[error("invalid numeric operation in {inst:?} for {ty:?}")]

@@ -4,7 +4,7 @@ pub mod inst;
 mod tests;
 
 pub(crate) use function::VerifiedBody;
-pub use function::{Block, Call, Edge, Function, Inst, PacketCall};
+pub use function::{Block, Call, Edge, Function, Inst, PacketCall, SliceParam};
 #[cfg(test)]
 pub(crate) use function::{InterpretError, buffer_address};
 pub use inst::{

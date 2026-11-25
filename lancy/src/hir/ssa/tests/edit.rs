@@ -145,3 +145,53 @@ fn merging_splices_nonempty_instruction_lists_without_reindexing() {
     assert_eq!(*f.op(add), Op::Bin(Binary::Add, val, val));
     f.verify().unwrap();
 }
+
+/// Retargeting a jump leaves its old edge record behind; compaction drops
+/// the record's arguments and keeps every ID valid.
+#[test]
+fn compaction_drops_the_arguments_of_retired_edges() {
+    let mut f = Function::scalar(1);
+    let entry = f.entry();
+    let x = f.params(entry)[0];
+    let join = f.create_block();
+    let y = f.append_param(join);
+    f.set_terminator(join, Terminator::Return(y));
+    for _ in 0..4 {
+        f.jump(entry, join, &[x]);
+    }
+    assert_eq!(f.operand_arena(), (4, 1));
+    f.compact();
+    assert_eq!(f.operand_arena(), (1, 1));
+    f.verify().unwrap();
+    assert_eq!(f.interpret(&[5]), Ok(5));
+}
+
+#[test]
+fn slice_params_must_be_distinct_pointer_and_length_parameters() {
+    use crate::hir::{SliceParam, Type};
+    let mut f = Function::new(&[Type::Ptr, Type::I32, Type::Ptr, Type::I32], Type::I32);
+    let [p, n, q, m] = f.params(f.entry()).try_into().unwrap();
+    let slice = |ptr, len, element| SliceParam {
+        ptr,
+        len,
+        element,
+        writable: false,
+    };
+    f.set_slice_params(vec![slice(p, n, 4), slice(q, m, 8)])
+        .unwrap();
+    let zero = f.append(f.entry(), Op::Const(0)).unwrap();
+    for bad in [
+        slice(n, p, 4),
+        slice(p, n, 1),
+        slice(p, zero, 4),
+        slice(q, n, 4),
+    ] {
+        let declared = vec![slice(p, n, 4), bad];
+        assert_eq!(
+            f.set_slice_params(declared),
+            Err(IrError::InvalidSliceParam { slice: bad })
+        );
+    }
+    assert_eq!(f.slice_param(q), Some(slice(q, m, 8)));
+    assert_eq!(f.slice_param(n), None);
+}

@@ -4,7 +4,7 @@ use super::super::bounds::{
 };
 use super::{CountedLoop, Facts, NaturalLoops};
 use crate::hir::transforms::{ControlFlowGraph, DomTree};
-use crate::hir::{Block, Function, Op, Simd, Terminator, Type, Value};
+use crate::hir::{Block, Function, Op, Simd, SliceParam, Terminator, Type, Value};
 use crate::support::slotmap::DenseMap;
 use std::collections::HashMap;
 
@@ -81,7 +81,13 @@ impl Bounds {
                 let Some(base) = facts.available(base, preheader, dom) else {
                     continue;
                 };
-                let Some((len, element, false)) = f.slice_param(base) else {
+                let Some(SliceParam {
+                    len,
+                    element,
+                    writable: false,
+                    ..
+                }) = f.slice_param(base)
+                else {
                     continue;
                 };
                 let stride = 1 << scale as u8;

@@ -304,16 +304,16 @@ pub(crate) fn simplify_bodies(module: &Module<VerifiedBody<'_>>) -> Result<Funct
         DenseMap::with_capacity(module.functions.len());
     for (id, source) in module.functions.iter() {
         let mut body = source.function.clone();
-        pipeline::optimize(
-            &mut body,
-            Analyses::new(Held::Borrowed(&source.cfg), Some(&source.dom)),
-        )?;
         for (site, target) in body.calls_mut() {
             let callee = source.callee(site);
             if callee != FunctionId::INVALID {
                 *target = Arc::clone(bodies.get(callee).expect("callees are numbered first"));
             }
         }
+        pipeline::optimize(
+            &mut body,
+            Analyses::new(Held::Borrowed(&source.cfg), Some(&source.dom)),
+        )?;
         if id == module.call_graph.root() {
             return Ok(body);
         }

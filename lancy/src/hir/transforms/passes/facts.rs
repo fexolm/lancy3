@@ -313,6 +313,7 @@ impl Facts {
 
     /// Whether evaluation can be skipped or moved without observing a trap
     /// or any memory or debug effect.
+    #[inline]
     pub(super) fn is_total(&self, f: &Function, inst: Inst) -> bool {
         let op = *f.op(inst);
         let effects = op.effects(f);
