@@ -100,7 +100,7 @@ impl Body {
                 } else {
                     // Keep the pairwise check bounded, including for unusual kernels
                     // with many distinct pointer sources.
-                    if memory.len() >= 8 {
+                    if memory.len() >= super::super::limits::FUSION_ACCESSES {
                         return None;
                     }
                     memory.push(Footprint {

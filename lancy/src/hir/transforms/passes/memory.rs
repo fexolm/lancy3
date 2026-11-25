@@ -407,8 +407,7 @@ pub(super) fn optimize(
                     }
                 }
             };
-            const MAX_KNOWN: usize = 16;
-            if known.len() == MAX_KNOWN {
+            if known.len() == super::limits::KNOWN_ACCESSES {
                 known.remove(0);
             }
             known.push(entry);

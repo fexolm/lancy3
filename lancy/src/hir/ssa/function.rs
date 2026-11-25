@@ -205,8 +205,26 @@ impl Function {
             .is_some_and(|(len, _, _)| len == value)
     }
 
+    /// Replace an operation without verifying the function: the passes'
+    /// editor. Debug builds check that the new operation keeps the type of
+    /// the result; `verify` checks the whole function after a pass.
     pub(in crate::hir) fn replace_op_preserving_type(&mut self, inst: Inst, op: Op) {
         self.insts[inst].op = op;
+        self.debug_assert_typed(inst);
+    }
+
+    fn debug_assert_typed(&self, inst: Inst) {
+        if cfg!(debug_assertions) {
+            let ty = self
+                .op(inst)
+                .result_type(self, inst, |v| Ok(self.types[v]))
+                .unwrap_or_else(|error| panic!("pass edit of {inst:?}: {error}"));
+            assert_eq!(
+                ty,
+                self.result(inst).map(|v| self.types[v]),
+                "pass edit of {inst:?} changes its result type"
+            );
+        }
     }
 
     pub(in crate::hir) fn disjoint_buffer_params(&self, a: Value, b: Value) -> bool {
@@ -464,9 +482,9 @@ impl Function {
     /// Splice a successor with exactly one incoming edge into its predecessor.
     /// Live IDs are stable. The successor block and its block-parameter IDs
     /// are retired. Arguments substitute parameters simultaneously, including
-    /// references in dominated blocks, calls and successor edges.
+    /// references in dominated blocks, calls and successor edges. Only the
+    /// two blocks and their edge are checked; `verify` checks the result.
     pub fn merge_blocks(&mut self, pred: Block, succ: Block) -> Result<(), IrError> {
-        self.verify()?;
         if pred == succ {
             return Err(IrError::MergeSameBlock { block: pred });
         }
@@ -488,11 +506,14 @@ impl Function {
                 actual: target,
             });
         }
-        let incoming = self
-            .blocks()
-            .flat_map(|b| self.terminator(b).edges())
-            .filter(|&e| self.edges[e].0 == succ)
-            .count();
+        let mut incoming = 0;
+        for b in self.blocks() {
+            incoming += self
+                .checked_terminator(b)?
+                .edges()
+                .filter(|&e| self.edges[e].0 == succ)
+                .count();
+        }
         if incoming != 1 {
             return Err(IrError::MergePredecessors {
                 block: succ,
@@ -577,6 +598,7 @@ impl Function {
         block: Block,
         mut rewrite: impl FnMut(Op, Option<Value>, &DenseMap<Value, Type>) -> Option<Op>,
     ) {
+        let id = block;
         let block = &mut self.blocks[block];
         let mut prev = Inst::INVALID;
         let mut i = block.first;
@@ -601,6 +623,12 @@ impl Function {
             i = next;
         }
         block.last = prev;
+        if cfg!(debug_assertions) {
+            let rewritten: Vec<_> = self.instructions(id).collect();
+            for inst in rewritten {
+                self.debug_assert_typed(inst);
+            }
+        }
     }
 
     /// Move instructions to the ends of earlier dominating blocks.
@@ -633,6 +661,7 @@ impl Function {
                 target.last = i;
                 self.insts[i].op = op;
                 self.insts[i].next = Inst::INVALID;
+                self.debug_assert_typed(i);
             } else {
                 prev = i;
             }

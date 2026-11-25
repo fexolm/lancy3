@@ -5,8 +5,7 @@ use crate::hir::transforms::{ControlFlowGraph, DomTree};
 use crate::hir::{Binary, Block, Function, Op, Terminator, Type, Value, ssa::Edge};
 use crate::support::slotmap::DenseMap;
 
-const VALUE_LIMIT: usize = 32;
-const EXPRESSION_LIMIT: usize = 64;
+use super::super::limits::{RECURRENCE_EXPRESSIONS, RECURRENCE_VALUES};
 
 type Coefficient = Option<usize>; // None is the zero coefficient.
 
@@ -44,7 +43,7 @@ struct Analysis<'a> {
 
 impl Analysis<'_> {
     fn term(&mut self, expr: Expr) -> Option<Coefficient> {
-        if self.expressions.len() == EXPRESSION_LIMIT {
+        if self.expressions.len() == RECURRENCE_EXPRESSIONS {
             return None;
         }
         let id = self.expressions.len();
@@ -98,7 +97,7 @@ impl Analysis<'_> {
         if let Some((_, known)) = self.seen.iter().find(|&&(v, _)| v == value) {
             return *known;
         }
-        if self.seen.len() == VALUE_LIMIT {
+        if self.seen.len() == RECURRENCE_VALUES {
             return None;
         }
         // An unresolved recursive use rejects coupled recurrences.
@@ -406,7 +405,7 @@ pub(super) fn collapse(
                 && !std::mem::replace(&mut seen[value], true)
             {
                 let candidate = &mut candidates[index];
-                if candidate.live_out.len() == VALUE_LIMIT {
+                if candidate.live_out.len() == RECURRENCE_VALUES {
                     candidate.valid = false;
                 } else {
                     candidate.live_out.push(value);

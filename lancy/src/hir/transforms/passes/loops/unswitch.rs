@@ -3,8 +3,7 @@ use crate::hir::transforms::{ControlFlowGraph, DomTree};
 use crate::hir::{Block, Edge, Function, Op, Terminator, Value};
 use std::collections::{BTreeSet, HashMap};
 
-const MAX_BLOCKS: usize = 16;
-const MAX_CLONE_COST: usize = 128;
+use super::super::limits::{UNSWITCH_BLOCKS, UNSWITCH_COST};
 
 #[derive(Default)]
 struct Region {
@@ -72,8 +71,8 @@ pub(super) fn run(
                 region.unsupported = true;
             }
         }
-        region.unsupported |= region.blocks.len() > MAX_BLOCKS
-            || region.cost > MAX_CLONE_COST
+        region.unsupported |= region.blocks.len() > UNSWITCH_BLOCKS
+            || region.cost > UNSWITCH_COST
             || matches!(term, Terminator::Return(_));
         // The predicate is already computed on entry, including for zero
         // iterations. Both branch arms must lead back into the loop region.

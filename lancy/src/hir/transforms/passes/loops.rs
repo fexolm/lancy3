@@ -103,10 +103,9 @@ fn hoist(f: &mut Function, dom: &DomTree, loops: &NaturalLoops, facts: &mut Fact
     }
 
     // Hoisting many vector-valued expressions across a backedge can trade
-    // cheap recomputation for spills. Restrict new kinds of hoists to linear,
-    // low-pressure bodies. Count definitions as an upper bound on loop-local
-    // vector register demand and leave room for incoming live values.
-    const VECTOR_BUDGET: usize = 12;
+    // cheap recomputation for spills (see `HOIST_VECTOR_VALUES`). Count
+    // definitions as an upper bound on loop-local vector register demand.
+    const VECTOR_BUDGET: usize = super::limits::HOIST_VECTOR_VALUES;
     let mut vector_values = DenseMap::filled(f.block_capacity(), 0);
     for &block in dom.preorder() {
         let Some(pressure) = vector_values.get_mut(loops.owner[block]) else {
@@ -146,13 +145,17 @@ fn hoist(f: &mut Function, dom: &DomTree, loops: &NaturalLoops, facts: &mut Fact
             continue;
         }
         let extended = nearest != Block::INVALID && vector_values[header] <= VECTOR_BUDGET;
+        // Without `extended`, only `i32` arithmetic other than division moves,
+        // which has no effects.
         total.clear();
-        total.extend(
-            f.instructions(block)
-                .filter(|&inst| facts.is_total(f, inst))
-                .filter_map(|inst| f.result(inst)),
-        );
-        total.sort_unstable();
+        if extended {
+            total.extend(
+                f.instructions(block)
+                    .filter(|&inst| facts.is_total(f, inst))
+                    .filter_map(|inst| f.result(inst)),
+            );
+            total.sort_unstable();
+        }
         f.hoist_instructions(block, |op, result, types| {
             let scalar_i32 = matches!(op, Op::Bin(kind, a, _) if types[a] == Type::I32
                 && !matches!(kind, Binary::Div | Binary::Rem));
@@ -185,7 +188,7 @@ fn hoist(f: &mut Function, dom: &DomTree, loops: &NaturalLoops, facts: &mut Fact
                 ) => true,
                 _ => false,
             };
-            if !cheap || total.binary_search(&result).is_err() {
+            if !cheap || (extended && total.binary_search(&result).is_err()) {
                 return None;
             }
             let available = |target| {

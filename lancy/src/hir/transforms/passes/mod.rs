@@ -5,6 +5,7 @@ mod dead;
 mod experimental;
 mod facts;
 mod inline;
+mod limits;
 mod local_cfg;
 mod loops;
 mod memory;
