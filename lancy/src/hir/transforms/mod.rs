@@ -1,3 +1,4 @@
+pub(crate) mod canonical;
 mod cfg;
 mod domtree;
 mod natural_loops;

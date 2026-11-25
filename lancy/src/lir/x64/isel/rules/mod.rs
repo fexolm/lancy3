@@ -16,11 +16,11 @@ mod packed_rearrange;
 pub(in crate::lir::x64) use packed::packed_half;
 
 use super::super::inst::{Cond, Inst, SelectCond, class};
-use super::masks::Masks;
+use super::masks::{Masks, native_compress_store, native_count};
 use crate::lir::x64::Cpu;
 use crate::{
     CompileError,
-    hir::{Call, Function, Lane, Op, Simd, Ternary, Type, Value},
+    hir::{Call, Function, Inst as HirInst, Lane, Op, Simd, Ternary, Type, Value},
     lir::{
         self,
         isel::{Context, Root},
@@ -28,6 +28,25 @@ use crate::{
     module::FunctionId,
 };
 use regalloc2::{PRegSet, VReg};
+
+/// Whether `inst`, a canonical predicate operation, has a rule here:
+/// its predicate operands and result live in mask registers, and the
+/// machine has the instructions. `canonical::expand` defines the others.
+pub(super) fn native_canonical(f: &Function, inst: HirInst, cpu: Cpu, masks: &Masks) -> bool {
+    let lane = |v| f.value_type(v).lane().unwrap();
+    match *f.op(inst) {
+        Op::Simd(Simd::FirstLanes(lane, _)) => {
+            cpu.isa.bmi2
+                && cpu.bytes / lane.bytes() <= 16
+                && f.result(inst).is_some_and(|v| masks.contains(v))
+        }
+        Op::Simd(Simd::MaskCount(mask)) => native_count(cpu, lane(mask)) && masks.contains(mask),
+        Op::Simd(Simd::CompressStore { mask, value, .. }) => {
+            native_compress_store(cpu, lane(value)) && masks.contains(mask)
+        }
+        _ => false,
+    }
+}
 
 pub(super) fn select(
     ctx: &mut Context,
@@ -125,6 +144,14 @@ impl Rules<'_> {
                 mask,
                 value,
             }) => self.masked_memory(address, mask, value)?,
+            Op::Simd(Simd::FirstLanes(lane, count)) => self.first_lanes(lane, count)?,
+            Op::Simd(Simd::MaskCount(mask)) => Inst::MaskCount(self.dst(), self.input(mask)),
+            Op::Simd(Simd::CompressStore {
+                base,
+                mask,
+                value,
+                limit,
+            }) => self.compress_store(base, mask, value, limit)?,
             Op::Call(site) => self.call(site, callee),
             Op::RustCall(import, a, b) => {
                 Inst::RustCall(import, self.input(a), self.input(b), self.dst())

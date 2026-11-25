@@ -291,6 +291,9 @@ pub(in crate::lir::x64) fn emit(
             Ok(())
         }
         Action::Iota | Action::Bitcast => unreachable!("selected before compound lowering"),
+        Action::FirstLanes | Action::MaskCount => {
+            unreachable!("canonical::expand defines predicate operations")
+        }
         _ => {
             let len = output.bytes(width) as i32 / d;
             for i in 0..len {

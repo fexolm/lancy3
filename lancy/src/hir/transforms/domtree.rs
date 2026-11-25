@@ -4,6 +4,7 @@ use crate::support::slotmap::DenseMap;
 use std::ops::Range;
 
 /// Block dominance for a snapshot of the control-flow graph.
+#[derive(Clone)]
 pub struct DomTree {
     // Each interval covers the block and all its descendants in preorder.
     intervals: DenseMap<Block, Range<usize>>,

@@ -71,16 +71,10 @@ fn main p:ptr one:i32 -> i32
 @run 1 -> 20 | 07 00 00 00 0d 00 00 00 | 07 00 00 00 0d 00 00 00
 @run 0 -> 0 | 07 00 00 00 0d 00 00 00 | 07 00 00 00 0d 00 00 00
 ---
-# Clamp the full unsigned count before producing its prefix.
+# A prefix predicate clamps its count: none for a negative count, every
+# lane past the lane count.
 fn main x:i32 -> i32
-  lanes = simd.lanes i32
-  n = bitcast u32 lanes
-  xu = bitcast u32 x
-  k = min xu n
-  count = bitcast i32 k
-  i = simd.iota i32
-  end = simd.splat count
-  pred = simd.lt i end
+  pred = simd.firstlanes i32 x
   any = simd.any pred
   all = simd.all pred
   result = add any all
@@ -91,15 +85,15 @@ fn main x:i32 -> i32
 @run 1 -> -1
 @run 16 -> -2
 @run 256 -> -2
-@run -1 -> -2
+@run 2147483647 -> -2
+@run -1 -> 0
 ---
 # Count and any use one canonical predicate.
 fn main limit:i32 -> i32
   i = simd.iota i32
   end = simd.splat limit
   mask = simd.lt i end
-  flags = simd.neg mask
-  count = simd.reduce add flags
+  count = simd.maskcount mask
   any = simd.any mask
   result = add count any
   ret result

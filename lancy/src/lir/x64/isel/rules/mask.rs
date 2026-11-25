@@ -1,10 +1,11 @@
 use super::super::masks::constant_predicate;
 use super::Rules;
 use crate::{
+    CompileError,
     hir::{Binary, Lane, Op, Simd, Ternary, Type, Unary, Value},
     lir::x64::inst::{Inst, VectorMask, simd::comparison_predicate},
 };
-use regalloc2::VReg;
+use regalloc2::{RegClass, VReg};
 
 impl Rules<'_> {
     pub(super) fn vector_mask(&mut self, value: Value) -> VectorMask<VReg> {
@@ -27,12 +28,6 @@ impl Rules<'_> {
                 }
                 Op::Bin(kind, x, y) => {
                     let lane = self.ty(x).lane()?;
-                    if kind == Binary::Lt
-                        && matches!(lane, Lane::I32 | Lane::U32)
-                        && let Some(prefix) = self.prefix_mask(x, y)
-                    {
-                        return Some(prefix);
-                    }
                     return Some(Inst::MaskCompare(
                         lane,
                         comparison_predicate(lane, kind)?,
@@ -78,16 +73,6 @@ impl Rules<'_> {
                 self.dst(),
                 self.input(value),
             )),
-            Op::Simd(Simd::Reduce(Binary::Add, value))
-                if self.ty(value) == Type::Vector(Lane::I32) && self.cpu.isa.popcnt =>
-            {
-                let Op::Unary(Unary::Neg, mask) = self.ctx.single_use(value)? else {
-                    return None;
-                };
-                self.masks
-                    .contains(mask)
-                    .then(|| Inst::MaskCount(self.dst(), self.input(mask)))
-            }
             Op::Simd(compact @ (Simd::Compress(value, mask) | Simd::Expand(value, mask)))
                 if self.masks.contains(mask) =>
             {
@@ -103,49 +88,26 @@ impl Rules<'_> {
         }
     }
 
+    /// `canonical::expand` leaves `FirstLanes` only in a predicate register
+    /// on a machine with BMI2.
+    pub(super) fn first_lanes(&mut self, lane: Lane, count: Value) -> Result<Inst, CompileError> {
+        let lanes = (self.cpu.bytes / lane.bytes()) as u8;
+        if let Some(count) = self.dword_constant(count) {
+            let count = (count as i32).clamp(0, lanes.into());
+            return Ok(Inst::MaskImmediate(self.dst(), (1u64 << count) - 1));
+        }
+        Ok(Inst::MaskPrefix(
+            lanes,
+            self.dst(),
+            self.input(count),
+            self.body.temp(RegClass::Int)?,
+        ))
+    }
+
     fn opmask(&mut self, value: Value) -> Option<VectorMask<VReg>> {
         self.masks
             .contains(value)
             .then(|| VectorMask::Register(self.ty(value).lane().unwrap(), self.input(value)))
-    }
-
-    fn prefix_mask(&mut self, iota: Value, right: Value) -> Option<Inst> {
-        if !matches!(
-            self.ctx.defining_op(iota),
-            Some(Op::Simd(Simd::Iota(Lane::I32 | Lane::U32)))
-        ) {
-            return None;
-        }
-        let Op::Simd(Simd::Splat(count)) = self.ctx.defining_op(right)? else {
-            return None;
-        };
-        let lanes = self.cpu.bytes as u32 / 4;
-        if let Some(count) = self.dword_constant(count) {
-            let count = if self.ty(iota) == Type::Vector(Lane::I32) && (count as i32) < 0 {
-                0
-            } else {
-                count.min(lanes)
-            };
-            return Some(Inst::MaskImmediate(self.dst(), (1u64 << count) - 1));
-        }
-        if !self.cpu.isa.bmi2 {
-            return None;
-        }
-        let unsigned = match self.ctx.defining_op(count) {
-            Some(Op::Bitcast(Type::I32, v)) if self.ty(v) == Type::U32 => v,
-            _ => count,
-        };
-        let Op::Bin(Binary::Min, a, b) = self.ctx.defining_op(unsigned)? else {
-            return None;
-        };
-        if self.ty(unsigned) != Type::U32 {
-            return None;
-        }
-        [a, b].into_iter().any(|v| {
-            self.dword_constant(v).is_some_and(|v| v <= lanes)
-                || matches!(self.ctx.defining_op(v), Some(Op::Bitcast(Type::U32, n)) if
-                    matches!(self.ctx.defining_op(n), Some(Op::Simd(Simd::LaneCount(lane))) if lane.bytes() >= 4))
-        }).then(|| Inst::MaskPrefix(self.dst(), self.input(unsigned)))
     }
 
     fn comparison_mask(&mut self, value: Value) -> Option<VectorMask<VReg>> {

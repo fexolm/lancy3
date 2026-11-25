@@ -6,7 +6,7 @@ pub(super) use rules::packed_half;
 use super::{Machine, inst::Inst};
 use crate::{
     CompileError,
-    hir::{Call, ssa::VerifiedBody},
+    hir::{Call, ssa::VerifiedBody, transforms::canonical},
     lir::{
         self,
         isel::{self, Edges},
@@ -22,9 +22,18 @@ pub(super) fn select(
     callee_info: impl Fn(Call) -> (FunctionId, PRegSet),
 ) -> Result<lir::Function<Inst>, CompileError> {
     let _span = tracing::debug_span!(target: "lancy::compile", "select_instructions").entered();
-    let (f, cfg) = (source.function, &source.cfg);
     let cpu = machine.cpu;
-    let masks = masks::Masks::analyze(f, cfg, cpu);
+    let masks = masks::Masks::analyze(source.function, &source.cfg, cpu);
+    let expanded = canonical::expand(source.function, |f, inst| {
+        rules::native_canonical(f, inst, cpu, &masks)
+    });
+    let expanded = expanded.as_ref().map(|f| source.with_instructions(f));
+    let (source, masks) = match &expanded {
+        // The definitions keep each predicate's register class.
+        Some(body) => (body, masks::Masks::analyze(body.function, &body.cfg, cpu)),
+        None => (source, masks),
+    };
+    let (f, cfg) = (source.function, &source.cfg);
     let reg = |v| masks.reg(f, v);
     let edges = Edges::new(source);
     let mut body = edges.function(machine)?;

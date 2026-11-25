@@ -60,12 +60,13 @@ impl Builder<'_> {
             }
             Iota => Op::Simd(V::Iota(lane(e))),
             SimdOp::FirstN => {
-                // Clamp the usize count to the lane count before narrowing
-                // it. Sign extension preserves unsigned order, so an `i32`
-                // form clamps as `u32` (or `i32` when it is nonnegative).
+                // `FirstLanes` takes every lane for a larger nonnegative
+                // `i32` count. Clamp any other usize count to the lane count
+                // before narrowing it; sign extension preserves unsigned
+                // order, so an `i32` form clamps as `u32`.
                 let width = self.value(Op::Simd(V::LaneCount(lane(e))));
                 let count = match self.exact32(vs[0]) {
-                    Some((count, true)) => self.value(Op::Bin(Binary::Min, count, width)),
+                    Some((count, true)) => count,
                     Some((count, false)) => {
                         let count = self.value(Op::Bitcast(Type::U32, count));
                         let width = self.value(Op::Bitcast(Type::U32, width));
@@ -187,21 +188,19 @@ impl Builder<'_> {
                 return Ok(Some(self.extend_index(prefix)));
             }
             CompressStore(b) => {
+                // Write what fits, then stop if any active lane did not.
                 let (base, len) = self.slice(b);
-                let data = self.value(Op::Simd(V::Compress(vs[2], vs[1])));
+                let (ptr, room) = self.room(e, base, len, vs[0]);
+                self.effect(Op::Simd(V::CompressStore {
+                    base: ptr,
+                    mask: vs[1],
+                    value: vs[2],
+                    limit: room,
+                }));
                 let count = self.mask_count(vs[1]);
-                let selected = self.first_lanes(e, count);
-                return Ok(self.masked_contiguous(
-                    e,
-                    base,
-                    len,
-                    vs[0],
-                    selected,
-                    Access {
-                        write: true,
-                        value: data,
-                    },
-                ));
+                let over = self.value(Op::Bin(Binary::Gt, count, room));
+                self.effect(Op::TrapIf(over, Trap::Bounds));
+                return Ok(None);
             }
             ExtractWrapping | ReplaceWrapping => {
                 let mask = self.value(Op::Const(e.lanes(self.vector_bytes) as i32 - 1));
@@ -308,14 +307,11 @@ impl Builder<'_> {
         self.value(Op::Simd(V::Splat(x)))
     }
     fn mask_count(&mut self, mask: Value) -> Value {
-        // Splice predicates are all-ones or zero in each Lancy lane.
-        let flags = self.value(Op::Unary(Unary::Neg, mask));
-        self.value(Op::Simd(V::Reduce(Binary::Add, flags)))
+        self.value(Op::Simd(V::MaskCount(mask)))
     }
+    /// The predicate of the first `count` lanes, an `i32`.
     fn first_lanes(&mut self, e: Element, count: Value) -> Value {
-        let iota = self.value(Op::Simd(V::Iota(lane(e.index()))));
-        let limit = self.splat_index(e, count);
-        self.value(Op::Bin(Binary::Lt, iota, limit))
+        self.value(Op::Simd(V::FirstLanes(lane(e.index()), count)))
     }
 
     /// A full load has no observable partial result. A short store must first
@@ -371,17 +367,10 @@ impl Builder<'_> {
         active: Value,
         access: Access,
     ) -> Option<Value> {
-        let zero = self.value(Op::Const(0));
-        let nonnegative = self.value(Op::Bin(Binary::Ge, offset, zero));
-        let left = self.value(Op::Bin(Binary::Sub, len, offset));
-        let left = self.value(Op::Bin(Binary::And, left, nonnegative));
-        let left = self.value(Op::Bin(Binary::Max, left, zero));
-        let width = self.value(Op::Simd(V::LaneCount(lane(e))));
-        let count = self.value(Op::Bin(Binary::Min, left, width));
+        let (ptr, count) = self.room(e, base, len, offset);
         let valid = self.first_lanes(e, count);
         let enabled = self.value(Op::Bin(Binary::And, active, valid));
         let bad = self.value(Op::Bin(Binary::Xor, active, enabled));
-        let ptr = self.value(Op::PtrOffset(base, offset, stride(e)));
         // All invalid contiguous lanes are a suffix. The mask suppresses every
         // out-of-bounds address, even when the slice is empty.
         let result = access.emit(
@@ -394,6 +383,19 @@ impl Builder<'_> {
         );
         self.check_mask(bad);
         result
+    }
+
+    /// The address of element `offset` and how many of a vector's elements
+    /// from it lie in the slice: zero for a negative offset, at most the lane count.
+    fn room(&mut self, e: Element, base: Value, len: Value, offset: Value) -> (Value, Value) {
+        let zero = self.value(Op::Const(0));
+        let nonnegative = self.value(Op::Bin(Binary::Ge, offset, zero));
+        let left = self.value(Op::Bin(Binary::Sub, len, offset));
+        let left = self.value(Op::Bin(Binary::And, left, nonnegative));
+        let left = self.value(Op::Bin(Binary::Max, left, zero));
+        let width = self.value(Op::Simd(V::LaneCount(lane(e))));
+        let count = self.value(Op::Bin(Binary::Min, left, width));
+        (self.value(Op::PtrOffset(base, offset, stride(e))), count)
     }
 
     fn check_mask(&mut self, bad: Value) {

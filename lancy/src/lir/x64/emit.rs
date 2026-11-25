@@ -828,9 +828,8 @@ impl Emitter<'_> {
             }
             Inst::MaskNot(lane, ..) => opmask::not(a, cpu, lane, reg(1), reg(0)),
             Inst::MaskImmediate(_, bits) => opmask::immediate(a, reg(0), bits),
-            Inst::MaskPrefix(..) => {
-                a.mov(r10d, -1)?;
-                a.bzhi(r10d, r10d, r(0))?;
+            Inst::MaskPrefix(lanes, ..) => {
+                prefix_bits(a, r(2), r(0), lanes)?;
                 a.kmovw(K[reg(1)], r10d)
             }
             Inst::MaskCount(..) => {
@@ -844,8 +843,10 @@ impl Emitter<'_> {
                 simd::packed::compact::emit(a, cpu, expand, [reg(2), reg(0), reg(1), reg(3)])
             }
             Inst::CompactStore { .. } => {
+                // Deposit the written prefix on the mask lanes, so the
+                // compressing store writes the first `limit` active lanes.
+                prefix_bits(a, r(5), r(3), (width / 4) as u8)?;
                 a.kmovw(r(4), K[reg(2)])?;
-                a.kmovw(r10d, K[reg(3)])?;
                 a.pdep(r10d, r10d, r(4))?;
                 a.kmovw(k1, r10d)?;
                 let address = ptr(q(0)).k1();
@@ -1149,4 +1150,23 @@ fn jcc(a: &mut CodeAssembler, cc: Cond, label: CodeLabel) -> AsmResult {
         Cond::Gt => a.jg(label),
         Cond::Ge => a.jge(label),
     }
+}
+
+/// `r10d` = the low `count` of `lanes` bits, with `count` clamped to
+/// `0..=lanes` in `temp`: `bzhi` reads only the low byte of its index.
+fn prefix_bits(
+    a: &mut CodeAssembler,
+    temp: AsmRegister32,
+    count: AsmRegister32,
+    lanes: u8,
+) -> AsmResult {
+    a.mov(temp, count)?;
+    a.xor(r10d, r10d)?;
+    a.test(temp, temp)?;
+    a.cmovs(temp, r10d)?;
+    a.mov(r10d, i32::from(lanes))?;
+    a.cmp(temp, r10d)?;
+    a.cmova(temp, r10d)?;
+    a.mov(r10d, -1)?;
+    a.bzhi(r10d, r10d, temp)
 }

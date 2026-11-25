@@ -75,7 +75,8 @@ impl Effects {
 
 /// The memory an access touches: `ty` at `address`, or the lanes of `ty` at
 /// `address + indices[k]` elements when indexed, limited to the active lanes
-/// of `mask` when masked.
+/// of `mask` when masked. A compressing store (`limit` set) writes the active
+/// lanes packed from `address`, so its mask does not name element positions.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Access {
     pub address: Value,
@@ -84,6 +85,8 @@ pub struct Access {
     pub mask: Option<Value>,
     /// The stored value of a write, or the passthrough of a masked read.
     pub value: Option<Value>,
+    /// The largest number of elements a compressing store writes.
+    pub limit: Option<Value>,
     pub write: bool,
 }
 
@@ -105,7 +108,7 @@ impl Op {
         !matches!(
             self,
             Self::Store(..)
-                | Self::Simd(Simd::MaskedStore { .. })
+                | Self::Simd(Simd::MaskedStore { .. } | Simd::CompressStore { .. })
                 | Self::BoundsCheck(..)
                 | Self::TrapIf(..)
                 | Self::Trap(_)
@@ -131,7 +134,9 @@ impl Op {
             Self::BoundsCheck(..) => Effects::trap(TrapKind::Bounds),
             Self::TrapIf(..) | Self::Trap(_) => Effects::trap(TrapKind::Explicit),
             Self::Load(..) | Self::Simd(Simd::MaskedLoad { .. }) => Effects::memory(false),
-            Self::Store(..) | Self::Simd(Simd::MaskedStore { .. }) => Effects::memory(true),
+            Self::Store(..) | Self::Simd(Simd::MaskedStore { .. } | Simd::CompressStore { .. }) => {
+                Effects::memory(true)
+            }
             Self::Call(_)
             | Self::RustCall(..)
             | Self::RustPacketCall(_)
@@ -160,6 +165,7 @@ impl Op {
             indices: None,
             mask: None,
             value,
+            limit: None,
             write,
         };
         Some(match self {
@@ -182,7 +188,22 @@ impl Op {
                 indices: address.indices,
                 mask: Some(mask),
                 value: Some(value),
+                limit: None,
                 write: matches!(self, Self::Simd(Simd::MaskedStore { .. })),
+            },
+            Self::Simd(Simd::CompressStore {
+                base,
+                mask,
+                value,
+                limit,
+            }) => Access {
+                address: base,
+                ty: f.value_type(value),
+                indices: None,
+                mask: Some(mask),
+                value: Some(value),
+                limit: Some(limit),
+                write: true,
             },
             _ => return None,
         })
@@ -467,12 +488,31 @@ fn simd_type(
             }
             l.scalar()
         }
-        AnyTrue(x) | AllTrue(x) => {
+        AnyTrue(x) | AllTrue(x) | MaskCount(x) => {
             let l = vector(x)?;
             if l.float() {
                 return Err(invalid(Type::Vector(l)));
             }
             Type::I32
+        }
+        FirstLanes(l, count) => {
+            expect(count, Type::I32)?;
+            if l.float() {
+                return Err(invalid(Type::Vector(l)));
+            }
+            Type::Vector(l)
+        }
+        CompressStore {
+            base,
+            mask,
+            value,
+            limit,
+        } => {
+            expect(base, Type::Ptr)?;
+            let l = vector(value)?;
+            expect(mask, Type::Vector(l).mask_type())?;
+            expect(limit, Type::I32)?;
+            return Ok(None);
         }
         Compress(x, mask) | Expand(x, mask) => {
             let ty = Type::Vector(vector(x)?);

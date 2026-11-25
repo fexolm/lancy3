@@ -58,6 +58,7 @@ fn main x:i32 -> i32
 | `v = literal f32 3f800000`, `v = cast f32 x`, `v = bitcast i32 x` | Литерал по шестнадцатеричному битовому представлению, числовое преобразование, переинтерпретация битов |
 | `v = sqrt x`, `v = fma x y z`, `v = simd.reduce add xs` | Поэлементная операция, FMA, свёртка в скаляр |
 | `v = simd.maskedload p indices mask fallback`, `simd.maskedstore p - mask v` | Доступ по индексам в элементах или к последовательным полосам при `-` |
+| `v = simd.firstlanes i32 n`, `v = simd.maskcount m`, `simd.compressstore p m v limit` | Предикат первых `n` полос, число полос со старшим битом, компактная запись не более `limit` элементов |
 | `v = const 7`, `v = copy x`, `v = call helper x y` | Константа, копия, прямой вызов |
 | `bounds i len`, `p = offset base i 4` | Беззнаковая проверка границ и адресация с шагом 1, 2, 4 или 8 байт |
 | `trap_if cond Overflow`, `trap Bounds` | Ловушка с кодом ядра (`Bounds`, `DivisionByZero`, `DivisionOverflow`, `Overflow`) при ненулевом условии или всегда. [Пример](passes/traps.lancy) |

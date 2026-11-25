@@ -47,6 +47,20 @@ pub(crate) fn evaluate(
             };
             out[..4].copy_from_slice(&(-i32::from(yes)).to_le_bytes());
         }
+        Action::MaskCount => {
+            let active = a[..width]
+                .chunks_exact(size)
+                .filter(|elem| elem[size - 1] & 0x80 != 0)
+                .count();
+            out[..4].copy_from_slice(&(active as u32).to_le_bytes());
+        }
+        Action::FirstLanes => {
+            let count = (read(&a[..4]) as u32 as i32).max(0) as usize;
+            let lane = output.lane().unwrap().bytes();
+            for elem in out[..width].chunks_exact_mut(lane).take(count) {
+                elem.fill(0xff);
+            }
+        }
         Action::Widen(_) | Action::Narrow => {
             let dst = output.lane().unwrap();
             for (i, elem) in out[..width].chunks_exact_mut(dst.bytes()).enumerate() {

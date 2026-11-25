@@ -466,17 +466,25 @@ impl Function {
         self.result(inst).ok_or(IrError::NoResult { inst })
     }
 
-    /// Insert before the first instruction. Operands must already dominate
-    /// the start of the block.
-    pub(in crate::hir) fn prepend(&mut self, b: Block, op: Op) -> Result<Value, IrError> {
+    /// Insert `op` after `after` in `b`, or first when `after` is `None`.
+    /// Its operands must be available at that point.
+    pub(in crate::hir) fn insert_after(
+        &mut self,
+        b: Block,
+        after: Option<Inst>,
+        op: Op,
+    ) -> Result<Inst, IrError> {
         let id = self.new_instruction(op)?;
         let block = &mut self.blocks[b];
-        self.insts[id].next = block.first;
-        if block.last == Inst::INVALID {
+        let next = match after {
+            Some(prev) => std::mem::replace(&mut self.insts[prev].next, id),
+            None => std::mem::replace(&mut block.first, id),
+        };
+        self.insts[id].next = next;
+        if next == Inst::INVALID {
             block.last = id;
         }
-        block.first = id;
-        self.result(id).ok_or(IrError::NoResult { inst: id })
+        Ok(id)
     }
 
     fn new_instruction(&mut self, op: Op) -> Result<Inst, IrError> {

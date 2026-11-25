@@ -19,7 +19,11 @@ fn entry_literal(
     bits: u128,
 ) -> Value {
     *literals.entry((lane, bits)).or_insert_with(|| {
-        let value = f.prepend(f.entry(), Op::literal(lane, bits)).unwrap();
+        let entry = f.entry();
+        let inst = f
+            .insert_after(entry, None, Op::literal(lane, bits))
+            .unwrap();
+        let value = f.result(inst).unwrap();
         assert_eq!(aliases.insert(value), value);
         value
     })

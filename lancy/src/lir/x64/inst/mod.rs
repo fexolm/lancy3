@@ -231,16 +231,18 @@ pub(super) enum Inst {
     MaskLogic(Lane, Binary, VReg, VReg, VReg),
     MaskNot(Lane, VReg, VReg),
     MaskImmediate(VReg, u64),
-    MaskPrefix(VReg, VReg),
+    /// The predicate of the first `count` of `lanes` lanes: dst, count, temp.
+    MaskPrefix(u8, VReg, VReg, VReg),
     MaskCount(VReg, VReg),
     MaskCompact(Lane, bool, VReg, VReg, VReg),
     CompactLookup(bool, VReg, VReg, VReg, VReg),
+    /// Store the `mask` lanes of `data` packed at `base`, at most `limit`.
     CompactStore {
         base: VReg,
         data: VReg,
-        original: VReg,
-        enabled: VReg,
-        temp: VReg,
+        mask: VReg,
+        limit: VReg,
+        temps: [VReg; 2],
     },
     Movsxd(VReg, VReg),
     Lea(VReg, Address),
@@ -420,11 +422,11 @@ impl TargetInst for Inst {
             | Self::MaskCompact(_, _, d, x, y) => {
                 out.extend([O::reg_use(x), O::reg_use(y), O::reg_def(d)]);
             }
-            Self::MaskNot(_, d, x)
-            | Self::AllMask(_, d, x)
-            | Self::MaskPrefix(d, x)
-            | Self::MaskCount(d, x) => {
+            Self::MaskNot(_, d, x) | Self::AllMask(_, d, x) | Self::MaskCount(d, x) => {
                 out.extend([O::reg_use(x), O::reg_def(d)]);
+            }
+            Self::MaskPrefix(_, d, count, temp) => {
+                out.extend([O::reg_use(count), O::reg_def(d), O::reg_temp(temp)]);
             }
             Self::MaskImmediate(d, _) => out.push(O::reg_def(d)),
             Self::DwordLane {
@@ -453,15 +455,16 @@ impl TargetInst for Inst {
             Self::CompactStore {
                 base,
                 data,
-                original,
-                enabled,
-                temp,
+                mask,
+                limit,
+                temps: [bits, prefix],
             } => out.extend([
                 O::reg_use(base),
                 O::reg_use(data),
-                O::reg_use(original),
-                O::reg_use(enabled),
-                O::reg_temp(temp),
+                O::reg_use(mask),
+                O::reg_use(limit),
+                O::reg_temp(bits),
+                O::reg_temp(prefix),
             ]),
             Self::Masked {
                 base,

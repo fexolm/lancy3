@@ -56,6 +56,8 @@ impl Address {
 struct Mask {
     indices: Option<Value>,
     value: Value,
+    /// A compressing store's limit: its mask does not name positions.
+    limit: Option<Value>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -66,8 +68,11 @@ struct Location {
 }
 
 impl Location {
+    /// Whether the lanes' positions are unknown: a gather, a scatter or a
+    /// compressing store.
     fn indexed(self) -> bool {
-        self.mask.is_some_and(|mask| mask.indices.is_some())
+        self.mask
+            .is_some_and(|mask| mask.indices.is_some() || mask.limit.is_some())
     }
 
     fn may_overlap(self, other: Self) -> bool {
@@ -252,6 +257,7 @@ fn access(
     let mask = access.mask.map(|mask| Mask {
         indices: access.indices.map(&root),
         value: root(mask),
+        limit: access.limit.map(&root),
     });
     Some((
         Location {

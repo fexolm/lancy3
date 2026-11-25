@@ -95,6 +95,18 @@ pub(super) fn hir(module: &Module<VerifiedBody>) -> String {
                             v(x)
                         )
                     }
+                    Op::Simd(Simd::CompressStore {
+                        base,
+                        mask,
+                        value,
+                        limit,
+                    }) => format!(
+                        "simd.compressstore {} {} {} {}",
+                        v(base),
+                        v(mask),
+                        v(value),
+                        v(limit)
+                    ),
                     Op::Literal(l, n) => format!("Literal({n}) {:?} ", l.scalar()),
                     op @ (Op::Simd(_)
                     | Op::Bin(..)

@@ -1,7 +1,7 @@
 use super::Rules;
 use crate::{
     CompileError,
-    hir::{Binary, Lane, Op, Scale, Simd, Type, Unary, Value, VectorAddress},
+    hir::{Op, Scale, Simd, Type, Value, VectorAddress},
     lir::x64::inst::{Address, Inst, VectorMask, simd::evex_masked_memory},
 };
 use regalloc2::RegClass;
@@ -45,12 +45,6 @@ impl Rules<'_> {
     ) -> Result<Inst, CompileError> {
         let ty = self.ty(value);
         let dst = self.result.map(|v| self.masks.reg(self.f, v));
-        if dst.is_none()
-            && address.indices.is_none()
-            && let Some(inst) = self.compact_store(address.base, mask, value)?
-        {
-            return Ok(inst);
-        }
         let base = self.input(address.base);
         let indices = address.indices.map(|v| self.input(v));
         let size = ty.lane().unwrap().bytes();
@@ -87,59 +81,25 @@ impl Rules<'_> {
         })
     }
 
-    fn compact_store(
+    /// `canonical::expand` leaves a compressing store only where
+    /// `native_compress_store` holds and its mask is a predicate register.
+    pub(super) fn compress_store(
         &mut self,
         base: Value,
-        enabled: Value,
-        result: Value,
-    ) -> Result<Option<Inst>, CompileError> {
-        if self.ty(result) != Type::Vector(Lane::I32)
-            || !self.masks.contains(enabled)
-            || !self.cpu.isa.bmi2
-        {
-            return Ok(None);
-        }
-        let Some(Op::Simd(Simd::Compress(data, original))) = self.ctx.single_use(result) else {
-            return Ok(None);
-        };
-        if !self.masks.contains(original) {
-            return Ok(None);
-        }
-        let Some(Op::Bin(Binary::And, a, b)) = self.ctx.defining_op(enabled) else {
-            return Ok(None);
-        };
-        let (Some(a), Some(b)) = (self.prefix_limit(a), self.prefix_limit(b)) else {
-            return Ok(None);
-        };
-        let exact_count = |limit| {
-            matches!(self.ctx.defining_op(limit), Some(Op::Simd(Simd::Reduce(Binary::Add, flags)))
-                if self.ctx.defining_op(flags) == Some(Op::Unary(Unary::Neg, original)))
-        };
-        // Both predicates are prefixes, and the count limits the prefix to
-        // real elements. Deposit its bits into the source lane positions.
-        if !exact_count(a) && !exact_count(b) {
-            return Ok(None);
-        }
-        Ok(Some(Inst::CompactStore {
+        mask: Value,
+        value: Value,
+        limit: Value,
+    ) -> Result<Inst, CompileError> {
+        Ok(Inst::CompactStore {
             base: self.input(base),
-            data: self.input(data),
-            original: self.input(original),
-            enabled: self.input(enabled),
-            temp: self.body.temp(RegClass::Int)?,
-        }))
-    }
-
-    fn prefix_limit(&self, value: Value) -> Option<Value> {
-        let Op::Bin(Binary::Lt, index, limit) = self.ctx.defining_op(value)? else {
-            return None;
-        };
-        if self.ctx.defining_op(index) != Some(Op::Simd(Simd::Iota(Lane::I32))) {
-            return None;
-        }
-        match self.ctx.defining_op(limit)? {
-            Op::Simd(Simd::Splat(value)) => Some(value),
-            _ => None,
-        }
+            data: self.input(value),
+            mask: self.input(mask),
+            limit: self.input(limit),
+            temps: [
+                self.body.temp(RegClass::Int)?,
+                self.body.temp(RegClass::Int)?,
+            ],
+        })
     }
 
     pub(super) fn address(&mut self, v: Value) -> Result<Address, CompileError> {

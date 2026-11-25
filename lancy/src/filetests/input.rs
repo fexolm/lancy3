@@ -208,6 +208,14 @@ fn simd(name: &str, args: &[&str], v: impl Fn(&str) -> Result<Value>) -> Result<
             })
         }
 
+        ("firstlanes", [t, n]) => Op::Simd(Simd::FirstLanes(element(t)?, v(n)?)),
+        ("maskcount", [m]) => Op::Simd(Simd::MaskCount(v(m)?)),
+        ("compressstore", [p, m, x, limit]) => Op::Simd(Simd::CompressStore {
+            base: v(p)?,
+            mask: v(m)?,
+            value: v(x)?,
+            limit: v(limit)?,
+        }),
         ("compress", [x, m]) => Op::Simd(Simd::Compress(v(x)?, v(m)?)),
         ("expand", [x, m]) => Op::Simd(Simd::Expand(v(x)?, v(m)?)),
         ("load", [t, p]) => Op::Load(Type::Vector(element(t)?), v(p)?),

@@ -1,0 +1,64 @@
+# Canonical predicate operations. A backend selects them natively (x64
+# with AVX-512 and BMI2: `bzhi`, `popcnt`, `pdep` + `vpcompressd`) or
+# defines them by `canonical::expand`; both give the same results.
+
+# A narrow lane clamps the count before narrowing it: 300 is not 44 lanes,
+# and -200 is not 56.
+fn main x:i32 -> i32
+  pred = simd.firstlanes i8 x
+  any = simd.any pred
+  all = simd.all pred
+  result = add any all
+  ret result
+@source check: simd.FirstLanes
+@run 300 -> -2
+@run -200 -> 0
+@run 1 -> -1
+---
+# MaskCount counts the high bits of any vector. Negating and adding the
+# lanes counts only predicates: here it would give -1 for a lane of 1.
+fn main x:i32 -> i32
+  zero = const 0
+  zeros = simd.splat zero
+  data = simd.insert zeros zero x
+  count = simd.maskcount data
+  ret count
+@isel not: mask.count
+@run 1 -> 0
+@run -2147483648 -> 1
+@run -1 -> 1
+---
+# The count of a predicate register is `popcnt`.
+fn main x:i32 -> i32
+  i = simd.iota i32
+  limit = simd.splat x
+  pred = simd.lt i limit
+  count = simd.maskcount pred
+  ret count
+@isel regex: COUNT=mask\.count|Reduce\(Add\)
+@isel check: $COUNT
+@run 0 -> 0
+@run 3 -> 3
+@run -5 -> 0
+---
+# A compressing store writes the odd lanes packed, at most `limit` of them,
+# and nothing for a negative limit.
+fn main out:ptr limit:i32 -> i32
+  i = simd.iota i32
+  one = const 1
+  ones = simd.splat one
+  zero = const 0
+  zeros = simd.splat zero
+  ten = const 10
+  tens = simd.splat ten
+  bit = and i ones
+  odd = ne bit zeros
+  data = add i tens
+  simd.compressstore out odd data limit
+  ret limit
+@isel regex: STORE=compress\.store|maskedstore\.Vector\(I32\)
+@isel check: $STORE
+@run 1 -> 1 | aa aa aa aa aa aa aa aa aa aa aa aa | 0b 00 00 00 aa aa aa aa aa aa aa aa
+@run 2 -> 2 | aa aa aa aa aa aa aa aa aa aa aa aa | 0b 00 00 00 0d 00 00 00 aa aa aa aa
+@run 0 -> 0 | aa aa aa aa aa aa aa aa aa aa aa aa | aa aa aa aa aa aa aa aa aa aa aa aa
+@run -1 -> -1 | aa aa aa aa aa aa aa aa aa aa aa aa | aa aa aa aa aa aa aa aa aa aa aa aa

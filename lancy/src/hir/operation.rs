@@ -18,6 +18,8 @@ pub(crate) enum Action {
     Reduce(Binary),
     AnyTrue,
     AllTrue,
+    FirstLanes,
+    MaskCount,
     Widen(bool),
     Narrow,
 }
@@ -43,6 +45,15 @@ pub(crate) fn operation(
             [Some(x), None, None],
         ),
         Op::Simd(Simd::AnyTrue(x)) => (Action::AnyTrue, ty(x), Type::I32, [Some(x), None, None]),
+        Op::Simd(Simd::MaskCount(x)) => {
+            (Action::MaskCount, ty(x), Type::I32, [Some(x), None, None])
+        }
+        Op::Simd(Simd::FirstLanes(l, n)) => (
+            Action::FirstLanes,
+            ty(n),
+            Type::Vector(l),
+            [Some(n), None, None],
+        ),
         Op::Simd(Simd::AllTrue(x)) => (Action::AllTrue, ty(x), Type::I32, [Some(x), None, None]),
         Op::Simd(Simd::Widen { to, high, value }) => (
             Action::Widen(high),

@@ -21,6 +21,24 @@ impl VerifiedBody<'_> {
     pub(crate) fn callee(&self, call: Call) -> FunctionId {
         self.callees[call]
     }
+
+    /// The body of `function`, which has the blocks, terminators and calls
+    /// of this one and more instructions inside its blocks (see
+    /// `transforms::canonical`), so the analyses still describe it.
+    pub(crate) fn with_instructions<'b>(&self, function: &'b Function) -> VerifiedBody<'b> {
+        if cfg!(debug_assertions) {
+            function
+                .verify()
+                .unwrap_or_else(|error| panic!("expanded body: {error}"));
+        }
+        VerifiedBody {
+            function,
+            cfg: self.cfg.clone(),
+            dom: self.dom.clone(),
+            has_call_scratch: self.has_call_scratch,
+            callees: self.callees.clone(),
+        }
+    }
 }
 
 impl Function {

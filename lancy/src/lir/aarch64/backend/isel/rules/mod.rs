@@ -267,6 +267,9 @@ impl Rules<'_> {
             Op::Simd(Simd::Reduce(kind, v)) => return self.reduce(kind, v),
             Op::Simd(Simd::AnyTrue(v)) => return self.mask_test(v, false),
             Op::Simd(Simd::AllTrue(v)) => return self.mask_test(v, true),
+            Op::Simd(Simd::FirstLanes(..) | Simd::MaskCount(_) | Simd::CompressStore { .. }) => {
+                unreachable!("canonical::expand defines {op:?} before selection")
+            }
             Op::Ternary(Ternary::BitSelect, mask, a, b) => {
                 return self.scalar_bit_select(mask, a, b);
             }

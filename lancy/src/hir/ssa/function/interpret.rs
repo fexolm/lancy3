@@ -223,6 +223,32 @@ pub(super) unsafe fn run(
                 }
                 result
             }
+            Op::Simd(Simd::CompressStore {
+                base,
+                mask,
+                value,
+                limit,
+            }) => {
+                let lane = graph.value_type(value).lane().unwrap();
+                let size = lane.bytes();
+                let limit = (f.read(limit) as u32 as i32).max(0) as usize;
+                let active = (0..width / size)
+                    .filter(|i| f.values[mask][(i + 1) * size - 1] & 0x80 != 0)
+                    .take(limit);
+                for (slot, i) in active.enumerate() {
+                    let addr = f.read(base).wrapping_add((slot * size) as u64);
+                    let data = &f.values[value][i * size..(i + 1) * size];
+                    if let Some(buf) = buffer.as_deref_mut() {
+                        buffer_value(buf, addr, lane.scalar(), width)?.copy_from_slice(data);
+                    } else {
+                        // SAFETY: interpret_raw's caller covers the written prefix.
+                        unsafe {
+                            std::ptr::copy_nonoverlapping(data.as_ptr(), addr as *mut u8, size)
+                        }
+                    }
+                }
+                continue;
+            }
             Op::Load(_, addr) => {
                 let ty = graph.value_type(graph.result(inst).unwrap());
                 let addr = f.read(addr);

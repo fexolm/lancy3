@@ -1,9 +1,7 @@
 //! Canonical predicates can share a register class through SSA copies and edges.
 use super::super::inst::{class, simd};
 use crate::hir::transforms::ControlFlowGraph;
-use crate::hir::{
-    Binary, Block, Function, Lane, Op, Simd, Terminator, Ternary, Type, Unary, Value,
-};
+use crate::hir::{Binary, Function, Lane, Op, Simd, Terminator, Ternary, Type, Unary, Value};
 use crate::lir::x64::Cpu;
 use regalloc2::{RegClass, VReg};
 
@@ -16,11 +14,6 @@ impl Masks {
         }
         let mut groups = Groups::new(f.value_count());
         let mut literals = vec![None; f.value_count()];
-        let uses = if cpu.isa.popcnt {
-            count_only_uses(f, cfg)
-        } else {
-            Vec::new()
-        };
         for &v in f.params(f.entry()) {
             groups.reject(v);
         }
@@ -60,13 +53,6 @@ impl Masks {
                     Op::Unary(Unary::Not, v) if result_is_mask => {
                         groups.join(result.unwrap(), v);
                     }
-                    Op::Unary(Unary::Neg, _)
-                        if uses.get(result.unwrap().index()) == Some(&Use::Count(b)) =>
-                    {
-                        // Code selection consumes the predicate instead of the
-                        // negated vector when the predicate stays in K registers.
-                        groups.reject(result.unwrap());
-                    }
                     Op::Bin(op, a, b)
                         if result_is_mask
                             && !matches!(lane(a), Lane::F16 | Lane::BF16)
@@ -76,6 +62,20 @@ impl Masks {
                         groups.reject(b);
                     }
                     Op::Simd(Simd::AnyTrue(_) | Simd::AllTrue(_)) => {}
+                    // A predicate producer, like a comparison; its count is a scalar.
+                    Op::Simd(Simd::FirstLanes(..)) if result_is_mask => {}
+                    Op::Simd(Simd::MaskCount(m)) if native_count(cpu, lane(m)) => {}
+                    Op::Simd(Simd::CompressStore { mask, value, .. }) => {
+                        groups.reject(value);
+                        // The mask stays a predicate for the native store and
+                        // for the fallback's compress and count.
+                        let lane = lane(value);
+                        let kept = native_compress_store(cpu, lane)
+                            || simd::compact_lanes(cpu, lane) && native_count(cpu, lane);
+                        if !kept {
+                            groups.reject(mask);
+                        }
+                    }
                     Op::Ternary(Ternary::Select, _, yes, no)
                         if simd::mask_lanes(cpu, lane(yes)) =>
                     {
@@ -159,37 +159,14 @@ pub(super) fn constant_predicate(lane: Lane, bits: u128) -> Option<bool> {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Use {
-    None,
-    Count(Block),
-    Other,
+/// `kmovw` and `popcnt` count a predicate of at most 16 lanes.
+pub(super) fn native_count(cpu: Cpu, lane: Lane) -> bool {
+    cpu.isa.popcnt && cpu.bytes / lane.bytes() <= 16
 }
 
-fn count_only_uses(f: &Function, cfg: &ControlFlowGraph) -> Vec<Use> {
-    let mut uses = vec![Use::None; f.value_count()];
-    for &b in cfg.reverse_postorder() {
-        for i in f.instructions(b) {
-            if let Op::Simd(Simd::Reduce(Binary::Add, v)) = *f.op(i)
-                && f.value_type(v) == Type::Vector(Lane::I32)
-                && uses[v.index()] == Use::None
-            {
-                uses[v.index()] = Use::Count(b);
-            } else {
-                f.visit_operands(i, |v| uses[v.index()] = Use::Other);
-            }
-        }
-        let term = *f.terminator(b);
-        if let Terminator::Return(v) = term {
-            uses[v.index()] = Use::Other;
-        }
-        for edge in term.edges() {
-            for &v in f.edge(edge).1 {
-                uses[v.index()] = Use::Other;
-            }
-        }
-    }
-    uses
+/// `pdep` places the written prefix on the mask and `vpcompressd` stores it.
+pub(super) fn native_compress_store(cpu: Cpu, lane: Lane) -> bool {
+    simd::evex(cpu) && cpu.isa.bmi2 && lane.bytes() == 4
 }
 
 // Each component must have one representation. Rejecting any noncanonical

@@ -4,6 +4,7 @@ use std::ops::Range;
 
 /// Edges and reverse postorder of a function's reachable blocks.
 /// Rebuild after changing blocks or terminators.
+#[derive(Clone)]
 pub struct ControlFlowGraph {
     successors: DenseMap<Block, [Option<Block>; 2]>,
     incoming: DenseMap<Block, Range<usize>>,

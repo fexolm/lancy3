@@ -45,6 +45,21 @@ pub enum Simd {
         mask: Value,
         value: Value,
     },
+    /// Lanes below the `i32` count are all ones and the others zero, so a
+    /// count of zero or less selects none: a predicate of integer lanes.
+    FirstLanes(Lane, Value),
+    /// The number of lanes of an integer vector whose high bit is set, as an `i32`.
+    MaskCount(Value),
+    /// Write the lanes of `value` whose `mask` lane has the high bit set to
+    /// consecutive elements from `base`, lowest lane first, but at most
+    /// `limit` of them (an `i32`; zero or less writes none). Nothing past
+    /// the written elements is accessed.
+    CompressStore {
+        base: Value,
+        mask: Value,
+        value: Value,
+        limit: Value,
+    },
 }
 
 impl Simd {
@@ -65,7 +80,20 @@ impl Simd {
                 *mask = map(*mask);
                 *value = map(*value);
             }
+            Self::CompressStore {
+                base,
+                mask,
+                value,
+                limit,
+            } => {
+                *base = map(*base);
+                *mask = map(*mask);
+                *value = map(*value);
+                *limit = map(*limit);
+            }
             Self::Reduce(_, v)
+            | Self::FirstLanes(_, v)
+            | Self::MaskCount(v)
             | Self::AnyTrue(v)
             | Self::AllTrue(v)
             | Self::Widen { value: v, .. }
