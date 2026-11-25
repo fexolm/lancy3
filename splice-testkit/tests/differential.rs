@@ -4,7 +4,7 @@ use splice::frontend::{KernelBuilder, Signature};
 use splice::hir::{Binary, Buffer, Reg, Simd, SimdOp};
 use splice::hir::{Constant, ScalarType};
 use splice::simd::Element;
-use splice::{BufferArg, BufferKind, CallError, Trap};
+use splice::{BufferArg, BufferKind, CallError, KernelScalar, Trap};
 use splice_testkit::{Stage, agree};
 use std::rc::Rc;
 
@@ -200,7 +200,7 @@ fn check_rows(
         (0..rows.len())
             .map(|case| {
                 let mut out = Column::new(to, [Constant::new(to, 0)]);
-                match call(&[case as i32], &mut [data.read(), out.write()]) {
+                match call(&[case as u64], &mut [data.read(), out.write()]) {
                     Ok(_) => out.first(to),
                     Err(error) => format!("{error:?}"),
                 }
@@ -217,6 +217,145 @@ fn check_rows(
     for ((row, seen), want) in rows.iter().zip(&seen).zip(&want) {
         assert_eq!(seen, want, "{name} {row:?}");
     }
+}
+
+/// The result word of a call, or its error. A word with bits above its
+/// value is shown as such: the entry must zero them.
+fn show_word(ty: ScalarType, result: Result<u64, CallError>) -> String {
+    match result {
+        Ok(word) if Constant::new(ty, word).bits() == word => show(Constant::new(ty, word)),
+        Ok(word) => format!("unnormalized {ty} word {word:#x}"),
+        Err(error) => format!("{error:?}"),
+    }
+}
+
+/// Every scalar type crosses the entry as one word at its own position:
+/// with one parameter of each type, the kernel returns parameter `k` (or,
+/// with a slice after the scalars, also through the descriptor path).
+#[test]
+fn every_scalar_type_passes_into_and_out_of_the_entry_at_its_position() {
+    let types = ScalarType::ALL;
+    let row = |i: usize| -> Vec<Constant> {
+        types
+            .iter()
+            .enumerate()
+            .map(|(k, &ty)| {
+                let values = edges(ty);
+                values[(i + k) % values.len()]
+            })
+            .collect()
+    };
+    let rows: Vec<_> = (0..8).map(row).collect();
+    let slices = [BufferKind::new(Element::I32, false)];
+    for buffers in [&[][..], &slices[..]] {
+        for (k, &ty) in types.iter().enumerate() {
+            let stage: Stage = Rc::new(move |b| b.ret(b.arg(k)?));
+            let seen = agree(
+                &format!("pass {ty} with {} slices", buffers.len()),
+                Signature::new(&types, ty, buffers),
+                &stage,
+                |call| {
+                    rows.iter()
+                        .map(|row| {
+                            let words: Vec<u64> = row.iter().map(|c| c.bits()).collect();
+                            let mut slice: Vec<_> = buffers
+                                .iter()
+                                .map(|_| BufferArg::read::<i32>(&[1, 2]))
+                                .collect();
+                            show_word(ty, call(&words, &mut slice))
+                        })
+                        .collect()
+                },
+            );
+            let want: Vec<_> = rows.iter().map(|row| show(row[k])).collect();
+            assert_eq!(seen, want, "{ty}");
+        }
+    }
+}
+
+/// Two parameters of one type combine natively into a result of that type
+/// (`Add`, or `Xor` for `bool`), against `checked_eval`.
+#[test]
+fn every_scalar_type_computes_on_entry_words_and_returns_one() {
+    for ty in ScalarType::ALL {
+        let op = if ty == ScalarType::Bool {
+            Binary::Xor
+        } else {
+            Binary::Add
+        };
+        let stage: Stage = Rc::new(move |b| {
+            let r = b.binary(op, b.arg(0)?, b.arg(1)?)?;
+            b.ret(r)
+        });
+        let values = edges(ty);
+        let pairs: Vec<_> = values
+            .iter()
+            .flat_map(|&a| values.iter().map(move |&z| (a, z)))
+            .collect();
+        let seen = agree(
+            &format!("{ty} {op:?} of entry words"),
+            Signature::new(&[ty; 2], ty, &[]),
+            &stage,
+            |call| {
+                pairs
+                    .iter()
+                    .map(|(a, z)| show_word(ty, call(&[a.bits(), z.bits()], &mut [])))
+                    .collect()
+            },
+        );
+        let want: Vec<_> = pairs
+            .iter()
+            .map(|&(a, z)| show(op.checked_eval(a, z).unwrap()))
+            .collect();
+        assert_eq!(seen, want, "{ty}");
+    }
+}
+
+/// A word with bits above its type's value is rejected before the call on
+/// every backend, as is a wrong number of words.
+#[test]
+fn entry_words_must_hold_exactly_their_value() {
+    use splice::SignatureError;
+    let types = [ScalarType::Bool, ScalarType::I32, ScalarType::F32];
+    let stage: Stage = Rc::new(|b| {
+        let r = b.constant(Constant::from(7))?;
+        b.ret(r)
+    });
+    let calls: [&[u64]; 5] = [
+        &[1, u64::from(u32::MAX), u64::from(1f32.to_bits())],
+        &[2, 0, 0],
+        &[0, 1 << 32, 0],
+        &[0, 0, u64::MAX],
+        &[0, 0],
+    ];
+    let seen = agree(
+        "entry words",
+        Signature::new(&types, ScalarType::I32, &[]),
+        &stage,
+        |call| {
+            calls
+                .iter()
+                .map(|words| format!("{:?}", call(words, &mut [])))
+                .collect()
+        },
+    );
+    let word = |index: usize| {
+        CallError::from(SignatureError::Word {
+            index,
+            ty: types[index],
+        })
+    };
+    let want = [
+        Ok(7),
+        Err(word(0)),
+        Err(word(1)),
+        Err(word(2)),
+        Err(CallError::from(SignatureError::Scalars {
+            expected: 3,
+            actual: 2,
+        })),
+    ];
+    assert_eq!(seen, want.map(|r| format!("{r:?}")));
 }
 
 #[test]
@@ -637,7 +776,7 @@ fn float_arithmetic_is_correctly_rounded_on_special_values() {
             &stage,
             |call| {
                 let mut out = vec![0f32; n];
-                let args: Vec<i32> = (1..=extra as i32).collect();
+                let args: Vec<u64> = (1..=extra as u64).collect();
                 let r = call(
                     &args,
                     &mut [BufferArg::from(&src[..]), BufferArg::from(&mut out[..])],
@@ -762,7 +901,11 @@ fn integer_lane_operations_agree_on_boundary_values() {
                     [1, 3, n as i32 - 1]
                         .into_iter()
                         .map(|offset| {
-                            let args = if extra == 1 { vec![offset] } else { vec![] };
+                            let args = if extra == 1 {
+                                vec![offset.to_word()]
+                            } else {
+                                vec![]
+                            };
                             let mut out = vec![0i32; n];
                             let r = if element == Element::I32 {
                                 call(
@@ -844,7 +987,7 @@ fn first_n_masks_saturate_at_both_ends() {
             .into_iter()
             .map(|k| {
                 let mut out = vec![7u16; n];
-                let r = call(&[k], &mut [BufferArg::from(&mut out[..])]);
+                let r = call(&[k.to_word()], &mut [BufferArg::from(&mut out[..])]);
                 format!("{r:?} {out:?}")
             })
             .collect()
@@ -937,7 +1080,7 @@ fn compress_expand_and_compress_store_agree_at_buffer_edges() {
                     let mut out = vec![-9; n];
                     let mut dst = vec![-5; len];
                     let r = call(
-                        &[at],
+                        &[at.to_word()],
                         &mut [
                             BufferArg::from(&x[..]),
                             BufferArg::from(&flags[..]),
@@ -1054,7 +1197,7 @@ fn partial_vector_accesses_agree_at_negative_and_far_offsets() {
                 for k in [0, 1, n as i32, -1] {
                     let mut out = vec![-1i64; n + 2];
                     let r = call(
-                        &[at, k],
+                        &[at, k].map(i32::to_word),
                         &mut [BufferArg::from(&mut out[..]), BufferArg::from(&src[..])],
                     );
                     seen.push(format!("at={at} k={k} {r:?} {out:?}"));

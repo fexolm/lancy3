@@ -5,7 +5,7 @@ mod yuv;
 
 use crate::Workload;
 use criterion::Criterion;
-use splice::{BufferArg, Executable};
+use splice::{BufferArg, Executable, KernelScalar};
 
 pub(super) fn compare(c: &mut Criterion) {
     yuv_to_rgba(c);
@@ -44,7 +44,7 @@ fn yuv_to_rgba(c: &mut Criterion) {
         equal: <[i32]>::eq,
         run: |kernel: &dyn Executable, out: &mut [i32]| {
             let count = kernel.call(&[], &mut [BufferArg::read(&pixels), BufferArg::write(out)])?;
-            usize::try_from(count).map_err(|_| "invalid RGBA output buffer".into())
+            usize::try_from(i32::from_word(count)).map_err(|_| "invalid RGBA output buffer".into())
         },
     }
     .compare(
@@ -86,10 +86,11 @@ fn integral_moments(c: &mut Criterion) {
         equal: <[i32]>::eq,
         run: |kernel: &dyn Executable, out: &mut [i32]| {
             let count = kernel.call(
-                &[WIDTH as i32, HEIGHT as i32],
+                &[WIDTH as u64, HEIGHT as u64],
                 &mut [BufferArg::read(&pixels), BufferArg::write(out)],
             )?;
-            usize::try_from(count).map_err(|_| "invalid integral image dimensions".into())
+            usize::try_from(i32::from_word(count))
+                .map_err(|_| "invalid integral image dimensions".into())
         },
     }
     .compare(
@@ -132,10 +133,10 @@ fn hash_keys(c: &mut Criterion) {
         equal: <[i32]>::eq,
         run: |kernel: &dyn Executable, out: &mut [i32]| {
             let count = kernel.call(
-                &[SEED],
+                &[SEED.to_word()],
                 &mut [BufferArg::read(&keys), BufferArg::write(out)],
             )?;
-            usize::try_from(count).map_err(|_| "invalid hash buffers".into())
+            usize::try_from(i32::from_word(count)).map_err(|_| "invalid hash buffers".into())
         },
     }
     .compare(
@@ -186,7 +187,7 @@ fn remap_rgb16(c: &mut Criterion) {
                     BufferArg::write::<u16>(out),
                 ],
             )?;
-            usize::try_from(count).map_err(|_| "invalid RGB16 remap buffers".into())
+            usize::try_from(i32::from_word(count)).map_err(|_| "invalid RGB16 remap buffers".into())
         },
     }
     .compare(

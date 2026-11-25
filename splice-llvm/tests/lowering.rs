@@ -1,7 +1,7 @@
 use splice_core::frontend::{KernelBuilder, Signature};
 use splice_core::hir::{Binary, Buffer, BufferKind, FunctionBuilder};
 use splice_core::hir::{Constant, ScalarType};
-use splice_core::{BufferArg, CallError, Codegen, Executable, Trap};
+use splice_core::{BufferArg, CallError, Codegen, Executable, KernelScalar, Trap};
 use splice_llvm::Llvm;
 use std::sync::Arc;
 
@@ -42,10 +42,10 @@ fn all_binary_ops_match_splice_at_signed_boundaries() {
             for &b in &cases {
                 let expected = op
                     .checked_eval(a.into(), b.into())
-                    .map(|c| c.bits() as i32)
+                    .map(|c| c.bits())
                     .map_err(CallError::from);
                 assert_eq!(
-                    code.call(&[i as i32, a, b], &mut []),
+                    code.call(&[i as i32, a, b].map(i32::to_word), &mut []),
                     expected,
                     "{a} {op:?} {b}"
                 );
@@ -113,7 +113,7 @@ fn checked_calls_remap_buffers_and_stop_after_the_first_fault() {
             BufferArg::read::<i32>(&[8, i32::MIN]),
             BufferArg::write(&mut output),
         ];
-        let result = code.call(&[index, divisor], &mut buffers);
+        let result = code.call(&[index, divisor].map(i32::to_word), &mut buffers);
         match expected {
             Some(value) => {
                 assert_eq!(result.unwrap(), 2);
@@ -171,7 +171,8 @@ fn shared_callees_loops_and_unreachable_tails_form_valid_llvm_blocks() {
     assert_eq!(ir.matches("define internal fastcc i32 @kernel").count(), 2);
     let code = Llvm::compile(&f).unwrap();
     for (limit, result) in [(-2, 0), (0, 0), (1, 2), (17, 18), (72, 72)] {
-        assert_eq!(code.call(&[limit], &mut []).unwrap(), result);
+        let word = code.call(&[limit.to_word()], &mut []).unwrap();
+        assert_eq!(i32::from_word(word), result);
     }
 }
 

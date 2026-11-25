@@ -19,8 +19,7 @@ mod aarch64_tests;
 use inkwell::{context::Context, module::Module, targets::TargetMachine};
 use splice_core::frontend::Signature;
 use splice_core::{
-    Backend, BufferArg, BufferKind, BuildOptions, CallError, Executable, Function, SignatureError,
-    Trap,
+    Backend, BufferArg, BufferKind, BuildOptions, CallError, Executable, Function, Trap,
 };
 
 /// In-process LLVM code generator.
@@ -118,14 +117,14 @@ const _: () = {
     assert!(std::mem::size_of::<Descriptor>() == 16);
 };
 
-type Entry = unsafe extern "C" fn(*const i32, *const Descriptor, *mut u32) -> i32;
+type Entry = unsafe extern "C" fn(*const u64, *const Descriptor, *mut u32) -> u64;
 
 /// Owns the LLVM session and the executable kernel it compiled.
 pub struct LlvmKernel {
     _debug: Option<splice_jit::Registration>,
     _owner: jit::Jit,
     entry: Entry,
-    arity: usize,
+    params: Box<[splice_core::hir::ScalarType]>,
     buffers: Box<[BufferKind]>,
     target: splice_core::Target,
     /// Compiled for SVE on a power-of-two vector length; see
@@ -214,7 +213,7 @@ impl LlvmKernel {
             _debug: registration,
             _owner: owner,
             entry,
-            arity: signature.params.len(),
+            params: signature.params.into(),
             buffers: signature.buffers.into(),
             target: options.target,
             scalable: target::Machine::new(&options.target).scalable,
@@ -223,7 +222,7 @@ impl LlvmKernel {
 }
 
 impl Executable for LlvmKernel {
-    fn call(&self, args: &[i32], buffers: &mut [BufferArg<'_>]) -> Result<i32, CallError> {
+    fn call(&self, args: &[u64], buffers: &mut [BufferArg<'_>]) -> Result<u64, CallError> {
         // SVE code needs the calling thread's vector length to match.
         if self.target.sve() {
             self.target.check_execution()?;
@@ -231,13 +230,7 @@ impl Executable for LlvmKernel {
                 return Err(splice_core::TargetError::VectorLengthNotPowerOfTwo.into());
             }
         }
-        if self.arity != args.len() {
-            return Err(SignatureError::Scalars {
-                expected: self.arity,
-                actual: args.len(),
-            }
-            .into());
-        }
+        splice_core::validate_scalars(&self.params, args)?;
         splice_core::validate_buffers(&self.buffers, buffers)?;
         let descriptors: Vec<_> = buffers
             .iter_mut()
@@ -263,8 +256,8 @@ impl Executable for LlvmKernel {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use splice_core::Codegen;
     use splice_core::hir::{Constant, ScalarType};
+    use splice_core::{Codegen, KernelScalar};
 
     fn options() -> BuildOptions {
         BuildOptions::host(splice_core::Mode::Release).unwrap()
@@ -345,7 +338,10 @@ mod tests {
             .unwrap(),
             Llvm::compile(&ir).unwrap(),
         ] {
-            assert_eq!(native.call(&[i32::MAX], &mut []), Ok(i32::MIN));
+            assert_eq!(
+                native.call(&[i32::MAX.to_word()], &mut []),
+                Ok(i32::MIN.to_word())
+            );
         }
     }
 
@@ -717,7 +713,7 @@ mod tests {
                     &mut want_dst[1..=dst_len],
                 );
                 let actual = native.call(
-                    &[base],
+                    &[base.to_word()],
                     &mut [
                         BufferArg::read(&indices),
                         BufferArg::read(&flags),
@@ -726,7 +722,12 @@ mod tests {
                         BufferArg::write(&mut dst[1..=dst_len]),
                     ],
                 );
-                assert_eq!(actual, expected.ok_or(CallError::Trap(Trap::Bounds)));
+                assert_eq!(
+                    actual,
+                    expected
+                        .map(i32::to_word)
+                        .ok_or(CallError::Trap(Trap::Bounds))
+                );
                 assert_eq!(mid, want_mid);
                 assert_eq!(dst, want_dst);
             }

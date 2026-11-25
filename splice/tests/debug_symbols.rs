@@ -214,7 +214,10 @@ fn exercise_partial<B: Codegen<Output: Executable>>() {
         B::compile(&ir).unwrap(),
     ] {
         for flag in [0, 3] {
-            assert_eq!(kernel.call(&[flag], &mut []), Ok(flag));
+            assert_eq!(
+                splice_testkit::call_i32(&kernel, &[flag], &mut []),
+                Ok(flag)
+            );
         }
     }
     for options in [

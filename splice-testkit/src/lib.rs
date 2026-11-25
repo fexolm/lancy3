@@ -33,14 +33,25 @@ macro_rules! each_backend {
 }
 
 use splice::frontend::{self, KernelBuilder};
-use splice::{BufferArg, BuildOptions, Codegen, Executable, Mode};
+use splice::{BufferArg, BuildOptions, Codegen, Executable, KernelScalar, Mode};
 use std::rc::Rc;
+
+/// Call a kernel whose scalar parameters and result are all `i32`, as most
+/// tests' kernels are.
+pub fn call_i32(
+    kernel: &dyn Executable,
+    args: &[i32],
+    buffers: &mut [BufferArg<'_>],
+) -> Result<i32, splice::CallError> {
+    let words: Vec<u64> = args.iter().map(|&arg| arg.to_word()).collect();
+    kernel.call(&words, buffers).map(i32::from_word)
+}
 
 /// A kernel body that can be staged repeatedly.
 pub type Stage = Rc<dyn Fn(&mut dyn KernelBuilder) -> splice::Result<()>>;
 
 /// Calls one compiled kernel.
-pub type Invoke<'a> = &'a dyn Fn(&[i32], &mut [BufferArg<'_>]) -> Result<i32, splice::CallError>;
+pub type Invoke<'a> = &'a dyn Fn(&[u64], &mut [BufferArg<'_>]) -> Result<u64, splice::CallError>;
 
 /// Compile `stage` with every backend, staged (`build`) and from portable IR
 /// (`compile`), in Debug and Release. `observe` runs each kernel and reports

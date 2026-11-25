@@ -1,6 +1,6 @@
 //! The generated Rust interface keeps the declared types and borrows. The
 //! scalar backend still receives the usual independent register and buffer lists.
-use super::{Binding, Scalar, lower::Context};
+use super::{Binding, lower::Context};
 use proc_macro2::{Ident, Span, TokenStream};
 use std::collections::HashSet;
 use syn::visit::Visit;
@@ -95,7 +95,6 @@ pub(super) fn generate(
     vis: &syn::Visibility,
     sig: &Signature,
     params: &[Parameter<'_>],
-    result: Scalar,
     unit_result: bool,
     context: Option<&Context>,
 ) -> Abi {
@@ -113,11 +112,8 @@ pub(super) fn generate(
         match param.binding {
             Binding::Aggregate(_) => unreachable!("aggregate local used as a formal parameter"),
             Binding::Host(_) => host.push((name, ty)),
-            Binding::Reg(kind, _) | Binding::Word(kind) => {
-                registers.push(match kind {
-                    Scalar::Bool => emit!(i32::from(self.#name)),
-                    _ => emit!(self.#name),
-                });
+            Binding::Reg(..) | Binding::Word(_) => {
+                registers.push(emit!(#root::KernelScalar::to_word(self.#name)));
                 runtime.push((name, ty));
             }
             Binding::Buffer(buffer) => {
@@ -234,10 +230,8 @@ pub(super) fn generate(
         emit!({
             let _ = __splice_result;
         })
-    } else if result == Scalar::Bool {
-        emit!(__splice_result != 0)
     } else {
-        emit!(__splice_result)
+        emit!(<#result_ty as #root::KernelScalar>::from_word(__splice_result))
     };
     let implementation = emit! {
         impl #call_decls #root::CallArgs for CallArgs #call_args #invoke_where {

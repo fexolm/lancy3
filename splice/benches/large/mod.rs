@@ -6,7 +6,7 @@ mod vector;
 
 use super::Workload;
 use criterion::Criterion;
-use splice::{BufferArg, Executable};
+use splice::{BufferArg, Executable, KernelScalar};
 use std::hint::black_box;
 
 pub(super) fn compare(c: &mut Criterion) {
@@ -61,14 +61,14 @@ fn parquet_delta(c: &mut Criterion) {
         equal: <[i32]>::eq,
         run: |kernel: &dyn Executable, out: &mut [i32]| {
             let count = kernel.call(
-                &[FIRST],
+                &[FIRST.to_word()],
                 &mut [
                     BufferArg::read(&minima),
                     BufferArg::read(&packed),
                     BufferArg::write(out),
                 ],
             )?;
-            usize::try_from(count).map_err(|_| "invalid delta page buffers".into())
+            usize::try_from(i32::from_word(count)).map_err(|_| "invalid delta page buffers".into())
         },
     }
     .compare(
@@ -110,7 +110,8 @@ fn decimal_csv(c: &mut Criterion) {
         run: |kernel: &dyn Executable, out: &mut [i32]| {
             let count =
                 kernel.call(&[], &mut [BufferArg::read(&records), BufferArg::write(out)])?;
-            usize::try_from(count).map_err(|_| "invalid CSV export buffers or value".into())
+            usize::try_from(i32::from_word(count))
+                .map_err(|_| "invalid CSV export buffers or value".into())
         },
     }
     .compare(
@@ -162,7 +163,8 @@ fn per_channel_requantize(c: &mut Criterion) {
                     BufferArg::write(out),
                 ],
             )?;
-            usize::try_from(count).map_err(|_| "invalid requantization buffers".into())
+            usize::try_from(i32::from_word(count))
+                .map_err(|_| "invalid requantization buffers".into())
         },
     }
     .compare(
@@ -236,7 +238,8 @@ fn audio_low_pass(c: &mut Criterion) {
                     BufferArg::write(state),
                 ],
             )?;
-            usize::try_from(count).map_err(|_| "invalid audio filter buffers".into())
+            usize::try_from(i32::from_word(count))
+                .map_err(|_| "invalid audio filter buffers".into())
         },
     }
     .compare(

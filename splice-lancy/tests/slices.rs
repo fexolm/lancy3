@@ -51,7 +51,7 @@ fn partial_columns_have_the_same_store_order_through_both_splice_entry_points() 
                     Err(splice_core::CallError::Trap(splice_core::Trap::Bounds))
                 );
             } else {
-                assert_eq!(result.unwrap(), n as i32);
+                assert_eq!(result.unwrap(), n as u64);
             }
             for (i, &value) in out.iter().enumerate() {
                 assert_eq!(

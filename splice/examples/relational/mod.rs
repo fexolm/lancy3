@@ -1,6 +1,6 @@
 //! A physical plan with two i32 columns per row. Both children of an inner
 //! equijoin can themselves be arbitrary physical plans.
-use splice::{BufferArg, CallError, Executable};
+use splice::{BufferArg, CallError, Executable, KernelScalar};
 
 mod kernels;
 mod pipeline;
@@ -89,6 +89,7 @@ impl Catalog {
                 BufferArg::write(state),
             ],
         )?;
+        let rows = i32::from_word(rows);
         if rows < 0 {
             return Err(RunError::WorkspaceTooSmall);
         }

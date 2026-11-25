@@ -1222,6 +1222,12 @@ mod index_arithmetic {
         i *= 2;
         if i > 5 { 1 } else { 0 }
     }
+
+    // A `usize` parameter and result cross the entry as 64-bit words.
+    #[kernel]
+    pub(super) fn shift_index(base: usize, xs: &[i32], past: bool) -> usize {
+        if past { base + xs.len() } else { base }
+    }
 }
 
 #[test]
@@ -1275,5 +1281,33 @@ fn compound_index_assignment_matches_rust_usize() {
         expect::<B>(|| double_len(&one, i32::MAX), jit, "2^31 * 2");
     }
 
+    splice_testkit::each_backend!(B => check::<B>());
+}
+
+#[test]
+fn usize_parameters_and_results_keep_all_64_bits() {
+    use index_arithmetic::shift_index;
+    fn check<B: Codegen<Output: Executable>>() {
+        let kernel = shift_index::build::<B>(shift_index::BuildArgs {}).unwrap();
+        let xs = [1, 2, 3];
+        for (base, past) in [
+            (0, true),
+            (1 << 40, true),
+            (usize::MAX, false),
+            (1 << 63, true),
+        ] {
+            let jit = kernel.call(shift_index::CallArgs {
+                base,
+                xs: &xs,
+                past,
+            });
+            let backend = std::any::type_name::<B>();
+            assert_eq!(
+                jit,
+                Ok(shift_index(base, &xs, past)),
+                "{backend} {base} {past}"
+            );
+        }
+    }
     splice_testkit::each_backend!(B => check::<B>());
 }

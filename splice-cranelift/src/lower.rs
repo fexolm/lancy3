@@ -104,8 +104,8 @@ pub(crate) fn trap(builder: &mut FunctionBuilder, trap: Trap) -> Value {
     builder.ins().iconst(I64, trap.status())
 }
 
-/// The scalar and slice parameters, and the result slot of a helper that
-/// returns its result in memory.
+/// The scalar and slice parameters, and the result slot of the entry or of
+/// a helper that returns its result in memory.
 fn parameters(
     b: &mut FunctionBuilder,
     f: &Function,
@@ -123,19 +123,15 @@ fn parameters(
             (params.to_vec(), None)
         };
     }
-    let scalars = b.block_params(entry)[0];
-    let descriptors = b.block_params(entry)[1];
+    let [scalars, descriptors, result] = b.block_params(entry).try_into().unwrap();
     let mut params = Vec::new();
-    // Executable::call checks both array lengths and constructs repr(C) descriptors.
+    // Executable::call checks both array lengths and every word, and
+    // constructs repr(C) descriptors. A word holds its value in the low
+    // bytes (the hosts are little-endian), so it loads at the value's type.
     let flags = MemFlags::trusted();
     for (i, &ty) in f.params().iter().enumerate() {
-        let addr = b.ins().iadd_imm(scalars, (i * size_of::<i32>()) as i64);
-        let word = b.ins().load(I32, flags, addr, 0);
-        params.push(match ty {
-            ScalarType::Bool => b.ins().icmp_imm(IntCC::NotEqual, word, 0),
-            ScalarType::I32 | ScalarType::U32 => word,
-            ty => unreachable!("an entry word cannot hold {ty}"),
-        });
+        let addr = b.ins().iadd_imm(scalars, (i * size_of::<u64>()) as i64);
+        params.push(b.ins().load(scalar_type(ty), flags, addr, 0));
     }
     for i in 0..f.buffer_kinds().len() {
         let addr = b
@@ -150,7 +146,9 @@ fn parameters(
                 .load(I32, flags, addr, offset_of!(Descriptor, len) as i32),
         );
     }
-    (params, None)
+    // The caller zeroes the result word, so storing the value at its type
+    // leaves the word's bits above it zero.
+    (params, Some(result))
 }
 
 pub(super) fn emit(

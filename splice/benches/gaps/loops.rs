@@ -1,6 +1,6 @@
 use super::{Builders, Workload};
 use criterion::Criterion;
-use splice::{BufferArg, Executable, kernel};
+use splice::{BufferArg, Executable, KernelScalar, kernel};
 use std::hint::black_box;
 
 // Transform one stream of samples, with a different format for negative values.
@@ -77,7 +77,8 @@ fn compare_kernel<S>(
                     BufferArg::write(out),
                 ],
             )?;
-            usize::try_from(count).map_err(|_| "invalid loop benchmark buffers".into())
+            usize::try_from(i32::from_word(count))
+                .map_err(|_| "invalid loop benchmark buffers".into())
         },
     }
     .compare(c, stage, builds);

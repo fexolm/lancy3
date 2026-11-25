@@ -21,7 +21,8 @@ use std::{
 #[cfg(test)]
 mod tests;
 
-// Only the public entry reads the argument arrays. Helpers use the host
+// Only the public entry reads the argument arrays and writes its result
+// word. Helpers use the host
 // calling convention with scalar values and (data, length) pairs.
 fn declare(
     module: &mut JITModule,
@@ -31,7 +32,8 @@ fn declare(
 ) -> splice_core::Result<FuncId> {
     let mut sig = module.make_signature();
     if entry {
-        sig.params.extend([AbiParam::new(I64); 2]);
+        // Scalar words, slice descriptors and the result word.
+        sig.params.extend([AbiParam::new(I64); 3]);
     } else {
         // Cranelift uses u16 indices for block parameters.
         let out = usize::from(lower::returns_in_memory(f.result()));

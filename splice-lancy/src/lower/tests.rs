@@ -1,4 +1,5 @@
 use super::*;
+use splice_core::KernelScalar;
 use splice_core::hir::{Constant, ScalarType};
 mod simd;
 
@@ -509,7 +510,8 @@ fn lowered_call_graphs_retain_slice_contracts_for_out_of_line_calls() {
                     .with_inlining(Inlining::Never),
             )
             .unwrap(),
-            arity: ir.arity(),
+            params: ir.params().into(),
+            result: ir.result(),
             slices: ir.buffer_kinds().into(),
         }
     }
@@ -526,11 +528,11 @@ fn lowered_call_graphs_retain_slice_contracts_for_out_of_line_calls() {
             );
             assert_eq!(
                 kernel.call(&[0], &mut [BufferArg::read::<i32>(&[])]),
-                Ok(if guard { -1 } else { 0 })
+                Ok(if guard { (-1i32).to_word() } else { 0 })
             );
             let empty = kernel.call(&[1], &mut [BufferArg::read::<i32>(&[])]);
             if guard {
-                assert_eq!(empty, Ok(-1));
+                assert_eq!(empty, Ok((-1i32).to_word()));
             } else {
                 assert!(empty.is_err());
             }
@@ -646,9 +648,14 @@ fn index_comparisons_on_i32_forms_match_unsigned_64_bit_order() {
                 .unwrap();
                 for a in args {
                     for b in args {
-                        let actual = kernel.call(&[a, b], &mut [BufferArg::read(&xs)]).unwrap();
+                        let actual =
+                            kernel.call(&[a, b].map(i32::to_word), &mut [BufferArg::read(&xs)]);
                         let want = expected(value(lhs, a), value(rhs, b));
-                        assert_eq!(actual, want as i32, "{lhs:?} {op:?} {rhs:?} at {a}, {b}");
+                        assert_eq!(
+                            actual,
+                            Ok(want.to_word()),
+                            "{lhs:?} {op:?} {rhs:?} at {a}, {b}"
+                        );
                     }
                 }
             }

@@ -41,6 +41,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use splice::KernelScalar;
     use splice::{Codegen, simd::Lane};
     use splice_text::Text;
 
@@ -73,7 +74,7 @@ mod tests {
                     ],
                 )
                 .unwrap();
-            assert_eq!(result, count);
+            assert_eq!(result, count.to_word());
             assert_eq!(&guarded[1..1 + output_len], expected);
             assert_eq!((guarded[0], guarded[output_len + 1]), (GUARD, GUARD));
         }

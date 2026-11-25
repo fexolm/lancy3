@@ -68,10 +68,16 @@ pub(super) fn expand(root: Path, native: &mut ItemFn) -> Result<TokenStream> {
             .filter(|t| {
                 matches!(
                     t,
-                    Scalar::Int | Scalar::Bool | Scalar::Vector(_) | Scalar::Mask(_)
+                    Scalar::Int
+                        | Scalar::Bool
+                        | Scalar::Index
+                        | Scalar::Vector(_)
+                        | Scalar::Mask(_)
                 )
             })
-            .ok_or_else(|| Error::new_spanned(ty, "expected (), i32, bool, Lane<T> or Mask<T>"))?
+            .ok_or_else(|| {
+                Error::new_spanned(ty, "expected (), i32, bool, usize, Lane<T> or Mask<T>")
+            })?
     };
     if matches!(
         result_type,
@@ -429,15 +435,7 @@ pub(super) fn expand(root: Path, native: &mut ItemFn) -> Result<TokenStream> {
             }
         }
     });
-    let public_abi = abi::generate(
-        &root,
-        vis,
-        sig,
-        &parameters,
-        result_type,
-        unit_result,
-        context.as_ref(),
-    );
+    let public_abi = abi::generate(&root, vis, sig, &parameters, unit_result, context.as_ref());
     // Rust requires lifetime parameters before the backend type; the backend
     // is still the first argument at the usual lifetime-elided turbofish.
     let mut compile_generics = public_abi.build_generics.clone();
@@ -717,7 +715,7 @@ fn parameter<'a>(arg: &'a FnArg, types: &[&Ident], name: Ident) -> Result<abi::P
         }
         [] if matches!(
             Scalar::from_type(&arg.ty, types),
-            Some(Scalar::Int | Scalar::Bool | Scalar::Vector(_) | Scalar::Mask(_))
+            Some(Scalar::Int | Scalar::Bool | Scalar::Index | Scalar::Vector(_) | Scalar::Mask(_))
         ) =>
         {
             Binding::Reg(Scalar::from_type(&arg.ty, types).unwrap(), mutable)
@@ -731,7 +729,7 @@ fn parameter<'a>(arg: &'a FnArg, types: &[&Ident], name: Ident) -> Result<abi::P
             let writable = slice_type(&arg.ty, types).ok_or_else(|| {
                 Error::new_spanned(
                     &arg.ty,
-                    "runtime parameters must be i32 or a slice of u16, u32, i32, i64, f32, or f64",
+                    "runtime parameters must be i32, bool, usize or a slice of u16, u32, i32, i64, f32, or f64",
                 )
             })?;
             if mutable {

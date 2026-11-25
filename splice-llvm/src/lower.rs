@@ -91,9 +91,8 @@ fn emit_entry<'ctx>(
     root: FunctionValue<'ctx>,
 ) -> Result<(), BuilderError> {
     let ptr = ctx.ptr_type(AddressSpace::default());
-    let i32_ty = ctx.i32_type();
     let i64_ty = ctx.i64_type();
-    let ty = i32_ty.fn_type(&[ptr.into(); 3], false);
+    let ty = i64_ty.fn_type(&[ptr.into(); 3], false);
     let entry = module.add_function("splice_entry", ty, None);
     b.position_at_end(ctx.append_basic_block(entry, "entry"));
     let mut params = entry.get_param_iter();
@@ -104,8 +103,8 @@ fn emit_entry<'ctx>(
     for (i, &ty) in signature.params.iter().enumerate() {
         let index = i64_ty.const_int(i as u64, false);
         // SAFETY: Executable::call verifies the length of the scalar array.
-        let address = unsafe { b.build_in_bounds_gep(i32_ty, scalars, &[index], "")? };
-        let word = b.build_load(i32_ty, address, "")?.into_int_value();
+        let address = unsafe { b.build_in_bounds_gep(i64_ty, scalars, &[index], "")? };
+        let word = b.build_load(i64_ty, address, "")?.into_int_value();
         args.push(from_word(ctx, b, word, ty)?.into());
     }
     let desc = ctx.struct_type(&[ptr.into(), i64_ty.into()], false);
@@ -123,7 +122,8 @@ fn emit_entry<'ctx>(
     Ok(())
 }
 
-/// A scalar parameter from its `i32` ABI word: a `bool` is 0 or 1.
+/// A scalar parameter from its 64-bit ABI word, which holds the value's
+/// bits in the low bits (see `splice_core::KernelScalar`).
 fn from_word<'ctx>(
     ctx: &'ctx Context,
     b: &Builder<'ctx>,
@@ -132,22 +132,36 @@ fn from_word<'ctx>(
 ) -> Result<BasicValueEnum<'ctx>, BuilderError> {
     Ok(match ty {
         ScalarType::Bool => b.build_int_truncate(word, ctx.bool_type(), "")?.into(),
-        _ => word.into(),
+        ScalarType::I32 | ScalarType::U32 => b.build_int_truncate(word, ctx.i32_type(), "")?.into(),
+        ScalarType::I64 | ScalarType::U64 | ScalarType::Index => word.into(),
+        ScalarType::F32 => {
+            let bits = b.build_int_truncate(word, ctx.i32_type(), "")?;
+            b.build_bit_cast(bits, ctx.f32_type(), "")?
+        }
+        ScalarType::F64 => b.build_bit_cast(word, ctx.f64_type(), "")?,
     })
 }
 
-/// The `i32` ABI word of a scalar result.
+/// The 64-bit ABI word of a scalar result: its bits, zero-extended.
 fn to_word<'ctx>(
     ctx: &'ctx Context,
     b: &Builder<'ctx>,
     value: BasicValueEnum<'ctx>,
     ty: ScalarType,
 ) -> Result<IntValue<'ctx>, BuilderError> {
-    let value = value.into_int_value();
-    Ok(match ty {
-        ScalarType::Bool => b.build_int_z_extend(value, ctx.i32_type(), "")?,
-        _ => value,
-    })
+    let i64_ty = ctx.i64_type();
+    let bits = match ty {
+        ScalarType::F32 => b
+            .build_bit_cast(value, ctx.i32_type(), "")?
+            .into_int_value(),
+        ScalarType::F64 => b.build_bit_cast(value, i64_ty, "")?.into_int_value(),
+        _ => value.into_int_value(),
+    };
+    if bits.get_type() == i64_ty {
+        Ok(bits)
+    } else {
+        b.build_int_z_extend(bits, i64_ty, "")
+    }
 }
 
 fn call<'ctx>(

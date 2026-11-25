@@ -363,7 +363,7 @@ fn verification_rechecks_a_loop_after_a_delayed_predecessor() {
         let code = B::compile(&function).unwrap();
         for (fast, initial) in [(1, 7), (0, 11)] {
             for count in [0, 2] {
-                assert_eq!(code.call(&[fast, count], &mut []).unwrap(), initial + count);
+                assert_eq!(splice_testkit::call_i32(&code,&[fast, count], &mut []).unwrap(), initial + count);
             }
         }
     });

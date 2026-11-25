@@ -5,9 +5,8 @@ mod lower;
 use lancy::ScalarKernel;
 pub use lower::lower;
 use splice_core::frontend::{Body, Signature};
-use splice_core::{
-    Backend, BufferArg, BuildOptions, CallError, Executable, Function, SignatureError, Trap,
-};
+use splice_core::hir::{Constant, ScalarType};
+use splice_core::{Backend, BufferArg, BuildOptions, CallError, Executable, Function, Trap};
 
 /// Compile Splice kernels through Lancy's SSA HIR and host backend.
 pub struct Lancy;
@@ -43,7 +42,8 @@ impl Backend for Lancy {
 pub struct LancyKernel {
     _debug: Option<splice_jit::Registration>,
     code: ScalarKernel,
-    arity: usize,
+    params: Box<[ScalarType]>,
+    result: ScalarType,
     slices: Box<[splice_core::BufferKind]>,
 }
 
@@ -86,27 +86,27 @@ impl LancyKernel {
         Ok(Self {
             _debug: registration,
             code,
-            arity: signature.params.len(),
+            params: signature.params.into(),
+            result: signature.result,
             slices: signature.buffers.into(),
         })
     }
 }
 
 impl Executable for LancyKernel {
-    fn call(&self, args: &[i32], buffers: &mut [BufferArg<'_>]) -> Result<i32, CallError> {
-        if args.len() != self.arity {
-            return Err(SignatureError::Scalars {
-                expected: self.arity,
-                actual: args.len(),
-            }
-            .into());
-        }
-        splice_core::hir::validate_buffers(&self.slices, buffers)?;
+    fn call(&self, args: &[u64], buffers: &mut [BufferArg<'_>]) -> Result<u64, CallError> {
+        splice_core::validate_scalars(&self.params, args)?;
+        splice_core::validate_buffers(&self.slices, buffers)?;
+        // Lancy reads a narrow scalar from the low bits of its word and may
+        // leave the high bits of a narrow result undefined.
+        let result = |word| Constant::new(self.result, word).bits();
         if self.slices.is_empty() && !self.code.requires_raw_call() {
-            return self.code.call(args).map_err(call_error);
+            let mut word = [0];
+            self.code.call_words(args, &mut word).map_err(call_error)?;
+            return Ok(result(word[0]));
         }
-        let mut words = Vec::with_capacity(self.arity + 2 * buffers.len());
-        words.extend(args.iter().map(|&v| v as u32 as u64));
+        let mut words = Vec::with_capacity(args.len() + 2 * buffers.len());
+        words.extend_from_slice(args);
         for slice in buffers {
             words.extend([slice.data() as u64, slice.len() as u64]);
         }
@@ -114,7 +114,7 @@ impl Executable for LancyKernel {
         // Rust contexts. Both Splice lowering paths check permissions and use
         // native call scratch only for initialized, shape-checked packets.
         unsafe { self.code.call_raw(&words) }
-            .map(|v| v as i32)
+            .map(result)
             .map_err(call_error)
     }
 }

@@ -37,7 +37,9 @@ use criterion::{
     measurement::WallTime,
 };
 use relational::{Catalog, pricing_plan, query};
-use splice::{BufferArg, BuildError, Codegen, Executable, TypedIr, TypedKernel, kernel};
+use splice::{
+    BufferArg, BuildError, Codegen, Executable, KernelScalar, TypedIr, TypedKernel, kernel,
+};
 use splice_cranelift::CraneliftKernel;
 use splice_lancy::LancyKernel;
 use splice_llvm::LlvmKernel;
@@ -201,7 +203,7 @@ fn projection(c: &mut Criterion) {
                     BufferArg::write(dst),
                 ],
             )?;
-            usize::try_from(count).map_err(|_| "negative projection length".into())
+            usize::try_from(i32::from_word(count)).map_err(|_| "negative projection length".into())
         },
     };
     workload.compare(
@@ -300,14 +302,14 @@ fn simd_matmul(c: &mut Criterion) {
         equal: <[i32]>::eq,
         run: |kernel: &dyn Executable, dst: &mut [i32]| {
             let written = kernel.call(
-                &[M as i32, K as i32, N as i32],
+                &[M as u64, K as u64, N as u64],
                 &mut [
                     BufferArg::read(&a),
                     BufferArg::read(&b),
                     BufferArg::write(dst),
                 ],
             )?;
-            usize::try_from(written).map_err(|_| "invalid matrix dimensions".into())
+            usize::try_from(i32::from_word(written)).map_err(|_| "invalid matrix dimensions".into())
         },
     };
     workload.compare(
@@ -336,7 +338,7 @@ fn simd_hash_lookup(c: &mut Criterion) {
                     BufferArg::write(dst),
                 ],
             )?;
-            usize::try_from(written).map_err(|_| "invalid hash table".into())
+            usize::try_from(i32::from_word(written)).map_err(|_| "invalid hash table".into())
         },
     };
     workload.compare(

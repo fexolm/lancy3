@@ -44,7 +44,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use splice::{Codegen, simd::Lane};
+    use splice::{Codegen, KernelScalar, simd::Lane};
 
     fn kernels() -> Vec<(&'static str, Box<dyn Executable>)> {
         let ir = matmul::ir().unwrap();
@@ -129,7 +129,7 @@ mod tests {
                 dst.fill(SENTINEL);
                 let actual = kernel
                     .call(
-                        &dims,
+                        &dims.map(i32::to_word),
                         &mut [
                             BufferArg::read(&a),
                             BufferArg::read(&b),
@@ -137,7 +137,7 @@ mod tests {
                         ],
                     )
                     .unwrap();
-                assert_eq!(actual, count as i32, "{name} {dims:?}");
+                assert_eq!(actual, count as u64, "{name} {dims:?}");
                 assert_eq!(dst, expected, "{name} {dims:?}");
             }
         }
@@ -154,7 +154,7 @@ mod tests {
             for (name, kernel) in &kernels {
                 let result = kernel
                     .call(
-                        &dims,
+                        &dims.map(i32::to_word),
                         &mut [
                             BufferArg::read::<i32>(&[3]),
                             BufferArg::read::<i32>(&[4]),
@@ -162,7 +162,7 @@ mod tests {
                         ],
                     )
                     .unwrap();
-                assert_eq!(result, -1, "{name} {dims:?}");
+                assert_eq!(result, (-1i32).to_word(), "{name} {dims:?}");
                 assert_eq!(out, [SENTINEL; 3], "{name} {dims:?}");
             }
         }

@@ -42,6 +42,7 @@ pub use typed::{CallArgs, CompileInput, TypedIr, TypedKernel};
 
 pub use frontend::ComptimeKey;
 pub use hir::{BufferArg, BufferElement, BufferKind, Function, validate_buffers};
+use hir::{Constant, ScalarType};
 pub use splice_macros::{ComptimeKey, KernelType, kernel};
 
 /// Result of staging or compiling a kernel.
@@ -139,7 +140,6 @@ pub trait Codegen: Backend {
         options: BuildOptions,
     ) -> Result<Self::Output> {
         let _span = tracing::debug_span!(target: "splice::compile", "build", backend = std::any::type_name::<Self>()).entered();
-        word_abi(signature)?;
         Self::stage(signature, validate::validated(signature, body), options)
     }
 }
@@ -147,25 +147,94 @@ pub trait Codegen: Backend {
 impl<B: Backend> Codegen for B {}
 
 /// [`Executable::call`] passes `i32` words: the entry's scalars must fit one.
-pub(crate) fn word_abi(signature: frontend::Signature<'_>) -> Result<()> {
-    use hir::ScalarType::{Bool, I32, U32};
-    let word = |ty| matches!(ty, Bool | I32 | U32);
-    if signature.params.iter().copied().all(word) && word(signature.result) {
-        Ok(())
-    } else {
-        Err(BuildError::unsupported(
-            "a kernel entry passes only bool, i32 and u32 scalars",
-        ))
-    }
-}
-
 /// The portable calling convention. Scalars and slices have separate
-/// argument lists, each following declaration order. An error stops execution;
-/// completed stores remain visible to the caller.
+/// argument lists, each following declaration order. Each scalar argument
+/// and the result is one word holding the value's [`Constant::bits`]: see
+/// [`KernelScalar`] for the encoding. An error stops execution; completed
+/// stores remain visible to the caller.
 pub trait Executable {
     fn call(
         &self,
-        args: &[i32],
+        args: &[u64],
         buffers: &mut [BufferArg<'_>],
-    ) -> std::result::Result<i32, CallError>;
+    ) -> std::result::Result<u64, CallError>;
+}
+
+impl<E: Executable + ?Sized> Executable for &E {
+    fn call(
+        &self,
+        args: &[u64],
+        buffers: &mut [BufferArg<'_>],
+    ) -> std::result::Result<u64, CallError> {
+        (**self).call(args, buffers)
+    }
+}
+
+impl<E: Executable + ?Sized> Executable for Box<E> {
+    fn call(
+        &self,
+        args: &[u64],
+        buffers: &mut [BufferArg<'_>],
+    ) -> std::result::Result<u64, CallError> {
+        (**self).call(args, buffers)
+    }
+}
+
+/// A Rust type of a kernel scalar and its ABI word: the value's bits in the
+/// low `TYPE.bits()` bits and zero above (`bool` is 0 or 1, a float its IEEE
+/// bit pattern).
+pub trait KernelScalar: Copy + Into<Constant> {
+    const TYPE: ScalarType;
+    fn to_word(self) -> u64 {
+        self.into().bits()
+    }
+    /// The value of a word of this type; bits above the value are ignored.
+    fn from_word(word: u64) -> Self;
+}
+
+macro_rules! kernel_scalar {
+    ($($ty:ty => $scalar:ident, |$word:ident| $decode:expr;)*) => {$(
+        impl KernelScalar for $ty {
+            const TYPE: ScalarType = ScalarType::$scalar;
+            fn from_word($word: u64) -> Self {
+                $decode
+            }
+        }
+    )*};
+}
+kernel_scalar! {
+    bool => Bool, |word| word & 1 != 0;
+    i32 => I32, |word| word as i32;
+    u32 => U32, |word| word as u32;
+    i64 => I64, |word| word as i64;
+    u64 => U64, |word| word;
+    usize => Index, |word| word as usize;
+    f32 => F32, |word| f32::from_bits(word as u32);
+    f64 => F64, |word| f64::from_bits(word);
+}
+
+/// Check scalar words against the parameter types before a call: every
+/// backend reads a word at its type's width, so a word with bits above its
+/// value would mean different values to different backends.
+pub fn validate_scalars(
+    params: &[ScalarType],
+    args: &[u64],
+) -> std::result::Result<(), SignatureError> {
+    if params.len() != args.len() {
+        return Err(SignatureError::Scalars {
+            expected: params.len(),
+            actual: args.len(),
+        });
+    }
+    match params
+        .iter()
+        .zip(args)
+        .position(|(&ty, &word)| Constant::new(ty, word).bits() != word)
+    {
+        Some(index) => Err(SignatureError::Word {
+            index,
+            ty: params[index],
+        }),
+        None => Ok(()),
+    }
 }

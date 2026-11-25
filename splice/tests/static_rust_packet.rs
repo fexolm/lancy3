@@ -45,7 +45,7 @@ fn static_packets_can_have_no_operands() {
             .unwrap(),
             B::compile(&ir).unwrap(),
         ] {
-            assert_eq!(kernel.call(&[], &mut []).unwrap(), 19);
+            assert_eq!(splice_testkit::call_i32(&kernel, &[], &mut []).unwrap(), 19);
         }
     }
 
@@ -155,27 +155,27 @@ fn static_packets_keep_nested_slice_borrows_and_effect_order() {
             let input = [7_u16];
             let mut short = [0];
             assert!(
-                kernel
-                    .call(
-                        &[5],
-                        &mut [BufferArg::write(&mut short), BufferArg::read::<u16>(&input)]
-                    )
-                    .is_err()
+                splice_testkit::call_i32(
+                    &kernel,
+                    &[5],
+                    &mut [BufferArg::write(&mut short), BufferArg::read::<u16>(&input)]
+                )
+                .is_err()
             );
             assert_eq!(short, [12]);
             assert_eq!(SEEN_INPUT.load(Ordering::Relaxed), input.as_ptr() as usize);
 
             let mut output = [0, 0];
             assert_eq!(
-                kernel
-                    .call(
-                        &[-10],
-                        &mut [
-                            BufferArg::write(&mut output),
-                            BufferArg::read::<u16>(&input)
-                        ]
-                    )
-                    .unwrap(),
+                splice_testkit::call_i32(
+                    &kernel,
+                    &[-10],
+                    &mut [
+                        BufferArg::write(&mut output),
+                        BufferArg::read::<u16>(&input)
+                    ]
+                )
+                .unwrap(),
                 -3
             );
             assert_eq!(output, [-2, -10]);
@@ -257,12 +257,12 @@ fn static_rust_adapters_cannot_reinterpret_a_slice_element_type() {
             let input = [12_i32];
             let mut output = [-1, -2];
             assert!(
-                kernel
-                    .call(
-                        &[3],
-                        &mut [BufferArg::read(&input), BufferArg::write(&mut output)]
-                    )
-                    .is_err()
+                splice_testkit::call_i32(
+                    &kernel,
+                    &[3],
+                    &mut [BufferArg::read(&input), BufferArg::write(&mut output)]
+                )
+                .is_err()
             );
             assert_eq!(output, [-1, -2]);
         }

@@ -185,7 +185,8 @@ where
         let code =
             code.unwrap_or_else(|e| panic!("{name} {path} {conversion:?} {from:?}->{to:?}: {e:?}"));
         let mut out = vec![T::default(); expected.len()];
-        let result = code.call(
+        let result = splice_testkit::call_i32(
+            &code,
             &[],
             &mut [
                 splice::BufferArg::read(input),

@@ -197,7 +197,10 @@ fn masked_contiguous_store_never_wraps_an_invalid_offset_to_zero() {
         )
         .unwrap();
         let mut dst = [8, 9];
-        let result = kernel.call(&[-1], &mut [BufferArg::write::<u16>(&mut dst)]);
+        let result = kernel.call(
+            &[splice_core::KernelScalar::to_word(-1i32)],
+            &mut [BufferArg::write::<u16>(&mut dst)],
+        );
         assert_eq!(
             result.unwrap_err(),
             splice_core::CallError::Trap(splice_core::Trap::Bounds)

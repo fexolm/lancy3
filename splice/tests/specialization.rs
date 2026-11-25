@@ -166,7 +166,7 @@ fn retry(root: &mut dyn splice::frontend::KernelBuilder) -> splice::Result<()> {
 fn a_failed_body_can_be_retried_and_its_completed_children_reused() {
     splice_testkit::each_backend!(B => {
         let code = B::build_with_options(Signature::new(&[ScalarType::I32; 0], ScalarType::I32, &[]), Box::new(retry), splice::BuildOptions::host(splice::Mode::Release).unwrap()).unwrap();
-        assert_eq!(code.call(&[], &mut []), Ok(17));
+        assert_eq!(splice_testkit::call_i32(&code,&[], &mut []), Ok(17));
     });
 }
 
@@ -258,7 +258,7 @@ fn invalid_arguments_are_rejected_before_staging_or_reusing_a_callee()
             Box::new(B::compile(&ir)?),
         ] {
             assert_eq!(
-                code.call(
+                splice_testkit::call_i32(&code,
                     &[37],
                     &mut [BufferArg::read::<i32>(&[]), BufferArg::write::<i32>(&mut [])]
                 )?,

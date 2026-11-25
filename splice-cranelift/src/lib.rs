@@ -15,7 +15,7 @@ use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{Module, default_libcall_names};
 use splice_core::{
     Backend, BufferArg, BufferKind, BuildOptions, CallError, Executable, Function, Result,
-    SignatureError,
+    hir::ScalarType,
 };
 use splice_target::abi::decode_status;
 use std::sync::Mutex;
@@ -132,8 +132,9 @@ struct Descriptor {
 }
 
 /// Every function returns a status (see [`splice_core::Trap::status`]), so a callee's
-/// status forwards through any number of calls without losing a result.
-type Entry = unsafe extern "C" fn(*const i32, *const Descriptor) -> i64;
+/// status forwards through any number of calls without losing a result. The
+/// entry writes its result word to the third argument.
+type Entry = unsafe extern "C" fn(*const u64, *const Descriptor, *mut u64) -> i64;
 
 struct CodeMemory(Option<JITModule>);
 
@@ -154,7 +155,7 @@ pub struct CraneliftKernel {
     // Concurrent calls use the immutable machine code without taking a lock.
     _memory: Mutex<CodeMemory>,
     entry: Entry,
-    arity: usize,
+    params: Box<[ScalarType]>,
     buffers: Box<[BufferKind]>,
 }
 
@@ -195,13 +196,13 @@ impl Backend for Cranelift {
         let address = module.get_finalized_function(id);
         let registration = debug_info::publish(module, symbols, target.vector_bytes(), debug)?;
         // SAFETY: KernelModule declares the entry with the host C calling convention,
-        // two pointer parameters and an i64 return. The kernel owns its module.
+        // three pointer parameters and an i64 return. The kernel owns its module.
         let entry = unsafe { std::mem::transmute::<*const u8, Entry>(address) };
         Ok(CraneliftKernel {
             _debug: registration,
             _memory: Mutex::new(memory),
             entry,
-            arity: function.arity(),
+            params: function.params().into(),
             buffers: function.buffer_kinds().into(),
         })
     }
@@ -210,16 +211,10 @@ impl Backend for Cranelift {
 impl Executable for CraneliftKernel {
     fn call(
         &self,
-        args: &[i32],
+        args: &[u64],
         buffers: &mut [BufferArg<'_>],
-    ) -> std::result::Result<i32, CallError> {
-        if args.len() != self.arity {
-            return Err(SignatureError::Scalars {
-                expected: self.arity,
-                actual: args.len(),
-            }
-            .into());
-        }
+    ) -> std::result::Result<u64, CallError> {
+        splice_core::validate_scalars(&self.params, args)?;
         splice_core::validate_buffers(&self.buffers, buffers)?;
         let descriptors: Vec<_> = buffers
             .iter_mut()
@@ -231,9 +226,11 @@ impl Executable for CraneliftKernel {
         // SAFETY: The signature check covers both input arrays, and their
         // buffers and Rust contexts stay borrowed throughout the call. Verified
         // HIR checks descriptor kinds and permissions, and lowering guards indices.
-        let status = unsafe { (self.entry)(args.as_ptr(), descriptors.as_ptr()) };
+        // The entry writes at most the 8 bytes of the local result word.
+        let mut result = 0;
+        let status = unsafe { (self.entry)(args.as_ptr(), descriptors.as_ptr(), &mut result) };
         decode_status(status)
-            .map(|word| word as i32)
+            .map(|_| result)
             .map_err(CallError::from)
     }
 }

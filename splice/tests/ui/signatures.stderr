@@ -4,7 +4,7 @@ error: expected a safe synchronous kernel with Rust ABI and fixed arity
 7 | async fn asynchronous() {}
   | ^^^^^^^^^^^^^^^^^^^^^^^
 
-error: expected (), i32, bool, Lane<T> or Mask<T>
+error: expected (), i32, bool, usize, Lane<T> or Mask<T>
   --> tests/ui/signatures.rs:10:21
    |
 10 | fn wide_result() -> i64 {

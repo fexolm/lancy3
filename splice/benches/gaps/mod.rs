@@ -1,6 +1,6 @@
 use super::{Builders, Workload};
 use criterion::Criterion;
-use splice::{BufferArg, Executable, kernel};
+use splice::{BufferArg, Executable, KernelScalar, kernel};
 use std::hint::black_box;
 
 mod loops;
@@ -187,7 +187,7 @@ fn run_unary<S>(
         equal: <[i32]>::eq,
         run: |kernel: &dyn Executable, out: &mut [i32]| {
             let count = kernel.call(&[], &mut [BufferArg::read(input), BufferArg::write(out)])?;
-            usize::try_from(count).map_err(|_| "invalid benchmark buffers".into())
+            usize::try_from(i32::from_word(count)).map_err(|_| "invalid benchmark buffers".into())
         },
     }
     .compare(c, stage, builds);
@@ -276,7 +276,8 @@ pub(super) fn compare(c: &mut Criterion) {
                         BufferArg::write(out),
                     ],
                 )?;
-                usize::try_from(count).map_err(|_| "invalid calibration buffers".into())
+                usize::try_from(i32::from_word(count))
+                    .map_err(|_| "invalid calibration buffers".into())
             },
         }
         .compare(

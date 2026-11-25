@@ -59,7 +59,7 @@ fn check_shifted_compares(options: BuildOptions) {
         let lanes = element.lanes(bytes);
         // Pairs of equal values: lane i equals lane i + 1 exactly when i is even.
         let expected = if element == Element::F32 {
-            lanes.div_ceil(2) as i32
+            lanes.div_ceil(2) as u64
         } else {
             1 // `Any` is true.
         };

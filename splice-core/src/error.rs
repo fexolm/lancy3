@@ -42,6 +42,12 @@ impl From<Trap> for CallError {
 pub enum SignatureError {
     #[error("expected {expected} scalar arguments, got {actual}")]
     Scalars { expected: usize, actual: usize },
+    /// The word has bits set above the value of its type (see [`crate::KernelScalar`]).
+    #[error("scalar argument {index} is not a {ty} word")]
+    Word {
+        index: usize,
+        ty: crate::hir::ScalarType,
+    },
     #[error("expected {expected} buffers, got {actual}")]
     Buffers { expected: usize, actual: usize },
     #[error("buffer {buffer} expects {} elements", expected.name())]

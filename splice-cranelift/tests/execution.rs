@@ -1,7 +1,7 @@
 use splice_core::frontend::{KernelBuilder, Signature};
 use splice_core::hir::{Binary, FunctionBuilder};
 use splice_core::hir::{Constant, ScalarType};
-use splice_core::{BufferArg, CallError, Codegen, Executable, Trap, kernel};
+use splice_core::{BufferArg, CallError, Codegen, Executable, KernelScalar, Trap, kernel};
 use splice_cranelift::Cranelift;
 use std::sync::Arc;
 
@@ -142,9 +142,9 @@ fn every_binary_operation_matches_splice_on_signed_boundaries() {
         for a in cases {
             for b in cases {
                 assert_eq!(
-                    kernel.call(&[a, b], &mut []),
+                    kernel.call(&[a, b].map(i32::to_word), &mut []),
                     op.checked_eval(a.into(), b.into())
-                        .map(|c| c.bits() as i32)
+                        .map(|c| c.bits())
                         .map_err(CallError::from),
                     "{a} {op:?} {b}"
                 );
@@ -238,7 +238,7 @@ fn shared_callees_stack_arguments_and_backedges_outlive_the_ir() {
     std::thread::scope(|scope| {
         for (limit, expected) in [(-2, 0), (1, 2), (19, 20)] {
             let code = &code;
-            scope.spawn(move || assert_eq!(code.call(&[limit], &mut []), Ok(expected)));
+            scope.spawn(move || assert_eq!(code.call(&[limit.to_word()], &mut []), Ok(expected)));
         }
     });
 }

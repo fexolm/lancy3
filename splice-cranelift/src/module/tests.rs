@@ -6,7 +6,7 @@ use cranelift_module::default_libcall_names;
 use splice_core::frontend::{KernelBuilder, Signature};
 use splice_core::hir::{Constant, ScalarType};
 use splice_core::{
-    CallError, Codegen, Executable, Trap,
+    CallError, Codegen, Executable, KernelScalar, Trap,
     hir::{Binary, FunctionBuilder},
 };
 
@@ -174,8 +174,10 @@ fn nested_and_shared_calls_inline_across_function_boundaries() {
     assert_eq!(graph.len(), 1);
     assert!(graph.values().all(Vec::is_empty));
     assert_eq!(
-        Cranelift::compile(&f).unwrap().call(&[i32::MAX], &mut []),
-        Ok(i32::MIN + 3)
+        Cranelift::compile(&f)
+            .unwrap()
+            .call(&[i32::MAX.to_word()], &mut []),
+        Ok((i32::MIN + 3).to_word())
     );
 }
 
@@ -189,7 +191,9 @@ fn shared_call_dag_keeps_reachable_out_of_line_definitions() {
     assert!(graph.values().any(|calls| !calls.is_empty()));
     assert!(graph.values().flatten().all(|id| graph.contains_key(id)));
     assert_eq!(
-        Cranelift::compile(&f).unwrap().call(&[-9], &mut []),
+        Cranelift::compile(&f)
+            .unwrap()
+            .call(&[(-9i32).to_word()], &mut []),
         Ok((1 << 12) - 9)
     );
 }
@@ -317,7 +321,7 @@ fn masked_contiguous_access_selects_packed_and_ordered_paths() {
     ] {
         let mut actual = vec![17u16; width + 3];
         let mut expected = actual.clone();
-        let mut status = Ok(active as i32);
+        let mut status = Ok((active as i32).to_word());
         for lane in 0..active {
             let i = offset as usize + lane;
             if i >= dst_len {
@@ -327,7 +331,7 @@ fn masked_contiguous_access_selects_packed_and_ordered_paths() {
             expected[1 + i] = source[i];
         }
         let result = code.call(
-            &[offset, active as i32],
+            &[offset, active as i32].map(i32::to_word),
             &mut [
                 (&source[..src_len]).into(),
                 (&mut actual[1..1 + dst_len]).into(),
