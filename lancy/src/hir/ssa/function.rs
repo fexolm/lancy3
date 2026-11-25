@@ -81,8 +81,11 @@ crate::slot_key!(pub Edge);
 /// `Block`, `Value`, `Inst`, `Edge` and `Call` handles index
 /// the function that issued them. Every method that takes a handle panics
 /// for a handle of another function or a block retired by
-/// [`Function::merge_blocks`]. Structural errors that a builder can make
-/// with valid handles are reported by `verify` as an [`IrError`].
+/// [`Function::merge_blocks`], and [`Function::add_edge`] and
+/// [`Function::add_call`] panic past 2^32 operands in all. Ill-typed
+/// operations are rejected by [`Function::append`] and structural errors
+/// that a builder can make with valid handles by `verify`, both as an
+/// [`IrError`].
 #[derive(Clone, Debug)]
 pub struct Function {
     arity: usize,
