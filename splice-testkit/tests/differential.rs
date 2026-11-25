@@ -219,6 +219,37 @@ fn check_rows(
     }
 }
 
+/// Stage `body` once per row of `rows`, selected by `arg(0)`, on the row's
+/// operands: loaded as `read_operands` does, except where `known` is set,
+/// where the operand is the row's value as a constant, for the backends to
+/// fold. Each case returns through `body`.
+fn each_row(
+    b: &mut dyn KernelBuilder,
+    ty: ScalarType,
+    rows: &[Vec<Constant>],
+    known: &[bool],
+    body: &dyn Fn(&mut dyn KernelBuilder, &[Reg]) -> splice::Result<()>,
+) -> splice::Result<()> {
+    let loaded = read_operands(b, ty, known.len())?;
+    let case = b.arg(0)?;
+    for (i, row) in rows.iter().enumerate() {
+        let (here, next) = (b.label()?, b.label()?);
+        let index = b.constant(Constant::from(i as i32))?;
+        let selected = b.binary(Binary::Eq, case, index)?;
+        b.branch(selected, here, next)?;
+        b.mark(here)?;
+        let operands = row
+            .iter()
+            .zip(&loaded)
+            .zip(known)
+            .map(|((&value, &load), &known)| if known { b.constant(value) } else { Ok(load) })
+            .collect::<splice::Result<Vec<_>>>()?;
+        body(b, &operands)?;
+        b.mark(next)?;
+    }
+    b.trap_bounds()
+}
+
 /// The result word of a call, or its error. A word with bits above its
 /// value is shown as such: the entry must zero them.
 fn show_word(ty: ScalarType, result: Result<u64, CallError>) -> String {
@@ -402,6 +433,71 @@ fn every_scalar_cast_matches_rust_as() {
             });
             check_rows(
                 &format!("{from} as {to}"),
+                &stage,
+                (from, to),
+                &rows,
+                |row| Ok(row[0].cast(to).expect("a Rust cast")),
+            );
+        }
+    }
+}
+
+/// `every_scalar_binary_matches_checked_eval_at_every_type` with constant
+/// operands, which each backend may fold at build time: both constant, or
+/// one constant and one loaded.
+#[test]
+fn every_scalar_binary_folds_constant_operands_like_checked_eval() {
+    use Binary::*;
+    for ty in ScalarType::ALL {
+        let values = edges(ty);
+        let rows: Rc<Vec<_>> = Rc::new(
+            values
+                .iter()
+                .flat_map(|&a| values.iter().map(move |&z| vec![a, z]))
+                .collect(),
+        );
+        for op in [
+            Add, Sub, Mul, Div, Rem, And, Or, Xor, Eq, Ne, Lt, Le, Gt, Ge, Shl, Shr, CheckedAdd,
+            CheckedSub, CheckedMul, CheckedShl, CheckedShr, Min, Max,
+        ] {
+            let Some(output) = op.output(ty) else {
+                continue;
+            };
+            for known in [[true, true], [false, true], [true, false]] {
+                let cases = Rc::clone(&rows);
+                let stage: Stage = Rc::new(move |b| {
+                    each_row(b, ty, &cases, &known, &|b, operands| {
+                        let r = b.binary(op, operands[0], operands[1])?;
+                        write_result(b, output, r)
+                    })
+                });
+                check_rows(
+                    &format!("{ty} {op:?} with known {known:?}"),
+                    &stage,
+                    (ty, output),
+                    &rows,
+                    |row| op.checked_eval(row[0], row[1]),
+                );
+            }
+        }
+    }
+}
+
+/// `every_scalar_cast_matches_rust_as` with a constant source.
+#[test]
+fn every_scalar_cast_folds_a_constant_like_rust_as() {
+    for from in ScalarType::ALL {
+        let rows: Rc<Vec<_>> = Rc::new(edges(from).into_iter().map(|v| vec![v]).collect());
+        for to in ScalarType::ALL.into_iter().filter(|&to| from.casts_to(to)) {
+            let cases = Rc::clone(&rows);
+            let stage: Stage = Rc::new(move |b| {
+                each_row(b, from, &cases, &[true], &|b, operands| {
+                    let r = b.cast(operands[0], to)?;
+                    write_result(b, to, r)
+                })
+            });
+            check_rows(
+                &format!("constant {from} as {to}"),
                 &stage,
                 (from, to),
                 &rows,
