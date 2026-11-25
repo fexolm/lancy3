@@ -6,7 +6,8 @@ use cranelift_codegen::{
 use cranelift_jit::JITModule;
 use cranelift_module::{FuncId, Module};
 use splice_core::hir::Instr;
-use splice_jit::gimli::write::{Address, FrameTable};
+use splice_jit::Publish;
+use splice_jit::gimli::write::Address;
 
 pub(super) struct Pending<'a> {
     source: &'a splice_core::Function,
@@ -52,37 +53,33 @@ impl<'a> Pending<'a> {
     }
 }
 
-pub(super) fn publish(
+/// The symbols of the finalized functions, with source statements and
+/// unwind rows in a debug build.
+pub(super) fn describe(
     module: &JITModule,
     pending: Vec<(FuncId, Pending<'_>)>,
     vector_bytes: usize,
     debug: bool,
-) -> splice_core::Result<Option<splice_jit::Registration>> {
+) -> Publish {
     use splice_jit::gimli::{AArch64, X86_64};
     let sp = if cfg!(target_arch = "x86_64") {
         X86_64::RSP
     } else {
         AArch64::SP
     };
-    let mut functions = Vec::with_capacity(pending.len());
-    let mut frames = FrameTable::default();
+    let mut publish = Publish::new(debug);
     let cie = debug
         .then(|| {
             module
                 .isa()
                 .create_systemv_cie()
-                .map(|cie| frames.add_cie(cie))
+                .map(|cie| publish.frames().add_cie(cie))
         })
         .flatten();
     for (id, info) in pending {
         let address = module.get_finalized_function(id) as u64;
         let name = info.source.source().map_or("kernel", |source| source.name);
-        let mut f = splice_jit::Function {
-            name: format!("splice_jit::{name}"),
-            address,
-            size: u64::from(info.size),
-            statements: Vec::new(),
-        };
+        let f = publish.function(name, address, u64::from(info.size));
         for (offset, index, base) in info.points {
             let Instr::Debug(point) = &info.source.instructions()[index as usize] else {
                 unreachable!("only sequence points bear Splice debug tags")
@@ -97,16 +94,16 @@ pub(super) fn publish(
             );
         }
         if let (Some(cie), Some(info)) = (cie, info.unwind) {
-            frames.add_fde(cie, info.to_fde(Address::Constant(address)));
+            publish
+                .frames()
+                .add_fde(cie, info.to_fde(Address::Constant(address)));
         }
-        functions.push(f);
     }
-    // perf record sets PERF_BUILDID_DIR, which activates Cranelift's
-    // native writer. Its declarations already carry the source names.
-    if !cfg!(target_os = "linux") || std::env::var_os("PERF_BUILDID_DIR").is_none() {
-        splice_jit::profile(&functions);
-    }
-    debug
-        .then(|| splice_jit::Registration::new(&functions, &frames))
-        .transpose()
+    publish
+}
+
+/// perf record sets PERF_BUILDID_DIR, which activates Cranelift's native
+/// writer. Its declarations already carry the source names.
+pub(super) fn profile_here() -> bool {
+    !cfg!(target_os = "linux") || std::env::var_os("PERF_BUILDID_DIR").is_none()
 }

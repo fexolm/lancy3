@@ -1,6 +1,6 @@
 use crate::jit::Jit;
 use inkwell::memory_buffer::MemoryBuffer;
-use splice_jit::gimli::write::FrameTable;
+use splice_jit::Publish;
 use std::ffi::CString;
 
 struct NativeFunction {
@@ -89,13 +89,16 @@ impl ObjectSymbols {
         Ok(result)
     }
 
-    pub fn publish(
+    /// Add the linked functions to `publish`, with source statements in a
+    /// debug build. LLVM's frames carry no unwind rows: a debug build keeps
+    /// frame pointers, which debuggers unwind through.
+    pub fn describe(
         self,
+        publish: &mut Publish,
         jit: &Jit,
         staged: &crate::lower::Staged,
         debug: bool,
-    ) -> splice_core::Result<Option<splice_jit::Registration>> {
-        let mut functions = Vec::with_capacity(self.functions.len());
+    ) -> splice_core::Result<()> {
         for native in self.functions {
             let address = jit.lookup(&native.name)?;
             let f = native.source_id.and_then(|id| staged.functions.get(id));
@@ -103,16 +106,10 @@ impl ObjectSymbols {
                 .and_then(|f| f.source)
                 .or(staged.source)
                 .map_or("kernel", |src| src.name);
-            let name = if f.is_some() || !debug {
-                format!("splice_jit::{name}")
+            let function = if f.is_some() || !debug {
+                publish.function(name, address, native.size)
             } else {
-                format!("splice_jit::{name}::entry")
-            };
-            let mut function = splice_jit::Function {
-                name,
-                address,
-                size: native.size,
-                statements: Vec::new(),
+                publish.function(&format!("{name}::entry"), address, native.size)
             };
             if let (Some(id), Some(f)) = (native.source_id, f)
                 && let Some(points) = self.points.get(&id)
@@ -140,12 +137,8 @@ impl ObjectSymbols {
                     );
                 }
             }
-            functions.push(function);
         }
-        splice_jit::profile(&functions);
-        debug
-            .then(|| splice_jit::Registration::new(&functions, &FrameTable::default()))
-            .transpose()
+        Ok(())
     }
 }
 mod stack_map;

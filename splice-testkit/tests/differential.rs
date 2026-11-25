@@ -1489,3 +1489,127 @@ fn every_build_route_reports_the_same_verify_error() {
         });
     }
 }
+
+/// Writes that trap: a contiguous store that crosses the end, masked stores
+/// and scatters with a bad active lane, and scatters that repeat an index.
+/// Every backend leaves the same buffer behind; a scatter writes its lanes
+/// in order, so the last of repeated lanes wins and the lanes before the
+/// first bad active one are written.
+#[test]
+fn trapping_and_repeated_writes_leave_the_same_buffer_on_every_backend() {
+    let e = Element::I32;
+    let n = e.lanes(bytes());
+    let stage: Stage = Rc::new(move |b| {
+        let at = index(b, 0)?;
+        let limit = index(b, 1)?;
+        let x = simd(b, e, SimdOp::Iota, &[]);
+        let hundred = simd(b, e, SimdOp::Splat(100), &[]);
+        let value = simd(b, e, SimdOp::Add, &[x, hundred]);
+        let mask = simd(b, e, SimdOp::FirstN, &[limit]);
+        let zero = b.constant(Constant::from(0usize))?;
+        let indices = load(b, e, 0, zero);
+        let op = b.arg(2)?;
+        let ops = [
+            SimdOp::Store(Buffer(1)),
+            SimdOp::StoreSelect(Buffer(1)),
+            SimdOp::Scatter(Buffer(1)),
+            SimdOp::ScatterSelect(Buffer(1)),
+        ];
+        let next = (0..ops.len())
+            .map(|_| b.label())
+            .collect::<splice::Result<Vec<_>>>()?;
+        for (case, (&simd_op, &label)) in ops.iter().zip(&next).enumerate() {
+            let here = b.label()?;
+            let k = b.constant(Constant::from(case as i32))?;
+            let hit = b.binary(Binary::Eq, op, k)?;
+            b.branch(hit, here, label)?;
+            b.mark(here)?;
+            let args = match simd_op {
+                SimdOp::Store(_) => vec![at, value],
+                SimdOp::StoreSelect(_) => vec![at, mask, value],
+                SimdOp::Scatter(_) => vec![indices, value],
+                _ => vec![indices, mask, value],
+            };
+            b.simd(
+                Simd {
+                    element: e,
+                    op: simd_op,
+                },
+                &args,
+            )?;
+            done(b)?;
+            b.mark(label)?;
+        }
+        done(b)?;
+        Ok(())
+    });
+    let kinds = [
+        BufferKind::new(Element::I32, false),
+        BufferKind::new(Element::I32, true),
+    ];
+    let len = n + 2;
+    // Scatter indices: lane 1 repeats lane 0, lane `bad` is out of bounds.
+    let scatter = |bad: Option<usize>| -> Vec<i32> {
+        (0..n)
+            .map(|lane| match lane {
+                _ if Some(lane) == bad => len as i32 + 5,
+                0 | 1 => 1,
+                lane => (lane as i32 * 3) % len as i32,
+            })
+            .collect()
+    };
+    let mut cases = Vec::new();
+    for at in [0, 2, 3, len as i32] {
+        for limit in [0, 1, n as i32] {
+            for op in [0, 1] {
+                cases.push((vec![0; n], at, limit, op));
+            }
+        }
+    }
+    for bad in [None, Some(0), Some(n / 2), Some(n - 1)] {
+        for limit in [0, n as i32 / 2, n as i32] {
+            for op in [2, 3] {
+                cases.push((scatter(bad), 0, limit, op));
+            }
+        }
+    }
+    let seen = agree(
+        "trapping writes",
+        Signature::new(&[ScalarType::I32; 3], ScalarType::I32, &kinds),
+        &stage,
+        |call| {
+            cases
+                .iter()
+                .map(|(indices, at, limit, op)| {
+                    let mut out = vec![-1; len];
+                    let r = call(
+                        &[*at, *limit, *op].map(i32::to_word),
+                        &mut [BufferArg::from(&indices[..]), BufferArg::from(&mut out[..])],
+                    );
+                    format!("{r:?} {out:?}")
+                })
+                .collect()
+        },
+    );
+    // A scatter writes its active lanes in order up to the first bad one.
+    for ((indices, _, limit, op), seen) in cases.iter().zip(&seen) {
+        if *op < 2 {
+            continue;
+        }
+        let active = |lane: usize| *op == 2 || (lane as i32) < *limit;
+        let mut out = vec![-1; len];
+        let mut status = "Ok(0)";
+        for lane in (0..n).filter(|&lane| active(lane)) {
+            let Some(slot) = out.get_mut(indices[lane] as usize) else {
+                status = "Err(Trap(Bounds))";
+                break;
+            };
+            *slot = 100 + lane as i32;
+        }
+        assert_eq!(
+            seen,
+            &format!("{status} {out:?}"),
+            "{indices:?} op {op} limit {limit}"
+        );
+    }
+}

@@ -181,7 +181,7 @@ pub(super) fn emit(
                 let Some(slot) = snapshots else {
                     continue;
                 };
-                use splice_core::debug::Value as DebugValue;
+                use splice_core::debug::Store as DebugStore;
                 let mut slots = point.function_slots(f, m.vector_bytes).peekable();
                 if slots.peek().is_none() {
                     // Sequence points themselves occupy no bytes in Cranelift.
@@ -189,30 +189,31 @@ pub(super) fn emit(
                     let zero = b.ins().iconst(I8, 0);
                     b.ins().stack_store(zero, slot, 0);
                 }
-                for splice_core::debug::Slot {
-                    variable: var,
-                    offset,
-                    ..
-                } in slots
-                {
-                    let offset = offset as i32;
-                    match var.value {
-                        // A register already has its DWARF representation:
-                        // a bool is one byte holding 0 or 1.
-                        DebugValue::Register(reg) => {
-                            for (part, &variable) in vars.get(reg).iter().enumerate() {
-                                let value = b.use_var(variable);
+                for point_slot in slots {
+                    for (offset, store) in point_slot.stores(|r| f.reg_type(r)) {
+                        let offset = offset as i32;
+                        match store {
+                            // A register already has its memory layout: a
+                            // bool is one byte holding 0 or 1, and a mask is
+                            // a vector of all-ones or zero index lanes.
+                            DebugStore::Scalar(reg, _)
+                            | DebugStore::Vector(reg)
+                            | DebugStore::Mask(reg, _) => {
+                                for (part, &variable) in vars.get(reg).iter().enumerate() {
+                                    let value = b.use_var(variable);
+                                    b.ins()
+                                        .stack_store(value, slot, offset + (part * 16) as i32);
+                                }
+                            }
+                            DebugStore::Data(buffer) => {
                                 b.ins()
-                                    .stack_store(value, slot, offset + (part * 16) as i32);
+                                    .stack_store(buffers[buffer.index()][0], slot, offset);
+                            }
+                            DebugStore::Length(buffer) => {
+                                let len = b.ins().uextend(I64, buffers[buffer.index()][1]);
+                                b.ins().stack_store(len, slot, offset);
                             }
                         }
-                        DebugValue::Slice(buffer) => {
-                            let [data, len] = buffers[buffer.index()];
-                            b.ins().stack_store(data, slot, offset);
-                            let len = b.ins().uextend(I64, len);
-                            b.ins().stack_store(len, slot, offset + 8);
-                        }
-                        DebugValue::Constant(_) => unreachable!("only runtime values have slots"),
                     }
                 }
                 let at = b.ins().sequence_point();

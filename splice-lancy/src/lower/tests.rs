@@ -511,15 +511,15 @@ fn lowered_call_graphs_retain_slice_contracts_for_out_of_line_calls() {
             assert_eq!(function.slice_param(scalar), None);
             assert_eq!(function.slice_param(ptr), Some((len, 4, writable)));
         }
+        let code = ScalarKernel::compile(
+            &root,
+            &lancy::CompileOptions::host()
+                .unwrap()
+                .with_inlining(Inlining::Never),
+        )
+        .unwrap();
         crate::LancyKernel {
-            _debug: None,
-            code: ScalarKernel::compile(
-                &root,
-                &lancy::CompileOptions::host()
-                    .unwrap()
-                    .with_inlining(Inlining::Never),
-            )
-            .unwrap(),
+            code: splice_jit::Publish::new(false).finish(false, code).unwrap(),
             interface: splice_core::call::Interface::new(ir.signature()),
         }
     }

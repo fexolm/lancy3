@@ -74,14 +74,93 @@ impl Function {
     }
 }
 
-/// Owns a symbol file until the kernel is dropped. Store this before the
-/// executable memory owner so the debugger sees removal before unmapping.
-pub struct Registration {
+/// The symbol name of kernel `name` in debuggers and profilers.
+pub fn symbol_name(name: &str) -> String {
+    format!("splice_jit::{name}")
+}
+
+/// The symbols of one compiled kernel, collected while its code is
+/// installed and published together by [`Publish::finish`].
+pub struct Publish {
+    debug: bool,
+    functions: Vec<Function>,
+    frames: FrameTable,
+}
+
+impl Publish {
+    /// In a `debug` build the symbols also go to debuggers.
+    pub fn new(debug: bool) -> Self {
+        Self {
+            debug,
+            functions: Vec::new(),
+            frames: FrameTable::default(),
+        }
+    }
+
+    /// Installed code of the kernel function `name` (its source name), to
+    /// which the caller adds source statements.
+    pub fn function(&mut self, name: &str, address: u64, size: u64) -> &mut Function {
+        self.functions.push(Function {
+            name: symbol_name(name),
+            address,
+            size,
+            statements: Vec::new(),
+        });
+        self.functions.last_mut().expect("just pushed")
+    }
+
+    /// Unwind tables for the published functions.
+    pub fn frames(&mut self) -> &mut FrameTable {
+        &mut self.frames
+    }
+
+    /// Give the names to perf when `profile` (a backend whose own writer
+    /// is active passes `false`), register the symbols with debuggers in a
+    /// debug build, and keep them until `memory`, the owner of the code,
+    /// is dropped.
+    pub fn finish<M>(self, profile: bool, memory: M) -> splice_core::Result<Published<M>> {
+        if profile {
+            self::profile(&self.functions);
+        }
+        let registration = self
+            .debug
+            .then(|| Registration::new(&self.functions, &self.frames))
+            .transpose()?;
+        Ok(Published {
+            registration,
+            memory,
+        })
+    }
+}
+
+/// Executable memory `M` whose symbols stay registered while it is mapped:
+/// dropping it removes the symbols before the code.
+pub struct Published<M> {
+    registration: Option<Registration>,
+    memory: M,
+}
+
+impl<M> Published<M> {
+    pub fn memory(&self) -> &M {
+        &self.memory
+    }
+}
+
+impl<M> Drop for Published<M> {
+    fn drop(&mut self) {
+        // The debugger must see the removal before the code is unmapped,
+        // which happens when `memory` drops after this.
+        drop(self.registration.take());
+    }
+}
+
+/// A symbol file registered with the GDB JIT interface.
+struct Registration {
     _entry: registry::Registration,
 }
 
 impl Registration {
-    pub fn new(functions: &[Function], frames: &FrameTable) -> splice_core::Result<Self> {
+    fn new(functions: &[Function], frames: &FrameTable) -> splice_core::Result<Self> {
         let sections = dwarf::sections(functions, frames)
             .map_err(|e| splice_core::BuildError::backend("JIT debug info", e))?;
         let file = elf::symbols(functions, &sections)?;
@@ -105,7 +184,7 @@ pub fn prepare_perf_map() {
     }
 }
 
-pub fn profile(functions: &[Function]) {
+fn profile(functions: &[Function]) {
     #[cfg(target_os = "linux")]
     if perf_enabled() && !functions.is_empty() {
         use std::fmt::Write as _;

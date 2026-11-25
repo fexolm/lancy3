@@ -46,7 +46,7 @@ impl Jit {
             &Module<'ctx>,
             crate::target::Machine,
         ) -> splice_core::Result<crate::lower::Staged>,
-    ) -> splice_core::Result<(Self, Entry, Option<splice_jit::Registration>)> {
+    ) -> splice_core::Result<(splice_jit::Published<Self>, Entry)> {
         options.target.check_execution()?;
         options.target.check_native_convention()?;
         let debug = options.debug();
@@ -73,14 +73,14 @@ impl Jit {
         let jit = tracing::debug_span!(target: "splice_core::compile", "link_llvm_object")
             .in_scope(|| Self::link(object))?;
         let address = jit.lookup(c"splice_entry")?;
-        let registration = info
-            .map(|info| info.publish(&jit, &staged, debug))
-            .transpose()?
-            .flatten();
+        let mut publish = splice_jit::Publish::new(debug);
+        if let Some(info) = info {
+            info.describe(&mut publish, &jit, &staged, debug)?;
+        }
         // SAFETY: The lowerer declares the entry with the host C ABI. It
         // receives the checked argument arrays and ORC retains the code.
         let entry = unsafe { std::mem::transmute::<usize, Entry>(address as usize) };
-        Ok((jit, entry, registration))
+        Ok((publish.finish(true, jit)?, entry))
     }
 
     /// Inkwell owns the module, optimizer and object generation. Its llvm-sys

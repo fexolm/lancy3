@@ -136,10 +136,9 @@ impl Drop for CodeMemory {
 
 /// Owns the executable code of the entry point and all its callees.
 pub struct CraneliftKernel {
-    _debug: Option<splice_jit::Registration>,
     // The module is Send. Only its owner needs exclusive access on drop.
     // Concurrent calls use the immutable machine code without taking a lock.
-    _memory: Mutex<CodeMemory>,
+    _memory: splice_jit::Published<Mutex<CodeMemory>>,
     entry: Entry,
     interface: Interface,
 }
@@ -179,14 +178,13 @@ impl Backend for Cranelift {
             },
         )?;
         let address = module.get_finalized_function(id);
-        let registration = debug_info::publish(module, symbols, target.vector_bytes(), debug)?;
+        let publish = debug_info::describe(module, symbols, target.vector_bytes(), debug);
         // SAFETY: KernelModule declares the entry with the host C calling
         // convention, three pointer parameters and an i64 status return
         // (`splice_core::call::Entry`). The kernel owns its module.
         let entry = unsafe { std::mem::transmute::<*const u8, Entry>(address) };
         Ok(CraneliftKernel {
-            _debug: registration,
-            _memory: Mutex::new(memory),
+            _memory: publish.finish(debug_info::profile_here(), Mutex::new(memory))?,
             entry,
             interface: Interface::new(function.signature()),
         })

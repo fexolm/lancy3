@@ -40,8 +40,7 @@ impl Backend for Lancy {
 }
 
 pub struct LancyKernel {
-    _debug: Option<splice_jit::Registration>,
-    code: ScalarKernel,
+    code: splice_jit::Published<ScalarKernel>,
     interface: Interface,
 }
 
@@ -68,22 +67,18 @@ impl LancyKernel {
         }
         let code = ScalarKernel::compile(&hir, &compile_options)
             .map_err(|e| splice_core::BuildError::backend("lancy", e))?;
-        let registration = if debug {
-            Some(debug_info::publish(&code, &sources)?)
+        let mut publish = splice_jit::Publish::new(debug);
+        if debug {
+            debug_info::describe(&mut publish, &code, &sources);
         } else {
-            if splice_jit::perf_enabled() {
-                splice_jit::profile(&[splice_jit::Function {
-                    name: debug_info::name(source),
-                    address: code.code_address() as u64,
-                    size: code.code_size() as u64,
-                    statements: Vec::new(),
-                }]);
-            }
-            None
-        };
+            publish.function(
+                source.map_or("kernel", |source| source.name),
+                code.code_address() as u64,
+                code.code_size() as u64,
+            );
+        }
         Ok(Self {
-            _debug: registration,
-            code,
+            code: publish.finish(true, code)?,
             interface: Interface::new(signature),
         })
     }
@@ -100,9 +95,12 @@ unsafe impl Executable for LancyKernel {
     }
 
     unsafe fn enter(&self, words: &[u64], slices: &[SliceDescriptor]) -> Result<u64, CallError> {
-        if slices.is_empty() && !self.code.requires_raw_call() {
+        if slices.is_empty() && !self.code.memory().requires_raw_call() {
             let mut word = [0];
-            self.code.call_words(words, &mut word).map_err(call_error)?;
+            self.code
+                .memory()
+                .call_words(words, &mut word)
+                .map_err(call_error)?;
             return Ok(word[0]);
         }
         // Lancy takes the scalars followed by each slice's address and length.
@@ -124,7 +122,7 @@ unsafe impl Executable for LancyKernel {
         // and exclusive Rust contexts. Both Splice lowering paths check
         // permissions and use native call scratch only for initialized,
         // shape-checked packets.
-        unsafe { self.code.call_raw(packed) }.map_err(call_error)
+        unsafe { self.code.memory().call_raw(packed) }.map_err(call_error)
     }
 }
 

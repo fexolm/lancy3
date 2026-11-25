@@ -1,6 +1,5 @@
 //! Concurrent registration and removal keep the GDB JIT list well formed.
-use splice_jit::gimli::write::FrameTable;
-use splice_jit::{Function, Registration};
+use splice_jit::{Publish, Published};
 
 #[repr(C)]
 struct Entry {
@@ -47,21 +46,19 @@ unsafe fn entries() -> usize {
 fn threads_register_and_drop_symbol_files_concurrently() {
     const THREADS: usize = 8;
     const ROUNDS: usize = 200;
-    let frames = FrameTable::default();
-    let kept: Vec<Vec<Registration>> = std::thread::scope(|scope| {
+    let kept: Vec<Vec<Published<()>>> = std::thread::scope(|scope| {
         let workers: Vec<_> = (0..THREADS)
             .map(|t| {
-                let frames = &frames;
                 scope.spawn(move || {
                     let mut kept = Vec::new();
                     for round in 0..ROUNDS {
-                        let function = Function {
-                            name: format!("kernel_{t}_{round}"),
-                            address: 0x10_0000 * (t as u64 + 1) + 0x100 * round as u64,
-                            size: 0x40,
-                            statements: Vec::new(),
-                        };
-                        let registration = Registration::new(&[function], frames).unwrap();
+                        let mut publish = Publish::new(true);
+                        publish.function(
+                            &format!("kernel_{t}_{round}"),
+                            0x10_0000 * (t as u64 + 1) + 0x100 * round as u64,
+                            0x40,
+                        );
+                        let registration = publish.finish(false, ()).unwrap();
                         // Keep every third file and drop the rest at once, so
                         // removals interleave with other threads' insertions.
                         if round % 3 == 0 {

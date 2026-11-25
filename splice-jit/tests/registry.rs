@@ -1,7 +1,7 @@
 //! Registered symbol files reach the process-wide GDB JIT descriptor, which
 //! is the one debuggers read even when LLVM supplies its definition (BE-05).
-use splice_jit::gimli::write::FrameTable;
-use splice_jit::{Function, Registration};
+use splice_jit::{Publish, Published};
+use std::cell::Cell;
 
 #[repr(C)]
 struct Entry {
@@ -23,12 +23,29 @@ unsafe extern "C" {
     static __jit_debug_descriptor: Descriptor;
 }
 
-fn function(name: &str, address: u64) -> Function {
-    Function {
-        name: name.to_owned(),
-        address,
-        size: 16,
-        statements: Vec::new(),
+fn publish<M>(name: &str, address: u64, memory: M) -> Published<M> {
+    let mut publish = Publish::new(true);
+    publish.function(name, address, 16);
+    publish.finish(false, memory).unwrap()
+}
+
+/// Code memory that records, when it is freed, how many symbol files are
+/// still registered.
+struct Memory<'a>(&'a Cell<Option<usize>>);
+
+impl Drop for Memory<'_> {
+    fn drop(&mut self) {
+        let descriptor = &raw const __jit_debug_descriptor;
+        let mut count = 0;
+        // SAFETY: no other thread registers while the test runs.
+        unsafe {
+            let mut entry = (&raw const (*descriptor).first).read_volatile();
+            while !entry.is_null() {
+                count += 1;
+                entry = (*entry).next;
+            }
+        }
+        self.0.set(Some(count));
     }
 }
 
@@ -44,9 +61,9 @@ fn registrations_link_into_the_gdb_descriptor() {
     }
     assert!(first().is_null());
 
-    let frames = FrameTable::default();
-    let outer = Registration::new(&[function("outer", 0x1000)], &frames).unwrap();
-    let inner = Registration::new(&[function("inner", 0x2000)], &frames).unwrap();
+    let freed = Cell::new(None);
+    let outer = publish("outer", 0x1000, Memory(&freed));
+    let inner = publish("inner", 0x2000, ());
     // SAFETY: both entries stay registered while they are read.
     unsafe {
         let newest = &*first();
@@ -69,6 +86,8 @@ fn registrations_link_into_the_gdb_descriptor() {
         assert!((*descriptor).relevant.is_null());
     }
     drop(outer);
+    // The debugger saw the removal before the code was freed.
+    assert_eq!(freed.get(), Some(1));
     // SAFETY: the inner entry is still registered.
     unsafe {
         let only = &*first();

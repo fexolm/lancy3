@@ -254,15 +254,19 @@ fn flagged(x: i32) -> i32 {
 fn gdb_shows_runtime_bools_as_rust_bools() {
     const CHILD: &str = "SPLICE_GDB_BOOL_CHILD";
     if std::env::var_os(CHILD).is_some() {
-        fn run<B: Codegen<Output: Executable>>() {
+        // Each kernel stays alive until the end: GDB can keep a breakpoint
+        // byte of a freed kernel and write it back into code that reuses
+        // the address.
+        fn run<B: Codegen<Output: Executable>>() -> impl Sized {
             let options = BuildOptions::host(Mode::Debug).unwrap();
             let code = flagged::build_with_options::<B>(options, flagged::BuildArgs {}).unwrap();
             assert_eq!(code.call(flagged::CallArgs { x: 4 }), Ok(8));
+            code
         }
-        run::<splice_lancy::Lancy>();
-        run::<splice_cranelift::Cranelift>();
+        let _lancy = run::<splice_lancy::Lancy>();
+        let _cranelift = run::<splice_cranelift::Cranelift>();
         #[cfg(feature = "llvm")]
-        run::<splice_llvm::Llvm>();
+        let _llvm = run::<splice_llvm::Llvm>();
         return;
     }
     let backends = if cfg!(feature = "llvm") { 3 } else { 2 };
@@ -296,4 +300,76 @@ fn gdb_shows_runtime_bools_as_rust_bools() {
         .filter_map(|l| l.strip_prefix('$')?.split_once(" = ").map(|(_, v)| v))
         .collect();
     assert_eq!(values, vec!["true"; backends], "{stdout}");
+}
+
+#[kernel]
+fn masked(xs: &[i32]) -> i32 {
+    let above = splice::simd::Lane::<i32>::load(xs, 0).simd_gt(splice::simd::Lane::splat(1));
+    let count = above.count(); // gdb: above is assigned
+    count.wrapping_add(xs[0])
+}
+
+/// A runtime mask reads as the vector of its index lanes in GDB on every
+/// native backend: all bits set for an active lane (CORE-16). Needs `gdb`;
+/// run with `--ignored`.
+#[test]
+#[ignore = "requires gdb"]
+fn gdb_shows_runtime_masks_as_lane_vectors() {
+    const CHILD: &str = "SPLICE_GDB_MASK_CHILD";
+    let lanes = splice::Target::host().unwrap().vector_bytes() / 4;
+    if std::env::var_os(CHILD).is_some() {
+        // As in `gdb_shows_runtime_bools_as_rust_bools`.
+        fn run<B: Codegen<Output: Executable>>(lanes: usize) -> impl Sized {
+            let options = BuildOptions::host(Mode::Debug).unwrap();
+            let code = masked::build_with_options::<B>(options, masked::BuildArgs {}).unwrap();
+            let xs: Vec<i32> = (0..lanes as i32).collect();
+            assert_eq!(
+                code.call(masked::CallArgs { xs: &xs }),
+                Ok(lanes as i32 - 2)
+            );
+            code
+        }
+        let _lancy = run::<splice_lancy::Lancy>(lanes);
+        let _cranelift = run::<splice_cranelift::Cranelift>(lanes);
+        #[cfg(feature = "llvm")]
+        let _llvm = run::<splice_llvm::Llvm>(lanes);
+        return;
+    }
+    let backends = if cfg!(feature = "llvm") { 3 } else { 2 };
+    let source = include_str!("debug_symbols.rs");
+    let line = 1 + source
+        .lines()
+        .position(|l| l.ends_with("// gdb: above is assigned"))
+        .unwrap();
+    let output = std::process::Command::new("gdb")
+        .args(["-q", "-batch", "-ex", "set breakpoint pending on"])
+        .args(["-ex", "set print repeats unlimited"])
+        .args([
+            "-ex",
+            &format!("break debug_symbols.rs:{line}"),
+            "-ex",
+            "run",
+        ])
+        .args(["-ex", "print above", "-ex", "continue"].repeat(backends))
+        .arg("--args")
+        .arg(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "gdb_shows_runtime_masks_as_lane_vectors",
+            "--ignored",
+        ])
+        .env(CHILD, "1")
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let values: Vec<_> = stdout
+        .lines()
+        .filter_map(|l| l.strip_prefix('$')?.split_once(" = ").map(|(_, v)| v))
+        .collect();
+    let expected = (0..lanes)
+        .map(|lane| if lane < 2 { "0" } else { "-1" })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let expected = format!("[{expected}]");
+    assert_eq!(values, vec![expected; backends], "{stdout}");
 }

@@ -141,6 +141,49 @@ pub struct Slot {
     pub offset: usize,
 }
 
+/// One store that saves (part of) a slot. Every backend writes the same
+/// bytes for it, in its own representation of the value.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Store {
+    /// A scalar register in its memory layout: a `bool` is one byte, 0 or 1.
+    Scalar(Reg, ScalarType),
+    /// A vector register.
+    Vector(Reg),
+    /// A mask register as the vector of its index lanes: all bits set for
+    /// an active lane, zero otherwise.
+    Mask(Reg, Element),
+    /// The data pointer of a slice.
+    Data(Buffer),
+    /// The length of a slice, zero-extended to 64 bits.
+    Length(Buffer),
+}
+
+impl Slot {
+    /// The stores that save this slot, at their byte offsets in the point's
+    /// workspace, for registers of the given types.
+    pub fn stores(
+        &self,
+        reg_type: impl Fn(Reg) -> ValueType,
+    ) -> impl Iterator<Item = (usize, Store)> {
+        let (first, second) = match self.variable.value {
+            Value::Register(reg) => (
+                match reg_type(reg) {
+                    ValueType::Scalar(ty) => Store::Scalar(reg, ty),
+                    ValueType::Vector(_) => Store::Vector(reg),
+                    ValueType::Mask(element) => Store::Mask(reg, element),
+                },
+                None,
+            ),
+            Value::Slice(buffer) => (
+                Store::Data(buffer),
+                Some((self.offset + 8, Store::Length(buffer))),
+            ),
+            Value::Constant(_) => unreachable!("only runtime values have slots"),
+        };
+        std::iter::once((self.offset, first)).chain(second)
+    }
+}
+
 impl Point {
     /// The runtime variables this point saves, for registers of the given
     /// types and vectors of `vector_bytes`.
@@ -198,5 +241,53 @@ impl Point {
         self.function_slots(function, vector_bytes)
             .last()
             .map_or(0, |slot| slot.offset + slot.ty.storage_bytes())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_backend_saves_the_same_stores_for_each_slot() {
+        let location = Location {
+            file: "f.rs",
+            directory: "",
+            line: 1,
+            column: 1,
+        };
+        let variable = |name, value| Variable { name, value };
+        let point = Point {
+            location,
+            variables: [
+                variable("flag", Value::Register(Reg(0))),
+                variable("xs", Value::Slice(Buffer(0))),
+                variable("known", Value::Constant(None)),
+                variable("lanes", Value::Register(Reg(1))),
+                variable("active", Value::Register(Reg(2))),
+            ]
+            .into(),
+        };
+        let types = [
+            ValueType::Scalar(ScalarType::Bool),
+            ValueType::Vector(Element::F32),
+            ValueType::Mask(Element::F32),
+        ];
+        let reg_type = |r: Reg| types[r.0 as usize];
+        let kinds = [BufferKind::new(Element::U16, false)];
+        let stores: Vec<_> = point
+            .slots(reg_type, &kinds, 16)
+            .flat_map(|slot| slot.stores(reg_type).collect::<Vec<_>>())
+            .collect();
+        assert_eq!(
+            stores,
+            [
+                (0, Store::Scalar(Reg(0), ScalarType::Bool)),
+                (8, Store::Data(Buffer(0))),
+                (16, Store::Length(Buffer(0))),
+                (24, Store::Vector(Reg(1))),
+                (40, Store::Mask(Reg(2), Element::F32)),
+            ]
+        );
     }
 }

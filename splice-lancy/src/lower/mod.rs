@@ -683,30 +683,33 @@ impl KernelBuilder for Builder<'_> {
             .slots(|r| self.types[r.0 as usize], self.kinds, self.vector_bytes)
             .collect();
         for slot in &slots {
-            let offset = u32::try_from(slot.offset)
-                .ok()
-                .filter(|offset| offset.checked_add(8).is_some())
-                .ok_or_else(|| splice_core::BuildError::unsupported("debug frame too large"))?;
-            match slot.variable.value {
-                splice_core::debug::Value::Register(reg) => {
-                    let mut value = self.observe(reg);
-                    if slot.ty == splice_core::debug::Type::Scalar(ScalarType::Bool) {
-                        // A DWARF bool is one byte holding 0 or 1.
+            let types = &self.types;
+            let stores: Vec<_> = slot.stores(|r| types[r.0 as usize]).collect();
+            for (at, store) in stores {
+                let value = match store {
+                    splice_core::debug::Store::Scalar(reg, ScalarType::Bool) => {
+                        // A comparison mask: zero or all bits set.
+                        let value = self.observe(reg);
                         let one = self.value(Op::Const(1));
                         let bit = self.value(Op::Bin(hir::Binary::And, value, one));
-                        value = self.value(Op::Cast(hir::Type::U8, bit));
+                        self.value(Op::Cast(hir::Type::U8, bit))
                     }
-                    self.effect(Op::DebugStore(offset, value));
-                }
-                splice_core::debug::Value::Slice(buffer) => {
-                    let (data, len) = self.slice(buffer);
-                    self.effect(Op::DebugStore(offset, data));
-                    let len = self.value(Op::Cast(hir::Type::I64, len));
-                    self.effect(Op::DebugStore(offset + 8, len));
-                }
-                splice_core::debug::Value::Constant(_) => {
-                    unreachable!("only runtime values have slots")
-                }
+                    // A Lancy mask is already a vector of all-ones or zero
+                    // index lanes.
+                    splice_core::debug::Store::Scalar(reg, _)
+                    | splice_core::debug::Store::Vector(reg)
+                    | splice_core::debug::Store::Mask(reg, _) => self.observe(reg),
+                    splice_core::debug::Store::Data(buffer) => self.slice(buffer).0,
+                    splice_core::debug::Store::Length(buffer) => {
+                        let len = self.slice(buffer).1;
+                        self.value(Op::Cast(hir::Type::I64, len))
+                    }
+                };
+                let at = u32::try_from(at)
+                    .ok()
+                    .filter(|at| at.checked_add(8).is_some())
+                    .ok_or_else(|| splice_core::BuildError::unsupported("debug frame too large"))?;
+                self.effect(Op::DebugStore(at, value));
             }
         }
         let sources = self.debug.as_mut().expect("debug build");

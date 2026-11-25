@@ -57,7 +57,11 @@ fn declare(
     sig.returns.push(AbiParam::new(I64));
     let id = if let Some(id) = profile_id {
         let label = f.source().map_or("kernel", |source| source.name);
-        module.declare_function(&format!("splice_jit::{label}#{id}"), Linkage::Local, &sig)
+        module.declare_function(
+            &splice_jit::symbol_name(&format!("{label}#{id}")),
+            Linkage::Local,
+            &sig,
+        )
     } else {
         module.declare_anonymous_function(&sig)
     };

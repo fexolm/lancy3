@@ -3,7 +3,7 @@ use inkwell::builder::Builder;
 use inkwell::values::BasicValueEnum;
 use splice_core::{
     debug,
-    hir::{ScalarType, ValueType},
+    hir::{Reg, ScalarType, ValueType},
 };
 
 impl<'ctx> Body<'_, 'ctx> {
@@ -38,39 +38,35 @@ impl<'ctx> Body<'_, 'ctx> {
             store.set_volatile(true).expect("a store can be volatile");
             Ok(())
         };
+        let load = |reg: Reg| {
+            let (ty, ptr) = self.registers[reg.0 as usize];
+            b.build_load(
+                simd::llvm_type(self.ctx, self.machine.vector_bytes, ty),
+                ptr,
+                "",
+            )
+        };
         for slot in slots {
-            match slot.variable.value {
-                debug::Value::Register(reg) => {
-                    let (ty, ptr) = self.registers[reg.0 as usize];
-                    let value = b.build_load(
-                        simd::llvm_type(self.ctx, self.machine.vector_bytes, ty),
-                        ptr,
-                        "",
-                    )?;
-                    let value = if let ValueType::Mask(element) = ty {
+            for (offset, store) in slot.stores(|reg| self.registers[reg.0 as usize].0) {
+                let value = match store {
+                    debug::Store::Scalar(reg, ScalarType::Bool) => b
+                        .build_int_z_extend(load(reg)?.into_int_value(), self.ctx.i8_type(), "")?
+                        .into(),
+                    debug::Store::Scalar(reg, _) | debug::Store::Vector(reg) => load(reg)?,
+                    debug::Store::Mask(reg, element) => {
                         let ty = simd::llvm_type(
                             self.ctx,
                             self.machine.vector_bytes,
                             ValueType::Vector(element.index()),
                         )
                         .into_vector_type();
-                        b.build_int_s_extend(value.into_vector_value(), ty, "")?
+                        b.build_int_s_extend(load(reg)?.into_vector_value(), ty, "")?
                             .into()
-                    } else if slot.ty == debug::Type::Scalar(ScalarType::Bool) {
-                        // A DWARF bool is one byte holding 0 or 1.
-                        b.build_int_z_extend(value.into_int_value(), self.ctx.i8_type(), "")?
-                            .into()
-                    } else {
-                        value
-                    };
-                    save(slot.offset, value)?;
-                }
-                debug::Value::Slice(buffer) => {
-                    let slice = self.slices[buffer.index()];
-                    save(slot.offset, slice.data.into())?;
-                    save(slot.offset + 8, slice.len.into())?;
-                }
-                debug::Value::Constant(_) => unreachable!("only runtime values have slots"),
+                    }
+                    debug::Store::Data(buffer) => self.slices[buffer.index()].data.into(),
+                    debug::Store::Length(buffer) => self.slices[buffer.index()].len.into(),
+                };
+                save(offset, value)?;
             }
         }
         // The stack map records a static alloca as a frame register plus

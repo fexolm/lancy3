@@ -107,8 +107,7 @@ pub fn to_llvm_ir(
 
 /// Owns the LLVM session and the executable kernel it compiled.
 pub struct LlvmKernel {
-    _debug: Option<splice_jit::Registration>,
-    _owner: jit::Jit,
+    _owner: splice_jit::Published<jit::Jit>,
     entry: Entry,
     interface: Interface,
 }
@@ -189,9 +188,8 @@ impl LlvmKernel {
         ) -> splice_core::Result<lower::Staged>,
     ) -> splice_core::Result<Self> {
         Llvm::version()?;
-        let (owner, entry, registration) = jit::Jit::compile(auto_vectorize, options, populate)?;
+        let (owner, entry) = jit::Jit::compile(auto_vectorize, options, populate)?;
         Ok(Self {
-            _debug: registration,
             _owner: owner,
             entry,
             // Code compiled for SVE on a power-of-two vector length uses
