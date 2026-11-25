@@ -3,7 +3,7 @@ mod rules;
 use super::{Result, inst::Inst};
 use crate::lir::aarch64::backend::Config;
 use crate::{
-    hir::{Function, ssa::VerifiedBody},
+    hir::{Call, ssa::VerifiedBody},
     lir::{
         self,
         isel::{self, Edges},
@@ -16,7 +16,7 @@ pub(super) fn select(
     source: &VerifiedBody<'_>,
     config: Config,
     entry: bool,
-    callee: impl Fn(&Function) -> (FunctionId, PRegSet),
+    callee: impl Fn(Call) -> (FunctionId, PRegSet),
 ) -> Result<lir::Function<Inst>> {
     let _span = tracing::debug_span!(target: "lancy::compile", "select_instructions").entered();
     let (f, cfg) = (source.function, &source.cfg);

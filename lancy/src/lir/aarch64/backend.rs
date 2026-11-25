@@ -28,10 +28,10 @@ use super::{
 };
 use crate::{
     CompileError, Trap,
-    hir::{Function, Type, ssa::VerifiedBody},
+    hir::{Type, ssa::VerifiedBody},
     jit::{DebugFrame, DebugFunction},
     lir::layout,
-    module::{FunctionId, FunctionIds, Module},
+    module::{FunctionId, Module},
     support::slotmap::DenseMap,
 };
 use compile::{Compiled, Frame, TEMP_WORD_BYTES, compile};
@@ -740,26 +740,19 @@ fn invert(c: Cond) -> Cond {
 pub(crate) fn emit(
     target: &splice_target::Target,
     source: Module<VerifiedBody<'_>>,
-    ids: &FunctionIds<Function>,
 ) -> Result<Code> {
-    emit_mode(Config::new(target), source, ids, false)
+    emit_mode(Config::new(target), source, false)
 }
 
 pub(crate) fn emit_debug(
     target: &splice_target::Target,
     source: Module<VerifiedBody<'_>>,
-    ids: &FunctionIds<Function>,
 ) -> Result<Code> {
-    emit_mode(Config::new(target), source, ids, true)
+    emit_mode(Config::new(target), source, true)
 }
 
-fn emit_mode(
-    config: Config,
-    source: Module<VerifiedBody<'_>>,
-    ids: &FunctionIds<Function>,
-    debug: bool,
-) -> Result<Code> {
-    let module = compile(source, ids, config)?;
+fn emit_mode(config: Config, source: Module<VerifiedBody<'_>>, debug: bool) -> Result<Code> {
+    let module = compile(source, config)?;
     emit_compiled(&module, config, debug)
 }
 

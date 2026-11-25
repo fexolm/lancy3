@@ -42,9 +42,9 @@ fn repeated_calls_clone_loops_and_each_early_return_into_its_own_continuation() 
     let answer = root.append(b, Op::Bin(Binary::Sub, a, c)).unwrap();
     root.set_terminator(b, Terminator::Return(answer));
 
-    let (source, ids) = root.verified_module().unwrap();
-    let expanded = inline_all(&source, &ids).unwrap();
-    assert_eq!(expanded.verified_module().unwrap().0.functions.len(), 1);
+    let source = root.verified_module().unwrap();
+    let expanded = inline_all(&source).unwrap();
+    assert_eq!(expanded.verified_module().unwrap().functions.len(), 1);
     for policy in [Inlining::Always, Inlining::Never] {
         let code =
             ScalarKernel::compile(&root, &crate::test_target::options().with_inlining(policy))
@@ -74,8 +74,8 @@ fn non_returning_callee_removes_only_the_unreachable_continuation() {
     let yes = root.add_edge(yes, &[]);
     let no = root.add_edge(no, &[]);
     root.set_terminator(b, Terminator::Branch { cond: x, yes, no });
-    let (source, ids) = root.verified_module().unwrap();
-    let expanded = inline_all(&source, &ids).unwrap();
+    let source = root.verified_module().unwrap();
+    let expanded = inline_all(&source).unwrap();
     expanded.verify().unwrap();
     assert_eq!(
         expanded
@@ -110,10 +110,10 @@ fn expansion_counts_only_the_live_parts_of_reused_templates() {
         caller.set_terminator(entry, Terminator::Return(value));
         callee = Arc::new(caller);
     }
-    let (source, ids) = callee.verified_module().unwrap();
-    let expanded = inline_all(&source, &ids).unwrap();
+    let source = callee.verified_module().unwrap();
+    let expanded = inline_all(&source).unwrap();
     assert_eq!(expanded.blocks().count(), 2);
-    assert_eq!(expanded.verified_module().unwrap().0.functions.len(), 1);
+    assert_eq!(expanded.verified_module().unwrap().functions.len(), 1);
 }
 
 #[test]

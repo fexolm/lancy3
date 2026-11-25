@@ -1,6 +1,6 @@
 use super::Rules;
 use crate::{
-    hir::{Call, Function, Terminator},
+    hir::{Call, Terminator},
     lir::aarch64::backend::inst::Inst,
     module::FunctionId,
 };
@@ -18,9 +18,9 @@ impl Rules<'_> {
     pub(super) fn call(
         &mut self,
         site: Call,
-        callee: impl Fn(&Function) -> (FunctionId, PRegSet),
+        callee: impl Fn(Call) -> (FunctionId, PRegSet),
     ) -> Inst {
-        let (function, args) = self.f.call(site);
+        let (_, args) = self.f.call(site);
         let mut offset = 0;
         for &arg in args {
             let ty = self.ty(arg);
@@ -28,7 +28,7 @@ impl Rules<'_> {
             self.out.push(Inst::StoreArg(ty, offset, input));
             offset += ty.bytes(self.config.bytes).next_multiple_of(8);
         }
-        let (target, writes) = callee(function);
+        let (target, writes) = callee(site);
         Inst::Call(target, writes, self.ty(self.result()), self.dst())
     }
 }

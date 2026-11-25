@@ -641,8 +641,10 @@ impl Function {
         self.blocks[from].last = prev;
     }
 
-    pub(in crate::hir) fn callees_mut(&mut self) -> impl Iterator<Item = &mut Arc<Function>> {
-        self.calls.values_mut().map(|site| &mut site.callee)
+    pub(in crate::hir) fn calls_mut(&mut self) -> impl Iterator<Item = (Call, &mut Arc<Function>)> {
+        self.calls
+            .iter_mut()
+            .map(|(call, site)| (call, &mut site.callee))
     }
 
     /// Scratch bytes addressed by this frame's own operations, rounded up so

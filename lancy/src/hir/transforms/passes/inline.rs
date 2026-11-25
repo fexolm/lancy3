@@ -6,11 +6,11 @@
 //! survives the call exactly as it did with separate frames. Calls of one
 //! caller never overlap in time, so they share the region above it.
 use crate::CompileError;
+use crate::hir::Call;
 use crate::hir::transforms::ControlFlowGraph;
 use crate::hir::{Block, Edge, Function, Op, Terminator, Value, ssa::VerifiedBody};
-use crate::module::{FunctionId, FunctionIds, Module};
+use crate::module::{FunctionId, Module};
 use crate::support::slotmap::DenseMap;
-use std::sync::Arc;
 
 struct Template {
     body: Function,
@@ -18,11 +18,8 @@ struct Template {
     returns: usize,
 }
 
-pub(crate) fn inline_all(
-    module: &Module<VerifiedBody<'_>>,
-    ids: &FunctionIds<Function>,
-) -> Result<Function, CompileError> {
-    check_expansion(module, ids)?;
+pub(crate) fn inline_all(module: &Module<VerifiedBody<'_>>) -> Result<Function, CompileError> {
+    check_expansion(module)?;
     let mut uses = DenseMap::filled(module.functions.len(), 0usize);
     for id in module.functions.keys() {
         for &child in module.call_graph.callees(id) {
@@ -38,21 +35,16 @@ pub(crate) fn inline_all(
         let args = body.params(entry).to_vec();
         let mut copy = Copier::new(src, &source.cfg, &mut body, entry, &args, Shift::default());
         let above = Shift::above(src);
-        copy.copy_blocks(
-            &mut body,
-            &source.cfg,
-            Exit::Root,
-            |out, at, callee, args| {
-                let id = ids[&std::ptr::from_ref(callee)];
-                let template = templates[id].as_ref().unwrap();
-                let result = template.expand(out, at, args, above);
-                uses[id] -= 1;
-                if uses[id] == 0 {
-                    templates[id] = None;
-                }
-                result
-            },
-        );
+        copy.copy_blocks(&mut body, &source.cfg, Exit::Root, |out, at, site, args| {
+            let id = source.callee(site);
+            let template = templates[id].as_ref().unwrap();
+            let result = template.expand(out, at, args, above);
+            uses[id] -= 1;
+            if uses[id] == 0 {
+                templates[id] = None;
+            }
+            result
+        });
         // A callee can loop forever. Its call continuation, and even other
         // caller blocks dominated by the call, then become unreachable.
         body.prune_unreachable()?;
@@ -152,10 +144,7 @@ impl Shift {
     }
 }
 
-fn check_expansion(
-    module: &Module<VerifiedBody<'_>>,
-    ids: &FunctionIds<Function>,
-) -> Result<(), CompileError> {
+fn check_expansion(module: &Module<VerifiedBody<'_>>) -> Result<(), CompileError> {
     let mut sizes: DenseMap<FunctionId, Size> = DenseMap::new();
     // Frame-local bytes after inlining: own regions plus the largest callee.
     let mut frames: DenseMap<FunctionId, [u64; 2]> = DenseMap::new();
@@ -172,10 +161,7 @@ fn check_expansion(
             return Err(CompileError::Unsupported(crate::Limit::Frame));
         }
         frames.insert(frame);
-        let callee = |site| {
-            let (target, _) = f.call(site);
-            (sizes[ids[&Arc::as_ptr(target)]], target.arity())
-        };
+        let callee = |site| (sizes[src.callee(site)], f.call(site).0.arity());
         // The copier allocates even dead continuations in this body. Its
         // callers only copy the blocks reachable after pruning.
         let prunes = module
@@ -315,7 +301,7 @@ impl<'a> Copier<'a> {
         out: &mut Function,
         cfg: &ControlFlowGraph,
         exit: Exit,
-        mut call: impl FnMut(&mut Function, Block, &Function, &[Value]) -> (Block, Value),
+        mut call: impl FnMut(&mut Function, Block, Call, &[Value]) -> (Block, Value),
     ) -> Option<(Block, Value)> {
         let mut single = None;
         for &b in cfg.reverse_postorder() {
@@ -323,9 +309,9 @@ impl<'a> Copier<'a> {
             for i in self.src.instructions(b) {
                 let mut op = *self.src.op(i);
                 if let Op::Call(site) = op {
-                    let (callee, args) = self.src.call(site);
+                    let (_, args) = self.src.call(site);
                     let result = self.src.result(i).unwrap();
-                    (at, self.values[result]) = call(out, at, callee, &self.arguments(args));
+                    (at, self.values[result]) = call(out, at, site, &self.arguments(args));
                 } else {
                     if let Op::RustPacketCall(site) = op {
                         let (import, scratch, operands) = self.src.packet_call(site);

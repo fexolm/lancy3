@@ -15,12 +15,12 @@ fn replacing_a_call_changes_the_next_modules_reachable_functions() {
     root.set_terminator(b, Terminator::Return(root.result(inst).unwrap()));
 
     {
-        let (before, _) = root.verified_module().unwrap();
+        let before = root.verified_module().unwrap();
         assert_eq!(before.functions.len(), 2);
         assert_eq!(before.call_graph.callees(before.call_graph.root()).len(), 1);
     }
     root.replace_op(inst, Op::Copy(x)).unwrap();
-    let (after, _) = root.verified_module().unwrap();
+    let after = root.verified_module().unwrap();
     assert_eq!(after.functions.len(), 1);
     assert!(after.call_graph.callees(after.call_graph.root()).is_empty());
     assert_eq!(

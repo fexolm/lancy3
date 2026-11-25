@@ -2,7 +2,7 @@ use super::{Machine, frame::Frame, inst::Inst, isel};
 use crate::{
     CompileError, hir,
     lir::{self, TargetInst, regalloc},
-    module::{FunctionIds, Module},
+    module::Module,
 };
 use regalloc2::{Ctx, Edit, Function as _, OperandKind, Output, PRegSet};
 
@@ -21,7 +21,6 @@ pub(super) struct CompiledFunction {
 pub(super) fn compile(
     machine: Machine,
     source: Module<hir::ssa::VerifiedBody<'_>>,
-    ids: &FunctionIds<hir::Function>,
 ) -> Result<Module<CompiledFunction>, CompileError> {
     let entry = source.call_graph.root();
     let width = machine.cpu.bytes;
@@ -35,7 +34,7 @@ pub(super) fn compile(
     let mut ctx = Ctx::default();
     let module = source.try_map_functions::<CompiledFunction>(|id, src, calls, compiled| {
         let mut body = isel::select(machine, src, id == entry, |callee| {
-            let id = ids[&std::ptr::from_ref(callee)];
+            let id = src.callee(callee);
             (id, compiled[id].written)
         })?;
         let allocation = regalloc::allocate(&mut body, &mut ctx)?;

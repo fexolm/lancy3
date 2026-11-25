@@ -6,8 +6,8 @@ use crate::lir::x64::{
 };
 
 fn selected(f: &Function) -> Vec<Inst> {
-    let (m, ids) = f.verified_module().unwrap();
-    let m = compile(crate::lir::x64::Machine::host(), m, &ids).unwrap();
+    let m = f.verified_module().unwrap();
+    let m = compile(crate::lir::x64::Machine::host(), m).unwrap();
     m.functions[m.call_graph.root()].body.insts().to_vec()
 }
 
@@ -118,9 +118,8 @@ fn all_scalar_casts_emit_call_free_machine_code() {
     for from in crate::jit::tests::numeric_coverage::LANES {
         for to in crate::jit::tests::numeric_coverage::LANES {
             let f = crate::jit::tests::numeric_coverage::conversions::scalar_cast(from, to);
-            let (module, ids) = f.verified_module().unwrap();
-            let code =
-                crate::lir::x64::emit::emit(&crate::test_target::target(), module, &ids).unwrap();
+            let module = f.verified_module().unwrap();
+            let code = crate::lir::x64::emit::emit(&crate::test_target::target(), module).unwrap();
             for inst in Decoder::new(64, &code.bytes[..code.text_len], DecoderOptions::NONE) {
                 assert!(!inst.is_invalid(), "{from:?} -> {to:?} at {}", inst.ip());
                 assert_ne!(

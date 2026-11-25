@@ -4,7 +4,7 @@ use crate::hir::{
     Binary, Function, IrError, Lane, Op, Simd, Terminator, Ternary, Type, Value, ssa::VerifiedBody,
     transforms::ControlFlowGraph,
 };
-use crate::module::{FunctionIds, Module};
+use crate::module::{FunctionId, Module};
 use crate::support::slotmap::DenseMap;
 use std::{collections::HashMap, sync::Arc};
 
@@ -297,28 +297,27 @@ pub(super) fn propagate(
     })
 }
 
-/// Rebind calls to optimized callees when the caller explicitly keeps them out of line.
-pub(crate) fn simplify_bodies(
-    module: &Module<VerifiedBody<'_>>,
-    ids: &FunctionIds<Function>,
-) -> Result<Function, IrError> {
-    let mut bodies = DenseMap::with_capacity(module.functions.len());
+/// Optimize every body of the module, callees first, and rebind the calls
+/// of each caller to its optimized callees.
+pub(crate) fn simplify_bodies(module: &Module<VerifiedBody<'_>>) -> Result<Function, IrError> {
+    let mut bodies: DenseMap<FunctionId, Arc<Function>> =
+        DenseMap::with_capacity(module.functions.len());
     for (id, source) in module.functions.iter() {
         let mut body = source.function.clone();
         pipeline::optimize(
             &mut body,
             Analyses::new(Held::Borrowed(&source.cfg), Some(&source.dom)),
         )?;
-        for target in body.callees_mut() {
-            if let Some(&child) = ids.get(&Arc::as_ptr(target))
-                && let Some(callee) = bodies.get(child)
-            {
-                *target = Arc::clone(callee);
+        for (site, target) in body.calls_mut() {
+            let callee = source.callee(site);
+            if callee != FunctionId::INVALID {
+                *target = Arc::clone(bodies.get(callee).expect("callees are numbered first"));
             }
         }
         if id == module.call_graph.root() {
             return Ok(body);
         }
+        debug_assert_eq!(bodies.len(), id.index());
         bodies.insert(Arc::new(body));
     }
     unreachable!("module has a root")

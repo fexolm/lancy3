@@ -6,7 +6,7 @@ pub(super) use rules::packed_half;
 use super::{Machine, inst::Inst};
 use crate::{
     CompileError,
-    hir::{Function, ssa::VerifiedBody},
+    hir::{Call, ssa::VerifiedBody},
     lir::{
         self,
         isel::{self, Edges},
@@ -19,7 +19,7 @@ pub(super) fn select(
     machine: Machine,
     source: &VerifiedBody<'_>,
     root: bool,
-    callee_info: impl Fn(&Function) -> (FunctionId, PRegSet),
+    callee_info: impl Fn(Call) -> (FunctionId, PRegSet),
 ) -> Result<lir::Function<Inst>, CompileError> {
     let _span = tracing::debug_span!(target: "lancy::compile", "select_instructions").entered();
     let (f, cfg) = (source.function, &source.cfg);

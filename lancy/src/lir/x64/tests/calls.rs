@@ -19,10 +19,10 @@ fn a_small_callee_leaves_registers_available_to_its_caller() {
         result = f.append(b, H::Bin(Binary::Add, result, arg)).unwrap();
     }
     f.set_terminator(b, Terminator::Return(result));
-    let (source, ids) = f.verified_module().unwrap();
+    let source = f.verified_module().unwrap();
     let entry = source.call_graph.root();
     let edges = source.call_graph.callees(entry).as_ptr();
-    let module = compile(crate::lir::x64::Machine::host(), source, &ids).unwrap();
+    let module = compile(crate::lir::x64::Machine::host(), source).unwrap();
     assert_eq!(module.call_graph.callees(entry).as_ptr(), edges);
     assert_eq!(
         module.functions[module.call_graph.root()]
@@ -125,9 +125,9 @@ fn shared_calls_preserve_live_registers_and_spilled_arguments() {
         v = f.append(b, H::Bin(Binary::Add, v, arg)).unwrap();
     }
     f.set_terminator(b, Terminator::Return(v));
-    let (source, ids) = f.verified_module().unwrap();
+    let source = f.verified_module().unwrap();
     assert_eq!(
-        compile(crate::lir::x64::Machine::host(), source, &ids)
+        compile(crate::lir::x64::Machine::host(), source)
             .unwrap()
             .functions
             .len(),

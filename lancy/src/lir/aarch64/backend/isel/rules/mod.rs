@@ -16,7 +16,7 @@ mod wide;
 use crate::lir::aarch64::backend::Config;
 use crate::{
     hir::operation::operation,
-    hir::{Binary, Function, Lane, Op, Simd, Ternary, Type, Unary, Value},
+    hir::{Binary, Call, Function, Lane, Op, Simd, Ternary, Type, Unary, Value},
     lir::{
         aarch64::backend::{
             inst::{Inst, class},
@@ -39,7 +39,7 @@ pub(super) fn select(
     out: &mut Vec<Inst>,
     config: Config,
     entry: bool,
-    callee: impl Fn(&Function) -> (FunctionId, PRegSet),
+    callee: impl Fn(Call) -> (FunctionId, PRegSet),
 ) {
     let mut rules = Rules {
         ctx,
@@ -173,7 +173,7 @@ impl Rules<'_> {
         Some(Inst::Rotate(form, self.dst(), self.input(a), self.input(b)))
     }
 
-    fn instruction(&mut self, op: Op, callee: impl Fn(&Function) -> (FunctionId, PRegSet)) -> Inst {
+    fn instruction(&mut self, op: Op, callee: impl Fn(Call) -> (FunctionId, PRegSet)) -> Inst {
         let native = match op {
             Op::Const(n) => return Inst::Literal(Type::I32, n as u32 as u128, self.dst()),
             Op::CallScratch { offset, bytes } => {

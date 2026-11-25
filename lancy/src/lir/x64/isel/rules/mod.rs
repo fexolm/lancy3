@@ -20,7 +20,7 @@ use super::masks::Masks;
 use crate::lir::x64::Cpu;
 use crate::{
     CompileError,
-    hir::{Function, Lane, Op, Simd, Ternary, Type, Value},
+    hir::{Call, Function, Lane, Op, Simd, Ternary, Type, Value},
     lir::{
         self,
         isel::{Context, Root},
@@ -36,7 +36,7 @@ pub(super) fn select(
     out: &mut Vec<Inst>,
     target: (Cpu, &Masks),
     root: Root,
-    callee: impl Fn(&Function) -> (FunctionId, PRegSet),
+    callee: impl Fn(Call) -> (FunctionId, PRegSet),
 ) -> Result<(), CompileError> {
     let mut rules = Rules {
         ctx,
@@ -72,7 +72,7 @@ impl Rules<'_> {
     fn instruction(
         &mut self,
         op: Op,
-        callee: impl Fn(&Function) -> (FunctionId, PRegSet),
+        callee: impl Fn(Call) -> (FunctionId, PRegSet),
     ) -> Result<Inst, CompileError> {
         Ok(match op {
             Op::Const(n) => Inst::Imm(self.dst(), n),

@@ -8,10 +8,10 @@ use super::{
 use crate::hir::operation::Action;
 use crate::{
     CompileError, Limit, Trap,
-    hir::{Binary, Function, Type, ssa::VerifiedBody},
+    hir::{Binary, Type, ssa::VerifiedBody},
     jit::{DebugFrame, DebugFunction},
     lir::layout,
-    module::{FunctionId, FunctionIds, Module},
+    module::{FunctionId, Module},
     support::slotmap::DenseMap,
 };
 use iced_x86::{BlockEncoderOptions, IcedError, code_asm::*};
@@ -128,17 +128,15 @@ pub(crate) struct Code {
 pub(crate) fn emit(
     target: &splice_target::Target,
     source: Module<VerifiedBody<'_>>,
-    ids: &FunctionIds<Function>,
 ) -> Result<Code, CompileError> {
-    emit_mode(&compile(Machine::new(target), source, ids)?, false)
+    emit_mode(&compile(Machine::new(target), source)?, false)
 }
 
 pub(crate) fn emit_debug(
     target: &splice_target::Target,
     source: Module<VerifiedBody<'_>>,
-    ids: &FunctionIds<Function>,
 ) -> Result<Code, CompileError> {
-    emit_mode(&compile(Machine::new(target), source, ids)?, true)
+    emit_mode(&compile(Machine::new(target), source)?, true)
 }
 
 #[cfg(test)]

@@ -8,8 +8,8 @@ mod regalloc;
 mod schedule;
 mod x64;
 
-use crate::hir::{Function as HirFunction, ssa::VerifiedBody};
-use crate::module::{FunctionIds, Module};
+use crate::hir::ssa::VerifiedBody;
+use crate::module::Module;
 use crate::{CompileError, jit::DebugFunction};
 use function::Function;
 use inst::TargetInst;
@@ -30,31 +30,28 @@ pub(crate) struct Code {
 pub(crate) fn emit(
     target: &Target,
     source: Module<VerifiedBody<'_>>,
-    ids: &FunctionIds<HirFunction>,
 ) -> Result<Code, CompileError> {
-    emit_mode(target, source, ids, false)
+    emit_mode(target, source, false)
 }
 
 pub(crate) fn emit_debug(
     target: &Target,
     source: Module<VerifiedBody<'_>>,
-    ids: &FunctionIds<HirFunction>,
 ) -> Result<Code, CompileError> {
-    emit_mode(target, source, ids, true)
+    emit_mode(target, source, true)
 }
 
 fn emit_mode(
     target: &Target,
     source: Module<VerifiedBody<'_>>,
-    ids: &FunctionIds<HirFunction>,
     debug: bool,
 ) -> Result<Code, CompileError> {
     Ok(match target.arch() {
         Arch::X86_64 => {
             let code = if debug {
-                x64::emit_debug(target, source, ids)?
+                x64::emit_debug(target, source)?
             } else {
-                x64::emit(target, source, ids)?
+                x64::emit(target, source)?
             };
             Code {
                 bytes: code.bytes,
@@ -65,9 +62,9 @@ fn emit_mode(
         }
         Arch::Aarch64 => {
             let code = if debug {
-                aarch64::emit_debug(target, source, ids)?
+                aarch64::emit_debug(target, source)?
             } else {
-                aarch64::emit(target, source, ids)?
+                aarch64::emit(target, source)?
             };
             Code {
                 bytes: code.bytes,
@@ -105,12 +102,11 @@ fn filetest_target(arch: Arch) -> Result<Target, String> {
 pub(crate) fn check_machine(
     case: &mut crate::filetests::Case<'_>,
     module: Module<VerifiedBody<'_>>,
-    ids: &FunctionIds<HirFunction>,
 ) -> crate::filetests::Result<()> {
     let root = module.functions[module.call_graph.root()].function;
-    x64::check_machine(case, &filetest_target(Arch::X86_64)?, module, ids)?;
-    let (module, ids) = root
+    x64::check_machine(case, &filetest_target(Arch::X86_64)?, module)?;
+    let module = root
         .verified_module()
         .map_err(|error| format!("verify: {error}"))?;
-    aarch64::check_machine(case, &filetest_target(Arch::Aarch64)?, module, &ids)
+    aarch64::check_machine(case, &filetest_target(Arch::Aarch64)?, module)
 }

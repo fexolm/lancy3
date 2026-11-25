@@ -3,7 +3,7 @@ mod listing;
 
 use crate::CompileError;
 use crate::filetests::{Case, Result};
-use crate::hir::{Function, ssa::VerifiedBody};
+use crate::hir::ssa::VerifiedBody;
 use crate::lir::{
     layout, regalloc,
     x64::{
@@ -13,24 +13,23 @@ use crate::lir::{
         isel,
     },
 };
-use crate::module::{FunctionIds, Module};
+use crate::module::Module;
 
 pub(crate) fn check_machine(
     case: &mut Case<'_>,
     target: &splice_target::Target,
     module: Module<VerifiedBody<'_>>,
-    ids: &FunctionIds<Function>,
 ) -> Result<()> {
     let machine = Machine::new(target);
     if case.checks.contains_key("isel") {
-        let text = selected(machine, &module, ids).map_err(|e| format!("isel: {e}"))?;
+        let text = selected(machine, &module).map_err(|e| format!("isel: {e}"))?;
         case.check("isel", || text)?;
     }
     if ["alloc", "asm", "layout"]
         .iter()
         .any(|stage| case.checks.contains_key(stage))
     {
-        let module = compile(machine, module, ids).map_err(|e| format!("alloc: {e}"))?;
+        let module = compile(machine, module).map_err(|e| format!("alloc: {e}"))?;
         case.check("alloc", || {
             let mut out = String::new();
             for (id, f) in module.functions.iter() {
@@ -55,7 +54,6 @@ pub(crate) fn check_machine(
 fn selected(
     machine: Machine,
     module: &Module<VerifiedBody>,
-    ids: &FunctionIds<Function>,
 ) -> std::result::Result<String, CompileError> {
     let mut out = String::new();
     let mut clobbers = crate::support::slotmap::DenseMap::new();
@@ -63,7 +61,7 @@ fn selected(
     for (id, src) in module.functions.iter() {
         let root = id == module.call_graph.root();
         let mut f = isel::select(machine, src, root, |callee| {
-            let id = ids[&std::ptr::from_ref(callee)];
+            let id = src.callee(callee);
             (id, clobbers[id])
         })?;
         listing::lir(&mut out, id, &f, None);

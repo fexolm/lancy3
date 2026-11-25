@@ -1,5 +1,5 @@
-use crate::hir::{self, Function, Op, Simd, Terminator, Value, ssa::VerifiedBody};
-use crate::module::{FunctionIds, Module};
+use crate::hir::{self, Op, Simd, Terminator, Value, ssa::VerifiedBody};
+use crate::module::Module;
 use std::fmt::{Display, Write};
 
 pub(crate) fn list(items: impl IntoIterator<Item = impl Display>) -> String {
@@ -14,7 +14,7 @@ fn v(value: Value) -> String {
     format!("v{}", value.index())
 }
 
-pub(super) fn hir(module: &Module<VerifiedBody>, ids: &FunctionIds<Function>) -> String {
+pub(super) fn hir(module: &Module<VerifiedBody>) -> String {
     let mut out = String::new();
     for (id, src) in module.functions.iter() {
         let f = src.function;
@@ -113,8 +113,8 @@ pub(super) fn hir(module: &Module<VerifiedBody>, ids: &FunctionIds<Function>) ->
                     Op::Load(t, p) => format!("load {t:?} {}", v(p)),
                     Op::Store(p, x) => format!("store {} {}", v(p), v(x)),
                     Op::Call(site) => {
-                        let (callee, args) = f.call(site);
-                        let id = ids[&std::sync::Arc::as_ptr(callee)];
+                        let (_, args) = f.call(site);
+                        let id = src.callee(site);
                         format!(
                             "call f{}({})",
                             id.index(),

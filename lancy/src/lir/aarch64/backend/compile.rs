@@ -6,9 +6,9 @@ use super::{
 };
 use crate::{
     CompileError,
-    hir::{Function, ssa::VerifiedBody},
+    hir::ssa::VerifiedBody,
     lir::{self, regalloc},
-    module::{FunctionIds, Module},
+    module::Module,
 };
 use regalloc2::{Ctx, Edit, Function as _, OperandKind, Output, PRegSet};
 
@@ -35,14 +35,13 @@ pub(super) struct Compiled {
 
 pub(super) fn compile(
     source: Module<VerifiedBody<'_>>,
-    ids: &FunctionIds<Function>,
     config: Config,
 ) -> Result<Module<Compiled>> {
     let root = source.call_graph.root();
     let mut ctx = Ctx::default();
     source.try_map_functions::<Compiled>(|id, source, calls, compiled| {
         let mut body = isel::select(source, config, id == root, |func| {
-            let id = ids[&std::ptr::from_ref(func)];
+            let id = source.callee(func);
             (id, compiled[id].written)
         })?;
         let allocation = regalloc::allocate(&mut body, &mut ctx)?;

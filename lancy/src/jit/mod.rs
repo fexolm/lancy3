@@ -33,7 +33,7 @@ pub(crate) mod tests;
 
 use crate::CompileError;
 use crate::hir::{Function, ssa::VerifiedBody, transforms::passes};
-use crate::module::{FunctionIds, Module};
+use crate::module::Module;
 use splice_target::Target;
 use splice_target::TargetError;
 
@@ -94,19 +94,18 @@ impl Inlining {
 /// Lower optimized HIR, retrying with calls if the expanded form exceeds a target limit.
 pub(crate) fn optimize_and_lower<T>(
     source: &Module<VerifiedBody<'_>>,
-    ids: &FunctionIds<Function>,
     inlining: Inlining,
-    mut lower: impl FnMut(Module<VerifiedBody<'_>>, &FunctionIds<Function>) -> Result<T, CompileError>,
+    mut lower: impl FnMut(Module<VerifiedBody<'_>>) -> Result<T, CompileError>,
 ) -> Result<T, CompileError> {
     let _span =
         tracing::debug_span!(target: "lancy::compile", "optimize_and_lower_lancy").entered();
     let mut emit = |body: Function| {
-        let (module, ids) = body.verified_module()?;
-        lower(module, &ids)
+        let module = body.verified_module()?;
+        lower(module)
     };
     if inlining.should_inline(source) {
         let expanded = tracing::debug_span!(target: "lancy::compile", "inline_lancy_hir")
-            .in_scope(|| passes::inline_all(source, ids))
+            .in_scope(|| passes::inline_all(source))
             .and_then(|mut body| {
                 tracing::debug_span!(target: "lancy::compile", "optimize_lancy_hir")
                     .in_scope(|| passes::simplify(&mut body))?;
@@ -119,6 +118,6 @@ pub(crate) fn optimize_and_lower<T>(
         }
     }
     let body = tracing::debug_span!(target: "lancy::compile", "optimize_lancy_hir")
-        .in_scope(|| passes::simplify_bodies(source, ids))?;
+        .in_scope(|| passes::simplify_bodies(source))?;
     emit(body)
 }

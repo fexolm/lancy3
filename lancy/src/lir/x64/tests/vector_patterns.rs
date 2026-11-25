@@ -20,8 +20,8 @@ fn instructions(f: &Function) -> Vec<Mnemonic> {
 }
 
 fn decoded(f: &Function) -> Vec<Instruction> {
-    let (module, ids) = f.verified_module().unwrap();
-    let code = x64::emit(&crate::test_target::target(), module, &ids).unwrap();
+    let module = f.verified_module().unwrap();
+    let code = x64::emit(&crate::test_target::target(), module).unwrap();
     Decoder::new(64, &code.bytes[..code.text_len], DecoderOptions::NONE)
         .into_iter()
         .collect()
@@ -319,8 +319,8 @@ fn adjacent_vector_load_can_be_a_packed_memory_operand() {
     assert_eq!(out, vec![0x3c3c_3c3c_3c3c_3c3c; n / 8]);
     let cpu = Cpu::host();
     if cpu.bytes == 64 || cpu.bytes == 32 && cpu.isa.avx2 {
-        let (m, ids) = f.verified_module().unwrap();
-        let code = x64::emit(&crate::test_target::target(), m, &ids).unwrap();
+        let m = f.verified_module().unwrap();
+        let code = x64::emit(&crate::test_target::target(), m).unwrap();
         assert!(
             Decoder::new(64, &code.bytes[..code.text_len], DecoderOptions::NONE)
                 .iter()

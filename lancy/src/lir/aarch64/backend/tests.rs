@@ -1,9 +1,6 @@
 use super::compile::Compiled;
 use crate::filetests::{Case, Result};
-use crate::{
-    hir::{Function, ssa::VerifiedBody},
-    module::{FunctionIds, Module},
-};
+use crate::{hir::ssa::VerifiedBody, module::Module};
 use regalloc2::{Block, Function as _, InstOrEdit};
 use splice_target::Profile;
 use std::fmt::Write;
@@ -12,7 +9,6 @@ pub(crate) fn check_machine(
     case: &mut Case<'_>,
     target: &splice_target::Target,
     module: Module<VerifiedBody<'_>>,
-    ids: &FunctionIds<Function>,
 ) -> Result<()> {
     if !["aarch64-isel", "aarch64-alloc"]
         .iter()
@@ -22,8 +18,8 @@ pub(crate) fn check_machine(
         return Ok(());
     }
     let simd = super::Config::new(target);
-    let compiled = super::compile(module, ids, simd)
-        .map_err(|error| format!("aarch64 allocation: {error}"))?;
+    let compiled =
+        super::compile(module, simd).map_err(|error| format!("aarch64 allocation: {error}"))?;
     let root = &compiled.functions[compiled.call_graph.root()];
     case.check("aarch64-isel", || selected(root))?;
     case.check("aarch64-alloc", || allocated(root))?;

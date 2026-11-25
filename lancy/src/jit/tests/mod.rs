@@ -36,9 +36,9 @@ fn an_unrepresentable_expansion_keeps_the_shared_graph_executable() {
         f.set_terminator(twice, Terminator::Return(sum));
         f.set_terminator(skip, Terminator::Return(one));
     }
-    let (m, ids) = f.verified_module().unwrap();
+    let m = f.verified_module().unwrap();
     assert!(matches!(
-        passes::inline_all(&m, &ids),
+        passes::inline_all(&m),
         Err(crate::CompileError::Unsupported(crate::Limit::Registers))
     ));
     let code = ScalarKernel::compile(&f, &crate::test_target::options()).unwrap();
@@ -57,7 +57,7 @@ fn every_size_limit_of_the_expanded_body_falls_back_to_calls() {
     let site = root.add_call(Arc::new(callee), &[x]);
     let result = root.append(entry, Op::Call(site)).unwrap();
     root.set_terminator(entry, Terminator::Return(result));
-    let (module, ids) = root.verified_module().unwrap();
+    let module = root.verified_module().unwrap();
     let limits = [
         CompileError::Unsupported(crate::Limit::Registers),
         CompileError::Unsupported(crate::Limit::BranchRange {
@@ -70,7 +70,7 @@ fn every_size_limit_of_the_expanded_body_falls_back_to_calls() {
     ];
     for limit in limits {
         let mut limit = Some(limit);
-        let lowered = super::optimize_and_lower(&module, &ids, Inlining::Always, |m, _| {
+        let lowered = super::optimize_and_lower(&module, Inlining::Always, |m| {
             // The first attempt is the inlined single-function body.
             match limit.take() {
                 Some(error) => {

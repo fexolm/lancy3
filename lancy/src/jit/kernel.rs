@@ -130,15 +130,15 @@ impl ScalarKernel {
         .entered();
         let target = options.target;
         target.check_execution()?;
-        let (source, ids) = function.verified_module()?;
+        let source = function.verified_module()?;
         // Scratch can materialize a pointer even for a numeric signature.
         // Its raw caller must ensure initialization and bound every access.
         let has_scratch = source.functions.values().any(|body| body.has_call_scratch);
         let code = if options.debug {
-            crate::lir::emit_debug(&target, source, &ids)?
+            crate::lir::emit_debug(&target, source)?
         } else {
-            super::optimize_and_lower(&source, &ids, options.inlining, |module, ids| {
-                crate::lir::emit(&target, module, ids)
+            super::optimize_and_lower(&source, options.inlining, |module| {
+                crate::lir::emit(&target, module)
             })?
         };
         let memory = tracing::debug_span!(target: "lancy::compile", "install_code")

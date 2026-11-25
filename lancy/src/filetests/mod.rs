@@ -4,7 +4,7 @@ pub(crate) mod listing;
 mod run;
 
 use crate::hir::{Function, ssa::VerifiedBody, transforms::passes};
-use crate::module::{FunctionIds, Module};
+use crate::module::Module;
 use crate::{CompileError, Inlining, ScalarKernel, jit, lir};
 use filecheck::{CheckerBuilder, NO_VARIABLES};
 use run::Run;
@@ -126,14 +126,10 @@ impl<'a> Case<'a> {
         self.runs.is_empty() && self.checks.is_empty() && self.encodings.is_empty()
     }
 
-    fn check_optimized(
-        &mut self,
-        module: Module<VerifiedBody<'_>>,
-        ids: &FunctionIds<Function>,
-    ) -> Result<()> {
-        self.check("opt", || listing::hir(&module, ids))?;
+    fn check_optimized(&mut self, module: Module<VerifiedBody<'_>>) -> Result<()> {
+        self.check("opt", || listing::hir(&module))?;
         self.interpret("opt", module.functions[module.call_graph.root()].function)?;
-        lir::check_machine(self, module, ids)
+        lir::check_machine(self, module)
     }
 
     fn execute(mut self) -> Result<()> {
@@ -162,8 +158,8 @@ impl<'a> Case<'a> {
             return Err("case has no expectations".into());
         }
         let f = parsed.map_err(|e| e.to_string())?;
-        let (source, ids) = f.verified_module().map_err(|e| format!("verify: {e}"))?;
-        self.check("source", || listing::hir(&source, &ids))?;
+        let source = f.verified_module().map_err(|e| format!("verify: {e}"))?;
+        self.check("source", || listing::hir(&source))?;
         self.check("cfg", || listing::cfg(&source))?;
         self.interpret("source", &f)?;
         if self.done() {
@@ -171,24 +167,23 @@ impl<'a> Case<'a> {
         }
         if self.checks.contains_key("inline") || !self.runs.is_empty() {
             if self.policy.should_inline(&source) {
-                let expanded =
-                    passes::inline_all(&source, &ids).map_err(|e| format!("inline: {e}"))?;
-                let (module, ids) = expanded
+                let expanded = passes::inline_all(&source).map_err(|e| format!("inline: {e}"))?;
+                let module = expanded
                     .verified_module()
                     .map_err(|e| format!("inline: {e}"))?;
-                self.check("inline", || listing::hir(&module, &ids))?;
+                self.check("inline", || listing::hir(&module))?;
                 self.interpret("inline", &expanded)?;
             } else {
-                self.check("inline", || listing::hir(&source, &ids))?;
+                self.check("inline", || listing::hir(&source))?;
                 self.interpret("inline", &f)?;
             }
         }
         if self.done() {
             return Ok(());
         }
-        jit::optimize_and_lower(&source, &ids, self.policy, |module, ids| {
+        jit::optimize_and_lower(&source, self.policy, |module| {
             // Keep fixture assertion failures separate from compiler errors that trigger fallback.
-            Ok(self.check_optimized(module, ids))
+            Ok(self.check_optimized(module))
         })
         .map_err(|e| format!("opt: {e}"))??;
         self.all_checks_reached()?;

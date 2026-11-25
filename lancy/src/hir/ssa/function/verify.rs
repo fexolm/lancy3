@@ -1,10 +1,10 @@
-use super::{Block, Function, Op, Terminator, Type, Value};
+use super::{Block, Call, Function, Op, Terminator, Type, Value};
 use crate::CompileError;
 use crate::hir::{
     IrError,
     transforms::{ControlFlowGraph, DomTree},
 };
-use crate::module::{FunctionIds, Module};
+use crate::module::{FunctionId, Module};
 use crate::support::slotmap::DenseMap;
 
 pub(crate) struct VerifiedBody<'a> {
@@ -12,6 +12,15 @@ pub(crate) struct VerifiedBody<'a> {
     pub cfg: ControlFlowGraph,
     pub dom: DomTree,
     pub has_call_scratch: bool,
+    /// The module ID of each call site's callee; `INVALID` for a call
+    /// record that no instruction uses.
+    callees: DenseMap<Call, FunctionId>,
+}
+
+impl VerifiedBody<'_> {
+    pub(crate) fn callee(&self, call: Call) -> FunctionId {
+        self.callees[call]
+    }
 }
 
 impl Function {
@@ -150,16 +159,16 @@ impl Function {
             cfg,
             dom,
             has_call_scratch,
+            callees: DenseMap::new(),
         })
     }
 }
 
 impl Function {
-    pub(crate) fn verified_module(
-        &self,
-    ) -> Result<(Module<VerifiedBody<'_>>, FunctionIds<Self>), CompileError> {
+    /// Verify this function and every distinct callee, numbered callee first.
+    pub(crate) fn verified_module(&self) -> Result<Module<VerifiedBody<'_>>, CompileError> {
         let _span = tracing::debug_span!(target: "lancy::compile", "verify_lancy_hir").entered();
-        Module::discover(self, |function, callees| {
+        let (mut module, ids) = Module::discover(self, |function, callees| {
             let body = function.verified_body()?;
             for inst in function.insts.values() {
                 if let Op::Call(site) = inst.op {
@@ -167,6 +176,14 @@ impl Function {
                 }
             }
             Ok(body)
-        })
+        })?;
+        for body in module.functions.values_mut() {
+            let calls = &body.function.calls;
+            body.callees = DenseMap::from_fn(calls.len(), |call| {
+                let callee = std::sync::Arc::as_ptr(&calls[call].callee);
+                ids.get(&callee).copied().unwrap_or(FunctionId::INVALID)
+            });
+        }
+        Ok(module)
     }
 }
