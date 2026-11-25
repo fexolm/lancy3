@@ -27,7 +27,9 @@ fn scratch_pointers_require_the_raw_call_contract_transitively() {
         )
         .unwrap();
     let value = callee.append(block, Op::Const(19)).unwrap();
-    callee.append(block, Op::Store(address, value));
+    callee
+        .append_inst(block, Op::Store(address, value))
+        .unwrap();
     let read = callee
         .append(block, Op::Load(crate::hir::Type::I32, address))
         .unwrap();

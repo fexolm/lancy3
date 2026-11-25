@@ -1,4 +1,4 @@
-use super::{Block, Call, Edge, Inst, Type, Value};
+use super::{Block, Call, Edge, Inst, Lane, Type, Value};
 use thiserror::Error;
 
 /// A structural, typing or dominance error in an SSA function or an attempted edit.
@@ -65,6 +65,12 @@ pub enum IrError {
         expected: Type,
         actual: Type,
     },
+    /// An `i32` literal is `Op::Const`; other literals hold only the bits of
+    /// their lane. See `Op::literal`.
+    #[error("non-canonical literal in {inst:?}: {bits:#x} as {lane:?}")]
+    NonCanonicalLiteral { inst: Inst, lane: Lane, bits: u128 },
+    #[error("{inst:?} defines no value")]
+    NoResult { inst: Inst },
     #[error("invalid numeric operation in {inst:?} for {ty:?}")]
     InvalidNumeric { inst: Inst, ty: Type },
     /// A scalar operation, load, store or conversion received a vector.

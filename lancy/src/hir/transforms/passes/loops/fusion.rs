@@ -2,7 +2,7 @@
 use super::super::facts::flatten;
 use super::{Bounds, Count, CountedLoop, Facts, NaturalLoops};
 use crate::hir::{
-    Block, Function, Op, Scale, Simd, Terminator, Type, Unary, Value, VectorAddress,
+    Block, Function, Op, Scale, Simd, Terminator, Unary, Value,
     ssa::Edge,
     transforms::{ControlFlowGraph, DomTree},
 };
@@ -66,31 +66,11 @@ impl Body {
                     return None;
                 }
                 let op = *f.op(inst);
-                let (address, ty, writes) = match op {
-                    Op::Load(ty, address) => (address, ty, false),
-                    Op::Simd(Simd::Load(lane, address)) => (address, Type::Vector(lane), false),
-                    Op::Store(address, value) | Op::Simd(Simd::Store(address, value)) => {
-                        (address, f.value_type(value), true)
+                let (address, ty, writes) = match op.access(f) {
+                    Some(access) if access.indices.is_none() => {
+                        (access.address, access.ty, access.write)
                     }
-                    Op::Simd(Simd::MaskedLoad {
-                        address:
-                            VectorAddress {
-                                base,
-                                indices: None,
-                            },
-                        passthrough,
-                        ..
-                    }) => (base, f.value_type(passthrough), false),
-                    Op::Simd(Simd::MaskedStore {
-                        address:
-                            VectorAddress {
-                                base,
-                                indices: None,
-                            },
-                        value,
-                        ..
-                    }) => (base, f.value_type(value), true),
-                    _ if facts.is_total(f, inst) => continue,
+                    None if facts.is_total(f, inst) => continue,
                     _ => return None,
                 };
                 let Some(Op::PtrOffset(base, index, scale)) = facts.op(f, address) else {

@@ -595,7 +595,7 @@ fn broadcast_shift_counts_become_immediates_with_wrapping_and_signedness() {
                 let mut f = Function::new(&[ty], ty);
                 let b = f.entry();
                 let x = f.params(b)[0];
-                let shift = f.append(b, Op::Literal(lane, count.into())).unwrap();
+                let shift = f.append(b, Op::literal(lane, count.into())).unwrap();
                 let counts = f.append(b, Op::Simd(Simd::Splat(shift))).unwrap();
                 let y = f.append(b, Op::Simd(Simd::Bin(op, x, counts))).unwrap();
                 let z = f.append(b, Op::Simd(Simd::Bin(Binary::Xor, x, y))).unwrap();
@@ -866,14 +866,15 @@ fn indexed_memory_can_reuse_the_mask_as_indices_and_passthrough() {
                 }),
             )
             .unwrap();
-        f.append(
+        f.append_inst(
             b,
             Op::Simd(Simd::MaskedStore {
                 address,
                 mask: both,
                 value: values,
             }),
-        );
+        )
+        .unwrap();
         let r = f
             .append(b, Op::Simd(Simd::Bin(Binary::Xor, loaded, both)))
             .unwrap();

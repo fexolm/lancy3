@@ -338,7 +338,10 @@ impl<'a> Copier<'a> {
                         op.map_operands(|v| self.values[v]);
                         op = self.shift.apply(op);
                     }
-                    if let Some(result) = out.append(at, op) {
+                    let copy = out
+                        .append_inst(at, op)
+                        .expect("a copy of a verified operation");
+                    if let Some(result) = out.result(copy) {
                         self.values[self.src.result(i).unwrap()] = result;
                     }
                 }

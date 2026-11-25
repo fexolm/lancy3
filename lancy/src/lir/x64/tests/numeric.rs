@@ -168,7 +168,8 @@ fn wide_spills_and_outlined_calls_preserve_every_lane() {
     let z = leaf
         .append(b, Op::Simd(Simd::Bin(Binary::Add, x, y)))
         .unwrap();
-    leaf.append(b, Op::Simd(Simd::ExtractLane(z, idx)));
+    leaf.append_inst(b, Op::Simd(Simd::ExtractLane(z, idx)))
+        .unwrap();
     leaf.set_terminator(b, Terminator::Return(z));
     let mut types = vec![v; 22];
     types.push(Type::I32);
@@ -208,10 +209,10 @@ fn unaligned_vector_store_precedes_trap() {
     let [p, i] = f.params(b).try_into().unwrap();
     let x = f.append(b, Op::Simd(Simd::Load(Lane::I32, p))).unwrap();
     let y = f.append(b, Op::Simd(Simd::Bin(Binary::Add, x, x))).unwrap();
-    f.append(b, Op::Simd(Simd::Store(p, y)));
+    f.append_inst(b, Op::Simd(Simd::Store(p, y))).unwrap();
     let n = f.append(b, Op::Simd(Simd::LaneCount(Lane::I32))).unwrap();
-    f.append(b, Op::BoundsCheck(i, n));
-    f.append(b, Op::Simd(Simd::Store(p, x)));
+    f.append_inst(b, Op::BoundsCheck(i, n)).unwrap();
+    f.append_inst(b, Op::Simd(Simd::Store(p, x))).unwrap();
     f.set_terminator(b, Terminator::Return(i));
     let k = ScalarKernel::compile(&f, &crate::test_target::options()).unwrap();
     let w = crate::test_target::width();

@@ -1,5 +1,7 @@
 use crate::hir::transforms::{ControlFlowGraph, DomTree};
-use crate::hir::{Binary, Block, Function, Inst, Lane, MIN_VECTOR_BYTES, Op, Simd, Value, integer};
+use crate::hir::{
+    Block, Effects, Function, Inst, Lane, MIN_VECTOR_BYTES, Op, Simd, TrapKind, Value, integer,
+};
 use crate::support::slotmap::DenseMap;
 use std::ops::Range;
 
@@ -313,33 +315,48 @@ impl Facts {
     /// or any memory or debug effect.
     pub(super) fn is_total(&self, f: &Function, inst: Inst) -> bool {
         let op = *f.op(inst);
-        if op.pure(f.result(inst).map(|v| f.value_type(v))) {
+        let effects = op.effects(f);
+        if effects.is_none() {
             return true;
         }
-        let (dividend, divisor) = match op {
-            Op::Bin(Binary::Div | Binary::Rem, a, b)
-            | Op::Simd(Simd::Bin(Binary::Div | Binary::Rem, a, b)) => (a, b),
-            Op::Simd(Simd::ExtractLane(vector, index) | Simd::InsertLane(vector, index, _)) => {
-                let lanes = MIN_VECTOR_BYTES / f.value_type(vector).lane().unwrap().bytes();
-                return self
-                    .constant(f, index)
-                    .is_some_and(|i| (i as u32) < lanes as u32);
-            }
-            _ => return false,
-        };
-        let Some((lane, bits)) = self.literal_bits(f, divisor) else {
+        // Only a trap that the operands rule out can be skipped.
+        if effects
+            != (Effects {
+                trap: effects.trap,
+                ..Effects::default()
+            })
+        {
             return false;
-        };
-        bits != 0
-            && (!lane.signed()
-                || bits != integer::mask(lane)
-                || self
-                    .literal_bits(f, dividend)
-                    .is_some_and(|(_, bits)| bits != 1 << (lane.bytes() * 8 - 1)))
+        }
+        match (effects.trap, op) {
+            (
+                Some(TrapKind::Division),
+                Op::Bin(_, dividend, divisor) | Op::Simd(Simd::Bin(_, dividend, divisor)),
+            ) => {
+                let Some((lane, bits)) = self.literal_bits(f, divisor) else {
+                    return false;
+                };
+                bits != 0
+                    && (!lane.signed()
+                        || bits != integer::mask(lane)
+                        || self
+                            .literal_bits(f, dividend)
+                            .is_some_and(|(_, bits)| bits != 1 << (lane.bytes() * 8 - 1)))
+            }
+            (
+                Some(TrapKind::LaneIndex),
+                Op::Simd(Simd::ExtractLane(vector, index) | Simd::InsertLane(vector, index, _)),
+            ) => {
+                let lanes = MIN_VECTOR_BYTES / f.value_type(vector).lane().unwrap().bytes();
+                self.constant(f, index)
+                    .is_some_and(|i| (i as u32) < lanes as u32)
+            }
+            _ => false,
+        }
     }
 
     pub(super) fn append(&mut self, f: &mut Function, block: Block, op: Op) -> Value {
-        let inst = f.append_inst(block, op);
+        let inst = f.append_inst(block, op).expect("well-typed operation");
         let value = f.result(inst).expect("value-producing operation");
         debug_assert_eq!(self.defs.len(), value.index());
         self.defs.insert(Definition { block, inst });

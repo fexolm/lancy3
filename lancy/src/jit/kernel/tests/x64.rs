@@ -115,9 +115,10 @@ fn outlined_vector_pressure_preserves_windows_xmm_registers_on_normal_and_trappi
             .append(b, Op::Simd(Simd::Bin(Binary::Add, sum, v)))
             .unwrap();
     }
-    leaf.append(b, Op::Simd(Simd::Store(dst, sum)));
+    leaf.append_inst(b, Op::Simd(Simd::Store(dst, sum)))
+        .unwrap();
     let one = leaf.append(b, Op::Const(1)).unwrap();
-    leaf.append(b, Op::BoundsCheck(index, one));
+    leaf.append_inst(b, Op::BoundsCheck(index, one)).unwrap();
     leaf.set_terminator(b, Terminator::Return(one));
 
     let mut root = Function::new(&params, Type::I32);

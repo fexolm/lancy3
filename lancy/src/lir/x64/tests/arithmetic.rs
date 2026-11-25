@@ -55,7 +55,7 @@ fn selection_uses_an_immediate_and_drops_an_unused_multiply() {
     let b = f.entry();
     let two = f.append(b, H::Const(2)).unwrap();
     let four = f.append(b, H::Bin(Binary::Add, two, two)).unwrap();
-    f.append(b, H::Bin(Binary::Mul, four, two));
+    f.append_inst(b, H::Bin(Binary::Mul, four, two)).unwrap();
     f.set_terminator(b, Terminator::Return(four));
     let (source, ids) = f.verified_module().unwrap();
     let module = compile(crate::lir::x64::Machine::host(), source, &ids).unwrap();

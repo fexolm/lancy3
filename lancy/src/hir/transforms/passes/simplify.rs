@@ -19,16 +19,18 @@ fn entry_literal(
     bits: u128,
 ) -> Value {
     *literals.entry((lane, bits)).or_insert_with(|| {
-        let value = f.prepend(f.entry(), sccp::literal(lane, bits)).unwrap();
+        let value = f.prepend(f.entry(), Op::literal(lane, bits)).unwrap();
         assert_eq!(aliases.insert(value), value);
         value
     })
 }
 
+/// The operation for a constant SCCP fact. A vector fact is uniform, so it
+/// is a `Splat` of the scalar literal (see `sccp::Fact::Constant`).
 fn constant_op(ty: Type, bits: u128, literals: &HashMap<(Lane, u128), Value>) -> Option<Op> {
     match ty {
         Type::Vector(lane) => Some(Op::Simd(Simd::Splat(*literals.get(&(lane, bits))?))),
-        _ => Some(sccp::literal(ty.lane()?, bits)),
+        _ => Some(Op::literal(ty.lane()?, bits)),
     }
 }
 

@@ -11,7 +11,7 @@ fn replacing_a_call_changes_the_next_modules_reachable_functions() {
     let b = root.entry();
     let x = root.params(b)[0];
     let site = root.add_call(Arc::new(leaf), &[x]);
-    let inst = root.append_inst(b, Op::Call(site));
+    let inst = root.append_inst(b, Op::Call(site)).unwrap();
     root.set_terminator(b, Terminator::Return(root.result(inst).unwrap()));
 
     {
@@ -38,7 +38,9 @@ fn pruning_a_staging_block_retires_only_its_instructions() {
     let arg = graph.params(entry)[0];
     graph.set_terminator(entry, Terminator::Return(arg));
     let dead = graph.create_block();
-    let operation = graph.append_inst(dead, Op::Bin(Binary::Div, arg, arg));
+    let operation = graph
+        .append_inst(dead, Op::Bin(Binary::Div, arg, arg))
+        .unwrap();
     assert_eq!(graph.prune_unreachable(), Ok(1));
     assert_eq!(
         graph.replace_op(operation, Op::Const(7)),
@@ -46,7 +48,7 @@ fn pruning_a_staging_block_retires_only_its_instructions() {
     );
     assert_eq!(graph.interpret(&[91]), Ok(91));
     let new_block = graph.create_block();
-    let new_inst = graph.append_inst(new_block, Op::Const(3));
+    let new_inst = graph.append_inst(new_block, Op::Const(3)).unwrap();
     assert_ne!(new_block, dead);
     assert_ne!(new_inst, operation);
 }
@@ -55,9 +57,11 @@ fn pruning_a_staging_block_retires_only_its_instructions() {
 fn batch_replacement_keeps_ids_and_rolls_back_failed_edits() {
     let mut f = Function::scalar(0);
     let block = f.entry();
-    let one = f.append_inst(block, Op::Const(1));
+    let one = f.append_inst(block, Op::Const(1)).unwrap();
     let value = f.result(one).unwrap();
-    let two = f.append_inst(block, Op::Bin(Binary::Add, value, value));
+    let two = f
+        .append_inst(block, Op::Bin(Binary::Add, value, value))
+        .unwrap();
     let result = f.result(two).unwrap();
     f.set_terminator(block, Terminator::Return(result));
     f.replace_op(two, Op::Bin(Binary::Div, value, value))
@@ -99,7 +103,7 @@ fn merging_rewrites_dominated_call_and_loop_arguments() {
     f.jump(entry, head, &[b, a]);
     f.jump(head, latch, &[]);
     let call = f.add_call(Arc::new(helper), &[y]);
-    let call_inst = f.append_inst(latch, Op::Call(call));
+    let call_inst = f.append_inst(latch, Op::Call(call)).unwrap();
     let called = f.result(call_inst).unwrap();
     let yes = f.add_edge(latch, &[]);
     let no = f.add_edge(exit, &[x]);
@@ -127,11 +131,13 @@ fn merging_splices_nonempty_instruction_lists_without_reindexing() {
     let mut f = Function::scalar(0);
     let entry = f.entry();
     let succ = f.create_block();
-    let def = f.append_inst(entry, Op::Const(8));
+    let def = f.append_inst(entry, Op::Const(8)).unwrap();
     let val = f.result(def).unwrap();
     let param = f.append_param(succ);
     f.jump(entry, succ, &[val]);
-    let add = f.append_inst(succ, Op::Bin(Binary::Add, param, val));
+    let add = f
+        .append_inst(succ, Op::Bin(Binary::Add, param, val))
+        .unwrap();
     f.set_terminator(succ, Terminator::Return(f.result(add).unwrap()));
     f.merge_blocks(entry, succ).unwrap();
     assert_eq!(f.blocks().count(), 1);

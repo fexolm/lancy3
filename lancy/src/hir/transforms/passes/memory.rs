@@ -4,7 +4,7 @@ use super::{
     facts::Facts,
 };
 use crate::hir::{
-    Block, Function, MAX_VECTOR_BYTES, MIN_VECTOR_BYTES, Op, Scale, Simd, Type, Value,
+    Block, Function, MAX_VECTOR_BYTES, MIN_VECTOR_BYTES, Op, Scale, Type, Value,
     transforms::{ControlFlowGraph, DomTree},
 };
 use crate::support::slotmap::DenseMap;
@@ -242,41 +242,21 @@ fn access(
     root: impl Fn(Value) -> Value,
     address: impl Fn(Value) -> Address,
 ) -> Option<(Location, Access)> {
-    let (pointer, ty, mask, kind) = match op {
-        Op::Load(ty, ptr) => (ptr, ty, None, Access::Read(None)),
-        Op::Simd(Simd::Load(lane, ptr)) => (ptr, Type::Vector(lane), None, Access::Read(None)),
-        Op::Store(ptr, value) | Op::Simd(Simd::Store(ptr, value)) => {
-            (ptr, f.value_type(value), None, Access::Write(root(value)))
-        }
-        Op::Simd(
-            Simd::MaskedLoad {
-                address,
-                mask,
-                passthrough: value,
-            }
-            | Simd::MaskedStore {
-                address,
-                mask,
-                value,
-            },
-        ) => {
-            let mask = Mask {
-                indices: address.indices.map(&root),
-                value: root(mask),
-            };
-            let kind = if matches!(op, Op::Simd(Simd::MaskedLoad { .. })) {
-                Access::Read(Some(root(value)))
-            } else {
-                Access::Write(root(value))
-            };
-            (address.base, f.value_type(value), Some(mask), kind)
-        }
-        _ => return None,
+    let access = op.access(f)?;
+    let value = access.value.map(&root);
+    let kind = if access.write {
+        Access::Write(value.expect("a store has a value"))
+    } else {
+        Access::Read(value)
     };
+    let mask = access.mask.map(|mask| Mask {
+        indices: access.indices.map(&root),
+        value: root(mask),
+    });
     Some((
         Location {
-            address: address(pointer),
-            ty,
+            address: address(access.address),
+            ty: access.ty,
             mask,
         },
         kind,
@@ -293,19 +273,7 @@ pub(super) fn optimize(
     let accesses = f
         .blocks()
         .flat_map(|block| f.instructions(block))
-        .filter(|&inst| {
-            matches!(
-                f.op(inst),
-                Op::Load(..)
-                    | Op::Store(..)
-                    | Op::Simd(
-                        Simd::Load(..)
-                            | Simd::Store(..)
-                            | Simd::MaskedLoad { .. }
-                            | Simd::MaskedStore { .. }
-                    )
-            )
-        })
+        .filter(|&inst| f.op(inst).access(f).is_some())
         .take(2)
         .count();
     if accesses < 2 {
@@ -364,10 +332,7 @@ pub(super) fn optimize(
                             entry.removable_store = None;
                         }
                     }
-                    Op::Call(_)
-                    | Op::RustCall(..)
-                    | Op::RustPacketCall(_)
-                    | Op::RustContextCall(..) => known.clear(),
+                    _ if op.effects(f).writes => known.clear(),
                     _ if !facts.is_total(f, inst) => {
                         // A check or arithmetic trap may expose completed stores.
                         for entry in &mut known {

@@ -24,12 +24,12 @@ fn pointer_arguments_survive_spills_calls_and_block_parameters() {
     let result = f.append(b, Op::Call(call)).unwrap();
     for p in [a, b1, c, d, e] {
         let value = f.append(b, Op::Const(27)).unwrap();
-        f.append(b, Op::Store(p, value));
+        f.append_inst(b, Op::Store(p, value)).unwrap();
     }
     // A pointer-sized store and load at an unaligned address.
     let one = f.append(b, Op::Const(1)).unwrap();
     let at = f.append(b, Op::PtrOffset(output, one, Scale::One)).unwrap();
-    f.append(b, Op::Store(at, result));
+    f.append_inst(b, Op::Store(at, result)).unwrap();
     let ptr = f.append(b, Op::Load(Ptr, at)).unwrap();
     f.set_terminator(b, Terminator::Return(ptr));
 
@@ -135,7 +135,7 @@ fn scaled_store_between_overlapping_loads_changes_exactly_four_bytes() {
         let [base, index, window, value] = f.params(b).try_into().unwrap();
         let before = f.append(b, Op::Load(Type::I32, window)).unwrap();
         let at = f.append(b, Op::PtrOffset(base, index, scale)).unwrap();
-        f.append(b, Op::Store(at, value));
+        f.append_inst(b, Op::Store(at, value)).unwrap();
         let after = f.append(b, Op::Load(Type::I32, window)).unwrap();
         let change = f.append(b, Op::Bin(Binary::Sub, after, before)).unwrap();
         f.set_terminator(b, Terminator::Return(change));

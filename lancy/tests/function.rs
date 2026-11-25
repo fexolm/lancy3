@@ -42,10 +42,8 @@ fn verify_rejects_bad_edges_dominance_call_signatures_and_unterminated_blocks() 
     identity.set_terminator(entry, Terminator::Return(identity.params(entry)[0]));
     let mut f = Function::scalar(0);
     let call = f.add_call(Arc::new(identity), &[]);
-    let output = f.append(f.entry(), Op::Call(call)).unwrap();
-    f.set_terminator(f.entry(), Terminator::Return(output));
     assert_eq!(
-        f.verify(),
+        f.append(f.entry(), Op::Call(call)),
         Err(IrError::CallArity {
             call,
             expected: 1,
@@ -275,12 +273,12 @@ fn release_code_drops_debug_points() {
         let entry = f.entry();
         let mut value = f.params(entry)[0];
         for id in 0..points {
-            f.append(entry, Op::DebugPoint(id));
+            f.append_inst(entry, Op::DebugPoint(id)).unwrap();
         }
         let three = f.append(entry, Op::Const(3)).unwrap();
         value = f.append(entry, Op::Bin(Binary::Mul, value, three)).unwrap();
         for id in 0..points {
-            f.append(entry, Op::DebugPoint(points + id));
+            f.append_inst(entry, Op::DebugPoint(points + id)).unwrap();
         }
         f.set_terminator(entry, Terminator::Return(value));
         ScalarKernel::compile(&f, &lancy::CompileOptions::host().unwrap()).unwrap()

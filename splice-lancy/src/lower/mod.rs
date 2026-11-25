@@ -205,7 +205,10 @@ impl<'a> Builder<'a> {
                 function: None,
                 point: None,
             });
-            builder.graph.append(entry, Op::DebugPoint(id));
+            builder
+                .graph
+                .append_inst(entry, Op::DebugPoint(id))
+                .expect("a debug point");
         }
         Ok(builder)
     }
@@ -389,7 +392,9 @@ impl Builder<'_> {
         let (base, len) = self.slice(buffer);
         let scale = simd::stride(self.kinds[buffer.index()].element());
         let block = self.current.expect("open block");
-        self.graph.append(block, Op::BoundsCheck(index, len));
+        self.graph
+            .append_inst(block, Op::BoundsCheck(index, len))
+            .expect("an i32 bounds check");
         self.graph
             .append(block, Op::PtrOffset(base, index, scale))
             .unwrap()
@@ -454,7 +459,7 @@ impl Builder<'_> {
     fn value(&mut self, op: Op) -> Value {
         self.graph
             .append(self.current.expect("open block"), op)
-            .expect("operation defines a value")
+            .expect("a well-typed lowering of verified IR defines a value")
     }
     fn scalar(&self, r: Reg) -> ScalarType {
         match self.types[r.0 as usize] {
@@ -469,7 +474,7 @@ impl Builder<'_> {
             ScalarType::I32 => self.value(Op::Const(bits as u32 as i32)),
             _ => {
                 let lane = scalar_type(ty).lane().expect("scalar lane");
-                self.value(Op::Literal(lane, bits.into()))
+                self.value(Op::literal(lane, bits.into()))
             }
         }
     }
@@ -641,7 +646,9 @@ impl Builder<'_> {
         }
     }
     fn effect(&mut self, op: Op) {
-        self.graph.append(self.current.expect("open block"), op);
+        self.graph
+            .append_inst(self.current.expect("open block"), op)
+            .expect("a well-typed lowering of verified IR");
     }
     /// A block for control flow inside one operation.
     fn block(&mut self) -> Block {

@@ -308,6 +308,19 @@ impl Function {
             block.params.retain(|&p| keep(p));
         }
     }
+    pub(in crate::hir) fn call_site(&self, call: Call) -> Option<(&Arc<Function>, &[Value])> {
+        let data = self.calls.get(call)?;
+        Some((&data.callee, &self.operands[data.args.range()]))
+    }
+
+    pub(in crate::hir) fn packet_site(
+        &self,
+        call: PacketCall,
+    ) -> Option<(&'static RustPacketImport, u32, &[Value])> {
+        let data = self.packets.get(call)?;
+        Some((data.import, data.scratch, &self.operands[data.args.range()]))
+    }
+
     pub fn call(&self, call: Call) -> (&Arc<Function>, &[Value]) {
         let data = &self.calls[call];
         (&data.callee, &self.operands[data.args.range()])
@@ -333,8 +346,9 @@ impl Function {
         params.push(value);
         value
     }
-    pub fn append_inst(&mut self, b: Block, op: Op) -> Inst {
-        let id = self.new_instruction(op);
+    /// Append `op` to `b` after checking its operand types.
+    pub fn append_inst(&mut self, b: Block, op: Op) -> Result<Inst, IrError> {
+        let id = self.new_instruction(op)?;
         let last = self.blocks[b].last;
         if last == Inst::INVALID {
             self.blocks[b].first = id;
@@ -342,58 +356,43 @@ impl Function {
             self.insts[last].next = id;
         }
         self.blocks[b].last = id;
-        id
+        Ok(id)
+    }
+
+    /// Append a value-defining `op` to `b` and return its result.
+    pub fn append(&mut self, b: Block, op: Op) -> Result<Value, IrError> {
+        let inst = self.append_inst(b, op)?;
+        self.result(inst).ok_or(IrError::NoResult { inst })
     }
 
     /// Insert before the first instruction. Operands must already dominate
     /// the start of the block.
-    pub(in crate::hir) fn prepend(&mut self, b: Block, op: Op) -> Option<Value> {
-        let id = self.new_instruction(op);
+    pub(in crate::hir) fn prepend(&mut self, b: Block, op: Op) -> Result<Value, IrError> {
+        let id = self.new_instruction(op)?;
         let block = &mut self.blocks[b];
         self.insts[id].next = block.first;
         if block.last == Inst::INVALID {
             block.last = id;
         }
         block.first = id;
-        self.result(id)
+        self.result(id).ok_or(IrError::NoResult { inst: id })
     }
 
-    fn new_instruction(&mut self, op: Op) -> Inst {
-        let result = if op.produces_value() {
-            let ty = match op {
-                Op::Simd(op) => op
-                    .result_type(|v| self.types.get(v).copied().unwrap_or(Type::I32))
-                    .expect("value-producing SIMD operation"),
-                Op::Literal(lane, _) => lane.scalar(),
-                Op::Ternary(_, _, v, _) => self.types.get(v).copied().unwrap_or(Type::I32),
-                Op::Unary(op, v) => op.result_type(self.types.get(v).copied().unwrap_or(Type::I32)),
-                Op::Cast(ty, _) | Op::Bitcast(ty, _) => ty,
-                Op::Bin(op, v, _) => {
-                    op.result_type(self.types.get(v).copied().unwrap_or(Type::I32))
-                }
-                Op::PtrOffset(..) | Op::CallScratch { .. } => Type::Ptr,
-                Op::Load(ty, _) => ty,
-                Op::Copy(v) => self.types.get(v).copied().unwrap_or(Type::I32),
-                Op::Call(c) => self
-                    .calls
-                    .get(c)
-                    .map_or(Type::I32, |c| c.callee.return_type()),
-                _ => Type::I32,
-            };
-            self.types.insert(ty)
-        } else {
-            Value::INVALID
-        };
-        self.insts.insert(InstData {
+    fn new_instruction(&mut self, op: Op) -> Result<Inst, IrError> {
+        // Instruction IDs are issued in order and never reused.
+        let inst = Inst::from_index(self.insts.slot_count());
+        let ty = op.result_type(self, inst, |v| Ok(self.types[v]))?;
+        debug_assert_eq!(ty.is_some(), op.has_result());
+        let result = ty.map_or(Value::INVALID, |ty| self.types.insert(ty));
+        let id = self.insts.insert(InstData {
             op,
             result,
             next: Inst::INVALID,
-        })
+        });
+        debug_assert_eq!(id, inst);
+        Ok(id)
     }
-    pub fn append(&mut self, b: Block, op: Op) -> Option<Value> {
-        let id = self.append_inst(b, op);
-        self.result(id)
-    }
+
     pub fn add_call(&mut self, callee: Arc<Function>, args: &[Value]) -> Call {
         let args = Span::append(&mut self.operands, args);
         self.calls.insert(CallData { callee, args })
@@ -444,7 +443,7 @@ impl Function {
                     IrError::UnknownInstruction { inst }
                 });
             };
-            if old.op.produces_value() != op.produces_value() {
+            if old.op.has_result() != op.has_result() {
                 return Err(IrError::ReplacementResultCount { inst });
             }
         }

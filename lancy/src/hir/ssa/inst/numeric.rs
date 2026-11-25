@@ -1,6 +1,6 @@
 //! Numeric types and element-wise arithmetic shared by scalar and SIMD instructions.
 macro_rules! numeric_types {
-    ($($name:ident: $bytes:literal),+) => {
+    ($($name:ident: $bytes:expr),+) => {
         #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
         pub enum Lane { $($name),+ }
         #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -21,7 +21,7 @@ macro_rules! numeric_types {
     };
 }
 
-numeric_types!(I8:1, U8:1, I16:2, U16:2, I32:4, U32:4, I64:8, U64:8, I128:16, U128:16, Isize:8, Usize:8, F16:2, BF16:2, F32:4, F64:8);
+numeric_types!(I8:1, U8:1, I16:2, U16:2, I32:4, U32:4, I64:8, U64:8, I128:16, U128:16, Isize:POINTER_BYTES, Usize:POINTER_BYTES, F16:2, BF16:2, F32:4, F64:8);
 
 impl Lane {
     pub fn float(self) -> bool {
@@ -35,10 +35,15 @@ impl Lane {
     }
 }
 
+/// Bytes of `Ptr`, `Isize` and `Usize`: the JIT emits only 64-bit code for
+/// the host, so the host's pointer width is the target's.
+pub(crate) const POINTER_BYTES: usize = size_of::<usize>();
+const _: () = assert!(POINTER_BYTES == 8, "lancy generates 64-bit code only");
+
 impl Type {
     pub(crate) fn bytes(self, vector_bytes: usize) -> usize {
         match self {
-            Self::Ptr => 8,
+            Self::Ptr => POINTER_BYTES,
             Self::Vector(_) => vector_bytes,
             _ => self.lane().unwrap().bytes(),
         }

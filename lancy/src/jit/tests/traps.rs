@@ -7,7 +7,7 @@ fn bounds_check_compares_both_i32_operands_as_unsigned() {
     let mut f = Function::scalar(2);
     let b = f.entry();
     let [index, len] = f.params(b).try_into().unwrap();
-    f.append(b, Op::BoundsCheck(index, len));
+    f.append_inst(b, Op::BoundsCheck(index, len)).unwrap();
     f.set_terminator(b, Terminator::Return(index));
     let kernel = ScalarKernel::compile(&f, &crate::test_target::options()).unwrap();
     for index in [0, 1, i32::MAX, i32::MIN, -2, -1] {
@@ -33,18 +33,18 @@ fn two_checked_calls(op: Binary) -> Function {
     let [dst, n, divisor, index] = leaf.params(b).try_into().unwrap();
     let one = leaf.append(b, Op::Const(1)).unwrap();
     let two = leaf.append(b, Op::Const(2)).unwrap();
-    leaf.append(b, Op::Store(dst, n));
-    leaf.append(b, Op::BoundsCheck(index, two));
+    leaf.append_inst(b, Op::Store(dst, n)).unwrap();
+    leaf.append_inst(b, Op::BoundsCheck(index, two)).unwrap();
     let at = leaf
         .append(b, Op::PtrOffset(dst, one, Scale::Four))
         .unwrap();
-    leaf.append(b, Op::Store(at, divisor));
+    leaf.append_inst(b, Op::Store(at, divisor)).unwrap();
     // The quotient/remainder is dead, but the check must still execute here.
-    leaf.append(b, Op::Bin(op, n, divisor));
+    leaf.append_inst(b, Op::Bin(op, n, divisor)).unwrap();
     let at = leaf
         .append(b, Op::PtrOffset(dst, two, Scale::Four))
         .unwrap();
-    leaf.append(b, Op::Store(at, index));
+    leaf.append_inst(b, Op::Store(at, index)).unwrap();
     leaf.set_terminator(b, Terminator::Return(index));
     let leaf = Arc::new(leaf);
 
@@ -64,7 +64,7 @@ fn two_checked_calls(op: Binary) -> Function {
         .append(b, Op::PtrOffset(dst, six, Scale::Four))
         .unwrap();
     let marker = root.append(b, Op::Const(99)).unwrap();
-    root.append(b, Op::Store(end, marker));
+    root.append_inst(b, Op::Store(end, marker)).unwrap();
     let sum = root.append(b, Op::Bin(Binary::Add, a, c)).unwrap();
     root.set_terminator(b, Terminator::Return(sum));
     root

@@ -1,7 +1,9 @@
+mod info;
 mod numeric;
 mod rust_import;
 mod simd;
 use super::{Call, Edge, PacketCall};
+pub use info::{Access, Effects, TrapKind};
 pub use numeric::{Lane, Ternary, Type, Unary};
 pub use simd::{Simd, VectorAddress};
 
@@ -165,45 +167,6 @@ impl Binary {
 }
 
 impl Op {
-    pub(crate) fn pure(self, result_type: Option<Type>) -> bool {
-        match self {
-            Self::Bin(Binary::Div | Binary::Rem, ..)
-            | Self::Simd(Simd::Bin(Binary::Div | Binary::Rem, ..)) => {
-                result_type.and_then(Type::lane).is_some_and(Lane::float)
-            }
-            Self::Simd(
-                Simd::Load(..)
-                | Simd::Store(..)
-                | Simd::MaskedLoad { .. }
-                | Simd::MaskedStore { .. }
-                | Simd::ExtractLane(..)
-                | Simd::InsertLane(..),
-            ) => false,
-            Self::Load(..)
-            | Self::Store(..)
-            | Self::BoundsCheck(..)
-            | Self::CheckOverflow(..)
-            | Self::Call(_)
-            | Self::RustCall(..)
-            | Self::RustPacketCall(_)
-            | Self::RustContextCall(..)
-            | Self::DebugStore(..)
-            | Self::DebugPoint(_) => false,
-            _ => true,
-        }
-    }
-    pub(in crate::hir::ssa) fn produces_value(self) -> bool {
-        !matches!(
-            self,
-            Self::Store(..)
-                | Self::Simd(Simd::MaskedStore { .. } | Simd::Store(..))
-                | Self::BoundsCheck(..)
-                | Self::CheckOverflow(..)
-                | Self::DebugStore(..)
-                | Self::DebugPoint(_)
-        )
-    }
-
     pub(crate) fn map_operands(&mut self, mut map: impl FnMut(Value) -> Value) {
         match self {
             Self::Simd(op) => op.map_operands(map),

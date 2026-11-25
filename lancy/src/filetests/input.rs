@@ -8,6 +8,45 @@ use std::sync::Arc;
 pub(crate) type Lines<'a> = Vec<(usize, &'a str)>;
 type Names<'a, T> = HashMap<&'a str, T>;
 type Result<T> = std::result::Result<T, String>;
+type Parsed<T> = std::result::Result<T, ParseError>;
+
+/// A malformed filetest, or IR that the builder rejects while it is parsed.
+#[derive(Debug)]
+pub(crate) enum ParseError {
+    Syntax(String),
+    /// The builder's error, after the location prefixes of `at`.
+    Invalid(String, crate::hir::IrError),
+}
+
+impl ParseError {
+    fn at(self, location: impl std::fmt::Display) -> Self {
+        match self {
+            Self::Syntax(message) => Self::Syntax(format!("{location}: {message}")),
+            Self::Invalid(place, error) => Self::Invalid(format!("{location}: {place}"), error),
+        }
+    }
+}
+
+impl From<String> for ParseError {
+    fn from(message: String) -> Self {
+        Self::Syntax(message)
+    }
+}
+
+impl From<&str> for ParseError {
+    fn from(message: &str) -> Self {
+        Self::Syntax(message.to_owned())
+    }
+}
+
+impl std::fmt::Display for ParseError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Syntax(message) => f.write_str(message),
+            Self::Invalid(place, error) => write!(f, "{place}invalid IR: {error}"),
+        }
+    }
+}
 
 fn ty(s: &str) -> Result<Type> {
     if s == "ptr" {
@@ -230,7 +269,7 @@ fn instruction<'a>(
     values: &mut Names<'a, Value>,
     blocks: &Names<Block>,
     functions: &Names<Arc<Function>>,
-) -> Result<bool> {
+) -> Parsed<bool> {
     let v = |name: &str| lookup(values, name);
     let term = match words {
         ["ret", name] => Some(Terminator::Return(v(name)?)),
@@ -263,7 +302,7 @@ fn instruction<'a>(
             let lane = element(t)?;
             let bits = u128::from_str_radix(n.trim_start_matches("0x"), 16)
                 .map_err(|_| "expected literal bits in hex")?;
-            Op::Literal(lane, bits)
+            Op::literal(lane, bits)
         }
         ["cast", t, x] => Op::Cast(ty(t)?, v(x)?),
         ["bitcast", t, x] => Op::Bitcast(ty(t)?, v(x)?),
@@ -312,7 +351,7 @@ fn instruction<'a>(
                 "2" => Scale::Two,
                 "4" => Scale::Four,
                 "8" => Scale::Eight,
-                _ => return Err(format!("invalid byte stride {stride}")),
+                _ => return Err(format!("invalid byte stride {stride}").into()),
             },
         ),
         ["call_scratch", offset, bytes] => Op::CallScratch {
@@ -331,9 +370,12 @@ fn instruction<'a>(
         }
         [name, x] => Op::Unary(unary(name)?, v(x)?),
         [name, a, b] => Op::Bin(binary(name)?, v(a)?, v(b)?),
-        _ => return Err(format!("invalid instruction: {}", words.join(" "))),
+        _ => return Err(format!("invalid instruction: {}", words.join(" ")).into()),
     };
-    match (dst, f.append(block, op)) {
+    let inst = f
+        .append_inst(block, op)
+        .map_err(|error| ParseError::Invalid(String::new(), error))?;
+    match (dst, f.result(inst)) {
         (Some(name), Some(value)) => define(values, name, value)?,
         (None, None) => {}
         _ => return Err("result binding does not match the instruction".into()),
@@ -357,7 +399,7 @@ fn body<'a>(
     signature: &[&'a str],
     lines: &[(usize, &'a str)],
     functions: &Names<Arc<Function>>,
-) -> Result<Function> {
+) -> Parsed<Function> {
     let [args @ .., "->", ret] = signature else {
         return Err("expected arguments -> type".into());
     };
@@ -406,28 +448,28 @@ fn body<'a>(
             f.set_slice_params(first, slices);
         } else {
             if ended {
-                return Err(format!("line {line}: instruction after terminator"));
+                return Err(format!("line {line}: instruction after terminator").into());
             }
             ended = instruction(&mut f, block, &words, &mut values, &blocks, functions)
-                .map_err(|e| format!("line {line}: {e}"))?;
+                .map_err(|e| e.at(format_args!("line {line}")))?;
         }
     }
     Ok(f)
 }
 
-pub(crate) fn parse(mut lines: &[(usize, &str)]) -> Result<Arc<Function>> {
+pub(crate) fn parse(mut lines: &[(usize, &str)]) -> Parsed<Arc<Function>> {
     let mut functions = Names::new();
     while let Some((&(line, header), rest)) = lines.split_first() {
         let words: Vec<_> = header.split_whitespace().collect();
         let ["fn", name, signature @ ..] = words.as_slice() else {
-            return Err(format!("line {line}: expected function header"));
+            return Err(format!("line {line}: expected function header").into());
         };
         let len = rest
             .iter()
             .position(|(_, s)| s.split_whitespace().next() == Some("fn"))
             .unwrap_or(rest.len());
         let f = body(signature, &rest[..len], &functions)
-            .map_err(|e| format!("fn {name} (line {line}): {e}"))?;
+            .map_err(|e| e.at(format_args!("fn {name} (line {line})")))?;
         define(&mut functions, name, Arc::new(f))?;
         lines = &rest[len..];
     }

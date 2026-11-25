@@ -137,14 +137,19 @@ impl<'a> Case<'a> {
     }
 
     fn execute(mut self) -> Result<()> {
-        let f = input::parse(&self.ir)?;
-        let verified = f.verified_module();
+        let parsed = input::parse(&self.ir);
         if let Some((line, reason)) = self.reject {
             if !self.done() {
                 return Err(format!(
                     "line {line}: @reject requires a verifier-only case"
                 ));
             }
+            // The builder checks each operation and the verifier the whole function.
+            let verified = match &parsed {
+                Err(input::ParseError::Invalid(_, e)) => Err(CompileError::InvalidIr(e.clone())),
+                Err(input::ParseError::Syntax(e)) => return Err(e.clone()),
+                Ok(f) => f.verified_module().map(drop),
+            };
             return match verified {
                 Err(CompileError::InvalidIr(e)) if e.to_string().contains(reason) => Ok(()),
                 Err(e) => Err(format!("line {line}, verify: expected '{reason}', got {e}")),
@@ -156,7 +161,8 @@ impl<'a> Case<'a> {
         if self.done() {
             return Err("case has no expectations".into());
         }
-        let (source, ids) = verified.map_err(|e| format!("verify: {e}"))?;
+        let f = parsed.map_err(|e| e.to_string())?;
+        let (source, ids) = f.verified_module().map_err(|e| format!("verify: {e}"))?;
         self.check("source", || listing::hir(&source, &ids))?;
         self.check("cfg", || listing::cfg(&source))?;
         self.interpret("source", &f)?;

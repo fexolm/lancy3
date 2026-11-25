@@ -8,9 +8,14 @@ use crate::support::slotmap::DenseMap;
 
 use crate::hir::integer::{self, binary as integer_binary, mask as lane_mask};
 
+/// What SCCP knows about a value.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Fact {
     Unknown,
+    /// The low lane bits of a scalar, or of every lane of a vector: a vector
+    /// fact is always uniform (a `Splat`), never a per-lane constant. A
+    /// per-lane vector constant would need its own fact, because `simplify`
+    /// rebuilds a vector constant as a `Splat` of one literal.
     Constant(u128),
     Varying,
 }
@@ -36,14 +41,6 @@ impl Fact {
             Self::Constant(bits) => Self::Constant(f(bits)),
             other => other,
         }
-    }
-}
-
-pub(super) fn literal(lane: Lane, bits: u128) -> Op {
-    if lane == Lane::I32 {
-        Op::Const(bits as i32)
-    } else {
-        Op::Literal(lane, bits)
     }
 }
 

@@ -122,6 +122,8 @@ pub(super) enum Root {
 #[derive(Default, Clone)]
 struct Definition {
     source: Option<(Block, Op)>,
+    /// The definition has no effects, so it may move or disappear.
+    pure: bool,
     uses: usize,
     register: bool,
 }
@@ -152,7 +154,7 @@ impl Context {
     pub fn single_use(&self, v: Value) -> Option<Op> {
         let def = &self.defs[v];
         let (b, op) = def.source?;
-        (b == self.current && def.uses == 1 && op.pure(None)).then_some(op)
+        (b == self.current && def.uses == 1 && def.pure).then_some(op)
     }
 
     pub fn adjacent_single_use(&self, v: Value) -> Option<Op> {
@@ -185,6 +187,7 @@ pub(super) fn select<I>(
             let op = *f.op(i);
             if let Some(v) = f.result(i) {
                 ctx.defs[v].source = Some((b, op));
+                ctx.defs[v].pure = op.effects(f).is_none();
             }
             f.visit_operands(i, |v| ctx.defs[v].uses += 1);
         }
@@ -224,7 +227,7 @@ pub(super) fn select<I>(
                     .and_then(|&prev| Some((f.result(prev)?, *f.op(prev))));
             }
             if f.result(i)
-                .is_some_and(|v| !ctx.defs[v].register && f.op(i).pure(Some(f.value_type(v))))
+                .is_some_and(|v| !ctx.defs[v].register && ctx.defs[v].pure)
             {
                 continue;
             }

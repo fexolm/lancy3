@@ -188,7 +188,10 @@ fn split(f: &mut Function, preheader: Block, region: &Region) {
         let insts: Vec<_> = f.instructions(block).collect();
         for inst in insts {
             let op = map_op(f, *f.op(inst), &values);
-            if let Some(copy) = f.append(blocks[&block], op) {
+            let copy = f
+                .append_inst(blocks[&block], op)
+                .expect("a copy of a verified operation");
+            if let Some(copy) = f.result(copy) {
                 values.insert(f.result(inst).unwrap(), copy);
             }
         }

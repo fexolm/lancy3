@@ -45,25 +45,25 @@ fn checked_nested_access_preserves_prior_stores_and_forwards_addresses() {
     let mut leaf = Function::new(&signature, I32);
     let b = leaf.entry();
     let [i, j, src, n, dst, m] = leaf.params(b).try_into().unwrap();
-    leaf.append(b, H::BoundsCheck(i, n));
+    leaf.append_inst(b, H::BoundsCheck(i, n)).unwrap();
     let at = leaf.append(b, H::PtrOffset(src, i, Scale::Four)).unwrap();
     let read = leaf.append(b, H::Load(I32, at)).unwrap();
     let sum = leaf.append(b, H::Bin(Binary::Add, read, n)).unwrap();
-    leaf.append(b, H::BoundsCheck(j, m));
+    leaf.append_inst(b, H::BoundsCheck(j, m)).unwrap();
     let at = leaf.append(b, H::PtrOffset(dst, j, Scale::Four)).unwrap();
-    leaf.append(b, H::Store(at, sum));
+    leaf.append_inst(b, H::Store(at, sum)).unwrap();
     leaf.set_terminator(b, Terminator::Return(sum));
 
     let mut root = Function::new(&signature, I32);
     let b = root.entry();
     let [i, j, dst, m, src, n] = root.params(b).try_into().unwrap();
     let nine = root.append(b, H::Const(9)).unwrap();
-    root.append(b, H::Store(dst, nine));
+    root.append_inst(b, H::Store(dst, nine)).unwrap();
     let call = root.add_call(Arc::new(leaf), &[i, j, src, n, dst, m]);
     let result = root.append(b, H::Call(call)).unwrap();
     let two = root.append(b, H::Const(2)).unwrap();
     let last = root.append(b, H::PtrOffset(dst, two, Scale::Four)).unwrap();
-    root.append(b, H::Store(last, result));
+    root.append_inst(b, H::Store(last, result)).unwrap();
     root.set_terminator(b, Terminator::Return(result));
     let k = ScalarKernel::compile(&root, &crate::test_target::options()).unwrap();
     assert_eq!(

@@ -1,7 +1,7 @@
 use super::{Block, Function, Op, Terminator, Type, Value};
 use crate::CompileError;
 use crate::hir::{
-    IrError, Ternary,
+    IrError,
     transforms::{ControlFlowGraph, DomTree},
 };
 use crate::module::{FunctionIds, Module};
@@ -89,195 +89,22 @@ impl Function {
                     used(v, i + 1)?;
                     Ok::<_, IrError>(self.value_type(v))
                 };
-                let expect = |v, ty| {
-                    let actual = operand(v)?;
-                    if actual != ty {
-                        return Err(IrError::OperandType {
-                            inst,
-                            value: v,
-                            expected: ty,
-                            actual,
-                        });
-                    }
-                    Ok(())
-                };
-                let ty = match *self.op(inst) {
-                    Op::Const(_) => Type::I32,
-                    Op::Simd(op) => {
-                        op.verify(inst, operand)?;
-                        let Some(ty) = op.result_type(|v| self.value_type(v)) else {
-                            continue;
-                        };
-                        ty
-                    }
-                    Op::Literal(lane, _) => lane.scalar(),
-                    Op::Copy(v) => operand(v)?,
-                    Op::Bin(op, a, b) => {
-                        let ty = operand(a)?;
-                        expect(b, ty)?;
-                        if matches!(ty, Type::Vector(_)) {
-                            return Err(IrError::UseSimdForm { inst, ty });
-                        }
-                        if !op.supports(ty) {
-                            return Err(IrError::InvalidNumeric { inst, ty });
-                        }
-                        op.result_type(ty)
-                    }
-                    Op::Unary(op, v) => {
-                        let ty = operand(v)?;
-                        if matches!(ty, Type::Vector(_)) {
-                            return Err(IrError::UseSimdForm { inst, ty });
-                        }
-                        if !op.supports(ty) {
-                            return Err(IrError::InvalidNumeric { inst, ty });
-                        }
-                        op.result_type(ty)
-                    }
-                    Op::Ternary(op, a, b, c) => {
-                        let ty = operand(b)?;
-                        if matches!(ty, Type::Vector(_)) {
-                            return Err(IrError::UseSimdForm { inst, ty });
-                        }
-                        expect(
-                            a,
-                            if op == Ternary::Select {
-                                ty.mask_type()
-                            } else {
-                                ty
-                            },
-                        )?;
-                        expect(c, ty)?;
-                        if ty
-                            .lane()
-                            .is_none_or(|l| op == Ternary::MulAdd && !l.float())
-                        {
-                            return Err(IrError::InvalidNumeric { inst, ty });
-                        }
-                        ty
-                    }
-                    Op::Cast(to, v) | Op::Bitcast(to, v) => {
-                        let ty = operand(v)?;
-                        let bitcast = matches!(self.op(inst), Op::Bitcast(..));
-                        match (ty, to) {
-                            (Type::Ptr, Type::U64) if bitcast => {}
-                            (Type::Ptr, _) | (_, Type::Ptr) => {
-                                return Err(IrError::PointerCast { inst, from: ty, to });
-                            }
-                            (Type::Vector(_), _) | (_, Type::Vector(_)) => {
-                                return Err(IrError::UseSimdForm { inst, ty });
-                            }
-                            _ if bitcast && ty.bytes(16) != to.bytes(16) => {
-                                return Err(IrError::InvalidNumeric { inst, ty });
-                            }
-                            _ => {}
-                        }
-                        to
-                    }
-                    Op::BoundsCheck(index, len) => {
-                        expect(index, Type::I32)?;
-                        expect(len, Type::I32)?;
-                        continue;
-                    }
-                    Op::CheckOverflow(cond) => {
-                        expect(cond, Type::I32)?;
-                        continue;
-                    }
-                    Op::RustCall(_, a, b) => {
-                        expect(a, Type::I32)?;
-                        expect(b, Type::I32)?;
-                        Type::I32
-                    }
-                    Op::RustPacketCall(site) => {
-                        let &super::PacketData {
-                            import,
-                            scratch,
-                            args,
-                        } = self
-                            .packets
-                            .get(site)
-                            .ok_or(IrError::InvalidRustPacket { inst })?;
-                        let Some(bytes) = import.packet_bytes() else {
-                            return Err(IrError::InvalidRustPacket { inst });
-                        };
-                        if args.len != import.arity || !valid_scratch(scratch, bytes) {
-                            return Err(IrError::InvalidRustPacket { inst });
-                        }
-                        for &word in &self.operands[args.range()] {
-                            expect(word, Type::I32)?;
-                        }
-                        Type::I32
-                    }
-                    Op::RustContextCall(import, [context, operation, a, b]) => {
-                        expect(context, Type::Ptr)?;
-                        expect(operation, Type::I32)?;
-                        expect(
-                            a,
-                            match import {
-                                super::super::RustContextImport::Scalars(_) => Type::I32,
-                                super::super::RustContextImport::Packet(_) => Type::Ptr,
-                            },
-                        )?;
-                        expect(b, Type::I32)?;
-                        Type::I32
-                    }
-                    Op::CallScratch { offset, bytes } => {
-                        if !valid_scratch(offset, bytes) {
-                            return Err(IrError::InvalidScratch { inst });
-                        }
-                        has_call_scratch = true;
-                        Type::Ptr
-                    }
-                    Op::PtrOffset(base, index, _) => {
-                        expect(base, Type::Ptr)?;
-                        expect(index, Type::I32)?;
-                        Type::Ptr
-                    }
-                    Op::Load(ty, addr) => {
-                        if matches!(ty, Type::Vector(_)) {
-                            return Err(IrError::UseSimdForm { inst, ty });
-                        }
-                        expect(addr, Type::Ptr)?;
-                        ty
-                    }
-                    Op::Store(addr, value) => {
-                        expect(addr, Type::Ptr)?;
-                        let ty = operand(value)?;
-                        if matches!(ty, Type::Vector(_)) {
-                            return Err(IrError::UseSimdForm { inst, ty });
-                        }
-                        continue;
-                    }
-                    Op::DebugStore(_, value) => {
-                        operand(value)?;
-                        continue;
-                    }
-                    Op::DebugPoint(_) => continue,
-                    Op::Call(id) => {
-                        let site = self
-                            .calls
-                            .get(id)
-                            .ok_or(IrError::UnknownCall { inst, call: id })?;
-                        let args = &self.operands[site.args.range()];
-                        if args.len() != site.callee.arity() {
-                            return Err(IrError::CallArity {
-                                call: id,
-                                expected: site.callee.arity(),
-                                actual: args.len(),
+                let op = *self.op(inst);
+                has_call_scratch |= matches!(op, Op::CallScratch { .. });
+                let expected = op.result_type(self, inst, operand)?;
+                match (expected, self.result(inst)) {
+                    (None, None) => {}
+                    (Some(expected), Some(result)) => {
+                        let actual = self.value_type(result);
+                        if actual != expected {
+                            return Err(IrError::ResultType {
+                                inst,
+                                expected,
+                                actual,
                             });
                         }
-                        for (&arg, &ty) in args.iter().zip(site.callee.param_types()) {
-                            expect(arg, ty)?;
-                        }
-                        site.callee.return_type()
                     }
-                };
-                let actual = self.value_type(self.result(inst).unwrap());
-                if actual != ty {
-                    return Err(IrError::ResultType {
-                        inst,
-                        expected: ty,
-                        actual,
-                    });
+                    _ => return Err(IrError::ReplacementResultCount { inst }),
                 }
             }
             let term = *self.terminator(block);
@@ -342,9 +169,4 @@ impl Function {
             Ok(body)
         })
     }
-}
-
-/// Scratch regions start 8-byte aligned and end within the 32-bit frame.
-fn valid_scratch(offset: u32, bytes: u32) -> bool {
-    offset.is_multiple_of(8) && offset.checked_add(bytes).is_some()
 }

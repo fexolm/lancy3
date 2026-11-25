@@ -92,7 +92,7 @@ impl Builder<'_> {
             },
             Narrow(to) => V::Narrow(lane(to), vs[0], vs[1]),
             Splat(bits) => {
-                let x = self.value(Op::Literal(lane(e), bits.into()));
+                let x = self.value(Op::literal(lane(e), bits.into()));
                 V::Splat(x)
             }
             Load(b) | Store(b) | LoadSelect(b) | StoreSelect(b) | Gather(b) | GatherSelect(b)
@@ -276,11 +276,10 @@ impl Builder<'_> {
         let mut append = |op| self.graph.append(block, op).expect("a value");
         match native_type(ty) {
             Type::Vector(lane) => {
-                let zero = append(Op::Literal(lane, 0));
+                let zero = append(Op::literal(lane, 0));
                 append(Op::Simd(V::Splat(zero)))
             }
-            Type::I32 => append(Op::Const(0)),
-            ty => append(Op::Literal(ty.lane().expect("a scalar lane"), 0)),
+            ty => append(Op::literal(ty.lane().expect("a scalar lane"), 0)),
         }
     }
     /// A nonnegative `i32` count as an `Index`.
@@ -296,7 +295,7 @@ impl Builder<'_> {
         index
     }
     fn splat_bits(&mut self, ty: Lane, bits: u64) -> Value {
-        let x = self.value(Op::Literal(ty, bits.into()));
+        let x = self.value(Op::literal(ty, bits.into()));
         self.vec_op(V::Splat(x))
     }
     fn splat_index(&mut self, e: Element, x: Value) -> Value {

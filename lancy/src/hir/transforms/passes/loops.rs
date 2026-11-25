@@ -139,7 +139,8 @@ fn hoist(f: &mut Function, dom: &DomTree, loops: &NaturalLoops, facts: &mut Fact
             .count();
     }
 
-    let mut total_divisions = Vec::new();
+    // Results that can be evaluated early without observing a trap.
+    let mut total = Vec::new();
     for &block in dom.preorder() {
         let header = loops.owner[block];
         if header == Block::INVALID {
@@ -151,20 +152,13 @@ fn hoist(f: &mut Function, dom: &DomTree, loops: &NaturalLoops, facts: &mut Fact
             continue;
         }
         let extended = nearest != Block::INVALID && vector_values[header] <= VECTOR_BUDGET;
-        total_divisions.clear();
-        if extended {
-            for inst in f.instructions(block) {
-                if matches!(
-                    f.op(inst),
-                    Op::Bin(Binary::Div | Binary::Rem, ..)
-                        | Op::Simd(Simd::Bin(Binary::Div | Binary::Rem, ..))
-                ) && facts.is_total(f, inst)
-                {
-                    total_divisions.push(f.result(inst).unwrap());
-                }
-            }
-            total_divisions.sort_unstable();
-        }
+        total.clear();
+        total.extend(
+            f.instructions(block)
+                .filter(|&inst| facts.is_total(f, inst))
+                .filter_map(|inst| f.result(inst)),
+        );
+        total.sort_unstable();
         f.hoist_instructions(block, |op, result, types| {
             let scalar_i32 = matches!(op, Op::Bin(kind, a, _) if types[a] == Type::I32
                 && !matches!(kind, Binary::Div | Binary::Rem));
@@ -197,10 +191,7 @@ fn hoist(f: &mut Function, dom: &DomTree, loops: &NaturalLoops, facts: &mut Fact
                 ) => true,
                 _ => false,
             };
-            if !cheap
-                || (!op.pure(Some(types[result]))
-                    && total_divisions.binary_search(&result).is_err())
-            {
+            if !cheap || total.binary_search(&result).is_err() {
                 return None;
             }
             let available = |target| {

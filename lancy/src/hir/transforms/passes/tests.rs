@@ -127,13 +127,13 @@ fn remove_dominated_checks_but_keep_sibling_checks_and_unused_trapping_math() {
     let yes = f.add_edge(a, &[]);
     let no = f.add_edge(b, &[]);
     f.set_terminator(entry, Terminator::Branch { cond, yes, no });
-    f.append(a, Op::BoundsCheck(i, n));
-    f.append(a, Op::BoundsCheck(i, n));
+    f.append_inst(a, Op::BoundsCheck(i, n)).unwrap();
+    f.append_inst(a, Op::BoundsCheck(i, n)).unwrap();
     f.jump(a, end, &[]);
     f.jump(b, end, &[]);
-    f.append(end, Op::BoundsCheck(i, n));
+    f.append_inst(end, Op::BoundsCheck(i, n)).unwrap();
     let zero = f.append(end, Op::Const(0)).unwrap();
-    f.append(end, Op::Bin(Binary::Div, n, zero));
+    f.append_inst(end, Op::Bin(Binary::Div, n, zero)).unwrap();
     f.set_terminator(end, Terminator::Return(zero));
     simplify(&mut f).unwrap();
     f.verify().unwrap();
