@@ -158,12 +158,13 @@ pub(super) unsafe fn run(
                 }
                 continue;
             }
-            Op::CheckOverflow(cond) => {
+            Op::TrapIf(cond, trap) => {
                 if f.read(cond) as u32 != 0 {
-                    return Err(Trap::Overflow.into());
+                    return Err(trap.into());
                 }
                 continue;
             }
+            Op::Trap(trap) => return Err(trap.into()),
             Op::PtrOffset(base, index, scale) => word(
                 f.read(base)
                     .wrapping_add((f.read(index) as i32 as i64 as u64) << scale as u8),

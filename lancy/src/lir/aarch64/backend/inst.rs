@@ -212,7 +212,8 @@ pub(super) enum Inst {
     Packed(Packed, VReg, VReg, VReg),
     PackedShiftImm(C, A, u8, VReg, VReg),
     Check(VReg, VReg),
-    CheckOverflow(VReg),
+    TrapIf(VReg, crate::Trap),
+    Trap(crate::Trap),
     Offset(Scale, VReg, VReg, VReg),
     Load(Type, VReg, VReg),
     Store(Type, VReg, VReg),
@@ -305,7 +306,7 @@ impl TargetInst for Inst {
                 out.extend([input(a), input(b), output(d)]);
             }
             Self::Check(a, b) | Self::Store(_, a, b) => out.extend([input(a), input(b)]),
-            Self::CheckOverflow(cond) => out.push(input(cond)),
+            Self::TrapIf(cond, _) => out.push(input(cond)),
             Self::Select(_, d, m, a, b) => out.extend([input(m), input(a), input(b), output(d)]),
             Self::Fma(_, _, d, args) | Self::Shuffle(Shuffle::Sve(_), d, args) => {
                 out.extend(args.map(input).into_iter().chain([output(d)]));
@@ -466,7 +467,7 @@ impl TargetInst for Inst {
                 out.push(Operand::reg_fixed_def(dst, return_reg(Type::I32)));
             }
             Self::CallScratch(_, _, dst) => out.push(Operand::reg_def(dst)),
-            Self::Libcall(..) | Self::Jump | Self::DebugPoint(_) => {}
+            Self::Libcall(..) | Self::Jump | Self::DebugPoint(_) | Self::Trap(_) => {}
         }
     }
 
@@ -560,9 +561,11 @@ impl Schedulable for Inst {
                 indices,
                 ..
             } => Ordered(if indices.is_some() { 9 } else { 5 }),
-            Self::Check(..) | Self::CheckOverflow(..) | Self::Store(..) | Self::Masked { .. } => {
-                Ordered(1)
-            }
+            Self::Check(..)
+            | Self::TrapIf(..)
+            | Self::Trap(_)
+            | Self::Store(..)
+            | Self::Masked { .. } => Ordered(1),
             Self::Int(
                 IntBinary {
                     op: IntOp::Divide { .. },

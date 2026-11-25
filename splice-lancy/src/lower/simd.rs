@@ -1,5 +1,6 @@
 //! Bounds-checked slice operations over one scalable Lancy vector.
 use super::{Builder, Narrow};
+use lancy::Trap;
 use lancy::hir::{
     Binary, Block, Lane, Op, Scale, Simd as V, Ternary, Type, Unary, Value, VectorAddress,
 };
@@ -334,23 +335,25 @@ impl Builder<'_> {
         let remaining = self.value(Op::Bin(Binary::Sub, len, offset));
         if let Some(value) = value {
             let full = self.value(Op::Bin(Binary::Ge, remaining, count));
-            let (yes, short, join) = (self.block(), self.block(), self.block());
-            self.end(super::Exit::Branch(full, yes, short));
-            self.begin(yes);
-            self.effect(Op::Simd(V::Store(ptr, value)));
-            self.end(super::Exit::Jump(join));
-            self.begin(short);
-            let prefix = self.first_lanes(e, remaining);
-            Access { write: true, value }.emit(
-                self,
-                VectorAddress {
-                    base: ptr,
-                    indices: None,
-                },
-                prefix,
-            );
-            self.effect(Op::BoundsCheck(len, len));
-            self.begin(join);
+            self.within(|this| {
+                let (yes, short, join) = (this.block(), this.block(), this.block());
+                this.end(super::Exit::Branch(full, yes, short));
+                this.begin(yes);
+                this.effect(Op::Simd(V::Store(ptr, value)));
+                this.end(super::Exit::Jump(join));
+                this.begin(short);
+                let prefix = this.first_lanes(e, remaining);
+                Access { write: true, value }.emit(
+                    this,
+                    VectorAddress {
+                        base: ptr,
+                        indices: None,
+                    },
+                    prefix,
+                );
+                this.effect(Op::Trap(Trap::Bounds));
+                this.begin(join);
+            });
             None
         } else {
             let one = self.value(Op::Const(1));
@@ -396,9 +399,7 @@ impl Builder<'_> {
 
     fn check_mask(&mut self, bad: Value) {
         let fail = self.vec_op(V::AnyTrue(bad));
-        let one = self.value(Op::Const(1));
-        // A true Lancy comparison is all ones, which fails unsigned bounds.
-        self.effect(Op::BoundsCheck(fail, one));
+        self.effect(Op::TrapIf(fail, Trap::Bounds));
     }
 
     fn indexed(

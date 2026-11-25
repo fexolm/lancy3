@@ -329,3 +329,11 @@
 - `Function::compact`: арена операндов пересобирается из живых рёбер/вызовов/пакетов, мёртвые рёбра получают цель `Block::INVALID`; ID не меняются (анализы с номерами рёбер остаются валидными — перенумерация ломала CFG в `dead` после `forward_acyclic_params`). `retain_block_params` сначала уплотняет и больше не угадывает живые рёбра по длине span. Конвейер уплотняет после последнего прохода.
 - Тесты: `compaction_drops_the_arguments_of_retired_edges`, `optimized_functions_keep_no_retired_operands` (unswitch), `slice_params_must_be_distinct_pointer_and_length_parameters`.
 - Не сделано в 5.3: рёбра как собственность терминатора (вариант (а) HIR-05) — `compact` даёт тот же результат дешевле; общий копировщик side-table операндов (`unswitch::map_op`/`inline::Copier`) — остался, дублирование небольшое.
+
+### Ф5.4a — ловушки в HIR (BE-08, BE-10)
+- Закрыто: BE-08, BE-10; часть 5.4 (`Op::Trap`, `Op::TrapIf(kind)`).
+- `Op::CheckOverflow` заменён на `Op::TrapIf(cond, Trap)` и `Op::Trap(Trap)` с кодом ядра (`Bounds`, `DivisionByZero`, `DivisionOverflow`, `Overflow`); `RustPanic`/`Abi` отклоняются при построении (`IrError::InvalidTrap`), их сообщает только Rust-вход. LIR x64/AArch64: `Inst::TrapIf`/`Inst::Trap` (`test; jne` / `subs; b.ne`, безусловный — переход на общий выход ловушки). SCCP: известное ложное условие удаляет `TrapIf`, истинное делает его `Trap`. Интерпретатор и filetests (`trap_if c Overflow`, `trap Bounds`).
+- splice-lancy: `trap_bounds` → `Trap(Bounds)`, провал маски → `TrapIf(AnyTrue(bad), Bounds)` (без опоры на «истина — все единицы»), короткая запись → `Trap(Bounds)` вместо `BoundsCheck(len, len)`.
+- BE-10: ветка короткой записи уже шла по внутренним блокам; теперь `Builder::within` сохраняет константы и общие загрузки через ромб (блок после него доминируется блоком до него), так что общая загрузка после векторной записи переиспользуется.
+- Тесты: `passes/traps.lancy` (бывший `integer-overflow-check.lancy` + коды всех ловушек, SCCP-случаи, AArch64 isel и кодирование, отказ `RustPanic`), `shared_loads_survive_the_short_store_path_of_a_vector_store` (падает без `within`: 2 загрузки вместо 1).
+- BE-07 (легализация памяти в splice-core для трёх бэкендов) остаётся: это перенос в splice-core, а не работа над HIR Lancy; Lancy теперь даёт для неё нужные примитивы (`TrapIf`).

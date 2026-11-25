@@ -72,7 +72,8 @@ fn opcode(inst: Inst) -> String {
         }
         Inst::BranchAll(lane, _) => format!("branch.all.{lane:?}"),
         Inst::CheckBounds(..) => "bounds".into(),
-        Inst::CheckOverflow(..) => "check_overflow".into(),
+        Inst::TrapIf(_, trap) => format!("trap_if {trap:?}"),
+        Inst::Trap(trap) => format!("trap {trap:?}"),
         Inst::RustCall(import, ..) => format!("rust_call {}", import.name),
         Inst::RustContextCall(..) => "rust_context_call".into(),
         Inst::RustPacketCall(import, offset, _) => {

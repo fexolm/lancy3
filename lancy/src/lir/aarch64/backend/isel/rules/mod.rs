@@ -194,7 +194,8 @@ impl Rules<'_> {
             Op::BoundsCheck(index, length) => {
                 return Inst::Check(self.input(index), self.input(length));
             }
-            Op::CheckOverflow(cond) => return Inst::CheckOverflow(self.input(cond)),
+            Op::TrapIf(cond, trap) => return Inst::TrapIf(self.input(cond), trap),
+            Op::Trap(trap) => return Inst::Trap(trap),
             Op::PtrOffset(base, index, scale) => {
                 return Inst::Offset(scale, self.dst(), self.input(base), self.input(index));
             }

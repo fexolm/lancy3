@@ -285,10 +285,14 @@ impl Emitter<'_> {
     }
 
     fn trap_if(&mut self, cond: Cond, trap: Trap) -> Result {
-        let exit = *self.failures[trap.code() as usize - 1].get_or_insert_with(|| self.a.label());
         self.a.skip_if(invert(cond))?;
-        self.a.jump(exit);
+        self.trap(trap);
         Ok(())
+    }
+
+    fn trap(&mut self, trap: Trap) {
+        let exit = *self.failures[trap.code() as usize - 1].get_or_insert_with(|| self.a.label());
+        self.a.jump(exit);
     }
 
     /// Trap with the code a Rust entry or runtime helper left in W16.
@@ -578,10 +582,14 @@ impl Emitter<'_> {
                 )?;
                 self.trap_if(Cond::Cs, Trap::Bounds)
             }
-            Inst::CheckOverflow(..) => {
+            Inst::TrapIf(_, trap) => {
                 self.a
                     .put(C::Subs_32_addsub_shift, &[r(R::WZR), r(word(0)), r(R::WZR)])?;
-                self.trap_if(Cond::Ne, Trap::Overflow)
+                self.trap_if(Cond::Ne, trap)
+            }
+            Inst::Trap(trap) => {
+                self.trap(trap);
+                Ok(())
             }
             Inst::CallScratch(offset, ..) => {
                 self.a

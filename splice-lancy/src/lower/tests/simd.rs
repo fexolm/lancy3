@@ -72,6 +72,44 @@ fn signed_index_gathers_check_each_width_with_one_unsigned_comparison() {
 }
 
 #[test]
+fn shared_loads_survive_the_short_store_path_of_a_vector_store() {
+    let kinds = [
+        BufferKind::new(Element::I32, false),
+        BufferKind::new(Element::I32, true),
+    ];
+    for graph in both(1, &kinds, |b| {
+        let first = b.constant(Constant::from(0usize))?;
+        let before = b.load(Buffer(0), first)?;
+        let i32_op = |op| Simd {
+            element: Element::I32,
+            op,
+        };
+        let one = b.simd(i32_op(SimdOp::Splat(1)), &[])?.unwrap();
+        let at = b.cast(b.arg(0)?, ScalarType::Index)?;
+        b.simd(i32_op(SimdOp::Store(Buffer(1))), &[at, one])?;
+        let first = b.constant(Constant::from(0usize))?;
+        let after = b.load(Buffer(0), first)?;
+        let sum = b.binary(splice_core::hir::Binary::Add, before, after)?;
+        b.ret(sum)?;
+        Ok(())
+    }) {
+        let loads = graph
+            .blocks()
+            .flat_map(|block| graph.instructions(block))
+            .filter(|&inst| matches!(graph.op(inst), Op::Load(..)))
+            .count();
+        assert_eq!(loads, 1);
+        let traps = graph
+            .blocks()
+            .flat_map(|block| graph.instructions(block))
+            .filter(|&inst| matches!(graph.op(inst), Op::BoundsCheck(..) | Op::Trap(_)))
+            .map(|inst| *graph.op(inst))
+            .collect::<Vec<_>>();
+        assert!(traps.contains(&Op::Trap(lancy::Trap::Bounds)), "{traps:?}");
+    }
+}
+
+#[test]
 fn packed_load_and_store_have_an_ordered_short_store_exit() {
     let kinds = [
         BufferKind::new(Element::U16, false),

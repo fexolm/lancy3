@@ -6,6 +6,7 @@ mod simd;
 #[cfg(test)]
 mod tests;
 
+use lancy::Trap;
 use lancy::hir::{self, Block, Function, Op, Value};
 use lancy::support::slotmap::DenseMap;
 use splice_core::{
@@ -499,7 +500,7 @@ impl Builder<'_> {
                 let narrow = self.value(Op::Cast(narrow_type, exact));
                 let extended = self.value(Op::Cast(wide_type, narrow));
                 let overflow = self.value(Op::Bin(hir::Binary::Ne, exact, extended));
-                self.effect(Op::CheckOverflow(overflow));
+                self.effect(Op::TrapIf(overflow, Trap::Overflow));
                 self.bind(dst, narrow);
             }
             Binary::CheckedShl | Binary::CheckedShr => {
@@ -512,7 +513,7 @@ impl Builder<'_> {
                     let zero = self.literal(ty, 0);
                     self.value(Op::Bin(hir::Binary::Ne, high, zero))
                 };
-                self.effect(Op::CheckOverflow(overflow));
+                self.effect(Op::TrapIf(overflow, Trap::Overflow));
                 self.define(dst, Op::Bin(kind, a, b));
             }
             Binary::Eq | Binary::Ne | Binary::Lt | Binary::Le | Binary::Gt | Binary::Ge
@@ -662,6 +663,17 @@ impl Builder<'_> {
         let state = self.blocks.insert(State::default());
         debug_assert_eq!(state, block);
         block
+    }
+    /// Lower control flow inside one operation. `body` leaves open a block
+    /// that the open block dominates, so the constants and shared loads
+    /// known here stay valid there.
+    fn within<R>(&mut self, body: impl FnOnce(&mut Self) -> R) -> R {
+        let constants = std::mem::take(&mut self.constants);
+        let shared_loads = std::mem::take(&mut self.shared_loads);
+        let result = body(self);
+        self.constants.extend(constants);
+        self.shared_loads.extend(shared_loads);
+        result
     }
     /// Continue in `block`, falling through from the open block.
     fn begin(&mut self, block: Block) {
@@ -851,8 +863,7 @@ impl KernelBuilder for Builder<'_> {
     }
     fn trap_bounds(&mut self) -> splice_core::Result<()> {
         if self.reachable() {
-            let zero = self.value(Op::Const(0));
-            self.effect(Op::BoundsCheck(zero, zero));
+            self.effect(Op::Trap(Trap::Bounds));
             let result = self.zero(ValueType::Scalar(self.result));
             self.end(Exit::Return(result));
         }

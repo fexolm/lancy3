@@ -46,6 +46,8 @@ enum Rewrite {
     Op(Op),
     /// Remove the instruction; its result is this value.
     Alias(Value),
+    /// Remove an instruction without a result.
+    Remove,
 }
 
 /// The local rewrite rules of `propagate`, applied in order to each
@@ -68,7 +70,14 @@ impl Rules<'_> {
     ) -> Rewrite {
         let op = self.min_max(op, result, types, aliases);
         let Some(dst) = result else {
-            return Rewrite::Op(op);
+            return match op {
+                Op::TrapIf(cond, trap) => match (self.known)(cond) {
+                    Some(0) => Rewrite::Remove,
+                    Some(_) => Rewrite::Op(Op::Trap(trap)),
+                    None => Rewrite::Op(op),
+                },
+                _ => Rewrite::Op(op),
+            };
         };
         if let Op::Copy(v) = op {
             return Rewrite::Alias(v);
@@ -268,6 +277,7 @@ pub(super) fn propagate(
             )?;
             match rules.rewrite(op, result, types, &aliases) {
                 Rewrite::Op(op) => Some(op),
+                Rewrite::Remove => None,
                 Rewrite::Alias(v) => {
                     aliases[result.unwrap()] = aliases[v];
                     changed_aliases = true;

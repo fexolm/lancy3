@@ -106,7 +106,8 @@ impl Rules<'_> {
                 }
             }
             Op::BoundsCheck(index, length) => self.bounds_check(index, length),
-            Op::CheckOverflow(cond) => Inst::CheckOverflow(self.input(cond)),
+            Op::TrapIf(cond, trap) => Inst::TrapIf(self.input(cond), trap),
+            Op::Trap(trap) => Inst::Trap(trap),
             Op::PtrOffset(base, index, scale) => self.pointer_offset(base, index, scale)?,
             Op::Load(ty, ptr) => self.load(ty, ptr)?,
             Op::Simd(Simd::Load(lane, ptr)) => self.load(Type::Vector(lane), ptr)?,

@@ -860,10 +860,14 @@ impl Emitter<'_> {
                 rm32!(cmp, r(0), 1)?;
                 a.jae(fail)
             }
-            Inst::CheckOverflow(..) => {
-                let fail = self.exits.trap(a, Trap::Overflow);
+            Inst::TrapIf(_, trap) => {
+                let fail = self.exits.trap(a, trap);
                 a.test(r(0), r(0))?;
                 a.jne(fail)
+            }
+            Inst::Trap(trap) => {
+                let fail = self.exits.trap(a, trap);
+                a.jmp(fail)
             }
             Inst::Movsxd(..) => a.movsxd(q(1), r(0)),
             Inst::Lea(_, addr) => a.lea(q(allocs.len() - 1), memory(addr, allocs)),

@@ -72,6 +72,8 @@ pub enum IrError {
     /// See `Function::set_slice_params`.
     #[error("invalid slice parameter {slice:?}")]
     InvalidSliceParam { slice: SliceParam },
+    #[error("{inst:?} stops with {trap:?}, which only a Rust entry reports")]
+    InvalidTrap { inst: Inst, trap: crate::Trap },
     #[error("{inst:?} defines no value")]
     NoResult { inst: Inst },
     #[error("invalid numeric operation in {inst:?} for {ty:?}")]

@@ -65,8 +65,10 @@ pub enum Op {
     Bin(Binary, Value, Value),
     /// Trap if the unsigned index is at least the unsigned length.
     BoundsCheck(Value, Value),
-    /// Trap with integer overflow if the i32 condition is nonzero.
-    CheckOverflow(Value),
+    /// Stop with the trap if the i32 condition is nonzero.
+    TrapIf(Value, crate::Trap),
+    /// Stop with the trap. Code after it in the block does not run.
+    Trap(crate::Trap),
     /// Base plus a signed i32 index times the byte stride, at pointer width.
     PtrOffset(Value, Value, Scale),
     /// Address of `bytes` of this frame's scratch memory at an 8-byte-aligned
@@ -171,7 +173,7 @@ impl Op {
         match self {
             Self::Simd(op) => op.map_operands(map),
             Self::Copy(v)
-            | Self::CheckOverflow(v)
+            | Self::TrapIf(v, _)
             | Self::DebugStore(_, v)
             | Self::Load(_, v)
             | Self::Unary(_, v)
@@ -200,6 +202,7 @@ impl Op {
             | Self::Call(_)
             | Self::RustPacketCall(_)
             | Self::DebugPoint(_)
+            | Self::Trap(_)
             | Self::CallScratch { .. } => {}
         }
     }

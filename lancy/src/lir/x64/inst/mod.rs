@@ -213,7 +213,8 @@ pub(super) enum Inst {
         quotient: Quotient,
     },
     CheckBounds(VReg, VReg),
-    CheckOverflow(VReg),
+    TrapIf(VReg, crate::Trap),
+    Trap(crate::Trap),
     CheckMask(VectorMask<VReg>),
     BranchAny(VectorMask<VReg>),
     BranchAll(Lane, VReg),
@@ -389,7 +390,7 @@ impl TargetInst for Inst {
                 out.extend([O::reg_use(value), O::reg_def_at_start(dst)])
             }
             Self::CheckBounds(i, n) => out.extend([O::reg_use(i), O::any_use(n)]),
-            Self::CheckOverflow(v) => out.push(O::reg_use(v)),
+            Self::TrapIf(v, _) => out.push(O::reg_use(v)),
             Self::Movsxd(d, a) => out.extend([O::reg_use(a), O::reg_def(d)]),
             Self::Lea(d, addr) | Self::Load(_, d, addr) | Self::BroadcastMemory(_, d, addr) => {
                 addr.operands(out);
@@ -505,7 +506,7 @@ impl TargetInst for Inst {
             }
             Self::CallScratch(_, _, dst) => out.push(O::reg_def(dst)),
             Self::Ret(v) => out.push(O::reg_fixed_use(v, return_reg(v))),
-            Self::Jump | Self::DebugPoint(_) => {}
+            Self::Jump | Self::DebugPoint(_) | Self::Trap(_) => {}
         }
     }
     fn clobbers(&self, machine: &Machine) -> PRegSet {

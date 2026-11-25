@@ -45,7 +45,8 @@ pub(super) fn hir(module: &Module<VerifiedBody>) -> String {
                     Op::Simd(Simd::Store(p, x)) => format!("simd.store {} {}", v(p), v(x)),
                     Op::PtrOffset(p, i, s) => format!("offset {} {} {}", v(p), v(i), 1 << s as u8),
                     Op::BoundsCheck(i, n) => format!("bounds {} {}", v(i), v(n)),
-                    Op::CheckOverflow(cond) => format!("check_overflow {}", v(cond)),
+                    Op::TrapIf(cond, trap) => format!("trap_if {} {trap:?}", v(cond)),
+                    Op::Trap(trap) => format!("trap {trap:?}"),
                     Op::RustCall(import, a, b) => {
                         format!("rust_call {} {} {}", import.name, v(a), v(b))
                     }

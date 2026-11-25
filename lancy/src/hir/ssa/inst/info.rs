@@ -14,8 +14,8 @@ pub enum TrapKind {
     LaneIndex,
     /// `Op::BoundsCheck`.
     Bounds,
-    /// `Op::CheckOverflow`.
-    Overflow,
+    /// `Op::TrapIf` or `Op::Trap`.
+    Explicit,
     /// A memory access. The program keeps its address valid where it runs, so
     /// moving or adding the access can fault.
     Memory,
@@ -107,7 +107,8 @@ impl Op {
             Self::Store(..)
                 | Self::Simd(Simd::MaskedStore { .. } | Simd::Store(..))
                 | Self::BoundsCheck(..)
-                | Self::CheckOverflow(..)
+                | Self::TrapIf(..)
+                | Self::Trap(_)
                 | Self::DebugStore(..)
                 | Self::DebugPoint(_)
         )
@@ -129,7 +130,7 @@ impl Op {
                 Effects::trap(TrapKind::LaneIndex)
             }
             Self::BoundsCheck(..) => Effects::trap(TrapKind::Bounds),
-            Self::CheckOverflow(_) => Effects::trap(TrapKind::Overflow),
+            Self::TrapIf(..) | Self::Trap(_) => Effects::trap(TrapKind::Explicit),
             Self::Load(..) | Self::Simd(Simd::Load(..) | Simd::MaskedLoad { .. }) => {
                 Effects::memory(false)
             }
@@ -287,8 +288,13 @@ impl Op {
                 expect(len, Type::I32)?;
                 return Ok(None);
             }
-            Self::CheckOverflow(cond) => {
+            Self::TrapIf(cond, trap) => {
                 expect(cond, Type::I32)?;
+                check_trap(inst, trap)?;
+                return Ok(None);
+            }
+            Self::Trap(trap) => {
+                check_trap(inst, trap)?;
                 return Ok(None);
             }
             Self::RustCall(_, a, b) => {
@@ -550,4 +556,14 @@ fn simd_type(
             Type::Vector(l)
         }
     }))
+}
+
+/// A kernel stops itself only for a runtime error of its own: Rust panics
+/// and ABI defects come from a Rust entry.
+fn check_trap(inst: Inst, trap: crate::Trap) -> Result<(), IrError> {
+    use crate::Trap as T;
+    match trap {
+        T::Bounds | T::DivisionByZero | T::DivisionOverflow | T::Overflow => Ok(()),
+        _ => Err(IrError::InvalidTrap { inst, trap }),
+    }
 }

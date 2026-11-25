@@ -60,6 +60,7 @@ fn main x:i32 -> i32
 | `v = simd.maskedload p indices mask fallback`, `simd.maskedstore p - mask v` | Доступ по индексам в элементах или к последовательным полосам при `-` |
 | `v = const 7`, `v = copy x`, `v = call helper x y` | Константа, копия, прямой вызов |
 | `bounds i len`, `p = offset base i 4` | Беззнаковая проверка границ и адресация с шагом 1, 2, 4 или 8 байт |
+| `trap_if cond Overflow`, `trap Bounds` | Ловушка с кодом ядра (`Bounds`, `DivisionByZero`, `DivisionOverflow`, `Overflow`) при ненулевом условии или всегда. [Пример](passes/traps.lancy) |
 | `v = load i32 p`, `store p v` | Тип загрузки указывается явно, ширина записи определяется типом значения |
 | `p = call_scratch 0 8`, `debug_store 8 v` | Адрес scratch-памяти кадра по смещению (кратно 8) и размеру; запись в отладочную область кадра по смещению. Инлайнинг сдвигает области вызываемой функции выше областей вызывающей. [Пример](passes/inline-call-scratch.lancy) |
 | `ret v`, `jump join a b`, `br cond left a \| right b` | Возврат и передача аргументов по рёбрам |

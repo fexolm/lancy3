@@ -312,7 +312,8 @@ fn instruction<'a>(
         ["bitselect", x, y, z] => Op::Ternary(Ternary::BitSelect, v(x)?, v(y)?, v(z)?),
         ["copy", x] => Op::Copy(v(x)?),
         ["bounds", i, n] => Op::BoundsCheck(v(i)?, v(n)?),
-        ["check_overflow", cond] => Op::CheckOverflow(v(cond)?),
+        ["trap_if", cond, trap] => Op::TrapIf(v(cond)?, parse_trap(trap)?),
+        ["trap", trap] => Op::Trap(parse_trap(trap)?),
         ["rust_call", "identity_or_error", value, fail] => Op::RustCall(
             &crate::hir::RustImport {
                 name: "identity_or_error",
@@ -490,4 +491,11 @@ pub(crate) fn parse(mut lines: &[(usize, &str)]) -> Parsed<Arc<Function>> {
         lines = &rest[len..];
     }
     functions.remove("main").ok_or("missing fn main".into())
+}
+
+fn parse_trap(name: &str) -> std::result::Result<crate::Trap, String> {
+    crate::Trap::ALL
+        .into_iter()
+        .find(|trap| format!("{trap:?}") == name)
+        .ok_or_else(|| format!("unknown trap {name}"))
 }
