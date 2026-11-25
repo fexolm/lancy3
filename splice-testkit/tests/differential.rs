@@ -219,6 +219,9 @@ fn check_rows(
     }
 }
 
+/// The kernel code for one row's operands.
+type RowBody<'a> = dyn Fn(&mut dyn KernelBuilder, &[Reg]) -> splice::Result<()> + 'a;
+
 /// Stage `body` once per row of `rows`, selected by `arg(0)`, on the row's
 /// operands: loaded as `read_operands` does, except where `known` is set,
 /// where the operand is the row's value as a constant, for the backends to
@@ -228,7 +231,7 @@ fn each_row(
     ty: ScalarType,
     rows: &[Vec<Constant>],
     known: &[bool],
-    body: &dyn Fn(&mut dyn KernelBuilder, &[Reg]) -> splice::Result<()>,
+    body: &RowBody<'_>,
 ) -> splice::Result<()> {
     let loaded = read_operands(b, ty, known.len())?;
     let case = b.arg(0)?;
