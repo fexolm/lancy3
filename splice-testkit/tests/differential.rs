@@ -1,7 +1,8 @@
 //! Operation × element × boundary data on every backend, build route and
 //! build mode, checked against each other and against Rust.
-use splice::frontend::KernelBuilder;
+use splice::frontend::{KernelBuilder, Signature};
 use splice::hir::{Binary, Buffer, Reg, Simd, SimdOp};
+use splice::hir::{Constant, ScalarType};
 use splice::simd::Element;
 use splice::{BufferArg, BufferKind, CallError, Trap};
 use splice_testkit::{Stage, agree};
@@ -11,8 +12,6 @@ use std::rc::Rc;
 fn bytes() -> usize {
     splice::Target::host().unwrap().vector_bytes()
 }
-
-const EDGE: [i32; 12] = [0, 1, -1, 2, 7, -7, 31, 32, 33, -32, i32::MIN, i32::MAX];
 
 fn simd(b: &mut dyn KernelBuilder, element: Element, op: SimdOp, args: &[Reg]) -> Reg {
     b.simd(Simd { element, op }, args).unwrap().unwrap()
@@ -33,37 +32,243 @@ fn load(b: &mut dyn KernelBuilder, element: Element, buffer: u32, at: Reg) -> Re
     simd(b, element, SimdOp::Load(Buffer(buffer)), &[at])
 }
 
-#[test]
-fn every_scalar_binary_matches_checked_eval() {
-    use Binary::*;
-    for op in [
-        Add, Sub, Mul, Div, Rem, And, Or, Xor, Eq, Ne, Lt, Le, Gt, Ge, Shl, Shr, CheckedAdd,
-        CheckedSub, CheckedMul, CheckedShl, CheckedShr, Min, Max,
-    ] {
-        let stage: Stage = Rc::new(move |b| {
-            let r = b.binary(op, b.arg(0)?, b.arg(1)?)?;
-            b.ret(r)?;
-            Ok(())
-        });
-        let seen = agree(&format!("{op:?}"), 2, &[], &stage, |call| {
-            let mut seen = Vec::new();
-            for a in EDGE {
-                for c in EDGE {
-                    seen.push(format!("{:?}", call(&[a, c], &mut [])));
-                }
-            }
-            seen
-        });
-        let mut expected = Vec::new();
-        for a in EDGE {
-            for c in EDGE {
-                expected.push(format!(
-                    "{:?}",
-                    op.checked_eval(a, c).map_err(CallError::from)
-                ));
-            }
+/// Boundary values of each scalar type.
+fn edges(ty: ScalarType) -> Vec<Constant> {
+    fn all<T: Into<Constant>>(values: impl IntoIterator<Item = T>) -> Vec<Constant> {
+        values.into_iter().map(Into::into).collect()
+    }
+    match ty {
+        ScalarType::Bool => all([false, true]),
+        ScalarType::I32 => all([0, 1, -1, 31, 32, -32, i32::MIN, i32::MAX]),
+        ScalarType::U32 => all([0, 1, 31, 32, 33, 1 << 31, (1 << 31) - 1, u32::MAX]),
+        ScalarType::I64 => all([0, 1, -1, 63, 64, 1 << 32, i64::MIN, i64::MAX]),
+        ScalarType::U64 => all([0, 1, 63, 64, 1 << 32, 1 << 63, (1 << 63) - 1, u64::MAX]),
+        ScalarType::Index => all([0, 1, 63, 64, 1 << 32, 1 << 63, (1 << 63) - 1, usize::MAX]),
+        ScalarType::F32 => all([
+            0.0,
+            -0.0,
+            1.5,
+            -2.0,
+            3e9,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+            f32::NAN,
+        ]),
+        ScalarType::F64 => all([
+            0.0,
+            -0.0,
+            1.5,
+            -2.0,
+            1e19,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            f64::NAN,
+        ]),
+    }
+}
+
+/// The buffer element that holds a scalar type: a `bool` is an `i32`
+/// word, an unsigned 64-bit integer the bits of an `i64`.
+fn storage(ty: ScalarType) -> Element {
+    match ty {
+        ScalarType::Bool => Element::I32,
+        ScalarType::U64 | ScalarType::Index => Element::I64,
+        ty => ty.element().expect("a buffer element"),
+    }
+}
+
+/// Typed slices for `values`, stored as `storage(ty)`.
+enum Column {
+    I32(Vec<i32>),
+    U32(Vec<u32>),
+    I64(Vec<i64>),
+    F32(Vec<f32>),
+    F64(Vec<f64>),
+}
+
+impl Column {
+    fn new(ty: ScalarType, values: impl IntoIterator<Item = Constant>) -> Self {
+        let bits = values.into_iter().map(Constant::bits);
+        match storage(ty) {
+            Element::I32 => Self::I32(bits.map(|b| b as u32 as i32).collect()),
+            Element::U32 => Self::U32(bits.map(|b| b as u32).collect()),
+            Element::I64 => Self::I64(bits.map(|b| b as i64).collect()),
+            Element::F32 => Self::F32(bits.map(|b| f32::from_bits(b as u32)).collect()),
+            _ => Self::F64(bits.map(f64::from_bits).collect()),
         }
-        assert_eq!(seen, expected, "{op:?}");
+    }
+    fn read(&self) -> BufferArg<'_> {
+        match self {
+            Self::I32(v) => BufferArg::read(v),
+            Self::U32(v) => BufferArg::read(v),
+            Self::I64(v) => BufferArg::read(v),
+            Self::F32(v) => BufferArg::read(v),
+            Self::F64(v) => BufferArg::read(v),
+        }
+    }
+    fn write(&mut self) -> BufferArg<'_> {
+        match self {
+            Self::I32(v) => BufferArg::write(v),
+            Self::U32(v) => BufferArg::write(v),
+            Self::I64(v) => BufferArg::write(v),
+            Self::F32(v) => BufferArg::write(v),
+            Self::F64(v) => BufferArg::write(v),
+        }
+    }
+    /// The first value as `ty`. Every NaN prints alike: the reference
+    /// does not define NaN payloads.
+    fn first(&self, ty: ScalarType) -> String {
+        let bits = match self {
+            Self::I32(v) => u64::from(v[0] as u32),
+            Self::U32(v) => u64::from(v[0]),
+            Self::I64(v) => v[0] as u64,
+            Self::F32(v) if v[0].is_nan() => return "NaN".into(),
+            Self::F32(v) => u64::from(v[0].to_bits()),
+            Self::F64(v) if v[0].is_nan() => return "NaN".into(),
+            Self::F64(v) => v[0].to_bits(),
+        };
+        show(Constant::new(ty, bits))
+    }
+}
+
+fn show(value: Constant) -> String {
+    let nan = match value.ty() {
+        ScalarType::F32 => f32::from_bits(value.bits() as u32).is_nan(),
+        ScalarType::F64 => f64::from_bits(value.bits()).is_nan(),
+        _ => false,
+    };
+    if nan { "NaN".into() } else { value.to_string() }
+}
+
+/// Read `inputs` elements of type `ty` from buffer 0 at
+/// `inputs * arg(0) + i`, as registers of type `ty`.
+fn read_operands(
+    b: &mut dyn KernelBuilder,
+    ty: ScalarType,
+    inputs: usize,
+) -> splice::Result<Vec<Reg>> {
+    let case = b.arg(0)?;
+    let case = b.cast(case, ScalarType::Index)?;
+    let width = b.constant(Constant::from(inputs))?;
+    let first = b.binary(Binary::Mul, case, width)?;
+    (0..inputs)
+        .map(|i| {
+            let offset = b.constant(Constant::from(i))?;
+            let at = b.binary(Binary::Add, first, offset)?;
+            let word = b.load(Buffer(0), at)?;
+            match ty {
+                ScalarType::Bool => {
+                    let zero = b.constant(Constant::from(0))?;
+                    b.binary(Binary::Ne, word, zero)
+                }
+                ScalarType::U64 | ScalarType::Index => b.cast(word, ty),
+                _ => Ok(word),
+            }
+        })
+        .collect()
+}
+
+/// Store `value`, a register of type `ty`, at element 0 of buffer 1 and return 0.
+fn write_result(b: &mut dyn KernelBuilder, ty: ScalarType, value: Reg) -> splice::Result<()> {
+    let value = match ty {
+        ScalarType::Bool => b.cast(value, ScalarType::I32)?,
+        ScalarType::U64 | ScalarType::Index => b.cast(value, ScalarType::I64)?,
+        _ => value,
+    };
+    let zero = b.constant(Constant::from(0usize))?;
+    b.store(Buffer(1), zero, value)?;
+    let zero = b.constant(Constant::from(0))?;
+    b.ret(zero)
+}
+
+/// Run `stage` on every row of `rows` (`inputs` operands of type `from`)
+/// and compare each result of type `to`, or its trap, with `expected`.
+fn check_rows(
+    name: &str,
+    stage: &Stage,
+    (from, to): (ScalarType, ScalarType),
+    rows: &[Vec<Constant>],
+    expected: impl Fn(&[Constant]) -> Result<Constant, Trap>,
+) {
+    let kinds = [
+        BufferKind::new(storage(from), false),
+        BufferKind::new(storage(to), true),
+    ];
+    let signature = Signature::new(&[ScalarType::I32], ScalarType::I32, &kinds);
+    let data = Column::new(from, rows.iter().flatten().copied());
+    let seen = agree(name, signature, stage, |call| {
+        (0..rows.len())
+            .map(|case| {
+                let mut out = Column::new(to, [Constant::new(to, 0)]);
+                match call(&[case as i32], &mut [data.read(), out.write()]) {
+                    Ok(_) => out.first(to),
+                    Err(error) => format!("{error:?}"),
+                }
+            })
+            .collect()
+    });
+    let want: Vec<_> = rows
+        .iter()
+        .map(|row| match expected(row) {
+            Ok(value) => show(value),
+            Err(trap) => format!("{:?}", CallError::from(trap)),
+        })
+        .collect();
+    for ((row, seen), want) in rows.iter().zip(&seen).zip(&want) {
+        assert_eq!(seen, want, "{name} {row:?}");
+    }
+}
+
+#[test]
+fn every_scalar_binary_matches_checked_eval_at_every_type() {
+    use Binary::*;
+    for ty in ScalarType::ALL {
+        let values = edges(ty);
+        let rows: Vec<_> = values
+            .iter()
+            .flat_map(|&a| values.iter().map(move |&z| vec![a, z]))
+            .collect();
+        for op in [
+            Add, Sub, Mul, Div, Rem, And, Or, Xor, Eq, Ne, Lt, Le, Gt, Ge, Shl, Shr, CheckedAdd,
+            CheckedSub, CheckedMul, CheckedShl, CheckedShr, Min, Max,
+        ] {
+            let Some(output) = op.output(ty) else {
+                continue;
+            };
+            let stage: Stage = Rc::new(move |b| {
+                let operands = read_operands(b, ty, 2)?;
+                let r = b.binary(op, operands[0], operands[1])?;
+                write_result(b, output, r)
+            });
+            check_rows(
+                &format!("{ty} {op:?}"),
+                &stage,
+                (ty, output),
+                &rows,
+                |row| op.checked_eval(row[0], row[1]),
+            );
+        }
+    }
+}
+
+#[test]
+fn every_scalar_cast_matches_rust_as() {
+    for from in ScalarType::ALL {
+        let rows: Vec<_> = edges(from).into_iter().map(|v| vec![v]).collect();
+        for to in ScalarType::ALL.into_iter().filter(|&to| from.casts_to(to)) {
+            let stage: Stage = Rc::new(move |b| {
+                let operand = read_operands(b, from, 1)?[0];
+                let r = b.cast(operand, to)?;
+                write_result(b, to, r)
+            });
+            check_rows(
+                &format!("{from} as {to}"),
+                &stage,
+                (from, to),
+                &rows,
+                |row| Ok(row[0].cast(to).expect("a Rust cast")),
+            );
+        }
     }
 }
 
@@ -96,7 +301,7 @@ fn every_backend_reports_the_same_typed_trap() {
             .collect::<splice::Result<Vec<_>>>()?;
         for (case, &exit) in exits.iter().enumerate() {
             let next = b.label()?;
-            let k = b.constant(case as i32)?;
+            let k = b.constant(Constant::from(case as i32))?;
             let hit = b.binary(Binary::Eq, kind, k)?;
             b.branch(hit, exit, next)?;
             b.mark(next)?;
@@ -105,7 +310,7 @@ fn every_backend_reports_the_same_typed_trap() {
             symbol: &IMPORT,
             arity: 2,
         };
-        let zero = b.constant(0)?;
+        let zero = b.constant(Constant::from(0))?;
         let passed = b.rust_call(import, &[value, zero])?;
         b.ret(passed)?;
         let operations = [
@@ -114,16 +319,20 @@ fn every_backend_reports_the_same_typed_trap() {
             (Binary::CheckedMul, i32::MAX, 2),
         ];
         b.mark(exits[0])?;
-        let read = b.load(Buffer(0), value)?;
+        let at = b.cast(value, ScalarType::Index)?;
+        let read = b.load(Buffer(0), at)?;
         b.ret(read)?;
         for (&exit, (op, x, y)) in exits[1..4].iter().zip(&operations) {
             b.mark(exit)?;
-            let (x, y) = (b.constant(*x)?, b.constant(*y)?);
+            let (x, y) = (
+                b.constant(Constant::from(*x))?,
+                b.constant(Constant::from(*y))?,
+            );
             let r = b.binary(*op, x, y)?;
             b.ret(r)?;
         }
         b.mark(exits[4])?;
-        let hundred = b.constant(100)?;
+        let hundred = b.constant(Constant::from(100))?;
         let fail = b.binary(Binary::Sub, value, hundred)?;
         let r = b.rust_call(import, &[value, fail])?;
         b.ret(r)?;
@@ -142,17 +351,22 @@ fn every_backend_reports_the_same_typed_trap() {
         (9, 7),
     ];
     let kinds = [BufferKind::new(Element::I32, false)];
-    let seen = agree("traps", 2, &kinds, &stage, |call| {
-        cases
-            .iter()
-            .map(|&(kind, value)| {
-                format!(
-                    "{:?}",
-                    call(&[kind, value], &mut [BufferArg::from(&[5, 6, 7, 8][..])])
-                )
-            })
-            .collect()
-    });
+    let seen = agree(
+        "traps",
+        Signature::new(&[ScalarType::I32; 2], ScalarType::I32, &kinds),
+        &stage,
+        |call| {
+            cases
+                .iter()
+                .map(|&(kind, value)| {
+                    format!(
+                        "{:?}",
+                        call(&[kind, value], &mut [BufferArg::from(&[5, 6, 7, 8][..])])
+                    )
+                })
+                .collect()
+        },
+    );
     let expected = [
         Ok(8),
         Err(CallError::Trap(Trap::Bounds)),
@@ -169,19 +383,31 @@ fn every_backend_reports_the_same_typed_trap() {
     assert_eq!(seen, expected);
 }
 
+/// Return 0 from the kernel.
+fn done(b: &mut dyn KernelBuilder) -> splice::Result<()> {
+    let zero = b.constant(Constant::from(0))?;
+    b.ret(zero)
+}
+
+/// Scalar argument `i` as a slice index, as Rust's `i as usize`.
+fn index(b: &mut dyn KernelBuilder, i: usize) -> splice::Result<Reg> {
+    let word = b.arg(i)?;
+    b.cast(word, ScalarType::Index)
+}
+
 /// Load `extra + 1` vectors of `from` (at 0 and at each argument), apply
 /// `op`, store the result as `to`.
 fn unary(from: Element, to: Element, op: SimdOp, extra: usize) -> Stage {
     Rc::new(move |b| {
-        let zero = b.constant(0)?;
+        let zero = b.constant(Constant::from(0usize))?;
         let mut args = vec![load(b, from, 0, zero)];
         for i in 0..extra {
-            let at = b.arg(i)?;
+            let at = index(b, i)?;
             args.push(load(b, from, 0, at));
         }
         let r = simd(b, from, op, &args);
         store(b, to, 1, zero, r);
-        b.ret(zero)?;
+        done(b)?;
         Ok(())
     })
 }
@@ -218,8 +444,11 @@ fn float_to_integer_casts_saturate_like_rust() {
     let stage = unary(Element::F32, Element::I32, SimdOp::Cast(Element::I32), 0);
     let seen = agree(
         "f32 -> i32",
-        0,
-        &kinds(Element::F32, Element::I32),
+        Signature::new(
+            &[ScalarType::I32; 0],
+            ScalarType::I32,
+            &kinds(Element::F32, Element::I32),
+        ),
         &stage,
         |call| {
             let mut out = vec![0i32; n];
@@ -236,8 +465,11 @@ fn float_to_integer_casts_saturate_like_rust() {
     let stage = unary(Element::F32, Element::U32, SimdOp::Cast(Element::U32), 0);
     let seen = agree(
         "f32 -> u32",
-        0,
-        &kinds(Element::F32, Element::U32),
+        Signature::new(
+            &[ScalarType::I32; 0],
+            ScalarType::I32,
+            &kinds(Element::F32, Element::U32),
+        ),
         &stage,
         |call| {
             let mut out = vec![0u32; n];
@@ -269,8 +501,11 @@ fn float_to_integer_casts_saturate_like_rust() {
     let stage = unary(Element::F64, Element::I64, SimdOp::Cast(Element::I64), 0);
     let seen = agree(
         "f64 -> i64",
-        0,
-        &kinds(Element::F64, Element::I64),
+        Signature::new(
+            &[ScalarType::I32; 0],
+            ScalarType::I32,
+            &kinds(Element::F64, Element::I64),
+        ),
         &stage,
         |call| {
             let mut out = vec![0i64; m];
@@ -305,8 +540,11 @@ fn integer_to_float_casts_round_like_rust() {
     let stage = unary(Element::I64, Element::F64, SimdOp::Cast(Element::F64), 0);
     let seen = agree(
         "i64 -> f64",
-        0,
-        &kinds(Element::I64, Element::F64),
+        Signature::new(
+            &[ScalarType::I32; 0],
+            ScalarType::I32,
+            &kinds(Element::I64, Element::F64),
+        ),
         &stage,
         |call| {
             let mut out = vec![0f64; m];
@@ -338,8 +576,11 @@ fn integer_to_float_casts_round_like_rust() {
     let stage = unary(Element::U32, Element::F32, SimdOp::Cast(Element::F32), 0);
     let seen = agree(
         "u32 -> f32",
-        0,
-        &kinds(Element::U32, Element::F32),
+        Signature::new(
+            &[ScalarType::I32; 0],
+            ScalarType::I32,
+            &kinds(Element::U32, Element::F32),
+        ),
         &stage,
         |call| {
             let mut out = vec![0f32; n];
@@ -388,8 +629,11 @@ fn float_arithmetic_is_correctly_rounded_on_special_values() {
         let stage = unary(Element::F32, Element::F32, op, extra);
         let seen = agree(
             &format!("{op:?}"),
-            extra,
-            &kinds(Element::F32, Element::F32),
+            Signature::new(
+                &vec![ScalarType::I32; extra],
+                ScalarType::I32,
+                &kinds(Element::F32, Element::F32),
+            ),
             &stage,
             |call| {
                 let mut out = vec![0f32; n];
@@ -424,7 +668,10 @@ fn float_comparisons_follow_ieee_unordered_rules() {
         (Ge, f32::ge),
     ] {
         let stage: Stage = Rc::new(move |b| {
-            let (zero, one) = (b.constant(0)?, b.constant(1)?);
+            let (zero, one) = (
+                b.constant(Constant::from(0usize))?,
+                b.constant(Constant::from(1usize))?,
+            );
             let x = load(b, Element::F32, 0, zero);
             let y = load(b, Element::F32, 0, one);
             let m = simd(b, Element::F32, op, &[x, y]);
@@ -432,13 +679,16 @@ fn float_comparisons_follow_ieee_unordered_rules() {
             let no = simd(b, Element::F32, Splat(0), &[]);
             let s = simd(b, Element::F32, Select, &[m, yes, no]);
             store(b, Element::F32, 1, zero, s);
-            b.ret(zero)?;
+            done(b)?;
             Ok(())
         });
         let seen = agree(
             &format!("{op:?}"),
-            0,
-            &kinds(Element::F32, Element::F32),
+            Signature::new(
+                &[ScalarType::I32; 0],
+                ScalarType::I32,
+                &kinds(Element::F32, Element::F32),
+            ),
             &stage,
             |call| {
                 let mut out = vec![9f32; n];
@@ -502,8 +752,11 @@ fn integer_lane_operations_agree_on_boundary_values() {
             let stage = unary(element, element, op, extra);
             agree(
                 &format!("{element:?} {op:?}"),
-                extra,
-                &kinds(element, element),
+                Signature::new(
+                    &vec![ScalarType::I32; extra],
+                    ScalarType::I32,
+                    &kinds(element, element),
+                ),
                 &stage,
                 |call| {
                     [1, 3, n as i32 - 1]
@@ -542,20 +795,22 @@ fn integer_lane_operations_agree_on_boundary_values() {
 fn first_n_masks_saturate_at_both_ends() {
     use SimdOp::*;
     let stage: Stage = Rc::new(|b| {
-        let k = b.arg(0)?;
+        let k = index(b, 0)?;
         let m = simd(b, Element::U16, FirstN, &[k]);
         let ones = simd(b, Element::U16, Splat(1), &[]);
         let zeros = simd(b, Element::U16, Splat(0), &[]);
         let s = simd(b, Element::U16, Select, &[m, ones, zeros]);
-        let zero = b.constant(0)?;
+        let zero = b.constant(Constant::from(0usize))?;
         store(b, Element::U16, 0, zero, s);
         let m = simd(b, Element::I64, FirstN, &[k]);
         let any = simd(b, Element::I64, Any, &[m]);
+        let any = b.cast(any, ScalarType::I32)?;
         let all = simd(b, Element::I64, All, &[m]);
+        let all = b.cast(all, ScalarType::I32)?;
         let r = b.binary(Binary::Add, any, all)?;
         let m = simd(b, Element::I32, FirstN, &[k]);
         let count = simd(b, Element::I32, Count, &[m]);
-        let ten = b.constant(10)?;
+        let ten = b.constant(Constant::from(10))?;
         let count = b.binary(Binary::Mul, count, ten)?;
         let r = b.binary(Binary::Add, r, count)?;
         b.ret(r)?;
@@ -564,8 +819,11 @@ fn first_n_masks_saturate_at_both_ends() {
     let n = Element::U16.lanes(bytes());
     let seen = agree(
         "first_n",
-        1,
-        &[BufferKind::new(Element::U16, true)],
+        Signature::new(
+            &[ScalarType::I32; 1],
+            ScalarType::I32,
+            &[BufferKind::new(Element::U16, true)],
+        ),
         &stage,
         |call| {
             [
@@ -609,11 +867,11 @@ fn first_n_masks_saturate_at_both_ends() {
     ]
     .into_iter()
     .map(|k: i32| {
-        // The count is unsigned; IR booleans are 0 or -1.
-        let active = |lanes: usize| (k as u32 as usize).min(lanes);
+        // The count is `k as usize`.
+        let active = |lanes: usize| (k as usize).min(lanes);
         let i64s = Element::I64.lanes(bytes());
-        let any = -i32::from(active(i64s) > 0);
-        let all = -i32::from(active(i64s) == i64s);
+        let any = i32::from(active(i64s) > 0);
+        let all = i32::from(active(i64s) == i64s);
         let count = active(Element::I32.lanes(bytes())) as i32;
         let out: Vec<u16> = (0..n).map(|i| u16::from(i < active(n))).collect();
         format!("Ok({}) {out:?}", any + all + 10 * count)
@@ -627,7 +885,10 @@ fn compress_expand_and_compress_store_agree_at_buffer_edges() {
     let n = Element::I32.lanes(bytes());
     for op in [SimdOp::Compress, SimdOp::Expand] {
         let stage: Stage = Rc::new(move |b| {
-            let (zero, one) = (b.constant(0)?, b.constant(1)?);
+            let (zero, one) = (
+                b.constant(Constant::from(0usize))?,
+                b.constant(Constant::from(1usize))?,
+            );
             let e = Element::I32;
             let x = load(b, e, 0, zero);
             let flags = load(b, e, 1, zero);
@@ -640,7 +901,7 @@ fn compress_expand_and_compress_store_agree_at_buffer_edges() {
                 simd(b, e, op, &[x, m, fallback])
             };
             store(b, e, 2, zero, r);
-            let at = b.arg(0)?;
+            let at = index(b, 0)?;
             b.simd(
                 Simd {
                     element: e,
@@ -648,7 +909,7 @@ fn compress_expand_and_compress_store_agree_at_buffer_edges() {
                 },
                 &[at, m, x],
             )?;
-            b.ret(zero)?;
+            done(b)?;
             Ok(())
         });
         let x: Vec<i32> = (100..100 + n as i32 + 1).collect();
@@ -658,39 +919,44 @@ fn compress_expand_and_compress_store_agree_at_buffer_edges() {
             BufferKind::Write,
             BufferKind::Write,
         ];
-        agree(&format!("{op:?}"), 1, &kinds, &stage, |call| {
-            [
-                (0b1011u32, 0, 8),
-                (0xffff, 2, 5),
-                (0, 100, 0),
-                (0x8001, 6, 7),
-                (0b111, -1, 4),
-            ]
-            .into_iter()
-            .map(|(bits, at, len)| {
-                let flags: Vec<i32> = (0..n).map(|i| ((bits >> (i % 32)) & 1) as i32).collect();
-                let mut out = vec![-9; n];
-                let mut dst = vec![-5; len];
-                let r = call(
-                    &[at],
-                    &mut [
-                        BufferArg::from(&x[..]),
-                        BufferArg::from(&flags[..]),
-                        BufferArg::from(&mut out[..]),
-                        BufferArg::from(&mut dst[..]),
-                    ],
-                );
-                format!("{r:?} {out:?} {dst:?}")
-            })
-            .collect()
-        });
+        agree(
+            &format!("{op:?}"),
+            Signature::new(&[ScalarType::I32; 1], ScalarType::I32, &kinds),
+            &stage,
+            |call| {
+                [
+                    (0b1011u32, 0, 8),
+                    (0xffff, 2, 5),
+                    (0, 100, 0),
+                    (0x8001, 6, 7),
+                    (0b111, -1, 4),
+                ]
+                .into_iter()
+                .map(|(bits, at, len)| {
+                    let flags: Vec<i32> = (0..n).map(|i| ((bits >> (i % 32)) & 1) as i32).collect();
+                    let mut out = vec![-9; n];
+                    let mut dst = vec![-5; len];
+                    let r = call(
+                        &[at],
+                        &mut [
+                            BufferArg::from(&x[..]),
+                            BufferArg::from(&flags[..]),
+                            BufferArg::from(&mut out[..]),
+                            BufferArg::from(&mut dst[..]),
+                        ],
+                    );
+                    format!("{r:?} {out:?} {dst:?}")
+                })
+                .collect()
+            },
+        );
     }
 }
 
 #[test]
 fn u16_gather_and_scatter_check_indices_at_16_bit_boundaries() {
     let stage: Stage = Rc::new(|b| {
-        let zero = b.constant(0)?;
+        let zero = b.constant(Constant::from(0usize))?;
         let e = Element::U16;
         let index = load(b, e, 0, zero);
         let g = simd(b, e, SimdOp::Gather(Buffer(1)), &[index]);
@@ -702,7 +968,7 @@ fn u16_gather_and_scatter_check_indices_at_16_bit_boundaries() {
             },
             &[index, g],
         )?;
-        b.ret(zero)?;
+        done(b)?;
         Ok(())
     });
     let n = Element::U16.lanes(bytes());
@@ -720,26 +986,31 @@ fn u16_gather_and_scatter_check_indices_at_16_bit_boundaries() {
         (32768, 32767),
         (32769, 32768),
     ];
-    let seen = agree("u16 gather", 0, &kinds, &stage, |call| {
-        cases
-            .into_iter()
-            .map(|(len, special)| {
-                let src: Vec<u16> = (0..len).map(|i| (i * 7) as u16).collect();
-                let mut index: Vec<u16> = (0..n).map(|i| i as u16 % 30).collect();
-                index[3] = special;
-                let mut out = vec![1u16; n + 40];
-                let r = call(
-                    &[],
-                    &mut [
-                        BufferArg::from(&index[..]),
-                        BufferArg::from(&src[..]),
-                        BufferArg::from(&mut out[..]),
-                    ],
-                );
-                format!("{r:?} {:?}", &out[..n])
-            })
-            .collect()
-    });
+    let seen = agree(
+        "u16 gather",
+        Signature::new(&[ScalarType::I32; 0], ScalarType::I32, &kinds),
+        &stage,
+        |call| {
+            cases
+                .into_iter()
+                .map(|(len, special)| {
+                    let src: Vec<u16> = (0..len).map(|i| (i * 7) as u16).collect();
+                    let mut index: Vec<u16> = (0..n).map(|i| i as u16 % 30).collect();
+                    index[3] = special;
+                    let mut out = vec![1u16; n + 40];
+                    let r = call(
+                        &[],
+                        &mut [
+                            BufferArg::from(&index[..]),
+                            BufferArg::from(&src[..]),
+                            BufferArg::from(&mut out[..]),
+                        ],
+                    );
+                    format!("{r:?} {:?}", &out[..n])
+                })
+                .collect()
+        },
+    );
     for ((len, special), seen) in cases.into_iter().zip(&seen) {
         // The gather reads `src[special]`; the scatter then writes `out[special]`.
         let gather_ok = (special as usize) < len;
@@ -756,15 +1027,15 @@ fn u16_gather_and_scatter_check_indices_at_16_bit_boundaries() {
 fn partial_vector_accesses_agree_at_negative_and_far_offsets() {
     let stage: Stage = Rc::new(|b| {
         let e = Element::I64;
-        let zero = b.constant(0)?;
+        let zero = b.constant(Constant::from(0usize))?;
         let x = simd(b, e, SimdOp::Iota, &[]);
-        let k = b.arg(1)?;
+        let k = index(b, 1)?;
         let m = simd(b, e, SimdOp::FirstN, &[k]);
-        let at = b.arg(0)?;
+        let at = index(b, 0)?;
         let l = simd(b, e, SimdOp::LoadSelect(Buffer(1)), &[at, m, x]);
         store(b, e, 0, zero, l);
         store(b, e, 0, at, x);
-        b.ret(zero)?;
+        done(b)?;
         Ok(())
     });
     let n = Element::I64.lanes(bytes());
@@ -772,27 +1043,35 @@ fn partial_vector_accesses_agree_at_negative_and_far_offsets() {
         BufferKind::new(Element::I64, true),
         BufferKind::new(Element::I64, false),
     ];
-    agree("i64 partial accesses", 2, &kinds, &stage, |call| {
-        let src: Vec<i64> = (0..n as i64 + 3).map(|i| i * 1000).collect();
-        let mut seen = Vec::new();
-        for at in [0, 1, 3, -1, i32::MIN, i32::MAX, n as i32, 2] {
-            for k in [0, 1, n as i32, -1] {
-                let mut out = vec![-1i64; n + 2];
-                let r = call(
-                    &[at, k],
-                    &mut [BufferArg::from(&mut out[..]), BufferArg::from(&src[..])],
-                );
-                seen.push(format!("at={at} k={k} {r:?} {out:?}"));
+    agree(
+        "i64 partial accesses",
+        Signature::new(&[ScalarType::I32; 2], ScalarType::I32, &kinds),
+        &stage,
+        |call| {
+            let src: Vec<i64> = (0..n as i64 + 3).map(|i| i * 1000).collect();
+            let mut seen = Vec::new();
+            for at in [0, 1, 3, -1, i32::MIN, i32::MAX, n as i32, 2] {
+                for k in [0, 1, n as i32, -1] {
+                    let mut out = vec![-1i64; n + 2];
+                    let r = call(
+                        &[at, k],
+                        &mut [BufferArg::from(&mut out[..]), BufferArg::from(&src[..])],
+                    );
+                    seen.push(format!("at={at} k={k} {r:?} {out:?}"));
+                }
             }
-        }
-        seen
-    });
+            seen
+        },
+    );
 }
 
 #[test]
 fn narrowing_and_widening_agree_on_extreme_lanes() {
     let stage: Stage = Rc::new(|b| {
-        let (zero, one) = (b.constant(0)?, b.constant(1)?);
+        let (zero, one) = (
+            b.constant(Constant::from(0usize))?,
+            b.constant(Constant::from(1usize))?,
+        );
         let x = load(b, Element::I64, 0, zero);
         let y = load(b, Element::I64, 0, one);
         let narrow = simd(b, Element::I64, SimdOp::Narrow(Element::I32), &[x, y]);
@@ -810,7 +1089,7 @@ fn narrowing_and_widening_agree_on_extreme_lanes() {
         };
         let hi = simd(b, Element::I32, high, &[narrow]);
         store(b, Element::I64, 4, zero, hi);
-        b.ret(zero)?;
+        done(b)?;
         Ok(())
     });
     let (n, m, h) = (
@@ -825,24 +1104,29 @@ fn narrowing_and_widening_agree_on_extreme_lanes() {
         BufferKind::new(Element::U32, true),
         BufferKind::new(Element::I64, true),
     ];
-    agree("narrow/widen", 0, &kinds, &stage, |call| {
-        let x: Vec<i64> = (0..m + 1)
-            .map(|i| [i64::MAX, i64::MIN, -1, 0x1_0000_0005, -0x1_0000_0005, 3][i % 6])
-            .collect();
-        let w: Vec<u16> = (0..h).map(|i| (i as u16).wrapping_mul(40000)).collect();
-        let (mut a, mut c, mut d) = (vec![0i32; n], vec![0u32; n], vec![0i64; m]);
-        let r = call(
-            &[],
-            &mut [
-                BufferArg::from(&x[..]),
-                BufferArg::from(&mut a[..]),
-                BufferArg::from(&w[..]),
-                BufferArg::from(&mut c[..]),
-                BufferArg::from(&mut d[..]),
-            ],
-        );
-        vec![format!("{r:?} {a:?} {c:?} {d:?}")]
-    });
+    agree(
+        "narrow/widen",
+        Signature::new(&[ScalarType::I32; 0], ScalarType::I32, &kinds),
+        &stage,
+        |call| {
+            let x: Vec<i64> = (0..m + 1)
+                .map(|i| [i64::MAX, i64::MIN, -1, 0x1_0000_0005, -0x1_0000_0005, 3][i % 6])
+                .collect();
+            let w: Vec<u16> = (0..h).map(|i| (i as u16).wrapping_mul(40000)).collect();
+            let (mut a, mut c, mut d) = (vec![0i32; n], vec![0u32; n], vec![0i64; m]);
+            let r = call(
+                &[],
+                &mut [
+                    BufferArg::from(&x[..]),
+                    BufferArg::from(&mut a[..]),
+                    BufferArg::from(&w[..]),
+                    BufferArg::from(&mut c[..]),
+                    BufferArg::from(&mut d[..]),
+                ],
+            );
+            vec![format!("{r:?} {a:?} {c:?} {d:?}")]
+        },
+    );
 }
 
 /// Each body breaks one verifier rule. Staging it directly on any backend
@@ -857,13 +1141,15 @@ fn every_build_route_reports_the_same_verify_error() {
     const KINDS: [BufferKind; 1] = [BufferKind::Read];
     let bodies: [(&str, Body); 10] = [
         ("uninitialized", |b| {
-            let value = b.local(ValueType::Scalar)?;
+            let value = b.local(ValueType::Scalar(ScalarType::I32))?;
             b.ret(value)
         }),
         ("uninitialized on one path", |b| {
-            let value = b.local(ValueType::Scalar)?;
+            let value = b.local(ValueType::Scalar(ScalarType::I32))?;
             let (set, join) = (b.label()?, b.label()?);
-            b.branch(b.arg(0)?, set, join)?;
+            let zero = b.constant(Constant::from(0))?;
+            let taken = b.binary(Binary::Ne, b.arg(0)?, zero)?;
+            b.branch(taken, set, join)?;
             b.mark(set)?;
             b.assign(value, b.arg(0)?)?;
             b.jump(join)?;
@@ -884,8 +1170,9 @@ fn every_build_route_reports_the_same_verify_error() {
         ("invalid register", |b| b.ret(Reg(99))),
         ("invalid parameter", |b| b.ret(b.arg(3)?)),
         ("read-only store", |b| {
-            let zero = b.constant(0)?;
-            b.store(Buffer(0), zero, zero)?;
+            let first = b.constant(Constant::from(0usize))?;
+            let zero = b.constant(Constant::from(0))?;
+            b.store(Buffer(0), first, zero)?;
             b.ret(zero)
         }),
         ("invalid buffer", |b| {
@@ -893,12 +1180,12 @@ fn every_build_route_reports_the_same_verify_error() {
             b.ret(len)
         }),
         ("falls off the end", |b| {
-            b.constant(1)?;
+            b.constant(Constant::from(1))?;
             Ok(())
         }),
     ];
     let options = BuildOptions::host(Mode::Release).unwrap();
-    let signature = Signature::new(1, &KINDS);
+    let signature = Signature::new(&[ScalarType::I32; 1], ScalarType::I32, &KINDS);
     for (name, body) in bodies {
         let expected = frontend::materialize(signature, Box::new(body), options).unwrap_err();
         assert!(

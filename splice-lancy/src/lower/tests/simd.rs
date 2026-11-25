@@ -1,5 +1,6 @@
 use super::*;
 use lancy::hir::Simd as V;
+use splice_core::hir::{Constant, ScalarType};
 use splice_core::simd::Element;
 use splice_core::{
     BufferArg, Executable,
@@ -12,13 +13,17 @@ fn both(
     stage: fn(&mut dyn KernelBuilder) -> splice_core::Result<()>,
 ) -> [hir::Function; 2] {
     let ir = splice_core::frontend::materialize(
-        Signature::new(arity, kinds),
+        Signature::new(&vec![ScalarType::I32; arity], ScalarType::I32, kinds),
         Box::new(stage),
         options(),
     )
     .unwrap();
     [
-        build(Signature::new(arity, kinds), Box::new(stage)).unwrap(),
+        build(
+            Signature::new(&vec![ScalarType::I32; arity], ScalarType::I32, kinds),
+            Box::new(stage),
+        )
+        .unwrap(),
         lower(&ir, &options().target).unwrap(),
     ]
 }
@@ -42,7 +47,7 @@ fn signed_index_gathers_check_each_width_with_one_unsigned_comparison() {
             let ids = b.simd(simd(SimdOp::Iota), &[])?.unwrap();
             b.simd(simd(SimdOp::Gather(buffer)), &[ids])?;
         }
-        let zero = b.constant(0)?;
+        let zero = b.constant(Constant::from(0))?;
         b.ret(zero)?;
         Ok(())
     }) {
@@ -73,11 +78,13 @@ fn packed_load_and_store_have_an_ordered_short_store_exit() {
         BufferKind::new(Element::U16, true),
     ];
     for graph in both(1, &kinds, |b| {
-        let zero = b.constant(0)?;
-        let a = b.simd(u16_op(SimdOp::Load(Buffer(0))), &[zero])?.unwrap();
+        let first = b.constant(Constant::from(0usize))?;
+        let a = b.simd(u16_op(SimdOp::Load(Buffer(0))), &[first])?.unwrap();
         let one = b.simd(u16_op(SimdOp::Splat(1)), &[])?.unwrap();
         let sum = b.simd(u16_op(SimdOp::Add), &[a, one])?.unwrap();
-        b.simd(u16_op(SimdOp::Store(Buffer(1))), &[b.arg(0)?, sum])?;
+        let at = b.cast(b.arg(0)?, ScalarType::Index)?;
+        b.simd(u16_op(SimdOp::Store(Buffer(1))), &[at, sum])?;
+        let zero = b.constant(Constant::from(0))?;
         b.ret(zero)?;
         Ok(())
     }) {
@@ -93,7 +100,7 @@ fn packed_load_and_store_have_an_ordered_short_store_exit() {
                 .any(|op| matches!(op, Op::Simd(V::MaskedStore { .. })))
         );
         let kernel = crate::LancyKernel::compile(
-            Signature::new(1, &kinds),
+            Signature::new(&[ScalarType::I32; 1], ScalarType::I32, &kinds),
             splice_core::BuildOptions::host(splice_core::Mode::Release).unwrap(),
             |_, _| Ok((graph, None)),
         )
@@ -131,15 +138,16 @@ fn scatter_addresses_unsigned_u16_and_stops_at_the_first_active_error() {
         BufferKind::new(Element::U16, true),
     ];
     for graph in both(0, &kinds, |b| {
-        let zero = b.constant(0)?;
-        let ids = b.simd(u16_op(SimdOp::Load(Buffer(0))), &[zero])?.unwrap();
+        let first = b.constant(Constant::from(0usize))?;
+        let ids = b.simd(u16_op(SimdOp::Load(Buffer(0))), &[first])?.unwrap();
+        let zero = b.constant(Constant::from(0))?;
         let values = b.simd(u16_op(SimdOp::Iota), &[])?.unwrap();
         b.simd(u16_op(SimdOp::Scatter(Buffer(1))), &[ids, values])?;
         b.ret(zero)?;
         Ok(())
     }) {
         let kernel = crate::LancyKernel::compile(
-            Signature::new(0, &kinds),
+            Signature::new(&[ScalarType::I32; 0], ScalarType::I32, &kinds),
             splice_core::BuildOptions::host(splice_core::Mode::Release).unwrap(),
             |_, _| Ok((graph, None)),
         )
@@ -177,15 +185,13 @@ fn masked_contiguous_store_never_wraps_an_invalid_offset_to_zero() {
         let i = b.simd(u16_op(SimdOp::Iota), &[])?.unwrap();
         let one = b.simd(u16_op(SimdOp::Splat(1)), &[])?.unwrap();
         let enabled = b.simd(u16_op(SimdOp::Eq), &[i, one])?.unwrap();
-        b.simd(
-            u16_op(SimdOp::StoreSelect(Buffer(0))),
-            &[b.arg(0)?, enabled, i],
-        )?;
+        let at = b.cast(b.arg(0)?, ScalarType::Index)?;
+        b.simd(u16_op(SimdOp::StoreSelect(Buffer(0))), &[at, enabled, i])?;
         b.ret(b.arg(0)?)?;
         Ok(())
     }) {
         let kernel = crate::LancyKernel::compile(
-            Signature::new(1, &kinds),
+            Signature::new(&[ScalarType::I32; 1], ScalarType::I32, &kinds),
             splice_core::BuildOptions::host(splice_core::Mode::Release).unwrap(),
             |_, _| Ok((graph, None)),
         )
@@ -208,11 +214,13 @@ fn vectors_and_masks_keep_their_element_type_across_a_join() {
             element: Element::F64,
             op,
         };
-        let zero = b.constant(0)?;
+        let zero = b.constant(Constant::from(0))?;
+        let first = b.constant(Constant::from(0usize))?;
         let v = b.local(ValueType::Vector(Element::F64))?;
         let mask = b.local(ValueType::Mask(Element::F64))?;
         let (left, right, join) = (b.label()?, b.label()?, b.label()?);
-        b.branch(b.arg(0)?, left, right)?;
+        let taken = b.binary(splice_core::hir::Binary::Ne, b.arg(0)?, zero)?;
+        b.branch(taken, left, right)?;
         for (block, lit, cmp) in [(left, 1.25_f64, SimdOp::Eq), (right, -2.0, SimdOp::Ne)] {
             b.mark(block)?;
             let n = b.simd(inst(SimdOp::Splat(lit.to_bits())), &[])?.unwrap();
@@ -222,7 +230,7 @@ fn vectors_and_masks_keep_their_element_type_across_a_join() {
             b.jump(join)?;
         }
         b.mark(join)?;
-        b.simd(inst(SimdOp::StoreSelect(Buffer(0))), &[zero, mask, v])?;
+        b.simd(inst(SimdOp::StoreSelect(Buffer(0))), &[first, mask, v])?;
         b.ret(zero)?;
         Ok(())
     }) {
@@ -234,7 +242,7 @@ fn vectors_and_masks_keep_their_element_type_across_a_join() {
         assert!(params.contains(&hir::Type::Vector(hir::Lane::F64)));
         assert!(params.contains(&hir::Type::Vector(hir::Lane::I64)));
         let kernel = crate::LancyKernel::compile(
-            Signature::new(1, &kinds),
+            Signature::new(&[ScalarType::I32; 1], ScalarType::I32, &kinds),
             splice_core::BuildOptions::host(splice_core::Mode::Release).unwrap(),
             |_, _| Ok((graph, None)),
         )

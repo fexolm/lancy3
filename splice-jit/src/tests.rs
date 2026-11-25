@@ -2,7 +2,8 @@
 use crate::{Function, Statement, VariableLocation, dwarf, elf};
 use gimli::write::FrameTable;
 use object::{Object, ObjectSection, ObjectSymbol};
-use splice_core::debug::{Location, Scalar, Type};
+use splice_core::debug::{Location, Type};
+use splice_core::hir::ScalarType;
 
 fn source(line: u32) -> Location {
     Location {
@@ -29,14 +30,18 @@ fn functions() -> Vec<Function> {
                 statement(
                     0x1000,
                     10,
-                    vec![("x", Type::Scalar(Scalar::I32), VariableLocation::Memory(-8))],
+                    vec![(
+                        "x",
+                        Type::Scalar(ScalarType::I32),
+                        VariableLocation::Memory(-8),
+                    )],
                 ),
                 statement(
                     0x1010,
                     11,
                     vec![(
                         "flag",
-                        Type::Scalar(Scalar::Bool),
+                        Type::Scalar(ScalarType::Bool),
                         VariableLocation::Memory(16),
                     )],
                 ),

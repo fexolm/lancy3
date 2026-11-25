@@ -145,7 +145,7 @@ impl Lower<'_> {
             let code = cond.code;
             (
                 emit!(let __splice_word = #code;),
-                emit!(#root::frontend::scalar::RunArg::known(&__splice_word).map(|value| value != 0)),
+                emit!(#root::frontend::scalar::RunArg::known(&__splice_word).map(|value| value.bits() != 0)),
             )
         } else {
             let test = self.reg(cond, Scalar::Bool, &at)?;
@@ -167,7 +167,7 @@ impl Lower<'_> {
                 let (__splice_yes, __splice_no, __splice_join) =
                     (__splice_builder.label()?, __splice_builder.label()?, __splice_builder.label()?);
                 if __splice_known_condition.is_none() {
-                    let __splice_cond = #root::frontend::scalar::RunArg::reg(__splice_word, __splice_builder)?;
+                    let __splice_cond = #root::frontend::scalar::RunArg::typed(__splice_word, #root::hir::ScalarType::Bool, __splice_builder)?;
                     __splice_builder.branch(__splice_cond, __splice_yes, __splice_no)?;
                 }
                 if __splice_known_condition != ::core::option::Option::Some(false) { __splice_builder.mark(__splice_yes)?; #yes_code; }
@@ -236,8 +236,9 @@ impl Lower<'_> {
                 "__splice_element_index",
                 span = proc_macro2::Span::mixed_site()
             );
+            let (start, one) = (self.constant(emit!(0usize)), self.constant(emit!(1usize)));
             let setup = emit!(let buffer = #slice;
-                let __splice_start = __splice_builder.constant(0)?;
+                let (__splice_start, __splice_one) = (#start, #one);
                 let __splice_limit = __splice_builder.buffer_len(buffer)?;);
             let read = emit!(let #id = __splice_builder.load(buffer, #index)?;);
             return self.counted_loop(f, binding, Scalar::Int, &index, setup, read);
@@ -253,23 +254,19 @@ impl Lower<'_> {
             return err(pat, "expected an immutable loop variable");
         }
         let stop_value = self.expr(stop)?;
-        let kind = if matches!(stop_value.stage, Stage::Reg(Scalar::Index | Scalar::Length)) {
-            // This loop uses a signed i32 induction variable. Both endpoints must fit.
-            if stop_value.stage != Stage::Reg(Scalar::Length)
-                || !matches!(&**start, Expr::Lit(l) if matches!(&l.lit, Lit::Int(i) if i.base10_parse::<i32>().is_ok()))
-            {
-                return err(
-                    range,
-                    "use an i32 range or a literal start with a slice.len() or Lane::lanes() bound",
-                );
+        let (kind, one) = match stop_value.stage {
+            // A variable below a slice length or a lane count fits a nonnegative i32.
+            Stage::Reg(Scalar::Length) if matches!(&**start, Expr::Lit(l) if matches!(&l.lit, Lit::Int(i) if i.base10_parse::<i32>().is_ok())) => {
+                (Scalar::Length, emit!(1usize))
             }
-            Scalar::Length
-        } else {
-            Scalar::Int
+            Stage::Reg(Scalar::Index | Scalar::Length) => (Scalar::Index, emit!(1usize)),
+            _ => (Scalar::Int, emit!(1i32)),
         };
         let initial = self.operand(start, kind)?;
         let bound = self.reg(stop_value, kind, stop)?;
-        let setup = emit!(let (__splice_start, __splice_limit) = (#initial, #bound););
+        let one = self.constant(one);
+        let setup =
+            emit!(let (__splice_start, __splice_limit, __splice_one) = (#initial, #bound, #one););
         self.counted_loop(f, pat, kind, &pat.ident, setup, TokenStream::new())
     }
 
@@ -321,7 +318,6 @@ impl Lower<'_> {
             #point
             #contents
             __splice_builder.mark(__splice_loop_next)?;
-            let __splice_one = __splice_builder.constant(1)?;
             let __splice_next = __splice_builder.binary(#root::hir::Binary::Add, #index, __splice_one)?;
             __splice_builder.assign(#index, __splice_next)?;
             __splice_builder.jump(__splice_for_head)?;
@@ -460,11 +456,9 @@ impl Lower<'_> {
             Pat::Lit(l) => {
                 let lit = match (&l.lit, t) {
                     (Lit::Int(_), Scalar::Int | Scalar::Inferred) => {
-                        emit!(__splice_builder.constant(#l)?)
+                        self.constant(emit!({let __splice_value: i32 = #l; __splice_value}))
                     }
-                    (Lit::Bool(_), Scalar::Bool | Scalar::Inferred) => {
-                        emit!(__splice_builder.constant(-i32::from(#l))?)
-                    }
+                    (Lit::Bool(_), Scalar::Bool | Scalar::Inferred) => self.constant(emit!(#l)),
                     _ => return err(l, "pattern type differs from match subject"),
                 };
                 Ok(self.bin("Eq", emit!(__splice_subject), lit))
@@ -490,7 +484,7 @@ impl Lower<'_> {
                     pred = Some(self.bin(
                         "Ge",
                         emit!(__splice_subject),
-                        emit!(__splice_builder.constant(#v)?),
+                        self.constant(emit!({let __splice_value: i32 = #v; __splice_value})),
                     ));
                 }
                 if let Some(stop) = &r.end {
@@ -498,7 +492,7 @@ impl Lower<'_> {
                     let upper = self.bin(
                         cmp,
                         emit!(__splice_subject),
-                        emit!(__splice_builder.constant(#v)?),
+                        self.constant(emit!({let __splice_value: i32 = #v; __splice_value})),
                     );
                     pred = Some(match pred {
                         Some(lower) => self.bin("And", lower, upper),

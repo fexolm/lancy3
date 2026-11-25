@@ -12,7 +12,10 @@ pub mod source;
 mod specialization;
 pub use specialization::{ComptimeKey, KeyArgument, MaybeKey, Specialization};
 
-use crate::hir::{Binary, Buffer, BufferKind, ContextSlice, Function, Label, Reg, Simd, ValueType};
+use crate::hir::{
+    Binary, Buffer, BufferKind, Constant, ContextSlice, Function, Label, Reg, ScalarType, Simd,
+    ValueType,
+};
 use std::sync::Arc;
 
 /// A function body is staged once against the builder selected by its backend.
@@ -27,16 +30,26 @@ pub struct KernelSource {
     pub buffers: &'static [&'static str],
 }
 
-/// The scalar and buffer parameters of a kernel, in declaration order.
+/// The scalar and buffer parameters of a kernel, in declaration order,
+/// and the type of its result.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Signature<'a> {
-    pub arity: usize,
+    pub params: &'a [ScalarType],
+    pub result: ScalarType,
     pub buffers: &'a [BufferKind],
 }
 
 impl<'a> Signature<'a> {
-    pub const fn new(arity: usize, buffers: &'a [BufferKind]) -> Self {
-        Self { arity, buffers }
+    pub const fn new(
+        params: &'a [ScalarType],
+        result: ScalarType,
+        buffers: &'a [BufferKind],
+    ) -> Self {
+        Self {
+            params,
+            result,
+            buffers,
+        }
     }
 }
 
@@ -76,7 +89,9 @@ pub trait KernelBuilder {
             "this builder does not support SIMD",
         ))
     }
-    fn constant(&mut self, value: i32) -> crate::Result<Reg>;
+    fn constant(&mut self, value: Constant) -> crate::Result<Reg>;
+    /// Rust's `value as to`.
+    fn cast(&mut self, value: Reg, to: ScalarType) -> crate::Result<Reg>;
     fn buffer_len(&mut self, buffer: Buffer) -> crate::Result<Reg>;
     fn load(&mut self, buffer: Buffer, index: Reg) -> crate::Result<Reg>;
     fn store(&mut self, buffer: Buffer, index: Reg, value: Reg) -> crate::Result<()>;

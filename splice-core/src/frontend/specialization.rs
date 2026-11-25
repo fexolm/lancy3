@@ -13,25 +13,23 @@ pub trait ComptimeKey {
 #[derive(Debug, Hash, PartialEq, Eq)]
 pub struct Specialization {
     declaration: TypeId,
-    arity: usize,
-    kinds: &'static [crate::BufferKind],
+    signature: super::Signature<'static>,
     types: Vec<TypeId>,
     values: Vec<u8>,
 }
 
 impl Specialization {
     #[doc(hidden)]
-    pub fn new<K: 'static>(arity: usize, kinds: &'static [crate::BufferKind]) -> Self {
+    pub fn new<K: 'static>(signature: super::Signature<'static>) -> Self {
         Self {
             declaration: TypeId::of::<K>(),
-            arity,
-            kinds,
+            signature,
             types: Vec::new(),
             values: Vec::new(),
         }
     }
     pub fn signature(&self) -> super::Signature<'static> {
-        super::Signature::new(self.arity, self.kinds)
+        self.signature
     }
 }
 

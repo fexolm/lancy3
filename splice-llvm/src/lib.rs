@@ -214,7 +214,7 @@ impl LlvmKernel {
             _debug: registration,
             _owner: owner,
             entry,
-            arity: signature.arity,
+            arity: signature.params.len(),
             buffers: signature.buffers.into(),
             target: options.target,
             scalable: target::Machine::new(&options.target).scalable,
@@ -264,6 +264,7 @@ impl Executable for LlvmKernel {
 mod tests {
     use super::*;
     use splice_core::Codegen;
+    use splice_core::hir::{Constant, ScalarType};
 
     fn options() -> BuildOptions {
         BuildOptions::host(splice_core::Mode::Release).unwrap()
@@ -275,16 +276,16 @@ mod tests {
         use splice_core::{frontend::KernelBuilder, hir::Binary};
         fn staged(b: &mut dyn KernelBuilder) -> splice_core::Result<()> {
             let value = b.call_kernel(
-                Signature::new(1, &[]),
+                Signature::new(&[ScalarType::I32; 1], ScalarType::I32, &[]),
                 &[b.arg(0)?],
                 &[],
                 Box::new(|child| {
                     let value = child.call_kernel(
-                        Signature::new(1, &[]),
+                        Signature::new(&[ScalarType::I32; 1], ScalarType::I32, &[]),
                         &[child.arg(0)?],
                         &[],
                         Box::new(|leaf| {
-                            let one = leaf.constant(1)?;
+                            let one = leaf.constant(Constant::from(1))?;
                             let value = leaf.binary(Binary::Add, leaf.arg(0)?, one)?;
                             leaf.ret(value)?;
                             Ok(())
@@ -297,17 +298,27 @@ mod tests {
             b.ret(value)?;
             Ok(())
         }
-        let ir =
-            splice_core::frontend::materialize(Signature::new(1, &[]), Box::new(staged), options())
-                .unwrap();
+        let ir = splice_core::frontend::materialize(
+            Signature::new(&[ScalarType::I32; 1], ScalarType::I32, &[]),
+            Box::new(staged),
+            options(),
+        )
+        .unwrap();
         let machine = target::Machine::new(&options().target);
         let target = target::machine(&options().target, false).unwrap();
         let ctx = Context::create();
         for direct in [false, true] {
             let m = build_module(&ctx, &target, machine, |ctx, m| {
                 if direct {
-                    lower::populate(ctx, m, machine, Signature::new(1, &[]), staged, false)
-                        .map(drop)
+                    lower::populate(
+                        ctx,
+                        m,
+                        machine,
+                        Signature::new(&[ScalarType::I32; 1], ScalarType::I32, &[]),
+                        staged,
+                        false,
+                    )
+                    .map(drop)
                 } else {
                     lower::populate_function(ctx, m, machine, &ir, false).map(drop)
                 }
@@ -326,7 +337,12 @@ mod tests {
             assert_eq!(definitions, [m.get_function("splice_entry").unwrap()]);
         }
         for native in [
-            Llvm::build_with_options(Signature::new(1, &[]), Box::new(staged), options()).unwrap(),
+            Llvm::build_with_options(
+                Signature::new(&[ScalarType::I32; 1], ScalarType::I32, &[]),
+                Box::new(staged),
+                options(),
+            )
+            .unwrap(),
             Llvm::compile(&ir).unwrap(),
         ] {
             assert_eq!(native.call(&[i32::MAX], &mut []), Ok(i32::MIN));
@@ -459,7 +475,8 @@ mod tests {
             BufferKind::new(Element::U16, true),
         ];
         fn stage(b: &mut dyn KernelBuilder) -> splice_core::Result<()> {
-            let offset = b.arg(0)?;
+            let result = b.arg(0)?;
+            let offset = b.cast(result, ScalarType::Index)?;
             let op = |op| Simd {
                 element: Element::U16,
                 op,
@@ -468,11 +485,15 @@ mod tests {
             let one = b.simd(op(SimdOp::Splat(1)), &[])?.unwrap();
             let sum = b.simd(op(SimdOp::Add), &[one, value])?.unwrap();
             b.simd(op(SimdOp::Store(Buffer(1))), &[offset, sum])?;
-            b.ret(offset)?;
+            b.ret(result)?;
             Ok(())
         }
-        let ir =
-            frontend::materialize(Signature::new(1, &kinds), Box::new(stage), options()).unwrap();
+        let ir = frontend::materialize(
+            Signature::new(&[ScalarType::I32; 1], ScalarType::I32, &kinds),
+            Box::new(stage),
+            options(),
+        )
+        .unwrap();
         let lanes = Element::U16.lanes(options().target.vector_bytes());
         let ty = format!("<{lanes} x i16>");
         let machine = target::Machine::new(&options().target);
@@ -481,8 +502,15 @@ mod tests {
         for direct in [true, false] {
             let m = build_module(&ctx, &target, machine, |ctx, m| {
                 if direct {
-                    lower::populate(ctx, m, machine, Signature::new(1, &kinds), stage, false)
-                        .map(drop)
+                    lower::populate(
+                        ctx,
+                        m,
+                        machine,
+                        Signature::new(&[ScalarType::I32; 1], ScalarType::I32, &kinds),
+                        stage,
+                        false,
+                    )
+                    .map(drop)
                 } else {
                     lower::populate_function(ctx, m, machine, &ir, false).map(drop)
                 }
@@ -503,7 +531,7 @@ mod tests {
             assert!(text.contains(&format!("add {ty}")), "{text}");
             let native = if direct {
                 LlvmManualSimd::build_with_options(
-                    Signature::new(1, &kinds),
+                    Signature::new(&[ScalarType::I32; 1], ScalarType::I32, &kinds),
                     Box::new(stage),
                     options(),
                 )
@@ -551,10 +579,11 @@ mod tests {
                 element: Element::I32,
                 op,
             };
-            let base = b.arg(0)?;
-            let zero = b.constant(0)?;
-            let indices = b.simd(op(SimdOp::Load(Buffer(0))), &[zero])?.unwrap();
-            let flags = b.simd(op(SimdOp::Load(Buffer(1))), &[zero])?.unwrap();
+            let base = b.cast(b.arg(0)?, ScalarType::Index)?;
+            let first = b.constant(Constant::from(0usize))?;
+            let zero = b.constant(Constant::from(0))?;
+            let indices = b.simd(op(SimdOp::Load(Buffer(0))), &[first])?.unwrap();
+            let flags = b.simd(op(SimdOp::Load(Buffer(1))), &[first])?.unwrap();
             let zeros = b.simd(op(SimdOp::Splat(0)), &[])?.unwrap();
             let mask = b.simd(op(SimdOp::Ne), &[flags, zeros])?.unwrap();
             let lanes = b.simd(op(SimdOp::Iota), &[])?.unwrap();
@@ -604,8 +633,12 @@ mod tests {
             Some(0)
         }
 
-        let ir =
-            frontend::materialize(Signature::new(1, &kinds), Box::new(stage), options()).unwrap();
+        let ir = frontend::materialize(
+            Signature::new(&[ScalarType::I32; 1], ScalarType::I32, &kinds),
+            Box::new(stage),
+            options(),
+        )
+        .unwrap();
         let machine = target::Machine::new(&options().target);
         let target = target::machine(&options().target, false).unwrap();
         let ctx = Context::create();
@@ -613,8 +646,15 @@ mod tests {
         for direct in [false, true] {
             let m = build_module(&ctx, &target, machine, |ctx, m| {
                 if direct {
-                    lower::populate(ctx, m, machine, Signature::new(1, &kinds), stage, false)
-                        .map(drop)
+                    lower::populate(
+                        ctx,
+                        m,
+                        machine,
+                        Signature::new(&[ScalarType::I32; 1], ScalarType::I32, &kinds),
+                        stage,
+                        false,
+                    )
+                    .map(drop)
                 } else {
                     lower::populate_function(ctx, m, machine, &ir, false).map(drop)
                 }
@@ -636,7 +676,11 @@ mod tests {
             }
 
             let native = if direct {
-                Llvm::build_with_options(Signature::new(1, &kinds), Box::new(stage), options())
+                Llvm::build_with_options(
+                    Signature::new(&[ScalarType::I32; 1], ScalarType::I32, &kinds),
+                    Box::new(stage),
+                    options(),
+                )
             } else {
                 Llvm::compile(&ir)
             }

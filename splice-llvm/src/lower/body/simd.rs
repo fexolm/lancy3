@@ -9,7 +9,7 @@ use inkwell::{
 };
 use splice_core::Trap;
 use splice_core::{
-    hir::{Reg, Simd, SimdOp, ValueType},
+    hir::{Reg, ScalarType, Simd, SimdOp, ValueType},
     simd::Element,
 };
 
@@ -35,9 +35,20 @@ fn vector_type_with_lanes(ctx: &Context, e: Element, lanes: u32) -> VectorType<'
     }
 }
 
+/// The LLVM type of a scalar register: a `bool` is an `i1`.
+pub(in crate::lower) fn scalar_type(ctx: &Context, ty: ScalarType) -> BasicTypeEnum<'_> {
+    match ty {
+        ScalarType::Bool => ctx.bool_type().into(),
+        ScalarType::I32 | ScalarType::U32 => ctx.i32_type().into(),
+        ScalarType::I64 | ScalarType::U64 | ScalarType::Index => ctx.i64_type().into(),
+        ScalarType::F32 => ctx.f32_type().into(),
+        ScalarType::F64 => ctx.f64_type().into(),
+    }
+}
+
 pub(super) fn llvm_type(ctx: &Context, bytes: usize, ty: ValueType) -> BasicTypeEnum<'_> {
     match ty {
-        ValueType::Scalar => ctx.i32_type().into(),
+        ValueType::Scalar(ty) => scalar_type(ctx, ty),
         ValueType::Vector(e) => vector_type(ctx, bytes, e).into(),
         ValueType::Mask(e) => ctx.bool_type().vec_type(e.lanes(bytes) as u32).into(),
     }
@@ -96,14 +107,25 @@ impl<'ctx> Body<'_, 'ctx> {
         let arg = |n: usize| self.vector(args[n]);
         let float = e.is_float();
         let value: BasicValueEnum<'ctx> = match inst.op {
-            Lanes => self.int(e.lanes(self.machine.vector_bytes) as i32).into(),
+            Lanes => self
+                .ctx
+                .i64_type()
+                .const_int(e.lanes(self.machine.vector_bytes) as u64, false)
+                .into(),
             SplatScalar | FirstN => {
-                let ty = self
-                    .ctx
-                    .i32_type()
-                    .vec_type(e.lanes(self.machine.vector_bytes) as u32);
-                let first =
-                    ir.build_insert_element(ty.get_undef(), self.load(args[0])?, self.int(0), "")?;
+                let lanes = e.lanes(self.machine.vector_bytes) as u32;
+                let ty = self.ctx.i32_type().vec_type(lanes);
+                let scalar = if inst.op == FirstN {
+                    // Clamp the usize count to the lane count before narrowing it.
+                    let count = self.offset(args[0])?;
+                    let lanes = self.ctx.i64_type().const_int(u64::from(lanes), false);
+                    let fits = ir.build_int_compare(IntPredicate::ULT, count, lanes, "")?;
+                    let count = ir.build_select(fits, count, lanes, "")?.into_int_value();
+                    ir.build_int_truncate(count, self.ctx.i32_type(), "")?
+                } else {
+                    self.load(args[0])?
+                };
+                let first = ir.build_insert_element(ty.get_undef(), scalar, self.int(0), "")?;
                 let splat = ir.build_shuffle_vector(first, ty.get_undef(), ty.const_zero(), "")?;
                 if inst.op == FirstN {
                     // Compare at the full index width even when the data lanes are narrower.
@@ -151,14 +173,17 @@ impl<'ctx> Body<'_, 'ctx> {
             AlignmentPrefix(b) => {
                 let slice = self.slices[b.index()];
                 let base = ir.build_ptr_to_int(slice.data, self.ctx.i32_type(), "address.low")?;
-                let scaled = ir.build_left_shift(self.load(args[0])?, self.int(2), "")?;
+                // Only the low bits of the address decide the alignment.
+                let offset = ir.build_int_truncate(self.load(args[0])?, self.ctx.i32_type(), "")?;
+                let scaled = ir.build_left_shift(offset, self.int(2), "")?;
                 let addr = ir.build_int_add(base, scaled, "")?;
                 let bytes = ir.build_and(
                     ir.build_int_neg(addr, "")?,
                     self.int((self.machine.vector_bytes - 1) as i32),
                     "",
                 )?;
-                ir.build_right_shift(bytes, self.int(2), false, "prefix")?
+                let prefix = ir.build_right_shift(bytes, self.int(2), false, "prefix")?;
+                ir.build_int_z_extend(prefix, self.ctx.i64_type(), "")?
                     .into()
             }
             Compress | Expand if self.machine.x86_compress => {
@@ -232,7 +257,7 @@ impl<'ctx> Body<'_, 'ctx> {
             CompressStore(b) => {
                 self.compress_store(
                     self.slices[b.index()],
-                    self.load(args[0])?,
+                    self.offset(args[0])?,
                     arg(1)?,
                     arg(2)?,
                 )?;
@@ -428,12 +453,12 @@ impl<'ctx> Body<'_, 'ctx> {
                     )
                     .unwrap();
                 let mask = ir.build_bit_cast(arg(0)?, bits, "")?.into_int_value();
-                let flag = if inst.op == Any {
+                if inst.op == Any {
                     ir.build_int_compare(IntPredicate::NE, mask, bits.const_zero(), "")?
                 } else {
                     ir.build_int_compare(IntPredicate::EQ, mask, bits.const_all_ones(), "")?
-                };
-                ir.build_int_s_extend(flag, self.ctx.i32_type(), "")?.into()
+                }
+                .into()
             }
         };
         ir.build_store(
@@ -470,7 +495,6 @@ impl<'ctx> Body<'_, 'ctx> {
     ) -> Built<()> {
         let ir = self.builder;
         let wide = self.ctx.i64_type();
-        let offset = ir.build_int_z_extend(offset, wide, "")?;
         // SAFETY: plain GEP is valid for inactive, out-of-slice offsets. The mask
         // passed to compressstore enables at most the available number of words.
         let ptr = unsafe { ir.build_gep(self.ctx.i32_type(), slice.data, &[offset], "")? };
@@ -605,7 +629,7 @@ impl<'ctx> Body<'_, 'ctx> {
             };
             (outside, BasicValueEnum::from(addr))
         } else {
-            let start = ir.build_int_z_extend(self.load(args[0])?, wide, "")?;
+            let start = self.offset(args[0])?;
             // SAFETY: plain GEP computes the address without accessing memory or
             // asserting in-bounds. The full interval or per-lane mask guards each use.
             let addr = unsafe { ir.build_gep(el, slice.data, &[start], "")? };

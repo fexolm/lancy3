@@ -86,7 +86,7 @@ impl LancyKernel {
         Ok(Self {
             _debug: registration,
             code,
-            arity: signature.arity,
+            arity: signature.params.len(),
             slices: signature.buffers.into(),
         })
     }

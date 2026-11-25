@@ -1,6 +1,6 @@
 //! Inspect a specialized kernel using `my_kernel::build::<splice_text::Text>(...)`.
-//! The listing follows Splice's scalar semantics (including wrapping arithmetic
-//! and comparison masks). Labels and mutable registers make control flow explicit.
+//! The listing follows Splice's scalar semantics (including wrapping arithmetic);
+//! constants carry their type suffix. Labels and mutable registers make control flow explicit.
 //!
 //! ```
 //! use splice_core::kernel;
@@ -19,7 +19,7 @@
 //! ```
 #![forbid(unsafe_code)]
 
-use splice_core::hir::{Binary, Buffer, Instr, Reg};
+use splice_core::hir::{Binary, Buffer, Instr, Reg, ValueType};
 use splice_core::{Backend, Function};
 use std::fmt::{self, Write};
 use std::sync::Arc;
@@ -86,11 +86,11 @@ fn render(root: &Function, out: &mut String) -> fmt::Result {
             writeln!(out)?;
         }
         write!(out, "fn {}(", symbol(f, id))?;
-        for i in 0..f.arity() {
+        for (i, ty) in f.params().iter().enumerate() {
             if i != 0 {
                 out.push_str(", ");
             }
-            write!(out, "{}: i32", reg(Reg(i as u32)))?;
+            write!(out, "{}: {ty}", reg(Reg(i as u32)))?;
         }
         for (i, kind) in f.buffer_kinds().iter().enumerate() {
             if i != 0 || f.arity() != 0 {
@@ -108,7 +108,7 @@ fn render(root: &Function, out: &mut String) -> fmt::Result {
                 kind.element().name()
             )?;
         }
-        writeln!(out, ") -> i32 {{")?;
+        writeln!(out, ") -> {} {{", f.result())?;
         for instruction in f.instructions() {
             match instruction {
                 Instr::Debug(_) => {}
@@ -202,6 +202,12 @@ fn render(root: &Function, out: &mut String) -> fmt::Result {
                     writeln!(out)?;
                 }
                 Instr::Const(dst, n) => writeln!(out, "    {} = {n}", reg(*dst))?,
+                Instr::Cast { dst, src } => {
+                    let ValueType::Scalar(to) = f.reg_type(*dst) else {
+                        unreachable!("verified scalar cast")
+                    };
+                    writeln!(out, "    {} = {} as {to}", reg(*dst), reg(*src))?
+                }
                 Instr::Copy(dst, src) => writeln!(out, "    {} = {}", reg(*dst), reg(*src))?,
                 Instr::Bin(dst, op, a, b) => {
                     writeln!(

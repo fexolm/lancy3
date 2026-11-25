@@ -4,7 +4,8 @@ use gimli::write::{
     LineString, Range, RangeList, Sections, Unit, UnitEntryId,
 };
 use gimli::{self as dw, Encoding, Format, LineEncoding, LittleEndian, Register};
-use splice_core::debug::{ConstantType, Location, Scalar, Type};
+use splice_core::debug::{ConstantType, Location, Type};
+use splice_core::hir::ScalarType;
 use splice_core::simd::Element;
 use std::path::{Path, PathBuf};
 
@@ -62,9 +63,15 @@ fn element(unit: &mut Unit, elem: Element) -> UnitEntryId {
 
 fn emit_type(unit: &mut Unit, ty: Type) -> UnitEntryId {
     match ty {
-        Type::Scalar(Scalar::Bool) => base(unit, "bool", 1, dw::DW_ATE_boolean),
-        Type::Scalar(Scalar::Index) => base(unit, "usize", 8, dw::DW_ATE_unsigned),
-        Type::Scalar(Scalar::I32) => element(unit, Element::I32),
+        Type::Scalar(ty) => {
+            let encoding = match ty {
+                ScalarType::Bool => dw::DW_ATE_boolean,
+                ScalarType::F32 | ScalarType::F64 => dw::DW_ATE_float,
+                ScalarType::I32 | ScalarType::I64 => dw::DW_ATE_signed,
+                ScalarType::U32 | ScalarType::U64 | ScalarType::Index => dw::DW_ATE_unsigned,
+            };
+            base(unit, ty.name(), ty.bytes(), encoding)
+        }
         Type::Constant(kind) => match kind {
             ConstantType::Bool => base(unit, "bool", 1, dw::DW_ATE_boolean),
             ConstantType::Usize => base(unit, "usize", 8, dw::DW_ATE_unsigned),

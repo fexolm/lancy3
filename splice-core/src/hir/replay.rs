@@ -142,8 +142,8 @@ impl<'f, 'b> Replay<'f, 'b> {
                         .iter()
                         .map(|&var| {
                             Ok(match var.value {
-                                Value::Register(r, scalar) => Variable {
-                                    value: Value::Register(self.reg(r)?, scalar),
+                                Value::Register(r) => Variable {
+                                    value: Value::Register(self.reg(r)?),
                                     ..var
                                 },
                                 _ => var,
@@ -171,6 +171,21 @@ impl<'f, 'b> Replay<'f, 'b> {
                     }
                 }
                 &Instr::Const(dst, value) => self.define(dst, |b| b.constant(value))?,
+                &Instr::Cast { dst, src } => {
+                    let src = self.reg(src)?;
+                    let to = match self.f.checked_reg_type(dst) {
+                        Some(super::ValueType::Scalar(ty)) => ty,
+                        // `define` rejects an invalid register.
+                        None => super::ScalarType::I32,
+                        Some(_) => {
+                            return Err(crate::BuildError::verify_at(
+                                pc,
+                                "a cast produces a scalar register",
+                            ));
+                        }
+                    };
+                    self.define(dst, |b| b.cast(src, to))?;
+                }
                 &Instr::Copy(dst, src) => {
                     let (dst, src) = (self.reg(dst)?, self.reg(src)?);
                     self.b.assign(dst, src)?;

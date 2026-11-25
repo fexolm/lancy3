@@ -1,37 +1,64 @@
 //! Staging support used by the scalar kernel attribute during HIR construction.
 use super::KernelBuilder;
-use crate::hir::{Binary, Reg};
+use crate::hir::{Binary, Constant, Reg, ScalarType, ValueType};
 use std::{cell::Cell, marker::PhantomData, rc::Rc};
 
 #[doc(hidden)]
 #[derive(Clone, Copy)]
 pub struct Host<T>(pub T);
+/// A host value that a kernel uses at run time.
 #[doc(hidden)]
 pub trait ScalarConstant {
-    fn bits(self) -> i32;
+    fn constant(self) -> Constant;
 }
 impl ScalarConstant for i32 {
-    fn bits(self) -> i32 {
-        self
+    fn constant(self) -> Constant {
+        self.into()
     }
 }
 impl ScalarConstant for bool {
-    fn bits(self) -> i32 {
-        -i32::from(self)
+    fn constant(self) -> Constant {
+        self.into()
     }
 }
 impl<T: ScalarConstant + Copy> ScalarConstant for &T {
-    fn bits(self) -> i32 {
-        (*self).bits()
+    fn constant(self) -> Constant {
+        (*self).constant()
     }
 }
 #[doc(hidden)]
 #[diagnostic::on_unimplemented(message = "a scalar kernel parameter requires an i32 value")]
 pub trait RunArg {
-    fn known(&self) -> Option<i32> {
+    fn known(&self) -> Option<Constant> {
         None
     }
     fn reg(self, builder: &mut dyn KernelBuilder) -> crate::Result<Reg>;
+    /// The value as a register of type `ty`. A Rust call returns an `i32`
+    /// word: a `bool` result is a nonzero word.
+    fn typed(self, ty: ScalarType, b: &mut dyn KernelBuilder) -> crate::Result<Reg>
+    where
+        Self: Sized,
+    {
+        let r = self.reg(b)?;
+        match b.reg_type(r) {
+            Some(ValueType::Scalar(ScalarType::I32)) if ty == ScalarType::Bool => {
+                let zero = b.constant(Constant::from(0))?;
+                b.binary(Binary::Ne, r, zero)
+            }
+            _ => Ok(r),
+        }
+    }
+    /// The value as the `i32` word that passes it to a Rust call.
+    fn word(self, b: &mut dyn KernelBuilder) -> crate::Result<Reg>
+    where
+        Self: Sized,
+    {
+        let r = self.reg(b)?;
+        match b.reg_type(r) {
+            Some(ValueType::Scalar(ScalarType::Bool)) => b.cast(r, ScalarType::I32),
+            _ => Ok(r),
+        }
+    }
 }
 impl RunArg for Reg {
     fn reg(self, _: &mut dyn KernelBuilder) -> crate::Result<Reg> {
@@ -41,24 +68,37 @@ impl RunArg for Reg {
 /// A word whose stage becomes known when the selected declaration is resolved.
 #[derive(Clone, Copy)]
 pub enum Word {
-    Known(i32),
+    Known(Constant),
     Runtime(Reg),
 }
 impl Word {
-    pub fn input(reg: Reg, inputs: &[(Reg, Option<i32>)]) -> Self {
+    pub fn input(reg: Reg, inputs: &[(Reg, Option<Constant>)]) -> Self {
         inputs
             .iter()
             .find(|(input, _)| *input == reg)
             .and_then(|(_, known)| *known)
             .map_or(Self::Runtime(reg), Self::Known)
     }
+    /// The result of a call evaluated at build time.
+    pub fn known<T: ImportWord>(value: T) -> Self {
+        Self::Known(value.constant())
+    }
     pub fn binary(self, op: Binary, rhs: Self, b: &mut dyn KernelBuilder) -> crate::Result<Self> {
         if let (Self::Known(a), Self::Known(z)) = (self, rhs)
+            && a.ty() == z.ty()
+            && op.output(a.ty()).is_some()
             && let Ok(value) = op.checked_eval(a, z)
         {
             return Ok(Self::Known(value));
         }
-        let (a, z) = (self.reg(b)?, rhs.reg(b)?);
+        let (mut a, mut z) = (self.reg(b)?, rhs.reg(b)?);
+        // A Rust call returns an i32 word: it meets a bool operand as a bool.
+        let bool = Some(ValueType::Scalar(ScalarType::Bool));
+        if b.reg_type(a) == bool {
+            z = z.typed(ScalarType::Bool, b)?;
+        } else if b.reg_type(z) == bool {
+            a = a.typed(ScalarType::Bool, b)?;
+        }
         Ok(Self::Runtime(b.binary(op, a, z)?))
     }
 }
@@ -90,13 +130,13 @@ pub fn has_destructor<T>(_: fn() -> T) -> bool {
 pub fn known_field<T, F: ImportWord>(
     _constructor: fn() -> T,
     _project: fn(&T) -> &F,
-    word: Option<i32>,
+    word: Option<Constant>,
 ) -> crate::Result<F> {
-    word.map(F::decode)
+    word.map(F::from_constant)
         .ok_or_else(|| crate::BuildError::staging("runtime aggregate in comptime!"))
 }
 impl RunArg for Word {
-    fn known(&self) -> Option<i32> {
+    fn known(&self) -> Option<Constant> {
         match *self {
             Self::Known(x) => Some(x),
             Self::Runtime(_) => None,
@@ -134,26 +174,26 @@ impl<T> KnownArg<T> for String {
 }
 impl<T: ImportWord> KnownArg<T> for Word {
     fn require(self) -> crate::Result<T> {
-        self.known().map(T::decode).ok_or_else(|| {
+        self.known().map(T::from_constant).ok_or_else(|| {
             crate::BuildError::staging("runtime value passed to a comptime parameter")
         })
     }
 }
 
 impl RunArg for Host<bool> {
-    fn known(&self) -> Option<i32> {
-        Some(-i32::from(self.0))
+    fn known(&self) -> Option<Constant> {
+        Some(self.0.into())
     }
     fn reg(self, b: &mut dyn KernelBuilder) -> crate::Result<Reg> {
-        b.constant(-i32::from(self.0))
+        b.constant(self.0.into())
     }
 }
 impl RunArg for Host<i32> {
-    fn known(&self) -> Option<i32> {
-        Some(self.0)
+    fn known(&self) -> Option<Constant> {
+        Some(self.0.into())
     }
     fn reg(self, b: &mut dyn KernelBuilder) -> crate::Result<Reg> {
-        b.constant(self.0)
+        b.constant(self.0.into())
     }
 }
 
@@ -173,12 +213,13 @@ pub enum HostFault {
 impl HostFault {
     /// An i32 kernel operation, with the faulting operator, that traps with
     /// the same error.
-    pub fn kernel_operation(self) -> (Binary, i32, i32) {
-        match self {
+    pub fn kernel_operation(self) -> (Binary, Constant, Constant) {
+        let (op, a, b) = match self {
             Self::DivisionByZero(op) => (op, 0, 0),
             Self::DivisionOverflow(op) => (op, i32::MIN, -1),
             Self::Overflow => (Binary::CheckedAdd, i32::MAX, 1),
-        }
+        };
+        (op, a.into(), b.into())
     }
 
     /// The trap the staged operation reports.
@@ -459,9 +500,15 @@ macro_rules! __splice_method_case {
     ($kind:ident (items $provided:ident $($items:item)*)) => {};
 }
 
+/// A value that a Rust call passes or returns as one `i32` word.
 pub trait ImportWord: Sized {
     fn decode(bits: i32) -> Self;
     fn encode(self) -> i32;
+    /// The value in a kernel register.
+    fn constant(self) -> Constant;
+    fn from_constant(value: Constant) -> Self {
+        Self::decode(value.bits() as u32 as i32)
+    }
 }
 impl ImportWord for i32 {
     fn decode(bits: i32) -> Self {
@@ -470,19 +517,28 @@ impl ImportWord for i32 {
     fn encode(self) -> i32 {
         self
     }
+    fn constant(self) -> Constant {
+        self.into()
+    }
 }
 impl ImportWord for bool {
     fn decode(bits: i32) -> Self {
         bits != 0
     }
     fn encode(self) -> i32 {
-        -i32::from(self)
+        i32::from(self)
+    }
+    fn constant(self) -> Constant {
+        self.into()
     }
 }
 impl ImportWord for () {
     fn decode(_: i32) -> Self {}
     fn encode(self) -> i32 {
         0
+    }
+    fn constant(self) -> Constant {
+        0i32.into()
     }
 }
 

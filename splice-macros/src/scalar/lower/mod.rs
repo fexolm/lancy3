@@ -143,6 +143,18 @@ pub(super) struct Lower<'a> {
     pub(super) context: Option<&'a Context>,
 }
 
+/// The IR type of a runtime scalar, or `None` for a vector, a mask, or a
+/// scalar whose type only the builder knows.
+pub(super) fn scalar_type(root: &Path, t: Scalar) -> Option<TokenStream> {
+    let ty = match t.base() {
+        Scalar::Int => emit!(I32),
+        Scalar::Bool => emit!(Bool),
+        Scalar::Index => emit!(Index),
+        _ => return None,
+    };
+    Some(emit!(#root::hir::ScalarType::#ty))
+}
+
 fn err<T>(at: impl ToTokens, msg: &str) -> Result<T> {
     Err(Error::new_spanned(at, msg))
 }
@@ -189,12 +201,28 @@ impl Lower<'_> {
             _ => err(at, "expected a comptime value; found a runtime expression"),
         }
     }
+    /// The IR type of a runtime scalar, or `None` if only the builder knows it.
+    fn scalar_type(&self, t: Scalar) -> Option<TokenStream> {
+        scalar_type(self.root, t)
+    }
+    /// A register holding the constant `value`.
+    fn constant(&self, value: TokenStream) -> TokenStream {
+        let root = self.root;
+        emit!(__splice_builder.constant(<#root::hir::Constant as ::core::convert::From<_>>::from(#value))?)
+    }
     fn reg(&self, v: Value, want: Scalar, at: impl ToTokens) -> Result<TokenStream> {
         let root = self.root;
         let want = want.base();
         let bits = match (v.stage, want) {
-            (Stage::Word(_), _) => {
-                return Ok(emit!(#root::frontend::scalar::RunArg::reg(#v,__splice_builder)?));
+            (Stage::Word(t), _) => {
+                // A Rust call returns an i32 word whatever its Rust type.
+                let ty = if want == Scalar::Inferred { t } else { want };
+                return Ok(match self.scalar_type(ty) {
+                    Some(ty) => {
+                        emit!(#root::frontend::scalar::RunArg::typed(#v, #ty, __splice_builder)?)
+                    }
+                    None => emit!(#root::frontend::scalar::RunArg::reg(#v, __splice_builder)?),
+                });
             }
             (Stage::Reg(t), _)
                 if t.base() == want
@@ -206,26 +234,33 @@ impl Lower<'_> {
                         Scalar::Index | Scalar::Vector(_) | Scalar::Mask(_)
                     ) && (t == Scalar::Inferred || want == Scalar::Inferred)) =>
             {
-                return Ok(v.code);
+                // An inferred register may be a Rust call's word.
+                return Ok(
+                    match self.scalar_type(want).filter(|_| t == Scalar::Inferred) {
+                        Some(ty) => {
+                            emit!(#root::frontend::scalar::RunArg::typed(#v, #ty, __splice_builder)?)
+                        }
+                        None => v.code,
+                    },
+                );
             }
-            (Stage::Host | Stage::Literal(Scalar::Int), Scalar::Index) => emit!({
-                let __splice_index: usize = #v;
-                let __splice_word = __splice_index as i32;
-                if __splice_word as usize != __splice_index {
-                    return ::core::result::Result::Err(#root::BuildError::staging("runtime usize value exceeds the scalar register width"));
-                }
-                __splice_word
-            }),
-            (Stage::Literal(Scalar::Int), Scalar::Int | Scalar::Inferred) => v.code,
+            (Stage::Host | Stage::Literal(Scalar::Int), Scalar::Index) => {
+                emit!(<#root::hir::Constant as ::core::convert::From<_>>::from(*::core::borrow::Borrow::<usize>::borrow(&(#v))))
+            }
+            (Stage::Literal(Scalar::Int), Scalar::Int | Scalar::Inferred) => {
+                emit!({let __splice_value: i32 = #v; <#root::hir::Constant as ::core::convert::From<_>>::from(__splice_value)})
+            }
             (Stage::Literal(Scalar::Bool), Scalar::Bool | Scalar::Inferred) => {
-                emit!(-i32::from(#v))
+                emit!(<#root::hir::Constant as ::core::convert::From<_>>::from(#v))
             }
-            (Stage::Host, Scalar::Int) => emit!(*::core::borrow::Borrow::<i32>::borrow(&(#v))),
+            (Stage::Host, Scalar::Int) => {
+                emit!(<#root::hir::Constant as ::core::convert::From<_>>::from(*::core::borrow::Borrow::<i32>::borrow(&(#v))))
+            }
             (Stage::Host, Scalar::Bool) => {
-                emit!(-i32::from(*::core::borrow::Borrow::<bool>::borrow(&(#v))))
+                emit!(<#root::hir::Constant as ::core::convert::From<_>>::from(*::core::borrow::Borrow::<bool>::borrow(&(#v))))
             }
             (Stage::Host, Scalar::Inferred) => {
-                emit!(#root::frontend::scalar::ScalarConstant::bits(#v))
+                emit!(#root::frontend::scalar::ScalarConstant::constant(#v))
             }
             _ => {
                 return err(
@@ -240,7 +275,7 @@ impl Lower<'_> {
                 );
             }
         };
-        Ok(emit!({let __splice_word = #bits; __splice_builder.constant(__splice_word)?}))
+        Ok(emit!({let __splice_constant = #bits; __splice_builder.constant(__splice_constant)?}))
     }
     fn operand(&self, expr: &Expr, kind: Scalar) -> Result<TokenStream> {
         let value = self.expr_with_hint(expr, Some(kind))?;
@@ -393,7 +428,8 @@ impl Lower<'_> {
 
     fn return_value(&self, value: Value, at: impl ToTokens) -> Result<TokenStream> {
         let value = if self.unit_result && value.stage == Stage::Unit {
-            emit!({#value; __splice_builder.constant(0)?})
+            let zero = self.constant(emit!(0i32));
+            emit!({#value; #zero})
         } else {
             self.reg(value, self.result_type, at)?
         };
@@ -458,14 +494,7 @@ impl Lower<'_> {
             ident.set_span(ident.span().located_at(proc_macro2::Span::mixed_site()));
             let value = match binding {
                 Binding::Word(_) => return None,
-                Binding::Reg(kind, _) => {
-                    let ty = match kind {
-                        Scalar::Bool => emit!(Bool),
-                        Scalar::Index | Scalar::Length => emit!(Index),
-                        _ => emit!(I32),
-                    };
-                    emit!(#root::debug::Value::Register(#ident, #root::debug::Scalar::#ty))
-                }
+                Binding::Reg(..) => emit!(#root::debug::Value::Register(#ident)),
                 Binding::Buffer(_) => emit!(#root::debug::Value::Slice(#ident)),
                 Binding::Host(_) => {
                     let constant = Self::constant_name(&ident);
@@ -710,9 +739,16 @@ impl Lower<'_> {
                 }
                 let code = match op {
                     UnOp::Neg(_) if t != Scalar::Bool => {
-                        self.operator_bin("Sub", emit!(__splice_builder.constant(0)?), v.code)
+                        self.operator_bin("Sub", self.constant(emit!(0i32)), v.code)
                     }
-                    UnOp::Not(_) => self.bin("Xor", v.code, emit!(__splice_builder.constant(-1)?)),
+                    UnOp::Not(_) => {
+                        let ones = match t.base() {
+                            Scalar::Bool => emit!(true),
+                            Scalar::Index => emit!(usize::MAX),
+                            _ => emit!(-1i32),
+                        };
+                        self.bin("Xor", v.code, self.constant(ones))
+                    }
                     _ => return err(x, "unsupported runtime unary operator"),
                 };
                 Ok(Value::new(Stage::Reg(t.base()), code))
@@ -771,10 +807,6 @@ impl Lower<'_> {
         let Some(Binding::Reg(t, true)) = binding else {
             return err(left, "assignment requires a mutable runtime variable");
         };
-        if op.is_some() && matches!(t, Scalar::Index | Scalar::Length) {
-            // Registers hold usize in 32 bits with i32 checks; see `binary`.
-            return err(expr, "cast the runtime index to i32 before arithmetic");
-        }
         let rhs = self.operand(right, t)?;
 
         let code = if let Some((op, _)) = op {
@@ -821,26 +853,25 @@ impl Lower<'_> {
         let index = [left.stage, right.stage]
             .iter()
             .any(|s| matches!(s, Stage::Reg(Scalar::Index | Scalar::Length)));
-        if index && !matches!(op, Eq(_) | Ne(_) | Lt(_) | Le(_) | Gt(_) | Ge(_)) {
-            return err(x, "cast the runtime index to i32 before arithmetic");
-        }
+        let number = if index { Scalar::Index } else { Scalar::Int };
+        let t = if index { Scalar::Index } else { t };
         let (operation, input, output) = match op {
-            Add(_) => ("Add", Scalar::Int, Scalar::Int),
-            Sub(_) => ("Sub", Scalar::Int, Scalar::Int),
-            Mul(_) => ("Mul", Scalar::Int, Scalar::Int),
-            Div(_) => ("Div", Scalar::Int, Scalar::Int),
-            Rem(_) => ("Rem", Scalar::Int, Scalar::Int),
-            Shl(_) => ("Shl", Scalar::Int, Scalar::Int),
-            Shr(_) => ("Shr", Scalar::Int, Scalar::Int),
+            Add(_) => ("Add", number, number),
+            Sub(_) => ("Sub", number, number),
+            Mul(_) => ("Mul", number, number),
+            Div(_) => ("Div", number, number),
+            Rem(_) => ("Rem", number, number),
+            Shl(_) => ("Shl", number, number),
+            Shr(_) => ("Shr", number, number),
             BitAnd(_) => ("And", t, t),
             BitOr(_) => ("Or", t, t),
             BitXor(_) => ("Xor", t, t),
             Eq(_) => ("Eq", t, Scalar::Bool),
             Ne(_) => ("Ne", t, Scalar::Bool),
-            Lt(_) => ("Lt", Scalar::Int, Scalar::Bool),
-            Gt(_) => ("Gt", Scalar::Int, Scalar::Bool),
-            Le(_) => ("Le", Scalar::Int, Scalar::Bool),
-            Ge(_) => ("Ge", Scalar::Int, Scalar::Bool),
+            Lt(_) => ("Lt", number, Scalar::Bool),
+            Gt(_) => ("Gt", number, Scalar::Bool),
+            Le(_) => ("Le", number, Scalar::Bool),
+            Ge(_) => ("Ge", number, Scalar::Bool),
             And(_) | Or(_) => {
                 let literal = Value::new(Stage::Literal(Scalar::Bool), emit!(false));
                 let true_ = Value::new(Stage::Literal(Scalar::Bool), emit!(true));
@@ -853,13 +884,8 @@ impl Lower<'_> {
             _ => return err(op, "unsupported runtime operator"),
         };
         let input = if index { Scalar::Index } else { input };
-        let mut lhs = self.reg(left, input, &x.left)?;
-        let mut rhs = self.reg(right, input, &x.right)?;
-        if index && !matches!(op, Eq(_) | Ne(_)) {
-            // Flip the sign bit to compare register-width indices as unsigned.
-            lhs = self.bin("Xor", lhs, emit!(__splice_builder.constant(i32::MIN)?));
-            rhs = self.bin("Xor", rhs, emit!(__splice_builder.constant(i32::MIN)?));
-        }
+        let lhs = self.reg(left, input, &x.left)?;
+        let rhs = self.reg(right, input, &x.right)?;
         Ok(Value::new(
             Stage::Reg(output),
             self.operator_bin(operation, lhs, rhs),

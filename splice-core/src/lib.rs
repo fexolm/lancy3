@@ -139,11 +139,25 @@ pub trait Codegen: Backend {
         options: BuildOptions,
     ) -> Result<Self::Output> {
         let _span = tracing::debug_span!(target: "splice::compile", "build", backend = std::any::type_name::<Self>()).entered();
+        word_abi(signature)?;
         Self::stage(signature, validate::validated(signature, body), options)
     }
 }
 
 impl<B: Backend> Codegen for B {}
+
+/// [`Executable::call`] passes `i32` words: the entry's scalars must fit one.
+pub(crate) fn word_abi(signature: frontend::Signature<'_>) -> Result<()> {
+    use hir::ScalarType::{Bool, I32, U32};
+    let word = |ty| matches!(ty, Bool | I32 | U32);
+    if signature.params.iter().copied().all(word) && word(signature.result) {
+        Ok(())
+    } else {
+        Err(BuildError::unsupported(
+            "a kernel entry passes only bool, i32 and u32 scalars",
+        ))
+    }
+}
 
 /// The portable calling convention. Scalars and slices have separate
 /// argument lists, each following declaration order. An error stops execution;

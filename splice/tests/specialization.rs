@@ -1,4 +1,5 @@
 use splice::frontend::Signature;
+use splice::hir::{Constant, ScalarType};
 use splice::{Codegen, ComptimeKey, Executable, kernel};
 use splice_text::Text;
 
@@ -115,16 +116,20 @@ fn retry(root: &mut dyn splice::frontend::KernelBuilder) -> splice::Result<()> {
     struct Parent;
     struct Child;
     let failed = root.call_specialized(
-        Specialization::new::<Parent>(0, &[]),
+        Specialization::new::<Parent>(Signature::new(&[ScalarType::I32; 0], ScalarType::I32, &[])),
         &[],
         &[],
         Box::new(|b| {
             b.call_specialized(
-                Specialization::new::<Child>(0, &[]),
+                Specialization::new::<Child>(Signature::new(
+                    &[ScalarType::I32; 0],
+                    ScalarType::I32,
+                    &[],
+                )),
                 &[],
                 &[],
                 Box::new(|c| {
-                    let value = c.constant(17)?;
+                    let value = c.constant(Constant::from(17))?;
                     c.ret(value)?;
                     Ok(())
                 }),
@@ -136,12 +141,16 @@ fn retry(root: &mut dyn splice::frontend::KernelBuilder) -> splice::Result<()> {
         matches!(failed, Err(splice::BuildError::Unsupported(feature)) if feature == "rejected")
     );
     let result = root.call_specialized(
-        Specialization::new::<Parent>(0, &[]),
+        Specialization::new::<Parent>(Signature::new(&[ScalarType::I32; 0], ScalarType::I32, &[])),
         &[],
         &[],
         Box::new(|b| {
             let reused = b.call_specialized(
-                Specialization::new::<Child>(0, &[]),
+                Specialization::new::<Child>(Signature::new(
+                    &[ScalarType::I32; 0],
+                    ScalarType::I32,
+                    &[],
+                )),
                 &[],
                 &[],
                 Box::new(|_| panic!("restaged a completed callee")),
@@ -156,7 +165,7 @@ fn retry(root: &mut dyn splice::frontend::KernelBuilder) -> splice::Result<()> {
 #[test]
 fn a_failed_body_can_be_retried_and_its_completed_children_reused() {
     splice_testkit::each_backend!(B => {
-        let code = B::build_with_options(Signature::new(0, &[]), Box::new(retry), splice::BuildOptions::host(splice::Mode::Release).unwrap()).unwrap();
+        let code = B::build_with_options(Signature::new(&[ScalarType::I32; 0], ScalarType::I32, &[]), Box::new(retry), splice::BuildOptions::host(splice::Mode::Release).unwrap()).unwrap();
         assert_eq!(code.call(&[], &mut []), Ok(17));
     });
 }
@@ -179,8 +188,13 @@ fn invalid_arguments_are_rejected_before_staging_or_reusing_a_callee()
         }
         for args in [&[][..], &[Reg(u32::MAX)], &[vector], &[mask]] {
             assert!(
-                root.call_kernel(Signature::new(1, &[]), args, &[], Box::new(unexpected))
-                    .is_err()
+                root.call_kernel(
+                    Signature::new(&[ScalarType::I32; 1], ScalarType::I32, &[]),
+                    args,
+                    &[],
+                    Box::new(unexpected)
+                )
+                .is_err()
             );
         }
         let read = [BufferKind::Read];
@@ -196,7 +210,7 @@ fn invalid_arguments_are_rejected_before_staging_or_reusing_a_callee()
         ] {
             assert!(
                 root.call_kernel(
-                    Signature::new(1, kinds),
+                    Signature::new(&[ScalarType::I32; 1], ScalarType::I32, kinds),
                     &[arg],
                     buffers,
                     Box::new(unexpected)
@@ -204,7 +218,13 @@ fn invalid_arguments_are_rejected_before_staging_or_reusing_a_callee()
                 .is_err()
             );
         }
-        let key = || Specialization::new::<Child>(1, &[BufferKind::Read, BufferKind::Read]);
+        let key = || {
+            Specialization::new::<Child>(Signature::new(
+                &[ScalarType::I32; 1],
+                ScalarType::I32,
+                &[BufferKind::Read, BufferKind::Read],
+            ))
+        };
         let shared = [Buffer(1), Buffer(1)];
         assert!(
             root.call_specialized(key(), &[vector], &shared, Box::new(unexpected))
@@ -228,13 +248,13 @@ fn invalid_arguments_are_rejected_before_staging_or_reusing_a_callee()
     }
     let kinds = [BufferKind::Read, BufferKind::Write];
     let ir = splice::frontend::materialize(
-        Signature::new(1, &kinds),
+        Signature::new(&[ScalarType::I32; 1], ScalarType::I32, &kinds),
         Box::new(stage),
         splice::BuildOptions::host(splice::Mode::Release)?,
     )?;
     splice_testkit::each_backend!(B => {
         for code in [
-            Box::new(B::build_with_options(Signature::new(1, &kinds), Box::new(stage), splice::BuildOptions::host(splice::Mode::Release).unwrap())?) as Box<dyn Executable>,
+            Box::new(B::build_with_options(Signature::new(&[ScalarType::I32; 1], ScalarType::I32, &kinds), Box::new(stage), splice::BuildOptions::host(splice::Mode::Release).unwrap())?) as Box<dyn Executable>,
             Box::new(B::compile(&ir)?),
         ] {
             assert_eq!(

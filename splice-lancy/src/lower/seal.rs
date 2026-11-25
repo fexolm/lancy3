@@ -1,5 +1,5 @@
 use super::{Builder, Exit};
-use lancy::hir::{Block, Function, Op, Terminator, Value};
+use lancy::hir::{Block, Function, Terminator, Value};
 use lancy::support::slotmap::DenseMap;
 use splice_core::hir::Reg;
 
@@ -33,7 +33,7 @@ impl Builder<'_> {
                     panic!("validated kernels assign {r:?} on every path to {start:?}")
                 }
                 [] => {
-                    let zero = self.graph.append(b, Op::Const(0)).unwrap();
+                    let zero = self.zero_in(b, self.types[r.0 as usize]);
                     self.unassigned.insert(zero);
                     self.blocks[b].defs.insert(r, zero);
                     break zero;

@@ -206,9 +206,9 @@ pub(crate) fn publish(
             let __splice_wants_debug = __splice_builder.debug_enabled();
             #(let #host_args = #support::KnownArg::require(#host_args)?;)*
             #(#debug_arguments)*
-            let __splice_known: [::core::option::Option<i32>; #arity] = [#(#support::RunArg::known(&#scalar_args)),*];
+            let __splice_known: [::core::option::Option<#hir::Constant>; #arity] = [#(#support::RunArg::known(&#scalar_args)),*];
             #(let #scalar_args = #support::RunArg::reg(#scalar_args, __splice_builder)?;)*
-            let __splice_inputs: &[(#hir::Reg, ::core::option::Option<i32>)] = &[#((#scalar_args, __splice_known[#indices])),*];
+            let __splice_inputs: &[(#hir::Reg, ::core::option::Option<#hir::Constant>)] = &[#((#scalar_args, __splice_known[#indices])),*];
             #(let #mutable_args = __splice_builder.copy(#mutable_args)?;)*
             let __splice_result = __splice_builder.local(#value_type)?;
             let __splice_return_label = __splice_builder.label()?;

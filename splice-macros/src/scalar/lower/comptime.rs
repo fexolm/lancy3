@@ -145,9 +145,9 @@ impl Lower<'_> {
                         emit!(::core::result::Result::Err::<#ty,#support::BuildError>(#support::BuildError::staging("runtime argument read in comptime!"))?)
                     } else {
                         let convert = match ty.to_string().as_str() {
-                            "bool" => emit!(word != 0),
-                            "usize" => emit!(word as usize),
-                            _ => emit!(word),
+                            "bool" => emit!(word.bits() != 0),
+                            "usize" => emit!(word.bits() as usize),
+                            _ => emit!(word.bits() as i32),
                         };
                         emit!({
                             let word=__splice_inputs.iter().find(|(reg,_)| *reg==#path)
@@ -166,7 +166,7 @@ impl Lower<'_> {
                     if self.source_fault.is_some() {
                         emit!(::core::result::Result::Err::<#ty,#support::BuildError>(#support::BuildError::staging("runtime value in comptime!"))?)
                     } else {
-                        emit!(<#ty as #support::frontend::scalar::ImportWord>::decode(
+                        emit!(<#ty as #support::frontend::scalar::ImportWord>::from_constant(
                             #support::frontend::scalar::RunArg::known(&#path).ok_or_else(|| #support::BuildError::staging("runtime value in comptime!"))?
                         ))
                     }

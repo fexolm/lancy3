@@ -524,8 +524,9 @@ impl Lower<'_> {
             emit! {
                 let (operation, a, z) = fault.kernel_operation();
                 let (a, z) = (__splice_builder.constant(a)?, __splice_builder.constant(z)?);
-                let fault = __splice_builder.binary(operation, a, z)?;
-                __splice_builder.ret(fault)?;
+                // The operation traps; the explicit trap after it is unreachable.
+                __splice_builder.binary(operation, a, z)?;
+                __splice_builder.trap_bounds()?;
                 break #region;
             }
         };

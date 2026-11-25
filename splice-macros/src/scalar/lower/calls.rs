@@ -156,7 +156,7 @@ impl Lower<'_> {
                 let mut runtime=||{::core::result::Result::Ok::<_,#root::BuildError>(#support::Word::Runtime(#target(#(#bound,)* __splice_builder)?))};
                 #item::__splice_fold!(
                     match #root::build_boundary(|| #item::__SpliceDefinition::__splice_eval #generics ((#(::core::option::Option::Some(#params),)*))) {
-                        ::core::result::Result::Ok(value)=>#support::Word::Known(#support::ImportWord::encode(value)),
+                        ::core::result::Result::Ok(value)=>#support::Word::known(value),
                         ::core::result::Result::Err(_)=>runtime()?,
                     },
                     runtime()?
@@ -201,7 +201,7 @@ impl Lower<'_> {
             let ordinary = self.import_result(p, &bound, cast, None);
             let kernel = staged_call(&bound);
             let boolean = if cast.is_some() {
-                self.bin("And", kernel.clone(), emit!(__splice_builder.constant(1)?))
+                emit!(#support::RunArg::word(#kernel, __splice_builder)?)
             } else {
                 kernel.clone()
             };

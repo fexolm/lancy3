@@ -1203,3 +1203,77 @@ fn mixed_stage_conditions_fold_in_the_frontend_on_every_path() {
     let direct = unknown::build::<Text>(unknown::BuildArgs {}).unwrap();
     assert_eq!(direct.to_string(), Text::compile(&ir).unwrap().to_string());
 }
+
+mod index_arithmetic {
+    use splice::kernel;
+
+    // MAC-02: `usize` locals follow Rust `usize` arithmetic in 64 bits.
+    #[kernel]
+    pub(super) fn decrement_len(xs: &[i32]) -> i32 {
+        let mut i = xs.len();
+        i -= 1;
+        if i > 5 { 1 } else { 0 }
+    }
+
+    #[kernel]
+    pub(super) fn double_len(xs: &[i32], extra: i32) -> i32 {
+        let mut i = xs.len();
+        i += extra as usize;
+        i *= 2;
+        if i > 5 { 1 } else { 0 }
+    }
+}
+
+#[test]
+fn compound_index_assignment_matches_rust_usize() {
+    use index_arithmetic::{decrement_len, double_len};
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+
+    fn expect<B: Codegen<Output: Executable>>(
+        native: impl FnOnce() -> i32,
+        jit: Result<i32, String>,
+        case: &str,
+    ) {
+        let backend = std::any::type_name::<B>();
+        match catch_unwind(AssertUnwindSafe(native)) {
+            Ok(value) => assert_eq!(jit, Ok(value), "{backend} {case}"),
+            Err(_) => assert!(
+                jit.is_err(),
+                "{backend} {case}: Rust panicked, JIT gave {jit:?}"
+            ),
+        }
+    }
+
+    // Both kernels stage natively, not as a call into their Rust function.
+    for ir in [
+        decrement_len::ir().unwrap().into_inner(),
+        double_len::ir().unwrap().into_inner(),
+    ] {
+        assert!(!ir.instructions().iter().any(|i| matches!(
+            i,
+            splice::hir::Instr::RustCall { .. } | splice::hir::Instr::RustPacketCall { .. }
+        )));
+    }
+
+    fn check<B: Codegen<Output: Executable>>() {
+        let empty: [i32; 0] = [];
+        let decrement = decrement_len::build::<B>(decrement_len::BuildArgs {}).unwrap();
+        let jit = decrement
+            .call(decrement_len::CallArgs { xs: &empty })
+            .map_err(|e| e.to_string());
+        expect::<B>(|| decrement_len(&empty), jit, "0 - 1");
+
+        // 2 * (1 + i32::MAX) is 2^32: exact in usize, but not in 32 bits.
+        let one = [0];
+        let double = double_len::build::<B>(double_len::BuildArgs {}).unwrap();
+        let jit = double
+            .call(double_len::CallArgs {
+                xs: &one,
+                extra: i32::MAX,
+            })
+            .map_err(|e| e.to_string());
+        expect::<B>(|| double_len(&one, i32::MAX), jit, "2^31 * 2");
+    }
+
+    splice_testkit::each_backend!(B => check::<B>());
+}

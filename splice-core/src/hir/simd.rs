@@ -1,9 +1,9 @@
-use super::{Buffer, BufferKind};
+use super::{Buffer, BufferKind, ScalarType};
 use crate::simd::Element;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ValueType {
-    Scalar,
+    Scalar(ScalarType),
     Vector(Element),
     Mask(Element),
 }
@@ -96,9 +96,9 @@ impl Simd {
     pub fn output(self) -> Option<ValueType> {
         use SimdOp::*;
         Some(match self.op {
-            Lanes | AlignmentPrefix(_) | Any | All | Last | ExtractWrapping | Count | ReduceSum => {
-                ValueType::Scalar
-            }
+            Lanes | AlignmentPrefix(_) => ValueType::Scalar(ScalarType::Index),
+            Any | All => ValueType::Scalar(ScalarType::Bool),
+            Last | ExtractWrapping | Count | ReduceSum => ValueType::Scalar(ScalarType::I32),
             FirstN | Eq | Ne | Lt | Le | Gt | Ge | MaskAnd | MaskOr | MaskXor | MaskNot => {
                 ValueType::Mask(self.element)
             }
@@ -114,7 +114,9 @@ impl Simd {
         let v = ValueType::Vector(self.element);
         let m = ValueType::Mask(self.element);
         let i = ValueType::Vector(self.element.index());
-        let s = ValueType::Scalar;
+        // Lane indices and counts are `i32`, memory offsets `usize`.
+        let s = ValueType::Scalar(ScalarType::I32);
+        let o = ValueType::Scalar(ScalarType::Index);
         let expected: &[ValueType] = match self.op {
             Lanes | Splat(_) | Iota => &[],
             Shuffle(_) if self.element == Element::I32 => &[v, v],
@@ -123,7 +125,7 @@ impl Simd {
                     "paired shuffle requires i32 lanes",
                 ));
             }
-            AlignmentPrefix(_) if self.element == Element::I32 => &[s],
+            AlignmentPrefix(_) if self.element == Element::I32 => &[o],
             Compress if self.element == Element::I32 => &[v, m],
             ExtractWrapping if self.element == Element::I32 => &[v, s],
             ReplaceWrapping if self.element == Element::I32 => &[v, s, s],
@@ -136,7 +138,7 @@ impl Simd {
                 return Err(crate::BuildError::verify("expected i32 lanes"));
             }
             Count if self.element == Element::I32 => &[m],
-            CompressStore(_) if self.element == Element::I32 => &[s, m, v],
+            CompressStore(_) if self.element == Element::I32 => &[o, m, v],
             Count | CompressStore(_) => {
                 return Err(crate::BuildError::verify(
                     "mask count and compact store require i32 lanes",
@@ -195,9 +197,9 @@ impl Simd {
             Cast(_) | Widen { .. } | Narrow(_) => {
                 return Err(crate::BuildError::verify("invalid SIMD lane conversion"));
             }
-            FirstN | Load(_) => &[s],
-            Store(_) => &[s, v],
-            LoadSelect(_) | StoreSelect(_) => &[s, m, v],
+            FirstN | Load(_) => &[o],
+            Store(_) => &[o, v],
+            LoadSelect(_) | StoreSelect(_) => &[o, m, v],
             Gather(_) => &[i],
             Scatter(_) => &[i, v],
             GatherSelect(_) | ScatterSelect(_) => &[i, m, v],

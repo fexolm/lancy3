@@ -60,7 +60,7 @@ impl Registers {
         for index in 0..f.register_count() {
             starts.push(vars.len());
             let (ty, count) = match f.reg_type(Reg(index as u32)) {
-                ValueType::Scalar => (I32, 1),
+                ValueType::Scalar(ty) => (super::scalar_type(ty), 1),
                 ValueType::Vector(e) => (chunk_type(e), m.chunks()),
                 ValueType::Mask(e) => (chunk_type(e.index()), m.chunks()),
             };
@@ -74,6 +74,14 @@ impl Registers {
         let index = reg.0 as usize;
         &self.vars[self.starts[index]..self.starts[index + 1]]
     }
+}
+
+/// A contiguous access start. Every slice length fits `i32`, so clamping
+/// keeps an out-of-range start out of range and lets `start + lanes`
+/// not wrap.
+fn offset(b: &mut FunctionBuilder, start: Value) -> Value {
+    let limit = b.ins().iconst(I64, i64::from(i32::MAX));
+    b.ins().umin(start, limit)
 }
 
 fn constant(b: &mut FunctionBuilder, ty: Type, bytes: &[u8; CHUNK_BYTES]) -> Value {
@@ -131,7 +139,7 @@ pub(super) fn emit(
             let address = if indexed {
                 Address::Indexed(&inputs[0])
             } else {
-                Address::Contiguous(b.ins().uextend(I64, inputs[0][0]))
+                Address::Contiguous(offset(b, inputs[0][0]))
             };
             let access = Memory {
                 m,
@@ -146,12 +154,15 @@ pub(super) fn emit(
             access.emit(b)
         }
         AlignmentPrefix(buf) => {
+            // Only the address modulo the vector width matters.
             let base = b.ins().ireduce(I32, buffers[buf.index()][0]);
-            let scaled = b.ins().ishl_imm(inputs[0][0], 2);
+            let offset = b.ins().ireduce(I32, inputs[0][0]);
+            let scaled = b.ins().ishl_imm(offset, 2);
             let addr = b.ins().iadd(base, scaled);
             let neg = b.ins().ineg(addr);
             let bytes = b.ins().band_imm(neg, (m.vector_bytes - 1) as i64);
-            vec![b.ins().ushr_imm(bytes, 2)]
+            let lanes = b.ins().ushr_imm(bytes, 2);
+            vec![b.ins().uextend(I64, lanes)]
         }
         Swizzle => swizzle_words(b, m, &inputs[0], &inputs[1], byte_order),
         Expand => expand_words(b, m, &inputs, byte_order),
@@ -159,7 +170,7 @@ pub(super) fn emit(
         CompressStore(buf) => {
             let [data, len] = buffers[buf.index()];
             let len = b.ins().uextend(I64, len);
-            let mut offset = b.ins().uextend(I64, inputs[0][0]);
+            let mut offset = offset(b, inputs[0][0]);
             for (&mask, &values) in inputs[1].iter().zip(&inputs[2]) {
                 for lane in 0..4 {
                     let active = b.ins().extractlane(mask, lane);
@@ -214,16 +225,16 @@ pub(super) fn emit(
             let sources: Vec<_> = inputs.iter().flatten().copied().collect();
             convert_width(b, m, element, to, &sources, 0)
         }
-        Lanes => vec![b.ins().iconst(I32, element.lanes(m.vector_bytes) as i64)],
+        Lanes => vec![b.ins().iconst(I64, element.lanes(m.vector_bytes) as i64)],
         FirstN => {
             // Clamp the full unsigned index before narrowing it to a mask lane.
-            let width = b.ins().iconst(I32, element.lanes(m.vector_bytes) as i64);
+            let width = b.ins().iconst(I64, element.lanes(m.vector_bytes) as i64);
             let count = b.ins().umin(inputs[0][0], width);
             let ty = chunk_type(element.index());
-            let count = match element.bytes() {
-                2 => b.ins().ireduce(ty.lane_type(), count),
-                8 => b.ins().uextend(I64, count),
-                _ => count,
+            let count = if ty.lane_type() == I64 {
+                count
+            } else {
+                b.ins().ireduce(ty.lane_type(), count)
             };
             let limit = b.ins().splat(ty, count);
             (0..m.chunks())
@@ -334,7 +345,7 @@ pub(super) fn emit(
                     Some(prior) => b.ins().band(prior, flag),
                 });
             }
-            vec![b.ins().bmask(I32, combined.unwrap())]
+            vec![combined.unwrap()]
         }
         _ => (0..m.chunks())
             .map(|i| packed(b, inst, &inputs, i))
@@ -686,7 +697,7 @@ impl Memory<'_> {
 
             Address::Contiguous(start) => start,
         };
-        // Widen before addition so even an invalid i32 start cannot wrap into the slice.
+        // offset() clamped the start, so this addition cannot wrap into the slice.
         let end = b
             .ins()
             .iadd_imm(start, self.element.lanes(self.m.vector_bytes) as i64);

@@ -34,12 +34,20 @@ fn declare(
         sig.params.extend([AbiParam::new(I64); 2]);
     } else {
         // Cranelift uses u16 indices for block parameters.
-        if f.arity() + 2 * f.buffer_kinds().len() > usize::from(u16::MAX) + 1 {
+        let out = usize::from(lower::returns_in_memory(f.result()));
+        if out + f.arity() + 2 * f.buffer_kinds().len() > usize::from(u16::MAX) + 1 {
             return Err(splice_core::BuildError::unsupported(
                 "too many parameters for a Cranelift kernel call",
             ));
         }
-        sig.params.resize(f.arity(), AbiParam::new(I32));
+        if lower::returns_in_memory(f.result()) {
+            sig.params.push(AbiParam::new(I64));
+        }
+        sig.params.extend(
+            f.params()
+                .iter()
+                .map(|&ty| AbiParam::new(lower::scalar_type(ty))),
+        );
         for _ in f.buffer_kinds() {
             sig.params.extend([AbiParam::new(I64), AbiParam::new(I32)]);
         }

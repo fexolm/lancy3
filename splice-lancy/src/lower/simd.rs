@@ -1,6 +1,8 @@
 //! Bounds-checked slice operations over one scalable Lancy vector.
 use super::Builder;
-use lancy::hir::{Binary, Lane, Op, Scale, Simd as V, Ternary, Type, Unary, Value, VectorAddress};
+use lancy::hir::{
+    Binary, Block, Lane, Op, Scale, Simd as V, Ternary, Type, Unary, Value, VectorAddress,
+};
 use splice_core::{
     hir::{Reg, Simd, SimdOp, ValueType},
     simd::Element,
@@ -19,13 +21,13 @@ fn lane(e: Element) -> Lane {
 
 pub(super) fn native_type(ty: ValueType) -> Type {
     match ty {
-        ValueType::Scalar => Type::I32,
+        ValueType::Scalar(ty) => super::scalar_type(ty),
         ValueType::Vector(e) => Type::Vector(lane(e)),
         ValueType::Mask(e) => Type::Vector(lane(e.index())),
     }
 }
 
-fn stride(e: Element) -> Scale {
+pub(super) fn stride(e: Element) -> Scale {
     match e {
         Element::U16 => Scale::Two,
         Element::I32 | Element::U32 | Element::F32 => Scale::Four,
@@ -43,19 +45,32 @@ impl Builder<'_> {
         if self.current.is_none() {
             return Ok(None);
         }
-        let vs: Vec<_> = args.iter().map(|&r| self.read(r)).collect();
+        let mut vs: Vec<_> = args.iter().map(|&r| self.read(r)).collect();
         let e = inst.element;
+        if matches!(
+            inst.op,
+            Load(_)
+                | Store(_)
+                | LoadSelect(_)
+                | StoreSelect(_)
+                | CompressStore(_)
+                | AlignmentPrefix(_)
+        ) {
+            // A memory offset, in bounds only below a slice length.
+            vs[0] = self.index32(vs[0]);
+        }
         let op = match inst.op {
-            Lanes => V::LaneCount(lane(e)),
+            Lanes => {
+                let lanes = self.vec_op(V::LaneCount(lane(e)));
+                return Ok(Some(self.extend_index(lanes)));
+            }
             Iota => V::Iota(lane(e)),
             SimdOp::FirstN => {
-                // Splice indices occupy an unsigned 32-bit word. Clamp at this
-                // width before converting the limit to a narrower lane.
-                let count = self.value(Op::Bitcast(Type::U32, vs[0]));
+                // Clamp the usize count to the lane count before narrowing it.
                 let width = self.vec_op(V::LaneCount(lane(e)));
-                let width = self.value(Op::Bitcast(Type::U32, width));
-                let count = self.value(Op::Bin(Binary::Min, count, width));
-                let count = self.value(Op::Bitcast(Type::I32, count));
+                let width = self.value(Op::Cast(Type::Usize, width));
+                let count = self.value(Op::Bin(Binary::Min, vs[0], width));
+                let count = self.value(Op::Cast(Type::I32, count));
                 return Ok(Some(self.first_lanes(e, count)));
             }
             SimdOp::SplatScalar => V::Splat(vs[0]),
@@ -168,7 +183,8 @@ impl Builder<'_> {
                 let mask = self.value(Op::Const((self.vector_bytes - 1) as i32));
                 let bytes = self.value(Op::Bin(Binary::And, neg, mask));
                 let two = self.value(Op::Const(2));
-                return Ok(Some(self.value(Op::Bin(Binary::Shr, bytes, two))));
+                let prefix = self.value(Op::Bin(Binary::Shr, bytes, two));
+                return Ok(Some(self.extend_index(prefix)));
             }
             CompressStore(b) => {
                 let (base, len) = self.slice(b);
@@ -256,10 +272,25 @@ impl Builder<'_> {
     }
     /// The zero of `ty` in the open block.
     pub(super) fn zero(&mut self, ty: ValueType) -> Value {
+        self.zero_in(self.current.expect("open block"), ty)
+    }
+    /// The zero of `ty` at the end of `block`.
+    pub(super) fn zero_in(&mut self, block: Block, ty: ValueType) -> Value {
+        let mut append = |op| self.graph.append(block, op).expect("a value");
         match native_type(ty) {
-            Type::Vector(lane) => self.splat_bits(lane, 0),
-            _ => self.value(Op::Const(0)),
+            Type::Vector(lane) => {
+                let zero = append(Op::Literal(lane, 0));
+                append(Op::Simd(V::Splat(zero)))
+            }
+            Type::I32 => append(Op::Const(0)),
+            ty => append(Op::Literal(ty.lane().expect("a scalar lane"), 0)),
         }
+    }
+    /// A nonnegative `i32` count as an `Index`.
+    fn extend_index(&mut self, count: Value) -> Value {
+        let index = self.value(Op::Cast(Type::Usize, count));
+        self.indices.insert(index, count);
+        index
     }
     fn splat_bits(&mut self, ty: Lane, bits: u64) -> Value {
         let x = self.value(Op::Literal(ty, bits.into()));

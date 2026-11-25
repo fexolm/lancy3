@@ -1,3 +1,4 @@
+use splice::hir::{Constant, ScalarType};
 use splice::{
     BufferArg, BuildError, CallError, Codegen, Executable, Trap, TypedKernel, kernel,
     simd::{Lane, Mask},
@@ -1241,9 +1242,9 @@ fn verifier_checks_vector_mask_and_buffer_element_types() {
     type Operation = fn(Reg, Reg) -> (Element, SimdOp, Vec<Reg>);
     let stage = |bad: Option<Operation>| {
         materialize(
-            Signature::new(0, &KINDS),
+            Signature::new(&[ScalarType::I32; 0], ScalarType::I32, &KINDS),
             Box::new(move |b: &mut dyn KernelBuilder| {
-                let offset = b.constant(0)?;
+                let offset = b.constant(Constant::from(0usize))?;
                 let f = b
                     .simd(
                         Simd {
@@ -1257,7 +1258,7 @@ fn verifier_checks_vector_mask_and_buffer_element_types() {
                     let (element, op, args) = bad(offset, f);
                     b.simd(Simd { element, op }, &args)?;
                 }
-                let zero = b.constant(0)?;
+                let zero = b.constant(Constant::from(0))?;
                 b.ret(zero)
             }),
             options(),

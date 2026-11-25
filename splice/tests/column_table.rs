@@ -193,7 +193,7 @@ fn sql_specialization_reads_the_selected_column_from_each_batch()
             plan: &plan,
         })?;
         assert_eq!(listing.as_inner(), Text::compile(&ir)?.as_inner());
-        assert!(listing.contains(&format!(" = {val}\n")), "{listing}");
+        assert!(listing.contains(&format!(" = {val}i32\n")), "{listing}");
         assert!(listing.contains("filter_ge"));
         assert!(
             !query::build::<Text>(query::BuildArgs {

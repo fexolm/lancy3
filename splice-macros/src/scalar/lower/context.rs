@@ -293,7 +293,14 @@ impl Context {
             .iter()
             .map(|operand| {
                 let value = lower.path(&operand.path);
-                lower.reg(value, operand.kind, &operand.path)
+                let reg = lower.reg(value, operand.kind, &operand.path)?;
+                // A Rust operation receives i32 words; a length fits one.
+                Ok(match operand.kind {
+                    Scalar::Bool | Scalar::Length => {
+                        emit!({let __splice_operand = #reg; __splice_builder.cast(__splice_operand, #root::hir::ScalarType::I32)?})
+                    }
+                    _ => reg,
+                })
             })
             .collect::<Result<Vec<_>>>()?;
         let slices = captures

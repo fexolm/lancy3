@@ -1,5 +1,6 @@
 use splice_core::frontend::{KernelBuilder, Signature};
 use splice_core::hir::{Binary, Buffer, BufferKind, FunctionBuilder};
+use splice_core::hir::{Constant, ScalarType};
 use splice_core::{BufferArg, CallError, Codegen, Executable, Trap};
 use splice_llvm::Llvm;
 use std::sync::Arc;
@@ -15,15 +16,21 @@ fn all_binary_ops_match_splice_at_signed_boundaries() {
     let ops = [
         Add, Sub, Mul, And, Or, Xor, Eq, Ne, Lt, Le, Gt, Ge, Shl, Shr, Min, Max, Div, Rem,
     ];
-    let mut b = FunctionBuilder::new(options(), Signature::new(3, &[]));
+    let mut b = FunctionBuilder::new(
+        options(),
+        Signature::new(&[ScalarType::I32; 3], ScalarType::I32, &[]),
+    );
     let (kind, left, right) = (b.arg(0).unwrap(), b.arg(1).unwrap(), b.arg(2).unwrap());
     for (i, &op) in ops.iter().enumerate() {
-        let id = b.constant(i as i32).unwrap();
+        let id = b.constant(Constant::from(i as i32)).unwrap();
         let chosen = b.binary(Eq, kind, id).unwrap();
         let (yes, next) = (b.label().unwrap(), b.label().unwrap());
         b.branch(chosen, yes, next).unwrap();
         b.mark(yes).unwrap();
-        let result = b.binary(op, left, right).unwrap();
+        let mut result = b.binary(op, left, right).unwrap();
+        if op.is_comparison() {
+            result = b.cast(result, ScalarType::I32).unwrap();
+        }
         b.ret(result).unwrap();
         b.mark(next).unwrap();
     }
@@ -33,7 +40,10 @@ fn all_binary_ops_match_splice_at_signed_boundaries() {
     for (i, &op) in ops.iter().enumerate() {
         for &a in &cases {
             for &b in &cases {
-                let expected = op.checked_eval(a, b).map_err(CallError::from);
+                let expected = op
+                    .checked_eval(a.into(), b.into())
+                    .map(|c| c.bits() as i32)
+                    .map_err(CallError::from);
                 assert_eq!(
                     code.call(&[i as i32, a, b], &mut []),
                     expected,
@@ -48,23 +58,35 @@ fn all_binary_ops_match_splice_at_signed_boundaries() {
 fn checked_calls_remap_buffers_and_stop_after_the_first_fault() {
     let mut child = FunctionBuilder::new(
         options(),
-        Signature::new(2, &[BufferKind::Write, BufferKind::Read]),
+        Signature::new(
+            &[ScalarType::I32; 2],
+            ScalarType::I32,
+            &[BufferKind::Write, BufferKind::Read],
+        ),
     );
-    let zero = child.constant(0).unwrap();
-    let one = child.constant(1).unwrap();
-    let mark = child.constant(42).unwrap();
+    let zero = child.constant(Constant::from(0usize)).unwrap();
+    let one = child.constant(Constant::from(1usize)).unwrap();
+    let mark = child.constant(Constant::from(42)).unwrap();
     child.store(Buffer(0), zero, mark).unwrap();
-    let value = child.load(Buffer(1), child.arg(0).unwrap()).unwrap();
+    let at = child
+        .cast(child.arg(0).unwrap(), ScalarType::Index)
+        .unwrap();
+    let value = child.load(Buffer(1), at).unwrap();
     let quotient = child
         .binary(Binary::Div, value, child.arg(1).unwrap())
         .unwrap();
     child.store(Buffer(0), one, quotient).unwrap();
     let length = child.buffer_len(Buffer(1)).unwrap();
+    let length = child.cast(length, ScalarType::I32).unwrap();
     child.ret(length).unwrap();
 
     let mut parent = FunctionBuilder::new(
         options(),
-        Signature::new(2, &[BufferKind::Read, BufferKind::Write]),
+        Signature::new(
+            &[ScalarType::I32; 2],
+            ScalarType::I32,
+            &[BufferKind::Read, BufferKind::Write],
+        ),
     );
     let child = Arc::new(child.finish().unwrap());
     let length = parent
@@ -74,7 +96,7 @@ fn checked_calls_remap_buffers_and_stop_after_the_first_fault() {
             &[Buffer(1), Buffer(0)],
         )
         .unwrap();
-    let two = parent.constant(2).unwrap();
+    let two = parent.constant(Constant::from(2usize)).unwrap();
     parent.store(Buffer(1), two, length).unwrap();
     parent.ret(length).unwrap();
     let code = Llvm::compile(&parent.finish().unwrap()).unwrap();
@@ -107,14 +129,20 @@ fn checked_calls_remap_buffers_and_stop_after_the_first_fault() {
 
 #[test]
 fn shared_callees_loops_and_unreachable_tails_form_valid_llvm_blocks() {
-    let mut step = FunctionBuilder::new(options(), Signature::new(1, &[]));
-    let one = step.constant(1).unwrap();
+    let mut step = FunctionBuilder::new(
+        options(),
+        Signature::new(&[ScalarType::I32; 1], ScalarType::I32, &[]),
+    );
+    let one = step.constant(Constant::from(1)).unwrap();
     let next = step.binary(Binary::Add, step.arg(0).unwrap(), one).unwrap();
     step.ret(next).unwrap();
     let step = Arc::new(step.finish().unwrap());
 
-    let mut b = FunctionBuilder::new(options(), Signature::new(1, &[]));
-    let i = b.constant(0).unwrap();
+    let mut b = FunctionBuilder::new(
+        options(),
+        Signature::new(&[ScalarType::I32; 1], ScalarType::I32, &[]),
+    );
+    let i = b.constant(Constant::from(0)).unwrap();
     let (head, body, done, orphan) = (
         b.label().unwrap(),
         b.label().unwrap(),
@@ -133,11 +161,11 @@ fn shared_callees_loops_and_unreachable_tails_form_valid_llvm_blocks() {
     b.ret(i).unwrap();
     // A verified function may have unreachable operations after a terminator,
     // adjacent labels and a dead tail without an explicit return.
-    b.constant(33).unwrap();
+    b.constant(Constant::from(33)).unwrap();
     b.mark(orphan).unwrap();
     let tail = b.label().unwrap();
     b.mark(tail).unwrap();
-    b.constant(11).unwrap();
+    b.constant(Constant::from(11)).unwrap();
     let f = b.finish().unwrap();
     let ir = splice_llvm::to_llvm_ir(&f, &f.options().target).unwrap();
     assert_eq!(ir.matches("define internal fastcc i32 @kernel").count(), 2);
@@ -160,7 +188,7 @@ fn masked_f64_gather_checks_active_indices_at_full_i64_width() {
         BufferKind::new(Element::F64, true),
     ];
     fn stage(b: &mut dyn KernelBuilder) -> splice_core::Result<()> {
-        let zero = b.constant(0)?;
+        let zero = b.constant(Constant::from(0usize))?;
         let i64op = |op| Simd {
             element: Element::I64,
             op,
@@ -182,13 +210,24 @@ fn masked_f64_gather_checks_active_indices_at_full_i64_width() {
             )?
             .unwrap();
         b.simd(f64op(SimdOp::Store(Buffer(2))), &[zero, selected])?;
-        b.ret(zero)?;
+        let result = b.constant(Constant::from(0))?;
+        b.ret(result)?;
         Ok(())
     }
-    let ir = frontend::materialize(Signature::new(0, &kinds), Box::new(stage), options()).unwrap();
+    let ir = frontend::materialize(
+        Signature::new(&[ScalarType::I32; 0], ScalarType::I32, &kinds),
+        Box::new(stage),
+        options(),
+    )
+    .unwrap();
     let n = Element::F64.lanes(options().target.vector_bytes());
     for kernel in [
-        Llvm::build_with_options(Signature::new(0, &kinds), Box::new(stage), options()).unwrap(),
+        Llvm::build_with_options(
+            Signature::new(&[ScalarType::I32; 0], ScalarType::I32, &kinds),
+            Box::new(stage),
+            options(),
+        )
+        .unwrap(),
         Llvm::compile(&ir).unwrap(),
     ] {
         let src = [-17.0];

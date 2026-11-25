@@ -18,7 +18,9 @@ impl Function {
 
 #[cfg(test)]
 mod tests {
-    use super::super::{Binary, Buffer, BufferKind, Label, Reg, Simd, SimdOp, ValueType};
+    use super::super::{
+        Binary, Buffer, BufferKind, Constant, Label, Reg, ScalarType, Simd, SimdOp, ValueType,
+    };
     use super::*;
     use crate::debug::{Location, Point, Value, Variable};
     use crate::simd::Element;
@@ -28,8 +30,20 @@ mod tests {
     const R1: Reg = Reg(1);
     const L0: Label = Label(0);
 
+    const I32: ValueType = ValueType::Scalar(ScalarType::I32);
+
+    /// A function of `arity` `i32` parameters with an `i32` result.
     fn function(
         arity: usize,
+        buffer_kinds: Vec<BufferKind>,
+        locals: Vec<ValueType>,
+        code: Vec<Instr>,
+    ) -> Function {
+        typed(vec![ScalarType::I32; arity], buffer_kinds, locals, code)
+    }
+
+    fn typed(
+        params: Vec<ScalarType>,
         buffer_kinds: Vec<BufferKind>,
         locals: Vec<ValueType>,
         code: Vec<Instr>,
@@ -46,7 +60,8 @@ mod tests {
         Function {
             source: None,
             options: crate::BuildOptions::host(crate::Mode::Debug).unwrap(),
-            arity,
+            params,
+            result: ScalarType::I32,
             buffer_kinds,
             needs_status: false,
             locals,
@@ -62,6 +77,15 @@ mod tests {
         code: Vec<Instr>,
     ) -> String {
         reason(function(arity, kinds, locals, code).verify().unwrap_err())
+    }
+
+    fn typed_error(
+        params: Vec<ScalarType>,
+        kinds: Vec<BufferKind>,
+        locals: Vec<ValueType>,
+        code: Vec<Instr>,
+    ) -> String {
+        reason(typed(params, kinds, locals, code).verify().unwrap_err())
     }
 
     /// The verifier's reason, with the instruction it names.
@@ -95,10 +119,10 @@ mod tests {
 
     #[test]
     fn a_well_formed_function_verifies_and_records_traps() {
-        let f = function(
-            1,
+        let f = typed(
+            vec![ScalarType::Index],
             vec![BufferKind::Read],
-            vec![ValueType::Scalar],
+            vec![I32],
             vec![
                 Instr::Load {
                     dst: R1,
@@ -144,7 +168,7 @@ mod tests {
             "undefined label Label(1) at instruction 0"
         );
         assert_eq!(
-            error(1, vec![], vec![], vec![Instr::Const(R0, 1)]),
+            error(1, vec![], vec![], vec![Instr::Const(R0, Constant::from(1))]),
             "reachable path falls off the end of the function"
         );
     }
@@ -192,7 +216,7 @@ mod tests {
             error(
                 1,
                 vec![],
-                vec![ValueType::Scalar],
+                vec![I32],
                 vec![Instr::Bin(R0, Binary::Add, R0, R1), Instr::Return(R0)]
             ),
             "uninitialized Reg(1) at instruction 0"
@@ -208,7 +232,7 @@ mod tests {
                 no: Label(1),
             },
             Instr::Label(L0),
-            Instr::Const(R1, 1),
+            Instr::Const(R1, Constant::from(1)),
             Instr::Jump(Label(2)),
             Instr::Label(Label(1)),
             Instr::Jump(Label(2)),
@@ -216,7 +240,7 @@ mod tests {
             Instr::Return(R1),
         ];
         assert_eq!(
-            error(1, vec![], vec![ValueType::Scalar], code),
+            typed_error(vec![ScalarType::Bool], vec![], vec![I32], code),
             "uninitialized Reg(1) at instruction 7"
         );
     }
@@ -295,7 +319,7 @@ mod tests {
     #[test]
     fn buffer_errors() {
         let load = Instr::Load {
-            dst: R0,
+            dst: R1,
             buffer: Buffer(0),
             index: R0,
         };
@@ -304,27 +328,121 @@ mod tests {
             index: R0,
             value: R0,
         };
+        let index = || vec![ScalarType::Index];
         assert_eq!(
-            error(1, vec![], vec![], vec![load.clone(), Instr::Return(R0)]),
+            typed_error(
+                index(),
+                vec![],
+                vec![I32],
+                vec![load.clone(), Instr::Return(R1)]
+            ),
             "invalid buffer at instruction 0"
         );
         assert_eq!(
-            error(
-                1,
-                vec![BufferKind::new(Element::F32, true)],
-                vec![],
-                vec![load, Instr::Return(R0)]
+            typed_error(
+                index(),
+                vec![BufferKind::new(Element::U16, true)],
+                vec![I32],
+                vec![load.clone(), Instr::Return(R1)]
             ),
-            "scalar element access requires an i32 buffer at instruction 0"
+            "a scalar register cannot hold a u16 element at instruction 0"
         );
         assert_eq!(
             error(
                 1,
                 vec![BufferKind::Read],
+                vec![I32],
+                vec![load, Instr::Return(R1)]
+            ),
+            "expected a register of type usize, got i32 at instruction 0"
+        );
+        assert_eq!(
+            typed_error(
+                index(),
+                vec![BufferKind::Read],
                 vec![],
-                vec![store, Instr::Return(R0)]
+                vec![store.clone(), Instr::Return(R0)]
             ),
             "store to read-only buffer at instruction 0"
         );
+        assert_eq!(
+            typed_error(
+                index(),
+                vec![BufferKind::Write],
+                vec![],
+                vec![store, Instr::Return(R0)]
+            ),
+            "expected a register of type i32, got usize at instruction 0"
+        );
+    }
+
+    #[test]
+    fn type_errors() {
+        let ty = ValueType::Scalar;
+        let (bool, i64) = (ScalarType::Bool, ScalarType::I64);
+        assert_eq!(
+            typed_error(
+                vec![ScalarType::I32, i64],
+                vec![],
+                vec![I32],
+                vec![Instr::Bin(Reg(2), Binary::Add, R0, R1), Instr::Return(R0)]
+            ),
+            "expected a register of type i32, got i64 at instruction 0"
+        );
+        assert_eq!(
+            typed_error(
+                vec![bool, bool],
+                vec![],
+                vec![ty(bool)],
+                vec![Instr::Bin(Reg(2), Binary::Lt, R0, R1), Instr::Return(R0)]
+            ),
+            "Lt does not apply to bool at instruction 0"
+        );
+        assert_eq!(
+            typed_error(
+                vec![ScalarType::I32],
+                vec![],
+                vec![ty(bool)],
+                vec![Instr::Cast { dst: R1, src: R0 }, Instr::Return(R0)]
+            ),
+            "Rust has no cast from i32 to bool at instruction 0"
+        );
+        assert_eq!(
+            error(
+                1,
+                vec![],
+                vec![],
+                vec![
+                    Instr::Branch {
+                        cond: R0,
+                        yes: L0,
+                        no: L0
+                    },
+                    Instr::Label(L0),
+                    Instr::Return(R0)
+                ]
+            ),
+            "expected a register of type bool, got i32 at instruction 0"
+        );
+        assert_eq!(
+            typed_error(vec![i64], vec![], vec![], vec![Instr::Return(R0)]),
+            "expected a register of type i32, got i64 at instruction 0"
+        );
+        // A comparison produces a bool; a cast of a bool is an integer.
+        typed(
+            vec![i64, i64],
+            vec![],
+            vec![ty(bool), I32],
+            vec![
+                Instr::Bin(Reg(2), Binary::Lt, R0, R1),
+                Instr::Cast {
+                    dst: Reg(3),
+                    src: Reg(2),
+                },
+                Instr::Return(Reg(3)),
+            ],
+        )
+        .verify()
+        .unwrap();
     }
 }

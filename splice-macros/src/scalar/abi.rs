@@ -115,7 +115,7 @@ pub(super) fn generate(
             Binding::Host(_) => host.push((name, ty)),
             Binding::Reg(kind, _) | Binding::Word(kind) => {
                 registers.push(match kind {
-                    Scalar::Bool => emit!(-i32::from(self.#name)),
+                    Scalar::Bool => emit!(i32::from(self.#name)),
                     _ => emit!(self.#name),
                 });
                 runtime.push((name, ty));

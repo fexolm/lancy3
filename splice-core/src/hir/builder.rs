@@ -1,5 +1,6 @@
 use super::{
-    Binary, Buffer, ContextSlice, Function, Instr, Label, Reg, RustContextTarget, Simd, ValueType,
+    Binary, Buffer, Constant, ContextSlice, Function, Instr, Label, Reg, RustContextTarget,
+    ScalarType, Simd, ValueType,
 };
 use crate::frontend::{Body, KernelBuilder, KernelSource, Signature, Specialization};
 use std::collections::HashMap;
@@ -22,7 +23,8 @@ impl FunctionBuilder {
                 source: None,
                 options,
                 needs_status: false,
-                arity: signature.arity,
+                params: signature.params.to_vec(),
+                result: signature.result,
                 buffer_kinds: signature.buffers.to_vec(),
                 locals: Vec::new(),
                 labels: 0,
@@ -46,8 +48,21 @@ impl FunctionBuilder {
         Ok(dst)
     }
 
-    fn scalar(&mut self, instruction: impl FnOnce(Reg) -> Instr) -> crate::Result<Reg> {
-        self.emit_value(ValueType::Scalar, instruction)
+    fn scalar(
+        &mut self,
+        ty: ScalarType,
+        instruction: impl FnOnce(Reg) -> Instr,
+    ) -> crate::Result<Reg> {
+        self.emit_value(ValueType::Scalar(ty), instruction)
+    }
+
+    /// The scalar type of `r`. An operation on an invalid operand records
+    /// `I32`; verification rejects it.
+    fn scalar_type(&self, r: Reg) -> ScalarType {
+        match self.function.checked_reg_type(r) {
+            Some(ValueType::Scalar(ty)) => ty,
+            _ => ScalarType::I32,
+        }
     }
 
     fn staged_call(
@@ -123,14 +138,23 @@ impl KernelBuilder for FunctionBuilder {
         })?;
         Ok(dst)
     }
-    fn constant(&mut self, value: i32) -> crate::Result<Reg> {
-        self.scalar(|dst| Instr::Const(dst, value))
+    fn constant(&mut self, value: Constant) -> crate::Result<Reg> {
+        self.scalar(value.ty(), |dst| Instr::Const(dst, value))
+    }
+    fn cast(&mut self, src: Reg, to: ScalarType) -> crate::Result<Reg> {
+        self.scalar(to, |dst| Instr::Cast { dst, src })
     }
     fn buffer_len(&mut self, buffer: Buffer) -> crate::Result<Reg> {
-        self.scalar(|dst| Instr::BufferLen { dst, buffer })
+        self.scalar(ScalarType::Index, |dst| Instr::BufferLen { dst, buffer })
     }
     fn load(&mut self, buffer: Buffer, index: Reg) -> crate::Result<Reg> {
-        self.scalar(|dst| Instr::Load { dst, buffer, index })
+        let ty = self
+            .function
+            .buffer_kinds
+            .get(buffer.index())
+            .and_then(|kind| ScalarType::of_element(kind.element()))
+            .unwrap_or(ScalarType::I32);
+        self.scalar(ty, |dst| Instr::Load { dst, buffer, index })
     }
     fn store(&mut self, buffer: Buffer, index: Reg, value: Reg) -> crate::Result<()> {
         self.push(Instr::Store {
@@ -140,7 +164,9 @@ impl KernelBuilder for FunctionBuilder {
         })
     }
     fn binary(&mut self, op: Binary, a: Reg, b: Reg) -> crate::Result<Reg> {
-        self.scalar(|dst| Instr::Bin(dst, op, a, b))
+        let ty = self.scalar_type(a);
+        let ty = op.output(ty).unwrap_or(ty);
+        self.scalar(ty, |dst| Instr::Bin(dst, op, a, b))
     }
     fn assign(&mut self, dst: Reg, src: Reg) -> crate::Result<()> {
         self.push(Instr::Copy(dst, src))
@@ -168,7 +194,7 @@ impl KernelBuilder for FunctionBuilder {
         self.push(Instr::TrapBounds)
     }
     fn rust_call(&mut self, import: super::RustCall, args: &[Reg]) -> crate::Result<Reg> {
-        self.scalar(|dst| Instr::RustCall {
+        self.scalar(ScalarType::I32, |dst| Instr::RustCall {
             dst,
             import,
             args: args.to_vec(),
@@ -179,7 +205,7 @@ impl KernelBuilder for FunctionBuilder {
         import: &'static super::RustPacketSymbol,
         args: &[Reg],
     ) -> crate::Result<Reg> {
-        self.scalar(|dst| Instr::RustPacketCall {
+        self.scalar(ScalarType::I32, |dst| Instr::RustPacketCall {
             dst,
             import,
             args: args.to_vec(),
@@ -192,7 +218,7 @@ impl KernelBuilder for FunctionBuilder {
         args: &[Reg],
         slices: &[ContextSlice],
     ) -> crate::Result<Reg> {
-        self.scalar(|dst| Instr::RustContextCall {
+        self.scalar(ScalarType::I32, |dst| Instr::RustContextCall {
             dst,
             target: RustContextTarget::Borrowed { context, operation },
             args: args.to_vec(),
@@ -205,7 +231,7 @@ impl KernelBuilder for FunctionBuilder {
         args: &[Reg],
         slices: &[ContextSlice],
     ) -> crate::Result<Reg> {
-        self.scalar(|dst| Instr::RustContextCall {
+        self.scalar(ScalarType::I32, |dst| Instr::RustContextCall {
             dst,
             target: RustContextTarget::Static(symbol),
             args: args.to_vec(),
@@ -236,7 +262,7 @@ impl KernelBuilder for FunctionBuilder {
         args: &[Reg],
         buffers: &[Buffer],
     ) -> crate::Result<Reg> {
-        self.scalar(|dst| Instr::Call {
+        self.scalar(function.result(), |dst| Instr::Call {
             dst,
             function: Arc::clone(function),
             args: args.to_vec(),
@@ -247,6 +273,6 @@ impl KernelBuilder for FunctionBuilder {
 
 impl Function {
     pub fn signature(&self) -> Signature<'_> {
-        Signature::new(self.arity, &self.buffer_kinds)
+        Signature::new(&self.params, self.result, &self.buffer_kinds)
     }
 }

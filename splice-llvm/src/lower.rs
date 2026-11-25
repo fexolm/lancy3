@@ -8,8 +8,10 @@ use inkwell::attributes::{Attribute, AttributeLoc};
 use inkwell::builder::{Builder, BuilderError};
 use inkwell::context::Context;
 use inkwell::module::{Linkage, Module};
-use inkwell::values::{BasicMetadataValueEnum, FunctionValue, IntValue};
-use splice_core::hir::BufferKind;
+use inkwell::types::{BasicMetadataTypeEnum, BasicType};
+use inkwell::values::{BasicMetadataValueEnum, BasicValueEnum, FunctionValue, IntValue};
+use splice_core::frontend::Signature;
+use splice_core::hir::ScalarType;
 
 // Only internal kernel functions use the fast calling convention.
 const FAST_CALL: u32 = inkwell::llvm_sys::LLVMCallConv::LLVMFastCallConv as u32;
@@ -17,10 +19,10 @@ const FAST_CALL: u32 = inkwell::llvm_sys::LLVMCallConv::LLVMFastCallConv as u32;
 fn declare<'ctx>(
     ctx: &'ctx Context,
     module: &Module<'ctx>,
-    arity: usize,
-    buffers: &[BufferKind],
+    signature: Signature<'_>,
     id: usize,
 ) -> splice_core::Result<FunctionValue<'ctx>> {
+    let (arity, buffers) = (signature.params.len(), signature.buffers);
     let n = buffers
         .len()
         .checked_mul(2)
@@ -33,12 +35,17 @@ fn declare<'ctx>(
     let mut params = Vec::with_capacity(n);
     let pointer = ctx.ptr_type(AddressSpace::default());
     params.push(pointer.into()); // status
-    params.resize(1 + arity, ctx.i32_type().into());
+    params.extend(
+        signature
+            .params
+            .iter()
+            .map(|&ty| BasicMetadataTypeEnum::from(body::scalar_type(ctx, ty))),
+    );
     for _ in buffers {
         params.push(pointer.into());
         params.push(ctx.i64_type().into());
     }
-    let ty = ctx.i32_type().fn_type(&params, false);
+    let ty = body::scalar_type(ctx, signature.result).fn_type(&params, false);
     let callee = module.add_function(&format!("kernel{id}"), ty, Some(Linkage::Internal));
     callee.set_call_conventions(FAST_CALL);
 
@@ -80,8 +87,7 @@ fn emit_entry<'ctx>(
     ctx: &'ctx Context,
     module: &Module<'ctx>,
     b: &Builder<'ctx>,
-    arity: usize,
-    buffer_count: usize,
+    signature: Signature<'_>,
     root: FunctionValue<'ctx>,
 ) -> Result<(), BuilderError> {
     let ptr = ctx.ptr_type(AddressSpace::default());
@@ -95,14 +101,15 @@ fn emit_entry<'ctx>(
     let descriptors = params.next().unwrap().into_pointer_value();
     let status = params.next().unwrap();
     let mut args = vec![status.into()];
-    for i in 0..arity {
+    for (i, &ty) in signature.params.iter().enumerate() {
         let index = i64_ty.const_int(i as u64, false);
         // SAFETY: Executable::call verifies the length of the scalar array.
         let address = unsafe { b.build_in_bounds_gep(i32_ty, scalars, &[index], "")? };
-        args.push(b.build_load(i32_ty, address, "")?.into());
+        let word = b.build_load(i32_ty, address, "")?.into_int_value();
+        args.push(from_word(ctx, b, word, ty)?.into());
     }
     let desc = ctx.struct_type(&[ptr.into(), i64_ty.into()], false);
-    for i in 0..buffer_count {
+    for i in 0..signature.buffers.len() {
         let index = i64_ty.const_int(i as u64, false);
         // SAFETY: Executable::call validates one (data, length) descriptor per slice.
         let slot = unsafe { b.build_in_bounds_gep(desc, descriptors, &[index], "")? };
@@ -112,17 +119,44 @@ fn emit_entry<'ctx>(
         args.push(b.build_load(i64_ty, len, "")?.into());
     }
     let result = call(b, root, &args)?;
-    b.build_return(Some(&result))?;
+    b.build_return(Some(&to_word(ctx, b, result, signature.result)?))?;
     Ok(())
+}
+
+/// A scalar parameter from its `i32` ABI word: a `bool` is 0 or 1.
+fn from_word<'ctx>(
+    ctx: &'ctx Context,
+    b: &Builder<'ctx>,
+    word: IntValue<'ctx>,
+    ty: ScalarType,
+) -> Result<BasicValueEnum<'ctx>, BuilderError> {
+    Ok(match ty {
+        ScalarType::Bool => b.build_int_truncate(word, ctx.bool_type(), "")?.into(),
+        _ => word.into(),
+    })
+}
+
+/// The `i32` ABI word of a scalar result.
+fn to_word<'ctx>(
+    ctx: &'ctx Context,
+    b: &Builder<'ctx>,
+    value: BasicValueEnum<'ctx>,
+    ty: ScalarType,
+) -> Result<IntValue<'ctx>, BuilderError> {
+    let value = value.into_int_value();
+    Ok(match ty {
+        ScalarType::Bool => b.build_int_z_extend(value, ctx.i32_type(), "")?,
+        _ => value,
+    })
 }
 
 fn call<'ctx>(
     b: &Builder<'ctx>,
     function: FunctionValue<'ctx>,
     args: &[BasicMetadataValueEnum<'ctx>],
-) -> Result<IntValue<'ctx>, BuilderError> {
+) -> Result<BasicValueEnum<'ctx>, BuilderError> {
     let call = b.build_call(function, args, "")?;
     call.set_call_convention(FAST_CALL);
-    // All Splice functions have an i32 result by construction.
-    Ok(call.try_as_basic_value().unwrap_basic().into_int_value())
+    // Every Splice function returns a scalar.
+    Ok(call.try_as_basic_value().unwrap_basic())
 }

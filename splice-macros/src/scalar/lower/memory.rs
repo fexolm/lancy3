@@ -76,7 +76,7 @@ impl Lower<'_> {
             } else {
                 Value::new(
                     Stage::Reg(Scalar::Bool),
-                    self.bin("Eq", length, emit!(__splice_builder.constant(0)?)),
+                    self.bin("Eq", length, self.constant(emit!(0usize))),
                 )
             });
         }
@@ -125,7 +125,7 @@ impl Lower<'_> {
                 let value = self.reg(receiver, Scalar::Int, &m.receiver)?;
                 return Ok(Value::new(
                     Stage::Reg(Scalar::Int),
-                    self.bin("Sub", emit!(__splice_builder.constant(0)?), value),
+                    self.bin("Sub", self.constant(emit!(0i32)), value),
                 ));
             }
             if matches!(
@@ -204,18 +204,18 @@ impl Lower<'_> {
                 "runtime casts support i32 and usize slice indices",
             );
         };
-        let code = match value.stage {
-            Stage::Reg(scalar @ (Scalar::Index | Scalar::Length | Scalar::Int))
-            | Stage::Word(scalar @ (Scalar::Index | Scalar::Length | Scalar::Int)) => {
-                self.reg(value, scalar, cast)?
-            }
-            Stage::Reg(Scalar::Bool) | Stage::Word(Scalar::Bool) => {
-                let bits = self.reg(value, Scalar::Bool, cast)?;
-                self.bin("And", bits, emit!(__splice_builder.constant(1)?))
-            }
-            _ => return err(cast, "expected an integer or boolean to cast"),
+        let (Stage::Reg(scalar @ (Scalar::Index | Scalar::Length | Scalar::Int | Scalar::Bool))
+        | Stage::Word(scalar @ (Scalar::Index | Scalar::Length | Scalar::Int | Scalar::Bool))) =
+            value.stage
+        else {
+            return err(cast, "expected an integer or boolean to cast");
         };
-        Ok(Value::new(Stage::Reg(kind), code))
+        let value = self.reg(value, scalar, cast)?;
+        let ty = self.scalar_type(kind);
+        Ok(Value::new(
+            Stage::Reg(kind),
+            emit!({let __splice_value = #value; __splice_builder.cast(__splice_value, #ty)?}),
+        ))
     }
 
     pub(super) fn reference(&self, reference: &ExprReference) -> Result<Value> {
@@ -250,13 +250,9 @@ impl Lower<'_> {
             return err(index, "use Lane::load or Lane::store for typed SIMD slices");
         }
         let value = self.expr(&index.index)?;
-        // Every host index above i32::MAX is out of bounds for a runtime
-        // slice. Keep the fault on the executed path, even for a literal.
-        let offset = if matches!(value.stage, Stage::Host | Stage::Literal(Scalar::Int)) {
-            emit!({let i: usize = #value; __splice_builder.constant(i32::try_from(i).unwrap_or(-1))?})
-        } else {
-            self.reg(value, Scalar::Index, &index.index)?
-        };
+        // An out-of-bounds host index faults on the executed path, even
+        // for a literal.
+        let offset = self.reg(value, Scalar::Index, &index.index)?;
         Ok((writable.write, slice.code, offset))
     }
 

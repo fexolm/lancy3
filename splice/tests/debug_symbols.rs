@@ -1,5 +1,6 @@
 use splice::frontend::Signature;
 use splice::hir::ValueType;
+use splice::hir::{Binary, Constant, ScalarType};
 use splice::{
     BuildOptions, CallError, Codegen, Executable, Mode, Trap, debug, hir::Instr, kernel, simd::Lane,
 };
@@ -164,12 +165,14 @@ fn observe_partially_assigned(
     b: &mut dyn splice::frontend::KernelBuilder,
     use_value: bool,
 ) -> splice::Result<()> {
-    let flag = b.arg(0)?;
-    let value = b.local(ValueType::Scalar)?;
+    let word = b.arg(0)?;
+    let zero = b.constant(Constant::from(0))?;
+    let flag = b.binary(Binary::Ne, word, zero)?;
+    let value = b.local(ValueType::Scalar(ScalarType::I32))?;
     let (assign, join) = (b.label()?, b.label()?);
     b.branch(flag, assign, join)?;
     b.mark(assign)?;
-    let five = b.constant(5)?;
+    let five = b.constant(Constant::from(5))?;
     b.assign(value, five)?;
     b.jump(join)?;
     b.mark(join)?;
@@ -181,17 +184,17 @@ fn observe_partially_assigned(
     };
     let variables = [debug::Variable {
         name: "value",
-        value: debug::Value::Register(value, debug::Scalar::I32),
+        value: debug::Value::Register(value),
     }];
     b.debug_point(location, &variables)?;
-    b.ret(if use_value { value } else { flag })?;
+    b.ret(if use_value { value } else { word })?;
     Ok(())
 }
 
 fn exercise_partial<B: Codegen<Output: Executable>>() {
     let options = BuildOptions::host(Mode::Debug).unwrap();
     let ir = splice::frontend::materialize(
-        Signature::new(1, &[]),
+        Signature::new(&[ScalarType::I32; 1], ScalarType::I32, &[]),
         Box::new(partially_assigned),
         options,
     )
@@ -203,7 +206,7 @@ fn exercise_partial<B: Codegen<Output: Executable>>() {
     );
     for kernel in [
         B::build_with_options(
-            Signature::new(1, &[]),
+            Signature::new(&[ScalarType::I32; 1], ScalarType::I32, &[]),
             Box::new(partially_assigned),
             options,
         )
@@ -220,7 +223,7 @@ fn exercise_partial<B: Codegen<Output: Executable>>() {
     ] {
         assert!(
             B::build_with_options(
-                Signature::new(1, &[]),
+                Signature::new(&[ScalarType::I32; 1], ScalarType::I32, &[]),
                 Box::new(partially_returned),
                 options
             )

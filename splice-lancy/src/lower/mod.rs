@@ -12,14 +12,38 @@ use splice_core::{
     BufferKind, ContextArguments, StaticRustSymbol,
     frontend::{Body, KernelBuilder, KernelSource, Signature, Specialization},
     hir::{
-        Binary, Buffer, ContextSlice, Label, Reg, RustCall, RustContextTarget, RustPacketSymbol,
-        Simd, ValueType,
+        Binary, Buffer, Constant, ContextSlice, Label, Reg, RustCall, RustContextTarget,
+        RustPacketSymbol, ScalarType, Simd, ValueType,
     },
 };
 use std::{
     collections::{HashMap, HashSet},
     sync::Arc,
 };
+
+/// The Lancy type of a scalar register. A `bool` is an `i32` mask, the
+/// form of Lancy comparisons: zero or all bits set.
+fn scalar_type(ty: ScalarType) -> hir::Type {
+    match ty {
+        ScalarType::Bool | ScalarType::I32 => hir::Type::I32,
+        ScalarType::U32 => hir::Type::U32,
+        ScalarType::I64 => hir::Type::I64,
+        ScalarType::U64 => hir::Type::U64,
+        ScalarType::Index => hir::Type::Usize,
+        ScalarType::F32 => hir::Type::F32,
+        ScalarType::F64 => hir::Type::F64,
+    }
+}
+
+/// The type twice as wide as an integer type, for overflow checks.
+fn wide(ty: ScalarType) -> hir::Type {
+    match ty {
+        ScalarType::I32 => hir::Type::I64,
+        ScalarType::U32 => hir::Type::U64,
+        ScalarType::I64 => hir::Type::I128,
+        _ => hir::Type::U128,
+    }
+}
 
 fn binary(op: Binary) -> hir::Binary {
     use hir::Binary as H;
@@ -61,7 +85,7 @@ pub(crate) fn stage(
 ) -> splice_core::Result<(Function, Option<&'static KernelSource>)> {
     let mut debug = debug;
     let sources = debug.as_deref_mut().map(std::mem::take);
-    let mut builder = Builder::new(signature, vector_bytes, sources)?;
+    let mut builder = Builder::new(signature, true, vector_bytes, sources)?;
     let staged = body(&mut builder);
     if let (Some(out), Some(sources)) = (debug, builder.debug.take()) {
         *out = sources;
@@ -96,15 +120,20 @@ pub(crate) fn lower_with(
 }
 
 impl<'a> Builder<'a> {
+    /// A function with `signature`. The root function is the kernel's
+    /// entry: its `bool` parameters and result are 0 or 1.
     fn new(
         signature: Signature<'a>,
+        root: bool,
         vector_bytes: usize,
         debug: Option<Vec<DebugSource>>,
     ) -> splice_core::Result<Self> {
         let Signature {
-            arity,
+            params: scalars,
+            result,
             buffers: kinds,
         } = signature;
+        let arity = scalars.len();
         let count = u32::try_from(arity)
             .map_err(|_| splice_core::BuildError::unsupported("too many kernel parameters"))?;
         if count == u32::MAX {
@@ -112,11 +141,11 @@ impl<'a> Builder<'a> {
                 "too many kernel parameters",
             ));
         }
-        let mut params = vec![hir::Type::I32; arity];
+        let mut params: Vec<_> = scalars.iter().map(|&ty| scalar_type(ty)).collect();
         for _ in kinds {
             params.extend([hir::Type::Ptr, hir::Type::I32]);
         }
-        let mut graph = Function::new(&params, hir::Type::I32);
+        let mut graph = Function::new(&params, scalar_type(result));
         // BufferArg enforces these borrows at entry; call-site validation
         // preserves them when a nested kernel receives forwarded buffers.
         graph.set_slice_params(
@@ -128,14 +157,16 @@ impl<'a> Builder<'a> {
         );
         let entry = graph.entry();
         let mut first = State::default();
-        first.defs.extend(
-            graph
-                .params(entry)
-                .iter()
-                .take(arity)
-                .enumerate()
-                .map(|(i, &v)| (Reg(i as u32), v)),
-        );
+        for (i, &ty) in scalars.iter().enumerate() {
+            let mut v = graph.params(entry)[i];
+            if root && ty == ScalarType::Bool {
+                let zero = graph.append(entry, Op::Const(0)).unwrap();
+                v = graph
+                    .append(entry, Op::Bin(hir::Binary::Sub, zero, v))
+                    .unwrap();
+            }
+            first.defs.insert(Reg(i as u32), v);
+        }
         let mut blocks = DenseMap::new();
         let state = blocks.insert(first);
         debug_assert_eq!(state, entry);
@@ -145,17 +176,23 @@ impl<'a> Builder<'a> {
             callees: HashMap::new(),
             functions: HashMap::new(),
             arity,
+            root,
+            result,
             kinds,
             vector_bytes,
             blocks,
             current: Some(entry),
-            types: vec![ValueType::Scalar; arity],
+            types: scalars.iter().map(|&ty| ValueType::Scalar(ty)).collect(),
             demands: Vec::new(),
             observed: HashMap::new(),
             unassigned: HashSet::new(),
             labels: Vec::new(),
-            has_shared_i32: kinds.contains(&BufferKind::Read),
+            has_shared: kinds
+                .iter()
+                .any(|kind| !kind.writable() && kind.context_signature().is_none()),
             constants: HashMap::new(),
+            indices: HashMap::new(),
+            index_constants: HashMap::new(),
             shared_loads: HashMap::new(),
             debug,
             marker: 0,
@@ -185,7 +222,7 @@ impl<'a> Builder<'a> {
         signature: Signature<'_>,
         body: impl FnOnce(&mut dyn KernelBuilder) -> splice_core::Result<()>,
     ) -> splice_core::Result<Arc<Function>> {
-        let mut child = Builder::new(signature, self.vector_bytes, self.debug.take())?;
+        let mut child = Builder::new(signature, false, self.vector_bytes, self.debug.take())?;
         std::mem::swap(&mut child.callees, &mut self.callees);
         std::mem::swap(&mut child.functions, &mut self.functions);
         let staged = body(&mut child);
@@ -221,6 +258,9 @@ struct State {
     exit: Option<Exit>,
 }
 
+/// A Rust call returns an `i32` word.
+const WORD: ValueType = ValueType::Scalar(ScalarType::I32);
+
 struct Builder<'a> {
     graph: Function,
     source: Option<&'static KernelSource>,
@@ -228,6 +268,9 @@ struct Builder<'a> {
     /// Lowered portable callees, by identity.
     functions: HashMap<*const splice_core::Function, (Arc<splice_core::Function>, Arc<Function>)>,
     arity: usize,
+    /// Whether this is the kernel's entry rather than a callee.
+    root: bool,
+    result: ScalarType,
     kinds: &'a [BufferKind],
     /// Width of the target's vectors; fixes lane counts and alignment.
     vector_bytes: usize,
@@ -242,8 +285,14 @@ struct Builder<'a> {
     /// Placeholders for a register that is unassigned on some path.
     unassigned: HashSet<Value>,
     labels: Vec<Option<Block>>,
-    has_shared_i32: bool,
+    /// Whether a read-only slice can share loads at one index.
+    has_shared: bool,
+    /// The `i32` constants of the open block.
     constants: HashMap<Value, i32>,
+    /// The `i32` that an `Index` value sign-extends.
+    indices: HashMap<Value, Value>,
+    /// `Index` constants, clamped to `i32::MAX` (see `index32`).
+    index_constants: HashMap<Value, i32>,
     shared_loads: HashMap<(Buffer, LoadIndex), Value>,
     /// The source points of a debug build, shared by its functions.
     debug: Option<Vec<DebugSource>>,
@@ -271,12 +320,32 @@ impl Builder<'_> {
         (params[first], params[first + 1])
     }
 
+    /// The `i32` Lancy index of a `usize` slice index or offset, with the
+    /// same bounds check: every slice length fits `i32`, so an `Index` past
+    /// `i32::MAX` clamps to it. An `Index` that sign-extends an `i32` is out
+    /// of bounds exactly when the `i32` is negative or too large.
+    fn index32(&mut self, index: Value) -> Value {
+        if let Some(&narrow) = self.indices.get(&index) {
+            return narrow;
+        }
+        if let Some(&n) = self.index_constants.get(&index) {
+            let narrow = self.value(Op::Const(n));
+            if self.has_shared {
+                self.constants.insert(narrow, n);
+            }
+            return narrow;
+        }
+        let max = self.value(Op::Literal(hir::Lane::Usize, i32::MAX as u128));
+        let clamped = self.value(Op::Bin(hir::Binary::Min, index, max));
+        self.value(Op::Cast(hir::Type::I32, clamped))
+    }
     fn address(&mut self, buffer: Buffer, index: Value) -> Value {
         let (base, len) = self.slice(buffer);
+        let scale = simd::stride(self.kinds[buffer.index()].element());
         let block = self.current.expect("open block");
         self.graph.append(block, Op::BoundsCheck(index, len));
         self.graph
-            .append(block, Op::PtrOffset(base, index, hir::Scale::Four))
+            .append(block, Op::PtrOffset(base, index, scale))
             .unwrap()
     }
     fn parameter(&mut self, block: Block, r: Reg, required: bool) -> Value {
@@ -341,37 +410,83 @@ impl Builder<'_> {
             .append(self.current.expect("open block"), op)
             .expect("operation defines a value")
     }
-    fn result(&mut self, op: Op) -> splice_core::Result<Reg> {
-        let r = self.local(ValueType::Scalar)?;
-        if self.reachable() {
-            self.define(r, op);
+    fn scalar(&self, r: Reg) -> ScalarType {
+        match self.types[r.0 as usize] {
+            ValueType::Scalar(ty) => ty,
+            _ => unreachable!("validated scalar register"),
         }
-        Ok(r)
+    }
+    /// A constant of `ty` with the given bits.
+    fn literal(&mut self, ty: ScalarType, bits: u64) -> Value {
+        match ty {
+            ScalarType::Bool => self.value(Op::Const(-((bits & 1) as i32))),
+            ScalarType::I32 => self.value(Op::Const(bits as u32 as i32)),
+            _ => {
+                let lane = scalar_type(ty).lane().expect("scalar lane");
+                self.value(Op::Literal(lane, bits.into()))
+            }
+        }
     }
 
     fn arithmetic(&mut self, dst: Reg, op: Binary, lhs: Reg, rhs: Reg) {
+        let ty = self.scalar(lhs);
         let (a, b) = (self.read(lhs), self.read(rhs));
         let kind = binary(op);
         match op {
             Binary::CheckedAdd | Binary::CheckedSub | Binary::CheckedMul => {
-                let a = self.value(Op::Cast(hir::Type::I64, a));
-                let b = self.value(Op::Cast(hir::Type::I64, b));
-                let wide = self.value(Op::Bin(kind, a, b));
-                let narrow = self.value(Op::Cast(hir::Type::I32, wide));
-                let sign_extended = self.value(Op::Cast(hir::Type::I64, narrow));
-                let overflow = self.value(Op::Bin(hir::Binary::Ne, wide, sign_extended));
-                let overflow = self.value(Op::Cast(hir::Type::I32, overflow));
+                // The exact result in twice the width must survive narrowing.
+                let (narrow_type, wide_type) = (scalar_type(ty), wide(ty));
+                let a = self.value(Op::Cast(wide_type, a));
+                let b = self.value(Op::Cast(wide_type, b));
+                let exact = self.value(Op::Bin(kind, a, b));
+                let narrow = self.value(Op::Cast(narrow_type, exact));
+                let extended = self.value(Op::Cast(wide_type, narrow));
+                let overflow = self.value(Op::Bin(hir::Binary::Ne, exact, extended));
                 self.effect(Op::CheckOverflow(overflow));
                 self.bind(dst, narrow);
             }
             Binary::CheckedShl | Binary::CheckedShr => {
-                let high_mask = self.value(Op::Const(!31));
-                let overflow = self.value(Op::Bin(hir::Binary::And, b, high_mask));
+                // The amount, as an unsigned value, must be below the width.
+                let high_bits = self.literal(ty, !u64::from(ty.bits() - 1));
+                let high = self.value(Op::Bin(hir::Binary::And, b, high_bits));
+                let overflow = if ty == ScalarType::I32 {
+                    high
+                } else {
+                    let zero = self.literal(ty, 0);
+                    self.value(Op::Bin(hir::Binary::Ne, high, zero))
+                };
                 self.effect(Op::CheckOverflow(overflow));
                 self.define(dst, Op::Bin(kind, a, b));
             }
             _ => self.define(dst, Op::Bin(kind, a, b)),
         }
+    }
+    /// Rust's `src as to`.
+    fn convert(&mut self, dst: Reg, src: Reg, to: ScalarType) {
+        let from = self.scalar(src);
+        let v = self.read(src);
+        let value = if from == to {
+            v
+        } else if from == ScalarType::Bool {
+            // The mask becomes 0 or 1.
+            let one = self.value(Op::Const(1));
+            let bit = self.value(Op::Bin(hir::Binary::And, v, one));
+            if to == ScalarType::I32 {
+                bit
+            } else {
+                self.value(Op::Cast(scalar_type(to), bit))
+            }
+        } else if let (ScalarType::Index, ScalarType::I32, Some(&narrow)) =
+            (from, to, self.indices.get(&v))
+        {
+            narrow
+        } else {
+            self.value(Op::Cast(scalar_type(to), v))
+        };
+        if from == ScalarType::I32 && to == ScalarType::Index {
+            self.indices.insert(value, v);
+        }
+        self.bind(dst, value);
     }
     fn bind(&mut self, r: Reg, v: Value) {
         let b = self.current.expect("open block");
@@ -380,14 +495,14 @@ impl Builder<'_> {
     fn define(&mut self, r: Reg, op: Op) {
         let v = self.value(op);
         if let Op::Const(n) = op
-            && self.has_shared_i32
+            && self.has_shared
         {
             self.constants.insert(v, n);
         }
         self.bind(r, v);
     }
     fn define_load(&mut self, dst: Reg, buffer: Buffer, index: Value) {
-        let shared = self.kinds[buffer.index()] == BufferKind::Read;
+        let shared = !self.kinds[buffer.index()].writable();
         let key = if shared {
             // A Splice shared slice cannot be modified via another parameter
             // or a callee. The first load already checked this index.
@@ -406,7 +521,8 @@ impl Builder<'_> {
             None
         };
         let address = self.address(buffer, index);
-        self.define(dst, Op::Load(hir::Type::I32, address));
+        let ty = scalar_type(self.scalar(dst));
+        self.define(dst, Op::Load(ty, address));
         if let Some(key) = key {
             let block = self.current.expect("open block");
             self.shared_loads.insert(key, self.blocks[block].defs[&dst]);
@@ -415,10 +531,11 @@ impl Builder<'_> {
     fn call(
         &mut self,
         callee: Arc<Function>,
+        result: ScalarType,
         args: &[Reg],
         buffers: &[Buffer],
     ) -> splice_core::Result<Reg> {
-        let dst = self.local(ValueType::Scalar)?;
+        let dst = self.local(ValueType::Scalar(result))?;
         if self.reachable() {
             let mut values: Vec<_> = args.iter().map(|&r| self.read(r)).collect();
             for &buffer in buffers {
@@ -437,7 +554,7 @@ impl Builder<'_> {
         args: &[Reg],
         slices: &[ContextSlice],
     ) -> splice_core::Result<Reg> {
-        let dst = self.local(ValueType::Scalar)?;
+        let dst = self.local(WORD)?;
         if !self.reachable() {
             return Ok(dst);
         }
@@ -526,7 +643,7 @@ impl Builder<'_> {
             }
             callee
         };
-        self.call(callee, args, buffers)
+        self.call(callee, signature.result, args, buffers)
     }
     fn target(&mut self, label: Label) -> Block {
         if let Some(block) = self.labels[label.0 as usize] {
@@ -591,18 +708,13 @@ impl KernelBuilder for Builder<'_> {
                 .filter(|offset| offset.checked_add(8).is_some())
                 .ok_or_else(|| splice_core::BuildError::unsupported("debug frame too large"))?;
             match slot.variable.value {
-                splice_core::debug::Value::Register(reg, _) => {
+                splice_core::debug::Value::Register(reg) => {
                     let mut value = self.observe(reg);
-                    match slot.ty {
-                        splice_core::debug::Type::Scalar(splice_core::debug::Scalar::Index) => {
-                            value = self.value(Op::Cast(hir::Type::I64, value));
-                        }
+                    if slot.ty == splice_core::debug::Type::Scalar(ScalarType::Bool) {
                         // A DWARF bool is one byte holding 0 or 1.
-                        splice_core::debug::Type::Scalar(splice_core::debug::Scalar::Bool) => {
-                            let one = self.value(Op::Const(1));
-                            value = self.value(Op::Bin(hir::Binary::And, value, one));
-                        }
-                        _ => {}
+                        let one = self.value(Op::Const(1));
+                        let bit = self.value(Op::Bin(hir::Binary::And, value, one));
+                        value = self.value(Op::Cast(hir::Type::U8, bit));
                     }
                     self.effect(Op::DebugStore(offset, value));
                 }
@@ -643,17 +755,42 @@ impl KernelBuilder for Builder<'_> {
         self.bind_simd(dst, value);
         Ok(dst)
     }
-    fn constant(&mut self, n: i32) -> splice_core::Result<Reg> {
-        self.result(Op::Const(n))
+    fn constant(&mut self, c: Constant) -> splice_core::Result<Reg> {
+        let dst = self.local(ValueType::Scalar(c.ty()))?;
+        if self.reachable() {
+            let v = self.literal(c.ty(), c.bits());
+            if c.ty() == ScalarType::Index {
+                let index = c.bits().min(i32::MAX as u64) as i32;
+                self.index_constants.insert(v, index);
+            }
+            self.bind(dst, v);
+        }
+        Ok(dst)
+    }
+    fn cast(&mut self, src: Reg, to: ScalarType) -> splice_core::Result<Reg> {
+        let dst = self.local(ValueType::Scalar(to))?;
+        if self.reachable() {
+            self.convert(dst, src, to);
+        }
+        Ok(dst)
     }
     fn buffer_len(&mut self, buffer: Buffer) -> splice_core::Result<Reg> {
-        let (_, len) = self.slice(buffer);
-        self.result(Op::Copy(len))
+        let dst = self.local(ValueType::Scalar(ScalarType::Index))?;
+        if self.reachable() {
+            let (_, len) = self.slice(buffer);
+            let v = self.value(Op::Cast(hir::Type::Usize, len));
+            self.indices.insert(v, len);
+            self.bind(dst, v);
+        }
+        Ok(dst)
     }
     fn load(&mut self, buffer: Buffer, index: Reg) -> splice_core::Result<Reg> {
-        let dst = self.local(ValueType::Scalar)?;
+        let ty = ScalarType::of_element(self.kinds[buffer.index()].element())
+            .expect("validated scalar element");
+        let dst = self.local(ValueType::Scalar(ty))?;
         if self.reachable() {
             let index = self.read(index);
+            let index = self.index32(index);
             self.define_load(dst, buffer, index);
         }
         Ok(dst)
@@ -661,13 +798,15 @@ impl KernelBuilder for Builder<'_> {
     fn store(&mut self, buffer: Buffer, index: Reg, value: Reg) -> splice_core::Result<()> {
         if self.reachable() {
             let (index, value) = (self.read(index), self.read(value));
+            let index = self.index32(index);
             let addr = self.address(buffer, index);
             self.effect(Op::Store(addr, value));
         }
         Ok(())
     }
     fn binary(&mut self, op: Binary, a: Reg, b: Reg) -> splice_core::Result<Reg> {
-        let dst = self.local(ValueType::Scalar)?;
+        let output = op.output(self.scalar(a)).expect("validated operation");
+        let dst = self.local(ValueType::Scalar(output))?;
         if self.reachable() {
             self.arithmetic(dst, op, a, b);
         }
@@ -707,7 +846,11 @@ impl KernelBuilder for Builder<'_> {
     }
     fn ret(&mut self, value: Reg) -> splice_core::Result<()> {
         if self.reachable() {
-            let v = self.read(value);
+            let mut v = self.read(value);
+            if self.root && self.result == ScalarType::Bool {
+                let one = self.value(Op::Const(1));
+                v = self.value(Op::Bin(hir::Binary::And, v, one));
+            }
             self.end(Exit::Return(v));
         }
         Ok(())
@@ -716,12 +859,13 @@ impl KernelBuilder for Builder<'_> {
         if self.reachable() {
             let zero = self.value(Op::Const(0));
             self.effect(Op::BoundsCheck(zero, zero));
-            self.end(Exit::Return(zero));
+            let result = self.zero(ValueType::Scalar(self.result));
+            self.end(Exit::Return(result));
         }
         Ok(())
     }
     fn rust_call(&mut self, import: RustCall, args: &[Reg]) -> splice_core::Result<Reg> {
-        let dst = self.local(ValueType::Scalar)?;
+        let dst = self.local(WORD)?;
         if self.reachable() {
             let [a, b] = self.rust_operands(args);
             self.define(dst, Op::RustCall(import.symbol, a, b));
@@ -733,7 +877,7 @@ impl KernelBuilder for Builder<'_> {
         import: &'static RustPacketSymbol,
         args: &[Reg],
     ) -> splice_core::Result<Reg> {
-        let dst = self.local(ValueType::Scalar)?;
+        let dst = self.local(WORD)?;
         if self.reachable() {
             self.shared_loads.clear();
             let args: Vec<_> = args.iter().map(|&arg| self.read(arg)).collect();
@@ -799,6 +943,6 @@ impl KernelBuilder for Builder<'_> {
                 callee
             }
         };
-        self.call(callee, args, buffers)
+        self.call(callee, function.result(), args, buffers)
     }
 }

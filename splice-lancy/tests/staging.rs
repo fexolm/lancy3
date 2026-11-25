@@ -1,4 +1,4 @@
-use splice_core::hir::{Binary, Function, Instr};
+use splice_core::hir::{Binary, Constant, Function, Instr};
 use splice_core::kernel;
 use splice_lancy::Lancy;
 
@@ -64,7 +64,7 @@ fn check_function(ir: &Function, expected_offset: i32) {
             _ => {}
         }
     }
-    assert_eq!(constants, [expected_offset]);
+    assert_eq!(constants, [Constant::from(expected_offset)]);
     assert_eq!(arithmetic, [checked(Binary::Add, Binary::CheckedAdd)]);
 }
 
@@ -188,7 +188,7 @@ fn a_const_kernel_can_be_evaluated_and_called_in_the_same_specialization() {
         stage
             .instructions()
             .iter()
-            .any(|i| matches!(i, Instr::Const(_, KNOWN_WEIGHT)))
+            .any(|i| matches!(i, Instr::Const(_, c) if *c == Constant::from(KNOWN_WEIGHT)))
     );
     assert!(calls[0].instructions().iter().any(
         |i| matches!(i, Instr::Bin(_, op, ..) if *op == checked(Binary::Mul, Binary::CheckedMul))
@@ -267,8 +267,9 @@ fn a_known_i32_is_a_plain_constant_argument_of_a_runtime_call() {
         .unwrap();
     assert_eq!(callee.arity(), 2);
     assert!(
-        code.iter()
-            .any(|op| matches!(op, Instr::Const(r, 13) if *r == args[1]))
+        code.iter().any(
+            |op| matches!(op, Instr::Const(r, c) if *r == args[1] && *c == Constant::from(13))
+        )
     );
     assert!(!code.iter().any(|op| matches!(op, Instr::Bin(..))));
     let jit = apply_affine::build::<Lancy>(apply_affine::BuildArgs { base: 4 }).unwrap();

@@ -1,15 +1,20 @@
 mod debug;
 mod simd;
+pub(super) use simd::scalar_type;
 
 use super::call;
 use inkwell::basic_block::BasicBlock;
 use inkwell::builder::{Builder, BuilderError};
 use inkwell::context::Context;
 use inkwell::types::BasicTypeEnum;
-use inkwell::values::{BasicMetadataValueEnum, BasicValue, FunctionValue, IntValue, PointerValue};
-use inkwell::{IntPredicate, module::Module};
+use inkwell::values::{
+    BasicMetadataValueEnum, BasicValue, BasicValueEnum, FloatValue, FunctionValue, IntValue,
+    PointerValue,
+};
+use inkwell::{FloatPredicate, IntPredicate, module::Module};
 use splice_core::hir::{
-    Binary, Buffer, BufferKind, ContextSlice, Label, Reg, RustContextTarget, ValueType,
+    Binary, Buffer, BufferKind, Constant, ContextSlice, Label, Reg, RustContextTarget, ScalarType,
+    ValueType,
 };
 use splice_core::{ContextArguments, Trap};
 
@@ -122,7 +127,7 @@ impl<'a, 'ctx> Body<'a, 'ctx> {
         let mut params = function.get_param_iter();
         let status = params.next().unwrap().into_pointer_value();
         for &(_, ptr) in &registers[..arity] {
-            builder.build_store(ptr, params.next().unwrap().into_int_value())?;
+            builder.build_store(ptr, params.next().unwrap())?;
         }
         let slices = kinds
             .iter()
@@ -212,17 +217,51 @@ impl<'a, 'ctx> Body<'a, 'ctx> {
         self.ctx.i32_type().const_int(n as u32 as u64, false)
     }
 
-    fn load(&self, reg: Reg) -> Built<IntValue<'ctx>> {
-        Ok(self
-            .builder
-            .build_load(self.ctx.i32_type(), self.registers[reg.0 as usize].1, "")?
-            .into_int_value())
+    fn scalar_type(&self, reg: Reg) -> ScalarType {
+        match self.registers[reg.0 as usize].0 {
+            ValueType::Scalar(ty) => ty,
+            _ => unreachable!("validated scalar register"),
+        }
     }
 
-    fn store(&self, reg: Reg, value: IntValue<'ctx>) -> Built<()> {
+    fn value(&self, reg: Reg) -> Built<BasicValueEnum<'ctx>> {
+        let (ty, ptr) = self.registers[reg.0 as usize];
+        let ty = simd::llvm_type(self.ctx, self.machine.vector_bytes, ty);
+        Ok(self.builder.build_load(ty, ptr, "")?)
+    }
+
+    /// An integer or `bool` register.
+    fn load(&self, reg: Reg) -> Built<IntValue<'ctx>> {
+        Ok(self.value(reg)?.into_int_value())
+    }
+
+    fn store(&self, reg: Reg, value: impl BasicValue<'ctx>) -> Built<()> {
         self.builder
             .build_store(self.registers[reg.0 as usize].1, value)?;
         Ok(())
+    }
+
+    /// A `usize` memory offset as `i64`, clamped to `i32::MAX`: every slice
+    /// length fits `i32`, so a larger offset is out of bounds either way.
+    fn offset(&self, reg: Reg) -> Built<IntValue<'ctx>> {
+        let wide = self.ctx.i64_type();
+        let umin = self.intrinsic("llvm.umin", &[wide.into()])?;
+        let max = wide.const_int(i32::MAX as u64, false);
+        Ok(self
+            .builder
+            .build_call(umin, &[self.load(reg)?.into(), max.into()], "")?
+            .try_as_basic_value()
+            .unwrap_basic()
+            .into_int_value())
+    }
+
+    /// The result of a function that stops with a status.
+    fn failed_result(&self) -> BasicValueEnum<'ctx> {
+        self.function
+            .get_type()
+            .get_return_type()
+            .expect("kernels return a value")
+            .const_zero()
     }
 
     // Guards of the same type share one side exit. Failed calls preserve
@@ -240,7 +279,7 @@ impl<'a, 'ctx> Body<'a, 'ctx> {
                 self.builder
                     .build_store(self.status, self.int(trap.code() as i32))?;
             }
-            self.builder.build_return(Some(&self.int(0)))?;
+            self.builder.build_return(Some(&self.failed_result()))?;
         }
         self.builder.position_at_end(next);
         Ok(())
@@ -248,16 +287,15 @@ impl<'a, 'ctx> Body<'a, 'ctx> {
 
     fn element(&mut self, buffer: Buffer, index: Reg) -> Built<PointerValue<'ctx>> {
         let slice = self.slices[buffer.0 as usize];
-        let index = self
-            .builder
-            .build_int_z_extend(self.load(index)?, self.ctx.i64_type(), "")?;
-        self.checked_element(slice, self.ctx.i32_type().into(), index)
+        let ty = ScalarType::of_element(slice.element).expect("validated scalar element");
+        let ty = simd::scalar_type(self.ctx, ty);
+        self.checked_element(slice, ty, self.load(index)?)
     }
 
     pub(super) fn trap_bounds(&self) -> Built<()> {
         self.builder
             .build_store(self.status, self.int(Trap::Bounds.code() as i32))?;
-        self.builder.build_return(Some(&self.int(0)))?;
+        self.builder.build_return(Some(&self.failed_result()))?;
         Ok(())
     }
 
@@ -267,7 +305,6 @@ impl<'a, 'ctx> Body<'a, 'ctx> {
         element: BasicTypeEnum<'ctx>,
         index: IntValue<'ctx>,
     ) -> Built<PointerValue<'ctx>> {
-        // The unsigned comparison also rejects negative signed indices, as every slice fits i32.
         let invalid = self
             .builder
             .build_int_compare(IntPredicate::UGE, index, slice.len, "")?;
@@ -282,90 +319,216 @@ impl<'a, 'ctx> Body<'a, 'ctx> {
     fn binary(
         &mut self,
         op: Binary,
-        a: IntValue<'ctx>,
-        b: IntValue<'ctx>,
-    ) -> Built<IntValue<'ctx>> {
+        ty: ScalarType,
+        a: BasicValueEnum<'ctx>,
+        b: BasicValueEnum<'ctx>,
+    ) -> Built<BasicValueEnum<'ctx>> {
+        if ty.is_float() {
+            return self.float_binary(op, a.into_float_value(), b.into_float_value());
+        }
+        let (a, b) = (a.into_int_value(), b.into_int_value());
         let ir = self.builder;
+        let int = a.get_type();
+        let signed = ty.is_signed();
+        let constant = |n: i64| int.const_int(n as u64, signed);
         use Binary::*;
-        match op {
-            Add => Ok(ir.build_int_add(a, b, "")?),
-            Sub => Ok(ir.build_int_sub(a, b, "")?),
-            Mul => Ok(ir.build_int_mul(a, b, "")?),
+        Ok(match op {
+            Add => ir.build_int_add(a, b, "")?.into(),
+            Sub => ir.build_int_sub(a, b, "")?.into(),
+            Mul => ir.build_int_mul(a, b, "")?.into(),
             CheckedAdd | CheckedSub | CheckedMul => {
-                let wide_type = self.ctx.i64_type();
-                let a = ir.build_int_s_extend(a, wide_type, "")?;
-                let b = ir.build_int_s_extend(b, wide_type, "")?;
-                let wide = match op {
-                    CheckedAdd => ir.build_int_add(a, b, "")?,
-                    CheckedSub => ir.build_int_sub(a, b, "")?,
-                    CheckedMul => ir.build_int_mul(a, b, "")?,
-                    _ => unreachable!(),
+                let name = match (op, signed) {
+                    (CheckedAdd, true) => "llvm.sadd.with.overflow",
+                    (CheckedAdd, false) => "llvm.uadd.with.overflow",
+                    (CheckedSub, true) => "llvm.ssub.with.overflow",
+                    (CheckedSub, false) => "llvm.usub.with.overflow",
+                    (_, true) => "llvm.smul.with.overflow",
+                    (_, false) => "llvm.umul.with.overflow",
                 };
-                let result = ir.build_int_truncate(wide, self.ctx.i32_type(), "")?;
-                let extended = ir.build_int_s_extend(result, wide_type, "")?;
-                let invalid = ir.build_int_compare(IntPredicate::NE, wide, extended, "")?;
-                self.exit_if(invalid, Failure::Trap(Trap::Overflow))?;
-                Ok(result)
+                let function = self.intrinsic(name, &[int.into()])?;
+                let pair = ir
+                    .build_call(function, &[a.into(), b.into()], "")?
+                    .try_as_basic_value()
+                    .unwrap_basic()
+                    .into_struct_value();
+                let result = ir.build_extract_value(pair, 0, "")?;
+                let overflow = ir.build_extract_value(pair, 1, "")?.into_int_value();
+                self.exit_if(overflow, Failure::Trap(Trap::Overflow))?;
+                result
             }
-            And => Ok(ir.build_and(a, b, "")?),
-            Or => Ok(ir.build_or(a, b, "")?),
-            Xor => Ok(ir.build_xor(a, b, "")?),
+            And => ir.build_and(a, b, "")?.into(),
+            Or => ir.build_or(a, b, "")?.into(),
+            Xor => ir.build_xor(a, b, "")?.into(),
             Div | Rem => {
-                let zero = ir.build_int_compare(IntPredicate::EQ, b, self.int(0), "")?;
+                let zero = ir.build_int_compare(IntPredicate::EQ, b, int.const_zero(), "")?;
                 self.exit_if(zero, Failure::Trap(Trap::DivisionByZero))?;
-                let min = ir.build_int_compare(IntPredicate::EQ, a, self.int(i32::MIN), "")?;
-                let minus_one = ir.build_int_compare(IntPredicate::EQ, b, self.int(-1), "")?;
-                self.exit_if(
-                    ir.build_and(min, minus_one, "")?,
-                    Failure::Trap(Trap::DivisionOverflow),
-                )?;
-                if op == Div {
-                    Ok(ir.build_int_signed_div(a, b, "")?)
-                } else {
-                    Ok(ir.build_int_signed_rem(a, b, "")?)
+                if signed {
+                    let min = constant(i64::MIN >> (64 - ty.bits()));
+                    let min = ir.build_int_compare(IntPredicate::EQ, a, min, "")?;
+                    let minus_one =
+                        ir.build_int_compare(IntPredicate::EQ, b, int.const_all_ones(), "")?;
+                    self.exit_if(
+                        ir.build_and(min, minus_one, "")?,
+                        Failure::Trap(Trap::DivisionOverflow),
+                    )?;
                 }
+                match (op, signed) {
+                    (Div, true) => ir.build_int_signed_div(a, b, "")?,
+                    (Div, false) => ir.build_int_unsigned_div(a, b, "")?,
+                    (_, true) => ir.build_int_signed_rem(a, b, "")?,
+                    (_, false) => ir.build_int_unsigned_rem(a, b, "")?,
+                }
+                .into()
             }
             Shl | Shr | CheckedShl | CheckedShr => {
+                let width = constant(i64::from(ty.bits()));
                 let count = if matches!(op, CheckedShl | CheckedShr) {
-                    let invalid = ir.build_int_compare(IntPredicate::UGE, b, self.int(32), "")?;
+                    let invalid = ir.build_int_compare(IntPredicate::UGE, b, width, "")?;
                     self.exit_if(invalid, Failure::Trap(Trap::Overflow))?;
                     b
                 } else {
-                    ir.build_and(b, self.int(31), "")?
+                    ir.build_and(b, constant(i64::from(ty.bits() - 1)), "")?
                 };
                 if matches!(op, Shl | CheckedShl) {
-                    Ok(ir.build_left_shift(a, count, "")?)
+                    ir.build_left_shift(a, count, "")?.into()
                 } else {
-                    Ok(ir.build_right_shift(a, count, true, "")?)
+                    ir.build_right_shift(a, count, signed, "")?.into()
                 }
             }
             Min | Max => {
-                let pred = if op == Min {
-                    IntPredicate::SLT
-                } else {
-                    IntPredicate::SGT
+                let pred = match (op, signed) {
+                    (Min, true) => IntPredicate::SLT,
+                    (Min, false) => IntPredicate::ULT,
+                    (_, true) => IntPredicate::SGT,
+                    (_, false) => IntPredicate::UGT,
                 };
                 let take_a = ir.build_int_compare(pred, a, b, "")?;
-                Ok(ir.build_select(take_a, a, b, "")?.into_int_value())
+                ir.build_select(take_a, a, b, "")?
+            }
+            Eq | Ne | Lt | Le | Gt | Ge => {
+                let pred = match (op, signed) {
+                    (Eq, _) => IntPredicate::EQ,
+                    (Ne, _) => IntPredicate::NE,
+                    (Lt, true) => IntPredicate::SLT,
+                    (Lt, false) => IntPredicate::ULT,
+                    (Le, true) => IntPredicate::SLE,
+                    (Le, false) => IntPredicate::ULE,
+                    (Gt, true) => IntPredicate::SGT,
+                    (Gt, false) => IntPredicate::UGT,
+                    (_, true) => IntPredicate::SGE,
+                    (_, false) => IntPredicate::UGE,
+                };
+                ir.build_int_compare(pred, a, b, "")?.into()
+            }
+        })
+    }
+
+    fn float_binary(
+        &self,
+        op: Binary,
+        a: FloatValue<'ctx>,
+        b: FloatValue<'ctx>,
+    ) -> Built<BasicValueEnum<'ctx>> {
+        let ir = self.builder;
+        use Binary::*;
+        Ok(match op {
+            Add => ir.build_float_add(a, b, "")?.into(),
+            Sub => ir.build_float_sub(a, b, "")?.into(),
+            Mul => ir.build_float_mul(a, b, "")?.into(),
+            Div => ir.build_float_div(a, b, "")?.into(),
+            Min | Max => {
+                // minimumNumber: llvm.minimum orders the zeros; a NaN
+                // operand yields the other operand.
+                let name = if op == Min {
+                    "llvm.minimum"
+                } else {
+                    "llvm.maximum"
+                };
+                let function = self.intrinsic(name, &[a.get_type().into()])?;
+                let both = ir
+                    .build_call(function, &[a.into(), b.into()], "")?
+                    .try_as_basic_value()
+                    .unwrap_basic();
+                let a_nan = ir.build_float_compare(FloatPredicate::UNO, a, a, "")?;
+                let b_nan = ir.build_float_compare(FloatPredicate::UNO, b, b, "")?;
+                let other = ir.build_select(a_nan, b, both.into_float_value(), "")?;
+                ir.build_select(b_nan, a.into(), other, "")?
             }
             Eq | Ne | Lt | Le | Gt | Ge => {
                 let pred = match op {
-                    Eq => IntPredicate::EQ,
-                    Ne => IntPredicate::NE,
-                    Lt => IntPredicate::SLT,
-                    Le => IntPredicate::SLE,
-                    Gt => IntPredicate::SGT,
-                    Ge => IntPredicate::SGE,
-                    _ => unreachable!(),
+                    Eq => FloatPredicate::OEQ,
+                    Ne => FloatPredicate::UNE,
+                    Lt => FloatPredicate::OLT,
+                    Le => FloatPredicate::OLE,
+                    Gt => FloatPredicate::OGT,
+                    _ => FloatPredicate::OGE,
                 };
-                let flag = ir.build_int_compare(pred, a, b, "")?;
-                Ok(ir.build_int_s_extend(flag, self.ctx.i32_type(), "")?)
+                ir.build_float_compare(pred, a, b, "")?.into()
             }
-        }
+            _ => unreachable!("validated float operation"),
+        })
     }
 
-    pub(super) fn constant(&self, dst: Reg, n: i32) -> Built<()> {
-        self.store(dst, self.int(n))
+    /// Rust's `value as to`.
+    fn convert(
+        &self,
+        value: BasicValueEnum<'ctx>,
+        from: ScalarType,
+        to: ScalarType,
+    ) -> Built<BasicValueEnum<'ctx>> {
+        let ir = self.builder;
+        let target = simd::scalar_type(self.ctx, to);
+        Ok(match (from.is_float(), to.is_float()) {
+            _ if from == to => value,
+            (false, false) => {
+                let value = value.into_int_value();
+                let target = target.into_int_type();
+                let (bits, wide) = (from.bits(), to.bits());
+                if bits > wide {
+                    ir.build_int_truncate(value, target, "")?.into()
+                } else if bits == wide {
+                    value.into()
+                } else if from.is_signed() {
+                    ir.build_int_s_extend(value, target, "")?.into()
+                } else {
+                    ir.build_int_z_extend(value, target, "")?.into()
+                }
+            }
+            (false, true) if from.is_signed() => ir
+                .build_signed_int_to_float(value.into_int_value(), target.into_float_type(), "")?
+                .into(),
+            (false, true) => ir
+                .build_unsigned_int_to_float(value.into_int_value(), target.into_float_type(), "")?
+                .into(),
+            (true, true) => ir
+                .build_float_cast(value.into_float_value(), target.into_float_type(), "")?
+                .into(),
+            (true, false) => {
+                let name = if to.is_signed() {
+                    "llvm.fptosi.sat"
+                } else {
+                    "llvm.fptoui.sat"
+                };
+                let function = self.intrinsic(name, &[target, value.get_type()])?;
+                ir.build_call(function, &[value.into()], "")?
+                    .try_as_basic_value()
+                    .unwrap_basic()
+            }
+        })
+    }
+
+    pub(super) fn constant(&self, dst: Reg, c: Constant) -> Built<()> {
+        let width = std::num::NonZero::new(c.ty().bits()).expect("a nonzero width");
+        let bits = self.ctx.custom_width_int_type(width).unwrap();
+        let bits = bits.const_int(c.bits(), false);
+        let ty = simd::scalar_type(self.ctx, c.ty());
+        // The builder folds a cast of a constant to a constant.
+        let value = self.builder.build_bit_cast(bits, ty, "")?;
+        self.store(dst, value)
+    }
+    pub(super) fn cast(&self, dst: Reg, src: Reg, to: ScalarType) -> Built<()> {
+        let value = self.convert(self.value(src)?, self.scalar_type(src), to)?;
+        self.store(dst, value)
     }
     pub(super) fn assign(&self, dst: Reg, src: Reg) -> Built<()> {
         let (ty, ptr) = self.registers[src.0 as usize];
@@ -379,29 +542,22 @@ impl<'a, 'ctx> Body<'a, 'ctx> {
         Ok(())
     }
     pub(super) fn arithmetic(&mut self, dst: Reg, op: Binary, a: Reg, b: Reg) -> Built<()> {
-        let result = self.binary(op, self.load(a)?, self.load(b)?)?;
+        let ty = self.scalar_type(a);
+        let result = self.binary(op, ty, self.value(a)?, self.value(b)?)?;
         self.store(dst, result)
     }
     pub(super) fn length(&self, dst: Reg, buffer: Buffer) -> Built<()> {
-        let len = self.slices[buffer.index()].len;
-        self.store(
-            dst,
-            self.builder
-                .build_int_truncate(len, self.ctx.i32_type(), "")?,
-        )
+        self.store(dst, self.slices[buffer.index()].len)
     }
     pub(super) fn read_element(&mut self, dst: Reg, buffer: Buffer, index: Reg) -> Built<()> {
         let ptr = self.element(buffer, index)?;
-        self.store(
-            dst,
-            self.builder
-                .build_load(self.ctx.i32_type(), ptr, "")?
-                .into_int_value(),
-        )
+        let ty = simd::scalar_type(self.ctx, self.scalar_type(dst));
+        let value = self.builder.build_load(ty, ptr, "")?;
+        self.store(dst, value)
     }
     pub(super) fn write_element(&mut self, buffer: Buffer, index: Reg, value: Reg) -> Built<()> {
         let ptr = self.element(buffer, index)?;
-        self.builder.build_store(ptr, self.load(value)?)?;
+        self.builder.build_store(ptr, self.value(value)?)?;
         Ok(())
     }
     pub(super) fn jump(&self, label: Label) -> Built<()> {
@@ -409,15 +565,12 @@ impl<'a, 'ctx> Body<'a, 'ctx> {
         Ok(())
     }
     pub(super) fn branch(&self, cond: Reg, yes: Label, no: Label) -> Built<()> {
-        let take =
-            self.builder
-                .build_int_compare(IntPredicate::NE, self.load(cond)?, self.int(0), "")?;
         self.builder
-            .build_conditional_branch(take, self.block(yes), self.block(no))?;
+            .build_conditional_branch(self.load(cond)?, self.block(yes), self.block(no))?;
         Ok(())
     }
     pub(super) fn ret(&self, value: Reg) -> Built<()> {
-        self.builder.build_return(Some(&self.load(value)?))?;
+        self.builder.build_return(Some(&self.value(value)?))?;
         Ok(())
     }
     pub(super) fn call_function(
@@ -433,7 +586,7 @@ impl<'a, 'ctx> Body<'a, 'ctx> {
             Vec::<BasicMetadataValueEnum>::with_capacity(callee.count_params() as usize);
         actuals.push(self.status.into());
         for &r in args {
-            actuals.push(self.load(r)?.into());
+            actuals.push(self.value(r)?.into());
         }
         for buffer in buffers {
             let slice = self.slices[buffer.index()];
@@ -666,7 +819,7 @@ impl<'a, 'ctx> Body<'a, 'ctx> {
             .builder
             .build_int_truncate(code, self.ctx.i32_type(), "")?;
         self.builder.build_store(self.status, code)?;
-        self.builder.build_return(Some(&self.int(0)))?;
+        self.builder.build_return(Some(&self.failed_result()))?;
         self.builder.position_at_end(next);
         self.store(
             dst,

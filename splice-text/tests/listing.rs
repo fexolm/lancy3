@@ -1,4 +1,5 @@
 use splice_core::frontend::{KernelBuilder, Signature};
+use splice_core::hir::ScalarType;
 use splice_core::{Codegen, hir::FunctionBuilder, kernel};
 use splice_text::Text;
 use std::sync::Arc;
@@ -107,7 +108,7 @@ fn printer_and_builder_specialize_host_iterations() -> Result<(), Box<dyn std::e
     assert_eq!(host_iterations(3, 5), 12);
     assert!(host_iterations::print(3)?.contains("x + 7"));
     assert!(
-        host_iterations::build::<Text>(host_iterations::BuildArgs { n: 3 })?.contains(" = 7\n")
+        host_iterations::build::<Text>(host_iterations::BuildArgs { n: 3 })?.contains(" = 7i32\n")
     );
     Ok(())
 }
@@ -175,12 +176,12 @@ fn only_the_chosen_comptime_arm_is_printed() -> Result<(), Box<dyn std::error::E
     let scale: String = specialize::<Text>(&Step::Scale(13))?;
     assert_eq!(
         scale,
-        "fn apply(x: i32) -> i32 {\n    %r2 = 13\n    %r3 = x * %r2\n    %r1 = %r3\n    goto L0\nL0:\n    return %r1\n}\n"
+        "fn apply(x: i32) -> i32 {\n    %r2 = 13i32\n    %r3 = x * %r2\n    %r1 = %r3\n    goto L0\nL0:\n    return %r1\n}\n"
     );
     let offset = apply::build::<Text>(apply::BuildArgs {
         step: &Step::Offset(-9),
     })?;
-    assert!(offset.contains(" = -9\n"));
+    assert!(offset.contains(" = -9i32\n"));
     assert!(offset.contains(" + "));
     assert!(!offset.contains(" * "));
     Ok(())
@@ -215,7 +216,7 @@ fn unrolled_calls_reuse_equal_steps_and_keep_the_runtime_loop()
 
 #[test]
 fn shared_callable_has_one_definition_and_two_uses() -> splice_core::Result<()> {
-    let scalar = Signature::new(1, &[]);
+    let scalar = Signature::new(&[ScalarType::I32; 1], ScalarType::I32, &[]);
     let mut leaf = FunctionBuilder::new(options(), scalar);
     leaf.ret(leaf.arg(0)?)?;
     let leaf = Arc::new(leaf.finish()?);
@@ -233,7 +234,7 @@ fn shared_callable_has_one_definition_and_two_uses() -> splice_core::Result<()> 
 #[test]
 fn build_propagates_the_original_staging_error() {
     let result = Text::build_with_options(
-        Signature::new(0, &[]),
+        Signature::new(&[ScalarType::I32; 0], ScalarType::I32, &[]),
         Box::new(|_| {
             Err(splice_core::BuildError::unsupported(
                 "invalid specialization",

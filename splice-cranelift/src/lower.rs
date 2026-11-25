@@ -1,13 +1,16 @@
 use crate::Descriptor;
 use cranelift_codegen::ir::{
-    DebugTag, FuncRef, InstBuilder, MemFlags, Opcode, StackSlot, StackSlotData, StackSlotKind,
-    TrapCode, Value,
-    condcodes::IntCC,
-    types::{I8, I32, I64},
+    DebugTag, FuncRef, InstBuilder, MemFlags, StackSlot, StackSlotData, StackSlotKind, TrapCode,
+    Type, Value,
+    condcodes::{FloatCC, IntCC},
+    immediates::{Ieee32, Ieee64},
+    types::{F32, F64, I8, I32, I64},
 };
 use cranelift_frontend::{FunctionBuilder, Variable};
 use splice_core::Trap;
-use splice_core::hir::{Binary, ContextSlice, Instr, Reg, RustContextTarget};
+use splice_core::hir::{
+    Binary, Constant, ContextSlice, Instr, Reg, RustContextTarget, ScalarType, ValueType,
+};
 use splice_core::{ContextArguments, Function};
 use std::collections::HashMap;
 use std::mem::{offset_of, size_of};
@@ -41,36 +44,98 @@ fn packet_words(
     }
 }
 
-/// Return a failed status from this function unchanged, then continue
-/// with its result word.
-fn forward_status(builder: &mut FunctionBuilder, status: Value) -> Value {
+/// The CLIF type of a scalar register. A `Bool` is an `I8` holding 0 or 1.
+pub(crate) fn scalar_type(ty: ScalarType) -> Type {
+    match ty {
+        ScalarType::Bool => I8,
+        ScalarType::I32 | ScalarType::U32 => I32,
+        ScalarType::I64 | ScalarType::U64 | ScalarType::Index => I64,
+        ScalarType::F32 => F32,
+        ScalarType::F64 => F64,
+    }
+}
+
+/// A function returns its status. A result of at most 32 bits is the low
+/// half of a success status; a wider result goes to a slot whose address
+/// the caller passes before the scalars.
+pub(crate) fn returns_in_memory(ty: ScalarType) -> bool {
+    ty.bits() > 32
+}
+
+fn scalar(f: &Function, reg: Reg) -> ScalarType {
+    match f.reg_type(reg) {
+        ValueType::Scalar(ty) => ty,
+        ty => unreachable!("verified scalar register, got {ty:?}"),
+    }
+}
+
+/// Return a failed status from this function unchanged.
+fn forward_status(builder: &mut FunctionBuilder, status: Value) {
     let failed = builder
         .ins()
         .icmp_imm(IntCC::UnsignedGreaterThan, status, i64::from(u32::MAX));
     return_if(builder, failed, status);
-    builder.ins().ireduce(I32, status)
+}
+
+/// The result in the low half of a success status.
+fn from_status(b: &mut FunctionBuilder, ty: ScalarType, status: Value) -> Value {
+    if ty == ScalarType::Bool {
+        return b.ins().ireduce(I8, status);
+    }
+    let word = b.ins().ireduce(I32, status);
+    if ty == ScalarType::F32 {
+        b.ins().bitcast(F32, MemFlags::new(), word)
+    } else {
+        word
+    }
+}
+
+/// The success status carrying a result of at most 32 bits.
+fn to_status(b: &mut FunctionBuilder, ty: ScalarType, value: Value) -> Value {
+    let word = if ty == ScalarType::F32 {
+        b.ins().bitcast(I32, MemFlags::new(), value)
+    } else {
+        value
+    };
+    b.ins().uextend(I64, word)
 }
 
 pub(crate) fn trap(builder: &mut FunctionBuilder, trap: Trap) -> Value {
     builder.ins().iconst(I64, trap.status())
 }
 
-fn parameters(b: &mut FunctionBuilder, f: &Function, is_entry: bool) -> Vec<Value> {
+/// The scalar and slice parameters, and the result slot of a helper that
+/// returns its result in memory.
+fn parameters(
+    b: &mut FunctionBuilder,
+    f: &Function,
+    is_entry: bool,
+) -> (Vec<Value>, Option<Value>) {
     let entry = b.create_block();
     b.append_block_params_for_function_params(entry);
     b.switch_to_block(entry);
     b.seal_block(entry);
     if !is_entry {
-        return b.block_params(entry).to_vec();
+        let params = b.block_params(entry);
+        return if returns_in_memory(f.result()) {
+            (params[1..].to_vec(), Some(params[0]))
+        } else {
+            (params.to_vec(), None)
+        };
     }
     let scalars = b.block_params(entry)[0];
     let descriptors = b.block_params(entry)[1];
     let mut params = Vec::new();
     // Executable::call checks both array lengths and constructs repr(C) descriptors.
     let flags = MemFlags::trusted();
-    for i in 0..f.arity() {
+    for (i, &ty) in f.params().iter().enumerate() {
         let addr = b.ins().iadd_imm(scalars, (i * size_of::<i32>()) as i64);
-        params.push(b.ins().load(I32, flags, addr, 0));
+        let word = b.ins().load(I32, flags, addr, 0);
+        params.push(match ty {
+            ScalarType::Bool => b.ins().icmp_imm(IntCC::NotEqual, word, 0),
+            ScalarType::I32 | ScalarType::U32 => word,
+            ty => unreachable!("an entry word cannot hold {ty}"),
+        });
     }
     for i in 0..f.buffer_kinds().len() {
         let addr = b
@@ -85,7 +150,7 @@ fn parameters(b: &mut FunctionBuilder, f: &Function, is_entry: bool) -> Vec<Valu
                 .load(I32, flags, addr, offset_of!(Descriptor, len) as i32),
         );
     }
-    params
+    (params, None)
 }
 
 pub(super) fn emit(
@@ -96,7 +161,7 @@ pub(super) fn emit(
     m: simd::Machine,
     debug_bytes: Option<u32>,
 ) {
-    let params = parameters(&mut b, f, is_entry);
+    let (params, result_slot) = parameters(&mut b, f, is_entry);
     let (scalars, pairs) = params.split_at(f.arity());
     let buffers = pairs.as_chunks::<2>().0;
     let vars = simd::Registers::new(&mut b, f, m);
@@ -135,29 +200,17 @@ pub(super) fn emit(
                 }
                 for splice_core::debug::Slot {
                     variable: var,
-                    ty,
                     offset,
+                    ..
                 } in slots
                 {
                     let offset = offset as i32;
                     match var.value {
-                        DebugValue::Register(reg, _) => {
+                        // A register already has its DWARF representation:
+                        // a bool is one byte holding 0 or 1.
+                        DebugValue::Register(reg) => {
                             for (part, &variable) in vars.get(reg).iter().enumerate() {
-                                let mut value = b.use_var(variable);
-                                match ty {
-                                    splice_core::debug::Type::Scalar(
-                                        splice_core::debug::Scalar::Index,
-                                    ) => {
-                                        value = b.ins().sextend(I64, value);
-                                    }
-                                    // A DWARF bool is one byte holding 0 or 1.
-                                    splice_core::debug::Type::Scalar(
-                                        splice_core::debug::Scalar::Bool,
-                                    ) => {
-                                        value = b.ins().band_imm(value, 1);
-                                    }
-                                    _ => {}
-                                }
+                                let value = b.use_var(variable);
                                 b.ins()
                                     .stack_store(value, slot, offset + (part * 16) as i32);
                             }
@@ -177,8 +230,13 @@ pub(super) fn emit(
                     [DebugTag::User(index as u32), DebugTag::StackSlot(slot)],
                 );
             }
-            Instr::Const(dst, n) => {
-                let value = b.ins().iconst(I32, i64::from(n));
+            Instr::Const(dst, c) => {
+                let value = constant(&mut b, c);
+                b.def_var(var(dst), value);
+            }
+            Instr::Cast { dst, src } => {
+                let value = b.use_var(var(src));
+                let value = convert(&mut b, value, scalar(f, src), scalar(f, dst));
                 b.def_var(var(dst), value);
             }
             Instr::Copy(dst, src) => {
@@ -197,14 +255,18 @@ pub(super) fn emit(
             Instr::Bin(dst, op, left, right) => {
                 let lhs = b.use_var(var(left));
                 let rhs = b.use_var(var(right));
-                let value = binary(&mut b, op, lhs, rhs);
+                let value = binary(&mut b, op, scalar(f, left), lhs, rhs);
                 b.def_var(var(dst), value);
             }
-            Instr::BufferLen { dst, buffer } => b.def_var(var(dst), buffers[buffer.index()][1]),
+            Instr::BufferLen { dst, buffer } => {
+                let len = b.ins().uextend(I64, buffers[buffer.index()][1]);
+                b.def_var(var(dst), len);
+            }
             Instr::Load { dst, buffer, index } => {
                 let index = b.use_var(var(index));
-                let addr = element(&mut b, buffers[buffer.index()], index);
-                let value = b.ins().load(I32, MemFlags::new(), addr, 0);
+                let ty = scalar_type(scalar(f, dst));
+                let addr = element(&mut b, buffers[buffer.index()], index, ty);
+                let value = b.ins().load(ty, MemFlags::new(), addr, 0);
                 b.def_var(var(dst), value);
             }
             Instr::Store {
@@ -213,8 +275,9 @@ pub(super) fn emit(
                 value,
             } => {
                 let index = b.use_var(var(index));
+                let ty = scalar_type(scalar(f, value));
                 let value = b.use_var(var(value));
-                let addr = element(&mut b, buffers[buffer.index()], index);
+                let addr = element(&mut b, buffers[buffer.index()], index, ty);
                 b.ins().store(MemFlags::new(), value, addr, 0);
             }
             Instr::RustCall {
@@ -239,7 +302,8 @@ pub(super) fn emit(
                     .iconst(I64, (import.symbol.resolve)() as usize as i64);
                 let call = b.ins().call_indirect(sig, address, &words);
                 let packed = b.inst_results(call)[0];
-                let value = forward_status(&mut b, packed);
+                forward_status(&mut b, packed);
+                let value = b.ins().ireduce(I32, packed);
                 b.def_var(var(dst), value);
             }
             Instr::RustPacketCall {
@@ -271,7 +335,8 @@ pub(super) fn emit(
                 );
                 let call = b.ins().call_indirect(sig, address, &[symbol, words, count]);
                 let packed = b.inst_results(call)[0];
-                let value = forward_status(&mut b, packed);
+                forward_status(&mut b, packed);
+                let value = b.ins().ireduce(I32, packed);
                 b.def_var(var(dst), value);
             }
             Instr::RustContextCall {
@@ -348,7 +413,8 @@ pub(super) fn emit(
                 let address = b.ins().iconst(ptr, entry as usize as i64);
                 let call = b.ins().call_indirect(sig, address, &words);
                 let packed = b.inst_results(call)[0];
-                let value = forward_status(&mut b, packed);
+                forward_status(&mut b, packed);
+                let value = b.ins().ireduce(I32, packed);
                 b.def_var(var(dst), value);
             }
             Instr::Call {
@@ -357,16 +423,30 @@ pub(super) fn emit(
                 ref args,
                 buffers: ref forwarded,
             } => {
-                let mut actuals: Vec<_> = args.iter().map(|&r| b.use_var(var(r))).collect();
+                let result = function.result();
+                let slot = returns_in_memory(result).then(|| {
+                    b.create_sized_stack_slot(StackSlotData::new(
+                        StackSlotKind::ExplicitSlot,
+                        result.bytes() as u32,
+                        3,
+                    ))
+                });
+                let mut actuals: Vec<_> = slot
+                    .map(|slot| b.ins().stack_addr(I64, slot, 0))
+                    .into_iter()
+                    .collect();
+                actuals.extend(args.iter().map(|&r| b.use_var(var(r))));
                 for slice in forwarded {
                     actuals.extend(buffers[slice.index()]);
                 }
                 let call = b.ins().call(imports[&Arc::as_ptr(function)], &actuals);
                 let status = b.inst_results(call)[0];
-                let value = if function.needs_status() {
-                    forward_status(&mut b, status)
-                } else {
-                    b.ins().ireduce(I32, status)
+                if function.needs_status() {
+                    forward_status(&mut b, status);
+                }
+                let value = match slot {
+                    Some(slot) => b.ins().stack_load(scalar_type(result), slot, 0),
+                    None => from_status(&mut b, result, status),
                 };
                 b.def_var(var(dst), value);
             }
@@ -376,7 +456,6 @@ pub(super) fn emit(
             }
             Instr::Branch { cond, yes, no } => {
                 let condition = b.use_var(var(cond));
-                let condition = branch_condition(&b, condition);
                 b.ins().brif(
                     condition,
                     labels[yes.0 as usize],
@@ -388,8 +467,14 @@ pub(super) fn emit(
             }
             Instr::Return(r) => {
                 let value = b.use_var(var(r));
-                let result = b.ins().uextend(I64, value);
-                b.ins().return_(&[result]);
+                let status = match result_slot {
+                    Some(slot) => {
+                        b.ins().store(MemFlags::trusted(), value, slot, 0);
+                        b.ins().iconst(I64, 0)
+                    }
+                    None => to_status(&mut b, f.result(), value),
+                };
+                b.ins().return_(&[status]);
                 open = false;
             }
             Instr::TrapBounds => {
@@ -407,19 +492,6 @@ pub(super) fn emit(
     b.finalize();
 }
 
-fn branch_condition(b: &FunctionBuilder, mut value: Value) -> Value {
-    // brif only tests for zero. These operations preserve that test while
-    // forming a Splice mask. Other users still see the materialized mask.
-    let dfg = &b.func.dfg;
-    while let Some(inst) = dfg.value_def(value).inst() {
-        match dfg.insts[inst].opcode() {
-            Opcode::Ineg | Opcode::Uextend | Opcode::Bmask => value = dfg.inst_args(inst)[0],
-            _ => break,
-        }
-    }
-    value
-}
-
 fn return_if(b: &mut FunctionBuilder, condition: Value, result: Value) {
     let exit = b.create_block();
     let next = b.create_block();
@@ -432,28 +504,69 @@ fn return_if(b: &mut FunctionBuilder, condition: Value, result: Value) {
     b.switch_to_block(next);
 }
 
-fn element(b: &mut FunctionBuilder, [data, len]: [Value; 2], index: Value) -> Value {
-    // Slice lengths fit i32, so unsigned comparison also rejects negative indices.
+fn element(b: &mut FunctionBuilder, [data, len]: [Value; 2], index: Value, ty: Type) -> Value {
+    let len = b.ins().uextend(I64, len);
     let invalid = b.ins().icmp(IntCC::UnsignedGreaterThanOrEqual, index, len);
     let bounds = trap(b, Trap::Bounds);
     return_if(b, invalid, bounds);
-    let index = b.ins().uextend(I64, index);
-    let bytes = b.ins().imul_imm(index, size_of::<i32>() as i64);
+    let bytes = b.ins().imul_imm(index, i64::from(ty.bytes()));
     b.ins().iadd(data, bytes)
 }
 
-fn binary(b: &mut FunctionBuilder, op: Binary, lhs: Value, rhs: Value) -> Value {
+fn constant(b: &mut FunctionBuilder, c: Constant) -> Value {
+    match c.ty() {
+        ScalarType::F32 => b.ins().f32const(Ieee32::with_bits(c.bits() as u32)),
+        ScalarType::F64 => b.ins().f64const(Ieee64::with_bits(c.bits())),
+        ty => b.ins().iconst(scalar_type(ty), c.bits() as i64),
+    }
+}
+
+/// Rust's `value as to`.
+fn convert(b: &mut FunctionBuilder, value: Value, from: ScalarType, to: ScalarType) -> Value {
+    let target = scalar_type(to);
+    match (from.is_float(), to.is_float()) {
+        _ if from == to => value,
+        (false, false) => {
+            let width = scalar_type(from).bits();
+            if width > target.bits() {
+                b.ins().ireduce(target, value)
+            } else if width == target.bits() {
+                value
+            } else if from.is_signed() {
+                b.ins().sextend(target, value)
+            } else {
+                b.ins().uextend(target, value)
+            }
+        }
+        (false, true) if from.is_signed() => b.ins().fcvt_from_sint(target, value),
+        (false, true) => b.ins().fcvt_from_uint(target, value),
+        (true, true) if to == ScalarType::F64 => b.ins().fpromote(target, value),
+        (true, true) => b.ins().fdemote(target, value),
+        // Saturating, with NaN as zero.
+        (true, false) if to.is_signed() => b.ins().fcvt_to_sint_sat(target, value),
+        (true, false) => b.ins().fcvt_to_uint_sat(target, value),
+    }
+}
+
+fn binary(b: &mut FunctionBuilder, op: Binary, ty: ScalarType, lhs: Value, rhs: Value) -> Value {
     use Binary::*;
+    if ty.is_float() {
+        return float_binary(b, op, lhs, rhs);
+    }
+    let signed = ty.is_signed();
+    let bits = i64::from(ty.bits());
     let cc = match op {
         Add => return b.ins().iadd(lhs, rhs),
         Sub => return b.ins().isub(lhs, rhs),
         Mul => return b.ins().imul(lhs, rhs),
         CheckedAdd | CheckedSub | CheckedMul => {
-            let (result, overflow) = match op {
-                CheckedAdd => b.ins().sadd_overflow(lhs, rhs),
-                CheckedSub => b.ins().ssub_overflow(lhs, rhs),
-                CheckedMul => b.ins().smul_overflow(lhs, rhs),
-                _ => unreachable!(),
+            let (result, overflow) = match (op, signed) {
+                (CheckedAdd, true) => b.ins().sadd_overflow(lhs, rhs),
+                (CheckedAdd, false) => b.ins().uadd_overflow(lhs, rhs),
+                (CheckedSub, true) => b.ins().ssub_overflow(lhs, rhs),
+                (CheckedSub, false) => b.ins().usub_overflow(lhs, rhs),
+                (_, true) => b.ins().smul_overflow(lhs, rhs),
+                (_, false) => b.ins().umul_overflow(lhs, rhs),
             };
             let fault = trap(b, Trap::Overflow);
             return_if(b, overflow, fault);
@@ -462,44 +575,85 @@ fn binary(b: &mut FunctionBuilder, op: Binary, lhs: Value, rhs: Value) -> Value 
         And => return b.ins().band(lhs, rhs),
         Or => return b.ins().bor(lhs, rhs),
         Xor => return b.ins().bxor(lhs, rhs),
-        Shl => return b.ins().ishl(lhs, rhs),
-        Shr => return b.ins().sshr(lhs, rhs),
-        CheckedShl | CheckedShr => {
-            let invalid = b.ins().icmp_imm(IntCC::UnsignedGreaterThanOrEqual, rhs, 32);
-            let fault = trap(b, Trap::Overflow);
-            return_if(b, invalid, fault);
-            return if op == CheckedShl {
-                b.ins().ishl(lhs, rhs)
-            } else {
-                b.ins().sshr(lhs, rhs)
+        // CLIF shifts take the amount modulo the width.
+        Shl | Shr | CheckedShl | CheckedShr => {
+            if matches!(op, CheckedShl | CheckedShr) {
+                let invalid = b
+                    .ins()
+                    .icmp_imm(IntCC::UnsignedGreaterThanOrEqual, rhs, bits);
+                let fault = trap(b, Trap::Overflow);
+                return_if(b, invalid, fault);
+            }
+            return match (op, signed) {
+                (Shl | CheckedShl, _) => b.ins().ishl(lhs, rhs),
+                (_, true) => b.ins().sshr(lhs, rhs),
+                (_, false) => b.ins().ushr(lhs, rhs),
             };
         }
-        Min => return b.ins().smin(lhs, rhs),
-        Max => return b.ins().smax(lhs, rhs),
+        Min if signed => return b.ins().smin(lhs, rhs),
+        Min => return b.ins().umin(lhs, rhs),
+        Max if signed => return b.ins().smax(lhs, rhs),
+        Max => return b.ins().umax(lhs, rhs),
         Div | Rem => {
             let zero = b.ins().icmp_imm(IntCC::Equal, rhs, 0);
             let fault = trap(b, Trap::DivisionByZero);
             return_if(b, zero, fault);
-            let min = b.ins().icmp_imm(IntCC::Equal, lhs, i64::from(i32::MIN));
-            let minus_one = b.ins().icmp_imm(IntCC::Equal, rhs, -1);
-            let overflow = b.ins().band(min, minus_one);
-            let fault = trap(b, Trap::DivisionOverflow);
-            return_if(b, overflow, fault);
-            return if op == Div {
-                b.ins().sdiv(lhs, rhs)
-            } else {
-                b.ins().srem(lhs, rhs)
+            if signed {
+                let min = b.ins().icmp_imm(IntCC::Equal, lhs, i64::MIN >> (64 - bits));
+                let minus_one = b.ins().icmp_imm(IntCC::Equal, rhs, -1);
+                let overflow = b.ins().band(min, minus_one);
+                let fault = trap(b, Trap::DivisionOverflow);
+                return_if(b, overflow, fault);
+            }
+            return match (op, signed) {
+                (Div, true) => b.ins().sdiv(lhs, rhs),
+                (Div, false) => b.ins().udiv(lhs, rhs),
+                (_, true) => b.ins().srem(lhs, rhs),
+                (_, false) => b.ins().urem(lhs, rhs),
             };
         }
         Eq => IntCC::Equal,
         Ne => IntCC::NotEqual,
-        Lt => IntCC::SignedLessThan,
-        Le => IntCC::SignedLessThanOrEqual,
-        Gt => IntCC::SignedGreaterThan,
-        Ge => IntCC::SignedGreaterThanOrEqual,
+        Lt if signed => IntCC::SignedLessThan,
+        Le if signed => IntCC::SignedLessThanOrEqual,
+        Gt if signed => IntCC::SignedGreaterThan,
+        Ge if signed => IntCC::SignedGreaterThanOrEqual,
+        Lt => IntCC::UnsignedLessThan,
+        Le => IntCC::UnsignedLessThanOrEqual,
+        Gt => IntCC::UnsignedGreaterThan,
+        Ge => IntCC::UnsignedGreaterThanOrEqual,
     };
-    // Cranelift icmp produces 0/1. Splice exposes an all-bits-set true mask.
-    let flag = b.ins().icmp(cc, lhs, rhs);
-    let bit = b.ins().uextend(I32, flag);
-    b.ins().ineg(bit)
+    b.ins().icmp(cc, lhs, rhs)
+}
+
+fn float_binary(b: &mut FunctionBuilder, op: Binary, lhs: Value, rhs: Value) -> Value {
+    use Binary::*;
+    let cc = match op {
+        Add => return b.ins().fadd(lhs, rhs),
+        Sub => return b.ins().fsub(lhs, rhs),
+        Mul => return b.ins().fmul(lhs, rhs),
+        Div => return b.ins().fdiv(lhs, rhs),
+        Min | Max => {
+            // minimumNumber: fmin orders the zeros; a NaN operand yields the
+            // other operand.
+            let both = if op == Min {
+                b.ins().fmin(lhs, rhs)
+            } else {
+                b.ins().fmax(lhs, rhs)
+            };
+            let lhs_nan = b.ins().fcmp(FloatCC::Unordered, lhs, lhs);
+            let rhs_nan = b.ins().fcmp(FloatCC::Unordered, rhs, rhs);
+            let other = b.ins().select(lhs_nan, rhs, both);
+            return b.ins().select(rhs_nan, lhs, other);
+        }
+        Eq => FloatCC::Equal,
+        // Unordered or unequal, like Rust's `!=`.
+        Ne => FloatCC::NotEqual,
+        Lt => FloatCC::LessThan,
+        Le => FloatCC::LessThanOrEqual,
+        Gt => FloatCC::GreaterThan,
+        Ge => FloatCC::GreaterThanOrEqual,
+        _ => unreachable!("verified float operation"),
+    };
+    b.ins().fcmp(cc, lhs, rhs)
 }

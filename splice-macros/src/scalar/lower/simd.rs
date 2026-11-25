@@ -159,7 +159,14 @@ impl Scalar {
                 let e = e.tokens(root, types);
                 emit!(#root::hir::ValueType::Mask(#e))
             }
-            _ => emit!(#root::hir::ValueType::Scalar),
+            scalar => {
+                let ty = match scalar.base() {
+                    Self::Bool => emit!(Bool),
+                    Self::Index => emit!(Index),
+                    _ => emit!(I32),
+                };
+                emit!(#root::hir::ValueType::Scalar(#root::hir::ScalarType::#ty))
+            }
         }
     }
 }
@@ -194,15 +201,6 @@ impl Lower<'_> {
             return err(expr, "expected a mask with one predicate per data lane");
         }
         self.operand(expr, ty)
-    }
-    fn offset(&self, v: Value, at: &Expr) -> Result<TokenStream> {
-        if v.stage.is_host() {
-            Ok(
-                emit!({let index:usize=#v; __splice_builder.constant(i32::try_from(index).unwrap_or(-1))?}),
-            )
-        } else {
-            self.reg(v, Scalar::Index, at)
-        }
     }
     pub(super) fn simd_constructor(&self, e: &Expr, hint: Option<Scalar>) -> Result<Option<Value>> {
         let Expr::Call(c) = e else { return Ok(None) };
@@ -277,7 +275,7 @@ impl Lower<'_> {
             "first_n" => self.vector_op(
                 elem,
                 emit!(FirstN),
-                vec![self.offset(self.expr(&c.args[0])?, &c.args[0])?],
+                vec![self.operand(&c.args[0], Scalar::Index)?],
                 Some(mask),
             ),
             "lanes" => self.vector_op(elem, emit!(Lanes), vec![], Some(Scalar::Length)),
@@ -307,13 +305,7 @@ impl Lower<'_> {
                 match name.as_str() {
                     "alignment_prefix" if elem == Elem::I32 => {
                         let index = self.expr(&c.args[1])?;
-                        // Alignment depends only on low address bits, including for
-                        // host offsets above the range representable by a JIT index.
-                        let offset = if index.stage.is_host() {
-                            emit!({let index:usize=#index; __splice_builder.constant(index as i32)?})
-                        } else {
-                            self.reg(index, Scalar::Index, &c.args[1])?
-                        };
+                        let offset = self.reg(index, Scalar::Index, &c.args[1])?;
                         self.vector_op(
                             elem,
                             emit!(AlignmentPrefix(buffer)),
@@ -323,7 +315,7 @@ impl Lower<'_> {
                     }
                     "alignment_prefix" => return err(c, "alignment_prefix expects i32 lanes"),
                     "load" | "load_select" => {
-                        let mut a = vec![self.offset(self.expr(&c.args[1])?, &c.args[1])?];
+                        let mut a = vec![self.operand(&c.args[1], Scalar::Index)?];
                         let op = if n == 4 {
                             a.extend([get(2, mask)?, get(3, v)?]);
                             emit!(LoadSelect(buffer))
@@ -619,7 +611,7 @@ impl Lower<'_> {
                     "store" => self.vector_op(
                         e,
                         emit!(Store(buffer)),
-                        vec![self.offset(self.expr(&args[1])?, &args[1])?, recv],
+                        vec![self.operand(&args[1], Scalar::Index)?, recv],
                         None,
                     ),
                     "compress_store" if e != Elem::I32 => {
@@ -632,11 +624,7 @@ impl Lower<'_> {
                         } else {
                             emit!(StoreSelect(buffer))
                         },
-                        vec![
-                            self.offset(self.expr(&args[1])?, &args[1])?,
-                            op(2, mask)?,
-                            recv,
-                        ],
+                        vec![self.operand(&args[1], Scalar::Index)?, op(2, mask)?, recv],
                         None,
                     ),
                     "scatter" => {

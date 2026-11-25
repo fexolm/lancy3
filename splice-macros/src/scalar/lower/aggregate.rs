@@ -78,7 +78,7 @@ impl Lower<'_> {
             // A formal register can carry a known scalar from an enclosing call.
             let word = if self.source_fault.is_some() {
                 if value.stage.is_host() {
-                    emit!(::core::option::Option::Some(#root::frontend::scalar::ScalarConstant::bits(#value)))
+                    emit!(::core::option::Option::Some(#root::frontend::scalar::ScalarConstant::constant(#value)))
                 } else {
                     emit!(::core::option::Option::None)
                 }
@@ -104,7 +104,7 @@ impl Lower<'_> {
         if self.source_fault.is_some() {
             let count = words.len();
             return Ok(emit!(
-                let mut #id: [::core::option::Option<i32>; #count] = [#(#words),*];
+                let mut #id: [::core::option::Option<#root::hir::Constant>; #count] = [#(#words),*];
                 if #id.iter().any(::core::option::Option::is_none) { #id.fill(::core::option::Option::None); }
             ));
         }

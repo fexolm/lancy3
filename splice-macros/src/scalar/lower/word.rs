@@ -12,7 +12,7 @@ impl Lower<'_> {
             Stage::Word(_) => v.code,
             Stage::Reg(_) => emit!(#word::Runtime(#v)),
             Stage::Host | Stage::Literal(_) => {
-                emit!(#word::Known(#root::frontend::scalar::ScalarConstant::bits(#v)))
+                emit!(#word::Known(#root::frontend::scalar::ScalarConstant::constant(#v)))
             }
             _ => return err(at, "expected a scalar word"),
         })

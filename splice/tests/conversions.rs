@@ -3,6 +3,7 @@
 //! saturation edges and wrapping integers).
 use splice::frontend::{self, KernelBuilder, Signature};
 use splice::hir::{Buffer, Simd, SimdOp};
+use splice::hir::{Constant, ScalarType};
 use splice::simd::Element;
 use splice::{BufferElement, BufferKind, BuildOptions, Codegen, Executable, Mode};
 
@@ -132,13 +133,14 @@ fn stage(
             element: from,
             op: SimdOp::Load(Buffer(0)),
         };
-        let zero = b.constant(0)?;
+        let zero = b.constant(Constant::from(0usize))?;
         let low = b.simd(load, &[zero])?.unwrap();
         let (op, args) = match conversion {
             Conversion::Cast => (SimdOp::Cast(to), vec![low]),
             Conversion::Widen { high } => (SimdOp::Widen { to, high }, vec![low]),
             Conversion::Narrow => {
-                let next = b.constant(from.lanes(options().target.vector_bytes()) as i32)?;
+                let next =
+                    b.constant(Constant::from(from.lanes(options().target.vector_bytes())))?;
                 let high = b.simd(load, &[next])?.unwrap();
                 (SimdOp::Narrow(to), vec![low, high])
             }
@@ -149,7 +151,8 @@ fn stage(
             op: SimdOp::Store(Buffer(1)),
         };
         b.simd(store, &[zero, converted])?;
-        b.ret(zero)?;
+        let result = b.constant(Constant::from(0))?;
+        b.ret(result)?;
         Ok(())
     }
 }
@@ -161,7 +164,7 @@ where
     let (from, to) = (F::ELEMENT, T::ELEMENT);
     let kinds = [BufferKind::new(from, false), BufferKind::new(to, true)];
     let ir = frontend::materialize(
-        Signature::new(0, &kinds),
+        Signature::new(&[ScalarType::I32; 0], ScalarType::I32, &kinds),
         Box::new(stage(from, to, conversion)),
         options(),
     )
@@ -170,7 +173,7 @@ where
         (
             "build",
             B::build_with_options(
-                Signature::new(0, &kinds),
+                Signature::new(&[ScalarType::I32; 0], ScalarType::I32, &kinds),
                 Box::new(stage(from, to, conversion)),
                 options(),
             ),
@@ -273,7 +276,7 @@ fn rejected_conversions_stay_rejected() {
         BufferKind::new(Element::I32, true),
     ];
     let error = frontend::materialize(
-        Signature::new(0, &kinds),
+        Signature::new(&[ScalarType::I32; 0], ScalarType::I32, &kinds),
         Box::new(stage(Element::F64, Element::I32, Conversion::Cast)),
         options(),
     );

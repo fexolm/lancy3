@@ -1,6 +1,7 @@
 use splice::frontend::KernelBuilder;
 use splice::frontend::Signature;
 use splice::hir::{Binary, BufferKind, FunctionBuilder, Instr, ValueType};
+use splice::hir::{Constant, ScalarType};
 use splice::{Backend, BufferArg, CallError, Codegen, Executable, Function, Trap, kernel};
 
 /// This machine's `SPLICE_SIMD` target in the mode of this test build.
@@ -17,21 +18,6 @@ impl Backend for Inspect {
     fn compile_function(f: &Function, _: splice::BuildOptions) -> splice::Result<Self> {
         Ok(Self(f.clone()))
     }
-}
-
-#[test]
-fn oversized_signature_is_rejected_by_the_portable_builder() {
-    let result = Inspect::build_with_options(
-        Signature::new(usize::MAX, &[]),
-        Box::new(|b| {
-            b.ret(b.arg(0)?)?;
-            Ok(())
-        }),
-        options(),
-    );
-    assert!(
-        matches!(result, Err(splice::BuildError::Verify { reason, .. }) if reason.contains("too many"))
-    );
 }
 
 mod pricing {
@@ -77,7 +63,7 @@ fn collection_computed_by_the_application_can_specialize_a_kernel() {
     assert!(
         ir.instructions()
             .iter()
-            .any(|i| matches!(i, Instr::Const(_, 7)))
+            .any(|i| matches!(i, Instr::Const(_, c) if *c == Constant::from(7)))
     );
     // Builds follow Rust's profile: debug builds check overflow.
     let add = if cfg!(debug_assertions) {
@@ -322,37 +308,43 @@ fn slice_kernel_compiles_the_complete_loop() {
 #[test]
 fn verification_rechecks_a_loop_after_a_delayed_predecessor() {
     let build = |initialize_delayed_arm| {
-        let mut b = FunctionBuilder::new(options(), Signature::new(2, &[]));
+        let mut b = FunctionBuilder::new(
+            options(),
+            Signature::new(&[ScalarType::I32; 2], ScalarType::I32, &[]),
+        );
         for _ in 0..64 {
-            b.local(ValueType::Scalar)?;
+            b.local(ValueType::Scalar(ScalarType::I32))?;
         }
-        let value = b.local(ValueType::Scalar)?;
+        let value = b.local(ValueType::Scalar(ScalarType::I32))?;
         let fast = b.label()?;
         let delayed = b.label()?;
         let delayed_tail = b.label()?;
         let head = b.label()?;
         let step = b.label()?;
         let done = b.label()?;
-        b.branch(b.arg(0)?, fast, delayed)?;
+        let zero = b.constant(Constant::from(0))?;
+        let take_fast = b.binary(Binary::Ne, b.arg(0)?, zero)?;
+        b.branch(take_fast, fast, delayed)?;
 
         b.mark(fast)?;
-        let seven = b.constant(7)?;
+        let seven = b.constant(Constant::from(7))?;
         b.assign(value, seven)?;
         b.jump(head)?;
         b.mark(delayed)?;
         b.jump(delayed_tail)?;
         b.mark(delayed_tail)?;
         if initialize_delayed_arm {
-            let eleven = b.constant(11)?;
+            let eleven = b.constant(Constant::from(11))?;
             b.assign(value, eleven)?;
         }
         b.jump(head)?;
 
         // The fast arm reaches the header before the delayed predecessor.
         b.mark(head)?;
-        b.branch(b.arg(1)?, step, done)?;
+        let more = b.binary(Binary::Ne, b.arg(1)?, zero)?;
+        b.branch(more, step, done)?;
         b.mark(step)?;
-        let one = b.constant(1)?;
+        let one = b.constant(Constant::from(1))?;
         let incremented = b.binary(Binary::Add, value, one)?;
         let remaining = b.binary(Binary::Sub, b.arg(1)?, one)?;
         b.assign(value, incremented)?;
@@ -380,7 +372,10 @@ fn verification_rechecks_a_loop_after_a_delayed_predecessor() {
 #[test]
 fn verification_resolves_jumps_even_in_unreachable_code() {
     let body = || {
-        let mut b = FunctionBuilder::new(options(), Signature::new(1, &[]));
+        let mut b = FunctionBuilder::new(
+            options(),
+            Signature::new(&[ScalarType::I32; 1], ScalarType::I32, &[]),
+        );
         b.ret(b.arg(0).unwrap()).unwrap();
         b
     };
@@ -434,7 +429,7 @@ mod directly_staged {
         ) -> splice::Result<Self> {
             assert!(signature.buffers.is_empty());
             let mut builder = Self {
-                next_reg: signature.arity as u32,
+                next_reg: signature.params.len() as u32,
                 bodies: 1,
                 ..Self::default()
             };
@@ -451,9 +446,9 @@ mod directly_staged {
             self.next_reg += 1;
             Ok(r)
         }
-        fn constant(&mut self, n: i32) -> splice::Result<Reg> {
-            self.constants.push(n);
-            self.local(ValueType::Scalar)
+        fn constant(&mut self, n: Constant) -> splice::Result<Reg> {
+            self.constants.push(n.bits() as i32);
+            self.local(ValueType::Scalar(ScalarType::I32))
         }
         fn buffer_len(&mut self, _: Buffer) -> splice::Result<Reg> {
             unreachable!()
@@ -465,7 +460,10 @@ mod directly_staged {
             unreachable!()
         }
         fn binary(&mut self, _: Binary, _: Reg, _: Reg) -> splice::Result<Reg> {
-            self.local(ValueType::Scalar)
+            self.local(ValueType::Scalar(ScalarType::I32))
+        }
+        fn cast(&mut self, _: Reg, to: ScalarType) -> splice::Result<Reg> {
+            self.local(ValueType::Scalar(to))
         }
         fn assign(&mut self, _: Reg, _: Reg) -> splice::Result<()> {
             Ok(())
@@ -497,7 +495,7 @@ mod directly_staged {
             let child = Self::stage(signature, body, options())?;
             self.bodies += child.bodies;
             self.constants.extend(child.constants);
-            self.local(ValueType::Scalar)
+            self.local(ValueType::Scalar(ScalarType::I32))
         }
     }
     #[test]

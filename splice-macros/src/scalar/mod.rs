@@ -284,6 +284,15 @@ pub(super) fn expand(root: Path, native: &mut ItemFn) -> Result<TokenStream> {
         }
     }
     let arity = reg_names.len();
+    // Only a scalar kernel has a Signature: a SIMD helper expands into its caller.
+    let scalar_signature =
+        |t| lower::scalar_type(&root, t).unwrap_or_else(|| emit!(#hir::ScalarType::I32));
+    let param_types = formals.iter().filter_map(|formal| match *formal {
+        Binding::Reg(t, _) => Some(scalar_signature(t)),
+        _ => None,
+    });
+    let params = emit!(&[#(#param_types),*]);
+    let result = scalar_signature(result_type);
     let host_decls = emit!(#(#host_names: #host_types,)*);
     let outer_host_decls = emit!(#(#host_names: #outer_host_types,)*);
     let unpack = emit!(#(let #reg_names = #support::RunArg::reg(#reg_names, __splice_builder)?;)*);
@@ -448,7 +457,7 @@ pub(super) fn expand(root: Path, native: &mut ItemFn) -> Result<TokenStream> {
         #[allow(unused_imports)]
         use #frontend::MaybeKey as _;
         #[allow(unused_mut)]
-        let mut __splice_key = ::core::option::Option::Some(#frontend::Specialization::new::<__SpliceIdentity>(#arity, #kinds));
+        let mut __splice_key = ::core::option::Option::Some(#frontend::Specialization::new::<__SpliceIdentity>(#frontend::Signature::new(#params, #result, #kinds)));
         #((&#frontend::KeyArgument::<#type_args>::for_type()).add_type(&mut __splice_key);)*
         #((&#frontend::KeyArgument::for_value(&#value_args)).add_value(&#value_args, &mut __splice_key);)*
     };
@@ -475,7 +484,7 @@ pub(super) fn expand(root: Path, native: &mut ItemFn) -> Result<TokenStream> {
             let __splice_body: #frontend::Body<'_> = #callback;
             match __splice_key {
                 ::core::option::Option::Some(key) => __splice_builder.call_specialized(key, &[#(#reg_names),*], &[#(#buffer_names),*], __splice_body),
-                ::core::option::Option::None => __splice_builder.call_kernel(#frontend::Signature::new(#arity, #kinds), &[#(#reg_names),*], &[#(#buffer_names),*], __splice_body),
+                ::core::option::Option::None => __splice_builder.call_kernel(#frontend::Signature::new(#params, #result, #kinds), &[#(#reg_names),*], &[#(#buffer_names),*], __splice_body),
             }
         }
     };
@@ -575,7 +584,7 @@ pub(super) fn expand(root: Path, native: &mut ItemFn) -> Result<TokenStream> {
                     let BuildArgs { #(#host_names,)* } = __splice_args;
                     #setup
                     <#backend as #root::Codegen>::build_with_options(
-                        #root::frontend::Signature::new(#arity, __splice_kinds), __splice_body, __splice_options,
+                        #root::frontend::Signature::new(#params, #result, __splice_kinds), __splice_body, __splice_options,
                     ).map(#root::TypedKernel::new)
                 })
             }
@@ -593,7 +602,7 @@ pub(super) fn expand(root: Path, native: &mut ItemFn) -> Result<TokenStream> {
                 #root::build_boundary(move || {
                     #setup
                     #root::frontend::materialize(
-                        #root::frontend::Signature::new(#arity, __splice_kinds), __splice_body, __splice_options,
+                        #root::frontend::Signature::new(#params, #result, __splice_kinds), __splice_body, __splice_options,
                     ).map(#root::TypedIr::new)
                 })
             }
@@ -638,10 +647,10 @@ pub(super) fn expand(root: Path, native: &mut ItemFn) -> Result<TokenStream> {
                 -> #root::Result<#hir::Reg> #outer_where {
                 let __splice_guard = #support::enter_expansion()?;
                 let __splice_wants_debug = __splice_builder.debug_enabled();
-                let __splice_input_values: [::core::option::Option<i32>; #arity] = [#(#support::RunArg::known(&#reg_names)),*];
+                let __splice_input_values: [::core::option::Option<#hir::Constant>; #arity] = [#(#support::RunArg::known(&#reg_names)),*];
                 #unpack
                 #owned_scope;
-                let __splice_inputs: &[(#hir::Reg, ::core::option::Option<i32>)] = &[#((#reg_names, __splice_input_values[#reg_indices])),*];
+                let __splice_inputs: &[(#hir::Reg, ::core::option::Option<#hir::Constant>)] = &[#((#reg_names, __splice_input_values[#reg_indices])),*];
                 #(#copy_mutable)*
                 #(#mutable_host)*
                 #(#debug_arguments)*

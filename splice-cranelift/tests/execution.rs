@@ -1,5 +1,6 @@
 use splice_core::frontend::{KernelBuilder, Signature};
 use splice_core::hir::{Binary, FunctionBuilder};
+use splice_core::hir::{Constant, ScalarType};
 use splice_core::{BufferArg, CallError, Codegen, Executable, Trap, kernel};
 use splice_cranelift::Cranelift;
 use std::sync::Arc;
@@ -130,7 +131,11 @@ fn every_binary_operation_matches_splice_on_signed_boundaries() {
     for op in [
         Add, Sub, Mul, Div, Rem, And, Or, Xor, Eq, Ne, Lt, Le, Gt, Ge, Shl, Shr, Min, Max,
     ] {
-        let mut f = FunctionBuilder::new(options(), Signature::new(2, &[]));
+        let output = op.output(ScalarType::I32).unwrap();
+        let mut f = FunctionBuilder::new(
+            options(),
+            Signature::new(&[ScalarType::I32; 2], output, &[]),
+        );
         let result = f.binary(op, f.arg(0).unwrap(), f.arg(1).unwrap()).unwrap();
         f.ret(result).unwrap();
         let kernel = Cranelift::compile(&f.finish().unwrap()).unwrap();
@@ -138,7 +143,9 @@ fn every_binary_operation_matches_splice_on_signed_boundaries() {
             for b in cases {
                 assert_eq!(
                     kernel.call(&[a, b], &mut []),
-                    op.checked_eval(a, b).map_err(CallError::from),
+                    op.checked_eval(a.into(), b.into())
+                        .map(|c| c.bits() as i32)
+                        .map_err(CallError::from),
                     "{a} {op:?} {b}"
                 );
             }
@@ -168,9 +175,15 @@ fn negative_and_past_end_indices_stop_before_the_first_store() {
 #[test]
 fn unrepresentable_callee_signature_returns_a_build_error() {
     let count = usize::from(u16::MAX) + 2;
-    let mut callee = FunctionBuilder::new(options(), Signature::new(count, &[]));
+    let mut callee = FunctionBuilder::new(
+        options(),
+        Signature::new(&vec![ScalarType::I32; count], ScalarType::I32, &[]),
+    );
     callee.ret(callee.arg(0).unwrap()).unwrap();
-    let mut root = FunctionBuilder::new(options(), Signature::new(1, &[]));
+    let mut root = FunctionBuilder::new(
+        options(),
+        Signature::new(&[ScalarType::I32; 1], ScalarType::I32, &[]),
+    );
     let callee = Arc::new(callee.finish().unwrap());
     let value = root
         .call_function(&callee, &vec![root.arg(0).unwrap(); count], &[])
@@ -184,18 +197,24 @@ fn unrepresentable_callee_signature_returns_a_build_error() {
 
 #[test]
 fn shared_callees_stack_arguments_and_backedges_outlive_the_ir() {
-    let mut child = FunctionBuilder::new(options(), Signature::new(8, &[]));
+    let mut child = FunctionBuilder::new(
+        options(),
+        Signature::new(&[ScalarType::I32; 8], ScalarType::I32, &[]),
+    );
     let next = child
         .binary(Binary::Add, child.arg(0).unwrap(), child.arg(7).unwrap())
         .unwrap();
     child.ret(next).unwrap();
     let child = Arc::new(child.finish().unwrap());
 
-    let mut f = FunctionBuilder::new(options(), Signature::new(1, &[]));
+    let mut f = FunctionBuilder::new(
+        options(),
+        Signature::new(&[ScalarType::I32; 1], ScalarType::I32, &[]),
+    );
     let limit = f.arg(0).unwrap();
-    let counter = f.constant(0).unwrap();
-    let zero = f.constant(0).unwrap();
-    let one = f.constant(1).unwrap();
+    let counter = f.constant(Constant::from(0)).unwrap();
+    let zero = f.constant(Constant::from(0)).unwrap();
+    let one = f.constant(Constant::from(1)).unwrap();
     let (head, body, done) = (f.label().unwrap(), f.label().unwrap(), f.label().unwrap());
     f.mark(head).unwrap();
     let more = f.binary(Binary::Lt, counter, limit).unwrap();
@@ -213,7 +232,7 @@ fn shared_callees_stack_arguments_and_backedges_outlive_the_ir() {
     f.ret(counter).unwrap();
     let orphan = f.label().unwrap();
     f.mark(orphan).unwrap();
-    f.constant(99).unwrap(); // verified, unreachable fallthrough
+    f.constant(Constant::from(99)).unwrap(); // verified, unreachable fallthrough
 
     let code = Cranelift::compile(&f.finish().unwrap()).unwrap();
     std::thread::scope(|scope| {
@@ -235,7 +254,8 @@ fn masked_f64_memory_keeps_global_lane_order_across_chunks() {
     let mut f = FunctionBuilder::new(
         options(),
         Signature::new(
-            0,
+            &[ScalarType::I32; 0],
+            ScalarType::I32,
             &[
                 BufferKind::new(F64, false),
                 BufferKind::new(I64, false),
@@ -244,7 +264,7 @@ fn masked_f64_memory_keeps_global_lane_order_across_chunks() {
             ],
         ),
     );
-    let offset = f.constant(0).unwrap();
+    let offset = f.constant(Constant::from(0usize)).unwrap();
     let mut simd = |element, op, args: &[_]| f.simd(Simd { element, op }, args).unwrap();
     let data = simd(F64, SimdOp::Load(Buffer(0)), &[offset]).unwrap();
     let indices = simd(I64, SimdOp::Load(Buffer(1)), &[offset]).unwrap();
@@ -265,6 +285,8 @@ fn masked_f64_memory_keeps_global_lane_order_across_chunks() {
     );
     let any = simd(F64, SimdOp::Any, &[active]).unwrap();
     let all = simd(F64, SimdOp::All, &[active]).unwrap();
+    let any = f.cast(any, ScalarType::I32).unwrap();
+    let all = f.cast(all, ScalarType::I32).unwrap();
     let result = f.binary(Binary::Add, any, all).unwrap();
     f.ret(result).unwrap();
     let code = Cranelift::compile(&f.finish().unwrap()).unwrap();
@@ -287,7 +309,7 @@ fn masked_f64_memory_keeps_global_lane_order_across_chunks() {
         indices[last] = last_index;
         let mut expected = [17.0, 29.0];
         let mut actual = expected;
-        let mut expected_result = Ok(-1);
+        let mut expected_result = Ok(1);
         for (&x, &i) in data.iter().zip(&indices) {
             if x > 0.0 {
                 let Some(slot) = expected.get_mut(i as usize) else {

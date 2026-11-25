@@ -1,6 +1,6 @@
 //! Source-level metadata supplied by the frontend to native code generators.
 
-use crate::hir::{Buffer, BufferKind, Function, Reg, ValueType};
+use crate::hir::{Buffer, BufferKind, Function, Reg, ScalarType, ValueType};
 use crate::simd::Element;
 
 #[derive(Clone, Copy, Debug)]
@@ -13,16 +13,9 @@ pub struct Location {
 
 #[derive(Clone, Copy, Debug)]
 pub enum Value {
-    Register(Reg, Scalar),
+    Register(Reg),
     Slice(Buffer),
     Constant(Option<Constant>),
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum Scalar {
-    I32,
-    Bool,
-    Index,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -118,8 +111,12 @@ pub struct Point {
 /// Shared layout of the values saved at a source statement.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Type {
-    Scalar(Scalar),
-    Vector { element: Element, lanes: usize },
+    /// A scalar in its memory layout: a `bool` is one byte holding 0 or 1.
+    Scalar(ScalarType),
+    Vector {
+        element: Element,
+        lanes: usize,
+    },
     Slice(Element),
     Constant(ConstantType),
 }
@@ -127,8 +124,7 @@ pub enum Type {
 impl Type {
     pub fn storage_bytes(self) -> usize {
         match self {
-            Self::Scalar(Scalar::Index) => 8,
-            Self::Scalar(_) => 4,
+            Self::Scalar(ty) => ty.bytes(),
             Self::Vector { element, lanes } => element.bytes() * lanes,
             Self::Slice(_) => 16,
             Self::Constant(_) => 0,
@@ -162,8 +158,8 @@ impl Point {
             .iter()
             .filter_map(move |&variable| {
                 let ty = match variable.value {
-                    Value::Register(reg, scalar) => match reg_type(reg) {
-                        ValueType::Scalar => Type::Scalar(scalar),
+                    Value::Register(reg) => match reg_type(reg) {
+                        ValueType::Scalar(ty) => Type::Scalar(ty),
                         ValueType::Vector(element) => vector(element),
                         ValueType::Mask(element) => vector(element.index()),
                     },

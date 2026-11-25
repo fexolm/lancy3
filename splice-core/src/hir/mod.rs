@@ -6,8 +6,10 @@ mod buffer;
 mod builder;
 mod replay;
 mod simd;
+mod types;
 mod verify;
 pub use simd::{Simd, SimdOp, ValueType};
+pub use types::{Constant, ScalarType};
 
 pub use buffer::{
     Buffer, BufferArg, BufferElement, BufferKind, check_forwarding, validate_buffers,
@@ -76,45 +78,12 @@ impl Binary {
                 | Self::CheckedShr
         )
     }
-
-    /// Scalar semantics shared by code generators. True comparisons produce
-    /// all bits set. Trapping arithmetic with invalid operands returns its trap.
-    pub fn checked_eval(self, a: i32, b: i32) -> Result<i32, crate::Trap> {
-        use crate::Trap::{DivisionByZero, DivisionOverflow, Overflow};
-        let divide = |quotient: Option<i32>| match (b, quotient) {
-            (0, _) => Err(DivisionByZero),
-            (_, None) => Err(DivisionOverflow),
-            (_, Some(value)) => Ok(value),
-        };
-        Ok(match self {
-            Self::Add => a.wrapping_add(b),
-            Self::Sub => a.wrapping_sub(b),
-            Self::Mul => a.wrapping_mul(b),
-            Self::Div => divide(a.checked_div(b))?,
-            Self::Rem => divide(a.checked_rem(b))?,
-            Self::And => a & b,
-            Self::Or => a | b,
-            Self::Xor => a ^ b,
-            Self::Eq => -i32::from(a == b),
-            Self::Ne => -i32::from(a != b),
-            Self::Lt => -i32::from(a < b),
-            Self::Le => -i32::from(a <= b),
-            Self::Gt => -i32::from(a > b),
-            Self::Ge => -i32::from(a >= b),
-            Self::Shl => a.wrapping_shl(b as u32),
-            Self::Shr => a.wrapping_shr(b as u32),
-            Self::CheckedAdd => a.checked_add(b).ok_or(Overflow)?,
-            Self::CheckedSub => a.checked_sub(b).ok_or(Overflow)?,
-            Self::CheckedMul => a.checked_mul(b).ok_or(Overflow)?,
-            Self::CheckedShl => a.checked_shl(b as u32).ok_or(Overflow)?,
-            Self::CheckedShr => a.checked_shr(b as u32).ok_or(Overflow)?,
-            Self::Min => a.min(b),
-            Self::Max => a.max(b),
-        })
-    }
 }
 
 pub use splice_target::abi::{RustPacketSymbol, RustSymbol};
+
+/// The operands of a Rust call are `i32` ABI words and it returns one.
+const WORD: Option<ValueType> = Some(ValueType::Scalar(ScalarType::I32));
 
 /// A scalar symbol and the number of its ABI words in use.
 #[derive(Clone, Copy, Debug)]
@@ -133,9 +102,9 @@ impl RustCall {
                 self.symbol.name
             )));
         }
-        if args.into_iter().any(|ty| ty != Some(ValueType::Scalar)) {
+        if args.into_iter().any(|ty| ty != WORD) {
             return Err(crate::BuildError::verify(format!(
-                "expected scalar operands for Rust import {}",
+                "expected i32 operands for Rust import {}",
                 self.symbol.name
             )));
         }
@@ -153,9 +122,10 @@ pub fn check_rust_packet_call(
             symbol.name
         )));
     }
-    if args.into_iter().any(|ty| ty != Some(ValueType::Scalar)) {
+    let args: Vec<_> = args.collect();
+    if args.iter().any(|&ty| ty != WORD) {
         return Err(crate::BuildError::verify(format!(
-            "expected scalar operands for Rust import {}",
+            "expected i32 operands for Rust import {}, got {args:?}",
             symbol.name
         )));
     }
@@ -194,9 +164,9 @@ pub fn check_rust_context_call(
             "incompatible Rust context operation arity",
         ));
     }
-    if args.into_iter().any(|ty| ty != Some(ValueType::Scalar)) {
+    if args.into_iter().any(|ty| ty != WORD) {
         return Err(crate::BuildError::verify(
-            "expected scalar operands for Rust context operation",
+            "expected i32 operands for Rust context operation",
         ));
     }
     if slices.len() != borrows as usize {
@@ -238,7 +208,12 @@ pub enum Instr {
         inst: Simd,
         args: Vec<Reg>,
     },
-    Const(Reg, i32),
+    Const(Reg, Constant),
+    /// Rust's `src as T`, where `T` is the type of `dst`.
+    Cast {
+        dst: Reg,
+        src: Reg,
+    },
     Copy(Reg, Reg),
     Bin(Reg, Binary, Reg, Reg),
     BufferLen {
@@ -315,6 +290,7 @@ impl Instr {
         match self {
             Self::Simd { dst, .. } => *dst,
             Self::Const(dst, _)
+            | Self::Cast { dst, .. }
             | Self::Copy(dst, _)
             | Self::Bin(dst, ..)
             | Self::BufferLen { dst, .. }
@@ -332,7 +308,8 @@ impl Instr {
 pub struct Function {
     source: Option<&'static crate::frontend::KernelSource>,
     options: crate::BuildOptions,
-    arity: usize,
+    params: Vec<ScalarType>,
+    result: ScalarType,
     buffer_kinds: Vec<BufferKind>,
     needs_status: bool,
     locals: Vec<ValueType>,
@@ -342,24 +319,24 @@ pub struct Function {
 
 /// Validate a nested kernel's scalar and buffer arguments in its caller.
 pub fn check_call(
-    arity: usize,
-    kinds: &[BufferKind],
+    callee: crate::frontend::Signature<'_>,
     args: impl ExactSizeIterator<Item = Option<ValueType>>,
     caller_kinds: &[BufferKind],
     buffers: &[Buffer],
 ) -> crate::Result<()> {
-    if args.len() != arity {
+    if args.len() != callee.params.len() {
         return Err(crate::BuildError::verify(format!(
-            "expected {arity} scalar arguments, got {}",
+            "expected {} scalar arguments, got {}",
+            callee.params.len(),
             args.len()
         )));
     }
-    for (i, ty) in args.enumerate() {
+    for (i, (ty, &param)) in args.zip(callee.params).enumerate() {
         match ty {
-            Some(ValueType::Scalar) => {}
-            Some(_) => {
+            Some(ValueType::Scalar(ty)) if ty == param => {}
+            Some(ty) => {
                 return Err(crate::BuildError::verify(format!(
-                    "expected a scalar register for call argument {i}"
+                    "expected a register of type {param} for call argument {i}, got {ty:?}"
                 )));
             }
             None => {
@@ -369,7 +346,7 @@ pub fn check_call(
             }
         }
     }
-    check_forwarding(caller_kinds, kinds, buffers)
+    check_forwarding(caller_kinds, callee.buffers, buffers)
 }
 
 impl Function {
@@ -382,7 +359,7 @@ impl Function {
     }
 
     pub fn register_count(&self) -> usize {
-        self.arity + self.locals.len()
+        self.params.len() + self.locals.len()
     }
 
     pub fn reg_type(&self, r: Reg) -> ValueType {
@@ -391,10 +368,9 @@ impl Function {
 
     fn checked_reg_type(&self, r: Reg) -> Option<ValueType> {
         let index = r.0 as usize;
-        if index < self.arity {
-            Some(ValueType::Scalar)
-        } else {
-            self.locals.get(index - self.arity).copied()
+        match self.params.get(index) {
+            Some(&ty) => Some(ValueType::Scalar(ty)),
+            None => self.locals.get(index - self.params.len()).copied(),
         }
     }
 
@@ -403,7 +379,13 @@ impl Function {
     }
 
     pub fn arity(&self) -> usize {
-        self.arity
+        self.params.len()
+    }
+    pub fn params(&self) -> &[ScalarType] {
+        &self.params
+    }
+    pub fn result(&self) -> ScalarType {
+        self.result
     }
     pub fn buffer_kinds(&self) -> &[BufferKind] {
         &self.buffer_kinds

@@ -16,8 +16,14 @@ use splice_core::{
     Function,
     debug::{Location, Point, Slot, Variable},
     frontend::{Body as StagedBody, KernelBuilder, KernelSource, Signature, Specialization},
-    hir::{Binary, Buffer, ContextSlice, Label, Reg, RustContextTarget, Simd, ValueType},
+    hir::{
+        Binary, Buffer, Constant, ContextSlice, Label, Reg, RustContextTarget, ScalarType, Simd,
+        ValueType,
+    },
 };
+
+/// A Rust call returns an `i32` word.
+const WORD: ScalarType = ScalarType::I32;
 use std::{
     cell::{Cell, RefCell},
     collections::HashMap,
@@ -64,13 +70,7 @@ impl<'ctx> Graph<'_, 'ctx> {
         stage: impl FnOnce(&mut dyn KernelBuilder) -> splice_core::Result<()>,
     ) -> splice_core::Result<(FunctionValue<'ctx>, bool)> {
         let id = self.count.get();
-        let function = declare(
-            self.ctx,
-            self.module,
-            signature.arity,
-            signature.buffers,
-            id,
-        )?;
+        let function = declare(self.ctx, self.module, signature, id)?;
         if self.debug {
             function.set_linkage(Linkage::External);
             self.staged
@@ -109,8 +109,8 @@ impl<'ctx> Graph<'_, 'ctx> {
             unit,
             &builder,
             function,
-            signature.arity,
-            std::iter::repeat_n(ValueType::Scalar, signature.arity),
+            signature.params.len(),
+            signature.params.iter().map(|&ty| ValueType::Scalar(ty)),
             signature.buffers,
         )
         .map_err(crate::error)?;
@@ -157,15 +157,7 @@ pub(crate) fn populate<'ctx>(
         functions: RefCell::default(),
     };
     let (root, _) = graph.function(signature, true, stage)?;
-    emit_entry(
-        ctx,
-        module,
-        &ctx.create_builder(),
-        signature.arity,
-        signature.buffers.len(),
-        root,
-    )
-    .map_err(crate::error)?;
+    emit_entry(ctx, module, &ctx.create_builder(), signature, root).map_err(crate::error)?;
     if graph.static_rust_slice_operands.get() {
         permit_buffer_capture(module);
     }
@@ -226,9 +218,10 @@ impl<'a, 'ctx> Direct<'a, 'ctx> {
     }
     fn result(
         &mut self,
+        ty: ScalarType,
         generate: impl FnOnce(&mut Body<'a, 'ctx>, Reg) -> Result<(), body::Error>,
     ) -> splice_core::Result<Reg> {
-        let dst = self.local(ValueType::Scalar)?;
+        let dst = self.local(ValueType::Scalar(ty))?;
         self.emit(|ir| generate(ir, dst))?;
         Ok(dst)
     }
@@ -244,10 +237,19 @@ impl<'a, 'ctx> Direct<'a, 'ctx> {
         &mut self,
         callee: FunctionValue<'ctx>,
         fallible: bool,
+        result: ScalarType,
         args: &[Reg],
         buffers: &[Buffer],
     ) -> splice_core::Result<Reg> {
-        self.result(|ir, d| ir.call_function(d, callee, fallible, args, buffers))
+        self.result(result, |ir, d| {
+            ir.call_function(d, callee, fallible, args, buffers)
+        })
+    }
+    fn scalar(&self, r: Reg) -> ScalarType {
+        match self.native.reg_type(r) {
+            Some(ValueType::Scalar(ty)) => ty,
+            _ => unreachable!("validated scalar register"),
+        }
     }
 }
 
@@ -315,20 +317,26 @@ impl KernelBuilder for Direct<'_, '_> {
         self.emit(|ir| ir.simd(dst, inst, args))?;
         Ok(dst)
     }
-    fn constant(&mut self, n: i32) -> splice_core::Result<Reg> {
-        self.result(|ir, d| ir.constant(d, n))
+    fn constant(&mut self, c: Constant) -> splice_core::Result<Reg> {
+        self.result(c.ty(), |ir, d| ir.constant(d, c))
+    }
+    fn cast(&mut self, src: Reg, to: ScalarType) -> splice_core::Result<Reg> {
+        self.result(to, |ir, d| ir.cast(d, src, to))
     }
     fn buffer_len(&mut self, b: Buffer) -> splice_core::Result<Reg> {
-        self.result(|ir, d| ir.length(d, b))
+        self.result(ScalarType::Index, |ir, d| ir.length(d, b))
     }
     fn load(&mut self, b: Buffer, index: Reg) -> splice_core::Result<Reg> {
-        self.result(|ir, d| ir.read_element(d, b, index))
+        let ty = ScalarType::of_element(self.kinds[b.index()].element())
+            .expect("validated scalar element");
+        self.result(ty, |ir, d| ir.read_element(d, b, index))
     }
     fn store(&mut self, b: Buffer, index: Reg, value: Reg) -> splice_core::Result<()> {
         self.emit(|ir| ir.write_element(b, index, value))
     }
     fn binary(&mut self, op: Binary, a: Reg, b: Reg) -> splice_core::Result<Reg> {
-        self.result(|ir, d| ir.arithmetic(d, op, a, b))
+        let ty = op.output(self.scalar(a)).expect("validated operation");
+        self.result(ty, |ir, d| ir.arithmetic(d, op, a, b))
     }
     fn assign(&mut self, d: Reg, s: Reg) -> splice_core::Result<()> {
         self.emit(|ir| ir.assign(d, s))
@@ -370,14 +378,14 @@ impl KernelBuilder for Direct<'_, '_> {
         import: splice_core::hir::RustCall,
         args: &[Reg],
     ) -> splice_core::Result<Reg> {
-        self.result(|ir, dst| ir.rust_call(dst, import, args))
+        self.result(WORD, |ir, dst| ir.rust_call(dst, import, args))
     }
     fn rust_packet_call(
         &mut self,
         import: &'static splice_core::hir::RustPacketSymbol,
         args: &[Reg],
     ) -> splice_core::Result<Reg> {
-        self.result(|ir, dst| ir.rust_packet_call(dst, import, args))
+        self.result(WORD, |ir, dst| ir.rust_packet_call(dst, import, args))
     }
     fn rust_context_call(
         &mut self,
@@ -387,7 +395,9 @@ impl KernelBuilder for Direct<'_, '_> {
         slices: &[ContextSlice],
     ) -> splice_core::Result<Reg> {
         let target = RustContextTarget::Borrowed { context, operation };
-        self.result(|ir, dst| ir.rust_context_call(dst, target, args, slices))
+        self.result(WORD, |ir, dst| {
+            ir.rust_context_call(dst, target, args, slices)
+        })
     }
     fn rust_static_call(
         &mut self,
@@ -396,7 +406,9 @@ impl KernelBuilder for Direct<'_, '_> {
         slices: &[ContextSlice],
     ) -> splice_core::Result<Reg> {
         let target = RustContextTarget::Static(symbol);
-        self.result(|ir, dst| ir.rust_context_call(dst, target, args, slices))
+        self.result(WORD, |ir, dst| {
+            ir.rust_context_call(dst, target, args, slices)
+        })
     }
     fn call_kernel(
         &mut self,
@@ -406,7 +418,7 @@ impl KernelBuilder for Direct<'_, '_> {
         stage: StagedBody<'_>,
     ) -> splice_core::Result<Reg> {
         let (callee, fallible) = self.graph.function(signature, false, stage)?;
-        self.call(callee, fallible, args, buffers)
+        self.call(callee, fallible, signature.result, args, buffers)
     }
     fn call_specialized(
         &mut self,
@@ -415,6 +427,7 @@ impl KernelBuilder for Direct<'_, '_> {
         buffers: &[Buffer],
         stage: StagedBody<'_>,
     ) -> splice_core::Result<Reg> {
+        let result = key.signature().result;
         let hit = self.graph.callees.borrow().get(&key).copied();
         let (callee, fallible) = match hit {
             Some(hit) => hit,
@@ -425,7 +438,7 @@ impl KernelBuilder for Direct<'_, '_> {
                 staged
             }
         };
-        self.call(callee, fallible, args, buffers)
+        self.call(callee, fallible, result, args, buffers)
     }
     fn call_function(
         &mut self,
@@ -453,6 +466,6 @@ impl KernelBuilder for Direct<'_, '_> {
                 (callee, fallible)
             }
         };
-        self.call(callee, fallible, args, buffers)
+        self.call(callee, fallible, function.result(), args, buffers)
     }
 }

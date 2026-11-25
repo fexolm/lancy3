@@ -33,7 +33,7 @@ macro_rules! each_backend {
 }
 
 use splice::frontend::{self, KernelBuilder};
-use splice::{BufferArg, BufferKind, BuildOptions, Codegen, Executable, Mode};
+use splice::{BufferArg, BuildOptions, Codegen, Executable, Mode};
 use std::rc::Rc;
 
 /// A kernel body that can be staged repeatedly.
@@ -48,16 +48,14 @@ pub type Invoke<'a> = &'a dyn Fn(&[i32], &mut [BufferArg<'_>]) -> Result<i32, sp
 /// same, which is returned for comparison with a Rust reference.
 pub fn agree(
     name: &str,
-    arity: usize,
-    kinds: &[BufferKind],
+    signature: frontend::Signature<'_>,
     stage: &Stage,
     mut observe: impl FnMut(Invoke<'_>) -> Vec<String>,
 ) -> Vec<String> {
     fn run<B: Codegen<Output: Executable>>(
         staged: bool,
         options: BuildOptions,
-        arity: usize,
-        kinds: &[BufferKind],
+        signature: frontend::Signature<'_>,
         stage: &Stage,
         observe: &mut dyn FnMut(Invoke<'_>) -> Vec<String>,
     ) -> (String, Vec<String>) {
@@ -66,9 +64,9 @@ pub fn agree(
             Box::new(move |b: &mut dyn KernelBuilder| stage(b))
         };
         let built = if staged {
-            B::build_with_options(frontend::Signature::new(arity, kinds), body, options)
+            B::build_with_options(signature, body, options)
         } else {
-            frontend::materialize(frontend::Signature::new(arity, kinds), body, options)
+            frontend::materialize(signature, body, options)
                 .and_then(|f| B::compile_with_options(&f, options))
         };
         let route = if staged { "build" } else { "compile" };
@@ -83,7 +81,7 @@ pub fn agree(
     for mode in [Mode::Debug, Mode::Release] {
         let options = BuildOptions::host(mode).expect("SPLICE_SIMD names a target of this machine");
         for staged in [true, false] {
-            each_backend!(B => runs.push(run::<B>(staged, options, arity, kinds, stage, &mut observe)));
+            each_backend!(B => runs.push(run::<B>(staged, options, signature, stage, &mut observe)));
         }
     }
     let (first, expected) = &runs[0];

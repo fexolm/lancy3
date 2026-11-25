@@ -1,5 +1,6 @@
 use splice::frontend::{KernelBuilder, Signature, materialize};
 use splice::hir::{Buffer, ContextSlice, Instr, RustContextTarget};
+use splice::hir::{Constant, ScalarType};
 use splice::{
     BufferArg, BufferKind, BuildOptions, Codegen, ContextArguments, Executable, Mode,
     StaticRustCall, StaticRustSymbol,
@@ -30,14 +31,14 @@ fn static_packets_can_have_no_operands() {
 
     fn check<B: Codegen<Output: Executable>>() {
         let ir = materialize(
-            Signature::new(0, &[]),
+            Signature::new(&[ScalarType::I32; 0], ScalarType::I32, &[]),
             Box::new(body),
             BuildOptions::host(Mode::Release).unwrap(),
         )
         .unwrap();
         for kernel in [
             B::build_with_options(
-                Signature::new(0, &[]),
+                Signature::new(&[ScalarType::I32; 0], ScalarType::I32, &[]),
                 Box::new(body),
                 BuildOptions::host(Mode::Release).unwrap(),
             )
@@ -93,16 +94,16 @@ fn modify_child(builder: &mut dyn KernelBuilder) -> splice::Result<()> {
 }
 
 fn forward_slices(builder: &mut dyn KernelBuilder) -> splice::Result<()> {
-    let first = builder.constant(0)?;
-    let marker = builder.constant(91)?;
+    let first = builder.constant(Constant::from(0usize))?;
+    let marker = builder.constant(Constant::from(91))?;
     builder.store(Buffer(0), first, marker)?;
     let result = builder.call_kernel(
-        Signature::new(1, &CHILD_KINDS),
+        Signature::new(&[ScalarType::I32; 1], ScalarType::I32, &CHILD_KINDS),
         &[builder.arg(0)?],
         &[Buffer(1), Buffer(0)],
         Box::new(modify_child),
     )?;
-    let one = builder.constant(1)?;
+    let one = builder.constant(Constant::from(1))?;
     let next = builder.binary(splice::hir::Binary::Add, result, one)?;
     builder.store(Buffer(0), first, next)?;
     builder.ret(result)?;
@@ -112,7 +113,7 @@ fn forward_slices(builder: &mut dyn KernelBuilder) -> splice::Result<()> {
 #[test]
 fn static_packets_keep_nested_slice_borrows_and_effect_order() {
     let ir = materialize(
-        Signature::new(1, &PARENT_KINDS),
+        Signature::new(&[ScalarType::I32; 1], ScalarType::I32, &PARENT_KINDS),
         Box::new(forward_slices),
         BuildOptions::host(Mode::Release).unwrap(),
     )
@@ -144,7 +145,7 @@ fn static_packets_keep_nested_slice_borrows_and_effect_order() {
     fn check<B: Codegen<Output: Executable>>(ir: &splice::Function) {
         for kernel in [
             B::build_with_options(
-                Signature::new(1, &PARENT_KINDS),
+                Signature::new(&[ScalarType::I32; 1], ScalarType::I32, &PARENT_KINDS),
                 Box::new(forward_slices),
                 BuildOptions::host(Mode::Release).unwrap(),
             )
@@ -221,14 +222,14 @@ fn invalid_static_packet_operands_are_rejected_before_native_codegen() {
         };
         assert!(
             materialize(
-                Signature::new(1, &kinds),
+                Signature::new(&[ScalarType::I32; 1], ScalarType::I32, &kinds),
                 Box::new(body),
                 BuildOptions::host(Mode::Release).unwrap()
             )
             .is_err()
         );
         splice_testkit::each_backend!(B => assert!(
-            B::build_with_options(Signature::new(1, &kinds), Box::new(body), BuildOptions::host(Mode::Release).unwrap()).is_err()
+            B::build_with_options(Signature::new(&[ScalarType::I32; 1], ScalarType::I32, &kinds), Box::new(body), BuildOptions::host(Mode::Release).unwrap()).is_err()
         ));
     }
 }
@@ -237,7 +238,7 @@ fn invalid_static_packet_operands_are_rejected_before_native_codegen() {
 fn static_rust_adapters_cannot_reinterpret_a_slice_element_type() {
     const KINDS: [BufferKind; 2] = [BufferKind::Read, BufferKind::Write];
     let ir = materialize(
-        Signature::new(1, &KINDS),
+        Signature::new(&[ScalarType::I32; 1], ScalarType::I32, &KINDS),
         Box::new(modify_child),
         BuildOptions::host(Mode::Release).unwrap(),
     )
@@ -246,7 +247,7 @@ fn static_rust_adapters_cannot_reinterpret_a_slice_element_type() {
     fn check<B: Codegen<Output: Executable>>(ir: &splice::Function) {
         for kernel in [
             B::build_with_options(
-                Signature::new(1, &KINDS),
+                Signature::new(&[ScalarType::I32; 1], ScalarType::I32, &KINDS),
                 Box::new(modify_child),
                 BuildOptions::host(Mode::Release).unwrap(),
             )

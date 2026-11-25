@@ -1,7 +1,10 @@
 use super::{Body, Built, simd};
 use inkwell::builder::Builder;
 use inkwell::values::BasicValueEnum;
-use splice_core::{debug, hir::ValueType};
+use splice_core::{
+    debug,
+    hir::{ScalarType, ValueType},
+};
 
 impl<'ctx> Body<'_, 'ctx> {
     /// Save the runtime variables of source point `ordinal` of function `id`
@@ -37,7 +40,7 @@ impl<'ctx> Body<'_, 'ctx> {
         };
         for slot in slots {
             match slot.variable.value {
-                debug::Value::Register(reg, _) => {
+                debug::Value::Register(reg) => {
                     let (ty, ptr) = self.registers[reg.0 as usize];
                     let value = b.build_load(
                         simd::llvm_type(self.ctx, self.machine.vector_bytes, ty),
@@ -53,12 +56,10 @@ impl<'ctx> Body<'_, 'ctx> {
                         .into_vector_type();
                         b.build_int_s_extend(value.into_vector_value(), ty, "")?
                             .into()
-                    } else if matches!(slot.ty, debug::Type::Scalar(debug::Scalar::Index)) {
-                        b.build_int_s_extend(value.into_int_value(), self.ctx.i64_type(), "")?
-                            .into()
-                    } else if matches!(slot.ty, debug::Type::Scalar(debug::Scalar::Bool)) {
+                    } else if slot.ty == debug::Type::Scalar(ScalarType::Bool) {
                         // A DWARF bool is one byte holding 0 or 1.
-                        b.build_and(value.into_int_value(), self.int(1), "")?.into()
+                        b.build_int_z_extend(value.into_int_value(), self.ctx.i8_type(), "")?
+                            .into()
                     } else {
                         value
                     };

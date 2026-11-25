@@ -1,4 +1,5 @@
 use super::*;
+use splice_core::hir::{Constant, ScalarType};
 mod simd;
 
 /// Stage `body` directly with the host vector width, as `Lancy::stage` does.
@@ -49,10 +50,16 @@ fn context_descriptors_reject_other_signatures_and_slice_operations() {
             b.ret(result)?;
             Ok(())
         };
-        assert!(build(Signature::new(1, &KINDS), Box::new(body)).is_err());
+        assert!(
+            build(
+                Signature::new(&[ScalarType::I32; 1], ScalarType::I32, &KINDS),
+                Box::new(body)
+            )
+            .is_err()
+        );
         assert!(
             splice_core::frontend::materialize(
-                Signature::new(1, &KINDS),
+                Signature::new(&[ScalarType::I32; 1], ScalarType::I32, &KINDS),
                 Box::new(body),
                 options()
             )
@@ -61,14 +68,17 @@ fn context_descriptors_reject_other_signatures_and_slice_operations() {
     }
 
     let direct = crate::Lancy::build_with_options(
-        Signature::new(1, &KINDS),
+        Signature::new(&[ScalarType::I32; 1], ScalarType::I32, &KINDS),
         Box::new(good),
         splice_core::BuildOptions::host(splice_core::Mode::Release).unwrap(),
     )
     .unwrap();
-    let ir =
-        splice_core::frontend::materialize(Signature::new(1, &KINDS), Box::new(good), options())
-            .unwrap();
+    let ir = splice_core::frontend::materialize(
+        Signature::new(&[ScalarType::I32; 1], ScalarType::I32, &KINDS),
+        Box::new(good),
+        options(),
+    )
+    .unwrap();
     let portable = crate::Lancy::compile(&ir).unwrap();
     for kernel in [direct, portable] {
         let mut unreachable = |_, _, _| panic!("wrong context callback was called");
@@ -133,13 +143,17 @@ fn context_slice_operands_require_valid_nonaliasing_descriptors() {
             Ok(())
         };
         assert_eq!(
-            build(Signature::new(0, &kinds), Box::new(body)).is_ok(),
+            build(
+                Signature::new(&[ScalarType::I32; 0], ScalarType::I32, &kinds),
+                Box::new(body)
+            )
+            .is_ok(),
             valid,
             "{slices:?}"
         );
         assert_eq!(
             splice_core::frontend::materialize(
-                Signature::new(0, &kinds),
+                Signature::new(&[ScalarType::I32; 0], ScalarType::I32, &kinds),
                 Box::new(body),
                 options()
             )
@@ -192,10 +206,17 @@ fn rust_imports_fill_unused_abi_arguments_with_zero_in_both_staging_paths() {
         Ok(())
     }
 
-    let direct = build(Signature::new(1, &[]), Box::new(body)).unwrap();
-    let portable =
-        splice_core::frontend::materialize(Signature::new(1, &[]), Box::new(body), options())
-            .unwrap();
+    let direct = build(
+        Signature::new(&[ScalarType::I32; 1], ScalarType::I32, &[]),
+        Box::new(body),
+    )
+    .unwrap();
+    let portable = splice_core::frontend::materialize(
+        Signature::new(&[ScalarType::I32; 1], ScalarType::I32, &[]),
+        Box::new(body),
+        options(),
+    )
+    .unwrap();
     for graph in [direct, lower(&portable, &options().target).unwrap()] {
         let kernel =
             lancy::ScalarKernel::compile(&graph, &lancy::CompileOptions::new(options().target))
@@ -208,10 +229,11 @@ fn rust_imports_fill_unused_abi_arguments_with_zero_in_both_staging_paths() {
 #[test]
 fn reuses_shared_loads_across_writes_in_both_staging_paths() {
     fn body(b: &mut dyn KernelBuilder) -> splice_core::Result<()> {
-        let zero = b.constant(0)?;
+        let zero = b.constant(Constant::from(0usize))?;
         let before = b.load(Buffer(0), zero)?;
-        b.store(Buffer(1), b.arg(0)?, before)?;
-        let zero = b.constant(0)?;
+        let at = b.cast(b.arg(0)?, ScalarType::Index)?;
+        b.store(Buffer(1), at, before)?;
+        let zero = b.constant(Constant::from(0usize))?;
         let after = b.load(Buffer(0), zero)?;
         let sum = b.binary(Binary::Add, before, after)?;
         b.ret(sum)?;
@@ -220,9 +242,13 @@ fn reuses_shared_loads_across_writes_in_both_staging_paths() {
 
     for input in [BufferKind::Read, BufferKind::Write] {
         let kinds = [input, BufferKind::Write];
-        let direct = build(Signature::new(1, &kinds), Box::new(body)).unwrap();
+        let direct = build(
+            Signature::new(&[ScalarType::I32; 1], ScalarType::I32, &kinds),
+            Box::new(body),
+        )
+        .unwrap();
         let portable = splice_core::frontend::materialize(
-            Signature::new(1, &kinds),
+            Signature::new(&[ScalarType::I32; 1], ScalarType::I32, &kinds),
             Box::new(body),
             options(),
         )
@@ -241,13 +267,19 @@ fn reuses_shared_loads_across_writes_in_both_staging_paths() {
 fn portable_calls_share_one_lowered_body_and_preserve_argument_reassignment() {
     use splice_core::hir::FunctionBuilder;
 
-    let mut leaf = FunctionBuilder::new(options(), Signature::new(1, &[]));
-    let one = leaf.constant(1).unwrap();
+    let mut leaf = FunctionBuilder::new(
+        options(),
+        Signature::new(&[ScalarType::I32; 1], ScalarType::I32, &[]),
+    );
+    let one = leaf.constant(Constant::from(1)).unwrap();
     let value = leaf.binary(Binary::Add, leaf.arg(0).unwrap(), one).unwrap();
     leaf.ret(value).unwrap();
     let leaf = Arc::new(leaf.finish().unwrap());
 
-    let mut caller = FunctionBuilder::new(options(), Signature::new(1, &[]));
+    let mut caller = FunctionBuilder::new(
+        options(),
+        Signature::new(&[ScalarType::I32; 1], ScalarType::I32, &[]),
+    );
     let arg = caller.arg(0).unwrap();
     let first = caller.call_function(&leaf, &[arg], &[]).unwrap();
     caller.assign(arg, first).unwrap();
@@ -272,18 +304,20 @@ fn portable_calls_share_one_lowered_body_and_preserve_argument_reassignment() {
 #[test]
 fn backedge_swaps_live_names_on_the_selected_edge() {
     let graph = build(
-        Signature::new(3, &[]),
+        Signature::new(&[ScalarType::I32; 3], ScalarType::I32, &[]),
         Box::new(|b| {
             let (n, x, y) = (b.arg(0)?, b.arg(1)?, b.arg(2)?);
             let (head, body, exit) = (b.label()?, b.label()?, b.label()?);
             b.mark(head)?;
-            b.branch(n, body, exit)?;
+            let zero = b.constant(Constant::from(0))?;
+            let more = b.binary(Binary::Ne, n, zero)?;
+            b.branch(more, body, exit)?;
             b.mark(body)?;
-            let saved = b.local(ValueType::Scalar)?;
+            let saved = b.local(ValueType::Scalar(ScalarType::I32))?;
             b.assign(saved, x)?;
             b.assign(x, y)?;
             b.assign(y, saved)?;
-            let one = b.constant(1)?;
+            let one = b.constant(Constant::from(1))?;
             let next = b.binary(Binary::Sub, n, one)?;
             b.assign(n, next)?;
             b.jump(head)?;
@@ -307,17 +341,17 @@ fn backedge_swaps_live_names_on_the_selected_edge() {
 #[test]
 fn backward_jump_into_previously_unreferenced_label_is_reachable() {
     let f = build(
-        Signature::new(1, &[]),
+        Signature::new(&[ScalarType::I32; 1], ScalarType::I32, &[]),
         Box::new(|b| {
             let (early, late, dead) = (b.label()?, b.label()?, b.label()?);
             let _unused = b.label()?;
             b.jump(late)?;
             b.mark(early)?;
-            let one = b.constant(1)?;
+            let one = b.constant(Constant::from(1))?;
             let v = b.binary(Binary::Add, one, b.arg(0)?)?;
             b.ret(v)?;
             b.mark(dead)?;
-            let uninitialized = b.local(ValueType::Scalar)?;
+            let uninitialized = b.local(ValueType::Scalar(ScalarType::I32))?;
             b.ret(uninitialized)?;
             b.mark(late)?;
             b.jump(early)?;
@@ -336,13 +370,15 @@ fn backward_jump_into_previously_unreferenced_label_is_reachable() {
 #[test]
 fn reads_require_a_definition_on_every_reachable_edge() {
     let result = build(
-        Signature::new(1, &[]),
+        Signature::new(&[ScalarType::I32; 1], ScalarType::I32, &[]),
         Box::new(|b| {
             let (yes, join) = (b.label()?, b.label()?);
-            let local = b.local(ValueType::Scalar)?;
-            b.branch(b.arg(0)?, yes, join)?;
+            let local = b.local(ValueType::Scalar(ScalarType::I32))?;
+            let zero = b.constant(Constant::from(0))?;
+            let taken = b.binary(Binary::Ne, b.arg(0)?, zero)?;
+            b.branch(taken, yes, join)?;
             b.mark(yes)?;
-            let val = b.constant(7)?;
+            let val = b.constant(Constant::from(7))?;
             b.assign(local, val)?;
             b.mark(join)?;
             b.ret(local)?;
@@ -357,15 +393,20 @@ fn reads_require_a_definition_on_every_reachable_edge() {
 #[test]
 fn checked_nested_call_preserves_writes_before_failure() {
     let graph = build(
-        Signature::new(1, &[BufferKind::Read, BufferKind::Write]),
+        Signature::new(
+            &[ScalarType::I32; 1],
+            ScalarType::I32,
+            &[BufferKind::Read, BufferKind::Write],
+        ),
         Box::new(|b| {
             let x = b.call_kernel(
-                Signature::new(1, &[BufferKind::Write]),
+                Signature::new(&[ScalarType::I32; 1], ScalarType::I32, &[BufferKind::Write]),
                 &[b.arg(0)?],
                 &[Buffer(1)],
                 Box::new(|c| {
-                    let zero = c.constant(0)?;
-                    c.store(Buffer(0), zero, c.arg(0)?)?;
+                    let first = c.constant(Constant::from(0usize))?;
+                    c.store(Buffer(0), first, c.arg(0)?)?;
+                    let zero = c.constant(Constant::from(0))?;
                     let x = c.binary(Binary::Div, c.arg(0)?, zero)?;
                     c.ret(x)?;
                     Ok(())
@@ -378,7 +419,11 @@ fn checked_nested_call_preserves_writes_before_failure() {
     .unwrap();
     use splice_core::Executable;
     let f = crate::LancyKernel::compile(
-        Signature::new(1, &[BufferKind::Read, BufferKind::Write]),
+        Signature::new(
+            &[ScalarType::I32; 1],
+            ScalarType::I32,
+            &[BufferKind::Read, BufferKind::Write],
+        ),
         splice_core::BuildOptions::host(splice_core::Mode::Release).unwrap(),
         |_, _| Ok((graph, None)),
     )
@@ -506,7 +551,7 @@ fn lowered_call_graphs_retain_slice_contracts_for_out_of_line_calls() {
 #[test]
 fn rejects_undefined_labels_and_aliased_writable_arguments() {
     let undefined = build(
-        Signature::new(0, &[]),
+        Signature::new(&[ScalarType::I32; 0], ScalarType::I32, &[]),
         Box::new(|b| {
             let missing = b.label()?;
             b.jump(missing)?;
@@ -517,14 +562,18 @@ fn rejects_undefined_labels_and_aliased_writable_arguments() {
         matches!(undefined.unwrap_err(), splice_core::BuildError::Verify { reason, .. } if reason.contains("undefined"))
     );
     let alias = build(
-        Signature::new(0, &[BufferKind::Write]),
+        Signature::new(&[ScalarType::I32; 0], ScalarType::I32, &[BufferKind::Write]),
         Box::new(|b| {
             let value = b.call_kernel(
-                Signature::new(0, &[BufferKind::Write, BufferKind::Read]),
+                Signature::new(
+                    &[ScalarType::I32; 0],
+                    ScalarType::I32,
+                    &[BufferKind::Write, BufferKind::Read],
+                ),
                 &[],
                 &[Buffer(0), Buffer(0)],
                 Box::new(|c| {
-                    let n = c.constant(0)?;
+                    let n = c.constant(Constant::from(0))?;
                     c.ret(n)?;
                     Ok(())
                 }),

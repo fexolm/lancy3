@@ -83,7 +83,7 @@ impl Lower<'_> {
                     #scalar::ImportWord::encode(#name #fish (#(#arguments),*))
                 }
             }
-            let words = [#(#scalar::RunArg::reg(#words, __splice_builder)?),*];
+            let words = [#(#scalar::RunArg::word(#words, __splice_builder)?),*];
             __splice_builder.rust_static_call(
                 const { &#root::StaticRustSymbol::of::<__SpliceScope #params>(::core::stringify!(#name)) },
                 &words, &[#(#slices),*]

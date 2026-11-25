@@ -3,6 +3,7 @@
 //! is 16-byte aligned.
 use splice_core::frontend::{self, KernelBuilder, Signature};
 use splice_core::hir::{Buffer, Simd, SimdOp};
+use splice_core::hir::{Constant, ScalarType};
 use splice_core::simd::Element;
 use splice_core::target::Profile;
 use splice_core::{BufferArg, BufferKind, BuildOptions, Codegen, Executable, Mode, Target};
@@ -15,8 +16,8 @@ fn shifted_compare(
     bytes: usize,
 ) -> impl Fn(&mut dyn KernelBuilder) -> splice_core::Result<()> {
     move |b| {
-        let zero = b.constant(0)?;
-        let one = b.constant(1)?;
+        let zero = b.constant(Constant::from(0usize))?;
+        let one = b.constant(Constant::from(1usize))?;
         let load = SimdOp::Load(Buffer(0));
         let x = b.simd(Simd { element, op: load }, &[zero])?.unwrap();
         let y = b.simd(Simd { element, op: load }, &[one])?.unwrap();
@@ -37,13 +38,14 @@ fn shifted_compare(
             };
             b.simd(count, &[mask])?
         } else {
-            b.simd(
+            let any = b.simd(
                 Simd {
                     element,
                     op: SimdOp::Any,
                 },
                 &[mask],
-            )?
+            )?;
+            Some(b.cast(any.unwrap(), ScalarType::I32)?)
         };
         b.ret(result.unwrap())?;
         Ok(())
@@ -59,12 +61,22 @@ fn check_shifted_compares(options: BuildOptions) {
         let expected = if element == Element::F32 {
             lanes.div_ceil(2) as i32
         } else {
-            -1 // `Any` returns a true scalar mask.
+            1 // `Any` is true.
         };
         let stage = || Box::new(shifted_compare(element, bytes));
-        let ir = frontend::materialize(Signature::new(0, &kinds), stage(), options).unwrap();
+        let ir = frontend::materialize(
+            Signature::new(&[ScalarType::I32; 0], ScalarType::I32, &kinds),
+            stage(),
+            options,
+        )
+        .unwrap();
         for code in [
-            Cranelift::build_with_options(Signature::new(0, &kinds), stage(), options).unwrap(),
+            Cranelift::build_with_options(
+                Signature::new(&[ScalarType::I32; 0], ScalarType::I32, &kinds),
+                stage(),
+                options,
+            )
+            .unwrap(),
             Cranelift::compile(&ir).unwrap(),
         ] {
             let result = match element {
