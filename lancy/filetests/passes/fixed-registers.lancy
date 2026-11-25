@@ -1,10 +1,10 @@
-fn main x:i32 y:i32 -> i32
+fn main(x:i32 y:i32) -> i32
   rest = rem x y
   result = shl rest y
   ret result
 
-@opt check: Rem
-@opt nextln: Shl
+@opt check: = rem
+@opt nextln: = shl
 @isel check: cdq
 @isel nextln: irem
 @isel nextln: shl

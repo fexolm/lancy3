@@ -1,16 +1,16 @@
 # The hot loop body falls through from the header. The exit was next in RPO.
-fn main p:ptr n:i32 -> i32
+fn main(p:ptr n:i32) -> i32
   zero = const 0
   one = const 1
-  jump head zero
-block head i:i32
+  jump head(zero)
+block head(i:i32)
   more = lt i n
-  br more body | done
-block body
+  br more body() | done()
+block body()
   next = add i one
   store p next
-  jump head next
-block done
+  jump head(next)
+block done()
   ret i
 @isel check: brcmp.Lt
 @asm check: jge
@@ -22,18 +22,18 @@ block done
 
 # The loop exit and backedge both need edge copies. An early exit swaps both
 # values, unlike a header exit, and each complete iteration swaps them again.
-fn main n:i32 stop:i32 a:i32 b:i32 -> i32
+fn main(n:i32 stop:i32 a:i32 b:i32) -> i32
   zero = const 0
   one = const 1
-  jump head zero a b
-block head i:i32 left:i32 right:i32
+  jump head(zero a b)
+block head(i:i32 left:i32 right:i32)
   more = lt i n
-  br more body | done left right
-block body
+  br more body() | done(left right)
+block body()
   next = add i one
   stop_now = eq i stop
-  br stop_now done right left | head next right left
-block done x:i32 y:i32
+  br stop_now done(right left) | head(next right left)
+block done(x:i32 y:i32)
   result = sub x y
   ret result
 @opt check: br

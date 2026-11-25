@@ -190,6 +190,11 @@ impl Function {
         Some(&self.slices[index as usize])
     }
 
+    /// The declared slices, in declaration order.
+    pub fn slice_params(&self) -> &[SliceParam] {
+        &self.slices
+    }
+
     /// The declared slice whose pointer is `ptr`.
     pub fn slice_param(&self, ptr: Value) -> Option<SliceParam> {
         self.slice(ptr).filter(|slice| slice.ptr == ptr).copied()

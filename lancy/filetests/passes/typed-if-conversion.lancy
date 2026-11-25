@@ -1,16 +1,16 @@
 # Selecting F64 values keeps the sign bit of zero.
-fn main cond:i32 -> i32
+fn main(cond:i32) -> i32
   negative = literal f64 8000000000000000
   positive = literal f64 0000000000000000
-  br cond join negative | join positive
-block join value:f64
+  br cond join(negative) | join(positive)
+block join(value:f64)
   bits = bitcast u64 value
   shift = literal u64 3f
   sign = shr bits shift
   result = cast i32 sign
   ret result
 @opt not: br
-@opt check: Ternary(Select) F64
+@opt check: f64 = select
 @run 0 -> 0
 @run 1 -> 1
 @run -2147483648 -> 1
@@ -18,61 +18,61 @@ block join value:f64
 ---
 
 # Empty forwarding arms can merge a narrow signed value.
-fn main cond:i32 x:i32 y:i32 -> i32
+fn main(cond:i32 x:i32 y:i32) -> i32
   a = cast i8 x
   b = cast i8 y
-  br cond left a | right b
-block left l:i8
-  jump join l
-block right r:i8
-  jump join r
-block join chosen:i8
+  br cond left(a) | right(b)
+block left(l:i8)
+  jump join(l)
+block right(r:i8)
+  jump join(r)
+block join(chosen:i8)
   result = cast i32 chosen
   ret result
 @opt not: br
-@opt check: Ternary(Select) I8
+@opt check: i8 = select
 @run 0 255 128 -> -128
 @run 2 255 128 -> -1
 
 ---
 
 # A wide scalar select preserves both words of its input.
-fn main cond:i32 -> i32
+fn main(cond:i32) -> i32
   a = literal u128 00000000000000070000000000000000
   b = literal u128 00000000000000140000000000000000
-  br cond join a | join b
-block join value:u128
+  br cond join(a) | join(b)
+block join(value:u128)
   shift = literal u128 40
   high = shr value shift
   result = cast i32 high
   ret result
 @opt not: br
-@opt check: Ternary(Select) U128
+@opt check: u128 = select
 @run 0 -> 20
 @run 1 -> 7
 
 ---
 
 # The branch condition uses nonzero, but SIMD selection uses lane sign bits.
-fn main cond:i32 x:i32 y:i32 -> i32
+fn main(cond:i32 x:i32 y:i32) -> i32
   a = cast u8 x
   b = cast u8 y
-  va = simd.splat a
-  vb = simd.splat b
-  br cond join va | join vb
-block join value:vec.u8
+  va = splat a
+  vb = splat b
+  br cond join(va) | join(vb)
+block join(value:vec.u8)
   zero = const 0
   one = const 1
-  width = simd.lanes u8
+  width = lanes u8
   last = sub width one
-  low_lane = simd.extract value zero
-  high_lane = simd.extract value last
+  low_lane = extract value zero
+  high_lane = extract value last
   low = cast i32 low_lane
   high = cast i32 high_lane
   result = add low high
   ret result
 @opt not: br
-@opt check: simd.Ternary(Select) Vector(U8)
+@opt check: vec.u8 = select
 @run 0 260 259 -> 6
 @run 1 260 259 -> 8
 @run 2 260 259 -> 8
@@ -82,24 +82,24 @@ block join value:vec.u8
 ---
 
 # F64 vectors require the corresponding 64-bit integer mask.
-fn main cond:i32 x:i32 y:i32 -> i32
+fn main(cond:i32 x:i32 y:i32) -> i32
   a = cast f64 x
   b = cast f64 y
-  va = simd.splat a
-  vb = simd.splat b
-  br cond left va | right vb
-block left l:vec.f64
-  jump join l
-block right r:vec.f64
-  jump join r
-block join value:vec.f64
+  va = splat a
+  vb = splat b
+  br cond left(va) | right(vb)
+block left(l:vec.f64)
+  jump join(l)
+block right(r:vec.f64)
+  jump join(r)
+block join(value:vec.f64)
   one = const 1
-  lane = simd.extract value one
+  lane = extract value one
   result = cast i32 lane
   ret result
 @opt not: br
-@opt check: simd.Splat Vector(I64)
-@opt check: simd.Ternary(Select) Vector(F64)
+@opt check: vec.i64 = splat
+@opt check: vec.f64 = select
 @run 0 -7 19 -> 19
 @run 1 -7 19 -> -7
 @run 2 -7 19 -> -7
@@ -108,15 +108,15 @@ block join value:vec.f64
 ---
 
 # The verifier accepts pointer block parameters and rejects pointer Select.
-fn main p:ptr cond:i32 -> i32
+fn main(p:ptr cond:i32) -> i32
   one = const 1
   q = offset p one 4
-  br cond join p | join q
-block join chosen:ptr
+  br cond join(p) | join(q)
+block join(chosen:ptr)
   result = load i32 chosen
   ret result
 @opt check: br
-@opt not: Select
+@opt not: = select
 @opt check: ret
 @run 0 -> 29 | 07 00 00 00 1d 00 00 00 | 07 00 00 00 1d 00 00 00
 @run 1 -> 7 | 07 00 00 00 1d 00 00 00 | 07 00 00 00 1d 00 00 00
@@ -124,19 +124,19 @@ block join chosen:ptr
 ---
 
 # Two varying join parameters stay as a branch.
-fn main cond:i32 x:i32 y:i32 -> i32
+fn main(cond:i32 x:i32 y:i32) -> i32
   fx = cast f64 x
   fy = cast f64 y
   nx = cast u16 x
   ny = cast u16 y
-  br cond join fx ny | join fy nx
-block join fp:f64 narrow:u16
+  br cond join(fx ny) | join(fy nx)
+block join(fp:f64 narrow:u16)
   l = cast i32 fp
   r = cast i32 narrow
   result = sub l r
   ret result
 @opt check: br
-@opt not: Select
+@opt not: = select
 @opt check: ret
 @run 0 -7 11 -> -65518
 @run 1 -7 11 -> -18
@@ -144,19 +144,19 @@ block join fp:f64 narrow:u16
 ---
 
 # Computing a trapping operand on the untaken path would add an error.
-fn main cond:i32 x:i32 y:i32 -> i32
+fn main(cond:i32 x:i32 y:i32) -> i32
   a = cast i64 x
   b = cast i64 y
-  br cond divide | join a
-block divide
+  br cond divide() | join(a)
+block divide()
   q = div a b
-  jump join q
-block join chosen:i64
+  jump join(q)
+block join(chosen:i64)
   result = cast i32 chosen
   ret result
 @opt check: br
-@opt check: Div
-@opt not: Select
+@opt check: = div
+@opt not: = select
 @opt check: ret
 @run 0 12 0 -> 12
 @run 1 12 0 -> !zero

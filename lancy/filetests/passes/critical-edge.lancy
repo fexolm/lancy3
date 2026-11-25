@@ -1,7 +1,7 @@
-fn main x:i32 y:i32 -> i32
+fn main(x:i32 y:i32) -> i32
   cond = lt x y
-  br cond join x y | join y x
-block join a:i32 b:i32
+  br cond join(x y) | join(y x)
+block join(a:i32 b:i32)
   diff = sub a b
   ret diff
 

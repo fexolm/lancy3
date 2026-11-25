@@ -1,7 +1,7 @@
 # Adapted from Wasmtime v45.0.3, runtests/stack.clif (%offset_unaligned).
 # SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 # The caller owns the scratch bytes. Check the neighbouring bytes as well.
-fn main base:ptr x:i32 -> i32
+fn main(base:ptr x:i32) -> i32
   one = const 1
   dst = offset base one 1
   store dst x
@@ -20,7 +20,7 @@ fn main base:ptr x:i32 -> i32
 ---
 
 # %stack_simple
-fn main p:ptr x:i32 -> i32
+fn main(p:ptr x:i32) -> i32
   store p x
   result = load i32 p
   ret result
@@ -31,7 +31,7 @@ fn main p:ptr x:i32 -> i32
 ---
 
 # %stack_offset
-fn main p:ptr x:i32 -> i32
+fn main(p:ptr x:i32) -> i32
   eight = const 8
   at = offset p eight 1
   store at x
@@ -44,7 +44,7 @@ fn main p:ptr x:i32 -> i32
 ---
 
 # %multi_slot_stack
-fn main p:ptr x:i32 y:i32 -> i32
+fn main(p:ptr x:i32 y:i32) -> i32
   one = const 1
   q = offset p one 4
   store p x

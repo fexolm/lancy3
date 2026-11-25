@@ -1,9 +1,8 @@
 //! Parse and check a fixture against the HIR passes and the host JIT.
-pub(crate) mod input;
 pub(crate) mod listing;
 mod run;
 
-use crate::hir::{Function, ssa::VerifiedBody, transforms::passes};
+use crate::hir::{self, Function, ssa::VerifiedBody, text::ParseError, transforms::passes};
 use crate::module::Module;
 use crate::{CompileError, Inlining, ScalarKernel, jit, lir};
 use filecheck::{CheckerBuilder, NO_VARIABLES};
@@ -15,23 +14,14 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 pub(crate) type Result<T> = std::result::Result<T, String>;
 
-pub(crate) fn integer(s: &str) -> Result<i32> {
-    let s = s.replace('_', "");
-    if let Some(hex) = s.strip_prefix("0x") {
-        u32::from_str_radix(hex, 16).map(|i| i as i32)
-    } else {
-        s.parse()
-    }
-    .map_err(|_| format!("expected i32, got {s}"))
-}
-
 const COMMON_STAGES: [&str; 5] = ["source", "cfg", "inline", "opt", "layout"];
 const X64_STAGES: [&str; 3] = ["isel", "alloc", "asm"];
 const ARM_STAGES: [&str; 2] = ["aarch64-isel", "aarch64-alloc"];
 
 #[derive(Default)]
 pub(crate) struct Case<'a> {
-    ir: input::Lines<'a>,
+    /// The IR lines of the case with their line numbers.
+    ir: Vec<(usize, &'a str)>,
     pub(crate) checks: BTreeMap<&'a str, (Vec<usize>, CheckerBuilder)>,
     pub(crate) encodings: Vec<(usize, &'a str)>,
     runs: Vec<Run>,
@@ -128,12 +118,32 @@ impl<'a> Case<'a> {
 
     fn check_optimized(&mut self, module: Module<VerifiedBody<'_>>) -> Result<()> {
         self.check("opt", || listing::hir(&module))?;
-        self.interpret("opt", module.functions[module.call_graph.root()].function)?;
+        let root = module.functions[module.call_graph.root()].function;
+        // Optimized values are not numbered in text order; the text read
+        // back is, and then prints the same again.
+        let once = reprint(&root.to_string())?;
+        if reprint(&once)? != once {
+            return Err(format!("the optimized text does not read back:\n{once}"));
+        }
+        self.interpret("opt", root)?;
         lir::check_machine(self, module)
     }
 
+    /// The IR of the case, on the lines of the file it came from.
+    fn text(&self) -> String {
+        let mut text = String::new();
+        for &(line, ir) in &self.ir {
+            while text.lines().count() + 1 < line {
+                text.push('\n');
+            }
+            text.push_str(ir);
+            text.push('\n');
+        }
+        text
+    }
+
     fn execute(mut self) -> Result<()> {
-        let parsed = input::parse(&self.ir);
+        let parsed = hir::text::parse(&self.text(), &RUST_FUNCTIONS);
         if let Some((line, reason)) = self.reject {
             if !self.done() {
                 return Err(format!(
@@ -142,8 +152,8 @@ impl<'a> Case<'a> {
             }
             // The builder checks each operation and the verifier the whole function.
             let verified = match &parsed {
-                Err(input::ParseError::Invalid(_, e)) => Err(CompileError::InvalidIr(e.clone())),
-                Err(input::ParseError::Syntax(e)) => return Err(e.clone()),
+                Err(ParseError::Invalid(_, e)) => Err(CompileError::InvalidIr(e.clone())),
+                Err(ParseError::Syntax(e)) => return Err(e.clone()),
                 Ok(f) => f.verified_module().map(drop),
             };
             return match verified {
@@ -158,6 +168,12 @@ impl<'a> Case<'a> {
             return Err("case has no expectations".into());
         }
         let f = parsed.map_err(|e| e.to_string())?;
+        let printed = f.to_string();
+        if reprint(&printed)? != printed {
+            return Err(format!(
+                "the text of the source does not read back:\n{printed}"
+            ));
+        }
         let source = f.verified_module().map_err(|e| format!("verify: {e}"))?;
         self.check("source", || listing::hir(&source))?;
         self.check("cfg", || listing::cfg(&source))?;
@@ -300,7 +316,7 @@ fn filetests() {
 fn mismatches_identify_the_stage_even_when_native_execution_would_succeed() {
     for &stage in COMMON_STAGES.iter().chain(&X64_STAGES).chain(&ARM_STAGES) {
         let source = format!(
-            "fn main x:i32 -> i32\nret x\n@{stage} regex: ANY=.*\n@run 8 -> 8\n@{stage} check: absent_opcode"
+            "fn main(x:i32) -> i32\nret x\n@{stage} regex: ANY=.*\n@run 8 -> 8\n@{stage} check: absent_opcode"
         );
         let error = run_text(&source).unwrap_err();
         assert!(
@@ -314,7 +330,7 @@ fn mismatches_identify_the_stage_even_when_native_execution_would_succeed() {
 
 #[test]
 fn invalid_filetest_memory_is_rejected_by_checked_interpretation() {
-    let source = "fn main p:ptr -> i32\nx = load i32 p\nret x\n@run -> 0 | 00 | 00";
+    let source = "fn main(p:ptr) -> i32\nx = load i32 p\nret x\n@run -> 0 | 00 | 00";
     let error = run_text(source).unwrap_err();
     assert!(
         error.contains("source") && error.contains("access outside buffer"),
@@ -324,7 +340,7 @@ fn invalid_filetest_memory_is_rejected_by_checked_interpretation() {
 
 #[test]
 fn unknown_directives_report_the_absolute_line_in_later_cases() {
-    let text = "fn main x:i32 -> i32\nret x\n@run 2 -> 2\n---\nfn main x:i32 -> i32\nret x\n@po  check: v0";
+    let text = "fn main(x:i32) -> i32\nret x\n@run 2 -> 2\n---\nfn main(x:i32) -> i32\nret x\n@po  check: v0";
     let error = run_text(text).unwrap_err();
     assert!(error.contains("line 7: unknown directive @po"), "{error}");
 }
@@ -332,11 +348,12 @@ fn unknown_directives_report_the_absolute_line_in_later_cases() {
 #[test]
 fn both_machines_are_checked_on_every_host() {
     for stage in ["isel", "aarch64-isel"] {
-        let case = format!("fn main x:i32 -> i32\nret x\n@{stage} check: absent_opcode");
+        let case = format!("fn main(x:i32) -> i32\nret x\n@{stage} check: absent_opcode");
         let error = run_text(&case).unwrap_err();
         assert!(error.contains(&format!("{stage}:")), "{error}");
     }
-    run_text("fn main x:i32 -> i32\nret x\n@isel check: ret\n@aarch64-isel check: Return").unwrap();
+    run_text("fn main(x:i32) -> i32\nret x\n@isel check: ret\n@aarch64-isel check: Return")
+        .unwrap();
 }
 
 #[test]
@@ -356,7 +373,7 @@ fn run_literals_must_match_the_signature() {
         ("@run 1 -> 1 | 00", "bytes before | bytes after"),
         ("@run 1 -> !nope", "unknown trap !nope"),
     ] {
-        let text = format!("fn main x:f32 -> f32\nret x\n{run}");
+        let text = format!("fn main(x:f32) -> f32\nret x\n{run}");
         let actual = run_text(&text).unwrap_err();
         assert!(actual.contains(error), "{run}: {actual}");
     }
@@ -368,8 +385,55 @@ fn aarch64_encodings_are_named_and_profiles_known() {
         ("all has no.such", "unknown AArch64 encoding no.such"),
         ("sme has blr", "invalid AArch64 assertion"),
     ] {
-        let text = format!("fn main x:i32 -> i32\nret x\n@aarch64 {check}");
+        let text = format!("fn main(x:i32) -> i32\nret x\n@aarch64 {check}");
         let actual = run_text(&text).unwrap_err();
         assert!(actual.contains(error), "{check}: {actual}");
     }
+}
+
+/// The text of the function that `text` reads as.
+fn reprint(text: &str) -> Result<String> {
+    hir::text::parse(text, &RUST_FUNCTIONS)
+        .map(|f| f.to_string())
+        .map_err(|e| format!("{e} in\n{text}"))
+}
+
+/// The Rust functions fixtures call by name.
+static RUST_FUNCTIONS: [&hir::RustFunction; 3] = [
+    &hir::RustFunction {
+        name: "identity_or_error",
+        entry: identity_or_error,
+    },
+    &hir::RustFunction {
+        name: "double",
+        entry: double,
+    },
+    &hir::RustFunction {
+        name: "sum4",
+        entry: sum4,
+    },
+];
+
+/// The operation, or the trap whose code is the word.
+unsafe extern "C" fn identity_or_error(_: *mut u8, value: u32, _: *const u8, fail: i32) -> i64 {
+    match crate::Trap::from_code(fail as u32) {
+        Some(trap) => trap.status(),
+        None => i64::from(value),
+    }
+}
+
+unsafe extern "C" fn double(_: *mut u8, value: u32, _: *const u8, _: i32) -> i64 {
+    i64::from(value.wrapping_mul(2))
+}
+
+/// The sum of the packet's four `i32` words.
+///
+/// # Safety
+/// The packet holds four `i32` words.
+unsafe extern "C" fn sum4(_: *mut u8, _: u32, packet: *const u8, _: i32) -> i64 {
+    let word = |i: usize| {
+        // SAFETY: the caller's packet holds four words.
+        unsafe { packet.cast::<i32>().add(i).read_unaligned() }
+    };
+    i64::from((0..4).map(word).fold(0, i32::wrapping_add) as u32)
 }

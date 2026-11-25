@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
 # %ishl_i32_i32
-fn main v0:i32 v1:i32 -> i32
+fn main(v0:i32 v1:i32) -> i32
   v2 = shl v0 v1
   ret v2
 @run 0x00000000 0 -> 0x00000000
@@ -16,7 +16,7 @@ fn main v0:i32 v1:i32 -> i32
 ---
 
 # %sshr_i32_i32
-fn main v0:i32 v1:i32 -> i32
+fn main(v0:i32 v1:i32) -> i32
   v2 = shr v0 v1
   ret v2
 @run 0x80000000 0 -> 0x80000000
@@ -30,7 +30,7 @@ fn main v0:i32 v1:i32 -> i32
 ---
 
 # %ishl_i32_const
-fn main v0:i32 -> i32
+fn main(v0:i32) -> i32
   t0 = const 33
   v1 = shl v0 t0
   ret v1
@@ -39,7 +39,7 @@ fn main v0:i32 -> i32
 ---
 
 # %ushr_i32_const
-fn main v0:i32 -> i32
+fn main(v0:i32) -> i32
   t0 = const 33
   t1 = shr v0 t0
   t2 = const 2147483647
@@ -50,7 +50,7 @@ fn main v0:i32 -> i32
 ---
 
 # %sshr_i32_const
-fn main v0:i32 -> i32
+fn main(v0:i32) -> i32
   t0 = const 33
   v1 = shr v0 t0
   ret v1

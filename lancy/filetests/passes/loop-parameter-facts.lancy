@@ -1,15 +1,15 @@
-fn main start:i32 limit:i32 -> i32
+fn main(start:i32 limit:i32) -> i32
   one = const 1
-  jump head start limit
-block head i:i32 cap:i32
+  jump head(start limit)
+block head(i:i32 cap:i32)
   more = lt i cap
-  br more body i | done
-block body j:i32
+  br more body(i) | done()
+block body(j:i32)
   next = add j one
-  jump latch next cap
-block latch k:i32 forwarded:i32
-  jump head k forwarded
-block done
+  jump latch(next cap)
+block latch(k:i32 forwarded:i32)
+  jump head(k forwarded)
+block done()
   ret start
 @source check: br
 @opt not: br
@@ -22,17 +22,17 @@ block done
 ---
 
 # The forwarded counter adds 2 overall and can wrap before reaching MAX.
-fn main start:i32 limit:i32 -> i32
+fn main(start:i32 limit:i32) -> i32
   one = const 1
-  jump head start limit
-block head i:i32 cap:i32
+  jump head(start limit)
+block head(i:i32 cap:i32)
   more = lt i cap
   next = add i one
-  br more body next | done
-block body j:i32
+  br more body(next) | done()
+block body(j:i32)
   next2 = add j one
-  jump head next2 cap
-block done
+  jump head(next2 cap)
+block done()
   ret start
 @opt check: br
 @run 0 3 -> 0
@@ -40,17 +40,17 @@ block done
 ---
 
 # A live-through header parameter also survives a direct use beyond the exit.
-fn main bound:i32 x:i32 -> i32
+fn main(bound:i32 x:i32) -> i32
   zero = const 0
   one = const 1
-  jump head zero x
-block head i:i32 forwarded:i32
+  jump head(zero x)
+block head(i:i32 forwarded:i32)
   more = lt i bound
-  br more body i | done
-block body j:i32
+  br more body(i) | done()
+block body(j:i32)
   next = add j one
-  jump head next forwarded
-block done
+  jump head(next forwarded)
+block done()
   ret forwarded
 @opt not: br
 @opt check: ret v1
@@ -61,16 +61,16 @@ block done
 
 # The first body parameter forwards to carry before the other body parameter
 # makes carry invariant. The cap must then be reconsidered.
-fn main start:i32 limit:i32 -> i32
+fn main(start:i32 limit:i32) -> i32
   one = const 1
-  jump head start limit limit
-block head i:i32 carry:i32 cap:i32
+  jump head(start limit limit)
+block head(i:i32 carry:i32 cap:i32)
   more = lt i cap
-  br more body carry carry | done
-block body cap_input:i32 carry_input:i32
+  br more body(carry carry) | done()
+block body(cap_input:i32 carry_input:i32)
   next = add i one
-  jump head next carry_input cap_input
-block done
+  jump head(next carry_input cap_input)
+block done()
   ret start
 @source check: br
 @opt not: br
@@ -80,17 +80,17 @@ block done
 
 ---
 
-fn main start:i32 limit:i32 -> i32
+fn main(start:i32 limit:i32) -> i32
   one = const 1
-  jump head start limit limit
-block head i:i32 carry:i32 cap:i32
+  jump head(start limit limit)
+block head(i:i32 carry:i32 cap:i32)
   more = lt i cap
-  br more body carry | done
-block body forwarded:i32
+  br more body(carry) | done()
+block body(forwarded:i32)
   next = add i one
   changed = sub forwarded one
-  jump head next forwarded changed
-block done
+  jump head(next forwarded changed)
+block done()
   ret i
 @opt check: br
 @run 0 4 -> 3
@@ -100,21 +100,21 @@ block done
 ---
 
 # Both arms of the latch target the header, with different cap arguments.
-fn main limit:i32 -> i32
+fn main(limit:i32) -> i32
   zero = const 0
   one = const 1
-  jump head zero limit zero
-block head i:i32 cap:i32 carry:i32
+  jump head(zero limit zero)
+block head(i:i32 cap:i32 carry:i32)
   more = lt i cap
-  br more body | done
-block body
+  br more body() | done()
+block body()
   bounds i limit
   next = add i one
   bigger = add cap one
   changed = add carry one
   stay = ne i zero
-  br stay head next cap carry | head next bigger changed
-block done
+  br stay head(next cap carry) | head(next bigger changed)
+block done()
   ret carry
 @opt check: bounds
 @run 0 -> 0

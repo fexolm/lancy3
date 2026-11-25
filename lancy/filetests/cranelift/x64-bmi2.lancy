@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
 # %bzhi32
-fn main v0:i32 v1:i32 -> i32
+fn main(v0:i32 v1:i32) -> i32
   v2 = const 1
   v3 = shl v2 v1
   v4 = sub v3 v2

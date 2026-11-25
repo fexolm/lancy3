@@ -1,16 +1,16 @@
-fn main data:ptr flag:i32 -> i32
+fn main(data:ptr flag:i32) -> i32
   z = const 0
   one = const 1
-  positive = simd.splat one
-  mask = simd.insert positive z flag
+  positive = splat one
+  mask = insert positive z flag
   fallback = const 79
-  pass = simd.splat fallback
-  got = simd.maskedload data - mask pass
+  pass = splat fallback
+  got = maskedload data - mask pass
   next = const 99
-  stores = simd.splat next
-  simd.maskedstore data - mask stores
-  first = simd.extract got z
-  second = simd.extract got one
+  stores = splat next
+  maskedstore data - mask stores
+  first = extract got z
+  second = extract got one
   r = sub first second
   ret r
 @aarch64 sve has z.ld1w
@@ -20,7 +20,7 @@ fn main data:ptr flag:i32 -> i32
 @run 0x80000000 -> -37 | 2a 00 00 00 0b 00 00 00 | 63 00 00 00 0b 00 00 00
 @run 1 -> 0 | 2a 00 00 00 0b 00 00 00 | 2a 00 00 00 0b 00 00 00
 ---
-fn main flag1:i32 flag3:i32 -> i32
+fn main(flag1:i32 flag3:i32) -> i32
   zero = const 0
   one = const 1
   two = const 2
@@ -29,19 +29,19 @@ fn main flag1:i32 flag3:i32 -> i32
   eight = const 8
   twelve = const 12
   eleven = const 11
-  len = simd.lanes i32
+  len = lanes i32
   last = sub len one
-  ramp = simd.iota i32
-  start = simd.splat eleven
-  values = simd.add ramp start
-  positive = simd.splat one
-  mask1 = simd.insert positive one flag1
-  mask = simd.insert mask1 three flag3
-  compressed = simd.compress values mask
-  a = simd.extract compressed zero
-  b = simd.extract compressed one
-  c = simd.extract compressed two
-  d = simd.extract compressed last
+  ramp = iota i32
+  start = splat eleven
+  values = add ramp start
+  positive = splat one
+  mask1 = insert positive one flag1
+  mask = insert mask1 three flag3
+  compressed = compress values mask
+  a = extract compressed zero
+  b = extract compressed one
+  c = extract compressed two
+  d = extract compressed last
   b4 = shl b four
   c8 = shl c eight
   d12 = shl d twelve
@@ -57,10 +57,10 @@ fn main flag1:i32 flag3:i32 -> i32
 @run 1 0x80000000 -> 14
 @run 1 1 -> 0
 ---
-fn main data:ptr flag:i32 -> i32
+fn main(data:ptr flag:i32) -> i32
   z = const 0
   one = const 1
-  n = simd.lanes u16
+  n = lanes u16
   last = sub n one
   base = offset data one 2
   invalid = literal i16 0x8000
@@ -69,18 +69,18 @@ fn main data:ptr flag:i32 -> i32
   ones = literal u16 0x1
   active = literal u16 0x8001
   last_mask = cast u16 flag
-  fill = simd.splat invalid
-  i0 = simd.insert fill z right
-  indices = simd.insert i0 last left
-  off = simd.splat ones
-  m0 = simd.insert off z active
-  flags = simd.insert m0 last last_mask
+  fill = splat invalid
+  i0 = insert fill z right
+  indices = insert i0 last left
+  off = splat ones
+  m0 = insert off z active
+  flags = insert m0 last last_mask
   alternate = literal u16 0x49
-  pass = simd.splat alternate
-  got = simd.maskedload base indices flags pass
-  a = simd.extract got z
-  b = simd.extract got one
-  c = simd.extract got last
+  pass = splat alternate
+  got = maskedload base indices flags pass
+  a = extract got z
+  b = extract got one
+  c = extract got last
   ai = cast i32 a
   bi = cast i32 b
   ci = cast i32 c
@@ -93,28 +93,28 @@ fn main data:ptr flag:i32 -> i32
 @run 0x8001 -> 207 | 21 00 43 00 65 00 | 21 00 43 00 65 00
 @run 1 -> 247 | 21 00 43 00 65 00 | 21 00 43 00 65 00
 ---
-fn main data:ptr flag:i32 -> i32
+fn main(data:ptr flag:i32) -> i32
   z = const 0
   one = const 1
-  n = simd.lanes u8
+  n = lanes u8
   last = sub n one
   base = offset data one 1
   invalid = literal i8 0x80
   left = literal i8 0xff
-  initial = simd.splat invalid
-  i0 = simd.insert initial z left
-  indices = simd.insert i0 last left
+  initial = splat invalid
+  i0 = insert initial z left
+  indices = insert i0 last left
   low = literal u8 0x1
   active = literal u8 0x81
   last_mask = cast u8 flag
-  off = simd.splat low
-  m0 = simd.insert off z active
-  flags = simd.insert m0 last last_mask
+  off = splat low
+  m0 = insert off z active
+  flags = insert m0 last last_mask
   a = literal u8 0x31
   b = literal u8 0x95
-  data_a = simd.splat a
-  values = simd.insert data_a last b
-  simd.maskedstore base indices flags values
+  data_a = splat a
+  values = insert data_a last b
+  maskedstore base indices flags values
   ret z
 @aarch64 sve has z.st1b.scatter.s
 @aarch64 sve2 has z.st1b.scatter.s

@@ -1,10 +1,10 @@
 # Select uses the sign bit of each lane. Any accepts every nonzero bit pattern.
-fn main mask:i32 value:i32 -> i32
-  masks = simd.splat mask
-  yes = simd.splat value
-  no = simd.not masks
-  chosen = simd.select masks yes no
-  result = simd.any chosen
+fn main(mask:i32 value:i32) -> i32
+  masks = splat mask
+  yes = splat value
+  no = not masks
+  chosen = select masks yes no
+  result = any chosen
   ret result
 @isel regex: FREE_RESULT=Def: v[0-9]+v reg
 @isel check: native.Vector(I32).Ternary(Select)
@@ -18,13 +18,13 @@ fn main mask:i32 value:i32 -> i32
 @run 0x80000000 0 -> 0
 ---
 # Only the last lane is zero after adding -(width-1).
-fn main x:i32 -> i32
-  n = simd.lanes i32
+fn main(x:i32) -> i32
+  n = lanes i32
   b = sub x n
-  delta = simd.splat b
-  indices = simd.iota i32
-  shifted = simd.add indices delta
-  result = simd.all shifted
+  delta = splat b
+  indices = iota i32
+  shifted = add indices delta
+  result = all shifted
   ret result
 @asm check: endbr64
 @asm not: call
@@ -33,22 +33,22 @@ fn main x:i32 -> i32
 @run 1 -> 0
 ---
 # Only the upper word of each i128 lane can be nonzero. Select tests its sign.
-fn main x:i32 -> i32
+fn main(x:i32) -> i32
   input = cast i128 x
   shift = literal i128 40
   high = shl input shift
-  masks = simd.splat high
+  masks = splat high
   zero = literal i128 0
   one = literal i128 1
-  zeros = simd.splat zero
-  ones = simd.splat one
-  chosen = simd.select masks ones zeros
-  sign = simd.any chosen
-  any = simd.any masks
-  all = simd.all masks
+  zeros = splat zero
+  ones = splat one
+  chosen = select masks ones zeros
+  sign = any chosen
+  any = any masks
+  all = all masks
   first = const 0
-  mixed = simd.insert masks first zero
-  mixed_all = simd.all mixed
+  mixed = insert masks first zero
+  mixed_all = all mixed
   counts = add any all
   signs = add sign mixed_all
   result = add counts signs
@@ -58,15 +58,15 @@ fn main x:i32 -> i32
 @run -1 -> -3
 ---
 # Bounds checks see any nonzero bit in an enabled lane.
-fn main x:i32 active:i32 -> i32
+fn main(x:i32 active:i32) -> i32
   zero = const 0
   one = const 1
-  xs = simd.splat x
-  zs = simd.splat zero
-  cmp = simd.lt xs zs
-  enabled = simd.splat active
-  masked = simd.and enabled cmp
-  bad = simd.any masked
+  xs = splat x
+  zs = splat zero
+  cmp = lt xs zs
+  enabled = splat active
+  masked = and enabled cmp
+  bad = any masked
   bounds bad one
   ret zero
 @isel check: bounds.mask
@@ -75,15 +75,15 @@ fn main x:i32 active:i32 -> i32
 @run 1 -1 -> 0
 ---
 # Select checks the high bit, including after AND with a comparison.
-fn main x:i32 active:i32 -> i32
+fn main(x:i32 active:i32) -> i32
   zero = const 0
-  xs = simd.splat x
-  zs = simd.splat zero
-  cmp = simd.lt xs zs
-  enabled = simd.splat active
-  masked = simd.and cmp enabled
-  picked = simd.select masked xs zs
-  result = simd.extract picked zero
+  xs = splat x
+  zs = splat zero
+  cmp = lt xs zs
+  enabled = splat active
+  masked = and cmp enabled
+  picked = select masked xs zs
+  result = extract picked zero
   ret result
 @isel regex: SELECT=select\.mask\.compare\.and|native\.Vector\(I32\)\.Ternary\(Select\)
 @isel check: $SELECT
@@ -92,13 +92,13 @@ fn main x:i32 active:i32 -> i32
 @run 7 0x80000000 -> 0
 ---
 # The comparison also supplies a vector payload.
-fn main x:i32 -> i32
+fn main(x:i32) -> i32
   zero = const 0
-  xs = simd.splat x
-  zs = simd.splat zero
-  mask = simd.lt xs zs
-  picked = simd.select mask mask zs
-  result = simd.extract picked zero
+  xs = splat x
+  zs = splat zero
+  mask = lt xs zs
+  picked = select mask mask zs
+  result = extract picked zero
   ret result
 @isel check: native.Vector(I32).Binary(Lt)
 @isel check: native.Vector(I32).Ternary(Select)
@@ -106,13 +106,13 @@ fn main x:i32 -> i32
 @run 7 -> 0
 ---
 # One active lane must only touch the provided word.
-fn main p:ptr value:i32 -> i32
-  i = simd.iota i32
+fn main(p:ptr value:i32) -> i32
+  i = iota i32
   one = const 1
-  ones = simd.splat one
-  first = simd.lt i ones
-  data = simd.splat value
-  simd.maskedstore p - first data
+  ones = splat one
+  first = lt i ones
+  data = splat value
+  maskedstore p - first data
   ret value
 @isel check: maskedstore.Vector(I32)
 @run 7 -> 7 | aa aa aa aa | 07 00 00 00

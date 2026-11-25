@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
 # %alias
-fn main v0:i32 -> i32
+fn main(v0:i32) -> i32
   v1 = copy v0
   ret v1
 @run 0 -> 0
@@ -11,7 +11,7 @@ fn main v0:i32 -> i32
 ---
 
 # %double_alias
-fn main v0:i32 -> i32
+fn main(v0:i32) -> i32
   v1 = copy v0
   v2 = copy v1
   ret v2
@@ -21,7 +21,7 @@ fn main v0:i32 -> i32
 ---
 
 # %alias_inst
-fn main -> i32
+fn main() -> i32
   v0 = const 10
   v1 = copy v0
   ret v1

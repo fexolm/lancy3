@@ -161,22 +161,21 @@ fn remove_dominated_checks_but_keep_sibling_checks_and_unused_trapping_math() {
 /// a signed `<` loop runs up to `u32::MAX` times when `start` is negative.
 #[test]
 fn recurrence_closed_form_holds_for_trip_counts_past_i32_max() {
-    let text = "fn main start:i32 bound:i32 -> i32
+    let text = "fn main(start:i32 bound:i32) -> i32
   one = const 1
   zero = const 0
-  jump head start zero
-block head i:i32 acc:i32
+  jump head(start zero)
+block head(i:i32 acc:i32)
   more = lt i bound
-  br more body | done acc
-block body
+  br more body() | done(acc)
+block body()
   next_i = add i one
   next_acc = add acc i
-  jump head next_i next_acc
-block done out:i32
+  jump head(next_i next_acc)
+block done(out:i32)
   ret out";
-    let lines: Vec<_> = text.lines().enumerate().collect();
-    let f = crate::filetests::input::parse(&lines).unwrap();
-    let mut optimized = (*f).clone();
+    let f = crate::hir::text::parse(text, &[]).unwrap();
+    let mut optimized = f.clone();
     simplify(&mut optimized).unwrap();
     assert!(
         optimized
@@ -209,29 +208,28 @@ block done out:i32
 /// and calls use.
 #[test]
 fn optimized_functions_keep_no_retired_operands() {
-    let text = "fn main n:i32 mode:i32 -> i32
+    let text = "fn main(n:i32 mode:i32) -> i32
   z = const 0
   one = const 1
-  jump head z z
-block head i:i32 acc:i32
+  jump head(z z)
+block head(i:i32 acc:i32)
   more = lt i n
-  br more choose | done
-block choose
-  br mode yes | no
-block yes
+  br more choose() | done()
+block choose()
+  br mode yes() | no()
+block yes()
   total = add acc one
-  jump latch total
-block no
+  jump latch(total)
+block no()
   other = sub acc one
-  jump latch other
-block latch sum:i32
+  jump latch(other)
+block latch(sum:i32)
   next = add i one
-  jump head next sum
-block done
+  jump head(next sum)
+block done()
   ret acc";
-    let lines: Vec<_> = text.lines().enumerate().collect();
-    let f = crate::filetests::input::parse(&lines).unwrap();
-    let mut optimized = (*f).clone();
+    let f = crate::hir::text::parse(text, &[]).unwrap();
+    let mut optimized = f.clone();
     simplify(&mut optimized).unwrap();
     let (arena, live) = optimized.operand_arena();
     assert_eq!(arena, live);

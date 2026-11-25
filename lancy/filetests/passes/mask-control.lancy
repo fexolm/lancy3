@@ -1,12 +1,12 @@
 # Only the last lane can be nonzero. A single low bit is enough to trap.
-fn main x:i32 -> i32
+fn main(x:i32) -> i32
   zero = const 0
   one = const 1
-  v = simd.splat zero
-  n = simd.lanes i32
+  v = splat zero
+  n = lanes i32
   last = sub n one
-  mask = simd.insert v last x
-  any = simd.any mask
+  mask = insert v last x
+  any = any mask
   bounds any one
   ret zero
 @isel not: AnyTrue
@@ -16,10 +16,10 @@ fn main x:i32 -> i32
 @run 0x80000000 -> !bounds
 ---
 # At length zero an empty mask still fails the ordinary unsigned check.
-fn main x:i32 -> i32
+fn main(x:i32) -> i32
   zero = const 0
-  v = simd.splat x
-  any = simd.any v
+  v = splat x
+  any = any v
   bounds any zero
   ret zero
 @isel check: AnyTrue
@@ -28,14 +28,14 @@ fn main x:i32 -> i32
 @run 1 -> !bounds
 ---
 # Another consumer needs the all-ones scalar. The branch and the check share it.
-fn main x:i32 -> i32
-  v = simd.splat x
-  any = simd.any v
+fn main(x:i32) -> i32
+  v = splat x
+  any = any v
   one = const 1
-  br any nonzero | empty
-block nonzero
+  br any nonzero() | empty()
+block nonzero()
   ret any
-block empty
+block empty()
   bounds any one
   ret any
 @isel check: AnyTrue
@@ -44,14 +44,14 @@ block empty
 @run 0 -> 0
 @run 1 -> -1
 ---
-fn main x:i32 -> i32
-  v = simd.splat x
-  any = simd.any v
-  br any nonzero | empty
-block nonzero
+fn main(x:i32) -> i32
+  v = splat x
+  any = any v
+  br any nonzero() | empty()
+block nonzero()
   yes = const 17
   ret yes
-block empty
+block empty()
   no = const 23
   ret no
 @isel not: AnyTrue

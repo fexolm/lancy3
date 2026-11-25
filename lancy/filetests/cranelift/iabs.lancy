@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
 # %iabs_i32
-fn main v0:i32 -> i32
+fn main(v0:i32) -> i32
   t0 = const 0
   t1 = sub t0 v0
   v1 = max v0 t1

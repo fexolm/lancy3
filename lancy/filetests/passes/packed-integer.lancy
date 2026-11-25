@@ -1,16 +1,16 @@
 # Counts in neighboring lanes differ. The high bits in a count are ignored.
-fn main x:i32 count:i32 -> i32
-  data = simd.splat x
-  counts = simd.splat count
-  iota = simd.iota i32
-  per_lane = simd.add counts iota
-  shifted = simd.shl data per_lane
-  rotated = simd.rotateright shifted per_lane
+fn main(x:i32 count:i32) -> i32
+  data = splat x
+  counts = splat count
+  iota = iota i32
+  per_lane = add counts iota
+  shifted = shl data per_lane
+  rotated = rotateright shifted per_lane
   lane = const 1
-  result = simd.extract rotated lane
+  result = extract rotated lane
   ret result
-@source check: Binary(Shl)
-@source check: Binary(RotateRight)
+@source check: = shl
+@source check: = rotateright
 @isel check: arg 0
 @isel not: packed.I32.Shl imm=
 @isel not: packed.I32.RotateRight imm=
@@ -23,17 +23,17 @@ fn main x:i32 count:i32 -> i32
 @run 0x80000001 32 -> 1
 ---
 # The low byte of each product wraps. Compare through the unsigned sign boundary.
-fn main x:i32 y:i32 -> i32
+fn main(x:i32 y:i32) -> i32
   x8 = cast u8 x
   y8 = cast u8 y
-  a = simd.splat x8
-  b = simd.splat y8
-  prod = simd.mul a b
-  high = simd.ge prod a
-  answer = simd.any high
+  a = splat x8
+  b = splat y8
+  prod = mul a b
+  high = ge prod a
+  answer = any high
   ret answer
-@source check: Binary(Mul)
-@source check: Binary(Ge)
+@source check: = mul
+@source check: = ge
 @asm check: endbr64
 @asm not: call
 @asm check: ret
@@ -42,13 +42,13 @@ fn main x:i32 y:i32 -> i32
 @run 255 1 -> -1
 ---
 # The immediate is reduced modulo 32. Signed right shift replicates the sign.
-fn main x:i32 -> i32
-  data = simd.splat x
+fn main(x:i32) -> i32
+  data = splat x
   count = const 33
-  counts = simd.splat count
-  shifted = simd.shr data counts
+  counts = splat count
+  shifted = shr data counts
   lane = const 0
-  result = simd.extract shifted lane
+  result = extract shifted lane
   ret result
 @isel regex: SHR=packed\.I32\.Shr imm=1|lanes\.Vector\(I32\)\.Binary\(Shr\)
 @isel check: $SHR

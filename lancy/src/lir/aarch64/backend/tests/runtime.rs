@@ -1,15 +1,8 @@
 //! Generated AArch64 code run against independently computed results.
-use crate::filetests::input;
 use crate::{CallError, Inlining, ScalarKernel, hir::Function};
 
-fn parse(text: &str) -> std::sync::Arc<Function> {
-    let lines: input::Lines<'_> = text
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .enumerate()
-        .collect();
-    input::parse(&lines).unwrap()
+fn parse(text: &str) -> Function {
+    crate::hir::text::parse(text, &[]).unwrap()
 }
 
 fn lane_words(lanes: impl IntoIterator<Item = u128>, size: usize) -> Vec<u64> {
@@ -50,7 +43,7 @@ fn packed_ordered_comparisons_evaluate_both_operands() {
         let count = width / size;
         for (op, invert) in [("ordered", false), ("unordered", true)] {
             let f = parse(&format!(
-                "fn main a:vec.{float} b:vec.{float} -> vec.{mask}\n r = simd.{op} a b\n ret r"
+                "fn main(a:vec.{float} b:vec.{float}) -> vec.{mask}\n r = {op} a b\n ret r"
             ));
             let kernel = ScalarKernel::compile(&f, &crate::test_target::options()).unwrap();
             for start in 0..rows.len() {
@@ -92,7 +85,7 @@ fn rotations_wrap_counts_within_each_integer_lane() {
                 ((data << c) | (data >> (bits - c))) & mask
             };
             let f = parse(&format!(
-                "fn main a:{ty} b:{ty} -> {ty}\n r = {op} a b\n ret r"
+                "fn main(a:{ty} b:{ty}) -> {ty}\n r = {op} a b\n ret r"
             ));
             let kernel = ScalarKernel::compile(&f, &crate::test_target::options()).unwrap();
             let data = high | 1;
@@ -104,7 +97,7 @@ fn rotations_wrap_counts_within_each_integer_lane() {
                 assert_eq!(u128::from(out[0]) & mask, expected(data, c), "{op} {ty}");
             }
             let f = parse(&format!(
-                "fn main a:vec.{ty} b:vec.{ty} -> vec.{ty}\n r = simd.{op} a b\n ret r"
+                "fn main(a:vec.{ty} b:vec.{ty}) -> vec.{ty}\n r = {op} a b\n ret r"
             ));
             let kernel = ScalarKernel::compile(&f, &crate::test_target::options()).unwrap();
             let n = width / size as usize;
@@ -148,7 +141,7 @@ fn packed_float_specials_preserve_payloads_and_form_whole_lane_masks() {
         let boolean = op.starts_with("is") || op == "signbit";
         let result = if boolean { "i64" } else { "f64" };
         let f = parse(&format!(
-            "fn main a:vec.f64 -> vec.{result}\n r = simd.{op} a\n ret r"
+            "fn main(a:vec.f64) -> vec.{result}\n r = {op} a\n ret r"
         ));
         let kernel = ScalarKernel::compile(&f, &crate::test_target::options()).unwrap();
         for offset in [0, 3, 7] {
@@ -175,7 +168,7 @@ fn packed_float_specials_preserve_payloads_and_form_whole_lane_masks() {
         }
     }
 
-    let f = parse("fn main m:u128 a:u128 b:u128 -> u128\n r = bitselect m a b\n ret r");
+    let f = parse("fn main(m:u128 a:u128 b:u128) -> u128\n r = bitselect m a b\n ret r");
     let kernel = ScalarKernel::compile(&f, &crate::test_target::options()).unwrap();
     let args = [
         0x00ff00ffff00ff00,
@@ -225,7 +218,7 @@ fn width_changing_float_conversions_use_distinct_lane_cursors() {
         let args = lane_words(cases.iter().map(|&(bits, _)| bits), 2);
         for (op, start) in [("widenlo", 0), ("widenhi", width / 4)] {
             let f = parse(&format!(
-                "fn main a:vec.{ty} -> vec.f32\n r = simd.{op} f32 a\n ret r"
+                "fn main(a:vec.{ty}) -> vec.f32\n r = {op} f32 a\n ret r"
             ));
             let kernel = ScalarKernel::compile(&f, &crate::test_target::options()).unwrap();
             let mut out = vec![0; width / 8];
@@ -239,7 +232,7 @@ fn width_changing_float_conversions_use_distinct_lane_cursors() {
         }
     }
 
-    let f = parse("fn main a:vec.f32 b:vec.f32 -> vec.bf16\n r = simd.narrow bf16 a b\n ret r");
+    let f = parse("fn main(a:vec.f32 b:vec.f32) -> vec.bf16\n r = narrow bf16 a b\n ret r");
     let kernel = ScalarKernel::compile(&f, &crate::test_target::options()).unwrap();
     let cases = [
         (0x3f807fff, 0x3f80),
@@ -265,7 +258,7 @@ fn width_changing_float_conversions_use_distinct_lane_cursors() {
         lane_words(cases.iter().map(|&(_, expected)| expected), 2)
     );
 
-    let f = parse("fn main a:vec.f16 b:vec.f16 -> vec.i8\n r = simd.narrow i8 a b\n ret r");
+    let f = parse("fn main(a:vec.f16 b:vec.f16) -> vec.i8\n r = narrow i8 a b\n ret r");
     let kernel = ScalarKernel::compile(&f, &crate::test_target::options()).unwrap();
     let cases = [
         (0xbe00, 255),
@@ -285,7 +278,7 @@ fn width_changing_float_conversions_use_distinct_lane_cursors() {
         lane_words(cases.iter().map(|&(_, expected)| expected), 1)
     );
 
-    let f = parse("fn main a:vec.f64 -> vec.i128\n r = simd.widenhi i128 a\n ret r");
+    let f = parse("fn main(a:vec.f64) -> vec.i128\n r = widenhi i128 a\n ret r");
     let kernel = ScalarKernel::compile(&f, &crate::test_target::options()).unwrap();
     let fp = [
         1.875,
@@ -310,7 +303,7 @@ fn width_changing_float_conversions_use_distinct_lane_cursors() {
         )
     );
 
-    let f = parse("fn main a:vec.u128 b:vec.u128 -> vec.f64\n r = simd.narrow f64 a b\n ret r");
+    let f = parse("fn main(a:vec.u128 b:vec.u128) -> vec.f64\n r = narrow f64 a b\n ret r");
     let kernel = ScalarKernel::compile(&f, &crate::test_target::options()).unwrap();
     let mid = (1_u128 << 100) + (1 << 63) + (1 << 47);
     let vals = [
@@ -351,7 +344,7 @@ fn wide_width_changes_use_logical_halves() {
     for (ty, signed) in [("i64", true), ("u64", false)] {
         for (op, half) in [("widenlo", 0), ("widenhi", n / 2)] {
             let f = parse(&format!(
-                "fn main a:vec.{ty} -> vec.u128\n r = simd.{op} u128 a\n ret r"
+                "fn main(a:vec.{ty}) -> vec.u128\n r = {op} u128 a\n ret r"
             ));
             let kernel = ScalarKernel::compile(&f, &crate::test_target::options()).unwrap();
             let mut out = vec![0; n];
@@ -372,7 +365,7 @@ fn wide_width_changes_use_logical_halves() {
             assert_eq!(out, expected);
         }
     }
-    let f = parse("fn main a:vec.i128 b:vec.i128 -> vec.u64\n r = simd.narrow u64 a b\n ret r");
+    let f = parse("fn main(a:vec.i128 b:vec.i128) -> vec.u64\n r = narrow u64 a b\n ret r");
     let kernel = ScalarKernel::compile(&f, &crate::test_target::options()).unwrap();
     let args: Vec<_> = source[..n]
         .iter()
@@ -387,7 +380,7 @@ fn wide_width_changes_use_logical_halves() {
 #[test]
 fn physical_sve_tail_does_not_extend_iota_or_reductions() {
     let width = crate::test_target::width();
-    let f = parse("fn main -> vec.bf16\n r = simd.iota bf16\n ret r");
+    let f = parse("fn main() -> vec.bf16\n r = iota bf16\n ret r");
     let kernel = ScalarKernel::compile(&f, &crate::test_target::options()).unwrap();
     let mut out = vec![0; width / 8];
     kernel.call_words(&[], &mut out).unwrap();
@@ -404,7 +397,7 @@ fn physical_sve_tail_does_not_extend_iota_or_reductions() {
         ("bf16", 0x3f84, [0x3fa3, 0x3fd0, 0x402a]),
     ] {
         let f = parse(&format!(
-            "fn main a:{ty} -> {ty}\n v = simd.splat a\n r = simd.reduce mul v\n ret r"
+            "fn main(a:{ty}) -> {ty}\n v = splat a\n r = reduce mul v\n ret r"
         ));
         let kernel = ScalarKernel::compile(&f, &crate::test_target::options()).unwrap();
         let mut out = [0];
@@ -412,7 +405,7 @@ fn physical_sve_tail_does_not_extend_iota_or_reductions() {
         assert_eq!(out[0], expect[(width / 16).trailing_zeros() as usize]);
     }
 
-    let f = parse("fn main a:vec.f32 -> f32\n r = simd.reduce min a\n ret r");
+    let f = parse("fn main(a:vec.f32) -> f32\n r = reduce min a\n ret r");
     let kernel = ScalarKernel::compile(&f, &crate::test_target::options()).unwrap();
     let mut input = vec![7.0_f32.to_bits() as u128; width / 4];
     *input.last_mut().unwrap() = 0x7f800001;
@@ -420,7 +413,7 @@ fn physical_sve_tail_does_not_extend_iota_or_reductions() {
     kernel.call_words(&lane_words(input, 4), &mut out).unwrap();
     assert_eq!(out[0], 7.0_f32.to_bits() as u64);
 
-    let f = parse("fn main a:vec.u128 -> u128\n r = simd.reduce mul a\n ret r");
+    let f = parse("fn main(a:vec.u128) -> u128\n r = reduce mul a\n ret r");
     let kernel = ScalarKernel::compile(&f, &crate::test_target::options()).unwrap();
     let mut lanes = vec![1; width / 16];
     lanes[0] = (1 << 64) | 1;
@@ -441,7 +434,7 @@ fn wide_rearrangement_and_mask_tests_keep_full_pairs() {
     let mut sources = lane_words((0..n).map(a), 16);
     sources.extend(lane_words((0..n).map(b), 16));
     let shuffle = parse(
-        "fn main a:vec.u128 b:vec.u128 idx:vec.u128 -> vec.u128\n r = simd.shuffle a b idx\n ret r",
+        "fn main(a:vec.u128 b:vec.u128 idx:vec.u128) -> vec.u128\n r = shuffle a b idx\n ret r",
     );
     let shuffle = ScalarKernel::compile(&shuffle, &crate::test_target::options()).unwrap();
     let cases = [
@@ -464,8 +457,7 @@ fn wide_rearrangement_and_mask_tests_keep_full_pairs() {
         assert_eq!(out, lane_words(cases.map(|(_, want)| want), 16));
     }
 
-    let expand =
-        parse("fn main a:vec.i128 mask:vec.i128 -> vec.i128\n r = simd.expand a mask\n ret r");
+    let expand = parse("fn main(a:vec.i128 mask:vec.i128) -> vec.i128\n r = expand a mask\n ret r");
     let expand = ScalarKernel::compile(&expand, &crate::test_target::options()).unwrap();
     for mask in [
         [1 << 127; 4],
@@ -488,9 +480,7 @@ fn wide_rearrangement_and_mask_tests_keep_full_pairs() {
     }
 
     for (op, all) in [("all", true), ("any", false)] {
-        let f = parse(&format!(
-            "fn main a:vec.u128 -> i32\n r = simd.{op} a\n ret r"
-        ));
+        let f = parse(&format!("fn main(a:vec.u128) -> i32\n r = {op} a\n ret r"));
         let kernel = ScalarKernel::compile(&f, &crate::test_target::options()).unwrap();
         for values in [
             [1, 1 << 64, 1, 1 << 127],
@@ -541,7 +531,7 @@ fn vector_integer_division_checks_every_logical_lane() {
         ));
         for (op, is_rem) in [("div", false), ("rem", true)] {
             let f = parse(&format!(
-                "fn main a:vec.{ty} b:vec.{ty} -> vec.{ty}\n r = simd.{op} a b\n ret r"
+                "fn main(a:vec.{ty} b:vec.{ty}) -> vec.{ty}\n r = {op} a b\n ret r"
             ));
             let code = ScalarKernel::compile(&f, &crate::test_target::options()).unwrap();
             let mut actual = vec![0; width / 8];
@@ -564,7 +554,7 @@ fn narrow_division_reports_the_earliest_fault_across_groups() {
     let boundary = width / 4;
     for op in ["div", "rem"] {
         let f = parse(&format!(
-            "fn main a:vec.i8 b:vec.i8 -> vec.i8\n r = simd.{op} a b\n ret r"
+            "fn main(a:vec.i8 b:vec.i8) -> vec.i8\n r = {op} a b\n ret r"
         ));
         let code = ScalarKernel::compile(&f, &crate::test_target::options()).unwrap();
         for (first, second, error) in [
@@ -588,7 +578,7 @@ fn compress_keeps_order_and_zeros_the_full_tail() {
         let n = width / size;
         let sign = 1u128 << (size * 8 - 1);
         let f = parse(&format!(
-            "fn main a:vec.{ty} m:vec.{ty} -> vec.{ty}\n r = simd.compress a m\n ret r"
+            "fn main(a:vec.{ty} m:vec.{ty}) -> vec.{ty}\n r = compress a m\n ret r"
         ));
         let code = ScalarKernel::compile(&f, &crate::test_target::options()).unwrap();
         let data: Vec<_> = (0..n).map(|i| sign | (3 * i + 1) as u128).collect();
@@ -635,7 +625,7 @@ fn wide_indexed_memory_uses_both_words_in_lane_order() {
     let pass = [join(17, 33), join(18, 34), join(19, 35), join(20, 36)];
     let expected = [original[0], pass[1], original[2], original[0]];
     let load = ScalarKernel::compile(&parse(
-        "fn main p:ptr i:vec.i128 m:vec.u128 a:vec.u128 -> vec.u128\n r = simd.maskedload p i m a\n ret r"
+        "fn main(p:ptr i:vec.i128 m:vec.u128 a:vec.u128) -> vec.u128\n r = maskedload p i m a\n ret r"
     ), &crate::test_target::options()).unwrap();
     for rotate in 0..indices.len() {
         let words =
@@ -651,7 +641,7 @@ fn wide_indexed_memory_uses_both_words_in_lane_order() {
     }
 
     let store = ScalarKernel::compile(&parse(
-        "fn main p:ptr i:vec.i128 m:vec.u128 a:vec.u128 -> i32\n simd.maskedstore p i m a\n z = const 0\n ret z"
+        "fn main(p:ptr i:vec.i128 m:vec.u128 a:vec.u128) -> i32\n maskedstore p i m a\n z = const 0\n ret z"
     ), &crate::test_target::options()).unwrap();
     for count in [n, n - 1] {
         let mut data = original;
@@ -704,7 +694,7 @@ fn wide_integer_operations_match_rust_for_both_words() {
             "mul", "div", "rem", "lt", "le", "eq", "ne", "ge", "gt", "min", "max",
         ] {
             let f = parse(&format!(
-                "fn main a:vec.{ty} b:vec.{ty} -> vec.{ty}\n r = simd.{op} a b\n ret r"
+                "fn main(a:vec.{ty} b:vec.{ty}) -> vec.{ty}\n r = {op} a b\n ret r"
             ));
             let kernel = ScalarKernel::compile(&f, &crate::test_target::options()).unwrap();
             let pairs = if ty == "i128" {
@@ -785,7 +775,7 @@ fn wide_shifts_saturation_and_counts_use_the_entire_pair() {
         ("rotateright", "u128", u128::rotate_right),
     ] {
         let f = parse(&format!(
-            "fn main a:vec.{ty} b:vec.{ty} -> vec.{ty}\n r = simd.{op} a b\n ret r"
+            "fn main(a:vec.{ty} b:vec.{ty}) -> vec.{ty}\n r = {op} a b\n ret r"
         ));
         let kernel = ScalarKernel::compile(&f, &crate::test_target::options()).unwrap();
         for counts in shifts.chunks(n) {
@@ -816,7 +806,7 @@ fn wide_shifts_saturation_and_counts_use_the_entire_pair() {
     for ty in ["i128", "u128"] {
         for (op, sub) in [("saturatingadd", false), ("saturatingsub", true)] {
             let f = parse(&format!(
-                "fn main a:vec.{ty} b:vec.{ty} -> vec.{ty}\n r = simd.{op} a b\n ret r"
+                "fn main(a:vec.{ty} b:vec.{ty}) -> vec.{ty}\n r = {op} a b\n ret r"
             ));
             let kernel = ScalarKernel::compile(&f, &crate::test_target::options()).unwrap();
             let pairs = if ty == "i128" {
@@ -858,7 +848,7 @@ fn wide_shifts_saturation_and_counts_use_the_entire_pair() {
         ("trailingzeros", |a| a.trailing_zeros() as u128),
     ] {
         let f = parse(&format!(
-            "fn main a:vec.i128 -> vec.i128\n r = simd.{op} a\n ret r"
+            "fn main(a:vec.i128) -> vec.i128\n r = {op} a\n ret r"
         ));
         let kernel = ScalarKernel::compile(&f, &crate::test_target::options()).unwrap();
         for input in boundary.chunks(n) {
@@ -879,13 +869,13 @@ fn wide_shifts_saturation_and_counts_use_the_entire_pair() {
 fn packed_division_preserves_the_live_left_operand() {
     let f = parse(
         "
-        fn quotient a:vec.f64 b:vec.f64 -> vec.f64
-          q = simd.div a b
+        fn quotient(a:vec.f64 b:vec.f64) -> vec.f64
+          q = div a b
           ret q
 
-        fn main a:vec.f64 b:vec.f64 -> vec.f64
-          q = call quotient a b
-          r = simd.sub a q
+        fn main(a:vec.f64 b:vec.f64) -> vec.f64
+          q = call quotient(a b)
+          r = sub a q
           ret r
     ",
     );
@@ -1021,7 +1011,7 @@ fn floating_and_wide_integer_casts_round_and_saturate_at_target_width() {
         ),
     ] {
         let f = parse(&format!(
-            "fn main a:{from} -> {to}\n r = cast {to} a\n ret r"
+            "fn main(a:{from}) -> {to}\n r = cast {to} a\n ret r"
         ));
         let kernel = ScalarKernel::compile(&f, &crate::test_target::options()).unwrap();
         for (bits, want) in input.into_iter().zip(expected) {
@@ -1043,12 +1033,12 @@ fn floating_and_wide_integer_casts_round_and_saturate_at_target_width() {
 fn wide_root_return_and_outline_preserve_all_words() {
     let f = parse(
         "
-        fn twice v:vec.u64 -> vec.u64
-          result = simd.add v v
+        fn twice(v:vec.u64) -> vec.u64
+          result = add v v
           ret result
 
-        fn main a:vec.u64 -> vec.u64
-          b = call twice a
+        fn main(a:vec.u64) -> vec.u64
+          b = call twice(a)
           ret b
     ",
     );
@@ -1077,7 +1067,7 @@ fn wide_arithmetic_and_iota_preserve_lane_pairs() {
         ("sub", u128::wrapping_sub),
     ] {
         let f = parse(&format!(
-            "fn main a:vec.u128 b:vec.u128 -> vec.u128\n r = simd.{op} a b\n ret r"
+            "fn main(a:vec.u128 b:vec.u128) -> vec.u128\n r = {op} a b\n ret r"
         ));
         let jit = ScalarKernel::compile(&f, &crate::test_target::options()).unwrap();
         let mut actual = vec![0; 2 * lanes];
@@ -1089,7 +1079,7 @@ fn wide_arithmetic_and_iota_preserve_lane_pairs() {
             .collect();
         assert_eq!(actual, expected, "{op}");
     }
-    let f = parse("fn main -> vec.u128\n r = simd.iota u128\n ret r");
+    let f = parse("fn main() -> vec.u128\n r = iota u128\n ret r");
     let mut actual = vec![u64::MAX; 2 * lanes];
     ScalarKernel::compile(&f, &crate::test_target::options())
         .unwrap()
@@ -1107,11 +1097,11 @@ fn sve_logical_width_and_shorter_thread_are_checked() {
     let lanes = config.vector_bytes() / 4;
     let f = parse(
         "
-        fn main dst:ptr src:ptr -> i32
-          input = simd.load i32 src
-          doubled = simd.add input input
-          simd.store dst doubled
-          lanes = simd.lanes i32
+        fn main(dst:ptr src:ptr) -> i32
+          input = load vec.i32 src
+          doubled = add input input
+          store dst doubled
+          lanes = lanes i32
           ret lanes
     ",
     );

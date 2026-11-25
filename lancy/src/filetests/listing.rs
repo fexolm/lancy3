@@ -1,4 +1,4 @@
-use crate::hir::{self, Op, Simd, Terminator, Type, Value, ssa::VerifiedBody};
+use crate::hir::{self, ssa::VerifiedBody};
 use crate::module::Module;
 use std::fmt::{Display, Write};
 
@@ -10,133 +10,13 @@ pub(crate) fn list(items: impl IntoIterator<Item = impl Display>) -> String {
         .join(" ")
 }
 
-fn v(value: Value) -> String {
-    format!("v{}", value.index())
-}
-
+/// The functions of `module` in its order, each named by its ID.
 pub(super) fn hir(module: &Module<VerifiedBody>) -> String {
     let mut out = String::new();
     for (id, src) in module.functions.iter() {
-        let f = src.function;
-        writeln!(out, "fn f{} -> {:?}", id.index(), f.return_type()).unwrap();
-        let edge = |e| {
-            let (b, args) = f.edge(e);
-            format!("b{}({})", b.index(), list(args.iter().copied().map(v)))
-        };
-        for b in f.blocks() {
-            let params = f
-                .params(b)
-                .iter()
-                .map(|&x| format!("{}:{:?}", v(x), f.value_type(x)));
-            writeln!(out, "b{}({})", b.index(), list(params)).unwrap();
-            for i in f.instructions(b) {
-                out.push_str("  ");
-                if let Some(x) = f.result(i) {
-                    write!(out, "{} = ", v(x)).unwrap();
-                }
-                let op = match *f.op(i) {
-                    Op::DebugStore(offset, v) => format!("debug_store {offset}, {v:?}"),
-                    Op::DebugPoint(id) => format!("debug_point {id}"),
-                    Op::Const(n) => format!("const {n}"),
-                    Op::Copy(x) => format!("copy {}", v(x)),
-                    Op::Bin(op, x, y) if !matches!(f.value_type(x), Type::Vector(_)) => {
-                        format!("{op:?} {} {}", v(x), v(y))
-                    }
-                    Op::Simd(Simd::LaneCount(lane)) => format!("simd.lanes {lane:?}"),
-                    Op::Load(Type::Vector(l), p) => format!("simd.load {l:?} {}", v(p)),
-                    Op::Store(p, x) if matches!(f.value_type(x), Type::Vector(_)) => {
-                        format!("simd.store {} {}", v(p), v(x))
-                    }
-                    Op::PtrOffset(p, i, s) => format!("offset {} {} {}", v(p), v(i), 1 << s as u8),
-                    Op::BoundsCheck(i, n) => format!("bounds {} {}", v(i), v(n)),
-                    Op::TrapIf(cond, trap) => format!("trap_if {} {trap:?}", v(cond)),
-                    Op::Trap(trap) => format!("trap {trap:?}"),
-                    Op::RustCall(function, args) => {
-                        format!("rust_call {} {}", function.name, list(args.map(v)))
-                    }
-                    Op::CallScratch { offset, bytes } => format!("call_scratch {offset} {bytes}"),
-                    Op::Simd(Simd::MaskedLoad {
-                        address,
-                        mask,
-                        passthrough: x,
-                    })
-                    | Op::Simd(Simd::MaskedStore {
-                        address,
-                        mask,
-                        value: x,
-                    }) => {
-                        let op = if matches!(f.op(i), Op::Simd(Simd::MaskedLoad { .. })) {
-                            "maskedload"
-                        } else {
-                            "maskedstore"
-                        };
-                        format!(
-                            "simd.{op} {} {} {} {}",
-                            v(address.base),
-                            address.indices.map(v).unwrap_or_else(|| "-".into()),
-                            v(mask),
-                            v(x)
-                        )
-                    }
-                    Op::Simd(Simd::CompressStore {
-                        base,
-                        mask,
-                        value,
-                        limit,
-                    }) => format!(
-                        "simd.compressstore {} {} {} {}",
-                        v(base),
-                        v(mask),
-                        v(value),
-                        v(limit)
-                    ),
-                    Op::Literal(l, n) => format!("Literal({n}) {:?} ", l.scalar()),
-                    op @ (Op::Simd(_)
-                    | Op::Bin(..)
-                    | Op::Unary(..)
-                    | Op::Ternary(..)
-                    | Op::Cast(..)
-                    | Op::Bitcast(..)) => {
-                        let (_, _, output, _) =
-                            crate::hir::operation::operation(op, |v| f.value_type(v)).unwrap();
-                        let prefix =
-                            if matches!(op, Op::Simd(_)) || matches!(output, Type::Vector(_)) {
-                                "simd."
-                            } else {
-                                ""
-                            };
-                        let (action, _, output, args) =
-                            crate::hir::operation::operation(op, |v| f.value_type(v)).unwrap();
-                        format!(
-                            "{prefix}{:?} {:?} {}",
-                            action,
-                            output,
-                            list(args.into_iter().flatten().map(v))
-                        )
-                    }
-                    Op::Load(t, p) => format!("load {t:?} {}", v(p)),
-                    Op::Store(p, x) => format!("store {} {}", v(p), v(x)),
-                    Op::Call(site) => {
-                        let (_, args) = f.call(site);
-                        let id = src.callee(site);
-                        format!(
-                            "call f{}({})",
-                            id.index(),
-                            list(args.iter().copied().map(v))
-                        )
-                    }
-                };
-                writeln!(out, "{op}").unwrap();
-            }
-            let term = match *f.terminator(b) {
-                Terminator::Return(x) => format!("ret {}", v(x)),
-                Terminator::Jump(e) => format!("jump {}", edge(e)),
-                Terminator::Branch { cond, yes, no } => {
-                    format!("br {} {} | {}", v(cond), edge(yes), edge(no))
-                }
-            };
-            writeln!(out, "  {term}").unwrap();
-        }
+        let callee = |call| format!("f{}", src.callee(call).index());
+        hir::text::write_function(&mut out, &format!("f{}", id.index()), src.function, &callee)
+            .unwrap();
     }
     out
 }

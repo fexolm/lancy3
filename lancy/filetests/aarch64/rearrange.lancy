@@ -1,5 +1,5 @@
-fn main extra:i32 -> i32
-  n = simd.lanes i32
+fn main(extra:i32) -> i32
+  n = lanes i32
   zero = const 0
   one = const 1
   two = const 2
@@ -9,20 +9,20 @@ fn main extra:i32 -> i32
   last = sub n one
   double = add n n
   end = sub double one
-  iota = simd.iota i32
-  tens = simd.splat ten
-  hundreds = simd.splat hundred
-  a = simd.add iota tens
-  b = simd.add iota hundreds
-  base = simd.splat extra
-  first = simd.insert base zero last
-  second = simd.insert first one n
-  indices = simd.insert second two end
-  selected = simd.shuffle a b indices
-  a_last = simd.extract selected zero
-  b_first = simd.extract selected one
-  b_last = simd.extract selected two
-  fourth = simd.extract selected three
+  iota = iota i32
+  tens = splat ten
+  hundreds = splat hundred
+  a = add iota tens
+  b = add iota hundreds
+  base = splat extra
+  first = insert base zero last
+  second = insert first one n
+  indices = insert second two end
+  selected = shuffle a b indices
+  a_last = extract selected zero
+  b_first = extract selected one
+  b_last = extract selected two
+  fourth = extract selected three
   a_offset = sub a_last n
   b_offset = sub b_last n
   first_pair = add a_offset b_first
@@ -41,19 +41,19 @@ fn main extra:i32 -> i32
 @run 0x80000000 -> 208
 @run 0x7fffffff -> 208
 ---
-fn main delta:i32 -> i32
+fn main(delta:i32) -> i32
   a0 = literal u8 0x11
   b0 = literal u8 0x17
-  a = simd.splat a0
-  b = simd.splat b0
-  n = simd.lanes u8
+  a = splat a0
+  b = splat b0
+  n = lanes u8
   size = add n n
   scalar = add size delta
   byte = cast u8 scalar
-  indices = simd.splat byte
-  result = simd.shuffle a b indices
+  indices = splat byte
+  result = shuffle a b indices
   zero = const 0
-  lane = simd.extract result zero
+  lane = extract result zero
   r = cast i32 lane
   ret r
 @aarch64 all lacks blr
@@ -61,23 +61,23 @@ fn main delta:i32 -> i32
 @run 0 -> 0
 @run 127 -> 0
 ---
-fn main first:i32 last:i32 -> i32
+fn main(first:i32 last:i32) -> i32
   one = const 1
   zero = const 0
   eleven = const 11
   sixteen = const 16
-  base = simd.splat eleven
-  iota = simd.iota i32
-  packed = simd.add iota base
-  lanes = simd.lanes i32
+  base = splat eleven
+  iota = iota i32
+  packed = add iota base
+  lanes = lanes i32
   end = sub lanes one
-  fill = simd.splat one
-  initial = simd.insert fill one first
-  mask = simd.insert initial end last
-  expanded = simd.expand packed mask
-  skip = simd.extract expanded zero
-  a = simd.extract expanded one
-  b = simd.extract expanded end
+  fill = splat one
+  initial = insert fill one first
+  mask = insert initial end last
+  expanded = expand packed mask
+  skip = extract expanded zero
+  a = extract expanded one
+  b = extract expanded end
   upper = mul b sixteen
   sum = add a upper
   result = add sum skip
@@ -91,24 +91,24 @@ fn main first:i32 last:i32 -> i32
 @run -1 1 -> 11
 @run 1 1 -> 0
 ---
-fn main first:i32 last:i32 -> i32
+fn main(first:i32 last:i32) -> i32
   one = const 1
   zero = const 0
   eleven = literal i64 0xb
   noncanonical = literal i64 0x0000000080000000
-  base = simd.splat eleven
-  iota = simd.iota i64
-  packed = simd.add iota base
-  lanes = simd.lanes i64
+  base = splat eleven
+  iota = iota i64
+  packed = add iota base
+  lanes = lanes i64
   end = sub lanes one
   lo = cast i64 first
   hi = cast i64 last
-  fill = simd.splat noncanonical
-  initial = simd.insert fill zero lo
-  mask = simd.insert initial end hi
-  expanded = simd.expand packed mask
-  a = simd.extract expanded zero
-  b = simd.extract expanded end
+  fill = splat noncanonical
+  initial = insert fill zero lo
+  mask = insert initial end hi
+  expanded = expand packed mask
+  a = extract expanded zero
+  b = extract expanded end
   a32 = cast i32 a
   b32 = cast i32 b
   sixteen = const 16
@@ -122,26 +122,26 @@ fn main first:i32 last:i32 -> i32
 @run -1 1 -> 11
 @run 1 1 -> 0
 ---
-fn main first:i32 last:i32 -> i32
+fn main(first:i32 last:i32) -> i32
   zero = const 0
   one = const 1
   base = literal u16 0x180
   noncanonical = literal u16 0x0080
-  iota = simd.iota u16
-  start = simd.splat base
-  values = simd.add iota start
-  lanes = simd.lanes u16
+  iota = iota u16
+  start = splat base
+  values = add iota start
+  lanes = lanes u16
   end = sub lanes one
   lo = cast u16 first
   hi = cast u16 last
-  fill = simd.splat noncanonical
-  initial = simd.insert fill zero lo
-  mask = simd.insert initial end hi
-  expanded = simd.expand values mask
-  a = simd.extract expanded zero
-  b = simd.extract expanded end
+  fill = splat noncanonical
+  initial = insert fill zero lo
+  mask = insert initial end hi
+  expanded = expand values mask
+  a = extract expanded zero
+  b = extract expanded end
   mid = shr lanes one
-  c = simd.extract expanded mid
+  c = extract expanded mid
   a32 = cast i32 a
   b32 = cast i32 b
   c32 = cast i32 c
@@ -161,35 +161,35 @@ fn main first:i32 last:i32 -> i32
 @run 0x0080 0x8100 -> 196608
 @run 0x0080 0x0080 -> 0
 ---
-fn main first:i32 -> i32
+fn main(first:i32) -> i32
   start = cast u8 first
-  base = simd.splat start
-  iota = simd.iota u8
-  values = simd.add iota base
+  base = splat start
+  iota = iota u8
+  values = add iota base
   on = literal u8 0x80
-  mask = simd.splat on
-  expanded = simd.expand values mask
-  diff = simd.ne expanded values
-  result = simd.any diff
+  mask = splat on
+  expanded = expand values mask
+  diff = ne expanded values
+  result = any diff
   ret result
 @aarch64 all lacks blr
 @run 21 -> 0
 @run 255 -> 0
 ---
-fn main -> i32
-  n = simd.lanes u8
+fn main() -> i32
+  n = lanes u8
   one = const 1
   last = sub n one
   last_byte = cast u8 last
-  n_minus_one = simd.splat last_byte
-  iota = simd.iota u8
-  mask = simd.sub n_minus_one iota
+  n_minus_one = splat last_byte
+  iota = iota u8
+  mask = sub n_minus_one iota
   seventeen = literal u8 0x11
-  base = simd.splat seventeen
-  values = simd.add base iota
-  result = simd.compress values mask
+  base = splat seventeen
+  values = add base iota
+  result = compress values mask
   zero = const 0
-  first = simd.extract result zero
+  first = extract result zero
   r = cast i32 first
   ret r
 @aarch64-isel check: Compact {
@@ -199,16 +199,16 @@ fn main -> i32
 @aarch64 all lacks blr
 @run -> 0
 ---
-fn main -> i32
-  n = simd.lanes u128
+fn main() -> i32
+  n = lanes u128
   one = const 1
   last = sub n one
   index_bits = cast u128 last
   cutoff = not index_bits
-  mask = simd.splat cutoff
-  indices = simd.iota u128
-  extra = simd.and indices mask
-  result = simd.any extra
+  mask = splat cutoff
+  indices = iota u128
+  extra = and indices mask
+  result = any extra
   ret result
 @aarch64-isel check: WideMaskTest(
 @aarch64 all lacks blr

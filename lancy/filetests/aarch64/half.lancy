@@ -1,4 +1,4 @@
-fn main x:i32 y:i32 -> i32
+fn main(x:i32 y:i32) -> i32
   xa = cast u16 x
   ya = cast u16 y
   a = bitcast bf16 xa
@@ -15,7 +15,7 @@ fn main x:i32 y:i32 -> i32
 @run 0x00fd 0x3f00 -> 0x007e
 @run 0x00ff 0x3f00 -> 0x0080
 ---
-fn main x:i32 y:i32 -> i32
+fn main(x:i32 y:i32) -> i32
   xa = cast u16 x
   ya = cast u16 y
   a = bitcast f16 xa
@@ -31,7 +31,7 @@ fn main x:i32 y:i32 -> i32
 @run 3 0x3800 -> 2
 @run 0x07ff 0x3800 -> 0x0400
 ---
-fn main x:i32 y:i32 -> i32
+fn main(x:i32 y:i32) -> i32
   xa = cast u16 x
   ya = cast u16 y
   a = bitcast bf16 xa
@@ -47,7 +47,7 @@ fn main x:i32 y:i32 -> i32
 @run 0x3f80 0xff81 -> 0xffc0
 @run 0xffd5 0x7f81 -> 0xffc0
 ---
-fn main x:i32 y:i32 -> i32
+fn main(x:i32 y:i32) -> i32
   xa = cast u16 x
   ya = cast u16 y
   a = bitcast f16 xa
@@ -62,7 +62,7 @@ fn main x:i32 y:i32 -> i32
 @run 0x7e55 0xfc01 -> 0x7e00
 @run 0x3c00 0xfc01 -> 0xfe00
 ---
-fn main x:i32 y:i32 -> i32
+fn main(x:i32 y:i32) -> i32
   xa = cast u16 x
   ya = cast u16 y
   a = bitcast bf16 xa
@@ -77,7 +77,7 @@ fn main x:i32 y:i32 -> i32
 @run 0x7f7f 0x7b00 -> 0x7f80
 @run 0x8000 0x8000 -> 0x8000
 ---
-fn main p:ptr -> i32
+fn main(p:ptr) -> i32
   v = load f64 p
   f = cast bf16 v
   raw = bitcast u16 f
@@ -91,17 +91,17 @@ fn main p:ptr -> i32
 @run -> 0x0000 | 00 00 00 00 00 00 90 37 | 00 00 00 00 00 00 90 37
 @run -> 0x0001 | 01 00 00 00 00 00 90 37 | 01 00 00 00 00 00 90 37
 ---
-fn main x:i32 -> i32
+fn main(x:i32) -> i32
   raw = cast u16 x
   f = bitcast f16 raw
   base = literal f16 0x3c00
-  v = simd.splat base
-  n = simd.lanes f16
+  v = splat base
+  n = lanes f16
   one = const 1
   last = sub n one
-  input = simd.insert v last f
-  out = simd.sqrt input
-  result = simd.extract out last
+  input = insert v last f
+  out = sqrt input
+  result = extract out last
   bits = bitcast u16 result
   r = cast i32 bits
   ret r
@@ -111,7 +111,7 @@ fn main x:i32 -> i32
 @run 0x0001 -> 0x0c00
 @run 0x8000 -> 0x8000
 ---
-fn main a:i32 b:i32 c:i32 -> i32
+fn main(a:i32 b:i32 c:i32) -> i32
   ap = cast u16 a
   bp = cast u16 b
   cp = cast u16 c
@@ -135,26 +135,26 @@ fn main a:i32 b:i32 c:i32 -> i32
 @run 0x8000 0x4000 0x8000 -> 0x8000
 @run 0x8000 0x4000 0x0000 -> 0
 ---
-fn main bits:i32 -> i32
+fn main(bits:i32) -> i32
   raw = cast u16 bits
   x = bitcast f16 raw
   y = literal f16 0x3c01
   z = literal f16 0xbe02
-  xv = simd.splat x
-  yv = simd.splat y
-  zv = simd.splat z
-  result = simd.fma xv yv zv
+  xv = splat x
+  yv = splat y
+  zv = splat z
+  result = fma xv yv zv
   one = const 1
-  n = simd.lanes f16
+  n = lanes f16
   last = sub n one
-  lane = simd.extract result last
+  lane = extract result last
   raw_result = bitcast u16 lane
   r = cast i32 raw_result
   ret r
 @aarch64 all lacks blr
 @run 0x3e00 -> 0x9000
 ---
-fn main bits:i32 -> i32
+fn main(bits:i32) -> i32
   raw = cast u16 bits
   f = bitcast f16 raw
   out = nextup f
@@ -170,7 +170,7 @@ fn main bits:i32 -> i32
 @run 0xfc00 -> 0xfbff
 @run 0xfc01 -> 0xfc01
 ---
-fn main bits:i32 -> i32
+fn main(bits:i32) -> i32
   raw = cast u16 bits
   f = bitcast bf16 raw
   out = nextdown f
@@ -186,7 +186,7 @@ fn main bits:i32 -> i32
 @run 0x7f80 -> 0x7f7f
 @run 0xffd5 -> 0xffd5
 ---
-fn main bits:i32 -> i32
+fn main(bits:i32) -> i32
   raw = cast u16 bits
   f = bitcast bf16 raw
   out = signum f

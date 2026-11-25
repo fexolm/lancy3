@@ -1,11 +1,11 @@
 # Forward an exact read regardless of the scalar type.
-fn main p:ptr x:i32 -> i32
+fn main(p:ptr x:i32) -> i32
   a = cast f64 x
   store p a
   read = load f64 p
   out = cast i32 read
   ret out
-@source check: load F64
+@source check: load f64
 @opt check: store
 @opt not: load
 @opt check: ret
@@ -13,7 +13,7 @@ fn main p:ptr x:i32 -> i32
 
 ---
 
-fn main p:ptr x:i32 -> i32
+fn main(p:ptr x:i32) -> i32
   a = cast u16 x
   z = const 0
   addr = offset p z 2
@@ -28,7 +28,7 @@ fn main p:ptr x:i32 -> i32
 
 ---
 
-fn main p:ptr -> i32
+fn main(p:ptr) -> i32
   wide = literal u128 00112233445566778899aabb00000007
   store p wide
   read = load u128 p
@@ -41,12 +41,12 @@ fn main p:ptr -> i32
 
 ---
 
-fn main p:ptr q:ptr replacement:ptr -> ptr
+fn main(p:ptr q:ptr replacement:ptr) -> ptr
   store p q
   store p replacement
   read = load ptr p
   ret read
-@source check: load Ptr
+@source check: load ptr
 @opt check: store
 @opt not: store
 @opt not: load
@@ -55,37 +55,37 @@ fn main p:ptr q:ptr replacement:ptr -> ptr
 ---
 
 # Match the CFG emitted by a checked full-width Splice store.
-fn main p:ptr n:i32 x:i32 -> i32
+fn main(p:ptr n:i32 x:i32) -> i32
   zero = const 0
-  original = simd.load u16 p
+  original = load vec.u16 p
   item = cast u16 x
-  updated = simd.insert original zero item
-  lanes = simd.lanes u16
+  updated = insert original zero item
+  lanes = lanes u16
   full = ge n lanes
-  br full whole | short
-block whole
-  simd.store p updated
-  jump join
-block short
+  br full whole() | short()
+block whole()
+  store p updated
+  jump join()
+block short()
   count = cast u16 n
-  limit = simd.splat count
-  indices = simd.iota u16
-  active = simd.lt indices limit
-  simd.maskedstore p - active updated
+  limit = splat count
+  indices = iota u16
+  active = lt indices limit
+  maskedstore p - active updated
   bounds n n
-  jump join
-block join
-  read = simd.load u16 p
-  item_out = simd.extract read zero
+  jump join()
+block join()
+  read = load vec.u16 p
+  item_out = extract read zero
   out = cast i32 item_out
   ret out
-@source check: simd.store
-@source check: simd.load U16
-@opt check: simd.load U16
-@opt check: simd.store
-@opt check: simd.maskedstore
+@source check: store
+@source check: load vec.u16
+@opt check: load vec.u16
+@opt check: store
+@opt check: maskedstore
 @opt check: bounds
-@opt not: simd.load
+@opt not: load vec.
 @opt check: ret
 @run 32 -2 -> 65534 | 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 | fe ff 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
 @run 1 -2 -> !bounds | 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 | fe ff 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
@@ -93,164 +93,164 @@ block join
 ---
 
 # The value in the successful predecessor does not dominate the load.
-fn main p:ptr n:i32 x:i32 -> i32
-  br n yes | fail
-block yes
+fn main(p:ptr n:i32 x:i32) -> i32
+  br n yes() | fail()
+block yes()
   one = const 1
   a = add x one
   store p a
-  jump join
-block fail
+  jump join()
+block fail()
   bounds n n
-  jump join
-block join
+  jump join()
+block join()
   read = load i32 p
   ret read
-@opt check: load I32
+@opt check: load i32
 @run 1 7 -> 8 | aa aa aa aa | 08 00 00 00
 @run 0 7 -> !bounds | aa aa aa aa | aa aa aa aa
 
 ---
 
 # A scalar write into the vector invalidates the earlier vector value.
-fn main p:ptr x:i32 -> i32
+fn main(p:ptr x:i32) -> i32
   zero = const 0
   one = const 1
   two = const 2
   item = cast u16 zero
-  v = simd.splat item
-  simd.store p v
+  v = splat item
+  store p v
   middle = offset p one 4
   store middle x
-  read = simd.load u16 p
-  item_out = simd.extract read two
+  read = load vec.u16 p
+  item_out = extract read two
   out = cast i32 item_out
   ret out
 @opt check: store
-@opt check: simd.load U16
+@opt check: load vec.u16
 @run 0x12345678 -> 22136 | 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 | 00 00 00 00 78 56 34 12 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
 
 ---
 
 # Indexed writes may reach bytes before their base.
-fn main p:ptr x:i32 -> i32
+fn main(p:ptr x:i32) -> i32
   zero = const 0
   one = const 1
   minus_one = const -1
   base = offset p one 4
   before = load i32 p
-  ramp = simd.iota i32
-  zeros = simd.splat zero
-  mask = simd.eq ramp zeros
-  indices = simd.splat minus_one
-  update = simd.splat x
-  simd.maskedstore base indices mask update
+  ramp = iota i32
+  zeros = splat zero
+  mask = eq ramp zeros
+  indices = splat minus_one
+  update = splat x
+  maskedstore base indices mask update
   after = load i32 p
   r = add before after
   ret r
-@opt check: load I32
-@opt check: simd.maskedstore
-@opt check: load I32
+@opt check: load i32
+@opt check: maskedstore
+@opt check: load i32
 @run 13 -> 20 | 07 00 00 00 09 00 00 00 | 0d 00 00 00 09 00 00 00
 
 ---
 
 # Masked reads can share a value when their inactive lanes agree.
-fn main p:ptr fallback:i32 -> i32
+fn main(p:ptr fallback:i32) -> i32
   zero = const 0
   one = const 1
-  zeros = simd.splat zero
-  ramp = simd.iota i32
-  mask = simd.eq ramp zeros
-  inactive = simd.splat fallback
-  a = simd.maskedload p - mask inactive
-  b = simd.maskedload p - mask inactive
-  x = simd.extract a zero
-  y = simd.extract b one
+  zeros = splat zero
+  ramp = iota i32
+  mask = eq ramp zeros
+  inactive = splat fallback
+  a = maskedload p - mask inactive
+  b = maskedload p - mask inactive
+  x = extract a zero
+  y = extract b one
   r = add x y
   ret r
-@opt check: simd.maskedload
-@opt not: simd.maskedload
+@opt check: maskedload
+@opt not: maskedload
 @opt check: ret
 @run 13 -> 20 | 07 00 00 00 | 07 00 00 00
 
 ---
 
 # The passthrough is part of a masked read's value.
-fn main p:ptr fallback:i32 -> i32
+fn main(p:ptr fallback:i32) -> i32
   zero = const 0
   one = const 1
-  zeros = simd.splat zero
-  ramp = simd.iota i32
-  mask = simd.eq ramp zeros
-  inactive = simd.splat fallback
-  a = simd.maskedload p - mask zeros
-  b = simd.maskedload p - mask inactive
-  x = simd.extract a one
-  y = simd.extract b one
+  zeros = splat zero
+  ramp = iota i32
+  mask = eq ramp zeros
+  inactive = splat fallback
+  a = maskedload p - mask zeros
+  b = maskedload p - mask inactive
+  x = extract a one
+  y = extract b one
   r = add x y
   ret r
-@opt check: simd.maskedload
-@opt check: simd.maskedload
+@opt check: maskedload
+@opt check: maskedload
 @run 13 -> 13 | 07 00 00 00 | 07 00 00 00
 
 ---
 
 # Identical masked scatters overwrite the same bytes, including duplicate indices.
-fn main p:ptr x:i32 -> i32
+fn main(p:ptr x:i32) -> i32
   zero = const 0
-  indices = simd.splat zero
-  mask = simd.eq indices indices
-  first = simd.iota i32
-  last = simd.splat x
-  simd.maskedstore p indices mask first
-  simd.maskedstore p indices mask last
+  indices = splat zero
+  mask = eq indices indices
+  first = iota i32
+  last = splat x
+  maskedstore p indices mask first
+  maskedstore p indices mask last
   ret zero
-@opt check: simd.maskedstore
-@opt not: simd.maskedstore
+@opt check: maskedstore
+@opt not: maskedstore
 @opt check: ret
 @run 13 -> 0 | 07 00 00 00 | 0d 00 00 00
 
 ---
 
 # A different mask can leave earlier bytes untouched.
-fn main p:ptr x:i32 y:i32 -> i32
+fn main(p:ptr x:i32 y:i32) -> i32
   zero = const 0
   one = const 1
-  zeros = simd.splat zero
-  ones = simd.splat one
-  ramp = simd.iota i32
-  first = simd.eq ramp ones
-  second = simd.eq ramp zeros
-  left = simd.splat x
-  right = simd.splat y
-  simd.maskedstore p - first left
-  simd.maskedstore p - second right
+  zeros = splat zero
+  ones = splat one
+  ramp = iota i32
+  first = eq ramp ones
+  second = eq ramp zeros
+  left = splat x
+  right = splat y
+  maskedstore p - first left
+  maskedstore p - second right
   ret zero
-@opt check: simd.maskedstore
-@opt check: simd.maskedstore
+@opt check: maskedstore
+@opt check: maskedstore
 @run 5 7 -> 0 | aa aa aa aa bb bb bb bb | 07 00 00 00 05 00 00 00
 
 ---
 
 # Loads on both sides of a join can reuse a common memory value.
-fn main p:ptr flag:i32 -> i32
+fn main(p:ptr flag:i32) -> i32
   first = load i32 p
-  br flag left | right
-block left
+  br flag left() | right()
+block left()
   one = const 1
   a = add first one
-  jump join a
-block right
+  jump join(a)
+block right()
   two = const 2
   b = xor first two
-  jump join b
-block join addend:i32
+  jump join(b)
+block join(addend:i32)
   again = load i32 p
   out = add again addend
   ret out
-@opt check: load I32
-@opt not: load I32
+@opt check: load i32
+@opt not: load i32
 @opt check: ret
 @run 1 -> 15 | 07 00 00 00 | 07 00 00 00
 @run 0 -> 12 | 07 00 00 00 | 07 00 00 00
@@ -258,42 +258,42 @@ block join addend:i32
 ---
 
 # An out-of-line write clobbers the previous read and may observe stores.
-fn write p:ptr x:i32 -> i32
+fn write(p:ptr x:i32) -> i32
   store p x
   ret x
-fn main p:ptr x:i32 -> i32
+fn main(p:ptr x:i32) -> i32
   a = load i32 p
-  written = call write p x
+  written = call write(p x)
   b = load i32 p
   out = add a b
   ret out
 @policy never
-@opt check: load I32
+@opt check: load i32
 @opt check: call
-@opt check: load I32
+@opt check: load i32
 @run 13 -> 20 | 07 00 00 00 | 0d 00 00 00
 
 ---
 
 # Full SIMD stores overwrite every byte, even across blocks.
-fn main p:ptr x:i32 -> i32
+fn main(p:ptr x:i32) -> i32
   zero = const 0
-  first = simd.splat x
-  last = simd.splat zero
-  simd.store p first
-  jump overwrite
-block overwrite
-  simd.store p last
+  first = splat x
+  last = splat zero
+  store p first
+  jump overwrite()
+block overwrite()
+  store p last
   ret zero
-@opt check: simd.store
-@opt not: simd.store
+@opt check: store
+@opt not: store
 @opt check: ret
 @run 7 -> 0 | 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 | 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
 
 ---
 
 # A trap between exact stores exposes the first one.
-fn main p:ptr i:i32 n:i32 x:i32 y:i32 -> i32
+fn main(p:ptr i:i32 n:i32 x:i32 y:i32) -> i32
   store p x
   bounds i n
   store p y
@@ -307,7 +307,7 @@ fn main p:ptr i:i32 n:i32 x:i32 y:i32 -> i32
 ---
 
 # A constant nonzero divisor other than signed -1 cannot expose the first store.
-fn main p:ptr x:i32 y:i32 -> i32
+fn main(p:ptr x:i32 y:i32) -> i32
   wide = cast i64 x
   two = literal i64 2
   store p x
@@ -316,7 +316,7 @@ fn main p:ptr x:i32 y:i32 -> i32
   out = cast i32 quotient
   ret out
 @opt not: store
-@opt check: Div
+@opt check: = div
 @opt check: store
 @opt not: store
 @opt check: ret
@@ -324,7 +324,7 @@ fn main p:ptr x:i32 y:i32 -> i32
 
 ---
 
-fn main p:ptr x:i32 y:i32 -> i32
+fn main(p:ptr x:i32 y:i32) -> i32
   min = literal i64 8000000000000000
   minus_one = literal i64 ffffffffffffffff
   store p x
@@ -333,26 +333,26 @@ fn main p:ptr x:i32 y:i32 -> i32
   out = cast i32 quotient
   ret out
 @opt check: store
-@opt check: Div
+@opt check: = div
 @opt check: store
 @run 5 7 -> !overflow | aa aa aa aa | 05 00 00 00
 
 ---
 
-fn main p:ptr x:i32 y:i32 -> i32
+fn main(p:ptr x:i32 y:i32) -> i32
   zero = const 0
   lane = cast u16 x
   two = literal u16 2
-  a = simd.splat lane
-  b = simd.splat two
+  a = splat lane
+  b = splat two
   store p x
-  quotient = simd.div a b
+  quotient = div a b
   store p y
-  low = simd.extract quotient zero
+  low = extract quotient zero
   out = cast i32 low
   ret out
 @opt not: store
-@opt check: simd.Binary(Div)
+@opt check: = div
 @opt check: store
 @opt check: ret
 @run 10 7 -> 5 | aa aa aa aa | 07 00 00 00
@@ -360,7 +360,7 @@ fn main p:ptr x:i32 y:i32 -> i32
 ---
 
 # Adjacent reads do not observe a store that will be overwritten.
-fn main p:ptr x:i32 y:i32 -> i32
+fn main(p:ptr x:i32 y:i32) -> i32
   four = const 4
   q = offset p four 1
   store p x
@@ -377,7 +377,7 @@ fn main p:ptr x:i32 y:i32 -> i32
 ---
 
 # An overlapping read observes the original store.
-fn main p:ptr x:i32 y:i32 -> i32
+fn main(p:ptr x:i32 y:i32) -> i32
   two = const 2
   q = offset p two 1
   store p x
@@ -392,7 +392,7 @@ fn main p:ptr x:i32 y:i32 -> i32
 ---
 
 # A narrow overwrite leaves part of a wider value observable.
-fn main p:ptr -> i32
+fn main(p:ptr) -> i32
   zero = const 0
   wide = literal u64 1234567889abcdef
   narrow = literal u32 10203040
@@ -406,13 +406,13 @@ fn main p:ptr -> i32
 ---
 
 # An overwrite on only one branch cannot kill an earlier store.
-fn main p:ptr flag:i32 x:i32 y:i32 -> i32
+fn main(p:ptr flag:i32 x:i32 y:i32) -> i32
   store p x
-  br flag overwrite | done x
-block overwrite
+  br flag overwrite() | done(x)
+block overwrite()
   store p y
-  jump done y
-block done result:i32
+  jump done(y)
+block done(result:i32)
   ret result
 @opt check: store
 @opt check: br

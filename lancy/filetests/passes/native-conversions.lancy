@@ -1,5 +1,5 @@
 # The input is dynamic so all three conversions must execute.
-fn main x:u128 -> i128
+fn main(x:u128) -> i128
   half = cast bf16 x
   single = cast f32 half
   wide = cast i128 single
@@ -8,29 +8,29 @@ fn main x:u128 -> i128
 @asm not: call
 @asm check: ret
 ---
-fn main x:f64 -> u128
+fn main(x:f64) -> u128
   wide = cast u128 x
   ret wide
 @asm check: endbr64
 @asm not: call
 @asm check: ret
 ---
-fn main x:f16 y:f16 z:f16 -> f16
+fn main(x:f16 y:f16 z:f16) -> f16
   answer = fma x y z
   ret answer
 @asm check: endbr64
 @asm not: call
 @asm check: ret
 ---
-fn main x:vec.bf16 y:vec.bf16 z:vec.bf16 -> vec.bf16
-  answer = simd.fma x y z
+fn main(x:vec.bf16 y:vec.bf16 z:vec.bf16) -> vec.bf16
+  answer = fma x y z
   ret answer
 @asm check: endbr64
 @asm not: call
 @asm check: ret
 ---
 # Exposing the low address bits permits alignment arithmetic on a slice.
-fn main base:ptr i:i32 -> i32
+fn main(base:ptr i:i32) -> i32
   next = offset base i 4
   a = bitcast u64 base
   b = bitcast u64 next

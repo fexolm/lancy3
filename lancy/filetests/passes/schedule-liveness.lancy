@@ -1,10 +1,10 @@
 # The use of b in sibling cannot extend its life in work.
-fn main route:i32 a:i32 b:i32 c:i32 d:i32 e:i32 -> i32
+fn main(route:i32 a:i32 b:i32 c:i32 d:i32 e:i32) -> i32
   mask = const 17
-  br route work | sibling
-block sibling
+  br route work() | sibling()
+block sibling()
   ret b
-block work
+block work()
   t0 = mul b d
   t1 = add a d
   t2 = sub t1 t0
@@ -26,7 +26,7 @@ block work
 ---
 
 # Every use of b is in work, but it remains live across the backedge.
-fn main p:ptr n:i32 b:i32 -> i32
+fn main(p:ptr n:i32 b:i32) -> i32
   zero = const 0
   one = const 1
   ka = const 4
@@ -34,15 +34,15 @@ fn main p:ptr n:i32 b:i32 -> i32
   kd = const 5
   ke = const 8
   mask = const 17
-  jump head zero
-block head i:i32
+  jump head(zero)
+block head(i:i32)
   a = add i ka
   c = add i kc
   d = add i kd
   e = add i ke
   more = lt i n
-  br more work | done
-block work
+  br more work() | done()
+block work()
   t0 = mul b d
   t1 = add a d
   t2 = sub t1 t0
@@ -51,12 +51,12 @@ block work
   t5 = or e b
   t6 = mul t4 t3
   answer = sub t6 t5
-  jump latch
-block latch
+  jump latch()
+block latch()
   store p answer
   next = add i one
-  jump head next
-block done
+  jump head(next)
+block done()
   ret i
 @alloc check: alu.Mul
 @alloc check: alu.Sub
@@ -70,12 +70,12 @@ block done
 ---
 
 # b escapes work as an argument from a critical-edge bridge.
-fn main route:i32 take:i32 a:i32 b:i32 c:i32 d:i32 e:i32 -> i32
+fn main(route:i32 take:i32 a:i32 b:i32 c:i32 d:i32 e:i32) -> i32
   mask = const 17
-  br route work | sibling
-block sibling
-  jump merge e c
-block work
+  br route work() | sibling()
+block sibling()
+  jump merge(e c)
+block work()
   t0 = mul b d
   t1 = add a d
   t2 = sub t1 t0
@@ -84,10 +84,10 @@ block work
   t5 = or e b
   t6 = mul t4 t3
   answer = sub t6 t5
-  br take merge answer b | plain
-block plain
+  br take merge(answer b) | plain()
+block plain()
   ret answer
-block merge sum:i32 carried:i32
+block merge(sum:i32 carried:i32)
   result = add sum carried
   ret result
 @alloc check: alu.Sub
@@ -100,7 +100,7 @@ block merge sum:i32 carried:i32
 ---
 
 # The last local use of b follows a scheduling barrier.
-fn main a:i32 b:i32 c:i32 d:i32 e:i32 divisor:i32 -> i32
+fn main(a:i32 b:i32 c:i32 d:i32 e:i32 divisor:i32) -> i32
   mask = const 17
   t0 = mul b d
   t1 = add a d

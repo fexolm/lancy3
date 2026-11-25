@@ -1,4 +1,4 @@
-fn main base:ptr i:i32 len:i32 -> i32
+fn main(base:ptr i:i32 len:i32) -> i32
   bounds i len
   bounds i len
   addr = offset base i 4
@@ -23,32 +23,32 @@ fn main base:ptr i:i32 len:i32 -> i32
 
 ---
 
-fn main cond:i32 i:i32 len:i32 -> i32
-  br cond left | right
-block left
+fn main(cond:i32 i:i32 len:i32) -> i32
+  br cond left() | right()
+block left()
   bounds i len
-  jump join
-block right
-  jump join
-block join
+  jump join()
+block right()
+  jump join()
+block join()
   bounds i len
-  jump tail
-block tail
+  jump tail()
+block tail()
   bounds i len
   ret i
 
 @source check: jump b4()
-@source nextln: b4()
+@source nextln: block b4()
 @source nextln: bounds
 @opt check: br v0 b1() | b2()
-@opt nextln: b1()
+@opt nextln: block b1()
 @opt nextln: bounds
-@opt check: b2()
+@opt check: block b2()
 @opt nextln: jump b3()
-@opt nextln: b3()
+@opt nextln: block b3()
 @opt nextln: bounds
 @opt nextln: jump b4()
-@opt nextln: b4()
+@opt nextln: block b4()
 @opt nextln: ret
 @run 0 1 1 -> !bounds
 @run 1 0 1 -> 0

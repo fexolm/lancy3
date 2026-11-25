@@ -1,18 +1,18 @@
-fn sink x:i32 -> i32
-  jump spin
-block spin
-  jump spin
+fn sink(x:i32) -> i32
+  jump spin()
+block spin()
+  jump spin()
 
-fn relay x:i32 -> i32
-  y = call sink x
+fn relay(x:i32) -> i32
+  y = call sink(x)
   ret y
 
-fn main cond:i32 x:i32 -> i32
-  br cond safe | slow
-block safe
+fn main(cond:i32 x:i32) -> i32
+  br cond safe() | slow()
+block safe()
   ret x
-block slow
-  result = call relay x
+block slow()
+  result = call relay(x)
   ret result
 @inline check: br
 @inline not: call

@@ -1,5 +1,5 @@
 # Like Rust's `signum`, every backend turns a NaN into the canonical quiet NaN.
-fn main bits:i32 -> i32
+fn main(bits:i32) -> i32
   f = bitcast f32 bits
   out = signum f
   r = bitcast i32 out
@@ -9,7 +9,7 @@ fn main bits:i32 -> i32
 @run 0xff800001 -> 0x7fc00000
 @run 0x7fc01234 -> 0x7fc00000
 ---
-fn main bits:i32 -> i32
+fn main(bits:i32) -> i32
   raw = cast u16 bits
   f = bitcast f16 raw
   out = signum f

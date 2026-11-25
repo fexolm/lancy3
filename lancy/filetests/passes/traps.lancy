@@ -1,5 +1,5 @@
 # A trap keeps the stores before it and stops before the stores after it.
-fn write out:ptr value:i32 overflow:i32 -> i32
+fn write(out:ptr value:i32 overflow:i32) -> i32
   store out value
   trap_if overflow Overflow
   one = const 1
@@ -7,8 +7,8 @@ fn write out:ptr value:i32 overflow:i32 -> i32
   store next value
   ret value
 
-fn main out:ptr value:i32 overflow:i32 -> i32
-  result = call write out value overflow
+fn main(out:ptr value:i32 overflow:i32) -> i32
+  result = call write(out value overflow)
   ret result
 @policy never
 @opt check: store
@@ -22,25 +22,25 @@ fn main out:ptr value:i32 overflow:i32 -> i32
 ---
 # Each kernel trap keeps its own code. A known condition decides the trap
 # at compile time: false removes it, true makes it unconditional.
-fn main out:ptr kind:i32 -> i32
+fn main(out:ptr kind:i32) -> i32
   zero = const 0
   one = const 1
   never = eq one zero
   trap_if never Bounds
   store out kind
   bounds_case = eq kind zero
-  br bounds_case out_of_bounds | other
-block out_of_bounds
+  br bounds_case out_of_bounds() | other()
+block out_of_bounds()
   always = eq zero zero
   trap_if always Bounds
   ret zero
-block other
+block other()
   is_zero = eq kind one
-  br is_zero division | rest
-block division
+  br is_zero division() | rest()
+block division()
   trap DivisionByZero
   ret zero
-block rest
+block rest()
   trap_if kind DivisionOverflow
   ret kind
 @opt check: store
@@ -60,7 +60,7 @@ block rest
 @run 2 -> !overflow | aa aa aa aa | 02 00 00 00
 ---
 # Only a Rust entry reports a panic or an ABI defect.
-fn main -> i32
+fn main() -> i32
   trap RustPanic
   zero = const 0
   ret zero

@@ -1,31 +1,31 @@
 # The outer branch chooses one of two loops. The accumulator is used directly
 # outside the original loop and must be joined across both copies.
-fn main n:i32 mode:i32 -> i32
+fn main(n:i32 mode:i32) -> i32
   z = const 0
   one = const 1
-  jump head z z
-block head i:i32 acc:i32
+  jump head(z z)
+block head(i:i32 acc:i32)
   more = lt i n
-  br more choose | done
-block choose
-  br mode yes | no
-block yes
+  br more choose() | done()
+block choose()
+  br mode yes() | no()
+block yes()
   total = add acc one
-  jump latch total
-block no
+  jump latch(total)
+block no()
   other = sub acc one
-  jump latch other
-block latch sum:i32
+  jump latch(other)
+block latch(sum:i32)
   next = add i one
-  jump head next sum
-block done
+  jump head(next sum)
+block done()
   ret acc
 @source check: br v1
-@opt not: Lt
+@opt not: = lt
 @opt check: br v1
-@opt check: Lt
+@opt check: = lt
 @opt check: br
-@opt check: Lt
+@opt check: = lt
 @opt check: br
 @opt not: br
 @run 0 0 -> 0
@@ -36,31 +36,31 @@ block done
 ---
 
 # A condition that changes with the induction variable stays in the loop.
-fn main n:i32 -> i32
+fn main(n:i32) -> i32
   z = const 0
   one = const 1
-  jump head z z
-block head i:i32 acc:i32
+  jump head(z z)
+block head(i:i32 acc:i32)
   more = lt i n
-  br more choose | done
-block choose
+  br more choose() | done()
+block choose()
   first = eq i z
-  br first yes | no
-block yes
+  br first yes() | no()
+block yes()
   total = add acc one
-  jump latch total
-block no
+  jump latch(total)
+block no()
   other = sub acc one
-  jump latch other
-block latch sum:i32
+  jump latch(other)
+block latch(sum:i32)
   next = add i one
-  jump head next sum
-block done
+  jump head(next sum)
+block done()
   ret acc
 @opt not: br
-@opt check: Lt
+@opt check: = lt
 @opt check: br
-@opt check: Eq
+@opt check: = eq
 @opt check: br
 @opt not: br
 @run 0 -> 0
@@ -70,31 +70,31 @@ block done
 ---
 
 # Reaching the invariant operands does not make the division safe to speculate.
-fn main n:i32 divisor:i32 -> i32
+fn main(n:i32 divisor:i32) -> i32
   z = const 0
   one = const 1
-  jump head z z
-block head i:i32 acc:i32
+  jump head(z z)
+block head(i:i32 acc:i32)
   more = lt i n
-  br more choose | done
-block choose
+  br more choose() | done()
+block choose()
   test = div one divisor
-  br test yes | no
-block yes
+  br test yes() | no()
+block yes()
   total = add acc one
-  jump latch total
-block no
+  jump latch(total)
+block no()
   other = sub acc one
-  jump latch other
-block latch sum:i32
+  jump latch(other)
+block latch(sum:i32)
   next = add i one
-  jump head next sum
-block done
+  jump head(next sum)
+block done()
   ret acc
-@opt not: Div
-@opt check: Lt
+@opt not: = div
+@opt check: = lt
 @opt check: br
-@opt check: Div
+@opt check: = div
 @opt check: br
 @run 0 0 -> 0
 @run 1 0 -> !zero

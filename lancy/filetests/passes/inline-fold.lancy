@@ -1,25 +1,25 @@
 # The call exposes a constant, copy propagation and DCE leave a single add.
-fn plus x:i32 inc:i32 -> i32
+fn plus(x:i32 inc:i32) -> i32
   alias = copy x
   dead = mul alias inc
   result = add alias inc
   ret result
 
-fn main x:i32 -> i32
+fn main(x:i32) -> i32
   three = const 3
   four = const 4
   seven = add three four
-  result = call plus x seven
+  result = call plus(x seven)
   ret result
 
 @source check: call f0
 @inline check: copy
-@inline check: Mul
+@inline check: = mul
 @inline not: call
 @opt not: copy
-@opt not: Mul
+@opt not: = mul
 @opt check: const 7
-@opt nextln: Add
+@opt nextln: = add
 @opt nextln: ret
 @isel check: alu.Add imm=7
 @isel not: alu.Mul

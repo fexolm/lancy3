@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
 # %bnot_i32
-fn main v0:i32 -> i32
+fn main(v0:i32) -> i32
   t0 = const -1
   v1 = xor v0 t0
   ret v1

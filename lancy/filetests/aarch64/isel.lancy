@@ -1,4 +1,4 @@
-fn main x:i32 -> i32
+fn main(x:i32) -> i32
   c = const 4095
   r = add c x
   ret r
@@ -9,7 +9,7 @@ fn main x:i32 -> i32
 @aarch64 all has add.w.4095
 @run 2147483647 -> -2147479554
 ---
-fn main x:i32 -> i32
+fn main(x:i32) -> i32
   c = const 4096
   r = sub x c
   ret r
@@ -18,7 +18,7 @@ fn main x:i32 -> i32
 @aarch64 all has sub.w.4096
 @run -2147483648 -> 2147479552
 ---
-fn main x:i32 -> i32
+fn main(x:i32) -> i32
   c = const 4097
   r = add x c
   ret r
@@ -27,7 +27,7 @@ fn main x:i32 -> i32
 @aarch64 all has add.w
 @run -4098 -> -1
 ---
-fn main x:i32 -> i32
+fn main(x:i32) -> i32
   c = const 37
   r = sub c x
   ret r
@@ -37,22 +37,22 @@ fn main x:i32 -> i32
 @run 12 -> 25
 @run -12 -> 49
 ---
-fn work out:ptr x:i32 d:i32 -> i32
+fn work(out:ptr x:i32 d:i32) -> i32
   store out x
   r = div x d
   ret r
 
-fn main out:ptr x:i32 d:i32 -> i32
+fn main(out:ptr x:i32 d:i32) -> i32
   k = const 4095
   a = add x k
   b = cast u8 a
-  s = simd.splat b
-  i = simd.iota u8
-  v = simd.add i s
+  s = splat b
+  i = iota u8
+  v = add i s
   three = const 3
   idx = and x three
-  q = call work out x d
-  lane = simd.extract v idx
+  q = call work(out x d)
+  lane = extract v idx
   l = cast i32 lane
   aq = add a q
   r = add aq l

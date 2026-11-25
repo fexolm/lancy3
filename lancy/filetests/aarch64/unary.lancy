@@ -1,4 +1,4 @@
-fn main x:i32 -> i32
+fn main(x:i32) -> i32
   a = bitcast f32 x
   b = round a
   r = bitcast i32 b
@@ -10,7 +10,7 @@ fn main x:i32 -> i32
 @run 0x3effffff -> 0
 @run 0xbeffffff -> 0x80000000
 ---
-fn main x:i32 -> i32
+fn main(x:i32) -> i32
   a = bitcast f32 x
   b = nearest a
   r = bitcast i32 b
@@ -21,7 +21,7 @@ fn main x:i32 -> i32
 @run 0xc0200000 -> 0xc0000000
 @run 0xbf000000 -> 0x80000000
 ---
-fn main x:i32 -> i32
+fn main(x:i32) -> i32
   a = bitcast f32 x
   b = sqrt a
   r = bitcast i32 b
@@ -31,7 +31,7 @@ fn main x:i32 -> i32
 @run 0x40800000 -> 0x40000000
 @run 0x80000000 -> 0x80000000
 ---
-fn main x:i32 -> i32
+fn main(x:i32) -> i32
   a = bitcast f32 x
   b = recip a
   r = bitcast i32 b
@@ -41,7 +41,7 @@ fn main x:i32 -> i32
 @run 0x40400000 -> 0x3eaaaaab
 @run 0x80000000 -> 0xff800000
 ---
-fn main x:i32 -> i32
+fn main(x:i32) -> i32
   a = bitcast f32 x
   b = fract a
   r = bitcast i32 b
@@ -52,16 +52,16 @@ fn main x:i32 -> i32
 @run 0x80000000 -> 0
 @run 0xc0000000 -> 0
 ---
-fn main x:i32 -> i32
+fn main(x:i32) -> i32
   lane = bitcast f32 x
   first = literal f32 0x3f800000
-  uniform = simd.splat first
-  lanes = simd.lanes f32
+  uniform = splat first
+  lanes = lanes f32
   one = const 1
   last = sub lanes one
-  data = simd.insert uniform last lane
-  rounded = simd.round data
-  result = simd.extract rounded last
+  data = insert uniform last lane
+  rounded = round data
+  result = extract rounded last
   r = bitcast i32 result
   ret r
 @aarch64-isel check: Unary(Float(Native(
@@ -72,7 +72,7 @@ fn main x:i32 -> i32
 @run 0xc0200000 -> 0xc0400000
 @run 0xbeffffff -> 0x80000000
 ---
-fn main x:i32 -> i32
+fn main(x:i32) -> i32
   a = cast u8 x
   lz = leadingzeros a
   tz = trailingzeros a
@@ -96,12 +96,12 @@ fn main x:i32 -> i32
 @run -255 -> 701
 @run 255 -> 8
 ---
-fn main x:i32 -> i32
+fn main(x:i32) -> i32
   a = cast u16 x
-  v = simd.splat a
-  c = simd.popcnt v
+  v = splat a
+  c = popcnt v
   zero = const 0
-  n = simd.extract c zero
+  n = extract c zero
   r = cast i32 n
   ret r
 @aarch64 neon has v.uaddlp.8h
@@ -111,9 +111,9 @@ fn main x:i32 -> i32
 @run 0x8101 -> 3
 @run 0xff00 -> 8
 ---
-fn main idx:i32 -> i32
-  values = simd.iota f16
-  lane = simd.extract values idx
+fn main(idx:i32) -> i32
+  values = iota f16
+  lane = extract values idx
   bits = bitcast u16 lane
   r = cast i32 bits
   ret r
@@ -126,7 +126,7 @@ fn main idx:i32 -> i32
 @run 7 -> 0x4700
 @run -1 -> !bounds
 ---
-fn main raw:i32 -> i32
+fn main(raw:i32) -> i32
   f = bitcast f32 raw
   out = nextup f
   r = bitcast i32 out
@@ -141,7 +141,7 @@ fn main raw:i32 -> i32
 @run 0x7f800042 -> 0x7f800042
 @run 0xffc54321 -> 0xffc54321
 ---
-fn main raw:i32 donor:i32 -> i32
+fn main(raw:i32 donor:i32) -> i32
   f = bitcast f32 raw
   d = bitcast f32 donor
   out = copysign f d
@@ -153,16 +153,16 @@ fn main raw:i32 donor:i32 -> i32
 @run 0xff800042 0x7fc54321 -> 0x7f800042
 @run 0 0xffc54321 -> 0x80000000
 ---
-fn main left:i32 right:i32 -> i32
+fn main(left:i32 right:i32) -> i32
   a = bitcast f32 left
   b = bitcast f32 right
-  av = simd.splat a
-  bv = simd.splat b
-  mask = simd.unordered av bv
+  av = splat a
+  bv = splat b
+  mask = unordered av bv
   one = const 1
-  n = simd.lanes i32
+  n = lanes i32
   last = sub n one
-  out = simd.extract mask last
+  out = extract mask last
   ret out
 @aarch64-isel check: Packed(FloatOrder(
 @aarch64 sve has p.fcmuo.s

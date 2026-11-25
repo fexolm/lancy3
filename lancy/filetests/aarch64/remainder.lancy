@@ -1,4 +1,4 @@
-fn main x:i32 y:i32 -> i32
+fn main(x:i32 y:i32) -> i32
   xb = cast u16 x
   yb = cast u16 y
   a = bitcast f16 xb
@@ -20,18 +20,18 @@ fn main x:i32 y:i32 -> i32
 @run 0x0400 0x03ff -> 1
 @run 0x7bff 11 -> 6
 ---
-fn main x:i32 y:i32 -> i32
+fn main(x:i32 y:i32) -> i32
   xb = cast u16 x
   yb = cast u16 y
   a = bitcast bf16 xb
   b = bitcast bf16 yb
-  av = simd.splat a
-  bv = simd.splat b
-  c = simd.rem av bv
-  n = simd.lanes bf16
+  av = splat a
+  bv = splat b
+  c = rem av bv
+  n = lanes bf16
   one = const 1
   last = sub n one
-  v = simd.extract c last
+  v = extract c last
   bits = bitcast u16 v
   r = cast i32 bits
   ret r
@@ -45,7 +45,7 @@ fn main x:i32 y:i32 -> i32
 @run 0x7f7f 11 -> 5
 @run 0x5f80 0x3fc0 -> 0x3f80
 ---
-fn main x:i32 y:i32 -> i32
+fn main(x:i32 y:i32) -> i32
   a = bitcast f32 x
   b = bitcast f32 y
   c = rem a b
@@ -57,7 +57,7 @@ fn main x:i32 y:i32 -> i32
 @run 0x00800001 0x00800000 -> 1
 @run 0x80000000 0x7f800000 -> 0x80000000
 ---
-fn main p:ptr -> i32
+fn main(p:ptr) -> i32
   i = const 1
   q = offset p i 8
   a = load f64 p
@@ -70,7 +70,7 @@ fn main p:ptr -> i32
 @aarch64 all lacks blr
 @run -> 4 | ff ff ff ff ff ff ef 7f 0b 00 00 00 00 00 00 00 | ff ff ff ff ff ff ef 7f 0b 00 00 00 00 00 00 00
 ---
-fn main x:i32 y:i32 -> i32
+fn main(x:i32 y:i32) -> i32
   a = bitcast f32 x
   b = bitcast f32 y
   c = rem a b

@@ -3,6 +3,7 @@ pub(crate) mod eval;
 mod integer;
 pub(crate) mod operation;
 pub mod ssa;
+pub mod text;
 pub mod transforms;
 
 /// Width-independent proofs (`Count::at_most`) hold for every target width

@@ -1,24 +1,24 @@
 # Signed clamp. Both compare masks become dead after replacing the selects.
-fn main x:i32 -> i32
-  a = simd.splat x
+fn main(x:i32) -> i32
+  a = splat x
   zero = const 0
-  zeros = simd.splat zero
+  zeros = splat zero
   cap = const 255
-  caps = simd.splat cap
-  below = simd.lt a zeros
-  positive = simd.select below zeros a
-  above = simd.le caps positive
-  chosen = simd.select above caps positive
-  result = simd.extract chosen zero
+  caps = splat cap
+  below = lt a zeros
+  positive = select below zeros a
+  above = le caps positive
+  chosen = select above caps positive
+  result = extract chosen zero
   ret result
-@source check: Ternary(Select)
-@opt not: Binary(Lt)
-@opt not: Ternary(Select)
-@opt check: Binary(Max)
-@opt not: Binary(Le)
-@opt not: Ternary(Select)
-@opt check: Binary(Min)
-@opt not: Ternary(Select)
+@source check: = select
+@opt not: = lt
+@opt not: = select
+@opt check: = max
+@opt not: = le
+@opt not: = select
+@opt check: = min
+@opt not: = select
 @opt check: ret
 @isel check: native.Vector(I32).Binary(Max)
 @isel check: native.Vector(I32).Binary(Min)
@@ -31,72 +31,72 @@ fn main x:i32 -> i32
 @run 2147483647 -> 255
 ---
 # Unsigned ordering, with aliases and another use of the comparison.
-fn main x:i32 y:i32 -> i32
+fn main(x:i32 y:i32) -> i32
   xu = bitcast u32 x
   yu = bitcast u32 y
-  a = simd.splat xu
-  b = simd.splat yu
-  ge = simd.ge a b
+  a = splat xu
+  b = splat yu
+  ge = ge a b
   mask = copy ge
   left = copy b
-  smaller = simd.select mask left a
+  smaller = select mask left a
   zero = const 0
-  result = simd.extract smaller zero
+  result = extract smaller zero
   bits = bitcast i32 result
-  flag = simd.any ge
+  flag = any ge
   combined = add bits flag
   ret combined
-@opt check: Binary(Ge)
-@opt check: Binary(Min)
-@opt not: Ternary(Select)
+@opt check: = ge
+@opt check: = min
+@opt not: = select
 @opt check: ret
 @run -1 1 -> 0
 @run 1 -1 -> 1
 @run 2 2 -> 1
 ---
 # Selecting a value absent from the comparison cannot become a min or max.
-fn main x:i32 y:i32 z:i32 -> i32
-  a = simd.splat x
-  b = simd.splat y
-  c = simd.splat z
-  below = simd.lt a b
-  chosen = simd.select below a c
+fn main(x:i32 y:i32 z:i32) -> i32
+  a = splat x
+  b = splat y
+  c = splat z
+  below = lt a b
+  chosen = select below a c
   zero = const 0
-  result = simd.extract chosen zero
+  result = extract chosen zero
   ret result
-@opt check: Binary(Lt)
-@opt check: Ternary(Select)
+@opt check: = lt
+@opt check: = select
 @run 5 3 99 -> 99
 @run 3 5 99 -> 3
 ---
 # Floating min would discard the NaN returned by this ordered comparison and select.
-fn main -> i32
+fn main() -> i32
   one = literal f32 3f800000
   nan = literal f32 7fc12345
-  a = simd.splat one
-  b = simd.splat nan
-  below = simd.lt a b
-  chosen = simd.select below a b
+  a = splat one
+  b = splat nan
+  below = lt a b
+  chosen = select below a b
   zero = const 0
-  result = simd.extract chosen zero
+  result = extract chosen zero
   bits = bitcast i32 result
   ret bits
-@opt check: Binary(Lt)
-@opt check: Ternary(Select)
+@opt check: = lt
+@opt check: = select
 @run -> 0x7fc12345
 ---
 # A select on a compare mask whose arms are not the compared values still
 # gets the ordinary rules: equal arms make it a copy.
-fn main x:i32 y:i32 -> i32
-  a = simd.splat x
-  b = simd.splat y
+fn main(x:i32 y:i32) -> i32
+  a = splat x
+  b = splat y
   zero = const 0
-  less = simd.lt a b
-  same = simd.select less b b
-  result = simd.extract same zero
+  less = lt a b
+  same = select less b b
+  result = extract same zero
   ret result
-@source check: Ternary(Select)
-@opt not: Ternary(Select)
+@source check: = select
+@opt not: = select
 @opt check: ret
 @run 1 2 -> 2
 @run 2 1 -> 1

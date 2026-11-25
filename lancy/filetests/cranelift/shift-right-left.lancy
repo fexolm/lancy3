@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
 # %unsigned_shift_right_shift_left_i32
-fn main v0:i32 -> i32
+fn main(v0:i32) -> i32
   v1 = const 5
   t0 = shr v0 v1
   t1 = const 134217727
@@ -16,7 +16,7 @@ fn main v0:i32 -> i32
 ---
 
 # %signed_shift_right_shift_left_i32
-fn main v0:i32 -> i32
+fn main(v0:i32) -> i32
   v1 = const 5
   v2 = shr v0 v1
   v3 = shl v2 v1

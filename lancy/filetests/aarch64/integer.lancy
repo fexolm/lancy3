@@ -1,15 +1,15 @@
-fn main x:i32 y:i32 -> i32
+fn main(x:i32 y:i32) -> i32
   a = cast i8 x
   b = cast i8 y
-  av = simd.splat a
-  bv = simd.splat b
-  signed = simd.min av bv
-  ax = simd.bitcast u8 av
-  bx = simd.bitcast u8 bv
-  unsigned = simd.max ax bx
+  av = splat a
+  bv = splat b
+  signed = min av bv
+  ax = bitcast vec.u8 av
+  bx = bitcast vec.u8 bv
+  unsigned = max ax bx
   zero = const 0
-  s = simd.extract signed zero
-  u = simd.extract unsigned zero
+  s = extract signed zero
+  u = extract unsigned zero
   s32 = cast i32 s
   u32 = cast i32 u
   three = const 3
@@ -26,18 +26,18 @@ fn main x:i32 y:i32 -> i32
 @run 127 -128 -> -256
 @run 17 17 -> 68
 ---
-fn main x:i32 y:i32 -> i32
+fn main(x:i32 y:i32) -> i32
   a = cast i8 x
   b = cast i8 y
-  av = simd.splat a
-  bv = simd.splat b
-  signed = simd.saturatingadd av bv
-  ax = simd.bitcast u8 av
-  bx = simd.bitcast u8 bv
-  unsigned = simd.saturatingsub ax bx
+  av = splat a
+  bv = splat b
+  signed = saturatingadd av bv
+  ax = bitcast vec.u8 av
+  bx = bitcast vec.u8 bv
+  unsigned = saturatingsub ax bx
   zero = const 0
-  s = simd.extract signed zero
-  u = simd.extract unsigned zero
+  s = extract signed zero
+  u = extract unsigned zero
   s32 = cast i32 s
   u32 = cast i32 u
   three = const 3
@@ -54,20 +54,20 @@ fn main x:i32 y:i32 -> i32
 @run -128 -1 -> -384
 @run 7 9 -> 48
 ---
-fn main x:i32 count:i32 -> i32
+fn main(x:i32 count:i32) -> i32
   a = cast i8 x
   c = cast i8 count
-  v = simd.splat a
-  amounts = simd.splat c
-  left = simd.shl v amounts
-  signed = simd.shr v amounts
-  unsigned_value = simd.bitcast u8 v
-  unsigned_amounts = simd.bitcast u8 amounts
-  unsigned = simd.shr unsigned_value unsigned_amounts
+  v = splat a
+  amounts = splat c
+  left = shl v amounts
+  signed = shr v amounts
+  unsigned_value = bitcast vec.u8 v
+  unsigned_amounts = bitcast vec.u8 amounts
+  unsigned = shr unsigned_value unsigned_amounts
   zero = const 0
-  l = simd.extract left zero
-  s = simd.extract signed zero
-  u = simd.extract unsigned zero
+  l = extract left zero
+  s = extract signed zero
+  u = extract unsigned zero
   l32 = cast i32 l
   s32 = cast i32 s
   u32 = cast i32 u
@@ -85,14 +85,14 @@ fn main x:i32 count:i32 -> i32
 @run -127 9 -> 6
 @run -127 -1 -> -384
 ---
-fn main x:i32 -> i32
+fn main(x:i32) -> i32
   a = cast i8 x
   count = literal i8 0xff
-  v = simd.splat a
-  shift = simd.splat count
-  result = simd.shr v shift
+  v = splat a
+  shift = splat count
+  result = shr v shift
   zero = const 0
-  n = simd.extract result zero
+  n = extract result zero
   r = cast i32 n
   ret r
 @aarch64-isel check: PackedShiftImm(
@@ -102,14 +102,14 @@ fn main x:i32 -> i32
 @run -127 -> -1
 @run 64 -> 0
 ---
-fn main x:i32 -> i32
+fn main(x:i32) -> i32
   a = cast i8 x
   count = literal i8 0x08
-  v = simd.splat a
-  shift = simd.splat count
-  result = simd.shr v shift
+  v = splat a
+  shift = splat count
+  result = shr v shift
   one = const 1
-  n = simd.extract result one
+  n = extract result one
   r = cast i32 n
   ret r
 @aarch64-isel check: Splat(
@@ -118,7 +118,7 @@ fn main x:i32 -> i32
 @run -127 -> -127
 @run 64 -> 64
 ---
-fn main a:i32 b:i32 -> i32
+fn main(a:i32 b:i32) -> i32
   x = cast i8 a
   y = cast i8 b
   value = saturatingadd x y
@@ -132,7 +132,7 @@ fn main a:i32 b:i32 -> i32
 @run 127 -128 -> -1
 @run -9 7 -> -2
 ---
-fn main a:i32 b:i32 -> i32
+fn main(a:i32 b:i32) -> i32
   x = cast u8 a
   y = cast u8 b
   value = saturatingsub x y
@@ -144,7 +144,7 @@ fn main a:i32 b:i32 -> i32
 @run 255 1 -> 254
 @run 12 5 -> 7
 ---
-fn main a:i32 b:i32 -> i32
+fn main(a:i32 b:i32) -> i32
   x = cast u8 a
   y = cast u8 b
   value = rotateleft x y

@@ -1,13 +1,13 @@
-fn main x:i32 -> i32
+fn main(x:i32) -> i32
   zero = const 0
-  br zero dead | live
-block dead
+  br zero dead() | live()
+block dead()
   trap = div x zero
   ret trap
-block live
+block live()
   ret x
-@source check: Div
-@opt not: Div
+@source check: = div
+@opt not: = div
 @opt not: br
 @opt check: jump
 @asm not: idiv
@@ -15,42 +15,42 @@ block live
 
 ---
 
-fn main x:i32 -> i32
-  jump join
-block join y:i32
+fn main(x:i32) -> i32
+  jump join()
+block join(y:i32)
   ret y
 @reject wrong arity
 
 ---
 
-fn main x:i32 -> i32
-  br x left | right
-block left
+fn main(x:i32) -> i32
+  br x left() | right()
+block left()
   y = const 4
   ret y
-block right
+block right()
   ret y
 @reject does not dominate
 
 ---
 
 # Pruning retires an incoming edge and keeps both arms of the remaining branch.
-fn main choose:i32 a:i32 b:i32 bias:i32 -> i32
+fn main(choose:i32 a:i32 b:i32 bias:i32) -> i32
   one = const 1
   zero = const 0
-  br one kept | retired
-block retired
-  jump join a a zero
-block kept
-  br choose join a b bias | join b a bias
-block join left:i32 right:i32 shared:i32
+  br one kept() | retired()
+block retired()
+  jump join(a a zero)
+block kept()
+  br choose join(a b bias) | join(b a bias)
+block join(left:i32 right:i32 shared:i32)
   diff = sub left right
   result = add diff shared
   ret result
 @cfg check: b3 preds=[b1 b2 b2] succs=[]
 @opt check: jump b2()
-@opt not: b1()
+@opt not: block b1()
 @opt check: br v0 b3(v1 v2) | b3(v2 v1)
-@opt nextln: b3(v4:I32 v5:I32)
+@opt nextln: block b3(v4:i32 v5:i32)
 @run 0 7 11 4 -> 8
 @run 1 7 11 4 -> 0

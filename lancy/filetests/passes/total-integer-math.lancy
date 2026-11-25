@@ -1,36 +1,36 @@
-fn main n:i32 x:i32 -> i32
+fn main(n:i32 x:i32) -> i32
   zero = const 0
   one = const 1
   two = const 2
-  jump head zero
-block head i:i32
+  jump head(zero)
+block head(i:i32)
   more = lt i n
-  br more body | done
-block body
+  br more body() | done()
+block body()
   a = xor x i
   unused = div a two
   next = add i one
-  jump head next
-block done
+  jump head(next)
+block done()
   ret x
-@source check: Div
+@source check: = div
 @opt not: br
-@opt not: Div
+@opt not: = div
 @opt check: ret v1
 @run 0 17 -> 17
 @run 3 -2147483648 -> -2147483648
 
 ---
 
-fn main raw:i32 -> i32
+fn main(raw:i32) -> i32
   narrowed = cast u16 raw
-  dividend = simd.splat narrowed
+  dividend = splat narrowed
   max = literal u16 0xffff
-  divisors = simd.splat max
-  unused = simd.div dividend divisors
+  divisors = splat max
+  unused = div dividend divisors
   ret raw
-@source check: Div
-@opt not: Div
+@source check: = div
+@opt not: = div
 @opt check: ret v0
 @run 65535 -> 65535
 @run -1 -> -1
@@ -38,29 +38,29 @@ fn main raw:i32 -> i32
 ---
 
 # The signed remainder can overflow on the second iteration.
-fn main p:ptr n:i32 x:i32 -> i32
+fn main(p:ptr n:i32 x:i32) -> i32
   zero = const 0
   one = const 1
   minus = literal i16 0xffff
-  denominators = simd.splat minus
+  denominators = splat minus
   short = cast i16 x
-  words = simd.splat short
-  jump head zero
-block head i:i32
+  words = splat short
+  jump head(zero)
+block head(i:i32)
   more = lt i n
-  br more body | done
-block body
+  br more body() | done()
+block body()
   next = add i one
   store p next
   lane = cast i16 i
-  offsets = simd.splat lane
-  numerators = simd.add words offsets
-  unused = simd.rem numerators denominators
-  jump head next
-block done
+  offsets = splat lane
+  numerators = add words offsets
+  unused = rem numerators denominators
+  jump head(next)
+block done()
   ret n
 @opt check: store
-@opt check: Rem
+@opt check: = rem
 @run 0 -32768 -> 0 | aa aa aa aa | aa aa aa aa
 @run 2 -32769 -> !overflow | aa aa aa aa | 02 00 00 00
 @run 2 0 -> 2 | aa aa aa aa | 02 00 00 00

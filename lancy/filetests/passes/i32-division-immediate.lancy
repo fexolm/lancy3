@@ -1,4 +1,4 @@
-fn main out:ptr x:i32 -> i32
+fn main(out:ptr x:i32) -> i32
   d = const -7
   q = div x d
   r = rem x d
@@ -16,7 +16,7 @@ fn main out:ptr x:i32 -> i32
 
 ---
 
-fn main x:i32 -> i32
+fn main(x:i32) -> i32
   d = const 10
   q = div x d
   ret q
@@ -30,7 +30,7 @@ fn main x:i32 -> i32
 
 ---
 
-fn main out:ptr x:i32 -> i32
+fn main(out:ptr x:i32) -> i32
   d = const 8
   q = div x d
   r = rem x d
@@ -47,7 +47,7 @@ fn main out:ptr x:i32 -> i32
 
 ---
 
-fn main out:ptr x:i32 -> i32
+fn main(out:ptr x:i32) -> i32
   d = const -2147483648
   q = div x d
   r = rem x d
@@ -60,7 +60,7 @@ fn main out:ptr x:i32 -> i32
 
 ---
 
-fn main out:ptr x:i32 -> i32
+fn main(out:ptr x:i32) -> i32
   d = const -1
   store out x
   dead = rem x d
@@ -77,7 +77,7 @@ fn main out:ptr x:i32 -> i32
 
 ---
 
-fn main x:i32 -> i32
+fn main(x:i32) -> i32
   d = const 0
   q = div x d
   ret q

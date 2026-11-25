@@ -1,4 +1,4 @@
-fn main x:i32 y:i32 -> i32
+fn main(x:i32 y:i32) -> i32
   xf = bitcast f32 x
   yf = bitcast f32 y
   three = literal f32 0x40400000
@@ -15,7 +15,7 @@ fn main x:i32 y:i32 -> i32
 @aarch64 all lacks blr
 @run 0x40c00000 0x40000000 -> 0x3fd55555
 ---
-fn main x:i32 y:i32 -> i32
+fn main(x:i32 y:i32) -> i32
   xf = bitcast f32 x
   yf = bitcast f32 y
   q = div xf yf
@@ -25,7 +25,7 @@ fn main x:i32 y:i32 -> i32
 @run 0x80000000 0x40000000 -> 0x80000000
 @run 0x3f800000 0x00000000 -> 0x7f800000
 ---
-fn main x:i32 y:i32 -> i32
+fn main(x:i32 y:i32) -> i32
   xf = bitcast f32 x
   yf = bitcast f32 y
   one = literal f32 0x3f800000
@@ -35,16 +35,16 @@ fn main x:i32 y:i32 -> i32
   ret r
 @run 0x3f800001 0x3f7ffffe -> 0
 ---
-fn main x:vec.f64 y:vec.f64 -> vec.f64
-  q = simd.div x y
-  r = simd.sub x q
+fn main(x:vec.f64 y:vec.f64) -> vec.f64
+  q = div x y
+  r = sub x q
   ret r
 @aarch64 neon has v.fdiv.2d
 @aarch64 sve has z.fdiv.d
 @aarch64 sve2 has z.fdiv.d
 @aarch64 all lacks blr
 ---
-fn main dst:ptr x:i32 -> i32
+fn main(dst:ptr x:i32) -> i32
   s = cast i8 x
   u = cast u8 x
   sw = cast u64 s
@@ -58,7 +58,7 @@ fn main dst:ptr x:i32 -> i32
 @aarch64 all lacks blr
 @run -128 -> -128 | 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 | 80 ff ff ff ff ff ff ff 80 00 00 00 00 00 00 00
 ---
-fn main x:i32 y:i32 -> i32
+fn main(x:i32 y:i32) -> i32
   a = bitcast f32 x
   b = bitcast f32 y
   minus_one = literal f32 0xbf800000
@@ -70,16 +70,16 @@ fn main x:i32 y:i32 -> i32
 @aarch64 all lacks blr
 @run 0x3f800001 0x3f7ffffe -> 0xa8800000
 ---
-fn main x:i32 y:i32 -> i32
+fn main(x:i32 y:i32) -> i32
   a = bitcast f32 x
   b = bitcast f32 y
   minus_one = literal f32 0xbf800000
-  av = simd.splat a
-  bv = simd.splat b
-  cv = simd.splat minus_one
-  fused = simd.fma av bv cv
+  av = splat a
+  bv = splat b
+  cv = splat minus_one
+  fused = fma av bv cv
   z = const 0
-  lane = simd.extract fused z
+  lane = extract fused z
   r = bitcast i32 lane
   ret r
 @aarch64 neon has v.fmla.4s

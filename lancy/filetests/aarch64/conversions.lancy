@@ -1,4 +1,4 @@
-fn main raw:i32 -> i32
+fn main(raw:i32) -> i32
   x = bitcast f32 raw
   y = cast i32 x
   ret y
@@ -10,7 +10,7 @@ fn main raw:i32 -> i32
 @run 0xff800000 -> -2147483648
 @run 0x7fc01234 -> 0
 ---
-fn main raw:i32 -> i32
+fn main(raw:i32) -> i32
   x = bitcast f32 raw
   y = cast i8 x
   z = cast u8 x
@@ -24,12 +24,12 @@ fn main raw:i32 -> i32
 @run 0xbff33333 -> -1
 @run 0x7fc01234 -> 0
 ---
-fn main raw:i32 -> i32
+fn main(raw:i32) -> i32
   x = bitcast f32 raw
-  vec = simd.splat x
-  y = simd.cast u32 vec
+  vec = splat x
+  y = cast vec.u32 vec
   z = const 0
-  v = simd.extract y z
+  v = extract y z
   r = bitcast i32 v
   ret r
 @aarch64-isel check: PackedCast
@@ -39,7 +39,7 @@ fn main raw:i32 -> i32
 @run 0x4f7fffff -> 0xffffff00
 @run 0x7fc01234 -> 0
 ---
-fn main x:i32 -> i32
+fn main(x:i32) -> i32
   y = cast f32 x
   r = bitcast i32 y
   ret r
@@ -47,18 +47,18 @@ fn main x:i32 -> i32
 @run -1 -> 0xbf800000
 @run 16777217 -> 0x4b800000
 ---
-fn main x:i32 -> i32
+fn main(x:i32) -> i32
   low = const 0
   one = const 1
-  len = simd.lanes i8
+  len = lanes i8
   high = sub len one
   init = literal i8 0x00
   three = literal i8 0x03
-  start = simd.splat init
+  start = splat init
   n = cast i8 x
-  a = simd.insert start low n
-  v = simd.insert a high three
-  sum = simd.reduce add v
+  a = insert start low n
+  v = insert a high three
+  sum = reduce add v
   r = cast i32 sum
   ret r
 @aarch64-isel check: Reduce(Integer(
@@ -67,17 +67,17 @@ fn main x:i32 -> i32
 @run -128 -> -125
 @run 255 -> 2
 ---
-fn main x:i32 -> i32
+fn main(x:i32) -> i32
   low = const 0
-  mask = simd.splat x
+  mask = splat x
   yes = const 0x0f0f0f0f
   no = const 0xf0f0f0f0
-  a = simd.splat yes
-  b = simd.splat no
-  selected = simd.select mask a b
-  bits = simd.bitselect mask a b
-  l = simd.extract selected low
-  r = simd.extract bits low
+  a = splat yes
+  b = splat no
+  selected = select mask a b
+  bits = bitselect mask a b
+  l = extract selected low
+  r = extract bits low
   out = xor l r
   ret out
 @aarch64-isel check: Select(
@@ -86,7 +86,7 @@ fn main x:i32 -> i32
 @run 0x80000001 -> 0x7ffffffe
 @run -1 -> 0
 ---
-fn main x:i32 -> i32
+fn main(x:i32) -> i32
   v = cast u16 x
   a = cast bf16 v
   r = bitcast u16 a
@@ -98,15 +98,15 @@ fn main x:i32 -> i32
 @run 257 -> 0x4380
 @run 259 -> 0x4382
 ---
-fn main x:i32 -> i32
+fn main(x:i32) -> i32
   raw = cast u16 x
   v = bitcast f16 raw
-  a = simd.splat v
-  b = simd.cast i16 a
-  n = simd.lanes i16
+  a = splat v
+  b = cast vec.i16 a
+  n = lanes i16
   one = const 1
   last = sub n one
-  s = simd.extract b last
+  s = extract b last
   r = cast i32 s
   ret r
 @aarch64-isel check: IntegerFloatCast(
@@ -116,7 +116,7 @@ fn main x:i32 -> i32
 @run 0xfbff -> -32768
 @run 0xfe09 -> 0
 ---
-fn main m:i32 yes:i32 no:i32 -> i32
+fn main(m:i32 yes:i32 no:i32) -> i32
   a = cast u8 m
   b = cast u8 yes
   c = cast u8 no
@@ -130,7 +130,7 @@ fn main m:i32 yes:i32 no:i32 -> i32
 @run 0 0x96 0x3c -> 0x3c
 @run 0xff 0x96 0x3c -> 0x96
 ---
-fn main m:i32 yes:i32 no:i32 -> i32
+fn main(m:i32 yes:i32 no:i32) -> i32
   a = bitcast f32 m
   b = bitcast f32 yes
   c = bitcast f32 no
