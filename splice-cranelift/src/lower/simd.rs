@@ -12,7 +12,10 @@ use cranelift_frontend::{FunctionBuilder, Variable};
 use splice_core::Trap;
 use splice_core::{
     Function,
-    hir::{Reg, Simd, SimdOp, ValueType},
+    hir::{
+        Buffer, Reg, Simd, SimdOp, ValueType,
+        memory::{self, Address, BeforeTrap, Masked, Slice},
+    },
     simd::Element,
 };
 
@@ -114,6 +117,20 @@ pub(super) fn emit(
     buffers: &[[Value; 2]],
 ) {
     use SimdOp::*;
+    if inst.op.may_trap() {
+        let Ok(result) = memory::lower(
+            &mut Slices {
+                b,
+                m,
+                vars,
+                buffers,
+            },
+            inst,
+            args,
+        );
+        define(b, vars, dst, result.map_or_else(Vec::new, |v| v.to_vec()));
+        return;
+    }
     let inputs: Vec<Vec<Value>> = args
         .iter()
         .map(|&r| vars.get(r).iter().map(|&v| b.use_var(v)).collect())
@@ -121,29 +138,6 @@ pub(super) fn emit(
     let element = inst.element;
     let byte_order = MemFlags::new().with_endianness(cranelift_codegen::ir::Endianness::Little);
     let results = match inst.op {
-        Load(buf) | Store(buf) | LoadSelect(buf) | StoreSelect(buf) | Gather(buf)
-        | GatherSelect(buf) | Scatter(buf) | ScatterSelect(buf) => {
-            let [data, len] = buffers[buf.index()];
-            let memory = inst.op.info().memory.expect("a vector memory operation");
-            let (indexed, masked) = (memory.indexed, memory.masked);
-            let write = memory.access == splice_core::hir::Access::Write;
-            let address = if indexed {
-                Address::Indexed(&inputs[0])
-            } else {
-                Address::Contiguous(offset(b, inputs[0][0]))
-            };
-            let access = Memory {
-                m,
-                data,
-                len: b.ins().uextend(I64, len),
-                element,
-                address,
-                mask: masked.then(|| inputs[1].as_slice()),
-                values: write.then(|| inputs.last().unwrap().as_slice()),
-                fallback: (masked && !write).then(|| inputs[2].as_slice()),
-            };
-            access.emit(b)
-        }
         AlignmentPrefix(buf) => {
             // Only the address modulo the vector width matters.
             let base = b.ins().ireduce(I32, buffers[buf.index()][0]);
@@ -158,33 +152,6 @@ pub(super) fn emit(
         Swizzle => swizzle_words(b, m, &inputs[0], &inputs[1], byte_order),
         Expand => expand_words(b, m, &inputs, byte_order),
         Compress => compress_words(b, m, &inputs[0], &inputs[1], byte_order),
-        CompressStore(buf) => {
-            let [data, len] = buffers[buf.index()];
-            let len = b.ins().uextend(I64, len);
-            let mut offset = offset(b, inputs[0][0]);
-            for (&mask, &values) in inputs[1].iter().zip(&inputs[2]) {
-                for lane in 0..4 {
-                    let active = b.ins().extractlane(mask, lane);
-                    let store = b.create_block();
-                    let next = b.create_block();
-                    let cursor = b.append_block_param(next, I64);
-                    b.ins().brif(active, store, &[], next, &[offset.into()]);
-                    b.switch_to_block(store);
-                    let outside = b.ins().icmp(IntCC::UnsignedGreaterThanOrEqual, offset, len);
-                    let fault = trap(b, Trap::Bounds);
-                    return_if(b, outside, fault);
-                    let bytes = b.ins().imul_imm(offset, 4);
-                    let ptr = b.ins().iadd(data, bytes);
-                    let value = b.ins().extractlane(values, lane);
-                    b.ins().store(MemFlags::new(), value, ptr, 0);
-                    let advanced = b.ins().iadd_imm(offset, 1);
-                    b.ins().jump(next, &[advanced.into()]);
-                    b.switch_to_block(next);
-                    offset = cursor;
-                }
-            }
-            vec![]
-        }
         Count => {
             let mut total = b.ins().iconst(I32, 0);
             for &mask in &inputs[0] {
@@ -342,6 +309,10 @@ pub(super) fn emit(
             .map(|i| packed(b, inst, &inputs, i))
             .collect(),
     };
+    define(b, vars, dst, results);
+}
+
+fn define(b: &mut FunctionBuilder, vars: &Registers, dst: Option<Reg>, results: Vec<Value>) {
     if let Some(dst) = dst {
         let output = vars.get(dst);
         debug_assert_eq!(output.len(), results.len());
@@ -652,17 +623,316 @@ fn gather_lanes(b: &mut FunctionBuilder, ty: Type, lanes: &[Value]) -> Value {
     result
 }
 
-enum Address<'a> {
+/// The 128-bit parts of one vector, up to the widest scalable vector.
+#[derive(Clone, Copy)]
+struct Chunks {
+    parts: [Value; 16],
+    len: usize,
+}
+
+impl std::ops::Deref for Chunks {
+    type Target = [Value];
+    fn deref(&self) -> &[Value] {
+        &self.parts[..self.len]
+    }
+}
+
+impl FromIterator<Value> for Chunks {
+    fn from_iter<I: IntoIterator<Item = Value>>(values: I) -> Self {
+        use cranelift_codegen::entity::EntityRef;
+        let mut chunks = Self {
+            parts: [Value::new(0); 16],
+            len: 0,
+        };
+        for value in values {
+            chunks.parts[chunks.len] = value;
+            chunks.len += 1;
+        }
+        chunks
+    }
+}
+
+/// The slices of the function being lowered, for [`memory::lower`].
+struct Slices<'a, 'f> {
+    b: &'a mut FunctionBuilder<'f>,
+    m: Machine,
+    vars: &'a Registers,
+    buffers: &'a [[Value; 2]],
+}
+
+type Lowered<T> = Result<T, std::convert::Infallible>;
+
+impl Slices<'_, '_> {
+    fn length(&mut self, buffer: Buffer) -> Value {
+        let len = self.buffers[buffer.index()][1];
+        self.b.ins().uextend(I64, len)
+    }
+    /// An access to the lanes at `at`.
+    fn access<'v>(&self, s: Slice, at: &'v Address<Value, Chunks>) -> Memory<'v> {
+        Memory {
+            m: self.m,
+            data: self.buffers[s.buffer.index()][0],
+            element: s.element,
+            address: match at {
+                Address::Offset(offset) => Lanes::Contiguous(*offset),
+                Address::Indices(indices) => Lanes::Indexed(indices),
+            },
+            mask: None,
+            values: None,
+            fallback: None,
+        }
+    }
+    /// The bits of the lanes of `mask`, lane 0 lowest.
+    fn mask_bits(&mut self, mask: Chunks) -> Value {
+        let b = &mut self.b;
+        let per_chunk = b.func.dfg.value_type(mask[0]).lane_count();
+        let mut bits = b.ins().iconst(I64, 0);
+        for (part, &chunk) in mask.iter().enumerate() {
+            let high = b.ins().vhigh_bits(I64, chunk);
+            let high = b.ins().ishl_imm(high, i64::from(per_chunk) * part as i64);
+            bits = b.ins().bor(bits, high);
+        }
+        bits
+    }
+    /// A scalar count or length as a lane of `ty`, splatted.
+    fn splat_lane(&mut self, ty: Type, x: Value) -> Value {
+        let x = if ty.lane_type() == I64 {
+            x
+        } else {
+            self.b.ins().ireduce(ty.lane_type(), x)
+        };
+        self.b.ins().splat(ty, x)
+    }
+}
+
+impl memory::Primitives for Slices<'_, '_> {
+    type Scalar = Value;
+    type Vector = Chunks;
+    type Error = std::convert::Infallible;
+
+    fn read_offset(&mut self, r: Reg) -> Lowered<Value> {
+        let start = self.b.use_var(self.vars.get(r)[0]);
+        Ok(offset(self.b, start))
+    }
+    fn read_vector(&mut self, r: Reg) -> Lowered<Chunks> {
+        Ok(self
+            .vars
+            .get(r)
+            .iter()
+            .map(|&v| self.b.use_var(v))
+            .collect())
+    }
+    fn require_full(
+        &mut self,
+        s: Slice,
+        offset: Value,
+        before_trap: BeforeTrap<'_, Self>,
+    ) -> Lowered<()> {
+        // offset() clamped the start, so this addition cannot wrap into the slice.
+        let lanes = s.element.lanes(self.m.vector_bytes) as i64;
+        let end = self.b.ins().iadd_imm(offset, lanes);
+        let len = self.length(s.buffer);
+        let outside = self.b.ins().icmp(IntCC::UnsignedGreaterThan, end, len);
+        self.trap_if(outside, before_trap)
+    }
+    fn room(&mut self, s: Slice, offset: Value) -> Lowered<Value> {
+        let len = self.length(s.buffer);
+        let end = self.b.ins().umax(offset, len);
+        Ok(self.b.ins().isub(end, offset))
+    }
+    fn first_lanes(&mut self, e: Element, count: Value) -> Lowered<Chunks> {
+        // A room can exceed the lanes, and the narrowest lane type.
+        let lanes = self
+            .b
+            .ins()
+            .iconst(I64, e.lanes(self.m.vector_bytes) as i64);
+        let count = self.b.ins().umin(count, lanes);
+        let limit = self.splat_lane(chunk_type(e.index()), count);
+        Ok((0..self.m.chunks())
+            .map(|part| {
+                let ord = lane_constant(self.b, e.index(), part, |i| i as u64);
+                self.b.ins().icmp(IntCC::SignedLessThan, ord, limit)
+            })
+            .collect())
+    }
+    fn outside(&mut self, s: Slice, indices: Chunks) -> Lowered<Chunks> {
+        let len = self.length(s.buffer);
+        let limit = self.splat_lane(chunk_type(s.element.index()), len);
+        Ok(indices
+            .iter()
+            .map(|&chunk| {
+                self.b
+                    .ins()
+                    .icmp(IntCC::UnsignedGreaterThanOrEqual, chunk, limit)
+            })
+            .collect())
+    }
+    fn length_at_most(&mut self, buffer: Buffer, n: u64) -> Lowered<Value> {
+        let len = self.length(buffer);
+        let ins = self.b.ins();
+        Ok(ins.icmp_imm(IntCC::UnsignedLessThanOrEqual, len, n as i64))
+    }
+    fn and(&mut self, a: Value, b: Value) -> Lowered<Value> {
+        Ok(self.b.ins().band(a, b))
+    }
+    fn mask_and(&mut self, a: Chunks, b: Chunks) -> Lowered<Chunks> {
+        Ok(a.iter()
+            .zip(b.iter())
+            .map(|(&x, &y)| self.b.ins().band(x, y))
+            .collect())
+    }
+    fn mask_xor(&mut self, a: Chunks, b: Chunks) -> Lowered<Chunks> {
+        Ok(a.iter()
+            .zip(b.iter())
+            .map(|(&x, &y)| self.b.ins().bxor(x, y))
+            .collect())
+    }
+    fn any(&mut self, mask: Chunks) -> Lowered<Value> {
+        let b = &mut self.b;
+        let all = mask
+            .iter()
+            .copied()
+            .reduce(|x, y| b.ins().bor(x, y))
+            .unwrap();
+        Ok(b.ins().vany_true(all))
+    }
+    fn before_first(&mut self, e: Element, mask: Chunks) -> Lowered<Chunks> {
+        // lowbit(bits) - 1 has every bit below the first lane, and all bits
+        // when the mask is empty. Lane `i` of each part tests bit `i`.
+        let bits = self.mask_bits(mask);
+        let negated = self.b.ins().ineg(bits);
+        let low = self.b.ins().band(bits, negated);
+        let before = self.b.ins().iadd_imm(low, -1);
+        let ty = chunk_type(e.index());
+        let per_chunk = ty.lane_count() as usize;
+        let lane = lane_constant(self.b, e.index(), 0, |i| 1 << i);
+        let zero = constant(self.b, ty, &[0; CHUNK_BYTES]);
+        Ok((0..mask.len())
+            .map(|part| {
+                let part = self.b.ins().ushr_imm(before, (per_chunk * part) as i64);
+                let part = self.splat_lane(ty, part);
+                let set = self.b.ins().band(part, lane);
+                self.b.ins().icmp(IntCC::NotEqual, set, zero)
+            })
+            .collect())
+    }
+    fn exceeds(&mut self, mask: Chunks, count: Value) -> Lowered<Value> {
+        let bits = self.mask_bits(mask);
+        let lanes = self.b.ins().popcnt(bits);
+        Ok(self.b.ins().icmp(IntCC::UnsignedGreaterThan, lanes, count))
+    }
+    fn trap_if(&mut self, condition: Value, before_trap: BeforeTrap<'_, Self>) -> Lowered<()> {
+        let Some(before_trap) = before_trap else {
+            let fault = trap(self.b, Trap::Bounds);
+            return_if(self.b, condition, fault);
+            return Ok(());
+        };
+        let fail = self.b.create_block();
+        let next = self.b.create_block();
+        self.b.ins().brif(condition, fail, &[], next, &[]);
+        self.b.switch_to_block(fail);
+        before_trap(self)?;
+        // Every block of the path that traps is cold.
+        let blocks = self.b.func.dfg.num_blocks() as u32;
+        for block in (fail.as_u32()..blocks).map(cranelift_codegen::ir::Block::from_u32) {
+            if block != next {
+                self.b.set_cold_block(block);
+            }
+        }
+        let fault = trap(self.b, Trap::Bounds);
+        self.b.ins().return_(&[fault]);
+        self.b.switch_to_block(next);
+        Ok(())
+    }
+    fn load(
+        &mut self,
+        s: Slice,
+        at: Address<Value, Chunks>,
+        masked: Option<Masked<Chunks>>,
+    ) -> Lowered<Chunks> {
+        let mut access = self.access(s, &at);
+        let Some(Masked { mask, passthrough }) = &masked else {
+            return Ok(match at {
+                Address::Offset(_) => access.full(self.b),
+                Address::Indices(_) => access.ordered(self.b),
+            }
+            .into_iter()
+            .collect());
+        };
+        (access.mask, access.fallback) = (Some(&mask[..]), Some(&passthrough[..]));
+        Ok(match at {
+            Address::Offset(_) => access.masked(self.b),
+            Address::Indices(ref indices) => {
+                access.masked_gather(self.b, indices, mask, passthrough)
+            }
+        }
+        .into_iter()
+        .collect())
+    }
+    fn store(
+        &mut self,
+        s: Slice,
+        at: Address<Value, Chunks>,
+        mask: Option<Chunks>,
+        value: Chunks,
+    ) -> Lowered<()> {
+        let mut access = self.access(s, &at);
+        (access.mask, access.values) = (mask.as_deref(), Some(&value[..]));
+        match (&at, mask) {
+            (_, Some(_)) => access.masked(self.b),
+            (Address::Offset(_), None) => access.full(self.b),
+            (Address::Indices(_), None) => access.ordered(self.b),
+        };
+        Ok(())
+    }
+    fn compress_store(
+        &mut self,
+        s: Slice,
+        offset: Value,
+        mask: Chunks,
+        value: Chunks,
+        room: Value,
+    ) -> Lowered<()> {
+        let data = self.buffers[s.buffer.index()][0];
+        let b = &mut self.b;
+        let end = b.ins().iadd(offset, room);
+        let mut cursor = offset;
+        for (&mask, &values) in mask.iter().zip(value.iter()) {
+            for lane in 0..4 {
+                let active = b.ins().extractlane(mask, lane);
+                let active = b.ins().icmp_imm(IntCC::NotEqual, active, 0);
+                let fits = b.ins().icmp(IntCC::UnsignedLessThan, cursor, end);
+                let write = b.ins().band(active, fits);
+                let store = b.create_block();
+                let next = b.create_block();
+                let advanced = b.append_block_param(next, I64);
+                b.ins().brif(write, store, &[], next, &[cursor.into()]);
+                b.switch_to_block(store);
+                let bytes = b.ins().imul_imm(cursor, 4);
+                let ptr = b.ins().iadd(data, bytes);
+                let value = b.ins().extractlane(values, lane);
+                b.ins().store(MemFlags::new(), value, ptr, 0);
+                let after = b.ins().iadd_imm(cursor, 1);
+                b.ins().jump(next, &[after.into()]);
+                b.switch_to_block(next);
+                cursor = advanced;
+            }
+        }
+        Ok(())
+    }
+}
+
+enum Lanes<'a> {
     Contiguous(Value),
     Indexed(&'a [Value]),
 }
 
+/// One unchecked access: every lane it touches is in bounds.
 struct Memory<'a> {
     m: Machine,
     data: Value,
-    len: Value,
     element: Element,
-    address: Address<'a>,
+    address: Lanes<'a>,
     mask: Option<&'a [Value]>,
     values: Option<&'a [Value]>,
     fallback: Option<&'a [Value]>,
@@ -674,56 +944,11 @@ impl Memory<'_> {
         b.ins().iadd(self.data, bytes)
     }
 
-    fn emit(&self, b: &mut FunctionBuilder) -> Vec<Value> {
-        let start = match self.address {
-            Address::Indexed(indices) => {
-                let invalid = self.invalid_indices(b, indices);
-                self.guard(b, invalid);
-                return match (self.mask, self.fallback) {
-                    (Some(mask), Some(fallback)) => self.masked_gather(b, indices, mask, fallback),
-                    (Some(_), None) => self.masked(b),
-                    (None, _) => self.ordered(b, false),
-                };
-            }
-
-            Address::Contiguous(start) => start,
+    /// Every lane of a contiguous vector.
+    fn full(&self, b: &mut FunctionBuilder) -> Vec<Value> {
+        let Lanes::Contiguous(start) = self.address else {
+            unreachable!("a contiguous access")
         };
-        // offset() clamped the start, so this addition cannot wrap into the slice.
-        let end = b
-            .ins()
-            .iadd_imm(start, self.element.lanes(self.m.vector_bytes) as i64);
-        let invalid = b.ins().icmp(IntCC::UnsignedGreaterThan, end, self.len);
-        if let Some(mask) = self.mask {
-            // The common case covers the whole vector. When it crosses the
-            // end, only enabled lanes need to fit; an empty mask can start anywhere.
-            let boundary = b.create_block();
-            let access = b.create_block();
-            b.ins().brif(invalid, boundary, &[], access, &[]);
-            b.switch_to_block(boundary);
-            let end = b.ins().umax(start, self.len);
-            let room = b.ins().isub(end, start);
-            let elem = self.element.index();
-            let ty = chunk_type(elem);
-            let count = if ty.lane_type() == I64 {
-                room
-            } else {
-                b.ins().ireduce(ty.lane_type(), room)
-            };
-            let limit = b.ins().splat(ty, count);
-            let mut bad = constant(b, ty, &[0; CHUNK_BYTES]);
-            for (part, &enabled) in mask.iter().enumerate() {
-                let ord = lane_constant(b, elem, part, |i| i as u64);
-                let outside = b.ins().icmp(IntCC::SignedGreaterThanOrEqual, ord, limit);
-                let failed = b.ins().band(outside, enabled);
-                bad = b.ins().bor(bad, failed);
-            }
-            let failed = b.ins().vany_true(bad);
-            self.guard(b, failed);
-            b.ins().jump(access, &[]);
-            b.switch_to_block(access);
-            return self.masked(b);
-        }
-        self.guard(b, invalid);
         let base = self.pointer(b, start);
         let mut out = Vec::new();
         for part in 0..self.m.chunks() {
@@ -739,7 +964,6 @@ impl Memory<'_> {
         }
         out
     }
-
     // A disabled lane can form an arbitrary address. Select a readable static
     // word before the load and merge its caller-provided fallback afterwards.
     // The word is aligned for every supported element and outlives the JIT code.
@@ -787,68 +1011,6 @@ impl Memory<'_> {
         result
     }
 
-    fn guard(&self, b: &mut FunctionBuilder, invalid: Value) {
-        let fault = trap(b, Trap::Bounds);
-        if self.values.is_some() {
-            // An invalid store can still write a valid prefix. Cold execution
-            // checks and writes each lane in source order, up to the first fault.
-            let partial = b.create_block();
-            let full = b.create_block();
-            b.set_cold_block(partial);
-            b.ins().brif(invalid, partial, &[], full, &[]);
-            b.switch_to_block(partial);
-            self.ordered(b, true);
-            b.ins().return_(&[fault]);
-            b.switch_to_block(full);
-        } else {
-            return_if(b, invalid, fault);
-        }
-    }
-
-    // A read fault exposes no partial result. A write fault takes the ordered
-    // cold path in guard() so stores before the first bad active lane survive.
-    fn invalid_indices(&self, b: &mut FunctionBuilder, indices: &[Value]) -> Value {
-        let ty = chunk_type(self.element.index());
-        let lane = ty.lane_type();
-        let len = if lane == I64 {
-            self.len
-        } else {
-            b.ins().ireduce(lane, self.len)
-        };
-        let limit = b.ins().splat(ty, len);
-        let bad = if self.mask.is_none() && lane != I64 {
-            // Only the largest value in each column of 128-bit chunks matters.
-            let max = indices
-                .iter()
-                .copied()
-                .reduce(|a, z| b.ins().umax(a, z))
-                .unwrap();
-            b.ins().icmp(IntCC::UnsignedGreaterThanOrEqual, max, limit)
-        } else {
-            let mut bad = constant(b, ty, &[0; CHUNK_BYTES]);
-            for (i, &chunk) in indices.iter().enumerate() {
-                let outside = b
-                    .ins()
-                    .icmp(IntCC::UnsignedGreaterThanOrEqual, chunk, limit);
-                let enabled = match self.mask {
-                    Some(mask) => b.ins().band(outside, mask[i]),
-                    None => outside,
-                };
-                bad = b.ins().bor(bad, enabled);
-            }
-            bad
-        };
-        let mut invalid = b.ins().vany_true(bad);
-        if self.element == Element::U16 {
-            // Every u16 offset fits in a slice with at least 65536 elements.
-            let narrow =
-                b.ins()
-                    .icmp_imm(IntCC::UnsignedLessThanOrEqual, self.len, u16::MAX as i64);
-            invalid = b.ins().band(invalid, narrow);
-        }
-        invalid
-    }
-
     fn masked(&self, b: &mut FunctionBuilder) -> Vec<Value> {
         let mask = self.mask.expect("masked access");
         let ty = chunk_type(self.element);
@@ -867,7 +1029,7 @@ impl Memory<'_> {
                 b.ins().brif(any, some, &[], done, &[]);
             }
             b.switch_to_block(some);
-            if let Address::Contiguous(base) = self.address {
+            if let Lanes::Contiguous(base) = self.address {
                 let start = b.ins().iadd_imm(base, (part * lanes as usize) as i64);
                 let full = b.ins().vall_true(m);
                 let packed = b.create_block();
@@ -884,7 +1046,7 @@ impl Memory<'_> {
                 }
                 b.switch_to_block(partial);
             }
-            let result = self.ordered_part(b, part, initial, false);
+            let result = self.ordered_part(b, part, initial);
             if let Some(v) = result {
                 b.ins().jump(done, &[v.into()]);
             } else {
@@ -904,11 +1066,11 @@ impl Memory<'_> {
             )
         })
     }
-    fn ordered(&self, b: &mut FunctionBuilder, check_lanes: bool) -> Vec<Value> {
+    fn ordered(&self, b: &mut FunctionBuilder) -> Vec<Value> {
         (0..self.m.chunks())
             .filter_map(|part| {
                 let value = self.initial(b, part);
-                self.ordered_part(b, part, value, check_lanes)
+                self.ordered_part(b, part, value)
             })
             .collect()
     }
@@ -917,7 +1079,6 @@ impl Memory<'_> {
         b: &mut FunctionBuilder,
         part: usize,
         mut value: Option<Value>,
-        check_lanes: bool,
     ) -> Option<Value> {
         let ty = chunk_type(self.element);
         let chunk_lanes = ty.lane_count() as u8;
@@ -937,11 +1098,11 @@ impl Memory<'_> {
                 next
             });
             let index = match self.address {
-                Address::Contiguous(base) => {
+                Lanes::Contiguous(base) => {
                     let i = part * usize::from(chunk_lanes) + usize::from(lane);
                     b.ins().iadd_imm(base, i as i64)
                 }
-                Address::Indexed(parts) => {
+                Lanes::Indexed(parts) => {
                     let i = b.ins().extractlane(parts[part], lane);
                     if self.element.bytes() == 8 {
                         i
@@ -950,13 +1111,6 @@ impl Memory<'_> {
                     }
                 }
             };
-            if check_lanes {
-                let invalid = b
-                    .ins()
-                    .icmp(IntCC::UnsignedGreaterThanOrEqual, index, self.len);
-                let fault = trap(b, Trap::Bounds);
-                return_if(b, invalid, fault);
-            }
             let ptr = self.pointer(b, index);
             if let Some(values) = self.values {
                 let item = b.ins().extractlane(values[part], lane);

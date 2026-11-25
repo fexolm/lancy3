@@ -1613,3 +1613,173 @@ fn trapping_and_repeated_writes_leave_the_same_buffer_on_every_backend() {
         );
     }
 }
+
+/// Every slice access against one model of its lanes: the active lanes, in
+/// lane order, up to the first one outside the slice. A read with such a
+/// lane reads nothing; a write keeps the lanes before it, and the last of
+/// repeated indices wins. Inactive lanes are never checked.
+#[test]
+fn every_slice_access_matches_the_lane_order_model() {
+    check_lane_order::<u16>(Element::U16);
+    check_lane_order::<i32>(Element::I32);
+    check_lane_order::<i64>(Element::I64);
+}
+
+fn check_lane_order<T>(e: Element)
+where
+    T: splice::BufferElement + Copy + std::fmt::Debug + TryFrom<i64>,
+{
+    let t = |x: i64| T::try_from(x).ok().expect("a value of the element");
+    let n = e.lanes(bytes());
+    let ops = [
+        SimdOp::Load(Buffer(1)),
+        SimdOp::LoadSelect(Buffer(1)),
+        SimdOp::Gather(Buffer(1)),
+        SimdOp::GatherSelect(Buffer(1)),
+        SimdOp::Store(Buffer(1)),
+        SimdOp::StoreSelect(Buffer(1)),
+        SimdOp::Scatter(Buffer(1)),
+        SimdOp::ScatterSelect(Buffer(1)),
+    ];
+    let stage: Stage = Rc::new(move |b| {
+        let at = index(b, 0)?;
+        let limit = index(b, 1)?;
+        let op = b.arg(2)?;
+        let zero = b.constant(Constant::from(0usize))?;
+        let indices = load(b, e, 0, zero);
+        let iota = simd(b, e, SimdOp::Iota, &[]);
+        let hundred = simd(b, e, SimdOp::Splat(100), &[]);
+        let value = simd(b, e, SimdOp::Add, &[iota, hundred]);
+        let passthrough = simd(b, e, SimdOp::Splat(7), &[]);
+        let mask = simd(b, e, SimdOp::FirstN, &[limit]);
+        for (case, &simd_op) in ops.iter().enumerate() {
+            let (here, next) = (b.label()?, b.label()?);
+            let k = b.constant(Constant::from(case as i32))?;
+            let hit = b.binary(Binary::Eq, op, k)?;
+            b.branch(hit, here, next)?;
+            b.mark(here)?;
+            let memory = simd_op.info().memory.unwrap();
+            let mut args = vec![if memory.indexed { indices } else { at }];
+            if memory.masked {
+                args.push(mask);
+            }
+            match memory.access {
+                splice::hir::Access::Write => args.push(value),
+                _ if memory.masked => args.push(passthrough),
+                _ => {}
+            }
+            let inst = Simd {
+                element: e,
+                op: simd_op,
+            };
+            if let Some(read) = b.simd(inst, &args)? {
+                store(b, e, 2, zero, read);
+            }
+            done(b)?;
+            b.mark(next)?;
+        }
+        done(b)?;
+        Ok(())
+    });
+    let mut cases: Vec<(usize, usize, i32, usize, Vec<i64>)> = Vec::new();
+    for len in [0, 3, n + 2] {
+        let lanes: Vec<i64> = (0..n as i64).collect();
+        let mut patterns: Vec<Vec<i64>> = vec![
+            lanes
+                .iter()
+                .map(|&lane| lane * 3 % len.max(1) as i64)
+                .collect(),
+        ];
+        for bad in [0, n / 2, n - 1] {
+            for value in [len as i64 + 5, -1] {
+                if T::try_from(value).is_ok() {
+                    let mut indices = patterns[0].clone();
+                    indices[1] = indices[0];
+                    indices[bad] = value;
+                    patterns.push(indices);
+                }
+            }
+        }
+        for (op, simd_op) in ops.iter().enumerate() {
+            let memory = simd_op.info().memory.unwrap();
+            for limit in [0, 1, n / 2, n] {
+                if memory.indexed {
+                    for indices in &patterns {
+                        cases.push((op, len, 0, limit, indices.clone()));
+                    }
+                } else {
+                    for at in [0, 1, 2, len as i32, -1] {
+                        cases.push((op, len, at, limit, patterns[0].clone()));
+                    }
+                }
+            }
+        }
+    }
+    let kinds = [
+        BufferKind::new(e, false),
+        BufferKind::new(e, true),
+        BufferKind::new(e, true),
+    ];
+    let initial = |len: usize| (0..len as i64).map(|i| t(i * 3 + 1)).collect::<Vec<T>>();
+    let seen = agree(
+        &format!("{e:?} lane order"),
+        Signature::new(&[ScalarType::I32; 3], ScalarType::I32, &kinds),
+        &stage,
+        |call| {
+            cases
+                .iter()
+                .map(|(op, len, at, limit, indices)| {
+                    let indices: Vec<T> = indices.iter().map(|&i| t(i)).collect();
+                    let mut data = initial(*len);
+                    let mut out = vec![t(9); n];
+                    let r = call(
+                        &[*at, *limit as i32, *op as i32].map(i32::to_word),
+                        &mut [
+                            BufferArg::from(&indices[..]),
+                            BufferArg::from(&mut data[..]),
+                            BufferArg::from(&mut out[..]),
+                        ],
+                    );
+                    format!("{r:?} {data:?} {out:?}")
+                })
+                .collect()
+        },
+    );
+    for ((op, len, at, limit, indices), seen) in cases.iter().zip(&seen) {
+        let memory = ops[*op].info().memory.unwrap();
+        let active = |lane: usize| !memory.masked || lane < *limit;
+        let address = |lane: usize| {
+            if memory.indexed {
+                indices[lane]
+            } else {
+                i64::from(*at) + lane as i64
+            }
+        };
+        let slot = |lane: usize| usize::try_from(address(lane)).ok().filter(|&a| a < *len);
+        let lanes = (0..n).filter(|&lane| active(lane));
+        let fails = lanes.clone().any(|lane| slot(lane).is_none());
+        let mut data = initial(*len);
+        let mut out = vec![t(9); n];
+        let write = memory.access == splice::hir::Access::Write;
+        if write {
+            for lane in lanes {
+                let Some(slot) = slot(lane) else { break };
+                data[slot] = t(100 + lane as i64);
+            }
+        } else if !fails {
+            for (lane, out) in out.iter_mut().enumerate() {
+                *out = match slot(lane) {
+                    Some(slot) if active(lane) => data[slot],
+                    _ => t(7),
+                };
+            }
+        }
+        let status = if fails { "Err(Trap(Bounds))" } else { "Ok(0)" };
+        assert_eq!(
+            seen,
+            &format!("{status} {data:?} {out:?}"),
+            "{e:?} {:?} len {len} at {at} limit {limit} indices {indices:?}",
+            ops[*op]
+        );
+    }
+}

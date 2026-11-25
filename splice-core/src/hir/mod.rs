@@ -4,6 +4,7 @@
 
 mod buffer;
 mod builder;
+pub mod memory;
 mod replay;
 mod rust_call;
 mod simd;

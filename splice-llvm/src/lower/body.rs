@@ -265,22 +265,30 @@ impl<'a, 'ctx> Body<'a, 'ctx> {
     // Guards of the same type share one side exit. Failed calls preserve
     // their callee's status and return immediately to the enclosing caller.
     fn exit_if(&mut self, condition: IntValue<'ctx>, fault: Failure) -> Built<()> {
-        let existing = self.exits[fault.index()];
-        let exit = existing.unwrap_or_else(|| self.ctx.append_basic_block(self.function, "error"));
+        let exit = self.exit(fault)?;
         let next = self.ctx.append_basic_block(self.function, "");
         self.builder
             .build_conditional_branch(condition, exit, next)?;
-        if existing.is_none() {
-            self.exits[fault.index()] = Some(exit);
-            self.builder.position_at_end(exit);
-            if let Failure::Trap(trap) = fault {
-                self.builder
-                    .build_store(self.status, self.int(trap.code() as i32))?;
-            }
-            self.builder.build_return(Some(&self.failed_result()))?;
-        }
         self.builder.position_at_end(next);
         Ok(())
+    }
+
+    /// The side exit for `fault`, created on first use.
+    fn exit(&mut self, fault: Failure) -> Built<BasicBlock<'ctx>> {
+        if let Some(exit) = self.exits[fault.index()] {
+            return Ok(exit);
+        }
+        let here = self.builder.get_insert_block().expect("positioned builder");
+        let exit = self.ctx.append_basic_block(self.function, "error");
+        self.exits[fault.index()] = Some(exit);
+        self.builder.position_at_end(exit);
+        if let Failure::Trap(trap) = fault {
+            self.builder
+                .build_store(self.status, self.int(trap.code() as i32))?;
+        }
+        self.builder.build_return(Some(&self.failed_result()))?;
+        self.builder.position_at_end(here);
+        Ok(exit)
     }
 
     fn element(&mut self, buffer: Buffer, index: Reg) -> Built<PointerValue<'ctx>> {

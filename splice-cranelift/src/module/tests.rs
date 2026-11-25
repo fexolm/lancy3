@@ -56,9 +56,11 @@ fn emitted_graph(f: &Function, unique_bodies: usize) -> HashMap<FuncId, Vec<Func
     graph
 }
 
+/// Instructions outside cold blocks: the path that does not trap.
 fn instructions_of_type(f: &ir::Function, opcode: Opcode, ty: Type) -> usize {
     f.layout
         .blocks()
+        .filter(|&b| !f.layout.is_cold(b))
         .flat_map(|b| f.layout.block_insts(b))
         .filter(|&i| f.dfg.insts[i].opcode() == opcode && f.dfg.ctrl_typevar(i) == ty)
         .count()
