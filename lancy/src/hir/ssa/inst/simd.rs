@@ -1,4 +1,4 @@
-use super::{Binary, Lane, Ternary, Unary, Value};
+use super::{Binary, Lane, Value};
 
 /// Contiguous lanes or signed element indices relative to a base pointer.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -30,16 +30,9 @@ pub enum Simd {
     },
     /// Convert and concatenate two vectors of elements twice as wide as the result.
     Narrow(Lane, Value, Value),
-    Unary(Unary, Value),
-    Ternary(Ternary, Value, Value, Value),
     Splat(Value),
     ExtractLane(Value, Value),
     InsertLane(Value, Value, Value),
-    Bin(Binary, Value, Value),
-    Cast(Lane, Value),
-    Bitcast(Lane, Value),
-    Load(Lane, Value),
-    Store(Value, Value),
     /// Read only lanes where the mask's high bit is set. Other lanes keep passthrough.
     MaskedLoad {
         address: VectorAddress,
@@ -76,12 +69,8 @@ impl Simd {
             | Self::AnyTrue(v)
             | Self::AllTrue(v)
             | Self::Widen { value: v, .. }
-            | Self::Load(_, v)
-            | Self::Unary(_, v)
-            | Self::Splat(v)
-            | Self::Cast(_, v)
-            | Self::Bitcast(_, v) => *v = map(*v),
-            Self::Shuffle(a, b, c) | Self::InsertLane(a, b, c) | Self::Ternary(_, a, b, c) => {
+            | Self::Splat(v) => *v = map(*v),
+            Self::Shuffle(a, b, c) | Self::InsertLane(a, b, c) => {
                 *a = map(*a);
                 *b = map(*b);
                 *c = map(*c);
@@ -89,9 +78,7 @@ impl Simd {
             Self::Compress(a, b)
             | Self::Expand(a, b)
             | Self::Narrow(_, a, b)
-            | Self::ExtractLane(a, b)
-            | Self::Bin(_, a, b)
-            | Self::Store(a, b) => {
+            | Self::ExtractLane(a, b) => {
                 *a = map(*a);
                 *b = map(*b);
             }

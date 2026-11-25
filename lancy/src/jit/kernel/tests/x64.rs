@@ -84,7 +84,7 @@ fn outlined_vector_pressure_preserves_windows_xmm_registers_on_normal_and_trappi
     use super::super::ScalarKernel;
     use crate::{
         Inlining,
-        hir::{Binary, Function, Lane, Op, Scale, Simd, Terminator, Type},
+        hir::{Binary, Function, Lane, Op, Scale, Terminator, Type},
     };
     use iced_x86::{Decoder, DecoderOptions, Mnemonic, Register};
     use splice_target::CallingConvention;
@@ -105,18 +105,15 @@ fn outlined_vector_pressure_preserves_windows_xmm_registers_on_normal_and_trappi
             .append(b, Op::PtrOffset(src, offset, Scale::Eight))
             .unwrap();
         values.push(
-            leaf.append(b, Op::Simd(Simd::Load(Lane::F64, ptr)))
+            leaf.append(b, Op::Load(Type::Vector(Lane::F64), ptr))
                 .unwrap(),
         );
     }
     let mut sum = values[0];
     for &v in &values[1..] {
-        sum = leaf
-            .append(b, Op::Simd(Simd::Bin(Binary::Add, sum, v)))
-            .unwrap();
+        sum = leaf.append(b, Op::Bin(Binary::Add, sum, v)).unwrap();
     }
-    leaf.append_inst(b, Op::Simd(Simd::Store(dst, sum)))
-        .unwrap();
+    leaf.append_inst(b, Op::Store(dst, sum)).unwrap();
     let one = leaf.append(b, Op::Const(1)).unwrap();
     leaf.append_inst(b, Op::BoundsCheck(index, one)).unwrap();
     leaf.set_terminator(b, Terminator::Return(one));

@@ -85,10 +85,10 @@ impl Rules<'_> {
             Op::Bitcast(to, v) if class(to) != class(self.ty(v)) => {
                 Inst::BitMove(self.ty(v), to, self.dst(), self.input(v))
             }
-            Op::Copy(v) | Op::Bitcast(_, v) | Op::Simd(Simd::Bitcast(_, v)) => {
-                Inst::Copy(self.dst(), self.input(v))
+            Op::Copy(v) | Op::Bitcast(_, v) => Inst::Copy(self.dst(), self.input(v)),
+            Op::Bin(kind, a, b) if !matches!(self.ty(a), Type::Vector(_)) => {
+                self.binary(kind, a, b)?
             }
-            Op::Bin(kind, a, b) => self.binary(kind, a, b)?,
             Op::Ternary(Ternary::Select, cond, yes, no) if self.ty(yes) == Type::I32 => {
                 let cond = if let Some(Op::Bin(kind, a, b)) = self.ctx.single_use(cond)
                     && self.ty(a) == Type::I32
@@ -110,8 +110,7 @@ impl Rules<'_> {
             Op::Trap(trap) => Inst::Trap(trap),
             Op::PtrOffset(base, index, scale) => self.pointer_offset(base, index, scale)?,
             Op::Load(ty, ptr) => self.load(ty, ptr)?,
-            Op::Simd(Simd::Load(lane, ptr)) => self.load(Type::Vector(lane), ptr)?,
-            Op::Store(ptr, value) | Op::Simd(Simd::Store(ptr, value)) => self.store(ptr, value)?,
+            Op::Store(ptr, value) => self.store(ptr, value)?,
             Op::DebugStore(offset, value) => {
                 Inst::DebugStore(self.ty(value), offset, self.input(value))
             }

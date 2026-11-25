@@ -163,10 +163,8 @@ fn hoist(f: &mut Function, dom: &DomTree, loops: &NaturalLoops, facts: &mut Fact
                 return None;
             }
             let cheap = match op {
-                Op::Bin(kind, ..) | Op::Simd(Simd::Bin(kind, ..)) => {
-                    !matches!(kind, Binary::Pow | Binary::Atan2 | Binary::Hypot)
-                }
-                Op::Unary(kind, ..) | Op::Simd(Simd::Unary(kind, ..)) => matches!(
+                Op::Bin(kind, ..) => !matches!(kind, Binary::Pow | Binary::Atan2 | Binary::Hypot),
+                Op::Unary(kind, ..) => matches!(
                     kind,
                     Unary::Neg
                         | Unary::Abs
@@ -178,14 +176,7 @@ fn hoist(f: &mut Function, dom: &DomTree, loops: &NaturalLoops, facts: &mut Fact
                 Op::Cast(..)
                 | Op::Bitcast(..)
                 | Op::Ternary(..)
-                | Op::Simd(
-                    Simd::Cast(..)
-                    | Simd::Bitcast(..)
-                    | Simd::Ternary(..)
-                    | Simd::LaneCount(_)
-                    | Simd::Iota(_)
-                    | Simd::Splat(_),
-                ) => true,
+                | Op::Simd(Simd::LaneCount(_) | Simd::Iota(_) | Simd::Splat(_)) => true,
                 _ => false,
             };
             if !cheap || (extended && total.binary_search(&result).is_err()) {

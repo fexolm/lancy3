@@ -59,9 +59,7 @@ fn zero_masked_load_has_no_merge_and_negative_zero_keeps_its_bits() {
         let [ptr, count] = f.params(b).try_into().unwrap();
         let iota = f.append(b, Op::Simd(Simd::Iota(Lane::I32))).unwrap();
         let count = f.append(b, Op::Simd(Simd::Splat(count))).unwrap();
-        let mask = f
-            .append(b, Op::Simd(Simd::Bin(Binary::Lt, iota, count)))
-            .unwrap();
+        let mask = f.append(b, Op::Bin(Binary::Lt, iota, count)).unwrap();
         let pass = f.append(b, Op::Literal(Lane::F32, fallback)).unwrap();
         let pass = f.append(b, Op::Simd(Simd::Splat(pass))).unwrap();
         let out = f
@@ -249,9 +247,7 @@ fn live_predicates_spill_safely_across_an_outlined_call() {
     let x = child.params(b)[0];
     let i = child.append(b, Op::Simd(Simd::Iota(Lane::I32))).unwrap();
     let limit = child.append(b, Op::Simd(Simd::Splat(x))).unwrap();
-    let cmp = child
-        .append(b, Op::Simd(Simd::Bin(Binary::Lt, i, limit)))
-        .unwrap();
+    let cmp = child.append(b, Op::Bin(Binary::Lt, i, limit)).unwrap();
     let status = child.append(b, Op::Simd(Simd::AnyTrue(cmp))).unwrap();
     child.set_terminator(b, Terminator::Return(status));
 
@@ -263,8 +259,7 @@ fn live_predicates_spill_safely_across_an_outlined_call() {
         .iter()
         .map(|&x| {
             let limit = f.append(b, Op::Simd(Simd::Splat(x))).unwrap();
-            f.append(b, Op::Simd(Simd::Bin(Binary::Lt, i, limit)))
-                .unwrap()
+            f.append(b, Op::Bin(Binary::Lt, i, limit)).unwrap()
         })
         .collect();
     let call = f.add_call(Arc::new(child), &args[8..]);
@@ -300,10 +295,8 @@ fn adjacent_vector_load_can_be_a_packed_memory_operand() {
     let mut f = Function::new(&[Type::Ptr, ty], ty);
     let b = f.entry();
     let [p, mask] = f.params(b).try_into().unwrap();
-    let v = f.append(b, Op::Simd(Simd::Load(Lane::I32, p))).unwrap();
-    let r = f
-        .append(b, Op::Simd(Simd::Bin(Binary::And, v, mask)))
-        .unwrap();
+    let v = f.append(b, Op::Load(Type::Vector(Lane::I32), p)).unwrap();
+    let r = f.append(b, Op::Bin(Binary::And, v, mask)).unwrap();
     f.set_terminator(b, Terminator::Return(r));
     let k = ScalarKernel::compile(&f, &crate::test_target::options()).unwrap();
     let n = crate::test_target::width();
@@ -369,9 +362,7 @@ fn masked_load_uses_the_comparison_mask_directly_on_avx512() {
         let mut f = Function::new(&[Type::Ptr, ty, ty], ty);
         let b = f.entry();
         let [base, lhs, rhs] = f.params(b).try_into().unwrap();
-        let mask = f
-            .append(b, Op::Simd(Simd::Bin(Binary::Lt, lhs, rhs)))
-            .unwrap();
+        let mask = f.append(b, Op::Bin(Binary::Lt, lhs, rhs)).unwrap();
         let out = f
             .append(
                 b,
@@ -430,10 +421,8 @@ fn comparison_and_any_test_every_lane_and_every_bit() {
         let mut f = Function::new(&[ty, ty, ty], Type::I32);
         let b = f.entry();
         let [x, y, enabled] = f.params(b).try_into().unwrap();
-        let less = f.append(b, Op::Simd(Simd::Bin(Binary::Lt, x, y))).unwrap();
-        let mask = f
-            .append(b, Op::Simd(Simd::Bin(Binary::And, enabled, less)))
-            .unwrap();
+        let less = f.append(b, Op::Bin(Binary::Lt, x, y)).unwrap();
+        let mask = f.append(b, Op::Bin(Binary::And, enabled, less)).unwrap();
         let any = f.append(b, Op::Simd(Simd::AnyTrue(mask))).unwrap();
         f.set_terminator(b, Terminator::Return(any));
         let k = ScalarKernel::compile(&f, &crate::test_target::options()).unwrap();
@@ -497,12 +486,9 @@ fn comparing_float_lanes_for_select_preserves_nan_and_zero_bits() {
         let mut f = Function::new(&[ty, ty], ty);
         let b = f.entry();
         let [lhs, rhs] = f.params(b).try_into().unwrap();
-        let condition = f.append(b, Op::Simd(Simd::Bin(op, lhs, rhs))).unwrap();
+        let condition = f.append(b, Op::Bin(op, lhs, rhs)).unwrap();
         let picked = f
-            .append(
-                b,
-                Op::Simd(Simd::Ternary(Ternary::Select, condition, lhs, rhs)),
-            )
+            .append(b, Op::Ternary(Ternary::Select, condition, lhs, rhs))
             .unwrap();
         f.set_terminator(b, Terminator::Return(picked));
         let expected: Vec<_> = lhs_values
@@ -547,9 +533,7 @@ fn dword_shifts_carry_lanes_across_register_chunks() {
         let offset = f.append(b, Op::Literal(Lane::U32, shift as u128)).unwrap();
         let offset = f.append(b, Op::Simd(Simd::Splat(offset))).unwrap();
         let iota = f.append(b, Op::Simd(Simd::Iota(Lane::U32))).unwrap();
-        let indices = f
-            .append(b, Op::Simd(Simd::Bin(Binary::Sub, iota, offset)))
-            .unwrap();
+        let indices = f.append(b, Op::Bin(Binary::Sub, iota, offset)).unwrap();
         let result = f.append(b, Op::Simd(Simd::Shuffle(x, y, indices))).unwrap();
         f.set_terminator(b, Terminator::Return(result));
         let mut expected = vec![0; n];
@@ -597,8 +581,8 @@ fn broadcast_shift_counts_become_immediates_with_wrapping_and_signedness() {
                 let x = f.params(b)[0];
                 let shift = f.append(b, Op::literal(lane, count.into())).unwrap();
                 let counts = f.append(b, Op::Simd(Simd::Splat(shift))).unwrap();
-                let y = f.append(b, Op::Simd(Simd::Bin(op, x, counts))).unwrap();
-                let z = f.append(b, Op::Simd(Simd::Bin(Binary::Xor, x, y))).unwrap();
+                let y = f.append(b, Op::Bin(op, x, counts)).unwrap();
+                let z = f.append(b, Op::Bin(Binary::Xor, x, y)).unwrap();
                 f.set_terminator(b, Terminator::Return(z));
                 let expected = values.map(|x| {
                     let y = match op {
@@ -875,9 +859,7 @@ fn indexed_memory_can_reuse_the_mask_as_indices_and_passthrough() {
             }),
         )
         .unwrap();
-        let r = f
-            .append(b, Op::Simd(Simd::Bin(Binary::Xor, loaded, both)))
-            .unwrap();
+        let r = f.append(b, Op::Bin(Binary::Xor, loaded, both)).unwrap();
         f.set_terminator(b, Terminator::Return(r));
         let k = ScalarKernel::compile(&f, &crate::test_target::options()).unwrap();
         let bytes = lane.bytes();

@@ -104,17 +104,13 @@ impl Rules<'_> {
     ) -> Op {
         match (op, result) {
             (
-                Op::Simd(Simd::Bin(
-                    kind @ (Binary::Lt | Binary::Le | Binary::Gt | Binary::Ge),
-                    x,
-                    y,
-                )),
+                Op::Bin(kind @ (Binary::Lt | Binary::Le | Binary::Gt | Binary::Ge), x, y),
                 Some(dst),
             ) if matches!(types[x], Type::Vector(lane) if !lane.float()) => {
                 self.orderings.insert(dst, (kind, aliases[x], aliases[y]));
                 op
             }
-            (Op::Simd(Simd::Ternary(Ternary::Select, mask, yes, no)), _) => {
+            (Op::Ternary(Ternary::Select, mask, yes, no), _) => {
                 let Some(&(kind, x, y)) = self.orderings.get(&aliases[mask]) else {
                     return op;
                 };
@@ -128,7 +124,7 @@ impl Rules<'_> {
                     return op;
                 };
                 let kind = if select_min { Binary::Min } else { Binary::Max };
-                Op::Simd(Simd::Bin(kind, yes, no))
+                Op::Bin(kind, yes, no)
             }
             _ => op,
         }
@@ -143,7 +139,7 @@ impl Rules<'_> {
         types: &DenseMap<Value, Type>,
         aliases: &DenseMap<Value, Value>,
     ) -> Option<Rewrite> {
-        let (Op::Bin(kind, x, y) | Op::Simd(Simd::Bin(kind, x, y))) = op else {
+        let Op::Bin(kind, x, y) = op else {
             return None;
         };
         if types[x].lane().is_none_or(Lane::float) {
@@ -155,7 +151,7 @@ impl Rules<'_> {
             Some(sccp::Reduced::Constant(bits)) => Some(Rewrite::Op(
                 constant_op(types[dst], bits, self.literals).unwrap_or(op),
             )),
-            None if matches!(op, Op::Bin(..)) && a.is_some() && b.is_none() => {
+            None if !matches!(types[x], Type::Vector(_)) && a.is_some() && b.is_none() => {
                 let flipped = match kind {
                     Binary::Lt => Binary::Gt,
                     Binary::Le => Binary::Ge,
@@ -186,9 +182,7 @@ impl Rules<'_> {
         types: &DenseMap<Value, Type>,
         aliases: &DenseMap<Value, Value>,
     ) -> Option<Rewrite> {
-        let (Op::Ternary(Ternary::Select, c, yes, no)
-        | Op::Simd(Simd::Ternary(Ternary::Select, c, yes, no))) = op
-        else {
+        let Op::Ternary(Ternary::Select, c, yes, no) = op else {
             return None;
         };
         if aliases[yes] == aliases[no] {

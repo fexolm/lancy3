@@ -131,20 +131,15 @@ impl Transfer {
             Op::Const(n) => Self::Constant(u128::from(n as u32)),
             Op::Literal(lane, bits) => Self::Constant(bits & lane_mask(lane)),
             Op::Copy(v) | Op::Simd(Simd::Splat(v)) => Self::Forward(v),
-            Op::Unary(kind, v) | Op::Simd(Simd::Unary(kind, v)) => {
+            Op::Unary(kind, v) => {
                 integer(v).map_or(Self::Varying, |lane| Self::Unary(kind, lane, v))
             }
-            Op::Bin(kind, a, b) | Op::Simd(Simd::Bin(kind, a, b)) if integer(a).is_some() => {
+            Op::Bin(kind, a, b) if integer(a).is_some() => {
                 Self::Binary(kind, f.value_type(a), a, b)
             }
             Op::Cast(to, v) => cast(to, v),
-            Op::Simd(Simd::Cast(to, v)) => cast(Type::Vector(to), v),
             Op::Bitcast(to, v) => bitcast(to.lane(), v),
-            Op::Simd(Simd::Bitcast(to, v)) => bitcast(Some(to), v),
-            Op::Ternary(Ternary::Select, c, yes, no)
-            | Op::Simd(Simd::Ternary(Ternary::Select, c, yes, no)) => {
-                Self::Select(f.value_type(c), c, yes, no)
-            }
+            Op::Ternary(Ternary::Select, c, yes, no) => Self::Select(f.value_type(c), c, yes, no),
             _ => Self::Varying,
         }
     }

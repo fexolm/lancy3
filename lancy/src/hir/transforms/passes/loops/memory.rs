@@ -4,7 +4,7 @@ use super::super::bounds::{
 };
 use super::{CountedLoop, Facts, NaturalLoops};
 use crate::hir::transforms::{ControlFlowGraph, DomTree};
-use crate::hir::{Block, Function, Op, Simd, SliceParam, Terminator, Type, Value};
+use crate::hir::{Block, Function, Op, SliceParam, Terminator, Type, Value};
 use crate::support::slotmap::DenseMap;
 use std::collections::HashMap;
 
@@ -72,7 +72,6 @@ impl Bounds {
                         continue;
                     }
                     Op::Load(ty, ptr) if declared => (ty, ptr),
-                    Op::Simd(Simd::Load(lane, ptr)) if declared => (Type::Vector(lane), ptr),
                     _ => continue,
                 };
                 let Some(Op::PtrOffset(base, i, scale)) = facts.op(f, ptr) else {
@@ -140,11 +139,7 @@ impl Bounds {
                         Index::Ssa(v) => v,
                     };
                     let addr = facts.append(f, target, Op::PtrOffset(base, i, scale));
-                    let op = match ty {
-                        Type::Vector(lane) => Op::Simd(Simd::Load(lane, addr)),
-                        _ => Op::Load(ty, addr),
-                    };
-                    facts.append(f, target, op)
+                    facts.append(f, target, Op::Load(ty, addr))
                 });
             f.replace_op_preserving_type(inst, Op::Copy(value));
         }

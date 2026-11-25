@@ -8,11 +8,7 @@ use crate::{
 
 impl Rules<'_> {
     pub(super) fn immediate_vector_shift(&mut self, op: Op) -> Option<Inst> {
-        let Op::Simd(Simd::Bin(
-            kind @ (B::Shl | B::Shr | B::RotateLeft | B::RotateRight),
-            src,
-            count,
-        )) = op
+        let Op::Bin(kind @ (B::Shl | B::Shr | B::RotateLeft | B::RotateRight), src, count) = op
         else {
             return None;
         };

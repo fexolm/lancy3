@@ -223,7 +223,7 @@ pub(super) unsafe fn run(
                 }
                 result
             }
-            Op::Load(_, addr) | Op::Simd(Simd::Load(_, addr)) => {
+            Op::Load(_, addr) => {
                 let ty = graph.value_type(graph.result(inst).unwrap());
                 let addr = f.read(addr);
                 let mut bits = [0; 64];
@@ -244,7 +244,7 @@ pub(super) unsafe fn run(
                 }
                 bits
             }
-            Op::Store(addr, v) | Op::Simd(Simd::Store(addr, v)) => {
+            Op::Store(addr, v) => {
                 let addr = f.read(addr);
                 let ty = graph.value_type(v);
                 let src = &f.values[v][..ty.bytes(width)];

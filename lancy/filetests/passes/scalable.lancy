@@ -172,12 +172,18 @@ block exit picked:vec.i32
 @alloc check: spill_slots=
 @run -123 -> 1
 ---
-fn main x:vec.f32 -> vec.f32
-  invalid = add x x
+# One `add` serves scalars and vectors, but not a scalar with a vector.
+fn main x:vec.f32 s:f32 -> vec.f32
+  invalid = add x s
   ret invalid
-@reject use its SIMD form
+@reject expected Vector(F32)
 ---
-fn main x:f64 -> f64
-  invalid = simd.add x x
-  ret invalid
-@reject invalid numeric operation
+fn main x:i32 -> i32
+  v = simd.splat x
+  w = add v v
+  zero = const 0
+  r = simd.extract w zero
+  ret r
+@opt check: simd.Binary(Add) Vector(I32)
+@run 5 -> 10
+@run -7 -> -14

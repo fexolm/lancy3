@@ -171,29 +171,29 @@ fn unary(name: &str) -> Result<Unary> {
     })
 }
 
-fn simd(name: &str, args: &[&str], v: impl Fn(&str) -> Result<Value>) -> Result<Simd> {
+fn simd(name: &str, args: &[&str], v: impl Fn(&str) -> Result<Value>) -> Result<Op> {
     Ok(match (name, args) {
-        ("lanes", [t]) => Simd::LaneCount(element(t)?),
-        ("iota", [t]) => Simd::Iota(element(t)?),
-        ("shuffle", [x, y, i]) => Simd::Shuffle(v(x)?, v(y)?, v(i)?),
-        ("any", [x]) => Simd::AnyTrue(v(x)?),
-        ("all", [x]) => Simd::AllTrue(v(x)?),
-        ("reduce", [op, x]) => Simd::Reduce(binary(op)?, v(x)?),
-        (part @ ("widenlo" | "widenhi"), [t, x]) => Simd::Widen {
+        ("lanes", [t]) => Op::Simd(Simd::LaneCount(element(t)?)),
+        ("iota", [t]) => Op::Simd(Simd::Iota(element(t)?)),
+        ("shuffle", [x, y, i]) => Op::Simd(Simd::Shuffle(v(x)?, v(y)?, v(i)?)),
+        ("any", [x]) => Op::Simd(Simd::AnyTrue(v(x)?)),
+        ("all", [x]) => Op::Simd(Simd::AllTrue(v(x)?)),
+        ("reduce", [op, x]) => Op::Simd(Simd::Reduce(binary(op)?, v(x)?)),
+        (part @ ("widenlo" | "widenhi"), [t, x]) => Op::Simd(Simd::Widen {
             to: element(t)?,
             high: part == "widenhi",
             value: v(x)?,
-        },
-        ("narrow", [t, x, y]) => Simd::Narrow(element(t)?, v(x)?, v(y)?),
-        ("splat", [x]) => Simd::Splat(v(x)?),
-        ("extract", [x, i]) => Simd::ExtractLane(v(x)?, v(i)?),
-        ("insert", [x, i, y]) => Simd::InsertLane(v(x)?, v(i)?, v(y)?),
+        }),
+        ("narrow", [t, x, y]) => Op::Simd(Simd::Narrow(element(t)?, v(x)?, v(y)?)),
+        ("splat", [x]) => Op::Simd(Simd::Splat(v(x)?)),
+        ("extract", [x, i]) => Op::Simd(Simd::ExtractLane(v(x)?, v(i)?)),
+        ("insert", [x, i, y]) => Op::Simd(Simd::InsertLane(v(x)?, v(i)?, v(y)?)),
         (op @ ("maskedload" | "maskedstore"), [p, idx, mask, x]) => {
             let address = crate::hir::VectorAddress {
                 base: v(p)?,
                 indices: if *idx == "-" { None } else { Some(v(idx)?) },
             };
-            if op == "maskedload" {
+            Op::Simd(if op == "maskedload" {
                 Simd::MaskedLoad {
                     address,
                     mask: v(mask)?,
@@ -205,20 +205,20 @@ fn simd(name: &str, args: &[&str], v: impl Fn(&str) -> Result<Value>) -> Result<
                     mask: v(mask)?,
                     value: v(x)?,
                 }
-            }
+            })
         }
 
-        ("compress", [x, m]) => Simd::Compress(v(x)?, v(m)?),
-        ("expand", [x, m]) => Simd::Expand(v(x)?, v(m)?),
-        ("load", [t, p]) => Simd::Load(element(t)?, v(p)?),
-        ("store", [p, x]) => Simd::Store(v(p)?, v(x)?),
-        ("cast", [t, x]) => Simd::Cast(element(t)?, v(x)?),
-        ("bitcast", [t, x]) => Simd::Bitcast(element(t)?, v(x)?),
-        ("fma", [x, y, z]) => Simd::Ternary(Ternary::MulAdd, v(x)?, v(y)?, v(z)?),
-        ("bitselect", [x, y, z]) => Simd::Ternary(Ternary::BitSelect, v(x)?, v(y)?, v(z)?),
-        ("select", [x, y, z]) => Simd::Ternary(Ternary::Select, v(x)?, v(y)?, v(z)?),
-        (name, [x]) => Simd::Unary(unary(name)?, v(x)?),
-        (name, [x, y]) => Simd::Bin(binary(name)?, v(x)?, v(y)?),
+        ("compress", [x, m]) => Op::Simd(Simd::Compress(v(x)?, v(m)?)),
+        ("expand", [x, m]) => Op::Simd(Simd::Expand(v(x)?, v(m)?)),
+        ("load", [t, p]) => Op::Load(Type::Vector(element(t)?), v(p)?),
+        ("store", [p, x]) => Op::Store(v(p)?, v(x)?),
+        ("cast", [t, x]) => Op::Cast(Type::Vector(element(t)?), v(x)?),
+        ("bitcast", [t, x]) => Op::Bitcast(Type::Vector(element(t)?), v(x)?),
+        ("fma", [x, y, z]) => Op::Ternary(Ternary::MulAdd, v(x)?, v(y)?, v(z)?),
+        ("bitselect", [x, y, z]) => Op::Ternary(Ternary::BitSelect, v(x)?, v(y)?, v(z)?),
+        ("select", [x, y, z]) => Op::Ternary(Ternary::Select, v(x)?, v(y)?, v(z)?),
+        (name, [x]) => Op::Unary(unary(name)?, v(x)?),
+        (name, [x, y]) => Op::Bin(binary(name)?, v(x)?, v(y)?),
         _ => return Err(format!("invalid SIMD instruction {name}")),
     })
 }
@@ -297,7 +297,7 @@ fn instruction<'a>(
         _ => (None, words),
     };
     let op = match words {
-        [name, args @ ..] if name.starts_with("simd.") => Op::Simd(simd(&name[5..], args, v)?),
+        [name, args @ ..] if name.starts_with("simd.") => simd(&name[5..], args, v)?,
         ["const", n] => Op::Const(super::integer(n)?),
         ["literal", t, n] => {
             let lane = element(t)?;

@@ -91,7 +91,7 @@ impl Rules<'_> {
     fn xor3_args(&self, a: Value, b: Value) -> Option<[Value; 3]> {
         [(a, b), (b, a)].into_iter().find_map(|(inner, other)| {
             match self.ctx.single_use(inner)? {
-                Op::Simd(Simd::Bin(Binary::Xor, x, y)) => Some([x, y, other]),
+                Op::Bin(Binary::Xor, x, y) => Some([x, y, other]),
                 _ => None,
             }
         })

@@ -28,13 +28,7 @@ fn each_integer_width_wraps_and_divides_with_its_signedness() {
             let bytes = ty.bytes(crate::test_target::width());
             let words = bytes.div_ceil(8);
             for op in [Binary::Add, Binary::Div, Binary::Lt] {
-                let k = kernel(&[ty, ty], op.result_type(ty), |v| {
-                    if matches!(ty, Type::Vector(_)) {
-                        Op::Simd(Simd::Bin(op, v[0], v[1]))
-                    } else {
-                        Op::Bin(op, v[0], v[1])
-                    }
-                });
+                let k = kernel(&[ty, ty], op.result_type(ty), |v| Op::Bin(op, v[0], v[1]));
                 let mut a = vec![0xff; words * 8];
                 let mut b = vec![0; words * 8];
                 let mut expected = Vec::new();
@@ -116,21 +110,9 @@ fn fp_results_include_signed_zero_nan_and_fused_rounding() {
                 .map(|x| crate::hir::eval::read(x) as u64)
                 .collect::<Vec<_>>()
         };
-        let sqrt = kernel(&[ty], ty, |v| {
-            if matches!(ty, Type::Vector(_)) {
-                Op::Simd(Simd::Unary(Unary::Sqrt, v[0]))
-            } else {
-                Op::Unary(Unary::Sqrt, v[0])
-            }
-        });
+        let sqrt = kernel(&[ty], ty, |v| Op::Unary(Unary::Sqrt, v[0]));
         assert!(run(&sqrt, &[from(-0.)]).iter().all(|&x| x == from(-0.)));
-        let div = kernel(&[ty, ty], ty, |v| {
-            if matches!(ty, Type::Vector(_)) {
-                Op::Simd(Simd::Bin(Binary::Div, v[0], v[1]))
-            } else {
-                Op::Bin(Binary::Div, v[0], v[1])
-            }
-        });
+        let div = kernel(&[ty, ty], ty, |v| Op::Bin(Binary::Div, v[0], v[1]));
         for x in run(&div, &[0, 0]) {
             assert!(if lane == Lane::F32 {
                 f32::from_bits(x as u32).is_nan()
@@ -139,11 +121,7 @@ fn fp_results_include_signed_zero_nan_and_fused_rounding() {
             });
         }
         let fma = kernel(&[ty; 3], ty, |v| {
-            if matches!(ty, Type::Vector(_)) {
-                Op::Simd(Simd::Ternary(Ternary::MulAdd, v[0], v[1], v[2]))
-            } else {
-                Op::Ternary(Ternary::MulAdd, v[0], v[1], v[2])
-            }
+            Op::Ternary(Ternary::MulAdd, v[0], v[1], v[2])
         });
         let eps = if lane == Lane::F32 {
             f32::EPSILON as f64
@@ -165,9 +143,7 @@ fn wide_spills_and_outlined_calls_preserve_every_lane() {
     let mut leaf = Function::new(&[v, Type::I32, v], v);
     let b = leaf.entry();
     let [x, idx, y] = leaf.params(b).try_into().unwrap();
-    let z = leaf
-        .append(b, Op::Simd(Simd::Bin(Binary::Add, x, y)))
-        .unwrap();
+    let z = leaf.append(b, Op::Bin(Binary::Add, x, y)).unwrap();
     leaf.append_inst(b, Op::Simd(Simd::ExtractLane(z, idx)))
         .unwrap();
     leaf.set_terminator(b, Terminator::Return(z));
@@ -179,9 +155,7 @@ fn wide_spills_and_outlined_calls_preserve_every_lane() {
     let site = root.add_call(Arc::new(leaf), &[args[0], args[22], args[1]]);
     let mut sum = root.append(b, Op::Call(site)).unwrap();
     for &arg in &args[2..22] {
-        sum = root
-            .append(b, Op::Simd(Simd::Bin(Binary::Add, sum, arg)))
-            .unwrap();
+        sum = root.append(b, Op::Bin(Binary::Add, sum, arg)).unwrap();
     }
     root.set_terminator(b, Terminator::Return(sum));
     for policy in [Inlining::Never, Inlining::Always] {
@@ -207,12 +181,12 @@ fn unaligned_vector_store_precedes_trap() {
     let mut f = Function::new(&[Type::Ptr, Type::I32], Type::I32);
     let b = f.entry();
     let [p, i] = f.params(b).try_into().unwrap();
-    let x = f.append(b, Op::Simd(Simd::Load(Lane::I32, p))).unwrap();
-    let y = f.append(b, Op::Simd(Simd::Bin(Binary::Add, x, x))).unwrap();
-    f.append_inst(b, Op::Simd(Simd::Store(p, y))).unwrap();
+    let x = f.append(b, Op::Load(Type::Vector(Lane::I32), p)).unwrap();
+    let y = f.append(b, Op::Bin(Binary::Add, x, x)).unwrap();
+    f.append_inst(b, Op::Store(p, y)).unwrap();
     let n = f.append(b, Op::Simd(Simd::LaneCount(Lane::I32))).unwrap();
     f.append_inst(b, Op::BoundsCheck(i, n)).unwrap();
-    f.append_inst(b, Op::Simd(Simd::Store(p, x))).unwrap();
+    f.append_inst(b, Op::Store(p, x)).unwrap();
     f.set_terminator(b, Terminator::Return(i));
     let k = ScalarKernel::compile(&f, &crate::test_target::options()).unwrap();
     let w = crate::test_target::width();
@@ -520,7 +494,7 @@ fn signed_zero_and_unordered_fp_comparisons_make_per_lane_masks() {
         Binary::Ge,
     ] {
         let k = kernel(&[ty, ty], Type::Vector(Lane::I32), |v| {
-            Op::Simd(Simd::Bin(op, v[0], v[1]))
+            Op::Bin(op, v[0], v[1])
         });
         let mut out = vec![0; w / 2];
         k.call_words(&args, &mut out).unwrap();
@@ -569,7 +543,7 @@ fn typed_word_abi_rejects_short_buffers_before_execution() {
 fn saturating_float_cast_uses_every_lane() {
     for ty in [Type::Vector(Lane::I32), Type::Vector(Lane::U32)] {
         let k = kernel(&[Type::Vector(Lane::F32)], ty, |v| {
-            Op::Simd(Simd::Cast(ty.lane().unwrap(), v[0]))
+            Op::Cast(Type::Vector(ty.lane().unwrap()), v[0])
         });
         let w = crate::test_target::width() / 8;
         let cases = [

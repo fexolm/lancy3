@@ -1,4 +1,4 @@
-use crate::hir::{self, Op, Simd, Terminator, Value, ssa::VerifiedBody};
+use crate::hir::{self, Op, Simd, Terminator, Type, Value, ssa::VerifiedBody};
 use crate::module::Module;
 use std::fmt::{Display, Write};
 
@@ -39,10 +39,14 @@ pub(super) fn hir(module: &Module<VerifiedBody>) -> String {
                     Op::DebugPoint(id) => format!("debug_point {id}"),
                     Op::Const(n) => format!("const {n}"),
                     Op::Copy(x) => format!("copy {}", v(x)),
-                    Op::Bin(op, x, y) => format!("{op:?} {} {}", v(x), v(y)),
+                    Op::Bin(op, x, y) if !matches!(f.value_type(x), Type::Vector(_)) => {
+                        format!("{op:?} {} {}", v(x), v(y))
+                    }
                     Op::Simd(Simd::LaneCount(lane)) => format!("simd.lanes {lane:?}"),
-                    Op::Simd(Simd::Load(l, p)) => format!("simd.load {l:?} {}", v(p)),
-                    Op::Simd(Simd::Store(p, x)) => format!("simd.store {} {}", v(p), v(x)),
+                    Op::Load(Type::Vector(l), p) => format!("simd.load {l:?} {}", v(p)),
+                    Op::Store(p, x) if matches!(f.value_type(x), Type::Vector(_)) => {
+                        format!("simd.store {} {}", v(p), v(x))
+                    }
                     Op::PtrOffset(p, i, s) => format!("offset {} {} {}", v(p), v(i), 1 << s as u8),
                     Op::BoundsCheck(i, n) => format!("bounds {} {}", v(i), v(n)),
                     Op::TrapIf(cond, trap) => format!("trap_if {} {trap:?}", v(cond)),
@@ -93,15 +97,19 @@ pub(super) fn hir(module: &Module<VerifiedBody>) -> String {
                     }
                     Op::Literal(l, n) => format!("Literal({n}) {:?} ", l.scalar()),
                     op @ (Op::Simd(_)
+                    | Op::Bin(..)
                     | Op::Unary(..)
                     | Op::Ternary(..)
                     | Op::Cast(..)
                     | Op::Bitcast(..)) => {
-                        let prefix = if matches!(op, Op::Simd(_)) {
-                            "simd."
-                        } else {
-                            ""
-                        };
+                        let (_, _, output, _) =
+                            crate::hir::operation::operation(op, |v| f.value_type(v)).unwrap();
+                        let prefix =
+                            if matches!(op, Op::Simd(_)) || matches!(output, Type::Vector(_)) {
+                                "simd."
+                            } else {
+                                ""
+                            };
                         let (action, _, output, args) =
                             crate::hir::operation::operation(op, |v| f.value_type(v)).unwrap();
                         format!(

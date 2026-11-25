@@ -2,7 +2,7 @@
 use super::Rules;
 use crate::{
     CompileError,
-    hir::{Binary, Op, Simd, Value},
+    hir::{Binary, Op, Simd, Type, Value},
     lir::x64::inst::Inst,
 };
 
@@ -24,13 +24,9 @@ impl Rules<'_> {
         // at the same point in the effect order by covering adjacent loads only.
         if self.cpu.bytes >= 32 {
             match op {
-                Op::Simd(Simd::Bin(
-                    kind @ (Binary::Add | Binary::And | Binary::Or | Binary::Xor),
-                    x,
-                    y,
-                )) => {
+                Op::Bin(kind @ (Binary::Add | Binary::And | Binary::Or | Binary::Xor), x, y) => {
                     for (loaded, other) in [(x, y), (y, x)] {
-                        if let Some(Op::Simd(Simd::Load(lane, ptr))) =
+                        if let Some(Op::Load(Type::Vector(lane), ptr)) =
                             self.ctx.adjacent_single_use(loaded)
                             && (kind != Binary::Add
                                 || !lane.float() && matches!(lane.bytes(), 4 | 8))

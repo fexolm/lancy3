@@ -330,10 +330,7 @@ impl Facts {
             return false;
         }
         match (effects.trap, op) {
-            (
-                Some(TrapKind::Division),
-                Op::Bin(_, dividend, divisor) | Op::Simd(Simd::Bin(_, dividend, divisor)),
-            ) => {
+            (Some(TrapKind::Division), Op::Bin(_, dividend, divisor)) => {
                 let Some((lane, bits)) = self.literal_bits(f, divisor) else {
                     return false;
                 };

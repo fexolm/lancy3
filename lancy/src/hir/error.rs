@@ -78,9 +78,6 @@ pub enum IrError {
     NoResult { inst: Inst },
     #[error("invalid numeric operation in {inst:?} for {ty:?}")]
     InvalidNumeric { inst: Inst, ty: Type },
-    /// A scalar operation, load, store or conversion received a vector.
-    #[error("{inst:?} applies a scalar operation to {ty:?}; use its SIMD form")]
-    UseSimdForm { inst: Inst, ty: Type },
     /// Pointers convert only by a bitcast to `U64`, which exposes the
     /// address bits for alignment arithmetic. Every other conversion would
     /// let integer arithmetic forge an address.

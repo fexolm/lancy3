@@ -130,15 +130,40 @@ fn rust_packet_calls_verify_word_types_and_arity() {
 }
 
 #[test]
-fn scalar_operations_name_the_vector_and_pointer_misuse() {
+fn one_operation_serves_scalars_and_vectors_but_not_their_mix() {
     use crate::hir::{Binary, Lane};
     let vector = Type::Vector(Lane::F32);
-    let mut f = Function::new(&[vector], vector);
-    let x = f.params(f.entry())[0];
+    let mut f = Function::new(&[vector, Type::F32], vector);
+    let [x, s] = f.params(f.entry())[..] else {
+        unreachable!()
+    };
+    let sum = f.append(f.entry(), Op::Bin(Binary::Add, x, x)).unwrap();
+    assert_eq!(f.value_type(sum), vector);
     assert!(matches!(
-        f.append(f.entry(), Op::Bin(Binary::Add, x, x)),
-        Err(IrError::UseSimdForm { ty, .. }) if ty == vector
+        f.append(f.entry(), Op::Bin(Binary::Add, x, s)),
+        Err(IrError::OperandType { .. })
     ));
+    // A vector cast keeps the lane count, so it keeps the lane width; a
+    // bitcast reinterprets the register. Neither turns a vector into a scalar.
+    let to_int = f
+        .append(f.entry(), Op::Cast(Type::Vector(Lane::I32), x))
+        .unwrap();
+    assert_eq!(f.value_type(to_int), Type::Vector(Lane::I32));
+    for op in [
+        Op::Cast(Type::Vector(Lane::F64), x),
+        Op::Cast(Type::F32, x),
+        Op::Bitcast(Type::F32, x),
+        Op::Cast(vector, s),
+    ] {
+        assert!(matches!(
+            f.append(f.entry(), op),
+            Err(IrError::InvalidNumeric { .. })
+        ));
+    }
+    let bytes = f
+        .append(f.entry(), Op::Bitcast(Type::Vector(Lane::U8), x))
+        .unwrap();
+    assert_eq!(f.value_type(bytes), Type::Vector(Lane::U8));
 
     for (op, to) in [
         (Op::Bitcast as fn(Type, _) -> Op, Type::I64),

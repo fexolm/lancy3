@@ -56,30 +56,23 @@ pub(crate) fn operation(
             Type::Vector(to),
             [Some(x), Some(y), None],
         ),
-        Op::Unary(op, x) | Op::Simd(Simd::Unary(op, x)) => (
+        Op::Unary(op, x) => (
             Action::Unary(op),
             ty(x),
             op.result_type(ty(x)),
             [Some(x), None, None],
         ),
-        Op::Bin(op, x, y) | Op::Simd(Simd::Bin(op, x, y)) => (
+        Op::Bin(op, x, y) => (
             Action::Binary(op),
             ty(x),
             op.result_type(ty(x)),
             [Some(x), Some(y), None],
         ),
-        Op::Ternary(op, x, y, z) | Op::Simd(Simd::Ternary(op, x, y, z)) => (
+        Op::Ternary(op, x, y, z) => (
             Action::Ternary(op),
             ty(y),
             ty(y),
             [Some(x), Some(y), Some(z)],
-        ),
-        Op::Simd(Simd::Cast(l, x)) => (Action::Cast, ty(x), Type::Vector(l), [Some(x), None, None]),
-        Op::Simd(Simd::Bitcast(l, x)) => (
-            Action::Bitcast,
-            ty(x),
-            Type::Vector(l),
-            [Some(x), None, None],
         ),
         Op::Cast(to, x) => (Action::Cast, ty(x), to, [Some(x), None, None]),
         Op::Bitcast(to, x) => (Action::Bitcast, ty(x), to, [Some(x), None, None]),

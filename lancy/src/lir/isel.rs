@@ -163,10 +163,7 @@ impl Context {
     }
 
     pub fn cover_adjacent_load(&mut self, v: Value) {
-        debug_assert!(matches!(
-            self.adjacent_single_use(v),
-            Some(Op::Load(..) | Op::Simd(crate::hir::Simd::Load(..)))
-        ));
+        debug_assert!(matches!(self.adjacent_single_use(v), Some(Op::Load(..))));
         self.covered = Some(v);
     }
 }

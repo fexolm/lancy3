@@ -83,7 +83,7 @@ impl Rules<'_> {
         match self.ctx.defining_op(value)? {
             Op::Simd(Simd::Iota(Lane::I32 | Lane::U32)) => Some(std::array::from_fn(|i| i as u32)),
             Op::Simd(Simd::Splat(value)) => Some([self.dword_constant(value)?; 16]),
-            Op::Simd(Simd::Bin(op, a, b)) if depth != 0 => {
+            Op::Bin(op, a, b) if depth != 0 => {
                 let left = self.constant_indices(a, depth - 1)?;
                 let right = self.constant_indices(b, depth - 1)?;
                 let combine = match op {
@@ -112,9 +112,7 @@ impl Rules<'_> {
                     .then(|| Inst::ExtractLane(lane, self.dst(), self.input(vector), index as u8))
             }
             Op::Simd(Simd::Shuffle(vector, _, indices)) if self.ty(vector).lane()?.bytes() == 4 => {
-                let Op::Simd(Simd::Bin(B::Sub, sequence, offset)) =
-                    self.ctx.defining_op(indices)?
-                else {
+                let Op::Bin(B::Sub, sequence, offset) = self.ctx.defining_op(indices)? else {
                     return None;
                 };
                 if !matches!(

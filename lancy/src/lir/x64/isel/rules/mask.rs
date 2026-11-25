@@ -14,11 +14,9 @@ impl Rules<'_> {
     }
 
     pub(super) fn masked_numeric(&mut self, op: Op) -> Option<Inst> {
-        if self.result.is_some_and(|v| self.masks.contains(v))
-            && let Op::Simd(op) = op
-        {
+        if self.result.is_some_and(|v| self.masks.contains(v)) {
             match op {
-                Simd::Bin(kind @ (Binary::And | Binary::Or | Binary::Xor), x, y) => {
+                Op::Bin(kind @ (Binary::And | Binary::Or | Binary::Xor), x, y) => {
                     return Some(Inst::MaskLogic(
                         self.ty(x).lane()?,
                         kind,
@@ -27,7 +25,7 @@ impl Rules<'_> {
                         self.input(y),
                     ));
                 }
-                Simd::Bin(kind, x, y) => {
+                Op::Bin(kind, x, y) => {
                     let lane = self.ty(x).lane()?;
                     if kind == Binary::Lt
                         && matches!(lane, Lane::I32 | Lane::U32)
@@ -43,10 +41,10 @@ impl Rules<'_> {
                         self.input(y),
                     ));
                 }
-                Simd::Unary(Unary::Not, x) => {
+                Op::Unary(Unary::Not, x) => {
                     return Some(Inst::MaskNot(self.ty(x).lane()?, self.dst(), self.input(x)));
                 }
-                Simd::Splat(x) => {
+                Op::Simd(Simd::Splat(x)) => {
                     let lane = self.ty(x).lane()?;
                     let bits = match self.ctx.defining_op(x)? {
                         Op::Const(n) => u128::from(n as u32),
@@ -64,7 +62,7 @@ impl Rules<'_> {
             }
         }
         match op {
-            Op::Simd(Simd::Ternary(Ternary::Select, cond, yes, no)) => Some(Inst::SelectMask {
+            Op::Ternary(Ternary::Select, cond, yes, no) => Some(Inst::SelectMask {
                 lane: self.ty(yes).lane()?,
                 mask: self.opmask(cond).or_else(|| self.comparison_mask(cond))?,
                 yes: self.input(yes),
@@ -83,7 +81,7 @@ impl Rules<'_> {
             Op::Simd(Simd::Reduce(Binary::Add, value))
                 if self.ty(value) == Type::Vector(Lane::I32) && self.cpu.isa.popcnt =>
             {
-                let Op::Simd(Simd::Unary(Unary::Neg, mask)) = self.ctx.single_use(value)? else {
+                let Op::Unary(Unary::Neg, mask) = self.ctx.single_use(value)? else {
                     return None;
                 };
                 self.masks
@@ -160,7 +158,7 @@ impl Rules<'_> {
             // A comparison yields all ones or zero. AND with arbitrary bits
             // can use a writemask derived by the consumer, which knows if the
             // lane's sign bit or any nonzero bit makes it active.
-            let Op::Simd(Simd::Bin(Binary::And, a, b)) = self.ctx.single_use(value)? else {
+            let Op::Bin(Binary::And, a, b) = self.ctx.single_use(value)? else {
                 return None;
             };
             [(a, b), (b, a)].into_iter().find_map(|(cmp, active)| {
@@ -181,13 +179,13 @@ impl Rules<'_> {
 
     fn comparison(&self, value: Value) -> Option<(Lane, i32, Value, Value)> {
         let mut op = self.ctx.single_use(value)?;
-        if let Op::Simd(Simd::Bitcast(to, from)) = op {
+        if let Op::Bitcast(Type::Vector(to), from) = op {
             if to.bytes() != self.ty(from).lane()?.bytes() {
                 return None;
             }
             op = self.ctx.single_use(from)?;
         }
-        let Op::Simd(Simd::Bin(kind, lhs, rhs)) = op else {
+        let Op::Bin(kind, lhs, rhs) = op else {
             return None;
         };
         let lane = self.ty(lhs).lane()?;

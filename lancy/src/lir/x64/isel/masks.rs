@@ -46,30 +46,28 @@ impl Masks {
                             && literals[v.index()]
                                 .and_then(|bits| constant_predicate(lane(v), bits))
                                 .is_some() => {}
-                    Op::Copy(v) | Op::Simd(Simd::Bitcast(_, v))
+                    Op::Copy(v)
                         if result_is_mask
                             && !lane(v).float()
                             && lane(v).bytes() == lane(result.unwrap()).bytes() =>
                     {
                         groups.join(result.unwrap(), v);
                     }
-                    Op::Simd(Simd::Bin(Binary::And | Binary::Or | Binary::Xor, a, b))
-                        if result_is_mask =>
-                    {
+                    Op::Bin(Binary::And | Binary::Or | Binary::Xor, a, b) if result_is_mask => {
                         groups.join(result.unwrap(), a);
                         groups.join(result.unwrap(), b);
                     }
-                    Op::Simd(Simd::Unary(Unary::Not, v)) if result_is_mask => {
+                    Op::Unary(Unary::Not, v) if result_is_mask => {
                         groups.join(result.unwrap(), v);
                     }
-                    Op::Simd(Simd::Unary(Unary::Neg, _))
+                    Op::Unary(Unary::Neg, _)
                         if uses.get(result.unwrap().index()) == Some(&Use::Count(b)) =>
                     {
                         // Code selection consumes the predicate instead of the
                         // negated vector when the predicate stays in K registers.
                         groups.reject(result.unwrap());
                     }
-                    Op::Simd(Simd::Bin(op, a, b))
+                    Op::Bin(op, a, b)
                         if result_is_mask
                             && !matches!(lane(a), Lane::F16 | Lane::BF16)
                             && simd::comparison_predicate(lane(a), op).is_some() =>
@@ -78,7 +76,7 @@ impl Masks {
                         groups.reject(b);
                     }
                     Op::Simd(Simd::AnyTrue(_) | Simd::AllTrue(_)) => {}
-                    Op::Simd(Simd::Ternary(Ternary::Select, _, yes, no))
+                    Op::Ternary(Ternary::Select, _, yes, no)
                         if simd::mask_lanes(cpu, lane(yes)) =>
                     {
                         groups.reject(yes);

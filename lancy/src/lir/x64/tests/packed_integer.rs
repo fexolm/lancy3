@@ -319,7 +319,7 @@ fn packed_bit_counts_handle_zero_and_the_top_bit() {
 fn packed_integer_temporaries_preserve_live_inputs_under_pressure() {
     use crate::{
         ScalarKernel,
-        hir::{Function, Op, Simd, Terminator, Ternary},
+        hir::{Function, Op, Terminator, Ternary},
     };
 
     const ARITY: usize = 18;
@@ -330,18 +330,16 @@ fn packed_integer_temporaries_preserve_live_inputs_under_pressure() {
     let mut acc = args[0];
     for pair in args.windows(2) {
         let [x, y] = [pair[0], pair[1]];
-        let mut emit = |op| f.append(block, Op::Simd(op)).unwrap();
-        let product = emit(Simd::Bin(B::Mul, x, y));
-        let rotated = emit(Simd::Bin(B::RotateLeft, product, y));
-        let neg = emit(Simd::Unary(U::Neg, y));
-        let lt = emit(Simd::Bin(B::Lt, x, y));
-        let term = emit(Simd::Ternary(Ternary::Select, lt, rotated, neg));
-        acc = emit(Simd::Bin(B::Xor, acc, term));
+        let mut emit = |op| f.append(block, op).unwrap();
+        let product = emit(Op::Bin(B::Mul, x, y));
+        let rotated = emit(Op::Bin(B::RotateLeft, product, y));
+        let neg = emit(Op::Unary(U::Neg, y));
+        let lt = emit(Op::Bin(B::Lt, x, y));
+        let term = emit(Op::Ternary(Ternary::Select, lt, rotated, neg));
+        acc = emit(Op::Bin(B::Xor, acc, term));
     }
     for &x in &args {
-        acc = f
-            .append(block, Op::Simd(Simd::Bin(B::Add, acc, x)))
-            .unwrap();
+        acc = f.append(block, Op::Bin(B::Add, acc, x)).unwrap();
     }
     f.set_terminator(block, Terminator::Return(acc));
     let k = ScalarKernel::compile(&f, &crate::test_target::options()).unwrap();

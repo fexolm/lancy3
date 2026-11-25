@@ -55,7 +55,9 @@ fn signed_index_gathers_check_each_width_with_one_unsigned_comparison() {
             .blocks()
             .flat_map(|b| graph.instructions(b))
             .filter_map(|inst| match *graph.op(inst) {
-                Op::Simd(V::Bin(op @ (hir::Binary::Lt | hir::Binary::Ge), left, _)) => {
+                Op::Bin(op @ (hir::Binary::Lt | hir::Binary::Ge), left, _)
+                    if matches!(graph.value_type(left), hir::Type::Vector(_)) =>
+                {
                     Some((op, graph.value_type(left)))
                 }
                 _ => None,
@@ -131,8 +133,15 @@ fn packed_load_and_store_have_an_ordered_short_store_exit() {
             .flat_map(|block| graph.instructions(block))
             .map(|inst| graph.op(inst))
             .collect();
-        assert!(ops.iter().any(|op| matches!(op, Op::Simd(V::Load(..)))));
-        assert!(ops.iter().any(|op| matches!(op, Op::Simd(V::Store(..)))));
+        let vector = |v| matches!(graph.value_type(v), hir::Type::Vector(_));
+        assert!(
+            ops.iter()
+                .any(|op| matches!(op, Op::Load(hir::Type::Vector(_), _)))
+        );
+        assert!(
+            ops.iter()
+                .any(|op| matches!(op, Op::Store(_, v) if vector(*v)))
+        );
         assert!(
             ops.iter()
                 .any(|op| matches!(op, Op::Simd(V::MaskedStore { .. })))

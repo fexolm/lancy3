@@ -285,22 +285,10 @@ fn arithmetic_and_conversions_match_reference_for_all_lane_types() {
         for ty in [lane.scalar(), Type::Vector(lane)] {
             let packed = matches!(ty, Type::Vector(_));
             for op in unary.into_iter().filter(|op| op.supports(ty)) {
-                differential(&[ty], op.result_type(ty), |p| {
-                    if packed {
-                        Op::Simd(Simd::Unary(op, p[0]))
-                    } else {
-                        Op::Unary(op, p[0])
-                    }
-                });
+                differential(&[ty], op.result_type(ty), |p| Op::Unary(op, p[0]));
             }
             for op in binary.into_iter().filter(|op| op.supports(ty)) {
-                differential(&[ty, ty], op.result_type(ty), |p| {
-                    if packed {
-                        Op::Simd(Simd::Bin(op, p[0], p[1]))
-                    } else {
-                        Op::Bin(op, p[0], p[1])
-                    }
-                });
+                differential(&[ty, ty], op.result_type(ty), |p| Op::Bin(op, p[0], p[1]));
             }
             for op in [Ternary::Select, Ternary::BitSelect, Ternary::MulAdd] {
                 if op == Ternary::MulAdd && !lane.float() {
@@ -311,19 +299,15 @@ fn arithmetic_and_conversions_match_reference_for_all_lane_types() {
                 } else {
                     ty
                 };
-                differential(&[first, ty, ty], ty, |p| {
-                    if packed {
-                        Op::Simd(Simd::Ternary(op, p[0], p[1], p[2]))
-                    } else {
-                        Op::Ternary(op, p[0], p[1], p[2])
-                    }
-                });
+                differential(&[first, ty, ty], ty, |p| Op::Ternary(op, p[0], p[1], p[2]));
             }
             for to in LANES {
                 if !packed {
                     differential(&[ty], to.scalar(), |p| Op::Cast(to.scalar(), p[0]));
                 } else if to.bytes() == lane.bytes() {
-                    differential(&[ty], Type::Vector(to), |p| Op::Simd(Simd::Cast(to, p[0])));
+                    differential(&[ty], Type::Vector(to), |p| {
+                        Op::Cast(Type::Vector(to), p[0])
+                    });
                 } else if to.bytes() == 2 * lane.bytes() {
                     for high in [false, true] {
                         differential(&[ty], Type::Vector(to), |p| {
@@ -409,7 +393,7 @@ fn overflowing_and_zero_divisors_trap_in_lane_order() {
         let mut f = Function::new(&[v, v], v);
         let b = f.entry();
         let [lhs, rhs] = f.params(b).try_into().unwrap();
-        let r = f.append(b, Op::Simd(Simd::Bin(op, lhs, rhs))).unwrap();
+        let r = f.append(b, Op::Bin(op, lhs, rhs)).unwrap();
         f.set_terminator(b, Terminator::Return(r));
         let k = ScalarKernel::compile(&f, &crate::test_target::options()).unwrap();
         let n = crate::test_target::width() / 8;

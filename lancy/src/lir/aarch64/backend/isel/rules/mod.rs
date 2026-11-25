@@ -174,6 +174,11 @@ impl Rules<'_> {
     }
 
     fn instruction(&mut self, op: Op, callee: impl Fn(Call) -> (FunctionId, PRegSet)) -> Inst {
+        // Numeric operations take the scalar or the vector rules by the
+        // type they produce.
+        let vector = self
+            .result
+            .is_some_and(|r| matches!(self.ty(r), Type::Vector(_)));
         let native = match op {
             Op::Const(n) => return Inst::Literal(Type::I32, n as u32 as u128, self.dst()),
             Op::CallScratch { offset, bytes } => {
@@ -187,7 +192,7 @@ impl Rules<'_> {
                     self.dst(),
                 );
             }
-            Op::Copy(v) | Op::Simd(Simd::Bitcast(_, v)) => {
+            Op::Copy(v) | Op::Bitcast(Type::Vector(_), v) => {
                 return Inst::Copy(self.dst(), self.input(v));
             }
             Op::Bitcast(to, v) => return self.bitcast(to, v),
@@ -200,10 +205,7 @@ impl Rules<'_> {
                 return Inst::Offset(scale, self.dst(), self.input(base), self.input(index));
             }
             Op::Load(ty, ptr) => return Inst::Load(ty, self.dst(), self.input(ptr)),
-            Op::Simd(Simd::Load(lane, ptr)) => {
-                return Inst::Load(Type::Vector(lane), self.dst(), self.input(ptr));
-            }
-            Op::Store(ptr, v) | Op::Simd(Simd::Store(ptr, v)) => {
+            Op::Store(ptr, v) => {
                 return Inst::Store(self.ty(v), self.input(ptr), self.input(v));
             }
             Op::DebugStore(offset, value) => {
@@ -240,17 +242,17 @@ impl Rules<'_> {
             Op::RustContextCall(import, args) => {
                 return Inst::RustContextCall(import, args.map(|arg| self.input(arg)), self.dst());
             }
+            Op::Bin(kind, a, b) if vector => self.vector_binary(kind, a, b),
             Op::Bin(kind, a, b) => self.scalar_binary(kind, a, b),
-            Op::Simd(Simd::Bin(kind, a, b)) => self.vector_binary(kind, a, b),
-            Op::Unary(kind, v) | Op::Simd(Simd::Unary(kind, v)) => self.unary(kind, v),
-            Op::Ternary(Ternary::MulAdd, a, b, c) => self.scalar_fma(a, b, c),
-            Op::Ternary(Ternary::Select, mask, a, b) => return self.scalar_select(mask, a, b),
-            Op::Simd(Simd::Ternary(Ternary::MulAdd, a, b, c)) => self.vector_fma(a, b, c),
-            Op::Simd(Simd::Ternary(kind @ (Ternary::Select | Ternary::BitSelect), mask, a, b)) => {
+            Op::Unary(kind, v) => self.unary(kind, v),
+            Op::Ternary(Ternary::MulAdd, a, b, c) if vector => self.vector_fma(a, b, c),
+            Op::Ternary(kind @ (Ternary::Select | Ternary::BitSelect), mask, a, b) if vector => {
                 return self.vector_select(kind, mask, a, b);
             }
+            Op::Ternary(Ternary::MulAdd, a, b, c) => self.scalar_fma(a, b, c),
+            Op::Ternary(Ternary::Select, mask, a, b) => return self.scalar_select(mask, a, b),
+            Op::Cast(Type::Vector(to), v) => self.vector_cast(to, v),
             Op::Cast(to, v) => self.scalar_cast(to, v),
-            Op::Simd(Simd::Cast(to, v)) => self.vector_cast(to, v),
             Op::Simd(Simd::Widen { to, high, value }) => return self.widen(to, high, value),
             Op::Simd(Simd::Narrow(to, a, b)) => return self.narrow(to, a, b),
             Op::Simd(Simd::Iota(lane)) => return self.iota(lane),

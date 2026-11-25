@@ -105,7 +105,7 @@ impl Op {
         !matches!(
             self,
             Self::Store(..)
-                | Self::Simd(Simd::MaskedStore { .. } | Simd::Store(..))
+                | Self::Simd(Simd::MaskedStore { .. })
                 | Self::BoundsCheck(..)
                 | Self::TrapIf(..)
                 | Self::Trap(_)
@@ -118,8 +118,7 @@ impl Op {
     #[inline]
     pub(crate) fn effects(self, f: &Function) -> Effects {
         match self {
-            Self::Bin(Binary::Div | Binary::Rem, a, _)
-            | Self::Simd(Simd::Bin(Binary::Div | Binary::Rem, a, _)) => {
+            Self::Bin(Binary::Div | Binary::Rem, a, _) => {
                 if f.value_type(a).lane().is_some_and(Lane::float) {
                     Effects::NONE
                 } else {
@@ -131,12 +130,8 @@ impl Op {
             }
             Self::BoundsCheck(..) => Effects::trap(TrapKind::Bounds),
             Self::TrapIf(..) | Self::Trap(_) => Effects::trap(TrapKind::Explicit),
-            Self::Load(..) | Self::Simd(Simd::Load(..) | Simd::MaskedLoad { .. }) => {
-                Effects::memory(false)
-            }
-            Self::Store(..) | Self::Simd(Simd::Store(..) | Simd::MaskedStore { .. }) => {
-                Effects::memory(true)
-            }
+            Self::Load(..) | Self::Simd(Simd::MaskedLoad { .. }) => Effects::memory(false),
+            Self::Store(..) | Self::Simd(Simd::MaskedStore { .. }) => Effects::memory(true),
             Self::Call(_)
             | Self::RustCall(..)
             | Self::RustPacketCall(_)
@@ -169,12 +164,7 @@ impl Op {
         };
         Some(match self {
             Self::Load(ty, address) => plain(address, ty, None, false),
-            Self::Simd(Simd::Load(lane, address)) => {
-                plain(address, Type::Vector(lane), None, false)
-            }
-            Self::Store(address, value) | Self::Simd(Simd::Store(address, value)) => {
-                plain(address, f.value_type(value), Some(value), true)
-            }
+            Self::Store(address, value) => plain(address, f.value_type(value), Some(value), true),
             Self::Simd(
                 Simd::MaskedLoad {
                     address,
@@ -220,14 +210,6 @@ impl Op {
                 })
             }
         };
-        let scalar = |value| {
-            let ty = operand(value)?;
-            if matches!(ty, Type::Vector(_)) {
-                Err(IrError::UseSimdForm { inst, ty })
-            } else {
-                Ok(ty)
-            }
-        };
         let ty = match self {
             Self::Const(_) => Type::I32,
             Self::Literal(lane, bits) => {
@@ -239,7 +221,7 @@ impl Op {
             Self::Simd(op) => return simd_type(op, inst, operand),
             Self::Copy(v) => operand(v)?,
             Self::Bin(op, a, b) => {
-                let ty = scalar(a)?;
+                let ty = operand(a)?;
                 expect(b, ty)?;
                 if !op.supports(ty) {
                     return Err(IrError::InvalidNumeric { inst, ty });
@@ -247,14 +229,14 @@ impl Op {
                 op.result_type(ty)
             }
             Self::Unary(op, v) => {
-                let ty = scalar(v)?;
+                let ty = operand(v)?;
                 if !op.supports(ty) {
                     return Err(IrError::InvalidNumeric { inst, ty });
                 }
                 op.result_type(ty)
             }
             Self::Ternary(op, a, b, c) => {
-                let ty = scalar(b)?;
+                let ty = operand(b)?;
                 expect(a, select_condition(op, ty))?;
                 expect(c, ty)?;
                 if ty
@@ -273,8 +255,16 @@ impl Op {
                     (Type::Ptr, _) | (_, Type::Ptr) => {
                         return Err(IrError::PointerCast { inst, from: ty, to });
                     }
+                    // Vector casts convert each lane to a lane of the same
+                    // width, so the lane count is kept; bitcasts reinterpret
+                    // the whole register.
+                    (Type::Vector(from), Type::Vector(lane)) => {
+                        if !bitcast && from.bytes() != lane.bytes() {
+                            return Err(IrError::InvalidNumeric { inst, ty });
+                        }
+                    }
                     (Type::Vector(_), _) | (_, Type::Vector(_)) => {
-                        return Err(IrError::UseSimdForm { inst, ty });
+                        return Err(IrError::InvalidNumeric { inst, ty });
                     }
                     _ if bitcast && ty.lane().map(Lane::bytes) != to.lane().map(Lane::bytes) => {
                         return Err(IrError::InvalidNumeric { inst, ty });
@@ -342,15 +332,12 @@ impl Op {
                 Type::Ptr
             }
             Self::Load(ty, address) => {
-                if matches!(ty, Type::Vector(_)) {
-                    return Err(IrError::UseSimdForm { inst, ty });
-                }
                 expect(address, Type::Ptr)?;
                 ty
             }
             Self::Store(address, value) => {
                 expect(address, Type::Ptr)?;
-                scalar(value)?;
+                operand(value)?;
                 return Ok(None);
             }
             Self::DebugStore(_, value) => {
@@ -423,15 +410,6 @@ fn simd_type(
     Ok(Some(match op {
         LaneCount(_) => Type::I32,
         Iota(l) => Type::Vector(l),
-        Load(l, p) => {
-            expect(p, Type::Ptr)?;
-            Type::Vector(l)
-        }
-        Store(p, x) => {
-            expect(p, Type::Ptr)?;
-            vector(x)?;
-            return Ok(None);
-        }
         Splat(x) => {
             let ty = operand(x)?;
             match ty.lane() {
@@ -439,48 +417,18 @@ fn simd_type(
                 _ => return Err(invalid(ty)),
             }
         }
-        Unary(op, x) => {
-            let ty = Type::Vector(vector(x)?);
-            if !op.supports(ty) {
-                return Err(invalid(ty));
-            }
-            op.result_type(ty)
-        }
-        Bin(op, x, y) => {
-            let ty = Type::Vector(vector(x)?);
-            expect(y, ty)?;
-            if !op.supports(ty) {
-                return Err(invalid(ty));
-            }
-            op.result_type(ty)
-        }
-        Ternary(op, x, y, z) => {
-            let l = vector(y)?;
-            let ty = Type::Vector(l);
-            expect(z, ty)?;
-            expect(x, select_condition(op, ty))?;
-            if op == super::Ternary::MulAdd && !l.float() {
-                return Err(invalid(ty));
-            }
-            ty
-        }
-        Cast(to, x) | Widen { to, value: x, .. } | Narrow(to, x, _) => {
+        Widen { to, value: x, .. } | Narrow(to, x, _) => {
             let l = vector(x)?;
             let size = match op {
-                Widen { .. } => l.bytes() * 2,
                 Narrow(_, _, y) => {
                     expect(y, Type::Vector(l))?;
                     l.bytes() / 2
                 }
-                _ => l.bytes(),
+                _ => l.bytes() * 2,
             };
             if to.bytes() != size {
                 return Err(invalid(Type::Vector(l)));
             }
-            Type::Vector(to)
-        }
-        Bitcast(to, x) => {
-            vector(x)?;
             Type::Vector(to)
         }
         ExtractLane(x, i) => {

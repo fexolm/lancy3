@@ -105,7 +105,7 @@ impl Rules<'_> {
         if !self.masks.contains(original) {
             return Ok(None);
         }
-        let Some(Op::Simd(Simd::Bin(Binary::And, a, b))) = self.ctx.defining_op(enabled) else {
+        let Some(Op::Bin(Binary::And, a, b)) = self.ctx.defining_op(enabled) else {
             return Ok(None);
         };
         let (Some(a), Some(b)) = (self.prefix_limit(a), self.prefix_limit(b)) else {
@@ -113,7 +113,7 @@ impl Rules<'_> {
         };
         let exact_count = |limit| {
             matches!(self.ctx.defining_op(limit), Some(Op::Simd(Simd::Reduce(Binary::Add, flags)))
-                if self.ctx.defining_op(flags) == Some(Op::Simd(Simd::Unary(Unary::Neg, original))))
+                if self.ctx.defining_op(flags) == Some(Op::Unary(Unary::Neg, original)))
         };
         // Both predicates are prefixes, and the count limits the prefix to
         // real elements. Deposit its bits into the source lane positions.
@@ -130,7 +130,7 @@ impl Rules<'_> {
     }
 
     fn prefix_limit(&self, value: Value) -> Option<Value> {
-        let Op::Simd(Simd::Bin(Binary::Lt, index, limit)) = self.ctx.defining_op(value)? else {
+        let Op::Bin(Binary::Lt, index, limit) = self.ctx.defining_op(value)? else {
             return None;
         };
         if self.ctx.defining_op(index) != Some(Op::Simd(Simd::Iota(Lane::I32))) {

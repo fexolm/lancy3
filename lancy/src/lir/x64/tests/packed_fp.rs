@@ -24,19 +24,19 @@ fn function(from: Lane, to: Lane, op: Action) -> Function {
     let mut f = Function::new(&vec![Type::Vector(from); arity(op)], Type::Vector(to));
     let block = f.entry();
     let args = f.params(block);
-    let simd = match op {
-        Action::Unary(op) => Simd::Unary(op, args[0]),
-        Action::Binary(op) => Simd::Bin(op, args[0], args[1]),
-        Action::Cast => Simd::Cast(to, args[0]),
-        Action::Widen(high) => Simd::Widen {
+    let op = match op {
+        Action::Unary(op) => Op::Unary(op, args[0]),
+        Action::Binary(op) => Op::Bin(op, args[0], args[1]),
+        Action::Cast => Op::Cast(Type::Vector(to), args[0]),
+        Action::Widen(high) => Op::Simd(Simd::Widen {
             to,
             high,
             value: args[0],
-        },
-        Action::Narrow => Simd::Narrow(to, args[0], args[1]),
+        }),
+        Action::Narrow => Op::Simd(Simd::Narrow(to, args[0], args[1])),
         _ => unreachable!(),
     };
-    let result = f.append(block, Op::Simd(simd)).unwrap();
+    let result = f.append(block, op).unwrap();
     f.set_terminator(block, Terminator::Return(result));
     f
 }
