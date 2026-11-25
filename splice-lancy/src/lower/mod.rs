@@ -192,7 +192,6 @@ impl<'a> Builder<'a> {
                 .any(|kind| !kind.writable() && kind.context_signature().is_none()),
             constants: HashMap::new(),
             indices: HashMap::new(),
-            index_constants: HashMap::new(),
             shared_loads: HashMap::new(),
             debug,
             marker: 0,
@@ -289,10 +288,8 @@ struct Builder<'a> {
     has_shared: bool,
     /// The `i32` constants of the open block.
     constants: HashMap<Value, i32>,
-    /// The `i32` that an `Index` value sign-extends.
-    indices: HashMap<Value, Value>,
-    /// `Index` constants, clamped to `i32::MAX` (see `index32`).
-    index_constants: HashMap<Value, i32>,
+    /// The `i32` form of `Index` values (see `index32`).
+    indices: HashMap<Value, Narrow>,
     shared_loads: HashMap<(Buffer, LoadIndex), Value>,
     /// The source points of a debug build, shared by its functions.
     debug: Option<Vec<DebugSource>>,
@@ -305,6 +302,17 @@ struct Demand {
     block: Block,
     reg: Reg,
     required: bool,
+}
+
+/// How an `Index` value relates to a Lancy `i32`.
+#[derive(Clone, Copy)]
+enum Narrow {
+    /// The `Index` sign-extends `value`, which is nonnegative if `nonnegative`.
+    Extends {
+        value: Value,
+        nonnegative: bool,
+    },
+    Constant(u64),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
@@ -325,19 +333,57 @@ impl Builder<'_> {
     /// `i32::MAX` clamps to it. An `Index` that sign-extends an `i32` is out
     /// of bounds exactly when the `i32` is negative or too large.
     fn index32(&mut self, index: Value) -> Value {
-        if let Some(&narrow) = self.indices.get(&index) {
-            return narrow;
-        }
-        if let Some(&n) = self.index_constants.get(&index) {
-            let narrow = self.value(Op::Const(n));
-            if self.has_shared {
-                self.constants.insert(narrow, n);
+        match self.indices.get(&index) {
+            Some(&Narrow::Extends { value, .. }) => return value,
+            Some(&Narrow::Constant(bits)) => {
+                return self.const32(bits.min(i32::MAX as u64) as i32);
             }
-            return narrow;
+            None => {}
         }
         let max = self.value(Op::Literal(hir::Lane::Usize, i32::MAX as u128));
         let clamped = self.value(Op::Bin(hir::Binary::Min, index, max));
         self.value(Op::Cast(hir::Type::I32, clamped))
+    }
+    fn const32(&mut self, n: i32) -> Value {
+        let v = self.value(Op::Const(n));
+        if self.has_shared {
+            self.constants.insert(v, n);
+        }
+        v
+    }
+    /// The `i32` that `index` sign-extends, and whether it is nonnegative.
+    fn exact32(&mut self, index: Value) -> Option<(Value, bool)> {
+        match *self.indices.get(&index)? {
+            Narrow::Extends { value, nonnegative } => Some((value, nonnegative)),
+            Narrow::Constant(bits) => {
+                let n = i32::try_from(bits).ok()?;
+                Some((self.const32(n), true))
+            }
+        }
+    }
+    /// An `Index` comparison of two values with exact `i32` forms, done on
+    /// those forms so that Lancy's `i32` bounds analysis sees the guard.
+    /// Sign extension preserves unsigned order, so the unsigned `i32`
+    /// comparison is exact; it is signed when both sides are nonnegative.
+    fn compare32(&mut self, kind: hir::Binary, a: Value, b: Value) -> Option<Value> {
+        // Check both before `exact32` materializes a constant.
+        let exact =
+            |n: Narrow| !matches!(n, Narrow::Constant(bits) if i32::try_from(bits).is_err());
+        if !exact(*self.indices.get(&a)?) || !exact(*self.indices.get(&b)?) {
+            return None;
+        }
+        let ((a, a_nonnegative), (b, b_nonnegative)) = (self.exact32(a)?, self.exact32(b)?);
+        let ordered = !matches!(kind, hir::Binary::Eq | hir::Binary::Ne);
+        let (a, b) = if ordered && !(a_nonnegative && b_nonnegative) {
+            let bias = self.value(Op::Const(i32::MIN));
+            (
+                self.value(Op::Bin(hir::Binary::Xor, a, bias)),
+                self.value(Op::Bin(hir::Binary::Xor, b, bias)),
+            )
+        } else {
+            (a, b)
+        };
+        Some(self.value(Op::Bin(kind, a, b)))
     }
     fn address(&mut self, buffer: Buffer, index: Value) -> Value {
         let (base, len) = self.slice(buffer);
@@ -458,6 +504,14 @@ impl Builder<'_> {
                 self.effect(Op::CheckOverflow(overflow));
                 self.define(dst, Op::Bin(kind, a, b));
             }
+            Binary::Eq | Binary::Ne | Binary::Lt | Binary::Le | Binary::Gt | Binary::Ge
+                if ty == ScalarType::Index =>
+            {
+                let v = self
+                    .compare32(kind, a, b)
+                    .unwrap_or_else(|| self.value(Op::Bin(kind, a, b)));
+                self.bind(dst, v);
+            }
             _ => self.define(dst, Op::Bin(kind, a, b)),
         }
     }
@@ -476,15 +530,19 @@ impl Builder<'_> {
             } else {
                 self.value(Op::Cast(scalar_type(to), bit))
             }
-        } else if let (ScalarType::Index, ScalarType::I32, Some(&narrow)) =
+        } else if let (ScalarType::Index, ScalarType::I32, Some(&Narrow::Extends { value, .. })) =
             (from, to, self.indices.get(&v))
         {
-            narrow
+            value
         } else {
             self.value(Op::Cast(scalar_type(to), v))
         };
         if from == ScalarType::I32 && to == ScalarType::Index {
-            self.indices.insert(value, v);
+            let narrow = Narrow::Extends {
+                value: v,
+                nonnegative: false,
+            };
+            self.indices.insert(value, narrow);
         }
         self.bind(dst, value);
     }
@@ -760,8 +818,7 @@ impl KernelBuilder for Builder<'_> {
         if self.reachable() {
             let v = self.literal(c.ty(), c.bits());
             if c.ty() == ScalarType::Index {
-                let index = c.bits().min(i32::MAX as u64) as i32;
-                self.index_constants.insert(v, index);
+                self.indices.insert(v, Narrow::Constant(c.bits()));
             }
             self.bind(dst, v);
         }
@@ -778,8 +835,7 @@ impl KernelBuilder for Builder<'_> {
         let dst = self.local(ValueType::Scalar(ScalarType::Index))?;
         if self.reachable() {
             let (_, len) = self.slice(buffer);
-            let v = self.value(Op::Cast(hir::Type::Usize, len));
-            self.indices.insert(v, len);
+            let v = self.extend_index(len);
             self.bind(dst, v);
         }
         Ok(dst)

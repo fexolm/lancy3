@@ -586,3 +586,111 @@ fn rejects_undefined_labels_and_aliased_writable_arguments() {
         matches!(alias.unwrap_err(), splice_core::BuildError::Verify { reason, .. } if reason.contains("aliases"))
     );
 }
+
+/// The `Index` side of a comparison: an argument cast from `i32`, the slice
+/// length or a constant.
+#[derive(Clone, Copy, Debug)]
+enum IndexOperand {
+    Arg(usize),
+    Len,
+    Constant(u64),
+}
+
+fn index_operand(b: &mut dyn KernelBuilder, operand: IndexOperand) -> splice_core::Result<Reg> {
+    match operand {
+        IndexOperand::Arg(n) => b.cast(b.arg(n)?, ScalarType::Index),
+        IndexOperand::Len => b.buffer_len(Buffer(0)),
+        IndexOperand::Constant(bits) => b.constant(Constant::from(bits as usize)),
+    }
+}
+
+#[test]
+fn index_comparisons_on_i32_forms_match_unsigned_64_bit_order() {
+    use splice_core::{BufferArg, Codegen, Executable};
+    type Order = fn(u64, u64) -> bool;
+    const COMPARISONS: [(Binary, Order); 6] = [
+        (Binary::Eq, |a, b| a == b),
+        (Binary::Ne, |a, b| a != b),
+        (Binary::Lt, |a, b| a < b),
+        (Binary::Le, |a, b| a <= b),
+        (Binary::Gt, |a, b| a > b),
+        (Binary::Ge, |a, b| a >= b),
+    ];
+    let constants = [0, 3, i32::MAX as u64, 1 << 31, u64::MAX];
+    let operands = |arg| {
+        [IndexOperand::Arg(arg), IndexOperand::Len]
+            .into_iter()
+            .chain(constants.map(IndexOperand::Constant))
+    };
+    let args = [i32::MIN, -1, 0, 2, 3, 4, i32::MAX];
+    let xs = [7; 3];
+    let value = |operand, arg: i32| match operand {
+        IndexOperand::Arg(_) => arg as usize as u64,
+        IndexOperand::Len => xs.len() as u64,
+        IndexOperand::Constant(bits) => bits,
+    };
+    for (op, expected) in COMPARISONS {
+        for lhs in operands(0) {
+            for rhs in operands(1) {
+                let body = move |b: &mut dyn KernelBuilder| {
+                    let (x, y) = (index_operand(b, lhs)?, index_operand(b, rhs)?);
+                    let compared = b.binary(op, x, y)?;
+                    let result = b.cast(compared, ScalarType::I32)?;
+                    b.ret(result)
+                };
+                let kernel = crate::Lancy::build_with_options(
+                    Signature::new(&[ScalarType::I32; 2], ScalarType::I32, &[BufferKind::Read]),
+                    Box::new(body),
+                    options(),
+                )
+                .unwrap();
+                for a in args {
+                    for b in args {
+                        let actual = kernel.call(&[a, b], &mut [BufferArg::read(&xs)]).unwrap();
+                        let want = expected(value(lhs, a), value(rhs, b));
+                        assert_eq!(actual, want as i32, "{lhs:?} {op:?} {rhs:?} at {a}, {b}");
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// `xs.len() < N` must stay a guard on the `i32` length parameter: Lancy's
+/// bounds analysis removes checks of constant indices below `N` only then
+/// (a 64-bit comparison cost `sql_plan` 13-17% in Ф4.1).
+#[test]
+fn index_guard_on_a_slice_length_compares_the_i32_length() {
+    fn body(b: &mut dyn KernelBuilder) -> splice_core::Result<()> {
+        let len = b.buffer_len(Buffer(0))?;
+        let four = b.constant(Constant::from(4usize))?;
+        let short = b.binary(Binary::Lt, len, four)?;
+        let (fail, read) = (b.label()?, b.label()?);
+        b.branch(short, fail, read)?;
+        b.mark(fail)?;
+        let minus_one = b.constant(Constant::from(-1))?;
+        b.ret(minus_one)?;
+        b.mark(read)?;
+        let three = b.constant(Constant::from(3usize))?;
+        let value = b.load(Buffer(0), three)?;
+        b.ret(value)
+    }
+    let graph = build(
+        Signature::new(&[], ScalarType::I32, &[BufferKind::Read]),
+        Box::new(body),
+    )
+    .unwrap();
+    let [_, len] = graph.params(graph.entry()).try_into().unwrap();
+    let hir::Terminator::Branch { cond, .. } = *graph.terminator(graph.entry()) else {
+        panic!("the entry ends in the guard");
+    };
+    let guard = graph
+        .instructions(graph.entry())
+        .find(|&i| graph.result(i) == Some(cond))
+        .unwrap();
+    let Op::Bin(hir::Binary::Lt, lhs, rhs) = *graph.op(guard) else {
+        panic!("the guard is a comparison");
+    };
+    assert_eq!(lhs, len);
+    assert_eq!(graph.value_type(rhs), hir::Type::I32);
+}

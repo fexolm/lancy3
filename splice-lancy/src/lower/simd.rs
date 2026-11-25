@@ -1,5 +1,5 @@
 //! Bounds-checked slice operations over one scalable Lancy vector.
-use super::Builder;
+use super::{Builder, Narrow};
 use lancy::hir::{
     Binary, Block, Lane, Op, Scale, Simd as V, Ternary, Type, Unary, Value, VectorAddress,
 };
@@ -66,11 +66,24 @@ impl Builder<'_> {
             }
             Iota => V::Iota(lane(e)),
             SimdOp::FirstN => {
-                // Clamp the usize count to the lane count before narrowing it.
+                // Clamp the usize count to the lane count before narrowing
+                // it. Sign extension preserves unsigned order, so an `i32`
+                // form clamps as `u32` (or `i32` when it is nonnegative).
                 let width = self.vec_op(V::LaneCount(lane(e)));
-                let width = self.value(Op::Cast(Type::Usize, width));
-                let count = self.value(Op::Bin(Binary::Min, vs[0], width));
-                let count = self.value(Op::Cast(Type::I32, count));
+                let count = match self.exact32(vs[0]) {
+                    Some((count, true)) => self.value(Op::Bin(Binary::Min, count, width)),
+                    Some((count, false)) => {
+                        let count = self.value(Op::Bitcast(Type::U32, count));
+                        let width = self.value(Op::Bitcast(Type::U32, width));
+                        let count = self.value(Op::Bin(Binary::Min, count, width));
+                        self.value(Op::Bitcast(Type::I32, count))
+                    }
+                    None => {
+                        let width = self.value(Op::Cast(Type::Usize, width));
+                        let count = self.value(Op::Bin(Binary::Min, vs[0], width));
+                        self.value(Op::Cast(Type::I32, count))
+                    }
+                };
                 return Ok(Some(self.first_lanes(e, count)));
             }
             SimdOp::SplatScalar => V::Splat(vs[0]),
@@ -287,9 +300,15 @@ impl Builder<'_> {
         }
     }
     /// A nonnegative `i32` count as an `Index`.
-    fn extend_index(&mut self, count: Value) -> Value {
+    pub(super) fn extend_index(&mut self, count: Value) -> Value {
         let index = self.value(Op::Cast(Type::Usize, count));
-        self.indices.insert(index, count);
+        self.indices.insert(
+            index,
+            Narrow::Extends {
+                value: count,
+                nonnegative: true,
+            },
+        );
         index
     }
     fn splat_bits(&mut self, ty: Lane, bits: u64) -> Value {
