@@ -51,25 +51,8 @@ pub(super) fn hir(module: &Module<VerifiedBody>) -> String {
                     Op::BoundsCheck(i, n) => format!("bounds {} {}", v(i), v(n)),
                     Op::TrapIf(cond, trap) => format!("trap_if {} {trap:?}", v(cond)),
                     Op::Trap(trap) => format!("trap {trap:?}"),
-                    Op::RustCall(import, a, b) => {
-                        format!("rust_call {} {} {}", import.name, v(a), v(b))
-                    }
-                    Op::RustPacketCall(site) => {
-                        let (import, scratch, args) = f.packet_call(site);
-                        format!(
-                            "rust_packet_call {} {} scratch {scratch}",
-                            import.name,
-                            list(args.iter().copied().map(v))
-                        )
-                    }
-                    Op::RustContextCall(_, [context, operation, a, b]) => {
-                        format!(
-                            "rust_context_call {} {} {} {}",
-                            v(context),
-                            v(operation),
-                            v(a),
-                            v(b)
-                        )
+                    Op::RustCall(function, args) => {
+                        format!("rust_call {} {}", function.name, list(args.map(v)))
                     }
                     Op::CallScratch { offset, bytes } => format!("call_scratch {offset} {bytes}"),
                     Op::Simd(Simd::MaskedLoad {

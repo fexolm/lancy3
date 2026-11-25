@@ -95,36 +95,44 @@ fn pointers_keep_their_type_across_edits_edges_and_returns() {
     );
 }
 #[test]
-fn rust_packet_calls_verify_word_types_and_arity() {
-    fn sum(args: &[i32]) -> i32 {
-        args.iter().copied().fold(0, i32::wrapping_add)
+fn rust_calls_verify_operand_types() {
+    unsafe extern "C" fn add(_: *mut u8, operation: u32, _: *const u8, word: i32) -> i64 {
+        i64::from((operation as i32).wrapping_add(word) as u32)
     }
-    static IMPORT: crate::hir::RustPacketImport = crate::hir::RustPacketImport {
-        name: "sum4",
-        arity: 4,
-        resolve: || sum,
+    static ADD: crate::hir::RustFunction = crate::hir::RustFunction {
+        name: "add",
+        entry: add,
     };
-    for (types, valid) in [
-        (&[Type::I32; 4][..], true),
-        (&[Type::I32; 3][..], false),
-        (&[Type::I32, Type::I64, Type::I32, Type::I32][..], false),
-    ] {
-        let mut function = Function::new(types, Type::I32);
+    // Each operand in turn gets a value of the other type.
+    for wrong in [None, Some(0), Some(1), Some(2), Some(3)] {
+        let mut function = Function::scalar(2);
         let entry = function.entry();
-        let args = function.params(entry).to_vec();
-        let site = function.add_packet_call(&IMPORT, 0, &args);
-        let result = function.append(entry, Op::RustPacketCall(site));
-        assert_eq!(result.is_ok(), valid);
+        let [operation, word] = function.params(entry)[..] else {
+            unreachable!()
+        };
+        let packet = function
+            .append(
+                entry,
+                Op::CallScratch {
+                    offset: 0,
+                    bytes: 8,
+                },
+            )
+            .unwrap();
+        let mut args = [packet, operation, packet, word];
+        if let Some(i) = wrong {
+            args[i] = if i % 2 == 0 { operation } else { packet };
+        }
+        let result = function.append(entry, Op::RustCall(&ADD, args));
+        assert_eq!(result.is_ok(), wrong.is_none());
         if let Ok(result) = result {
             function.set_terminator(entry, Terminator::Return(result));
             function.verify().unwrap();
-            assert_eq!(function.interpret(&[1, 2, 3, 4]), Ok(10));
-            assert_eq!(
-                crate::ScalarKernel::compile(&function, &crate::test_target::options())
-                    .unwrap()
-                    .call(&[1, 2, 3, 4]),
-                Ok(10)
-            );
+            assert_eq!(function.interpret(&[3, 4]), Ok(7));
+            let kernel =
+                crate::ScalarKernel::compile(&function, &crate::test_target::options()).unwrap();
+            // SAFETY: the only pointer is the kernel's own call scratch.
+            assert_eq!(unsafe { kernel.call_raw(&[3, 4]) }, Ok(7));
         }
     }
 }

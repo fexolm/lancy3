@@ -1,8 +1,7 @@
 mod info;
 mod numeric;
-mod rust_import;
 mod simd;
-use super::{Call, Edge, PacketCall};
+use super::{Call, Edge};
 pub use info::{Access, Effects, TrapKind};
 pub use numeric::{Lane, Ternary, Type, Unary};
 pub use simd::{Simd, VectorAddress};
@@ -19,36 +18,7 @@ pub enum Scale {
     Eight = 3,
 }
 
-pub use rust_import::{RustImport, RustPacketImport, invoke_packet_import};
-
-/// Checked-context dispatcher. Raw callers must supply the context token
-/// expected by the dispatcher as its first argument.
-#[derive(Clone, Copy, Debug)]
-pub enum RustContextImport {
-    Scalars(unsafe extern "C" fn(*mut u8, u32, i32, i32) -> i64),
-    Packet(unsafe extern "C" fn(*mut u8, u32, *const u8, i32) -> i64),
-}
-
-impl RustContextImport {
-    pub(crate) fn address(self) -> usize {
-        match self {
-            Self::Scalars(entry) => entry as usize,
-            Self::Packet(entry) => entry as usize,
-        }
-    }
-}
-
-impl PartialEq for RustContextImport {
-    fn eq(&self, other: &Self) -> bool {
-        match (*self, *other) {
-            (Self::Scalars(a), Self::Scalars(b)) => std::ptr::fn_addr_eq(a, b),
-            (Self::Packet(a), Self::Packet(b)) => std::ptr::fn_addr_eq(a, b),
-            _ => false,
-        }
-    }
-}
-
-impl Eq for RustContextImport {}
+pub use splice_target::abi::{RustEntry, RustFunction};
 
 /// Variable-sized operands live in side tables, keeping common operations inline.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -73,8 +43,8 @@ pub enum Op {
     PtrOffset(Value, Value, Scale),
     /// Address of `bytes` of this frame's scratch memory at an 8-byte-aligned
     /// `offset`. The frame's scratch covers its largest `offset + bytes`,
-    /// starts uninitialized and is reused by Rust packet calls of the same
-    /// frame. Inlining moves a callee's scratch above the caller's.
+    /// starts uninitialized and holds the packets of the frame's Rust
+    /// calls. Inlining moves a callee's scratch above the caller's.
     CallScratch {
         offset: u32,
         bytes: u32,
@@ -89,9 +59,9 @@ pub enum Op {
     /// Associate the current machine-code position with an embedder's source point.
     DebugPoint(u32),
     Call(Call),
-    RustCall(&'static RustImport, Value, Value),
-    RustPacketCall(PacketCall),
-    RustContextCall(RustContextImport, [Value; 4]),
+    /// Call the Rust function with a `ptr` receiver, an `i32` operation, a
+    /// `ptr` packet and an `i32` word. A trapping status stops the kernel.
+    RustCall(&'static RustFunction, [Value; 4]),
 }
 
 /// The operation performed by an `Op::Bin` instruction.
@@ -184,13 +154,12 @@ impl Op {
                 *b = map(*b);
                 *c = map(*c);
             }
-            Self::RustContextCall(_, args) => {
+            Self::RustCall(_, args) => {
                 for arg in args {
                     *arg = map(*arg);
                 }
             }
             Self::Bin(_, a, b)
-            | Self::RustCall(_, a, b)
             | Self::PtrOffset(a, b, _)
             | Self::Store(a, b)
             | Self::BoundsCheck(a, b) => {
@@ -200,7 +169,6 @@ impl Op {
             Self::Const(_)
             | Self::Literal(..)
             | Self::Call(_)
-            | Self::RustPacketCall(_)
             | Self::DebugPoint(_)
             | Self::Trap(_)
             | Self::CallScratch { .. } => {}

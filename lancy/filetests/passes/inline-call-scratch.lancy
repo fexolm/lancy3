@@ -49,8 +49,20 @@ fn main x:i32 -> i32
 # A Rust packet is written to scratch too. An inlined callee's packet must not
 # overwrite the caller's scratch word.
 fn callee x:i32 -> i32
+  packet = call_scratch 0 16
   a = const 1
-  r = rust_packet_call sum4 a a a x
+  four = const 4
+  eight = const 8
+  twelve = const 12
+  pb = offset packet four 1
+  pc = offset packet eight 1
+  pd = offset packet twelve 1
+  store packet a
+  store pb a
+  store pc a
+  store pd x
+  zero = const 0
+  r = rust_call sum4 packet zero packet zero
   ret r
 
 fn main x:i32 -> i32
@@ -64,8 +76,9 @@ fn main x:i32 -> i32
   result = add scaled r
   ret result
 
-@inline check: rust_packet_call sum4
-@inline sameln: scratch 8
+@inline check: call_scratch 0 8
+@inline check: call_scratch 8 16
+@inline check: rust_call sum4
 @run 16 -> 719
 ---
 # The debugger workspace moves the same way (HIR-13).

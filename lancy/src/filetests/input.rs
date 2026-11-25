@@ -322,37 +322,13 @@ fn instruction<'a>(
         ["bounds", i, n] => Op::BoundsCheck(v(i)?, v(n)?),
         ["trap_if", cond, trap] => Op::TrapIf(v(cond)?, parse_trap(trap)?),
         ["trap", trap] => Op::Trap(parse_trap(trap)?),
-        ["rust_call", "identity_or_error", value, fail] => Op::RustCall(
-            &crate::hir::RustImport {
-                name: "identity_or_error",
-                resolve: || identity_or_error,
-            },
-            v(value)?,
-            v(fail)?,
+        ["rust_call", name, receiver, operation, packet, word] => Op::RustCall(
+            RUST_FUNCTIONS
+                .iter()
+                .find(|function| function.name == *name)
+                .ok_or_else(|| format!("unknown Rust function {name}"))?,
+            [v(receiver)?, v(operation)?, v(packet)?, v(word)?],
         ),
-        ["rust_call", "double", value, unused] => Op::RustCall(
-            &crate::hir::RustImport {
-                name: "double",
-                resolve: || double,
-            },
-            v(value)?,
-            v(unused)?,
-        ),
-        ["rust_packet_call", "sum4", args @ ..] => {
-            fn sum(words: &[i32]) -> i32 {
-                words.iter().copied().fold(0, i32::wrapping_add)
-            }
-            let args = args.iter().map(|arg| v(arg)).collect::<Result<Vec<_>>>()?;
-            Op::RustPacketCall(f.add_packet_call(
-                &crate::hir::RustPacketImport {
-                    name: "sum4",
-                    arity: 4,
-                    resolve: || sum,
-                },
-                0,
-                &args,
-            ))
-        }
         ["offset", p, i, stride] => Op::PtrOffset(
             v(p)?,
             v(i)?,
@@ -394,15 +370,44 @@ fn instruction<'a>(
 }
 
 /// Return `value`, or report the trap whose code is `fail`.
-extern "C" fn identity_or_error(value: i32, fail: i32) -> i64 {
+/// The Rust functions fixtures call by name.
+static RUST_FUNCTIONS: [crate::hir::RustFunction; 3] = [
+    crate::hir::RustFunction {
+        name: "identity_or_error",
+        entry: identity_or_error,
+    },
+    crate::hir::RustFunction {
+        name: "double",
+        entry: double,
+    },
+    crate::hir::RustFunction {
+        name: "sum4",
+        entry: sum4,
+    },
+];
+
+/// The operation, or the trap whose code is the word.
+unsafe extern "C" fn identity_or_error(_: *mut u8, value: u32, _: *const u8, fail: i32) -> i64 {
     match crate::Trap::from_code(fail as u32) {
         Some(trap) => trap.status(),
-        None => i64::from(value as u32),
+        None => i64::from(value),
     }
 }
 
-extern "C" fn double(value: i32, _: i32) -> i64 {
-    i64::from(value.wrapping_mul(2) as u32)
+unsafe extern "C" fn double(_: *mut u8, value: u32, _: *const u8, _: i32) -> i64 {
+    i64::from(value.wrapping_mul(2))
+}
+
+/// The sum of the packet's four `i32` words.
+///
+/// # Safety
+/// The packet holds four `i32` words.
+unsafe extern "C" fn sum4(_: *mut u8, _: u32, packet: *const u8, _: i32) -> i64 {
+    let word = |i: usize| {
+        // SAFETY: the caller's packet holds four words.
+        unsafe { packet.cast::<i32>().add(i).read_unaligned() }
+    };
+    i64::from((0..4).map(word).fold(0, i32::wrapping_add) as u32)
 }
 
 fn body<'a>(

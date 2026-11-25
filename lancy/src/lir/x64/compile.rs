@@ -66,15 +66,8 @@ pub(super) fn compile(
                     scratch_words =
                         scratch_words.max((offset as usize + bytes as usize).div_ceil(8))
                 }
-                Inst::RustCall(..) | Inst::RustPacketCall(..) | Inst::RustContextCall(..)
-                    if machine.abi.is_foreign() =>
-                {
+                Inst::RustCall(..) if machine.abi.is_foreign() => {
                     return Err(foreign_calls(machine));
-                }
-                Inst::RustPacketCall(import, offset, _) => {
-                    let bytes = import.packet_bytes().expect("verified Rust packet");
-                    scratch_words =
-                        scratch_words.max((offset as usize + bytes as usize).div_ceil(8));
                 }
                 _ => {}
             }

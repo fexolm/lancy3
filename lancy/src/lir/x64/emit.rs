@@ -985,33 +985,14 @@ impl Emitter<'_> {
             Inst::CallScratch(offset, ..) => {
                 a.lea(q(0), ptr(r11 + (disp(frame.scratch_base) + offset as i32)))
             }
-            Inst::StorePacketWord(offset, _) => store(
-                a,
-                width,
-                Type::I32,
-                ptr(r11 + (disp(frame.scratch_base) + offset as i32)),
-                reg(0),
-            ),
-            Inst::RustCall(..) | Inst::RustPacketCall(..) | Inst::RustContextCall(..) => {
-                let entry = match inst {
-                    Inst::RustCall(import, ..) => (import.resolve)() as usize,
-                    Inst::RustPacketCall(import, offset, _) => {
-                        let [symbol, words, count, _] = abi.args.map(|reg| R64[reg.hw_enc()]);
-                        a.mov(symbol, std::ptr::from_ref(import) as u64)?;
-                        a.lea(words, ptr(r11 + (disp(frame.scratch_base) + offset as i32)))?;
-                        a.mov(count, u64::from(import.arity))?;
-                        crate::hir::invoke_packet_import as *const () as usize
-                    }
-                    Inst::RustContextCall(import, ..) => import.address(),
-                    _ => unreachable!(),
-                };
+            Inst::RustCall(function, ..) => {
                 // Every generated frame enters with RSP 8 mod 16. Leave the
                 // Win64 shadow space intact and save the volatile workspace
                 // outside it. SysV requires no shadow space.
                 let shadow = abi.shadow;
                 a.sub(rsp, shadow + 8)?;
                 a.mov(qword_ptr(rsp + shadow), r11)?;
-                a.mov(r10, entry as u64)?;
+                a.mov(r10, function.entry as usize as u64)?;
                 a.call(r10)?;
                 a.mov(r11, qword_ptr(rsp + shadow))?;
                 a.add(rsp, shadow + 8)?;

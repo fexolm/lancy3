@@ -6,7 +6,7 @@ use super::width::{Narrow, Widen};
 use super::{A, C, Cond, Config};
 use crate::{
     hir::operation::Action,
-    hir::{Lane, RustContextImport, RustImport, RustPacketImport, Scale, Type, Unary},
+    hir::{Lane, RustFunction, Scale, Type, Unary},
     lir::{
         TargetInst,
         schedule::{Schedulable, Scheduling},
@@ -232,12 +232,7 @@ pub(super) enum Inst {
     Call(FunctionId, PRegSet, Type, VReg),
     LibArg(Type, usize, VReg),
     Libcall(Action, Type, Type, [usize; 3]),
-    RustCall(&'static RustImport, VReg, VReg, VReg),
-    /// Call with the packet at a byte offset of the frame's scratch memory.
-    RustPacketCall(&'static RustPacketImport, u32, VReg),
-    /// Store a packet word at a byte offset of the frame's scratch memory.
-    StorePacketWord(u32, VReg),
-    RustContextCall(RustContextImport, [VReg; 4], VReg),
+    RustCall(&'static RustFunction, [VReg; 4], VReg),
     /// Address of the frame's scratch memory at a byte offset, with the
     /// region's size in bytes.
     CallScratch(u32, u32, VReg),
@@ -440,7 +435,6 @@ impl TargetInst for Inst {
             }
             Self::StoreArg(_, _, v)
             | Self::DebugStore(_, _, v)
-            | Self::StorePacketWord(_, v)
             | Self::LibArg(_, _, v)
             | Self::Branch(v) => out.push(input(v)),
             Self::Return(ty, v, root) => {
@@ -450,15 +444,7 @@ impl TargetInst for Inst {
                     input(v)
                 });
             }
-            Self::RustCall(_, a, b, dst) => out.extend([
-                Operand::reg_fixed_use(a, PReg::new(0, RegClass::Int)),
-                Operand::reg_fixed_use(b, PReg::new(1, RegClass::Int)),
-                Operand::reg_fixed_def(dst, return_reg(Type::I32)),
-            ]),
-            Self::RustPacketCall(_, _, dst) => {
-                out.push(Operand::reg_fixed_def(dst, return_reg(Type::I32)))
-            }
-            Self::RustContextCall(_, args, dst) => {
+            Self::RustCall(_, args, dst) => {
                 out.extend(
                     args.into_iter().enumerate().map(|(reg, arg)| {
                         Operand::reg_fixed_use(arg, PReg::new(reg, RegClass::Int))
@@ -479,7 +465,7 @@ impl TargetInst for Inst {
                 regs
             }
             Self::Libcall(..) => call_clobbers(),
-            Self::RustCall(..) | Self::RustPacketCall(..) | Self::RustContextCall(..) => {
+            Self::RustCall(..) => {
                 let mut regs = call_clobbers();
                 regs.remove(return_reg(Type::I32));
                 regs

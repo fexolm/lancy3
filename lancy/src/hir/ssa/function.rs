@@ -9,7 +9,7 @@ mod verify;
 
 pub(crate) use verify::VerifiedBody;
 
-use super::{Op, RustPacketImport, Terminator, Type, Value};
+use super::{Op, Terminator, Type, Value};
 use crate::hir::IrError;
 use crate::support::slotmap::{DenseMap, SlotMap};
 use std::{ops::Range, sync::Arc};
@@ -66,15 +66,6 @@ impl Span {
 }
 
 crate::slot_key!(pub Call);
-crate::slot_key!(pub PacketCall);
-
-#[derive(Clone, Copy, Debug)]
-struct PacketData {
-    import: &'static RustPacketImport,
-    scratch: u32,
-    args: Span,
-}
-
 #[derive(Clone, Debug)]
 struct CallData {
     callee: Arc<Function>,
@@ -87,7 +78,7 @@ crate::slot_key!(pub Edge);
 ///
 /// # Panics
 ///
-/// `Block`, `Value`, `Inst`, `Edge`, `Call` and `PacketCall` handles index
+/// `Block`, `Value`, `Inst`, `Edge` and `Call` handles index
 /// the function that issued them. Every method that takes a handle panics
 /// for a handle of another function or a block retired by
 /// [`Function::merge_blocks`]. Structural errors that a builder can make
@@ -100,7 +91,6 @@ pub struct Function {
     insts: SlotMap<Inst, InstData>,
     edges: DenseMap<Edge, (Block, Span)>,
     calls: DenseMap<Call, CallData>,
-    packets: DenseMap<PacketCall, PacketData>,
     operands: Vec<Value>,
     types: DenseMap<Value, Type>,
     slices: Vec<SliceParam>,
@@ -139,7 +129,6 @@ impl Function {
             insts: SlotMap::new(),
             edges: DenseMap::new(),
             calls: DenseMap::new(),
-            packets: DenseMap::new(),
             operands: Vec::new(),
             types: DenseMap::with_capacity(arity),
             slices: Vec::new(),
@@ -290,7 +279,6 @@ impl Function {
         let mut op = *self.op(i);
         match op {
             Op::Call(site) => self.call(site).1.iter().copied().for_each(visit),
-            Op::RustPacketCall(site) => self.packet_call(site).2.iter().copied().for_each(visit),
             _ => op.map_operands(|v| {
                 visit(v);
                 v
@@ -311,8 +299,8 @@ impl Function {
         (block, &self.operands[args.range()])
     }
 
-    /// Operands held by the arena, and those that live edge, call and
-    /// packet records reference.
+    /// Operands held by the arena, and those that live edge and call
+    /// records reference.
     #[cfg(test)]
     pub(crate) fn operand_arena(&self) -> (usize, usize) {
         let edges = self
@@ -323,7 +311,6 @@ impl Function {
             .map(|e| self.edge(e).1.len());
         let calls = self.insts.values().map(|inst| match inst.op {
             Op::Call(call) => self.call(call).1.len(),
-            Op::RustPacketCall(packet) => self.packet_call(packet).2.len(),
             _ => 0,
         });
         (self.operands.len(), edges.chain(calls).sum())
@@ -361,9 +348,9 @@ impl Function {
         }
     }
 
-    /// Rebuild the operand arena from the edge, call and packet records
-    /// that a terminator or instruction references. Unreferenced edge
-    /// records are retired: their target becomes `Block::INVALID` and their
+    /// Rebuild the operand arena from the edge and call records that a
+    /// terminator or instruction references. Unreferenced edge records are
+    /// retired: their target becomes `Block::INVALID` and their
     /// arguments empty. Every ID stays valid, so analyses that name edges
     /// remain usable.
     pub(in crate::hir) fn compact(&mut self) {
@@ -383,24 +370,13 @@ impl Function {
             }
         }
         let mut calls = DenseMap::filled(self.calls.len(), false);
-        let mut packets = DenseMap::filled(self.packets.len(), false);
         for inst in self.insts.values() {
-            match inst.op {
-                Op::Call(call) => calls[call] = true,
-                Op::RustPacketCall(packet) => packets[packet] = true,
-                _ => {}
+            if let Op::Call(call) = inst.op {
+                calls[call] = true;
             }
         }
         for (call, data) in self.calls.iter_mut() {
             let live = if calls[call] {
-                &old[data.args.range()]
-            } else {
-                &[]
-            };
-            data.args = Span::append(&mut self.operands, live);
-        }
-        for (packet, data) in self.packets.iter_mut() {
-            let live = if packets[packet] {
                 &old[data.args.range()]
             } else {
                 &[]
@@ -414,24 +390,9 @@ impl Function {
         Some((&data.callee, &self.operands[data.args.range()]))
     }
 
-    pub(in crate::hir) fn packet_site(
-        &self,
-        call: PacketCall,
-    ) -> Option<(&'static RustPacketImport, u32, &[Value])> {
-        let data = self.packets.get(call)?;
-        Some((data.import, data.scratch, &self.operands[data.args.range()]))
-    }
-
     pub fn call(&self, call: Call) -> (&Arc<Function>, &[Value]) {
         let data = &self.calls[call];
         (&data.callee, &self.operands[data.args.range()])
-    }
-
-    /// The import, the packet's offset in this frame's scratch memory and the
-    /// words stored into the packet.
-    pub fn packet_call(&self, call: PacketCall) -> (&'static RustPacketImport, u32, &[Value]) {
-        let data = self.packets[call];
-        (data.import, data.scratch, &self.operands[data.args.range()])
     }
 
     pub fn create_block(&mut self) -> Block {
@@ -507,21 +468,6 @@ impl Function {
         self.calls.insert(CallData { callee, args })
     }
 
-    /// Call `import` with a packet written at an 8-byte-aligned `scratch`
-    /// offset of this frame's scratch memory (see [`Op::CallScratch`]).
-    pub fn add_packet_call(
-        &mut self,
-        import: &'static RustPacketImport,
-        scratch: u32,
-        args: &[Value],
-    ) -> PacketCall {
-        let args = Span::append(&mut self.operands, args);
-        self.packets.insert(PacketData {
-            import,
-            scratch,
-            args,
-        })
-    }
     pub fn add_edge(&mut self, target: Block, args: &[Value]) -> Edge {
         let args = Span::append(&mut self.operands, args);
         self.edges.insert((target, args))
@@ -773,11 +719,6 @@ impl Function {
     pub(crate) fn scratch_bytes(&self) -> u64 {
         self.frame_extent(|op| match op {
             Op::CallScratch { offset, bytes } => Some(u64::from(offset) + u64::from(bytes)),
-            Op::RustPacketCall(site) => {
-                let data = self.packets[site];
-                let bytes = data.import.packet_bytes().expect("verified Rust packet");
-                Some(u64::from(data.scratch) + u64::from(bytes))
-            }
             _ => None,
         })
     }

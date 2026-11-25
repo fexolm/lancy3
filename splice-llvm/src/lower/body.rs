@@ -645,7 +645,7 @@ impl<'a, 'ctx> Body<'a, 'ctx> {
             false,
         );
         let entry = wide
-            .const_int(plan.entry as usize as u64, false)
+            .const_int(plan.entry.entry as usize as u64, false)
             .const_to_pointer(pointer);
         let operands = [
             receiver.into(),

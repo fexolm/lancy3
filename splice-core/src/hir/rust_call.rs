@@ -1,7 +1,9 @@
 //! Rust calls: one instruction, one native entry and one packet layout,
 //! which every backend materializes from [`RustTarget::plan`].
 use super::{Buffer, BufferKind, ContextSlice, ScalarType, ValueType};
-use crate::{ContextArguments, RustEntry, StaticRustSymbol};
+use crate::runtime_context::{CONTEXT_CALL, STATIC_CALL};
+use crate::{ContextArguments, StaticRustSymbol};
+use splice_target::abi::RustFunction;
 use std::collections::HashMap;
 
 /// The Rust code a [`super::Instr::RustCall`] runs.
@@ -61,7 +63,7 @@ pub struct PacketStore {
 /// buffer, or the packet itself when there is none.
 #[derive(Clone, Debug)]
 pub struct RustCallPlan {
-    pub entry: RustEntry,
+    pub entry: &'static RustFunction,
     pub context: Option<Buffer>,
     pub operation: u32,
     pub bytes: u32,
@@ -147,15 +149,13 @@ impl RustTarget {
     /// The native call of a checked Rust call with `words` operands and
     /// `slices`. The operands follow the layout of [`ContextArguments`]; a
     /// static call's packet starts with the symbol's address (see
-    /// [`crate::invoke_static`]), so no backend embeds a pointer constant.
+    /// `invoke_static`), so no backend embeds a pointer constant.
     pub fn plan(self, kinds: &[BufferKind], words: usize, slices: &[ContextSlice]) -> RustCallPlan {
         let layout = ContextArguments::packet_layout(words as u32, slices.len() as u32)
             .expect("a checked Rust call has a valid packet");
-        let (entry, context, operation, header): (RustEntry, _, _, _) = match self {
-            Self::Context { buffer, operation } => {
-                (crate::invoke_context, Some(buffer), operation, 0)
-            }
-            Self::Static(_) => (crate::invoke_static, None, 0, crate::STATIC_HEADER),
+        let (entry, context, operation, header) = match self {
+            Self::Context { buffer, operation } => (&CONTEXT_CALL, Some(buffer), operation, 0),
+            Self::Static(_) => (&STATIC_CALL, None, 0, crate::STATIC_HEADER),
         };
         let mut stores = Vec::new();
         if let Self::Static(symbol) = self {

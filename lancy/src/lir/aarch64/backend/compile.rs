@@ -63,10 +63,6 @@ pub(super) fn compile(
                 Inst::CallScratch(offset, bytes, _) => {
                     scratch_bytes = scratch_bytes.max(offset as usize + bytes as usize);
                 }
-                Inst::RustPacketCall(import, offset, _) => {
-                    let bytes = import.packet_bytes().expect("verified Rust packet");
-                    scratch_bytes = scratch_bytes.max(offset as usize + bytes as usize);
-                }
                 _ => {}
             }
         }

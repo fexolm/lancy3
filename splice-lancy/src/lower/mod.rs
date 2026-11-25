@@ -925,10 +925,7 @@ impl KernelBuilder for Builder<'_> {
         let zero = self.value(Op::Const(0));
         self.define(
             dst,
-            Op::RustContextCall(
-                hir::RustContextImport::Packet(plan.entry),
-                [receiver, operation, packet, zero],
-            ),
+            Op::RustCall(plan.entry, [receiver, operation, packet, zero]),
         );
         Ok(dst)
     }

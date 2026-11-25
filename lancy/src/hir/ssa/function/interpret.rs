@@ -286,18 +286,21 @@ pub(super) unsafe fn run(
                 continue;
             }
             Op::DebugStore(..) | Op::DebugPoint(_) => continue,
-            Op::RustCall(import, a, b) => {
-                let status = ((import.resolve)())(f.read(a) as i32, f.read(b) as i32);
-                word(u64::from(splice_target::abi::decode_status(status)?))
+            Op::RustCall(..) if buffer.is_some() => {
+                return Err(InterpretError::Unsupported("Rust calls with a run buffer"));
             }
-            Op::RustPacketCall(site) => {
-                let (import, _, words) = graph.packet_call(site);
-                let arguments: Vec<_> = words.iter().map(|&value| f.read(value) as i32).collect();
-                let status = import.invoke(&arguments);
+            Op::RustCall(function, [receiver, operation, packet, extra]) => {
+                // SAFETY: without a run buffer every pointer is a live address
+                // (see `run`), and the entry is the function's own contract.
+                let status = unsafe {
+                    (function.entry)(
+                        f.read(receiver) as *mut u8,
+                        f.read(operation) as u32,
+                        f.read(packet) as *const u8,
+                        f.read(extra) as i32,
+                    )
+                };
                 word(u64::from(splice_target::abi::decode_status(status)?))
-            }
-            Op::RustContextCall(..) => {
-                return Err(InterpretError::Unsupported("Rust context calls"));
             }
             Op::CallScratch { .. } if buffer.is_some() => {
                 return Err(InterpretError::Unsupported(

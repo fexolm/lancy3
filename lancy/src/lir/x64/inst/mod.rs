@@ -5,7 +5,7 @@ pub(super) mod simd;
 pub(super) use super::abi::SCRATCH;
 use super::abi::{MASKS, Machine, gprs, vectors};
 use crate::hir::operation::Action;
-use crate::hir::{Binary, Lane, RustContextImport, RustImport, RustPacketImport, Scale, Type};
+use crate::hir::{Binary, Lane, RustFunction, Scale, Type};
 use crate::{lir::TargetInst, module::FunctionId};
 use regalloc2::{MachineEnv, Operand, PReg, PRegSet, RegClass, VReg};
 use simd::Native;
@@ -281,12 +281,7 @@ pub(super) enum Inst {
         dst: VReg,
         clobbers: PRegSet,
     },
-    RustCall(&'static RustImport, VReg, VReg, VReg),
-    /// Call with the packet at a byte offset of the frame's scratch memory.
-    RustPacketCall(&'static RustPacketImport, u32, VReg),
-    /// Store a packet word at a byte offset of the frame's scratch memory.
-    StorePacketWord(u32, VReg),
-    RustContextCall(RustContextImport, [VReg; 4], VReg),
+    RustCall(&'static RustFunction, [VReg; 4], VReg),
     /// Address of the frame's scratch memory at a byte offset, with the
     /// region's size in bytes.
     CallScratch(u32, u32, VReg),
@@ -490,16 +485,9 @@ impl TargetInst for Inst {
             Self::BranchAll(_, v)
             | Self::StoreArg(_, _, v)
             | Self::DebugStore(_, _, v)
-            | Self::StorePacketWord(_, v)
             | Self::Branch(v) => out.push(O::reg_use(v)),
             Self::Call { dst, .. } => out.push(O::reg_fixed_def(dst, return_reg(dst))),
-            Self::RustCall(_, a, b, dst) => out.extend([
-                O::reg_fixed_use(a, machine.abi.args[0]),
-                O::reg_fixed_use(b, machine.abi.args[1]),
-                O::reg_fixed_def(dst, AX),
-            ]),
-            Self::RustPacketCall(_, _, dst) => out.push(O::reg_fixed_def(dst, AX)),
-            Self::RustContextCall(_, args, dst) => {
+            Self::RustCall(_, args, dst) => {
                 out.extend(
                     args.into_iter()
                         .zip(machine.abi.args)
@@ -525,7 +513,7 @@ impl TargetInst for Inst {
         };
         match self {
             Self::Call { clobbers, .. } => *clobbers,
-            Self::RustCall(..) | Self::RustPacketCall(..) | Self::RustContextCall(..) => {
+            Self::RustCall(..) => {
                 let mut regs = callee();
                 regs.remove(AX);
                 regs

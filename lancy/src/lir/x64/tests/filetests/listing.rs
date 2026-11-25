@@ -74,12 +74,7 @@ fn opcode(inst: Inst) -> String {
         Inst::CheckBounds(..) => "bounds".into(),
         Inst::TrapIf(_, trap) => format!("trap_if {trap:?}"),
         Inst::Trap(trap) => format!("trap {trap:?}"),
-        Inst::RustCall(import, ..) => format!("rust_call {}", import.name),
-        Inst::RustContextCall(..) => "rust_context_call".into(),
-        Inst::RustPacketCall(import, offset, _) => {
-            format!("rust_packet_call {} scratch {offset}", import.name)
-        }
-        Inst::StorePacketWord(offset, _) => format!("store_packet_word {offset}"),
+        Inst::RustCall(function, ..) => format!("rust_call {}", function.name),
         Inst::CallScratch(offset, bytes, _) => format!("call_scratch {offset} {bytes}"),
         Inst::Cdq { .. } => "cdq".into(),
         Inst::IDiv { remainder, .. } => if remainder { "irem" } else { "idiv" }.into(),

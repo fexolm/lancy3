@@ -1,5 +1,5 @@
 //! A synchronous Rust dispatcher borrowed for one native invocation.
-use splice_target::abi::{Trap, rust_entry};
+use splice_target::abi::{RustFunction, Trap, rust_entry};
 use std::{
     fmt,
     hash::{Hash, Hasher},
@@ -278,13 +278,6 @@ pub trait StaticRustCall {
     fn invoke(arguments: ContextArguments<'_>) -> i32;
 }
 
-/// The native entry of every Rust call: `entry(target, operation, packet, 0)`.
-/// `target` is the [`RuntimeContext`] of a context operation, or the
-/// [`StaticRustSymbol`] of a static one. It returns a status (see
-/// [`Trap::status`]) whose result word is the operation's `i32` result.
-/// The last operand is unused.
-pub type RustEntry = unsafe extern "C" fn(*mut u8, u32, *const u8, i32) -> i64;
-
 /// A Rust operation selected when the kernel is staged, with its packet shape.
 #[derive(Debug)]
 pub struct StaticRustSymbol {
@@ -409,7 +402,21 @@ impl fmt::Debug for RuntimeContext<'_> {
     }
 }
 
-/// The [`RustEntry`] of a context operation.
+/// The Rust function of every context operation: `invoke_context(context,
+/// operation, packet, 0)`, where `context` is the [`RuntimeContext`].
+pub(crate) static CONTEXT_CALL: RustFunction = RustFunction {
+    name: "invoke_context",
+    entry: invoke_context,
+};
+
+/// The Rust function of every static operation: `invoke_static(_, 0, packet,
+/// 0)`, where the packet starts with the [`StaticRustSymbol`].
+pub(crate) static STATIC_CALL: RustFunction = RustFunction {
+    name: "invoke_static",
+    entry: invoke_static,
+};
+
+/// The entry of a context operation.
 ///
 /// # Safety
 /// `raw` must hold the live, exclusive [`RuntimeContext`] borrow provided by
@@ -418,7 +425,7 @@ impl fmt::Debug for RuntimeContext<'_> {
 /// descriptors must point to validated live slices. Every descriptor tagged
 /// writable must grant exclusive access and be disjoint from the other views.
 /// Neither pointer nor the temporary borrows may be retained.
-pub unsafe extern "C" fn invoke_context(
+unsafe extern "C" fn invoke_context(
     raw: *mut u8,
     operation: u32,
     packet: *const u8,
@@ -444,14 +451,14 @@ pub unsafe extern "C" fn invoke_context(
 /// its [`StaticRustSymbol`].
 pub const STATIC_HEADER: u32 = 8;
 
-/// The [`RustEntry`] of a static operation. Its packet starts with the
+/// The entry of a static operation. Its packet starts with the
 /// address of the [`StaticRustSymbol`]; the operands follow at
 /// [`STATIC_HEADER`] in the layout of [`ContextArguments`].
 ///
 /// # Safety
 /// `packet` holds the address of the live symbol the call was verified
 /// against, followed by its operands, as for [`invoke_context`].
-pub unsafe extern "C" fn invoke_static(
+unsafe extern "C" fn invoke_static(
     _receiver: *mut u8,
     _operation: u32,
     packet: *const u8,

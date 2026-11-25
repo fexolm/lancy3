@@ -227,20 +227,8 @@ impl Rules<'_> {
                 return self.masked_memory(address, mask, value);
             }
             Op::Call(site) => return self.call(site, callee),
-            Op::RustCall(import, a, b) => {
-                return Inst::RustCall(import, self.input(a), self.input(b), self.dst());
-            }
-            Op::RustPacketCall(site) => {
-                let (import, scratch, args) = self.f.packet_call(site);
-                for (index, &word) in args.iter().enumerate() {
-                    let word = self.input(word);
-                    self.out
-                        .push(Inst::StorePacketWord(scratch + index as u32 * 4, word));
-                }
-                return Inst::RustPacketCall(import, scratch, self.dst());
-            }
-            Op::RustContextCall(import, args) => {
-                return Inst::RustContextCall(import, args.map(|arg| self.input(arg)), self.dst());
+            Op::RustCall(function, args) => {
+                return Inst::RustCall(function, args.map(|arg| self.input(arg)), self.dst());
             }
             Op::Bin(kind, a, b) if vector => self.vector_binary(kind, a, b),
             Op::Bin(kind, a, b) => self.scalar_binary(kind, a, b),

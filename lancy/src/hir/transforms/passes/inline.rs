@@ -313,17 +313,8 @@ impl<'a> Copier<'a> {
                     let result = self.src.result(i).unwrap();
                     (at, self.values[result]) = call(out, at, site, &self.arguments(args));
                 } else {
-                    if let Op::RustPacketCall(site) = op {
-                        let (import, scratch, operands) = self.src.packet_call(site);
-                        op = Op::RustPacketCall(out.add_packet_call(
-                            import,
-                            scratch + self.shift.scratch,
-                            &self.arguments(operands),
-                        ));
-                    } else {
-                        op.map_operands(|v| self.values[v]);
-                        op = self.shift.apply(op);
-                    }
+                    op.map_operands(|v| self.values[v]);
+                    op = self.shift.apply(op);
                     let copy = out
                         .append_inst(at, op)
                         .expect("a copy of a verified operation");

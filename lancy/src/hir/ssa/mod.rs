@@ -4,10 +4,10 @@ pub mod inst;
 mod tests;
 
 pub(crate) use function::VerifiedBody;
-pub use function::{Block, Call, Edge, Function, Inst, PacketCall, SliceParam};
+pub use function::{Block, Call, Edge, Function, Inst, SliceParam};
 #[cfg(test)]
 pub(crate) use function::{InterpretError, buffer_address};
 pub use inst::{
-    Access, Binary, Effects, Lane, Op, RustContextImport, RustImport, RustPacketImport, Scale,
-    Simd, Terminator, Ternary, TrapKind, Type, Unary, Value, VectorAddress, invoke_packet_import,
+    Access, Binary, Effects, Lane, Op, RustEntry, RustFunction, Scale, Simd, Terminator, Ternary,
+    TrapKind, Type, Unary, Value, VectorAddress,
 };

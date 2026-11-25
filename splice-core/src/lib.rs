@@ -21,8 +21,7 @@ mod runtime_context;
 #[doc(hidden)]
 pub use runtime_context::{
     ContextArguments, ContextFrame, ContextOperation, ContextPacketLayout, ContextSignature,
-    RuntimeContext, RustEntry, STATIC_HEADER, StaticRustCall, StaticRustSymbol, invoke_context,
-    invoke_static,
+    RuntimeContext, STATIC_HEADER, StaticRustCall, StaticRustSymbol,
 };
 
 /// Description of an actual Rust struct field for this monomorphization.

@@ -303,7 +303,7 @@ pub(super) fn emit(
                     .extend([I64, I32, I64, I32].map(AbiParam::new));
                 signature.returns.push(AbiParam::new(I64));
                 let sig = b.import_signature(signature);
-                let entry = b.ins().iconst(I64, plan.entry as usize as i64);
+                let entry = b.ins().iconst(I64, plan.entry.entry as usize as i64);
                 let call = b
                     .ins()
                     .call_indirect(sig, entry, &[receiver, operation, address, zero]);

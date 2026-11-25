@@ -153,20 +153,8 @@ impl Rules<'_> {
                 limit,
             }) => self.compress_store(base, mask, value, limit)?,
             Op::Call(site) => self.call(site, callee),
-            Op::RustCall(import, a, b) => {
-                Inst::RustCall(import, self.input(a), self.input(b), self.dst())
-            }
-            Op::RustPacketCall(site) => {
-                let (import, scratch, args) = self.f.packet_call(site);
-                for (index, &word) in args.iter().enumerate() {
-                    let word = self.input(word);
-                    self.out
-                        .push(Inst::StorePacketWord(scratch + index as u32 * 4, word));
-                }
-                Inst::RustPacketCall(import, scratch, self.dst())
-            }
-            Op::RustContextCall(import, args) => {
-                Inst::RustContextCall(import, args.map(|arg| self.input(arg)), self.dst())
+            Op::RustCall(function, args) => {
+                Inst::RustCall(function, args.map(|arg| self.input(arg)), self.dst())
             }
             op => self.numeric(op)?,
         })

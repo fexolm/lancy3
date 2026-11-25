@@ -224,12 +224,6 @@ fn map_op(f: &mut Function, mut op: Op, values: &HashMap<Value, Value>) -> Op {
             let args: Vec<_> = args.iter().copied().map(map).collect();
             op = Op::Call(f.add_call(callee.clone(), &args));
         }
-    } else if let Op::RustPacketCall(site) = op {
-        let (import, scratch, args) = f.packet_call(site);
-        if args.iter().any(|v| values.contains_key(v)) {
-            let args: Vec<_> = args.iter().copied().map(map).collect();
-            op = Op::RustPacketCall(f.add_packet_call(import, scratch, &args));
-        }
     } else {
         op.map_operands(map);
     }

@@ -2,7 +2,7 @@
 //! its result, its effects and its memory access. Builders, the verifier and
 //! the passes ask these functions instead of matching `Op` themselves, so a
 //! new operation is described here once.
-use super::{Binary, Lane, Op, RustContextImport, Simd, Ternary, Type, Value};
+use super::{Binary, Lane, Op, Simd, Ternary, Type, Value};
 use crate::hir::{Function, Inst, IrError, integer};
 
 /// Why an operation may stop the program instead of producing its result.
@@ -137,10 +137,7 @@ impl Op {
             Self::Store(..) | Self::Simd(Simd::MaskedStore { .. } | Simd::CompressStore { .. }) => {
                 Effects::memory(true)
             }
-            Self::Call(_)
-            | Self::RustCall(..)
-            | Self::RustPacketCall(_)
-            | Self::RustContextCall(..) => Effects::CALL,
+            Self::Call(_) | Self::RustCall(..) => Effects::CALL,
             Self::DebugStore(..) | Self::DebugPoint(_) => Effects::DEBUG,
             Self::Const(_)
             | Self::Literal(..)
@@ -308,37 +305,11 @@ impl Op {
                 check_trap(inst, trap)?;
                 return Ok(None);
             }
-            Self::RustCall(_, a, b) => {
-                expect(a, Type::I32)?;
-                expect(b, Type::I32)?;
-                Type::I32
-            }
-            Self::RustPacketCall(site) => {
-                let (import, scratch, words) = f
-                    .packet_site(site)
-                    .ok_or(IrError::InvalidRustPacket { inst })?;
-                let Some(bytes) = import.packet_bytes() else {
-                    return Err(IrError::InvalidRustPacket { inst });
-                };
-                if words.len() != import.arity as usize || !valid_scratch(scratch, bytes) {
-                    return Err(IrError::InvalidRustPacket { inst });
-                }
-                for &word in words {
-                    expect(word, Type::I32)?;
-                }
-                Type::I32
-            }
-            Self::RustContextCall(import, [context, operation, a, b]) => {
-                expect(context, Type::Ptr)?;
+            Self::RustCall(_, [receiver, operation, packet, word]) => {
+                expect(receiver, Type::Ptr)?;
                 expect(operation, Type::I32)?;
-                expect(
-                    a,
-                    match import {
-                        RustContextImport::Scalars(_) => Type::I32,
-                        RustContextImport::Packet(_) => Type::Ptr,
-                    },
-                )?;
-                expect(b, Type::I32)?;
+                expect(packet, Type::Ptr)?;
+                expect(word, Type::I32)?;
                 Type::I32
             }
             Self::CallScratch { offset, bytes } => {

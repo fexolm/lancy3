@@ -97,6 +97,26 @@ pub const fn decode_status(status: i64) -> Result<u32, Trap> {
     }
 }
 
+/// The native entry of every Rust call a kernel makes:
+/// `entry(receiver, operation, packet, word)` with the host C convention. It
+/// returns a status (see [`Trap::status`]) whose low word is the call's `i32`
+/// result.
+pub type RustEntry = unsafe extern "C" fn(*mut u8, u32, *const u8, i32) -> i64;
+
+/// A static descriptor of a [`RustEntry`]. The name is for listings.
+#[derive(Debug)]
+pub struct RustFunction {
+    pub name: &'static str,
+    pub entry: RustEntry,
+}
+
+impl PartialEq for RustFunction {
+    fn eq(&self, other: &Self) -> bool {
+        self.name == other.name && std::ptr::fn_addr_eq(self.entry, other.entry)
+    }
+}
+impl Eq for RustFunction {}
+
 thread_local! {
     static PANIC_MESSAGE: RefCell<Option<String>> = const { RefCell::new(None) };
 }

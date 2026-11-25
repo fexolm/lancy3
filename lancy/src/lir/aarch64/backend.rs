@@ -595,28 +595,10 @@ impl Emitter<'_> {
                 self.a
                     .addr(g(0), R::X19, self.frame.scratch_base + offset as usize)
             }
-            Inst::StorePacketWord(offset, _) => self.value_access(
-                false,
-                Type::I32,
-                n(0),
-                (R::X19, self.frame.scratch_base + offset as usize),
-            ),
-            Inst::RustCall(..) | Inst::RustPacketCall(..) | Inst::RustContextCall(..) => {
-                let entry = match op {
-                    Inst::RustCall(import, ..) => (import.resolve)() as usize,
-                    Inst::RustPacketCall(import, offset, _) => {
-                        self.a.imm(R::X0, std::ptr::from_ref(import) as u64)?;
-                        let packet = self.frame.scratch_base + offset as usize;
-                        self.a.addr(R::X1, R::X19, packet)?;
-                        self.a.imm(R::X2, u64::from(import.arity))?;
-                        crate::hir::invoke_packet_import as *const () as usize
-                    }
-                    Inst::RustContextCall(import, ..) => import.address(),
-                    _ => unreachable!(),
-                };
+            Inst::RustCall(function, ..) => {
                 // The frame has already saved LR and keeps the workspace in
                 // callee-saved registers across this AAPCS64 call.
-                self.a.imm(R::X16, entry as u64)?;
+                self.a.imm(R::X16, function.entry as usize as u64)?;
                 self.a.put(C::Blr_64_branch_reg, &[r(R::X16)])?;
                 self.byte_predicate = false;
                 self.a.put(
