@@ -19,7 +19,11 @@ type Pressure = [u16; 3];
 #[derive(Clone, Copy)]
 pub(super) enum Scheduling {
     Compute(u8),
-    /// Memory accesses and checks share one order, independent of SSA uses.
+    /// A memory read: it stays after the previous `Ordered` instruction and
+    /// before the next one, but loads may pass each other.
+    Load(u8),
+    /// Stores and checks keep one order with each other and with every load,
+    /// independent of SSA uses.
     Ordered(u8),
     Barrier,
 }
@@ -250,16 +254,26 @@ impl Workspace {
         nodes.fill(Node::default());
         self.registers.clear();
         let generation = range.start + 1;
-        let mut ordered: Option<usize> = None;
+        // The last store or check, and the loads after it.
+        let mut ordered: u64 = 0;
+        let mut loads: u64 = 0;
         for (n, i) in range.clone().enumerate() {
             let bit = 1 << n;
+            let follow = |nodes: &mut [Node], preds: u64| {
+                nodes[n].ordered_pred = preds;
+                for p in members(preds) {
+                    nodes[p].successors |= bit;
+                }
+            };
             nodes[n].latency = u16::from(match f.insts()[i].scheduling() {
+                Scheduling::Load(latency) => {
+                    follow(nodes, ordered);
+                    loads |= bit;
+                    latency
+                }
                 Scheduling::Ordered(latency) => {
-                    if let Some(p) = ordered {
-                        nodes[n].ordered_pred = 1 << p;
-                        nodes[p].successors |= bit;
-                    }
-                    ordered = Some(n);
+                    follow(nodes, ordered | loads);
+                    (ordered, loads) = (bit, 0);
                     latency
                 }
                 Scheduling::Compute(latency) => latency,
@@ -361,7 +375,7 @@ pub(super) fn run<I: TargetInst + Schedulable>(f: &mut Function<I>) {
                 start = i + usize::from(matches!(kind, Scheduling::Barrier));
                 total = 0;
             }
-            total += usize::from(matches!(kind, Scheduling::Compute(_)));
+            total += usize::from(matches!(kind, Scheduling::Compute(_) | Scheduling::Load(_)));
         }
     }
 }

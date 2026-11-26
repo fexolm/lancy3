@@ -19,6 +19,7 @@ struct Fake {
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Kind {
     Compute,
+    Load,
     Ordered,
     Barrier,
     Branch,
@@ -64,6 +65,7 @@ impl Schedulable for Fake {
     fn scheduling(&self) -> Scheduling {
         match self.kind {
             Kind::Compute => Scheduling::Compute(1 + (self.id % 4) as u8),
+            Kind::Load => Scheduling::Load(4),
             Kind::Ordered => Scheduling::Ordered(3),
             Kind::Barrier | Kind::Branch | Kind::Ret => Scheduling::Barrier,
         }
@@ -85,14 +87,16 @@ impl Random {
 fn scheduling_keeps_data_ordered_and_barrier_dependencies() {
     let mut random = Random(0x853c_49e6_748f_ea9b);
     let mut reordered = 0;
+    let mut passed_loads = 0;
     for _ in 0..300 {
         let len = 8 + random.below(90);
         let mut f = Function::<Fake>::new((), 1, len).unwrap();
         let mut defined = Vec::new();
         for id in 0..len {
-            let kind = match random.below(10) {
+            let kind = match random.below(12) {
                 0..=5 => Kind::Compute,
-                6..=8 => Kind::Ordered,
+                6..=7 => Kind::Load,
+                8..=10 => Kind::Ordered,
                 _ => Kind::Barrier,
             };
             let mut operand = || {
@@ -155,9 +159,34 @@ fn scheduling_keeps_data_ordered_and_barrier_dependencies() {
             .collect();
         assert!(
             ordered.windows(2).all(|w| w[0] < w[1]),
-            "memory accesses and checks keep their order and stay between barriers"
+            "stores and checks keep their order and stay between barriers"
         );
+        // A load stays between its neighboring stores, checks and barriers.
+        for (i, load) in before.iter().enumerate() {
+            if load.kind != Kind::Load {
+                continue;
+            }
+            let fenced = |inst: &Fake| inst.kind != Kind::Compute && inst.kind != Kind::Load;
+            if let Some(prev) = before[..i].iter().rev().find(|inst| fenced(inst)) {
+                assert!(
+                    position[prev.id] < position[load.id],
+                    "a load passed {prev:?}"
+                );
+            }
+            if let Some(next) = before[i + 1..].iter().find(|inst| fenced(inst)) {
+                assert!(
+                    position[load.id] < position[next.id],
+                    "a load passed {next:?}"
+                );
+            }
+            passed_loads += before[i + 1..]
+                .iter()
+                .take_while(|inst| !fenced(inst))
+                .filter(|inst| inst.kind == Kind::Load && position[inst.id] < position[load.id])
+                .count();
+        }
     }
+    assert!(passed_loads > 0, "independent loads never change order");
     assert!(
         reordered > 100,
         "the scheduler moved only {reordered} of 300 bodies"

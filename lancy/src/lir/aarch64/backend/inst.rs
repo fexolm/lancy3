@@ -519,19 +519,21 @@ impl TargetInst for Inst {
 
 impl Schedulable for Inst {
     fn scheduling(&self) -> Scheduling {
-        use Scheduling::{Barrier, Compute, Ordered};
+        use Scheduling::{Barrier, Compute, Load, Ordered};
         match *self {
-            Self::Load(..) => Ordered(5),
+            Self::Load(..) => Load(5),
             Self::Masked {
                 dst: Some(_),
                 indices,
                 ..
-            } => Ordered(if indices.is_some() { 9 } else { 5 }),
+            } => Load(if indices.is_some() { 9 } else { 5 }),
             Self::Check(..)
             | Self::TrapIf(..)
             | Self::Trap(_)
             | Self::Store(..)
-            | Self::Masked { .. } => Ordered(1),
+            | Self::Masked { dst: None, .. }
+            | Self::StoreArg(..) => Ordered(1),
+            // Divisions and dynamic lane indices can trap.
             Self::Int(
                 IntBinary {
                     op: IntOp::Divide { .. },
@@ -539,6 +541,7 @@ impl Schedulable for Inst {
                 },
                 ..,
             )
+            | Self::WideMath(..)
             | Self::VectorDivide(..)
             | Self::LaneAccess { .. } => Ordered(12),
             Self::Int(
@@ -550,7 +553,30 @@ impl Schedulable for Inst {
             )
             | Self::Float(..)
             | Self::Fma(..)
+            | Self::Sve2Ternary(..)
+            | Self::NeonMul64(..)
             | Self::Packed(..) => Compute(4),
+            Self::Unary(..)
+            | Self::WideUnary(..)
+            | Self::WideAdd { .. }
+            | Self::Half(..)
+            | Self::HalfCast(..)
+            | Self::WideCast(..)
+            | Self::FloatCast(..)
+            | Self::PackedCast(..)
+            | Self::Shuffle(..)
+            | Self::Compact { .. }
+            | Self::Rotate(..)
+            | Self::ScalarSaturate(..)
+            | Self::FloatSpecial(..)
+            | Self::Expand(..)
+            | Self::Widen(..)
+            | Self::Narrow(..)
+            | Self::Reduce(..)
+            | Self::FloatCompare(..)
+            | Self::SveSplat128(..)
+            | Self::MaskTest(..)
+            | Self::WideMaskTest(..) => Compute(3),
             Self::Literal(..)
             | Self::Copy(..)
             | Self::BitMove(..)
@@ -561,8 +587,21 @@ impl Schedulable for Inst {
             | Self::Select(..)
             | Self::Splat(..)
             | Self::SveIota(..)
-            | Self::PackedShiftImm(..) => Compute(1),
-            _ => Barrier,
+            | Self::PackedShiftImm(..)
+            | Self::CallScratch(..) => Compute(1),
+            // Entry arguments, debug state, calls and the fallback's frame
+            // area protocol keep their place, as do terminators.
+            Self::Arg(..)
+            | Self::DebugStore(..)
+            | Self::DebugPoint(_)
+            | Self::Call(..)
+            | Self::LibArg(..)
+            | Self::Libcall(..)
+            | Self::LibResult(..)
+            | Self::RustCall(..)
+            | Self::Jump
+            | Self::Branch(_)
+            | Self::Return(..) => Barrier,
         }
     }
 }
