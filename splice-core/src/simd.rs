@@ -10,6 +10,7 @@
 //!     Lane::<u16>::lanes() as i32
 //! }
 //! ```
+use splice_target::MAX_VECTOR_BYTES;
 use std::{
     marker::PhantomData,
     ops::{Add, BitAnd, BitOr, BitXor, Mul, Not, Sub},
@@ -99,12 +100,12 @@ macro_rules! element {
     ($ty:ty, $kind:ident, $idx:ty, $bits:expr, $add:expr, $sub:expr, $mul:expr) => {
         impl sealed::Sealed for $ty {}
         impl LaneElement for $ty {
-            type Storage = [$ty; 64 / size_of::<$ty>()];
+            type Storage = [$ty; MAX_VECTOR_BYTES / size_of::<$ty>()];
             type Index = $idx;
             const ELEMENT: Element = Element::$kind;
             const ZERO: Self = 0 as $ty;
             fn fill(v: Self) -> Self::Storage {
-                [v; 64 / size_of::<$ty>()]
+                [v; MAX_VECTOR_BYTES / size_of::<$ty>()]
             }
             fn number(n: usize) -> Self {
                 n as Self
@@ -163,6 +164,8 @@ pub struct Lane<T: LaneElement>(T::Storage);
 /// One predicate per lane of the corresponding data vector.
 #[derive(Clone, Copy)]
 pub struct Mask<T: LaneElement>(u32, PhantomData<T>);
+// The narrowest element (`u16`) has the most lanes; each needs a mask bit.
+const _: () = assert!(MAX_VECTOR_BYTES / Element::U16.bytes() <= u32::BITS as usize);
 impl<T: LaneElement> Mask<T> {
     fn from_fn(f: impl Fn(usize) -> bool) -> Self {
         let mut bits = 0;

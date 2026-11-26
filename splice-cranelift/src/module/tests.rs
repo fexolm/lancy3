@@ -363,3 +363,63 @@ fn a_full_gather_has_one_bounds_branch_for_all_lanes() {
         .count();
     assert_eq!(branches, 1);
 }
+
+#[test]
+fn stack_shuffles_share_one_slot_per_function() {
+    use splice_core::{
+        hir::{Simd, SimdOp},
+        simd::Element,
+    };
+
+    let mut f = FunctionBuilder::new(
+        options(),
+        Signature::new(&[ScalarType::I32; 1], ScalarType::I32, &[]),
+    );
+    let op = |op| Simd {
+        element: Element::I32,
+        op,
+    };
+    let lane = f.arg(0).unwrap();
+    let count = f.cast(lane, ScalarType::Index).unwrap();
+    let iota = f.simd(op(SimdOp::Iota), &[]).unwrap().unwrap();
+    let mask = f.simd(op(SimdOp::FirstN), &[count]).unwrap().unwrap();
+    let packed = f
+        .simd(op(SimdOp::Compress), &[iota, mask])
+        .unwrap()
+        .unwrap();
+    let spread = f
+        .simd(op(SimdOp::Expand), &[packed, mask, iota])
+        .unwrap()
+        .unwrap();
+    let x = f
+        .simd(op(SimdOp::ExtractWrapping), &[spread, lane])
+        .unwrap()
+        .unwrap();
+    let replaced = f
+        .simd(op(SimdOp::ReplaceWrapping), &[packed, lane, x])
+        .unwrap()
+        .unwrap();
+    let y = f
+        .simd(op(SimdOp::ExtractWrapping), &[replaced, lane])
+        .unwrap()
+        .unwrap();
+    let sum = f.binary(Binary::Add, x, y).unwrap();
+    f.ret(sum).unwrap();
+    let f = f.finish().unwrap();
+
+    let mut jit = JITModule::new(JITBuilder::new(default_libcall_names()).unwrap());
+    let module = KernelModule::lower(&mut jit, &f, &options().target, false).unwrap();
+    let body = &module.bodies[&module.entry];
+    assert_eq!(body.sized_stack_slots.len(), 1, "{body}");
+    assert_eq!(
+        body.sized_stack_slots.values().next().unwrap().size as usize,
+        options().target.vector_bytes()
+    );
+
+    let code = Cranelift::compile(&f).unwrap();
+    // Lanes below `lane` are compressed in order and expanded back, so both
+    // reads see the lane's own index.
+    for lane in 1..4 {
+        assert_eq!(code.call(&[lane], &mut []), Ok(2 * lane));
+    }
+}

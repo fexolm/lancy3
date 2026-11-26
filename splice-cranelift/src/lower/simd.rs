@@ -4,7 +4,7 @@
 use super::return_if;
 use crate::lower::trap;
 use cranelift_codegen::ir::{
-    InstBuilder, MemFlags, Type, Value,
+    InstBuilder, MemFlags, StackSlot, StackSlotData, StackSlotKind, Type, Value,
     condcodes::{FloatCC, IntCC},
     types::{F32X4, F64X2, I8X16, I16X8, I32, I32X4, I64, I64X2},
 };
@@ -18,6 +18,7 @@ use splice_core::{
     },
     simd::Element,
 };
+use std::cell::Cell;
 
 const CHUNK_BYTES: usize = 16;
 
@@ -54,6 +55,10 @@ fn chunk_type(element: Element) -> Type {
 pub(super) struct Registers {
     starts: Vec<usize>,
     vars: Vec<Variable>,
+    /// One vector-sized stack slot that `ExtractWrapping`, `ReplaceWrapping`,
+    /// `Expand` and `Compress` share: each uses it only inside the
+    /// instruction (BE-12).
+    scratch: Cell<Option<StackSlot>>,
 }
 
 impl Registers {
@@ -70,7 +75,23 @@ impl Registers {
             vars.extend((0..count).map(|_| b.declare_var(ty)));
         }
         starts.push(vars.len());
-        Self { starts, vars }
+        Self {
+            starts,
+            vars,
+            scratch: Cell::new(None),
+        }
+    }
+
+    fn scratch(&self, b: &mut FunctionBuilder, m: Machine) -> StackSlot {
+        let slot = self.scratch.get().unwrap_or_else(|| {
+            b.create_sized_stack_slot(StackSlotData::new(
+                StackSlotKind::ExplicitSlot,
+                m.vector_bytes as u32,
+                4,
+            ))
+        });
+        self.scratch.set(Some(slot));
+        slot
     }
 
     pub(super) fn get(&self, reg: Reg) -> &[Variable] {
@@ -150,8 +171,14 @@ pub(super) fn emit(
             vec![b.ins().uextend(I64, lanes)]
         }
         Swizzle => swizzle_words(b, m, &inputs[0], &inputs[1], byte_order),
-        Expand => expand_words(b, m, &inputs, byte_order),
-        Compress => compress_words(b, m, &inputs[0], &inputs[1], byte_order),
+        Expand => {
+            let slot = vars.scratch(b, m);
+            expand_words(b, m, slot, &inputs, byte_order)
+        }
+        Compress => {
+            let slot = vars.scratch(b, m);
+            compress_words(b, m, slot, &inputs[0], &inputs[1], byte_order)
+        }
         Count => {
             let mut total = b.ins().iconst(I32, 0);
             for &mask in &inputs[0] {
@@ -234,13 +261,8 @@ pub(super) fn emit(
                 .collect()
         }
         ExtractWrapping | ReplaceWrapping => {
-            use cranelift_codegen::ir::{StackSlotData, StackSlotKind};
             let bytes = m.vector_bytes;
-            let slot = b.create_sized_stack_slot(StackSlotData::new(
-                StackSlotKind::ExplicitSlot,
-                bytes as u32,
-                4,
-            ));
+            let slot = vars.scratch(b, m);
             for (part, &chunk) in inputs[0].iter().enumerate() {
                 b.ins()
                     .stack_store(chunk, slot, (part * CHUNK_BYTES) as i32);
@@ -408,15 +430,10 @@ const fn shuffle_controls(expand: bool) -> [[u8; 16]; 16] {
 fn expand_words(
     b: &mut FunctionBuilder,
     m: Machine,
+    slot: StackSlot,
     inputs: &[Vec<Value>],
     order: MemFlags,
 ) -> Vec<Value> {
-    use cranelift_codegen::ir::{StackSlotData, StackSlotKind};
-    let slot = b.create_sized_stack_slot(StackSlotData::new(
-        StackSlotKind::ExplicitSlot,
-        (inputs[0].len() * 16) as u32,
-        4,
-    ));
     for (i, &part) in inputs[0].iter().enumerate() {
         b.ins().stack_store(part, slot, (i * 16) as i32);
     }
@@ -445,16 +462,11 @@ fn expand_words(
 fn compress_words(
     b: &mut FunctionBuilder,
     m: Machine,
+    slot: StackSlot,
     parts: &[Value],
     masks: &[Value],
     order: MemFlags,
 ) -> Vec<Value> {
-    use cranelift_codegen::ir::{StackSlotData, StackSlotKind};
-    let slot = b.create_sized_stack_slot(StackSlotData::new(
-        StackSlotKind::ExplicitSlot,
-        (parts.len() * 16) as u32,
-        4,
-    ));
     let zero = constant(b, I32X4, &[0; 16]);
     for i in 0..parts.len() {
         b.ins().stack_store(zero, slot, (16 * i) as i32);
