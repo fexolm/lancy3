@@ -616,8 +616,8 @@ impl Lower<'_> {
         if init.diverge.is_some() || !local.attrs.is_empty() {
             return err(local, "expected a kernel let binding");
         }
-        if let Expr::Struct(literal) = &*init.expr {
-            return self.aggregate_local(&local.pat, literal);
+        if let Some(literal) = aggregate::Literal::of(self, local, &init.expr) {
+            return self.aggregate_local(&local.pat, &literal);
         }
         let hint = match &local.pat {
             Pat::Type(t) => Scalar::from_type(&t.ty, self.types),

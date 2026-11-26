@@ -531,7 +531,19 @@ impl Lower<'_> {
             match stmt {
                 Stmt::Local(local) if local.init.is_some() => {
                     let init = local.init.as_ref().unwrap();
-                    let value = self.required_expr(&init.expr, None, &locals, inputs)?;
+                    let value = match &*init.expr {
+                        // A tuple struct's constructor runs as Rust.
+                        Expr::Call(call) if self.body.projected_local(local) => {
+                            let func = &call.func;
+                            let args = call
+                                .args
+                                .iter()
+                                .map(|arg| self.required_expr(arg, None, &locals, inputs))
+                                .collect::<Result<Vec<_>>>()?;
+                            emit!(#func(#(#args),*))
+                        }
+                        init => self.required_expr(init, None, &locals, inputs)?,
+                    };
                     let otherwise = init
                         .diverge
                         .as_ref()

@@ -528,6 +528,27 @@ pub(crate) fn native_body(block: &mut Block) -> Result<()> {
             }
             syn::visit_mut::visit_expr_mut(self, expr);
         }
+        fn visit_macro_mut(&mut self, mac: &mut syn::Macro) {
+            // `vec!` elements are expressions of the body: `comptime!` in
+            // them is plain Rust too.
+            if !crate::kast::vec_macro(&mac.path) {
+                return;
+            }
+            match crate::kast::vec_elements(mac) {
+                Ok(mut elements) => {
+                    self.visit_expr_mut(&mut elements);
+                    mac.tokens = match elements {
+                        syn::Expr::Array(array) => array.elems.into_token_stream(),
+                        syn::Expr::Repeat(repeat) => {
+                            let (value, len) = (&repeat.expr, &repeat.len);
+                            quote::quote!(#value; #len)
+                        }
+                        _ => unreachable!("brackets parse as an array or a repeat"),
+                    };
+                }
+                Err(error) => self.0 = Some(error),
+            }
+        }
         fn visit_item_mut(&mut self, _: &mut Item) {}
     }
     let mut native = Native(None);

@@ -137,6 +137,56 @@ fn fields_inherit_the_stage_of_the_constructed_aggregate() {
     splice_testkit::each_backend!(B => check::<B>());
 }
 
+#[derive(splice::KernelType)]
+struct Wrapped(i32, i32);
+
+/// A tuple struct's constructor builds an aggregate like a struct literal.
+#[kernel]
+fn wrapped(#[comptime] known: i32, value: i32) -> i32 {
+    let pair = Wrapped(known, value);
+    pair.0 * 10 + pair.1
+}
+
+#[test]
+fn tuple_struct_constructors_take_runtime_fields() {
+    fn check<B: Codegen<Output: Executable>>() {
+        let portable = B::compile(&wrapped::ir(3).unwrap()).unwrap();
+        let direct = wrapped::build::<B>(wrapped::BuildArgs { known: 3 }).unwrap();
+        for code in [direct, portable] {
+            assert_eq!(
+                code.call(wrapped::CallArgs { value: 4 }).unwrap(),
+                wrapped(3, 4)
+            );
+        }
+    }
+    splice_testkit::each_backend!(B => check::<B>());
+}
+
+/// `comptime!` in the elements of a host `vec!` is evaluated by the
+/// generator, inside a loop or not.
+#[kernel]
+fn host_vectors(#[comptime] n: i32, value: i32) -> i32 {
+    let first = vec![comptime!(n)];
+    let second = vec![comptime!(n + 1), 2];
+    let third = vec![comptime!(n * 2); 2];
+    value + first[0] + second[0] + third[1]
+}
+
+#[test]
+fn comptime_in_host_vec_elements_is_evaluated() {
+    fn check<B: Codegen<Output: Executable>>() {
+        let portable = B::compile(&host_vectors::ir(3).unwrap()).unwrap();
+        let direct = host_vectors::build::<B>(host_vectors::BuildArgs { n: 3 }).unwrap();
+        for code in [direct, portable] {
+            assert_eq!(
+                code.call(host_vectors::CallArgs { value: 4 }).unwrap(),
+                host_vectors(3, 4)
+            );
+        }
+    }
+    splice_testkit::each_backend!(B => check::<B>());
+}
+
 #[kernel]
 fn floor(#[comptime] plan: &Plan, value: i32) -> i32 {
     let threshold = comptime!({

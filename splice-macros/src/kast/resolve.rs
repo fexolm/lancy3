@@ -119,6 +119,15 @@ impl<'ast> Visit<'ast> for Resolve {
         visit::visit_expr_path(self, path);
     }
 
+    fn visit_expr_field(&mut self, field: &'ast syn::ExprField) {
+        visit::visit_expr_field(self, field);
+        if let Expr::Path(base) = &*field.base
+            && let Some(decl) = self.ids.uses.get(&address(base))
+        {
+            self.ids.projected.insert(*decl);
+        }
+    }
+
     fn visit_expr_let(&mut self, expr: &'ast syn::ExprLet) {
         // `let` in a condition binds into the enclosing condition scope.
         self.visit_expr(&expr.expr);
@@ -162,9 +171,7 @@ impl<'ast> Visit<'ast> for Resolve {
         let parsed = if mac.path.is_ident("comptime") {
             mac.parse_body::<Expr>()
         } else if super::vec_macro(&mac.path) {
-            // The elements of `vec![a, b]` or `vec![v; n]`, as an array.
-            let tokens = &mac.tokens;
-            syn::parse2::<Expr>(quote::quote!([#tokens]))
+            super::vec_elements(mac)
         } else {
             // Other macros own their tokens.
             return;

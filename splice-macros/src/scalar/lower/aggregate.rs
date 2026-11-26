@@ -2,28 +2,96 @@
 //! of the entire aggregate before exposing any projection to the lowerer.
 use super::{Binding, Lower, Scalar, Stage, err};
 use proc_macro2::TokenStream;
-use syn::{Expr, ExprField, ExprStruct, Member, Pat, Path, Result};
+use quote::ToTokens;
+use syn::{Expr, ExprField, Member, Pat, Path, Result};
 
 pub(in crate::scalar) struct Layout {
     fields: Vec<(Member, Scalar)>,
     constructor: TokenStream,
 }
 
-// A function item fixes the Rust type without constructing or dropping it.
-fn constructor(root: &Path, pat: &Pat, literal: &ExprStruct) -> TokenStream {
-    let mut witness = literal.clone();
-    for field in &mut witness.fields {
-        field.colon_token = Some(Default::default());
-        field.expr = syn::parse_quote!(#root::frontend::scalar::ImportWord::decode(0));
-    }
-    let result = match pat {
-        Pat::Type(typed) => {
-            let ty = &typed.ty;
-            emit!(-> #ty)
+/// The initializer of an aggregate local: a struct literal, or a call of a
+/// tuple struct's constructor whose fields the body reads.
+pub(super) struct Literal<'e> {
+    fields: Vec<(Member, &'e Expr)>,
+    /// The literal with every field replaced by `value`.
+    shape: Box<dyn Fn(TokenStream) -> TokenStream + 'e>,
+    /// Requires the callee of a constructor call to be a tuple struct.
+    tuple: Option<&'e Expr>,
+    at: &'e Expr,
+}
+
+impl<'e> Literal<'e> {
+    pub(super) fn of(lower: &Lower<'_>, local: &syn::Local, init: &'e Expr) -> Option<Self> {
+        match init {
+            Expr::Struct(literal) => Some(Self {
+                fields: literal
+                    .fields
+                    .iter()
+                    .map(|field| (field.member.clone(), &field.expr))
+                    .collect(),
+                shape: Box::new(move |value| {
+                    let mut witness = literal.clone();
+                    for field in &mut witness.fields {
+                        field.colon_token = Some(Default::default());
+                        field.expr = Expr::Verbatim(value.clone());
+                    }
+                    witness.rest = None;
+                    witness.into_token_stream()
+                }),
+                tuple: None,
+                at: init,
+            }),
+            // A field read of the result means rustc typed the call as a
+            // struct; the pattern check below rejects any callee other than
+            // a tuple struct.
+            Expr::Call(call)
+                if matches!(&*call.func, Expr::Path(path) if path.qself.is_none())
+                    && lower.body.projected_local(local) =>
+            {
+                Some(Self {
+                    fields: call
+                        .args
+                        .iter()
+                        .enumerate()
+                        .map(|(index, arg)| (Member::Unnamed(index.into()), arg))
+                        .collect(),
+                    shape: Box::new(move |value| {
+                        let (func, values) = (&call.func, call.args.iter().map(|_| &value));
+                        emit!(#func(#(#values),*))
+                    }),
+                    tuple: Some(&call.func),
+                    at: init,
+                })
+            }
+            _ => None,
         }
-        _ => TokenStream::new(),
-    };
-    emit!(|| #result { #witness })
+    }
+
+    pub(super) fn has_rest(&self) -> bool {
+        matches!(self.at, Expr::Struct(literal) if literal.rest.is_some())
+    }
+
+    // A function item fixes the Rust type without constructing or dropping it.
+    fn constructor(&self, root: &Path, pat: &Pat) -> TokenStream {
+        let witness = (self.shape)(emit!(#root::frontend::scalar::ImportWord::decode(0)));
+        let result = match pat {
+            Pat::Type(typed) => {
+                let ty = &typed.ty;
+                emit!(-> #ty)
+            }
+            _ => TokenStream::new(),
+        };
+        let tuple = self.tuple.map(|func| {
+            let fields = self.fields.iter().map(|_| emit!(_));
+            emit!(let #func(#(#fields),*) = __splice_witness;)
+        });
+        emit!(|| #result {
+            let __splice_witness = #witness;
+            #tuple
+            __splice_witness
+        })
+    }
 }
 
 impl Lower<'_> {
@@ -36,31 +104,27 @@ impl Lower<'_> {
         emit!(#(#root::frontend::scalar::dropless_aggregate(#owners);)*)
     }
 
-    pub(super) fn aggregate_local(
-        &mut self,
-        pat: &Pat,
-        literal: &ExprStruct,
-    ) -> Result<TokenStream> {
+    pub(super) fn aggregate_local(&mut self, pat: &Pat, literal: &Literal) -> Result<TokenStream> {
         let pattern = match pat {
             Pat::Type(p) => &*p.pat,
             p => p,
         };
         let name = super::super::named(pattern)?;
         let id = &name.ident;
-        if literal.rest.is_some() {
-            return err(literal, "struct update requires an owned Rust value");
+        if literal.has_rest() {
+            return err(literal.at, "struct update requires an owned Rust value");
         }
         let root = self.root;
         let mut fields = Vec::with_capacity(literal.fields.len());
         let mut words = Vec::with_capacity(literal.fields.len());
-        for field in &literal.fields {
-            let value = self.expr(&field.expr)?;
+        for (member, expr) in &literal.fields {
+            let value = self.expr(expr)?;
             let kind = match value.stage {
                 Stage::Word(kind) | Stage::Reg(kind) | Stage::Literal(kind) => kind,
                 Stage::Host => Scalar::Inferred,
-                _ => return err(field, "expected a scalar field initializer"),
+                _ => return err(expr, "expected a scalar field initializer"),
             };
-            fields.push((field.member.clone(), kind));
+            fields.push((member.clone(), kind));
             // A formal register can carry a known scalar from an enclosing call.
             let word = if self.source_fault.is_some() {
                 if value.stage.is_host() {
@@ -74,11 +138,11 @@ impl Lower<'_> {
                     #root::frontend::scalar::Word::input(reg, __splice_inputs)
                 })
             } else {
-                self.word(value, &field.expr)?
+                self.word(value, expr)?
             };
             words.push(word);
         }
-        let constructor = constructor(root, pat, literal);
+        let constructor = literal.constructor(root, pat);
         let mut layouts = self.aggregates.borrow_mut();
         self.bindings
             .insert(id.to_string(), Binding::Aggregate(layouts.len()));

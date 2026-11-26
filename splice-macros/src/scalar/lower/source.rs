@@ -16,10 +16,11 @@ impl Lower<'_> {
             let rendered = match stmt {
                 Stmt::Local(local) => {
                     let init = local.init.as_ref().expect("validated local");
-                    if let Expr::Struct(literal) = &*init.expr {
+                    if let Some(literal) = super::aggregate::Literal::of(&scope, local, &init.expr)
+                    {
                         let value = scope.source_syntax(&init.expr)?;
                         let pat = &local.pat;
-                        let binding = scope.aggregate_local(pat, literal)?;
+                        let binding = scope.aggregate_local(pat, &literal)?;
                         statements.push(binding);
                         let line =
                             emit!(::std::format!("let {} = {};", ::core::stringify!(#pat), #value));

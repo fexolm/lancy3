@@ -29,4 +29,15 @@ fn vector_remainder(xs: &[i32], out: &mut [i32]) -> i32 {
     0
 }
 
+fn pair(x: i32) -> (i32, i32) {
+    (x, x)
+}
+
+// A field read of a call's result needs a tuple struct's constructor.
+#[kernel]
+fn projected_call(x: i32) -> i32 {
+    let p = pair(x);
+    p.0
+}
+
 fn main() {}

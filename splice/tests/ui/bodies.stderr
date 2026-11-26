@@ -22,6 +22,14 @@ error: a kernel supports +, -, *, /, &, | and ^ on SIMD vectors
 28 |     (v % v).store(out, 0);
    |        ^
 
+error[E0532]: expected a pattern, found a function call
+  --> tests/ui/bodies.rs:39:13
+   |
+39 |     let p = pair(x);
+   |             ^^^^ not a tuple struct or tuple variant
+   |
+   = note: function calls are not allowed in patterns: <https://doc.rust-lang.org/book/ch19-00-patterns.html>
+
 warning: unused import: `splice::simd::Lane`
  --> tests/ui/bodies.rs:3:5
   |

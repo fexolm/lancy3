@@ -21,7 +21,7 @@ impl Lower<'_> {
         if self.body.staged_loop(expr) {
             return Ok(None);
         }
-        self.host_code(expr, true).map(Some)
+        self.host_code(expr).map(Some)
     }
     // Join two generated Rust arms of a host conditional. A terminating arm
     // can hand back an unreachable register for the surrounding build code.

@@ -65,6 +65,8 @@ struct Ids {
     /// The declarations bound by the pattern of a `match` arm, `for`,
     /// `if let`/`while let` or closure parameter, by the pattern's address.
     patterns: HashMap<usize, std::ops::Range<u32>>,
+    /// The declarations whose fields the body reads (`v.0`, `v.name`).
+    projected: std::collections::HashSet<DeclId>,
     next: u32,
 }
 
@@ -170,6 +172,15 @@ impl<'a> Body<'a> {
             .is_some_and(|decls| decls.iter().any(|decl| self.usize_decls[decl.0 as usize]))
     }
 
+    /// Whether the body reads a field of a name the `let` binds.
+    pub(crate) fn projected_local(&self, local: &Local) -> bool {
+        let id = Self::lookup(&self.ids.locals, local);
+        self.ids
+            .let_decls
+            .get(&id)
+            .is_some_and(|decls| decls.iter().any(|decl| self.ids.projected.contains(decl)))
+    }
+
     /// The declarations a binding pattern of the body introduces.
     fn pattern_decls(&self, pat: &syn::Pat) -> impl Iterator<Item = DeclId> {
         Self::lookup(&self.ids.patterns, pat).map(DeclId)
@@ -186,6 +197,13 @@ pub(crate) fn vec_macro(path: &syn::Path) -> bool {
         || (path.segments.len() == 2
             && (path.segments[0].ident == "std" || path.segments[0].ident == "alloc")
             && path.segments[1].ident == "vec")
+}
+
+/// The elements of `vec![a, b]` or `vec![v; n]`, as an array or a repeat
+/// expression.
+pub(crate) fn vec_elements(mac: &Macro) -> Result<Expr> {
+    let tokens = &mac.tokens;
+    syn::parse2(quote::quote!([#tokens]))
 }
 
 #[cfg(test)]

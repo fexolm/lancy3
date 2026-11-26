@@ -16,20 +16,20 @@ struct HostCheck<'a> {
     outer: Vec<Ident>,
     error: Option<Error>,
     rewrite: bool,
-    guarded_loop: bool,
 }
 impl<'ast, 'a: 'ast> Visit<'ast> for HostCheck<'a> {
     fn visit_expr(&mut self, expr: &'ast Expr) {
-        let loop_expr = matches!(expr, Expr::Loop(_) | Expr::While(_) | Expr::ForLoop(_));
-        self.rewrite |= loop_expr
-            || matches!(
-                expr,
-                Expr::Field(_) | Expr::Index(_) | Expr::Call(_) | Expr::MethodCall(_)
-            );
-        let previous = self.guarded_loop;
-        self.guarded_loop |= loop_expr;
+        self.rewrite |= matches!(
+            expr,
+            Expr::Loop(_)
+                | Expr::While(_)
+                | Expr::ForLoop(_)
+                | Expr::Field(_)
+                | Expr::Index(_)
+                | Expr::Call(_)
+                | Expr::MethodCall(_)
+        );
         syn::visit::visit_expr(self, expr);
-        self.guarded_loop = previous;
     }
     fn visit_expr_binary(&mut self, binary: &'ast syn::ExprBinary) {
         self.rewrite = true;
@@ -64,8 +64,9 @@ impl<'ast, 'a: 'ast> Visit<'ast> for HostCheck<'a> {
         syn::visit::visit_expr_path(self, p);
     }
     fn visit_macro(&mut self, m: &'ast syn::Macro) {
-        if self.guarded_loop && m.path.is_ident("comptime") {
+        if m.path.is_ident("comptime") {
             // The mandatory evaluator checks this expression when reached.
+            self.rewrite = true;
             return;
         }
         if vec_macro(&m.path) {
@@ -97,7 +98,6 @@ pub(super) fn guarded_negation(unary: &syn::ExprUnary) -> bool {
 /// clone: every expression it hands to the lowering is a node of the body.
 struct PrepareHost<'a, 'ast> {
     lower: &'a Lower<'ast>,
-    guarded_loop: bool,
     error: Option<Error>,
 }
 
@@ -240,13 +240,11 @@ impl PrepareHost<'_, '_> {
     }
 
     fn loop_body(&mut self, body: &Block) -> TokenStream {
-        let guarded_loop = std::mem::replace(&mut self.guarded_loop, true);
         let stmts = body
             .stmts
             .iter()
             .map(|stmt| self.stmt(stmt))
             .collect::<Vec<_>>();
-        self.guarded_loop = guarded_loop;
         let root = self.lower.root;
         emit!({
             #root::frontend::scalar::specialization_step()?;
@@ -284,7 +282,7 @@ impl PrepareHost<'_, '_> {
                 let code = self.lower.required(expr, None);
                 self.attempt(code)
             }
-            Expr::Macro(value) if self.guarded_loop && value.mac.path.is_ident("comptime") => {
+            Expr::Macro(value) if value.mac.path.is_ident("comptime") => {
                 let code = self
                     .lower
                     .required(self.lower.body.comptime(&value.mac), None);
@@ -304,9 +302,7 @@ impl PrepareHost<'_, '_> {
                 emit!(#(#attrs)* #label for #pat in #iterable #body)
             }
             Expr::While(value) => {
-                let guarded_loop = std::mem::replace(&mut self.guarded_loop, true);
                 let cond = self.expr(&value.cond);
-                self.guarded_loop = guarded_loop;
                 let body = self.loop_body(&value.body);
                 let (attrs, label) = (&value.attrs, &value.label);
                 emit!(#(#attrs)* #label while #cond #body)
@@ -349,7 +345,7 @@ impl Lower<'_> {
     pub(super) fn plan_iterable(&self, expr: &Expr) -> Result<TokenStream> {
         let root = self.root;
         let support = emit!(#root::frontend::evaluation);
-        self.host_check(expr, false)?;
+        self.host_check(expr)?;
         let reject = || {
             emit!(if false { #expr } else {
                 return ::core::result::Result::Err(#root::BuildError::staging("opaque iterator constructor during specialization"));
@@ -498,14 +494,14 @@ impl Lower<'_> {
     }
 
     pub(super) fn host_raw(&self, e: &Expr) -> Result<TokenStream> {
-        self.host_code(e, false)
+        self.host_code(e)
     }
 
     pub(super) fn host_only(&self, e: &Expr) -> bool {
-        self.host_check(e, false).is_ok()
+        self.host_check(e).is_ok()
     }
 
-    fn host_check(&self, e: &Expr, guarded_loop: bool) -> Result<HostCheck<'_>> {
+    fn host_check(&self, e: &Expr) -> Result<HostCheck<'_>> {
         let mut check = HostCheck {
             body: self.body,
             names: &self.bindings,
@@ -513,7 +509,6 @@ impl Lower<'_> {
             outer: Vec::new(),
             error: None,
             rewrite: false,
-            guarded_loop,
         };
         check.visit_expr(e);
         if let Some(error) = check.error.take() {
@@ -522,12 +517,11 @@ impl Lower<'_> {
         Ok(check)
     }
 
-    pub(super) fn host_code(&self, e: &Expr, guarded_loop: bool) -> Result<TokenStream> {
-        let check = self.host_check(e, guarded_loop)?;
-        let code = if check.rewrite || guarded_loop {
+    pub(super) fn host_code(&self, e: &Expr) -> Result<TokenStream> {
+        let check = self.host_check(e)?;
+        let code = if check.rewrite {
             let mut prepare = PrepareHost {
                 lower: self,
-                guarded_loop,
                 error: None,
             };
             let code = prepare.expr(e);
