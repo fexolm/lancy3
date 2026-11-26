@@ -59,7 +59,10 @@ impl Rules<'_> {
             }
         }
         match op {
-            Op::Ternary(Ternary::Select, cond, yes, no) => {
+            // A scalar select has no lanes for a predicate register.
+            Op::Ternary(Ternary::Select, cond, yes, no)
+                if matches!(self.ty(yes), Type::Vector(_)) =>
+            {
                 let select = MaskSelect {
                     lane: self.ty(yes).lane()?,
                     mask: self.opmask(cond).or_else(|| self.comparison_mask(cond))?,

@@ -467,6 +467,37 @@ fn binary(b: &mut FunctionBuilder, op: Binary, ty: ScalarType, lhs: Value, rhs: 
             return_if(b, overflow, fault);
             return result;
         }
+        SaturatingAdd | SaturatingSub | SaturatingMul => {
+            let (result, overflow) = match (op, signed) {
+                (SaturatingAdd, true) => b.ins().sadd_overflow(lhs, rhs),
+                (SaturatingAdd, false) => b.ins().uadd_overflow(lhs, rhs),
+                (SaturatingSub, true) => b.ins().ssub_overflow(lhs, rhs),
+                (SaturatingSub, false) => b.ins().usub_overflow(lhs, rhs),
+                (_, true) => b.ins().smul_overflow(lhs, rhs),
+                (_, false) => b.ins().umul_overflow(lhs, rhs),
+            };
+            let int = b.func.dfg.value_type(lhs);
+            // CLIF immediates hold the value's bits zero-extended.
+            let bounded = |value: i64| (value as u64 & (u64::MAX >> (64 - bits))) as i64;
+            let saturated = if signed {
+                // Sums and differences leave the range on the side of `lhs`,
+                // products on the side of their sign.
+                let side = if op == SaturatingMul {
+                    b.ins().bxor(lhs, rhs)
+                } else {
+                    lhs
+                };
+                let negative = b.ins().icmp_imm(IntCC::SignedLessThan, side, 0);
+                let min = b.ins().iconst(int, bounded(i64::MIN >> (64 - bits)));
+                let max = b.ins().iconst(int, bounded(i64::MAX >> (64 - bits)));
+                b.ins().select(negative, min, max)
+            } else if op == SaturatingSub {
+                b.ins().iconst(int, 0)
+            } else {
+                b.ins().iconst(int, bounded(-1))
+            };
+            return b.ins().select(overflow, saturated, result);
+        }
         And => return b.ins().band(lhs, rhs),
         Or => return b.ins().bor(lhs, rhs),
         Xor => return b.ins().bxor(lhs, rhs),

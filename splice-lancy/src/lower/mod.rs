@@ -49,9 +49,9 @@ fn wide(ty: ScalarType) -> hir::Type {
 fn binary(op: Binary) -> hir::Binary {
     use hir::Binary as H;
     match op {
-        Binary::Add | Binary::CheckedAdd => H::Add,
-        Binary::Sub | Binary::CheckedSub => H::Sub,
-        Binary::Mul | Binary::CheckedMul => H::Mul,
+        Binary::Add | Binary::CheckedAdd | Binary::SaturatingAdd => H::Add,
+        Binary::Sub | Binary::CheckedSub | Binary::SaturatingSub => H::Sub,
+        Binary::Mul | Binary::CheckedMul | Binary::SaturatingMul => H::Mul,
         Binary::Div => H::Div,
         Binary::Rem => H::Rem,
         Binary::And => H::And,
@@ -527,6 +527,42 @@ impl Builder<'_> {
                 let overflow = self.value(Op::Bin(hir::Binary::Ne, exact, extended));
                 self.effect(Op::TrapIf(overflow, Trap::Overflow));
                 self.bind(dst, narrow);
+            }
+            Binary::SaturatingAdd | Binary::SaturatingSub | Binary::SaturatingMul => {
+                // The exact result in twice the width, clamped if narrowing
+                // changes it. Signed sums and differences leave the range on
+                // the side of `a`, products on the side of their sign.
+                let (narrow_type, wide_type) = (scalar_type(ty), wide(ty));
+                let wide_a = self.value(Op::Cast(wide_type, a));
+                let wide_b = self.value(Op::Cast(wide_type, b));
+                let exact = self.value(Op::Bin(kind, wide_a, wide_b));
+                let narrow = self.value(Op::Cast(narrow_type, exact));
+                let extended = self.value(Op::Cast(wide_type, narrow));
+                let overflow = self.value(Op::Bin(hir::Binary::Ne, exact, extended));
+                let bits = ty.bits();
+                let saturated = if ty.is_signed() {
+                    let side = if op == Binary::SaturatingMul {
+                        self.value(Op::Bin(hir::Binary::Xor, a, b))
+                    } else {
+                        a
+                    };
+                    let zero = self.literal(ty, 0);
+                    let negative = self.value(Op::Bin(hir::Binary::Lt, side, zero));
+                    let min = self.literal(ty, 1 << (bits - 1));
+                    let max = self.literal(ty, (1 << (bits - 1)) - 1);
+                    self.value(Op::Ternary(hir::Ternary::Select, negative, min, max))
+                } else if op == Binary::SaturatingSub {
+                    self.literal(ty, 0)
+                } else {
+                    self.literal(ty, u64::MAX >> (64 - bits))
+                };
+                let v = self.value(Op::Ternary(
+                    hir::Ternary::Select,
+                    overflow,
+                    saturated,
+                    narrow,
+                ));
+                self.bind(dst, v);
             }
             Binary::CheckedShl | Binary::CheckedShr => {
                 // The amount, as an unsigned value, must be below the width.

@@ -116,57 +116,46 @@ impl Lower<'_> {
                 return Ok(Value::new(Stage::Host, self.required(&expression, hint)?));
             }
         }
-        if matches!(
-            receiver.stage,
-            Stage::Reg(Scalar::Int) | Stage::Word(Scalar::Int)
-        ) {
-            let method = &m.method;
-            if method == "wrapping_neg" && m.args.is_empty() {
-                let value = self.reg(receiver, Scalar::Int, &m.receiver)?;
-                return Ok(Value::new(
-                    Stage::Reg(Scalar::Int),
-                    self.bin("Sub", self.constant(emit!(0i32)), value),
-                ));
-            }
-            if matches!(
-                method.to_string().as_str(),
-                "saturating_add" | "saturating_sub" | "saturating_mul"
-            ) && let Some(right) = m.args.first()
-                && m.args.len() == 1
+        let kind = match receiver.stage {
+            Stage::Reg(t) | Stage::Word(t)
+                if matches!(t.base(), Scalar::Int | Scalar::Index | Scalar::Inferred) =>
             {
-                let left = self.reg(receiver, Scalar::Int, &m.receiver)?;
-                let right = self.operand(right, Scalar::Int)?;
-                let item = syn::parse_quote!(::core::primitive::i32::#method);
-                let operation = self.import_call(&item, &[left, right]);
-                return Ok(Value::new(Stage::Reg(Scalar::Int), operation));
+                t.base()
             }
-        }
-        let binary = match m.method.to_string().as_str() {
-            "min" => Some("Min"),
-            "max" => Some("Max"),
-            "wrapping_add" => Some("Add"),
-            "wrapping_sub" => Some("Sub"),
-            "wrapping_mul" => Some("Mul"),
-            _ => None,
+            // A host receiver with runtime arguments, such as `k.min(x)`,
+            // takes the arguments' type.
+            stage if stage.is_host() => {
+                if m.args.is_empty() {
+                    return err(m, "a host method cannot consume runtime values");
+                }
+                Scalar::Inferred
+            }
+            _ => {
+                return err(
+                    m,
+                    "expected slice.len/is_empty or an integer method such as min, max, wrapping_add or saturating_add",
+                );
+            }
         };
-        if let Some(op) = binary
-            && m.args.len() == 1
-        {
-            let rhs = &m.args[0];
-            let left = self.reg(receiver, Scalar::Int, &m.receiver)?;
-            let right = self.operand(rhs, Scalar::Int)?;
-            return Ok(Value::new(
-                Stage::Reg(Scalar::Int),
-                self.bin(op, left, right),
-            ));
-        }
-        if receiver.stage.is_host() {
-            return err(m, "a host method cannot consume runtime values");
-        }
-        err(
-            m,
-            "expected slice.len/is_empty, i32.min/max, or i32.wrapping_add/sub/mul",
-        )
+        // The registry stages the method on the receiver's type; the name
+        // must be registered for some type.
+        let root = self.root;
+        let name = m.method.to_string();
+        let receiver = self.reg(receiver, kind, &m.receiver)?;
+        let args = m
+            .args
+            .iter()
+            .map(|arg| self.operand(arg, kind))
+            .collect::<Result<Vec<_>>>()?;
+        let message = format!("`{name}` is not a kernel operation on runtime integers");
+        Ok(Value::new(
+            Stage::Reg(kind),
+            emit!({
+                const { ::core::assert!(#root::frontend::intrinsics::is_method(#name), #message) };
+                let operands = [#receiver, #(#args),*];
+                #root::frontend::intrinsics::method(__splice_builder, #name, &operands)?
+            }),
+        ))
     }
 
     pub(super) fn cast(&self, cast: &ExprCast) -> Result<Value> {

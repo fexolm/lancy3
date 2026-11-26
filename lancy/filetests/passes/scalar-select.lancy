@@ -1,0 +1,27 @@
+# A scalar select of a type other than i32 is not a predicated vector select:
+# with AVX-512 the mask rules used to take its compared scalars as vector
+# registers and its lanes as a predicate.
+fn main(a:u32 b:u32) -> u32
+  wa:u64 = cast u64 a
+  wb:u64 = cast u64 b
+  exact:u64 = add wa wb
+  narrow:u32 = cast u32 exact
+  back:u64 = cast u64 narrow
+  overflow:i32 = ne exact back
+  max:u32 = literal u32 0xffffffff
+  result:u32 = select overflow max narrow
+  ret result
+@isel not: select.mask
+@run 1 4294967295 -> 4294967295
+@run 5 7 -> 12
+@run 0 0 -> 0
+
+---
+
+fn main(a:i64 b:i64) -> i64
+  less:i32 = lt a b
+  result:i64 = select less a b
+  ret result
+@isel not: select.mask
+@run -3 2 -> -3
+@run 9 2 -> 2

@@ -362,6 +362,45 @@ impl<'a, 'ctx> Body<'a, 'ctx> {
                 self.exit_if(overflow, Failure::Trap(Trap::Overflow))?;
                 result
             }
+            SaturatingAdd | SaturatingSub => {
+                let name = match (op, signed) {
+                    (SaturatingAdd, true) => "llvm.sadd.sat",
+                    (SaturatingAdd, false) => "llvm.uadd.sat",
+                    (_, true) => "llvm.ssub.sat",
+                    (_, false) => "llvm.usub.sat",
+                };
+                let function = self.intrinsic(name, &[int.into()])?;
+                ir.build_call(function, &[a.into(), b.into()], "")?
+                    .try_as_basic_value()
+                    .unwrap_basic()
+            }
+            SaturatingMul => {
+                let name = if signed {
+                    "llvm.smul.with.overflow"
+                } else {
+                    "llvm.umul.with.overflow"
+                };
+                let function = self.intrinsic(name, &[int.into()])?;
+                let pair = ir
+                    .build_call(function, &[a.into(), b.into()], "")?
+                    .try_as_basic_value()
+                    .unwrap_basic()
+                    .into_struct_value();
+                let product = ir.build_extract_value(pair, 0, "")?.into_int_value();
+                let overflow = ir.build_extract_value(pair, 1, "")?.into_int_value();
+                let saturated = if signed {
+                    // A product leaves the range on the side of its sign.
+                    let sign = ir.build_xor(a, b, "")?;
+                    let negative =
+                        ir.build_int_compare(IntPredicate::SLT, sign, int.const_zero(), "")?;
+                    let min = constant(i64::MIN >> (64 - ty.bits()));
+                    let max = constant(i64::MAX >> (64 - ty.bits()));
+                    ir.build_select(negative, min, max, "")?.into_int_value()
+                } else {
+                    int.const_all_ones()
+                };
+                ir.build_select(overflow, saturated, product, "")?
+            }
             And => ir.build_and(a, b, "")?.into(),
             Or => ir.build_or(a, b, "")?.into(),
             Xor => ir.build_xor(a, b, "")?.into(),

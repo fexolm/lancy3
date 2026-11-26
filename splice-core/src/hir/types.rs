@@ -271,7 +271,7 @@ impl Binary {
     /// `None` if it does not apply to them. Comparisons produce `Bool`.
     /// `Bool` supports `Eq`, `Ne`, `And`, `Or` and `Xor`; floats support
     /// `Add`, `Sub`, `Mul`, `Div`, `Min`, `Max` and comparisons; integers
-    /// support every operation.
+    /// support every operation, including the `Saturating` forms.
     pub const fn output(self, ty: ScalarType) -> Option<ScalarType> {
         let applies = match ty {
             ScalarType::Bool => {
@@ -301,7 +301,8 @@ impl Binary {
     ///
     /// Plain `Add`, `Sub`, `Mul` and shifts wrap; a shift amount is taken
     /// modulo the width. The `Checked` forms trap on overflow, and on a
-    /// shift amount outside `0..width`. Integer `Div` and `Rem` trap on a
+    /// shift amount outside `0..width`. The `Saturating` forms clamp the
+    /// exact result to the type's range. Integer `Div` and `Rem` trap on a
     /// zero divisor and on signed `MIN / -1`. Float `Min` and `Max` are
     /// IEEE 754-2019 `minimumNumber` and `maximumNumber`: a NaN operand
     /// yields the other operand and -0 is below +0.
@@ -363,6 +364,12 @@ impl Binary {
             Self::CheckedShl | Self::CheckedShr if amount >= u64::from(bits) => Err(Trap::Overflow),
             Self::CheckedShl => wrap(x << amount),
             Self::CheckedShr => wrap(x >> amount),
+            Self::SaturatingAdd => wrap((x + y).clamp(min, max)),
+            Self::SaturatingSub => wrap((x - y).clamp(min, max)),
+            Self::SaturatingMul => wrap(x.checked_mul(y).map_or_else(
+                || if (x < 0) == (y < 0) { max } else { min },
+                |v| v.clamp(min, max),
+            )),
             Self::Min => wrap(x.min(y)),
             Self::Max => wrap(x.max(y)),
             Self::Eq | Self::Ne | Self::Lt | Self::Le | Self::Gt | Self::Ge => unreachable!(),

@@ -3,6 +3,7 @@
 pub use crate::hir::FunctionBuilder;
 #[doc(hidden)]
 pub mod evaluation;
+pub mod intrinsics;
 #[doc(hidden)]
 pub mod native;
 #[doc(hidden)]

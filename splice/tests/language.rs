@@ -1303,3 +1303,121 @@ fn usize_parameters_and_results_keep_all_64_bits() {
     }
     splice_testkit::each_backend!(B => check::<B>());
 }
+
+// `min`/`max` are tested here as registered intrinsics; `clamp` is not one.
+#[allow(clippy::manual_clamp)]
+#[kernel]
+fn integer_methods(xs: &[i32], a: i32, b: i32, n: usize) -> i32 {
+    let len = xs.len();
+    let index = len.saturating_sub(n).min(len.wrapping_sub(1));
+    let clamp = a.max(-100).min(100);
+    if index < len {
+        xs[index]
+            .saturating_add(a.saturating_mul(b))
+            .wrapping_sub(a.wrapping_neg())
+            .wrapping_add(clamp)
+    } else {
+        a.saturating_sub(b).wrapping_add(n.max(3) as i32)
+    }
+}
+
+/// MAC-13, MAC-14: integer methods of runtime `i32` and `usize` values are
+/// registered intrinsics: each stages one portable operation, without a
+/// Rust call, and matches Rust on both build paths.
+#[test]
+fn integer_methods_are_intrinsics_on_every_integer_type() {
+    use splice::hir::{Binary, Instr};
+    let ir = integer_methods::ir().unwrap();
+    let ops: Vec<_> = splice_testkit::instructions(&ir)
+        .filter_map(|op| match op {
+            Instr::Bin(_, op, _, _) => Some(*op),
+            _ => None,
+        })
+        .collect();
+    for op in [
+        Binary::SaturatingAdd,
+        Binary::SaturatingSub,
+        Binary::SaturatingMul,
+        Binary::Min,
+        Binary::Max,
+    ] {
+        assert!(ops.contains(&op), "{op:?} in {ops:?}");
+    }
+    assert!(!splice_testkit::instructions(&ir).any(|op| matches!(op, Instr::RustCall { .. })));
+    fn check<B: Codegen<Output: Executable>>() {
+        let direct = integer_methods::build::<B>(integer_methods::BuildArgs {}).unwrap();
+        let portable = B::compile(&integer_methods::ir().unwrap()).unwrap();
+        let data = [7, i32::MAX, -3, i32::MIN];
+        for xs in [&data[..], &[]] {
+            for (a, b) in [
+                (1, 2),
+                (i32::MAX, 2),
+                (i32::MIN, 3),
+                (-5, i32::MIN),
+                (250, -7),
+            ] {
+                for n in [0, 1, 3, usize::MAX] {
+                    let expected = integer_methods(xs, a, b, n);
+                    for code in [&direct, &portable] {
+                        let actual = code.call(integer_methods::CallArgs { xs, a, b, n });
+                        assert_eq!(actual, Ok(expected), "{xs:?} {a} {b} {n}");
+                    }
+                }
+            }
+        }
+    }
+    splice_testkit::each_backend!(B => check::<B>());
+}
+
+mod intrinsic_methods {
+    use splice::kernel;
+
+    pub struct Math;
+
+    #[kernel]
+    impl Math {
+        #[intrinsic("splice.i32.max")]
+        pub fn max(a: i32, b: i32) -> i32 {
+            if a > b { a } else { b }
+        }
+
+        #[intrinsic("acme.i32.max")]
+        pub fn unregistered(a: i32, b: i32) -> i32 {
+            if a > b { a } else { b }
+        }
+    }
+
+    #[kernel]
+    pub fn registered(x: i32, y: i32) -> i32 {
+        Math::max(x, y)
+    }
+
+    #[kernel]
+    pub fn fallback(x: i32, y: i32) -> i32 {
+        Math::unregistered(x, y)
+    }
+}
+
+/// MAC-13: a `#[intrinsic("name")]` method stages the registered operation
+/// in place of its body; an unregistered name stages the body.
+#[test]
+fn intrinsic_methods_stage_the_registered_operation_or_their_body() {
+    use intrinsic_methods::{fallback, registered};
+    use splice::hir::{Binary, Instr};
+    let branches = |ir: &splice::Function| {
+        splice_testkit::instructions(ir).any(|op| matches!(op, Instr::Branch { .. }))
+    };
+    let maxima = |ir: &splice::Function| {
+        splice_testkit::instructions(ir).any(|op| matches!(op, Instr::Bin(_, Binary::Max, ..)))
+    };
+    let ir = registered::ir().unwrap();
+    assert!(maxima(&ir) && !branches(&ir));
+    let ir = fallback::ir().unwrap();
+    assert!(!maxima(&ir) && branches(&ir));
+    for (x, y) in [(-5, 2), (7, 3), (i32::MIN, i32::MAX)] {
+        let code = registered::build::<Lancy>(registered::BuildArgs {}).unwrap();
+        assert_eq!(code.call(registered::CallArgs { x, y }), Ok(x.max(y)));
+        let code = fallback::build::<Lancy>(fallback::BuildArgs {}).unwrap();
+        assert_eq!(code.call(fallback::CallArgs { x, y }), Ok(x.max(y)));
+    }
+}

@@ -52,6 +52,7 @@ pub(crate) fn expand(root: Path, lowering: Lowering, tokens: TokenStream) -> Res
                     for item in shape {
                         specialized.push(syn::ImplItem::Verbatim(quote!(#(#[#gates])* #item)));
                     }
+                    let intrinsic = intrinsic_name(&method.attrs)?;
                     let generated = match lowering {
                         Lowering::Ir => crate::scalar::methods::publish(
                             &root,
@@ -59,6 +60,7 @@ pub(crate) fn expand(root: Path, lowering: Lowering, tokens: TokenStream) -> Res
                             &method.block,
                             &method.vis,
                             trait_path.is_some(),
+                            intrinsic.as_ref(),
                         )
                         .unwrap_or_else(|error| {
                             errors.push(error);
@@ -403,6 +405,16 @@ fn marker(attr: &Attribute, name: &str) -> bool {
         .segments
         .last()
         .is_some_and(|segment| segment.ident == name)
+}
+
+/// The name of the method's `#[intrinsic("name")]`, validated by
+/// [`item_markers`].
+fn intrinsic_name(attrs: &[Attribute]) -> Result<Option<syn::LitStr>> {
+    attrs
+        .iter()
+        .find(|attr| marker(attr, "intrinsic"))
+        .map(Attribute::parse_args)
+        .transpose()
 }
 
 fn item_markers(attrs: &mut Vec<Attribute>, intrinsic_body: bool) -> Result<()> {

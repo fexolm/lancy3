@@ -22,12 +22,16 @@ pub(crate) fn entry_name(kind: &str, name: &Ident) -> Ident {
     )
 }
 
+/// `intrinsic` is the name of a `#[intrinsic("name")]` method: its stage
+/// entry stages the registered operation when there is one for its
+/// operands, and its body otherwise.
 pub(crate) fn publish(
     root: &syn::Path,
     signature: &Signature,
     body: &Block,
     visibility: &Visibility,
     trait_impl: bool,
+    intrinsic: Option<&syn::LitStr>,
 ) -> syn::Result<Vec<TokenStream>> {
     let runtime_receiver = !trait_impl
         && signature.receiver().is_some_and(|r| {
@@ -198,6 +202,15 @@ pub(crate) fn publish(
     let indices = 0..scalar_args.len();
     let debug_arguments = debug_host_args.iter().map(|id| lower.capture_constant(id));
     let overflow = super::lower::overflow_prologue(root);
+    let intrinsic = intrinsic.map(|name| {
+        emit! {
+            if let ::core::option::Option::Some(result) =
+                #root::frontend::intrinsics::call(__splice_builder, #name, &[#(#scalar_args),*])?
+            {
+                return ::core::result::Result::Ok(result);
+            }
+        }
+    });
     let stage = emit! {
         #[doc(hidden)]
         #[allow(unreachable_code, clippy::too_many_arguments)]
@@ -212,6 +225,7 @@ pub(crate) fn publish(
             let __splice_known: [::core::option::Option<#hir::Constant>; #arity] = [#(#support::RunArg::known(&#scalar_args)),*];
             #(let #scalar_args = #support::RunArg::reg(#scalar_args, __splice_builder)?;)*
             let __splice_inputs: &[(#hir::Reg, ::core::option::Option<#hir::Constant>)] = &[#((#scalar_args, __splice_known[#indices])),*];
+            #intrinsic
             #(let #mutable_args = __splice_builder.copy(#mutable_args)?;)*
             let __splice_result = __splice_builder.local(#value_type)?;
             let __splice_return_label = __splice_builder.label()?;

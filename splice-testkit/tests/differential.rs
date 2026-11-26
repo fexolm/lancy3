@@ -448,17 +448,13 @@ fn entry_words_must_hold_exactly_their_value() {
 
 #[test]
 fn every_scalar_binary_matches_checked_eval_at_every_type() {
-    use Binary::*;
     for ty in ScalarType::ALL {
         let values = edges(ty);
         let rows: Vec<_> = values
             .iter()
             .flat_map(|&a| values.iter().map(move |&z| vec![a, z]))
             .collect();
-        for op in [
-            Add, Sub, Mul, Div, Rem, And, Or, Xor, Eq, Ne, Lt, Le, Gt, Ge, Shl, Shr, CheckedAdd,
-            CheckedSub, CheckedMul, CheckedShl, CheckedShr, Min, Max,
-        ] {
+        for op in Binary::ALL {
             let Some(output) = op.output(ty) else {
                 continue;
             };
@@ -504,7 +500,6 @@ fn every_scalar_cast_matches_rust_as() {
 /// one constant and one loaded.
 #[test]
 fn every_scalar_binary_folds_constant_operands_like_checked_eval() {
-    use Binary::*;
     for ty in ScalarType::ALL {
         let values = edges(ty);
         let rows: Rc<Vec<_>> = Rc::new(
@@ -513,10 +508,7 @@ fn every_scalar_binary_folds_constant_operands_like_checked_eval() {
                 .flat_map(|&a| values.iter().map(move |&z| vec![a, z]))
                 .collect(),
         );
-        for op in [
-            Add, Sub, Mul, Div, Rem, And, Or, Xor, Eq, Ne, Lt, Le, Gt, Ge, Shl, Shr, CheckedAdd,
-            CheckedSub, CheckedMul, CheckedShl, CheckedShr, Min, Max,
-        ] {
+        for op in Binary::ALL {
             let Some(output) = op.output(ty) else {
                 continue;
             };

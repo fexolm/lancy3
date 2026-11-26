@@ -58,11 +58,45 @@ pub enum Binary {
     CheckedMul,
     CheckedShl,
     CheckedShr,
+    /// Integer `saturating_add`, `saturating_sub` and `saturating_mul`.
+    SaturatingAdd,
+    SaturatingSub,
+    SaturatingMul,
     Min,
     Max,
 }
 
 impl Binary {
+    /// Every operation, in declaration order.
+    pub const ALL: [Self; 26] = [
+        Self::Add,
+        Self::Sub,
+        Self::Mul,
+        Self::Div,
+        Self::Rem,
+        Self::And,
+        Self::Or,
+        Self::Xor,
+        Self::Eq,
+        Self::Ne,
+        Self::Lt,
+        Self::Le,
+        Self::Gt,
+        Self::Ge,
+        Self::Shl,
+        Self::Shr,
+        Self::CheckedAdd,
+        Self::CheckedSub,
+        Self::CheckedMul,
+        Self::CheckedShl,
+        Self::CheckedShr,
+        Self::SaturatingAdd,
+        Self::SaturatingSub,
+        Self::SaturatingMul,
+        Self::Min,
+        Self::Max,
+    ];
+
     pub fn may_trap(self) -> bool {
         matches!(
             self,
