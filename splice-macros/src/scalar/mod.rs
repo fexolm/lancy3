@@ -41,7 +41,9 @@ pub(crate) fn configuration(meta: &Meta) -> Result<Option<TokenStream>> {
     Ok((!gates.is_empty()).then(|| emit!(cfg_attr(#condition, #(#gates),*))))
 }
 
-pub(super) fn expand(root: Path, native: &mut ItemFn) -> Result<TokenStream> {
+/// `print` (`#[kernel(print)]`) also publishes `print`, which renders the
+/// specialized kernel as Rust; without it the kernel prints as a call.
+pub(super) fn expand(root: Path, native: &mut ItemFn, print: bool) -> Result<TokenStream> {
     let mut generated_sig = native.sig.clone();
     crate::declaration::rebase_signature(&mut generated_sig);
     let sig = &generated_sig;
@@ -331,16 +333,17 @@ pub(super) fn expand(root: Path, native: &mut ItemFn) -> Result<TokenStream> {
     let debug_arguments = host_names.iter().map(|id| lower.capture_constant(id));
     let source_support = emit!(#root::frontend::source);
     let overflow = lower::overflow_prologue(&root);
-    let source_body = if context.is_some() {
-        emit!(return ::core::result::Result::Err(#root::BuildError::staging("a Rust context kernel cannot be printed as Rust; inspect its portable IR with `ir()`"));)
+    if print && context.is_some() {
+        return Err(Error::new_spanned(
+            sig,
+            "a Rust context kernel cannot be printed as Rust; inspect its portable IR with `ir()`",
+        ));
+    }
+    let source_body = if print {
+        let body = lower.source_body(&lowered_block)?;
+        emit!(let __splice_printed = #body;)
     } else {
-        match lower.source_body(&lowered_block) {
-            Ok(body) => emit!(let __splice_printed = #body;),
-            Err(error) => {
-                let error = error.to_string();
-                emit!(return ::core::result::Result::Err(#root::BuildError::unsupported(#error));)
-            }
-        }
+        TokenStream::new()
     };
     let source_aliases = types.iter().map(|ty| {
         emit!((
@@ -352,7 +355,17 @@ pub(super) fn expand(root: Path, native: &mut ItemFn) -> Result<TokenStream> {
         let ty = &param.ty;
         emit!((::std::borrow::ToOwned::to_owned(::core::stringify!(#name)), ::std::format!("const {}: {} = {};", ::core::stringify!(#name), ::core::stringify!(#ty), #source_support::literal(#name))))
     }));
-    let (source_entry, source_body_method) = {
+    let (source_entry, source_body_method) = if !print {
+        // A caller's `print` shows the call as written.
+        let nested_source = columns.is_none().then(|| emit! {
+            #[doc(hidden)]
+            #[allow(unused_variables, clippy::too_many_arguments)]
+            #vis fn __splice_source_call #generic (#(#source_decls,)* __splice_source: &mut #source_support::Source) -> #root::Result<::core::option::Option<::std::string::String>> #where_ {
+                ::core::result::Result::Ok(::core::option::Option::None)
+            }
+        });
+        (emit!(#nested_source), TokenStream::new())
+    } else {
         let source_layout = columns.as_ref().map(|layout| emit! {
             let __splice_layout = #layout;
             let __splice_column_layout: &[#root::BufferKind] = ::core::convert::AsRef::as_ref(&__splice_layout);
@@ -361,11 +374,11 @@ pub(super) fn expand(root: Path, native: &mut ItemFn) -> Result<TokenStream> {
             emit! {
                 #[doc(hidden)]
                 #[allow(clippy::too_many_arguments)]
-                #vis fn __splice_source_call #generic (#(#source_decls,)* __splice_source: &mut #source_support::Source) -> #root::Result<::std::string::String> #where_ {
+                #vis fn __splice_source_call #generic (#(#source_decls,)* __splice_source: &mut #source_support::Source) -> #root::Result<::core::option::Option<::std::string::String>> #where_ {
                     #(#extract_known)*
                     let name = __SpliceDefinition::__splice_print #fish (#(#host_names,)* __splice_source)?;
                     let arguments: &[::std::string::String] = &[#(#source_args),*];
-                    ::core::result::Result::Ok(::std::format!("{}({})", name, arguments.join(", ")))
+                    ::core::result::Result::Ok(::core::option::Option::Some(::std::format!("{}({})", name, arguments.join(", "))))
                 }
             }
         } else {
@@ -901,6 +914,7 @@ mod tests {
             let error = crate::declaration::expand(
                 parse_quote!(::splice),
                 crate::import::Lowering::Ir,
+                false,
                 emit!(#item),
             )
             .unwrap_err();
@@ -913,7 +927,7 @@ mod tests {
         let mut f = parse_quote! {
             fn edit(column: &[i32]) -> i32 { column[0] = 1; 0 }
         };
-        let error = expand(parse_quote!(::splice), &mut f).unwrap_err();
+        let error = expand(parse_quote!(::splice), &mut f, false).unwrap_err();
         assert!(error.to_string().contains("requires &mut [i32]"));
     }
 
@@ -924,7 +938,7 @@ mod tests {
             #[cfg_attr(all(), inline, cfg(target_arch = "x86_64"))]
             fn sum(x: i32, y: i32) -> i32 { x + y }
         };
-        let items = syn::parse2::<syn::File>(expand(parse_quote!(::splice), &mut f).unwrap())
+        let items = syn::parse2::<syn::File>(expand(parse_quote!(::splice), &mut f, true).unwrap())
             .unwrap()
             .items;
         assert_eq!(items.len(), 3);

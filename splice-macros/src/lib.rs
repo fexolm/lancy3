@@ -77,7 +77,9 @@ fn derive_root(attrs: &[syn::Attribute]) -> syn::Result<Path> {
 /// Publish a free function or all methods of an `impl` or `trait` block.
 /// For a free function, `name::build::<Backend>(...)` stages its comptime
 /// parameters into the selected backend. `name::ir(...)` builds portable IR.
-/// `name::print(...)` specializes the Rust source without building IR.
+/// `#[kernel(print)]` also publishes `name::print(...)`, which specializes
+/// the Rust source without building IR; a caller prints a call to a kernel
+/// without it as written.
 ///
 /// A body Splice cannot lower is a compile error. `#[kernel(rust)]` (on the
 /// function, or on a method inside a `#[kernel]` block) publishes the same API
@@ -86,7 +88,7 @@ fn derive_root(attrs: &[syn::Attribute]) -> syn::Result<Path> {
 #[proc_macro_attribute]
 pub fn kernel(options: TokenStream, item: TokenStream) -> TokenStream {
     let options = parse_macro_input!(options with KernelOptions::parse);
-    declaration::expand(options.root, options.lowering, item.into())
+    declaration::expand(options.root, options.lowering, options.print, item.into())
         .unwrap_or_else(Error::into_compile_error)
         .into()
 }
@@ -94,16 +96,21 @@ pub fn kernel(options: TokenStream, item: TokenStream) -> TokenStream {
 struct KernelOptions {
     root: Path,
     lowering: import::Lowering,
+    print: bool,
 }
 
 impl KernelOptions {
     fn parse(input: syn::parse::ParseStream) -> syn::Result<Self> {
         let mut root = None;
         let mut lowering = None;
+        let mut print = None;
         for option in Punctuated::<Meta, Token![,]>::parse_terminated(input)? {
             match &option {
                 Meta::Path(path) if path.is_ident("rust") && lowering.is_none() => {
                     lowering = Some(import::Lowering::Rust);
+                }
+                Meta::Path(path) if path.is_ident("print") && print.is_none() => {
+                    print = Some(path.clone());
                 }
                 Meta::NameValue(MetaNameValue {
                     path,
@@ -115,14 +122,23 @@ impl KernelOptions {
                 _ => {
                     return Err(Error::new_spanned(
                         option,
-                        "expected `rust` or `crate = path`, each at most once",
+                        "expected `rust`, `print` or `crate = path`, each at most once",
                     ));
                 }
             }
         }
+        if let Some(print) = &print
+            && lowering.is_some()
+        {
+            return Err(Error::new_spanned(
+                print,
+                "`print` renders the Splice source of a lowered kernel; a #[kernel(rust)] function has none",
+            ));
+        }
         Ok(Self {
             root: root.unwrap_or_else(|| parse_quote!(::splice)),
             lowering: lowering.unwrap_or(import::Lowering::Ir),
+            print: print.is_some(),
         })
     }
 }

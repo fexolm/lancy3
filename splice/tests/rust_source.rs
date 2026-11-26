@@ -35,7 +35,7 @@ fn calls_to(function: &Function, callee: &Arc<Function>) -> usize {
         .count()
 }
 
-#[kernel]
+#[kernel(print)]
 fn stop_early(#[comptime] bail: bool, x: i32) -> i32 {
     if bail {
         return 17;
@@ -46,7 +46,7 @@ fn stop_early(#[comptime] bail: bool, x: i32) -> i32 {
     x.wrapping_add(42)
 }
 
-#[kernel]
+#[kernel(print)]
 fn unroll_until(#[comptime] steps: &[i32], mut x: i32) -> i32 {
     for step in steps {
         if *step == 0 {
@@ -62,7 +62,7 @@ fn unroll_until(#[comptime] steps: &[i32], mut x: i32) -> i32 {
 
 // The comptime `stop` must select the inner runtime `if` on its own.
 #[allow(clippy::collapsible_if)]
-#[kernel]
+#[kernel(print)]
 fn unroll_runtime_control(#[comptime] steps: &[i32], x: i32, #[comptime] stop: bool) -> i32 {
     let mut total = 0;
     for step in steps {
@@ -79,7 +79,7 @@ fn unroll_runtime_control(#[comptime] steps: &[i32], x: i32, #[comptime] stop: b
     total
 }
 
-#[kernel]
+#[kernel(print)]
 fn unroll_nested(#[comptime] outer: &[i32], #[comptime] inner: &[i32], x: i32) -> i32 {
     let mut total = 0;
     for a in outer {
@@ -140,7 +140,7 @@ fn rust_source_prunes_host_transfers_but_keeps_runtime_control() -> splice::Resu
     Ok(())
 }
 
-#[kernel]
+#[kernel(print)]
 fn host_iterations(#[comptime] n: i32, x: i32) -> i32 {
     let mut k = 0;
     while k < n {
@@ -158,7 +158,7 @@ fn host_iterations(#[comptime] n: i32, x: i32) -> i32 {
     x + k
 }
 
-#[kernel]
+#[kernel(print)]
 fn print_division(#[comptime] d: i32, x: i32) -> i32 {
     if x > 0 {
         let q = 100 / d;
@@ -168,7 +168,7 @@ fn print_division(#[comptime] d: i32, x: i32) -> i32 {
     }
 }
 
-#[kernel]
+#[kernel(print)]
 fn print_remainder(#[comptime] a: i32, #[comptime] d: i32, marks: &mut [i32], x: i32) -> i32 {
     match x {
         0 => 9,
@@ -185,7 +185,7 @@ mod __splice_source_child_0 {
     pub use splice::simd::Lane;
 }
 
-#[kernel]
+#[kernel(print)]
 fn identifier_in_path(x: i32) -> i32 {
     __splice_source_child_0::Lane::<i32>::splat(x).last()
 }
@@ -326,4 +326,32 @@ fn build_propagates_the_original_staging_error() {
         );
     }
     splice_testkit::each_backend!(B => check::<B>());
+}
+
+#[kernel]
+fn unprinted_scale(#[comptime] k: i32, x: i32) -> i32 {
+    x * k
+}
+
+#[kernel(print)]
+fn printed_scale(#[comptime] k: i32, x: i32) -> i32 {
+    unprinted_scale(k, x) + 1
+}
+
+#[kernel(print)]
+fn printed_twice(x: i32) -> i32 {
+    printed_scale(2, x)
+}
+
+/// `#[kernel(print)]` kernels print their specialized body; a call to a
+/// kernel without `print` stays the call as written, with its comptime
+/// arguments known.
+#[test]
+fn print_specializes_only_printed_kernels() -> Result<(), Box<dyn std::error::Error>> {
+    let text = printed_twice::print()?;
+    assert!(text.contains("fn printed_scale"), "{text}");
+    assert!(text.contains("unprinted_scale(2, x)"), "{text}");
+    assert!(!text.contains("fn unprinted_scale"), "{text}");
+    assert_eq!(printed_twice(5), 11);
+    Ok(())
 }

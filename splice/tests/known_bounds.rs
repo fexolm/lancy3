@@ -6,7 +6,7 @@ use std::{
     sync::atomic::{AtomicUsize, Ordering},
 };
 
-#[kernel]
+#[kernel(print)]
 fn chosen(#[comptime] table: &[u16], flag: i32) -> i32 {
     if flag != 0 { table[0] as i32 } else { 0 }
 }

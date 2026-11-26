@@ -39,7 +39,7 @@ fn filter_ge(col: &[i32], #[comptime] val: i32, out: &mut [i32]) -> i32 {
     n
 }
 
-#[kernel]
+#[kernel(print)]
 #[allow(unused_variables, reason = "schema describes the staged column layout")]
 fn query(
     #[comptime] schema: &Schema,
@@ -61,7 +61,7 @@ fn query(
     }
 }
 
-#[kernel]
+#[kernel(print)]
 fn any_ge_float(col: &[f32], #[comptime] val: f32) -> i32 {
     let width = Lane::<f32>::lanes() as i32;
     let mut row = 0;
@@ -221,7 +221,7 @@ fn sql_specialization_reads_the_selected_column_from_each_batch()
     Ok(())
 }
 
-#[kernel]
+#[kernel(print)]
 fn unchecked_query(
     #[comptime] col: usize,
     #[columns([BufferKind::new(Element::F64, false)])] columns: &[BufferArg<'_>],

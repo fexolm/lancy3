@@ -55,7 +55,7 @@ struct Plan {
 }
 
 // One active lane keeps the operators short and works for every lane width.
-#[kernel]
+#[kernel(print)]
 fn filter<T: LaneElement>(
     col: &[T],
     #[comptime] op: Compare,
@@ -76,7 +76,7 @@ fn filter<T: LaneElement>(
     0
 }
 
-#[kernel]
+#[kernel(print)]
 fn join<T: LaneElement>(
     left_key: &[T],
     right_key: &[T],
@@ -101,7 +101,7 @@ fn join<T: LaneElement>(
     count
 }
 
-#[kernel]
+#[kernel(print)]
 fn project<T: LaneElement>(
     col: &[T],
     right_rows: &[i32],
@@ -128,7 +128,7 @@ fn project<T: LaneElement>(
     0
 }
 
-#[kernel]
+#[kernel(print)]
 fn query(
     #[comptime] schema: &Schema,
     #[comptime] plan: &Plan,

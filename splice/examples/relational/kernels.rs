@@ -117,7 +117,7 @@ fn read_indices(arena: &[i32], indices: Lane<i32>, count: i32) -> Lane<i32> {
     }
 }
 
-#[kernel]
+#[kernel(print)]
 pub fn query(
     #[comptime] program: &Program<'_>,
     offsets: &[i32],

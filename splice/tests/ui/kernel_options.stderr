@@ -1,10 +1,10 @@
-error: expected `rust` or `crate = path`, each at most once
+error: expected `rust`, `print` or `crate = path`, each at most once
  --> tests/ui/kernel_options.rs:3:10
   |
 3 | #[kernel(fast)]
   |          ^^^^
 
-error: expected `rust` or `crate = path`, each at most once
+error: expected `rust`, `print` or `crate = path`, each at most once
  --> tests/ui/kernel_options.rs:8:16
   |
 8 | #[kernel(rust, rust)]
@@ -25,3 +25,25 @@ error: a #[kernel(rust)] function keeps its specialization arguments after build
    |
 24 | fn borrowed(#[comptime] plan: &[i32], x: i32) -> i32 {
    |             ^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: `print` renders the Splice source of a lowered kernel; a #[kernel(rust)] function has none
+  --> tests/ui/kernel_options.rs:29:16
+   |
+29 | #[kernel(rust, print)]
+   |                ^^^^^
+
+error: #[kernel(print)] publishes `print` for a free function
+  --> tests/ui/kernel_options.rs:35:1
+   |
+35 | / impl Unit {
+36 | |     fn two() -> i32 {
+37 | |         2
+38 | |     }
+39 | | }
+   | |_^
+
+error[E0425]: cannot find function `print` in module `unprinted`
+  --> tests/ui/kernel_options.rs:48:24
+   |
+48 |     let _ = unprinted::print();
+   |                        ^^^^^ not found in `unprinted`

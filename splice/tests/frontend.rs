@@ -49,7 +49,7 @@ fn host_associated_functions_can_belong_to_a_type_named_lane() {
     }
 }
 
-#[kernel]
+#[kernel(print)]
 fn staged_weights(#[comptime] bias: i32, value: i32) -> i32 {
     value + bias
 }

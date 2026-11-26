@@ -5,7 +5,7 @@ use std::{
     sync::atomic::{AtomicUsize, Ordering},
 };
 
-#[kernel]
+#[kernel(print)]
 fn count_by_twos(#[comptime] target: i32, value: i32) -> i32 {
     let mut count = 0_i32;
     while count != target {
@@ -30,7 +30,7 @@ fn mandatory_loop(#[comptime] target: i32, value: i32) -> i32 {
     total.wrapping_add(value)
 }
 
-#[kernel]
+#[kernel(print)]
 fn unrolled(#[comptime] plan: &[i32], mut value: i32) -> i32 {
     for &delta in plan {
         value = value.wrapping_add(delta);
@@ -225,7 +225,7 @@ impl<'a> IntoIterator for &'a CountingPlan {
     }
 }
 
-#[kernel]
+#[kernel(print)]
 fn opaque_iterator(#[comptime] plan: &CountingPlan, mut value: i32) -> i32 {
     for delta in plan {
         value = value.wrapping_add(delta);
@@ -269,7 +269,7 @@ impl std::ops::Deref for IndirectSteps {
     }
 }
 
-#[kernel]
+#[kernel(print)]
 fn indirect_steps(#[comptime] plan: &IndirectSteps, mut value: i32) -> i32 {
     for &step in plan.values.iter() {
         value = value.wrapping_add(step);
@@ -289,7 +289,7 @@ impl IndirectSteps {
     }
 }
 
-#[kernel]
+#[kernel(print)]
 fn discarded_method(#[comptime] plan: &IndirectSteps, value: i32) -> i32 {
     plan.mark();
     value

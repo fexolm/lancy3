@@ -715,7 +715,7 @@ fn a_borrowing_opaque_result_outlives_the_kernel() {
     splice_testkit::each_backend!(B => check!(B));
 }
 
-#[kernel]
+#[kernel(print)]
 fn sum_items(xs: &[i32]) -> i32 {
     let mut sum = 0_i32;
     for &x in xs {

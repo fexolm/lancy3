@@ -22,7 +22,7 @@ mod status {
         if true { Ok } else { Err }
     }
 
-    #[kernel]
+    #[kernel(print)]
     pub fn add(#[comptime] k: i32, x: i32) -> i32 {
         k + x
     }
@@ -40,7 +40,7 @@ mod bare {
     #![no_implicit_prelude]
     use ::splice::kernel;
 
-    #[kernel]
+    #[kernel(print)]
     pub fn scale(#[comptime] k: i32, xs: &[i32]) -> i32 {
         let mut sum = 0;
         for &x in xs {
@@ -73,7 +73,7 @@ mod receiver {
         }
     }
 
-    #[kernel]
+    #[kernel(print)]
     pub fn read(#[comptime] holder: &Holder, x: i32) -> i32 {
         Holder::get(holder, x)
     }
@@ -100,14 +100,14 @@ mod relative {
     pub mod inner {
         use splice::kernel;
 
-        #[kernel]
+        #[kernel(print)]
         pub fn shifted(x: i32) -> i32 {
             use super::offset;
             x + offset()
         }
     }
 
-    #[kernel]
+    #[kernel(print)]
     pub fn local(x: i32) -> i32 {
         use self::inner::shifted;
         shifted(x) + 1
@@ -155,7 +155,7 @@ mod generated_names {
     #[derive(Clone, Copy)]
     pub struct CallArgs(pub i32);
 
-    #[kernel]
+    #[kernel(print)]
     pub fn scaled(#[comptime] s: &Signature, #[comptime] b: BuildArgs, x: i32) -> i32 {
         s.scale * x + b.0
     }

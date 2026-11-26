@@ -273,10 +273,15 @@ impl Lower<'_> {
                             }
                         })
                         .collect::<Result<Vec<_>>>()?;
-                    let kernel =
-                        emit!(#path::__splice_source_call #fish (#(#args,)* __splice_source)?);
+                    let syntax = self.source_syntax(e)?;
+                    let kernel = emit!(
+                        match #path::__splice_source_call #fish (#(#args,)* __splice_source)? {
+                            ::core::option::Option::Some(text) => text,
+                            ::core::option::Option::None => #syntax,
+                        }
+                    );
                     return if p.qself.is_none() && !p.path.is_ident(self.name) {
-                        Ok(self.dispatch_call(p, kernel, self.source_syntax(e)?))
+                        Ok(self.dispatch_call(p, kernel, syntax))
                     } else {
                         Ok(kernel)
                     };

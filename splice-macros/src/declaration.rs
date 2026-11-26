@@ -10,7 +10,13 @@ use crate::import::Lowering;
 mod selector;
 pub(crate) use selector::{trait_method_dispatch, trait_method_eval_dispatch};
 
-pub(crate) fn expand(root: Path, lowering: Lowering, tokens: TokenStream) -> Result<TokenStream> {
+/// `print` (`#[kernel(print)]`) applies to a free function lowered to IR.
+pub(crate) fn expand(
+    root: Path,
+    lowering: Lowering,
+    print: bool,
+    tokens: TokenStream,
+) -> Result<TokenStream> {
     let method_error = "put #[kernel] on the enclosing impl or trait to publish its methods";
     let item = match syn::parse2::<Item>(tokens.clone()) {
         Ok(Item::Verbatim(_)) | Err(_)
@@ -28,8 +34,12 @@ pub(crate) fn expand(root: Path, lowering: Lowering, tokens: TokenStream) -> Res
             hoist_lint_attributes(&mut function.attrs, &mut function.sig);
             signature(&function.sig)?;
             item_markers(&mut function.attrs, false)?;
-            crate::import::expand_function(root, function, lowering)
+            crate::import::expand_function(root, function, lowering, print)
         }
+        Item::Impl(_) | Item::Trait(_) if print => Err(Error::new_spanned(
+            tokens,
+            "#[kernel(print)] publishes `print` for a free function",
+        )),
         Item::Impl(_) | Item::Trait(_) if lowering == Lowering::Rust => Err(Error::new_spanned(
             tokens,
             "put #[kernel(rust)] on individual methods of a #[kernel] impl or trait",
@@ -208,9 +218,14 @@ mod tests {
         ];
         for item in items {
             let expand = || {
-                expand(syn::parse_quote!(::splice), Lowering::Ir, item.clone())
-                    .unwrap()
-                    .to_string()
+                expand(
+                    syn::parse_quote!(::splice),
+                    Lowering::Ir,
+                    false,
+                    item.clone(),
+                )
+                .unwrap()
+                .to_string()
             };
             assert_eq!(expand(), expand());
         }
@@ -235,7 +250,7 @@ mod tests {
             ),
             quote!(impl Plan { #[kernel] fn value() -> i32 { 1 } }),
         ] {
-            let error = expand(syn::parse_quote!(::splice), Lowering::Ir, item).unwrap_err();
+            let error = expand(syn::parse_quote!(::splice), Lowering::Ir, false, item).unwrap_err();
             assert!(
                 error.to_string().contains("enclosing impl or trait"),
                 "{error}"

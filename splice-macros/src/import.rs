@@ -34,9 +34,10 @@ pub(crate) fn expand_function(
     root: Path,
     mut function: ItemFn,
     lowering: Lowering,
+    print: bool,
 ) -> Result<TokenStream> {
     match lowering {
-        Lowering::Ir => crate::scalar::expand(root, &mut function).map_err(|mut error| {
+        Lowering::Ir => crate::scalar::expand(root, &mut function, print).map_err(|mut error| {
             error.combine(Error::new_spanned(
                 &function.sig.ident,
                 "this function is not a Splice kernel; mark it #[kernel(rust)] to publish it as a Rust call",
@@ -385,13 +386,6 @@ fn expand(root: &Path, mut function: ItemFn, checks: Vec<Check>) -> Result<Token
                 -> ::core::result::Result<#ir_type, #root::BuildError> #ir_where
             {
                 ir::<#(#args),*>(#(#host_names),*)
-            }
-
-            #vis fn print #ir_decls (#(#host_fields),*) -> #root::Result<::std::string::String> #ir_where {
-                #(let _ = #host_names;)*
-                ::core::result::Result::Err(#root::BuildError::staging(::core::concat!(
-                    "`", ::core::stringify!(#name), "` is a #[kernel(rust)] function without Splice source",
-                )))
             }
 
             #invocation
