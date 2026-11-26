@@ -4,7 +4,7 @@ use super::{Result, inst::Inst};
 use crate::lir::aarch64::backend::Config;
 use crate::lir::frame::argument_words;
 use crate::{
-    hir::{Call, ssa::VerifiedBody, transforms::canonical},
+    hir::{Call, Type, ssa::VerifiedBody, transforms::canonical},
     lir::{
         self,
         isel::{self, Edges},
@@ -33,6 +33,13 @@ pub(super) fn select(
         Ok(())
     })?;
 
+    // Without vector values, a vector register holds at most a 16-byte
+    // scalar, so its spills and moves need not cover the whole register.
+    let vectors = f.value_types().iter().any(|t| matches!(t, Type::Vector(_)));
+    let config = Config {
+        register_bytes: if vectors { config.bytes } else { 16 },
+        ..config
+    };
     let mut body = edges.function(config)?;
     for &b in cfg.reverse_postorder() {
         if b == f.entry() {

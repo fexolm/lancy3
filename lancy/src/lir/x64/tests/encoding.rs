@@ -1,5 +1,5 @@
-//! Encoding choices of emitted code: VEX forms and `vzeroupper` with AVX
-//! (X64-02).
+//! Encoding and layout choices of emitted code: VEX forms and `vzeroupper`
+//! with AVX (X64-02), spill widths (X64-08), and the constant pool (X64-16).
 use crate::hir::{Function, Op, Terminator, Type, Value};
 use iced_x86::{Decoder, DecoderOptions, EncodingKind};
 use splice_target::{Profile, Target};
@@ -127,4 +127,61 @@ fn avx_code_has_no_legacy_sse_instructions() {
         }
     }
     assert!(found.is_empty(), "{}", found.join("\n"));
+}
+
+/// The workspace displacement of every spill or reload of a `kind`
+/// register (`xmm`, `ymm` or `zmm`).
+fn workspace_accesses(code: &str, kind: &str) -> Vec<i64> {
+    code.lines()
+        .filter(|l| l.contains(" vmovdqu") && l.contains(kind))
+        .filter_map(|l| l.split_once("[r11")?.1.split_once(']'))
+        .map(|(disp, _)| match disp.strip_prefix('+') {
+            Some(hex) => i64::from_str_radix(hex.trim_end_matches('h'), 16).unwrap(),
+            None => 0,
+        })
+        .collect()
+}
+
+/// Without vector values a vector register holds a scalar, so it spills and
+/// moves 16 bytes even when the target's vectors are wider.
+#[test]
+fn scalar_functions_spill_and_move_sixteen_bytes() {
+    let text = "fn main(a:f64 b:f64 c:f64 v:i32 fail:i32) -> f64
+  p = call_scratch 0 8
+  s = add a b
+  t = mul s c
+  d = rust_call double p v p fail
+  u = add t s
+  w = add u a
+  ret w
+";
+    for profile in [Profile::Avx2, Profile::Avx512] {
+        let code = listing(text, profile);
+        assert!(!workspace_accesses(&code, "xmm").is_empty(), "{code}");
+        assert!(!code.contains("ymm") && !code.contains("zmm"), "{code}");
+    }
+}
+
+/// Equal constants share one pool entry, and entries are written widest
+/// first, so each starts at a multiple of its size.
+#[test]
+fn the_constant_pool_shares_equal_entries_widest_first() {
+    use iced_x86::code_asm::CodeAssembler;
+    let mut a = CodeAssembler::new(64).unwrap();
+    let mut pool = crate::lir::x64::emit::Constants::default();
+    let [one, two] = [1u8, 2].map(|b| [b; 64]);
+    let small = pool.label(&mut a, one, 16);
+    let wide = pool.label(&mut a, two, 64);
+    assert_eq!(pool.label(&mut a, one, 16), small);
+    assert_eq!(pool.label(&mut a, two, 64), wide);
+    // Bytes past the size are not part of the constant.
+    let mut tail = one;
+    tail[40] = 9;
+    assert_eq!(pool.label(&mut a, tail, 16), small);
+    assert_ne!(pool.label(&mut a, one, 32), small);
+    a.nop().unwrap();
+    assert_eq!(pool.emit(&mut a).unwrap(), 64 + 32 + 16);
+    let bytes = a.assemble(0).unwrap();
+    assert_eq!(bytes[1..65], [2; 64]);
+    assert_eq!(bytes[65..113], [1; 48]);
 }

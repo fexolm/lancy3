@@ -177,17 +177,7 @@ impl Vector<'_> {
         if word == u64::MAX {
             return self.ones(d);
         }
-        let label = if let Some((label, ..)) = self
-            .pool
-            .iter()
-            .find(|(_, b, n)| *n == self.width && *b == bytes)
-        {
-            *label
-        } else {
-            let label = self.a.create_label();
-            self.pool.push((label, bytes, self.width));
-            label
-        };
+        let label = self.pool.label(self.a, bytes, self.width);
         load(self.a, d, ptr(label), self.width)
     }
     fn sign_mask(&mut self, size: usize, src: usize) -> Result {

@@ -379,6 +379,8 @@ codes! {
     Orr_asimdsame_only =   0x0ea01c00, Neon, _, NeonBits;
     Eor_asimdsame_only =   0x2e201c00, Neon, _, NeonBits;
     Fadd_asimdsame =       0x0e20d400, Neon, _, FloatNeon;
+    Fmaxnm_asimdsame =     0x0e20c400, Neon, _, FloatNeon;
+    Fminnm_asimdsame =     0x0ea0c400, Neon, _, FloatNeon;
     Fsub_asimdsame =       0x0ea0d400, Neon, _, FloatNeon;
     Fmul_asimdsame =       0x2e20dc00, Neon, _, FloatNeon;
     Fdiv_asimdsame =       0x2e20fc00, Neon, _, FloatNeon;
@@ -394,6 +396,8 @@ codes! {
     Fsub_z_zz_ =           0x65000400, Sve,  _, SveArithmetic;
     Fmul_z_zz_ =           0x65000800, Sve,  _, SveArithmetic;
     Fdiv_z_p_zz_ =         0x650d8000, Sve,  _, SveDestructive;
+    Fmaxnm_z_p_zz =        0x65048000, Sve,  _, SveDestructive;
+    Fminnm_z_p_zz =        0x65058000, Sve,  _, SveDestructive;
     Fdivr_z_p_zz_ =        0x650c8000, Sve,  _, SveDestructive;
     Dup_z_r =              0x05203800, Sve,  _, Dup(true);
     Cmplt_p_p_zi =         0x25002000, Sve,  _, SveCompareImmediate;

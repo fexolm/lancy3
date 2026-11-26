@@ -21,8 +21,47 @@ use iced_x86::{BlockEncoder, BlockEncoderOptions, IcedError, InstructionBlock, c
 use regalloc2::RegClass;
 use regalloc2::{Allocation, Edit, Function as _, InstOrEdit, VReg};
 use simd::{K, XMM, YMM, ZMM, opmask};
+use std::collections::HashMap;
 
-pub(super) type Constants = Vec<(CodeLabel, [u8; 64], usize)>;
+/// The module's constant pool, emitted after the code (X64-16). Equal
+/// constants share one entry. Entries are written widest first, so each
+/// starts at a multiple of its size from the pool's start.
+#[derive(Default)]
+pub(super) struct Constants {
+    labels: HashMap<([u8; 64], usize), CodeLabel>,
+    entries: Vec<(CodeLabel, [u8; 64], usize)>,
+}
+
+impl Constants {
+    /// The label of the first `size` bytes of `bits`.
+    pub fn label(&mut self, a: &mut CodeAssembler, bits: [u8; 64], size: usize) -> CodeLabel {
+        let mut key = [0; 64];
+        key[..size].copy_from_slice(&bits[..size]);
+        *self.labels.entry((key, size)).or_insert_with(|| {
+            let label = a.create_label();
+            self.entries.push((label, key, size));
+            label
+        })
+    }
+
+    #[cfg(all(test, target_arch = "x86_64"))]
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    /// Write the pool; its size in bytes.
+    pub fn emit(mut self, a: &mut CodeAssembler) -> Result<usize, IcedError> {
+        self.entries
+            .sort_by_key(|&(_, _, size)| std::cmp::Reverse(size));
+        let mut bytes = 0;
+        for (label, bits, size) in self.entries {
+            bind(a, label)?;
+            a.db(&bits[..size])?;
+            bytes += size;
+        }
+        Ok(bytes)
+    }
+}
 type AsmResult = Result<(), IcedError>;
 
 pub(super) const R64: [AsmRegister64; 16] = [
@@ -65,7 +104,7 @@ impl Frame {
 
     fn emit_move(
         &self,
-        cpu: Cpu,
+        machine: &Machine,
         a: &mut CodeAssembler,
         from: Allocation,
         to: Allocation,
@@ -73,15 +112,16 @@ impl Frame {
         if from == to {
             return Ok(());
         }
+        let (cpu, bytes) = (machine.cpu, machine.register_bytes);
         match (from.as_reg(), to.as_reg()) {
             (Some(s), Some(d)) if s.class() == RegClass::Vector => {
-                simd::copy(a, d.hw_enc(), s.hw_enc(), cpu.bytes)
+                simd::copy(a, d.hw_enc(), s.hw_enc(), bytes)
             }
             (Some(s), None) if s.class() == RegClass::Vector => {
-                simd::store(a, self.spill(to), s.hw_enc(), cpu.bytes)
+                simd::store(a, self.spill(to), s.hw_enc(), bytes)
             }
             (None, Some(d)) if d.class() == RegClass::Vector => {
-                simd::load(a, d.hw_enc(), self.spill(from), cpu.bytes)
+                simd::load(a, d.hw_enc(), self.spill(from), bytes)
             }
             (Some(s), Some(d)) if s.class() == RegClass::Float => {
                 if cpu.isa.bw {
@@ -217,7 +257,7 @@ fn assemble(module: &Module<CompiledFunction>, debug: bool) -> Result<Code, Fail
         }
         a.ret()
     };
-    let mut constants = Vec::new();
+    let mut constants = Constants::default();
     let mut sites = crate::lir::Sites::default();
     let mut debug_functions = Vec::new();
     // The root (last in postorder) follows the native entry prologue.
@@ -286,11 +326,7 @@ fn assemble(module: &Module<CompiledFunction>, debug: bool) -> Result<Code, Fail
     if !debug {
         restore(&mut a)?;
     }
-    let pool_bytes: usize = constants.iter().map(|(_, _, size)| size).sum();
-    for (label, bits, size) in constants {
-        bind(&mut a, label)?;
-        a.db(&bits[..size])?;
-    }
+    let pool_bytes = constants.emit(&mut a)?;
     let options = if debug {
         BlockEncoderOptions::RETURN_NEW_INSTRUCTION_OFFSETS
     } else {
@@ -378,9 +414,12 @@ impl Emitter<'_> {
             bind(self.a, labels[b.index()])?;
             for op in self.machine.allocation.block_insts_and_edits(body, b) {
                 match op {
-                    InstOrEdit::Edit(&Edit::Move { from, to }) => {
-                        self.machine.frame.emit_move(self.cpu, self.a, from, to)?
-                    }
+                    InstOrEdit::Edit(&Edit::Move { from, to }) => self.machine.frame.emit_move(
+                        self.machine.body.machine(),
+                        self.a,
+                        from,
+                        to,
+                    )?,
                     InstOrEdit::Inst(j) => {
                         let allocs = Allocations::of(body, &self.machine.allocation, j);
                         match body.insts()[j.index()] {
@@ -623,10 +662,9 @@ impl Emitter<'_> {
             Inst::Fallback(id) => self.fallback(details.expansions[id], allocs),
             Inst::Literal(l, bits, dst) => match l.bytes() {
                 16 => {
-                    let label = a.create_label();
                     let mut data = [0; 64];
                     data[..16].copy_from_slice(&bits.to_le_bytes());
-                    self.constants.push((label, data, 16));
+                    let label = self.constants.label(a, data, 16);
                     simd::load(a, reg(dst), ptr(label), 16)
                 }
                 8 if l.float() => {
@@ -641,9 +679,8 @@ impl Emitter<'_> {
                 size => a.mov(r(dst), (bits & (u128::MAX >> (128 - size * 8))) as u32),
             },
             Inst::Iota(l, dst) => {
-                let label = a.create_label();
                 let bits = super::super::constants::iota_bytes(l, width);
-                self.constants.push((label, bits, width));
+                let label = self.constants.label(a, bits, width);
                 simd::load(a, reg(dst), ptr(label), width)
             }
             Inst::BitMove(from, to, dst, src) => match (class(to), from.bytes(width)) {

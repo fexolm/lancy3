@@ -59,10 +59,13 @@ pub(super) fn compile(
             child_peak = child_peak.max(compiled[child].peak);
         }
         let needs = FrameRequirements::scan(&body);
+        // Spills start, and the frame ends, at a multiple of the vector
+        // spill size up to a cache line, so no spill straddles a line.
+        let align = body.machine().register_bytes.min(64);
         let spills = if id == root {
             0
         } else {
-            super::CHILD_SAVES.len() * 8
+            (super::CHILD_SAVES.len() * 8).next_multiple_of(align)
         };
         let spill_bytes = allocation
             .num_spillslots
@@ -79,7 +82,8 @@ pub(super) fn compile(
         };
         let debug_base = frame::sum([saves, root_saves])?;
         let scratch_base = frame::sum([debug_base, needs.debug.next_multiple_of(8)])?;
-        let bytes = frame::sum([scratch_base, needs.scratch.next_multiple_of(8)])?;
+        let bytes =
+            frame::sum([scratch_base, needs.scratch.next_multiple_of(8)])?.next_multiple_of(align);
         let peak = frame::sum([bytes, child_peak])?;
         Ok(Compiled {
             body,

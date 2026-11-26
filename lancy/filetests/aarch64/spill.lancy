@@ -1,0 +1,12 @@
+# A call clobbers every vector register, so the float values live across it
+# spill. Without vector values a register holds a 16-byte scalar, so the
+# spill is a Q access at any SVE width, not a full-width ST1B (A64-10).
+fn main(a:f64 b:f64 v:i32 fail:i32) -> f64
+  p = call_scratch 0 8
+  s = add a b
+  d = rust_call double p v p fail
+  u = add s a
+  ret u
+@aarch64 all lacks z.st1b
+@aarch64 all lacks z.ld1b
+@run 1.0 2.0 3 0 -> 4.0

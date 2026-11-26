@@ -538,7 +538,7 @@ impl TargetInst for Inst {
     }
     fn spillslot_size(config: &Config, class: RegClass) -> usize {
         if class == RegClass::Vector {
-            config.bytes / 8
+            config.register_bytes / 8
         } else {
             1
         }

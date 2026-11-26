@@ -595,7 +595,7 @@ impl TargetInst for Inst {
     fn clobbers(&self, machine: &Machine, details: &Details) -> PRegSet {
         let abi = machine.abi;
         // A wider value in a preserved vector register loses its upper lanes.
-        let wide = machine.cpu.bytes > 16;
+        let wide = machine.register_bytes > 16;
         let callee = || {
             let mut regs = abi.volatile | MASKS | abi.volatile_vectors;
             if wide {
@@ -659,7 +659,7 @@ impl TargetInst for Inst {
     }
     fn spillslot_size(machine: &Machine, class: RegClass) -> usize {
         if class == RegClass::Vector {
-            machine.cpu.bytes / 8
+            machine.register_bytes / 8
         } else {
             1
         }

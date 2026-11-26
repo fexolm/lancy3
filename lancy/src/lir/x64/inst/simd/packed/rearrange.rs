@@ -67,12 +67,11 @@ impl PairedShuffle {
                 }
             },
             _ => {
-                let label = a.create_label();
                 let mut bits = [0u8; 64];
                 for (i, word) in bits.chunks_exact_mut(4).enumerate() {
                     word.copy_from_slice(&(self.index(i, 16) as u32).to_le_bytes());
                 }
-                pool.push((label, bits, 64));
+                let label = pool.label(a, bits, 64);
                 load(a, SCRATCH, ptr(label), 64)?;
                 if dst == rhs && lhs != rhs {
                     a.vpermi2d(ZMM[SCRATCH], ZMM[lhs], ZMM[rhs])?;
@@ -97,8 +96,7 @@ fn lane_mask(
     temp: usize,
 ) -> Result {
     let x = XMM[SCRATCH];
-    let label = a.create_label();
-    pool.push((label, crate::lir::constants::iota_bytes(Lane::I32, 16), 16));
+    let label = pool.label(a, crate::lir::constants::iota_bytes(Lane::I32, 16), 16);
     a.movdqu(XMM[temp], xmmword_ptr(label))?;
     a.movd(x, emit::R32[index])?;
     a.pshufd(x, x, 0)?;
@@ -169,12 +167,11 @@ pub(in crate::lir::x64) fn insert_dword(
         a.por(x, t)?;
         return a.movaps(XMM[dst], x);
     }
-    let label = a.create_label();
-    pool.push((
-        label,
+    let label = pool.label(
+        a,
         crate::lir::constants::iota_bytes(Lane::I32, width),
         width,
-    ));
+    );
     if width == 32 {
         let scratch = YMM[SCRATCH];
         let temp = temp.unwrap();

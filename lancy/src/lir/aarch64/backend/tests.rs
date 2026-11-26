@@ -17,6 +17,18 @@ const ENCODINGS: &[(&str, u32, u32)] = &[
     ("sdiv", 0x7fe0_fc00, 0x1ac0_0c00),
     ("rorv", 0x7fe0_fc00, 0x1ac0_2c00),
     ("bl", 0xfc00_0000, 0x9400_0000),
+    ("add.x29.sp.24", 0xffff_ffff, 0x9100_63fd),
+    ("cbz.w", 0xff00_0000, 0x3400_0000),
+    ("cbnz.w", 0xff00_0000, 0x3500_0000),
+    ("v.fminnm", 0xbfa0_fc00, 0x0ea0_c400),
+    ("v.fmaxnm", 0xbfa0_fc00, 0x0e20_c400),
+    ("z.fminnm", 0xff3f_e000, 0x6505_8000),
+    ("z.fmaxnm", 0xff3f_e000, 0x6504_8000),
+    ("fmov.x.d", 0xffff_fc00, 0x9e66_0000),
+    ("fcmp", 0xff20_fc07, 0x1e20_2000),
+    ("z.lastb", 0xff3f_e000, 0x0521_a000),
+    ("z.ld1b", 0xfff0_e000, 0xa400_a000),
+    ("z.st1b", 0xfff0_e000, 0xe400_e000),
     ("blr", 0xffff_fc1f, 0xd63f_0000),
     ("add.w", 0xffe0_fc00, 0x0b00_0000),
     ("sub.w", 0xffe0_fc00, 0x4b00_0000),
@@ -97,3 +109,38 @@ fn encoding_names_are_unique_and_values_fit_their_masks() {
 // Executing AArch64 code needs an AArch64 host.
 #[cfg(target_arch = "aarch64")]
 mod runtime;
+
+/// A conditional branch reaches ±1 MiB. Beyond that the assembler reports
+/// that the code needs long branches, and with them inverts the condition
+/// over an unconditional `B` (A64-07).
+#[test]
+fn far_conditional_branches_relax_to_an_inverted_skip_over_b() {
+    use super::{Assembler, C, Cond, R};
+    use splice_target::Profile;
+    let assemble = |long| {
+        let mut a = Assembler::new(Profile::Neon, long);
+        let target = a.label();
+        a.jump_if(Cond::Eq, target).unwrap();
+        a.jump_if_zero(true, R::W3, target).unwrap();
+        for _ in 0..(1 << 18) {
+            a.put(C::Nop_HI_hints, &[]).unwrap();
+        }
+        a.bind(target);
+        a.put(C::Nop_HI_hints, &[]).unwrap();
+        a.finish().unwrap()
+    };
+    assert!(assemble(false).is_none());
+    let code = assemble(true).unwrap();
+    let words: Vec<u32> = code
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|w| u32::from_le_bytes(*w))
+        .take(4)
+        .collect();
+    // b.ne +8; b target; cbnz w3, +8; b target
+    assert_eq!(words[0], 0x5400_0041);
+    assert_eq!(words[1] & 0xfc00_0000, 0x1400_0000);
+    assert_eq!(words[2], 0x3500_0043);
+    assert_eq!(words[3] & 0xfc00_0000, 0x1400_0000);
+}

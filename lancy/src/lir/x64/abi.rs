@@ -145,6 +145,9 @@ impl Cpu {
 pub(crate) struct Machine {
     pub cpu: Cpu,
     pub abi: &'static Abi,
+    /// The widest value a vector register holds in the function: spills
+    /// and moves of the `Vector` class use this width (X64-08).
+    pub register_bytes: usize,
 }
 
 impl Machine {
@@ -154,6 +157,7 @@ impl Machine {
             .expect("x64 code generation for an x86-64 target");
         Self {
             cpu: Cpu::new(target.vector_bytes(), isa),
+            register_bytes: target.vector_bytes(),
             abi: match target.calling_convention() {
                 CallingConvention::Win64 => &WIN64,
                 _ => &SYSV,

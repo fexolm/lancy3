@@ -2,6 +2,7 @@ mod kernel;
 mod memory;
 #[cfg(all(test, target_arch = "x86_64"))]
 pub(crate) mod packed_test;
+mod workspace;
 
 pub use kernel::ScalarKernel;
 

@@ -44,6 +44,9 @@ use splice_target::Profile;
 pub(crate) struct Config {
     pub profile: Profile,
     pub bytes: usize,
+    /// The widest value a vector register holds in the function: spills
+    /// and moves of the `Vector` class use this width (A64-10).
+    pub register_bytes: usize,
 }
 
 impl Config {
@@ -61,15 +64,20 @@ impl Config {
         Self {
             profile,
             bytes: target.vector_bytes(),
+            register_bytes: target.vector_bytes(),
         }
     }
 }
 
-// Status pointer and eight result words.
-const ROOT_BYTES: usize = 9 * 8;
-const ROOT_SAVES: [u8; 4] = [19, 20, 22, 30];
+// Status pointer and eight result words, padded to a cache line so that
+// every frame starts aligned (A64-10).
+const ROOT_BYTES: usize = 128;
+// X29 and X30 are adjacent so that they form the AAPCS64 frame record that
+// frame-pointer unwinders follow through the root (A64-17).
+const ROOT_SAVES: [u8; 5] = [19, 20, 22, 29, 30];
+const FRAME_RECORD: usize = 3 * 8;
 const CHILD_SAVES: [u8; 3] = [19, 22, 30];
-const HOST_STACK_BYTES: u64 = 32;
+const HOST_STACK_BYTES: u64 = 48;
 const RESULT: (R, usize) = (R::X20, 8);
 
 type Result<T = ()> = std::result::Result<T, CompileError>;
@@ -104,7 +112,12 @@ fn allocatable(reg: R) -> Option<PReg> {
 struct Assembler {
     words: Vec<u32>,
     labels: Vec<Option<u64>>,
-    fixups: Vec<(usize, C, Label)>,
+    /// Branch word, its code, the operand before the target (a condition or
+    /// a register) and the target.
+    fixups: Vec<(usize, C, Option<O>, Label)>,
+    /// Conditional branches reach ±1 MiB. Code that is larger is emitted
+    /// again with each one as a short inverted branch over a `B` (A64-07).
+    long_branches: bool,
     /// The extensions selection may use.
     features: super::FeatureSet,
     /// In debug builds, while one instruction is emitted: the allocatable
@@ -113,13 +126,14 @@ struct Assembler {
 }
 
 impl Assembler {
-    fn new(profile: Profile) -> Self {
+    fn new(profile: Profile, long_branches: bool) -> Self {
         use super::{Feature, FeatureSet};
         let base = FeatureSet::NONE.with(Feature::Neon);
         Self {
             words: Vec::new(),
             labels: Vec::new(),
             fixups: Vec::new(),
+            long_branches,
             writable: None,
             features: match profile {
                 Profile::Sve2 => base.with(Feature::Sve2),
@@ -175,13 +189,30 @@ impl Assembler {
         self.labels[label] = Some(self.words.len() as u64 * 4);
     }
 
-    fn branch(&mut self, code: C, label: Label) {
-        self.fixups.push((self.words.len(), code, label));
+    fn branch(&mut self, code: C, operand: Option<O>, label: Label) {
+        self.fixups.push((self.words.len(), code, operand, label));
         self.words.push(0);
     }
 
     fn jump(&mut self, label: Label) {
-        self.branch(C::B_only_branch_imm, label);
+        self.branch(C::B_only_branch_imm, None, label);
+    }
+
+    /// Branch to `label` when the 32-bit register `reg` is zero, or nonzero.
+    fn jump_if_zero(&mut self, zero: bool, reg: R, label: Label) -> Result {
+        let (short, inverse) = if zero {
+            (C::Cbz_32_compbranch, C::Cbnz_32_compbranch)
+        } else {
+            (C::Cbnz_32_compbranch, C::Cbz_32_compbranch)
+        };
+        if self.long_branches {
+            let skip = O::label(self.words.len() as u64 * 4 + 8);
+            self.put(inverse, &[O::reg(reg), skip])?;
+            self.jump(label);
+        } else {
+            self.branch(short, Some(O::reg(reg)), label);
+        }
+        Ok(())
     }
 
     fn skip_if(&mut self, cond: Cond) -> Result {
@@ -192,16 +223,32 @@ impl Assembler {
     }
 
     fn jump_if(&mut self, cond: Cond, label: Label) -> Result {
-        self.skip_if(invert(cond))?;
-        self.jump(label);
+        if self.long_branches {
+            self.skip_if(invert(cond))?;
+            self.jump(label);
+        } else {
+            self.branch(C::B_only_condbranch, Some(O::cond(cond)), label);
+        }
         Ok(())
     }
 
-    fn finish(mut self) -> Result<Vec<u8>> {
-        for (at, code, label) in self.fixups {
+    /// The code, or `None` when a conditional branch is out of range and the
+    /// code needs `long_branches`.
+    fn finish(mut self) -> Result<Option<Vec<u8>>> {
+        for (at, code, operand, label) in self.fixups {
             let target = self.labels[label].expect("branch target emitted");
             let pc = at as u64 * 4;
-            self.words[at] = code.encode(&[O::label(target)], pc).map_err(|error| {
+            let operands: &[O] = match operand {
+                Some(operand) => &[operand, O::label(target)],
+                None => &[O::label(target)],
+            };
+            let encoded = code.encode(operands, pc);
+            if !matches!(code, C::B_only_branch_imm | C::Bl_only_branch_imm)
+                && matches!(encoded, Err(super::EncodeError::Branch { .. }))
+            {
+                return Ok(None);
+            }
+            self.words[at] = encoded.map_err(|error| {
                 if matches!(error, super::EncodeError::Branch { .. }) {
                     CompileError::from(crate::Limit::BranchRange {
                         offset: pc as usize,
@@ -212,7 +259,9 @@ impl Assembler {
                 }
             })?;
         }
-        Ok(self.words.into_iter().flat_map(u32::to_le_bytes).collect())
+        Ok(Some(
+            self.words.into_iter().flat_map(u32::to_le_bytes).collect(),
+        ))
     }
 
     fn imm(&mut self, dst: R, value: u64) -> Result {
@@ -318,32 +367,27 @@ impl Emitter<'_> {
     fn check_status(&mut self) -> Result {
         self.a.access(true, 8, 10, (R::X20, 0))?;
         self.a.access(true, 4, 9, (R::X10, 0))?;
-        self.a.put(
-            C::Subs_32_addsub_imm,
-            &[O::reg(R::WZR), O::reg(R::W9), O::imm(0)],
-        )?;
-        self.a.skip_if(Cond::Eq)?;
-        self.a.jump(self.epilogue);
-        Ok(())
+        self.a.jump_if_zero(false, R::W9, self.epilogue)
     }
 
     fn trap_if(&mut self, cond: Cond, trap: Trap) -> Result {
-        self.a.skip_if(invert(cond))?;
-        self.trap(trap);
-        Ok(())
+        let exit = self.trap_exit(trap);
+        self.a.jump_if(cond, exit)
     }
 
     fn trap(&mut self, trap: Trap) {
-        let exit = *self.failures[trap.code() as usize - 1].get_or_insert_with(|| self.a.label());
+        let exit = self.trap_exit(trap);
         self.a.jump(exit);
+    }
+
+    fn trap_exit(&mut self, trap: Trap) -> Label {
+        *self.failures[trap.code() as usize - 1].get_or_insert_with(|| self.a.label())
     }
 
     /// Trap with the code a Rust entry or runtime helper left in W16.
     fn report_if(&mut self, cond: Cond) -> Result {
         let report = *self.report.get_or_insert_with(|| self.a.label());
-        self.a.skip_if(invert(cond))?;
-        self.a.jump(report);
-        Ok(())
+        self.a.jump_if(cond, report)
     }
 
     fn traps(&mut self) -> Result {
@@ -414,7 +458,7 @@ impl Emitter<'_> {
             return Ok(());
         }
         if to.class() == RegClass::Vector {
-            self.copy_vec(d, s, self.config.bytes > 16)
+            self.copy_vec(d, s, self.config.register_bytes > 16)
         } else {
             self.a.put(
                 C::Orr_64_log_shift,
@@ -451,7 +495,7 @@ impl Emitter<'_> {
             (Some(s), Some(d)) => self.move_regs(s, d),
             (Some(s), None) => {
                 let size = if s.class() == RegClass::Vector {
-                    self.config.bytes
+                    self.config.register_bytes
                 } else {
                     8
                 };
@@ -459,7 +503,7 @@ impl Emitter<'_> {
             }
             (None, Some(d)) => {
                 let size = if d.class() == RegClass::Vector {
-                    self.config.bytes
+                    self.config.register_bytes
                 } else {
                     8
                 };
@@ -764,7 +808,8 @@ impl Emitter<'_> {
             Inst::Call(target, ..) => {
                 self.a.addr(R::X0, R::X19, self.frame.outgoing)?;
                 self.a.addr(R::X1, R::X19, self.frame.bytes)?;
-                self.a.branch(C::Bl_only_branch_imm, self.entries[target]);
+                self.a
+                    .branch(C::Bl_only_branch_imm, None, self.entries[target]);
                 self.byte_predicate = false;
                 self.check_status()
             }
@@ -782,15 +827,12 @@ impl Emitter<'_> {
                 Ok(())
             }
             Inst::Branch(cond) => {
-                self.a.put(
-                    C::Subs_32_addsub_imm,
-                    &[r(R::WZR), r(word(cond)), O::imm(0)],
-                )?;
                 let [yes, no] = [succs[0], succs[1]];
                 if Some(yes) == next {
-                    self.a.jump_if(Cond::Eq, labels[no.index()])
+                    self.a.jump_if_zero(true, word(cond), labels[no.index()])
                 } else {
-                    self.a.jump_if(Cond::Ne, labels[yes.index()])?;
+                    self.a
+                        .jump_if_zero(false, word(cond), labels[yes.index()])?;
                     if Some(no) != next {
                         self.a.jump(labels[no.index()]);
                     }
@@ -803,7 +845,12 @@ impl Emitter<'_> {
                 } else if root && matches!(ty, Type::F32 | Type::F64) {
                     self.float_move(ty, false, n(v), 0)?;
                 }
-                self.a.jump(self.epilogue);
+                // The epilogue follows the last block unless trap exits
+                // come between them.
+                let exits = self.report.is_some() || self.failures.iter().any(Option::is_some);
+                if next.is_some() || exits {
+                    self.a.jump(self.epilogue);
+                }
                 Ok(())
             }
         }
@@ -849,15 +896,23 @@ pub(crate) fn emit(
     let module = compile(source, config, stages)?;
     let root = &module.functions[module.call_graph.root()].body;
     stages(Stage::Layout(&|| crate::lir::layout::listing(root)));
-    let code = emit_compiled(&module, config, debug)?;
+    let code = match emit_compiled(&module, config, debug, false)? {
+        Some(code) => code,
+        None => emit_compiled(&module, config, debug, true)?.expect("long branches reach"),
+    };
     stages(Stage::Assemble(&code.bytes));
     Ok(code)
 }
 
-fn emit_compiled(module: &Module<Compiled>, config: Config, debug: bool) -> Result<Code> {
+fn emit_compiled(
+    module: &Module<Compiled>,
+    config: Config,
+    debug: bool,
+    long_branches: bool,
+) -> Result<Option<Code>> {
     let _span = tracing::debug_span!(target: "lancy::compile", "emit_machine_code").entered();
     let root = module.call_graph.root();
-    let mut a = Assembler::new(config.profile);
+    let mut a = Assembler::new(config.profile, long_branches);
     let mut sites = crate::lir::fallback::Sites::default();
     let mut debug_functions = Vec::new();
     let entries = DenseMap::from_fn(module.functions.len(), |_| a.label());
@@ -887,6 +942,7 @@ fn emit_compiled(module: &Module<Compiled>, config: Config, debug: bool) -> Resu
             a.access(false, 8, reg, (save_base, i * 8))?;
         }
         if entry {
+            a.addr(R::X29, R::SP, FRAME_RECORD)?;
             a.addr(R::X20, R::X1, 0)?;
             a.addr(R::X19, R::X1, ROOT_BYTES)?;
             for (i, reg) in machine.written.into_iter().enumerate() {
@@ -909,7 +965,7 @@ fn emit_compiled(module: &Module<Compiled>, config: Config, debug: bool) -> Resu
             frame: &machine.frame,
             sites: &mut sites,
             entries: &entries,
-            config,
+            config: *machine.body.machine(),
             epilogue,
             byte_predicate: false,
             failures: [None; Trap::ALL.len()],
@@ -1004,10 +1060,13 @@ fn emit_compiled(module: &Module<Compiled>, config: Config, debug: bool) -> Resu
     let bytes = ROOT_BYTES
         .checked_add(module.functions[root].peak)
         .ok_or(CompileError::Unsupported(crate::Limit::Frame))?;
-    Ok(Code {
-        bytes: a.finish()?,
+    let Some(bytes_out) = a.finish()? else {
+        return Ok(None);
+    };
+    Ok(Some(Code {
+        bytes: bytes_out,
         words: bytes / 8,
         sites,
         debug: debug_functions,
-    })
+    }))
 }

@@ -7,7 +7,7 @@ use super::{Machine, inst::Inst};
 use crate::lir::frame::argument_words;
 use crate::{
     CompileError,
-    hir::{Call, ssa::VerifiedBody, transforms::canonical},
+    hir::{Call, Type, ssa::VerifiedBody, transforms::canonical},
     lir::{
         self,
         isel::{self, Edges},
@@ -36,6 +36,13 @@ pub(super) fn select(
     };
     let (f, cfg) = (source.function, &source.cfg);
     let reg = |v| masks.reg(f, v);
+    // Without vector values, a vector register holds at most a 16-byte
+    // scalar, so its spills and moves need not cover the whole register.
+    let vectors = f.value_types().iter().any(|t| matches!(t, Type::Vector(_)));
+    let machine = Machine {
+        register_bytes: if vectors { cpu.bytes } else { 16 },
+        ..machine
+    };
     let edges = Edges::new(source);
     let mut body = edges.function(machine)?;
     let mut blocks = isel::select(f, cfg, |ctx, root, out| {

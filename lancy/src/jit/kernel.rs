@@ -199,13 +199,16 @@ impl ScalarKernel {
             return Err(CallError::Signature(SignatureError::PointerSignature));
         }
         self.check_arity(args.len())?;
-        let mut scratch = vec![MaybeUninit::<u64>::uninit(); self.words + args.len()];
-        let (workspace, packed) = scratch.split_at_mut(self.words);
-        for (slot, &arg) in packed.iter_mut().zip(args) {
-            slot.write(arg as u32 as u64);
-        }
-        // SAFETY: all ABI arguments are initialized integers. HIR has no integer-to-pointer casts.
-        unsafe { self.invoke(packed.as_ptr().cast(), workspace) }.map(|value| value as i32)
+        super::workspace::with(self.words + args.len(), |scratch| {
+            let (workspace, packed) = scratch.split_at_mut(self.words);
+            for (slot, &arg) in packed.iter_mut().zip(args) {
+                slot.write(arg as u32 as u64);
+            }
+            // SAFETY: all ABI arguments are initialized integers. HIR has no
+            // integer-to-pointer casts.
+            unsafe { self.invoke(packed.as_ptr().cast(), workspace) }
+        })
+        .map(|value| value as i32)
     }
 
     /// Invoke the typed kernel with one native word per argument. I32 uses the low 32 bits.
@@ -225,9 +228,10 @@ impl ScalarKernel {
             return Err(CallError::Signature(SignatureError::WideSignature));
         }
         self.check_arity(args.len())?;
-        let mut workspace = vec![MaybeUninit::<u64>::uninit(); self.words];
         // SAFETY: the caller supplies valid memory for every external access.
-        unsafe { self.invoke(args.as_ptr(), &mut workspace) }
+        super::workspace::with(self.words, |workspace| unsafe {
+            self.invoke(args.as_ptr(), workspace)
+        })
     }
 
     /// Invoke a numeric signature. Values occupy consecutive little-endian words,
@@ -256,18 +260,21 @@ impl ScalarKernel {
                 actual: result.len(),
             }));
         }
-        let mut workspace = vec![MaybeUninit::<u64>::uninit(); self.words];
-        // SAFETY: the sizes match the compiled ABI and the caller covers pointer validity.
-        let low = unsafe { self.invoke(args.as_ptr(), &mut workspace) }?;
-        if self.result_words == 1 {
-            result[0] = low;
-        } else {
-            for (dst, slot) in result.iter_mut().zip(&workspace[1..]) {
-                // SAFETY: a successful wide root return writes every result byte at root[1].
-                *dst = unsafe { slot.assume_init() };
+        super::workspace::with(self.words, |workspace| {
+            // SAFETY: the sizes match the compiled ABI and the caller covers
+            // pointer validity.
+            let low = unsafe { self.invoke(args.as_ptr(), workspace) }?;
+            if self.result_words == 1 {
+                result[0] = low;
+            } else {
+                for (dst, slot) in result.iter_mut().zip(&workspace[1..]) {
+                    // SAFETY: a successful wide root return writes every
+                    // result byte at root[1].
+                    *dst = unsafe { slot.assume_init() };
+                }
             }
-        }
-        Ok(())
+            Ok(())
+        })
     }
 
     fn check_arity(&self, count: usize) -> Result<(), CallError> {

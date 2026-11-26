@@ -250,6 +250,10 @@ impl Function {
     pub fn value_count(&self) -> usize {
         self.types.len()
     }
+    /// The type of every value, indexed by `Value`.
+    pub(crate) fn value_types(&self) -> &[Type] {
+        self.types.as_slice()
+    }
     /// Number of block IDs issued, including blocks retired by a merge.
     pub fn block_capacity(&self) -> usize {
         self.blocks.slot_count()

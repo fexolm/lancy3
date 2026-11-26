@@ -101,21 +101,18 @@ pub(super) fn host_supports(feature: Isa) -> bool {
 // that pool lands at the wrapper's first store. Only the prefix is executable.
 pub(super) fn body(op: simd::Native, regs: &[usize]) -> (Vec<u8>, usize) {
     let mut a = CodeAssembler::new(64).unwrap();
-    let mut pool = Vec::new();
+    let mut pool = crate::lir::x64::emit::Constants::default();
     let temps: Vec<_> = (6..15)
         .filter(|r| !regs.contains(r))
         .take(op.temporaries())
         .collect();
     assert_eq!(temps.len(), op.temporaries());
     op.emit_allocated(&mut a, regs, &temps, &mut pool).unwrap();
-    let data_len: usize = pool.iter().map(|(_, _, n)| n).sum();
+    let mut data_len = 0;
     if !pool.is_empty() {
         let done = a.create_label();
         a.jmp(done).unwrap();
-        for (label, bits, len) in pool {
-            bind(&mut a, label).unwrap();
-            a.db(&bits[..len]).unwrap();
-        }
+        data_len = pool.emit(&mut a).unwrap();
         bind(&mut a, done).unwrap();
     }
     let bytes = a.assemble(0).unwrap();
