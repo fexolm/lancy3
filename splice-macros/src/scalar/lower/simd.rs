@@ -402,10 +402,21 @@ impl Lower<'_> {
             syn::BinOp::BitAnd(_) => "And",
             syn::BinOp::BitOr(_) => "Or",
             syn::BinOp::BitXor(_) => "Xor",
-            _ => {
+            syn::BinOp::Eq(_)
+            | syn::BinOp::Ne(_)
+            | syn::BinOp::Lt(_)
+            | syn::BinOp::Le(_)
+            | syn::BinOp::Gt(_)
+            | syn::BinOp::Ge(_) => {
                 return err(
                     op,
                     "use simd_eq/lt/le/gt/ge/ne for element-wise comparisons",
+                );
+            }
+            _ => {
+                return err(
+                    op,
+                    "a kernel supports +, -, *, /, &, | and ^ on SIMD vectors",
                 );
             }
         };

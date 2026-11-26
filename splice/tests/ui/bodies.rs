@@ -21,4 +21,12 @@ fn untyped_splat(out: &mut [i32]) -> i32 {
     0
 }
 
+// MAC-24: an unsupported vector operator is not a comparison.
+#[kernel]
+fn vector_remainder(xs: &[i32], out: &mut [i32]) -> i32 {
+    let v = Lane::<i32>::load(xs, 0);
+    (v % v).store(out, 0);
+    0
+}
+
 fn main() {}
