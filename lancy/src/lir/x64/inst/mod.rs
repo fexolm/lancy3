@@ -159,6 +159,12 @@ pub(super) enum SelectCond {
     Compare(Cond, VReg, Rhs),
 }
 
+/// A scalar integer narrower than its register holds its value in the low
+/// `size` bytes only; the upper bits are undefined. Producers leave whatever
+/// is convenient there (a signed `Cast` sign-extends, a load zero-extends,
+/// `IntBinary` keeps the carry-out), and every consumer reads just the low
+/// bytes: a narrow store, a `Cast` through `movsx`/`movzx`, lanes inserted
+/// by size, and a root return the caller truncates to the result type.
 #[derive(Clone, Copy, Debug)]
 pub(super) enum Inst {
     Argv(VReg),

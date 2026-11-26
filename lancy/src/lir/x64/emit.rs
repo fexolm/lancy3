@@ -690,6 +690,7 @@ impl Emitter<'_> {
                         }
                     };
                 }
+                // Narrow results keep the carry-out above their size (see `Inst`).
                 match op {
                     Binary::Add => integer!(add),
                     Binary::Sub => integer!(sub),
@@ -698,11 +699,6 @@ impl Emitter<'_> {
                     Binary::Or => integer!(or),
                     Binary::Xor => integer!(xor),
                     _ => unreachable!(),
-                }?;
-                match size {
-                    1 => a.movzx(r(dst), R8[reg(dst)]),
-                    2 => a.movzx(r(dst), R16[reg(dst)]),
-                    _ => Ok(()),
                 }
             }
             Inst::Imm(dst, n) => a.mov(r(dst), n),
