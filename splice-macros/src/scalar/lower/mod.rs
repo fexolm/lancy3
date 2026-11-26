@@ -10,6 +10,7 @@ pub(crate) use comptime::uses_stage_requirements;
 pub(super) use context::Context;
 mod host;
 use host::guarded_negation;
+pub(crate) use host::overflow_prologue;
 mod memory;
 mod owned;
 pub(super) mod simd;
@@ -319,23 +320,19 @@ impl Lower<'_> {
         let Some(checked) = checked_operator(op) else {
             return self.bin(op, x, y);
         };
-        match crate::overflow::explicit_mode() {
-            Some(mode) => self.bin(if mode { checked } else { op }, x, y),
-            None => {
-                let root = self.root;
-                let op = Ident::new(op, proc_macro2::Span::call_site());
-                let checked = Ident::new(checked, proc_macro2::Span::call_site());
-                emit!({
-                    let (a, b) = (#x, #y);
-                    let op = if ::core::cfg!(debug_assertions) {
-                        #root::hir::Binary::#checked
-                    } else {
-                        #root::hir::Binary::#op
-                    };
-                    __splice_builder.binary(op, a, b)?
-                })
-            }
-        }
+        let root = self.root;
+        let op = Ident::new(op, proc_macro2::Span::call_site());
+        let checked = Ident::new(checked, proc_macro2::Span::call_site());
+        let checks = host::kernel_overflow_checks();
+        emit!({
+            let (a, b) = (#x, #y);
+            let op = if #checks {
+                #root::hir::Binary::#checked
+            } else {
+                #root::hir::Binary::#op
+            };
+            __splice_builder.binary(op, a, b)?
+        })
     }
     fn stage_join(&self, a: Stage, z: Stage, at: impl ToTokens) -> Result<Stage> {
         use Stage::*;
@@ -472,17 +469,29 @@ impl Lower<'_> {
             return TokenStream::new();
         }
         let root = self.root;
-        let (file, line, column) = if proc_macro::is_available() {
+        let (file, directory, line, column) = if proc_macro::is_available() {
             let source = span.unwrap();
-            (source.file(), source.line() as u32, source.column() as u32)
+            // rustc names a file relative to its working directory, which is
+            // also the directory of the compilation unit.
+            let directory = std::env::current_dir().unwrap_or_default();
+            let file = source.local_file().map_or_else(
+                || directory.join(source.file()),
+                |file| directory.join(file),
+            );
+            (
+                file.to_string_lossy().into_owned(),
+                directory.to_string_lossy().into_owned(),
+                source.line() as u32,
+                source.column() as u32,
+            )
         } else {
             // The macro's token-level unit tests run outside rustc's expansion context.
-            (String::new(), 0, 0)
+            (String::new(), String::new(), 0, 0)
         };
         let location = emit!(
             #root::debug::Location {
                 file: #file,
-                directory: ::core::env!("CARGO_MANIFEST_DIR"),
+                directory: #directory,
                 line: #line,
                 column: #column,
             }

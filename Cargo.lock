@@ -966,6 +966,7 @@ dependencies = [
  "splice-cranelift",
  "splice-lancy",
  "splice-llvm",
+ "splice-test-overflow",
  "splice-test-traits",
  "splice-testkit",
  "tracing",
@@ -1011,6 +1012,13 @@ dependencies = [
 [[package]]
 name = "splice-target"
 version = "0.1.0"
+
+[[package]]
+name = "splice-test-overflow"
+version = "0.0.0"
+dependencies = [
+ "splice-kernel",
+]
 
 [[package]]
 name = "splice-test-traits"

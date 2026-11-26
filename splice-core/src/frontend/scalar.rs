@@ -197,6 +197,58 @@ impl RunArg for Host<i32> {
     }
 }
 
+/// Whether the crate of `module` (a `module_path!()`) compiles Rust
+/// arithmetic with overflow checks.
+/// `probe` is `|value| value + 1` compiled in that crate, so it panics on
+/// `i32::MAX` exactly when the crate checks overflow. `unwind` and `profile`
+/// are the crate's `cfg!(panic = "unwind")` and `cfg!(debug_assertions)`:
+/// under `panic = "abort"` the probe cannot run and the profile decides
+/// (`BuildOptions::with_overflow_checks` overrides it for kernel code).
+/// The answer is computed once per crate name.
+#[doc(hidden)]
+pub fn overflow_checks(
+    module: &'static str,
+    probe: fn(i32) -> i32,
+    unwind: bool,
+    profile: bool,
+) -> bool {
+    use std::sync::Mutex;
+    static CRATES: Mutex<Vec<(&'static str, bool)>> = Mutex::new(Vec::new());
+    let krate = module.split("::").next().unwrap_or(module);
+    let mut crates = CRATES.lock().unwrap_or_else(|poison| poison.into_inner());
+    if let Some(&(_, checks)) = crates.iter().find(|(name, _)| *name == krate) {
+        return checks;
+    }
+    let checks = if unwind { panics(probe) } else { profile };
+    crates.push((krate, checks));
+    checks
+}
+
+/// Run `probe(i32::MAX)` and report whether it panicked. While it runs, this
+/// thread's panic is hidden from the panic hook; other threads still reach
+/// the hook that was installed, which is restored afterwards.
+fn panics(probe: fn(i32) -> i32) -> bool {
+    use std::panic;
+    use std::sync::Arc;
+    thread_local! {
+        static PROBING: Cell<bool> = const { Cell::new(false) };
+    }
+    let previous: Arc<dyn Fn(&panic::PanicHookInfo<'_>) + Send + Sync> =
+        Arc::from(panic::take_hook());
+    let delegate = Arc::clone(&previous);
+    panic::set_hook(Box::new(move |info| {
+        if !PROBING.get() {
+            delegate(info);
+        }
+    }));
+    PROBING.set(true);
+    let panicked = panic::catch_unwind(|| probe(std::hint::black_box(i32::MAX))).is_err();
+    PROBING.set(false);
+    drop(panic::take_hook());
+    panic::set_hook(Box::new(move |info| previous(info)));
+    panicked
+}
+
 /// A host integer operation on which Rust panics (or would panic with
 /// overflow checks). Kernels defer it: staged code traps when the operation
 /// is reached, and `comptime!` returns its trap as a build error.
@@ -539,5 +591,33 @@ impl ImportWord for () {
     }
     fn constant(self) -> Constant {
         0i32.into()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::overflow_checks;
+    use std::cell::Cell;
+
+    #[test]
+    fn the_overflow_probe_hides_only_its_own_panic_and_keeps_the_hook() {
+        thread_local! {
+            static HOOKED: Cell<usize> = const { Cell::new(0) };
+        }
+        let previous = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            HOOKED.set(HOOKED.get() + 1);
+            previous(info);
+        }));
+        let checked: fn(i32) -> i32 = |value| value.checked_add(1).expect("overflow");
+        let wrapping: fn(i32) -> i32 = |value| value.wrapping_add(1);
+        assert!(overflow_checks("checked::kernel", checked, true, false));
+        assert!(!overflow_checks("wrapping::kernel", wrapping, true, true));
+        // Without unwinding the profile decides; each crate is probed once.
+        assert!(overflow_checks("aborting::kernel", checked, false, true));
+        assert!(overflow_checks("checked::other", wrapping, true, false));
+        assert_eq!(HOOKED.get(), 0);
+        let _ = std::panic::catch_unwind(|| panic!("after the probe"));
+        assert_eq!(HOOKED.get(), 1);
     }
 }

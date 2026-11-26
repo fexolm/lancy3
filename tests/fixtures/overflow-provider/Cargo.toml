@@ -1,0 +1,8 @@
+[package]
+name = "splice-test-overflow"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+splice = { package = "splice-kernel", path = "../../../splice" }

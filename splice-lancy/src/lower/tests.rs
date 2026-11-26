@@ -5,7 +5,7 @@ mod simd;
 
 /// Stage `body` directly with the host vector width, as `Lancy::stage` does.
 fn build(signature: Signature<'_>, body: Body<'_>) -> splice_core::Result<Function> {
-    let body = splice_core::validate::validated(signature, body);
+    let body = splice_core::validate::validated(signature, body, None);
     stage(signature, body, options().target.vector_bytes(), None).map(|(function, _)| function)
 }
 

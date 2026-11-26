@@ -576,12 +576,43 @@ pub(super) fn operator_fault(
     Some((guard, division))
 }
 
-/// Whether to evaluate a fault guard: overflow follows the crate's
-/// overflow-check mode, while division faults in every mode.
+/// Whether to evaluate a fault guard: overflow follows the overflow-check
+/// mode of the kernel's crate (host code is native Rust there), while
+/// division faults in every mode.
 pub(super) fn fault_checks(division: bool) -> TokenStream {
     if division {
         emit!(true)
     } else {
-        crate::overflow::enabled()
+        emit!(__splice_overflow)
     }
+}
+
+/// Bind `__splice_overflow`, whether the kernel's crate compiles Rust
+/// arithmetic with overflow checks, at the start of a generated function.
+/// The probe is compiled in that crate, so it sees its real flags.
+pub(crate) fn overflow_prologue(root: &syn::Path) -> TokenStream {
+    emit! {
+        #[allow(unused_variables)]
+        let __splice_overflow: bool = {
+            fn probe(value: i32) -> i32 {
+                value + 1
+            }
+            #root::frontend::scalar::overflow_checks(
+                ::core::module_path!(),
+                probe,
+                ::core::cfg!(panic = "unwind"),
+                ::core::cfg!(debug_assertions),
+            )
+        };
+    }
+}
+
+/// Whether staged kernel arithmetic checks overflow: the build options'
+/// mode, or else the kernel crate's.
+pub(super) fn kernel_overflow_checks() -> TokenStream {
+    emit!(
+        __splice_builder
+            .overflow_checks()
+            .unwrap_or(__splice_overflow)
+    )
 }

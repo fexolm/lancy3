@@ -70,12 +70,14 @@ impl Lower<'_> {
                 ))
             )
         };
+        let overflow = super::overflow_prologue(root);
         Ok(emit! {
             #[doc(hidden)]
             #[allow(unused_variables,unreachable_code,clippy::type_complexity)]
             #vis fn #name #generics ((#(#names,)*): (#(::core::option::Option<#types>,)*))
                 -> #root::Result<#ty> #where_clause {
                 let _depth=#root::frontend::scalar::enter_expansion()?;
+                #overflow
                 #(#checks)*
                 ::core::result::Result::Ok(#body)
             }

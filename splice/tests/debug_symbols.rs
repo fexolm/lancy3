@@ -102,6 +102,13 @@ fn staging_preserves_names_types_and_locations_in_debug_only() {
             .iter()
             .all(|p| p.location.file.ends_with("debug_symbols.rs") && p.location.line > 10)
     );
+    // MAC-26: the file is this file's absolute path, whatever directory
+    // rustc ran in, so debuggers find it without a search.
+    let this_file = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/debug_symbols.rs");
+    assert!(points.iter().all(|p| {
+        let file = std::path::Path::new(p.location.file);
+        file.is_absolute() && file.canonicalize().ok() == this_file.canonicalize().ok()
+    }));
     assert!(points.iter().any(|p| {
         p.function_slots(&ir, ir.options().target.vector_bytes())
             .any(|slot| {

@@ -7,7 +7,7 @@ use gimli::{self as dw, Encoding, Format, LineEncoding, LittleEndian, Register};
 use splice_core::debug::{ConstantType, Location, Type};
 use splice_core::hir::ScalarType;
 use splice_core::simd::Element;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 pub(crate) const ENCODING: Encoding = Encoding {
     format: Format::Dwarf32,
@@ -15,18 +15,11 @@ pub(crate) const ENCODING: Encoding = Encoding {
     address_size: 8,
 };
 
+/// The file of a source location; a relative file is relative to its
+/// compilation directory.
 fn source_path(source: Location) -> String {
-    let file = Path::new(source.file);
-    if file.is_absolute() {
-        return source.file.replace('\\', "/");
-    }
-    let manifest = Path::new(source.directory);
-    // rustc can make file! relative to the workspace or to the package.
-    manifest
-        .ancestors()
-        .map(|dir| dir.join(file))
-        .find(|path| path.is_file())
-        .unwrap_or_else(|| PathBuf::from(source.directory).join(file))
+    Path::new(source.directory)
+        .join(source.file)
         .to_string_lossy()
         .replace('\\', "/")
 }

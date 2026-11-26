@@ -65,7 +65,7 @@ impl Lower<'_> {
         let plain = emit!(#root::hir::Binary::#variant);
         let op = if let Some(checked) = checked_operator(op) {
             let checked = Ident::new(checked, Span::call_site());
-            let enabled = crate::overflow::enabled();
+            let enabled = super::host::kernel_overflow_checks();
             emit!(if #enabled { #root::hir::Binary::#checked }else{#plain})
         } else {
             plain

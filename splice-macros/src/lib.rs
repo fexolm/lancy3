@@ -8,7 +8,6 @@ use syn::{
 mod comptime_key;
 mod declaration;
 mod import;
-mod overflow;
 mod scalar;
 
 /// Derive a value key for a struct or enum used as a specialization parameter.

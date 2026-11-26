@@ -69,6 +69,12 @@ pub trait KernelBuilder {
     fn debug_enabled(&self) -> bool {
         false
     }
+    /// The overflow mode the build options impose on kernel arithmetic, or
+    /// `None` when each kernel follows its crate (see
+    /// [`BuildOptions::overflow_checks`](crate::BuildOptions::overflow_checks)).
+    fn overflow_checks(&self) -> Option<bool> {
+        None
+    }
     fn debug_point(
         &mut self,
         _location: crate::debug::Location,
@@ -188,7 +194,7 @@ pub fn materialize(
 ) -> crate::Result<Function> {
     record(
         signature,
-        crate::validate::validated(signature, body),
+        crate::validate::validated(signature, body, options.overflow_checks),
         options,
     )
 }

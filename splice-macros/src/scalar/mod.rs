@@ -329,6 +329,7 @@ pub(super) fn expand(root: Path, native: &mut ItemFn) -> Result<TokenStream> {
     let owned_scope = lower.owned_scope(native);
     let debug_arguments = host_names.iter().map(|id| lower.capture_constant(id));
     let source_support = emit!(#root::frontend::source);
+    let overflow = lower::overflow_prologue(&root);
     let source_body = if context.is_some() {
         emit!(return ::core::result::Result::Err(#root::BuildError::staging("a Rust context kernel cannot be printed as Rust; inspect its portable IR with `ir()`"));)
     } else {
@@ -381,6 +382,7 @@ pub(super) fn expand(root: Path, native: &mut ItemFn) -> Result<TokenStream> {
             #[allow(unused_variables, unreachable_code)]
             fn __splice_print #outer_generic (#outer_host_decls __splice_source: &mut #source_support::Source) -> #root::Result<::std::string::String> #outer_where {
                 let _guard = #support::enter_expansion()?;
+                #overflow
                 let (id, name) = __splice_source.function(::core::stringify!(#name));
                 let transfer = __splice_source.transfer.take();
                 #source_layout
@@ -644,6 +646,7 @@ pub(super) fn expand(root: Path, native: &mut ItemFn) -> Result<TokenStream> {
             fn __splice_inline #outer_generic (#(#outer_call_decls,)* #context_decls __splice_builder:&mut #factory)
                 -> #root::Result<#hir::Reg> #outer_where {
                 let __splice_guard = #support::enter_expansion()?;
+                #overflow
                 let __splice_wants_debug = __splice_builder.debug_enabled();
                 let __splice_input_values: [::core::option::Option<#hir::Constant>; #arity] = [#(#support::RunArg::known(&#reg_names)),*];
                 #unpack

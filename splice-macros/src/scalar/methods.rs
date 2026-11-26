@@ -196,6 +196,7 @@ pub(crate) fn publish(
     let arity = scalar_args.len();
     let indices = 0..scalar_args.len();
     let debug_arguments = debug_host_args.iter().map(|id| lower.capture_constant(id));
+    let overflow = super::lower::overflow_prologue(root);
     let stage = emit! {
         #[doc(hidden)]
         #[allow(unreachable_code, clippy::too_many_arguments)]
@@ -203,6 +204,7 @@ pub(crate) fn publish(
             -> #root::Result<#hir::Reg> #where_
         {
             let __splice_guard = #support::enter_expansion()?;
+            #overflow
             let __splice_wants_debug = __splice_builder.debug_enabled();
             #(let #host_args = #support::KnownArg::require(#host_args)?;)*
             #(#debug_arguments)*

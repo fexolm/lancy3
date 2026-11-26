@@ -3,6 +3,8 @@
 use crate::hir::{Buffer, BufferKind, Function, Reg, ScalarType, ValueType};
 use crate::simd::Element;
 
+/// A point in a kernel's source. `#[kernel]` gives an absolute `file`; a
+/// relative one is relative to `directory`, the compilation directory.
 #[derive(Clone, Copy, Debug)]
 pub struct Location {
     pub file: &'static str,

@@ -15,9 +15,16 @@ use std::sync::Arc;
 const WORD: ValueType = ValueType::Scalar(ScalarType::I32);
 
 /// Check `body` as it stages and when it completes.
-pub fn validated<'a>(signature: Signature<'a>, body: Body<'a>) -> Body<'a> {
+/// `overflow_checks` is the build's overflow mode, passed on to nested
+/// bodies (see [`KernelBuilder::overflow_checks`]).
+pub fn validated<'a>(
+    signature: Signature<'a>,
+    body: Body<'a>,
+    overflow_checks: Option<bool>,
+) -> Body<'a> {
     Box::new(move |builder| {
         let mut validating = Validating::new(builder, signature)?;
+        validating.overflow_checks = overflow_checks;
         body(&mut validating)?;
         validating.finish()
     })
@@ -40,6 +47,7 @@ pub struct Validating<'a> {
     blocks: Vec<Block>,
     current: Option<usize>,
     pc: usize,
+    overflow_checks: Option<bool>,
 }
 
 #[derive(Clone, Copy)]
@@ -91,6 +99,7 @@ impl<'a> Validating<'a> {
             blocks: vec![Block::new()],
             current: Some(0),
             pc: 0,
+            overflow_checks: None,
         })
     }
 
@@ -314,6 +323,9 @@ impl KernelBuilder for Validating<'_> {
     fn debug_enabled(&self) -> bool {
         self.inner.debug_enabled()
     }
+    fn overflow_checks(&self) -> Option<bool> {
+        self.overflow_checks
+    }
     fn debug_point(
         &mut self,
         location: crate::debug::Location,
@@ -496,9 +508,12 @@ impl KernelBuilder for Validating<'_> {
         body: Body<'_>,
     ) -> Result<Reg> {
         self.call_arguments(signature, args, buffers)?;
-        let r = self
-            .inner
-            .call_kernel(signature, args, buffers, validated(signature, body))?;
+        let r = self.inner.call_kernel(
+            signature,
+            args,
+            buffers,
+            validated(signature, body, self.overflow_checks),
+        )?;
         Ok(self.value(args, r, ValueType::Scalar(signature.result)))
     }
     fn call_specialized(
@@ -511,9 +526,12 @@ impl KernelBuilder for Validating<'_> {
         let signature = key.signature();
         self.call_arguments(signature, args, buffers)?;
         let _staging = Staging::enter(&key)?;
-        let r = self
-            .inner
-            .call_specialized(key, args, buffers, validated(signature, body))?;
+        let r = self.inner.call_specialized(
+            key,
+            args,
+            buffers,
+            validated(signature, body, self.overflow_checks),
+        )?;
         Ok(self.value(args, r, ValueType::Scalar(signature.result)))
     }
     fn call_function(

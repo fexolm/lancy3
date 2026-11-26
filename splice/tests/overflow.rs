@@ -295,3 +295,80 @@ fn host_arithmetic_faults_are_deferred_for_every_integer_type() {
         splice_testkit::each_backend!(B => check_host_faults::<B>(options));
     }
 }
+
+// MAC-15: overflow checks follow the crate that compiles a kernel, as they do
+// for its Rust function, and `BuildOptions::with_overflow_checks` overrides
+// them for kernel code. The fixture crate checks overflow exactly when this
+// crate does not (see the workspace profiles).
+#[kernel]
+fn across_crates(a: i32, b: i32, c: i32) -> i32 {
+    splice_test_overflow::add(a, b) - c
+}
+
+fn check_crate_overflow<B: Codegen<Output: Executable>>(mode: Mode) {
+    use splice_test_overflow::{add, add_known};
+    let here = cfg!(debug_assertions);
+    let fixture = !here;
+    let wraps = |checks: bool, value: i32| {
+        if checks {
+            Err(CallError::Trap(Trap::Overflow))
+        } else {
+            Ok(value)
+        }
+    };
+    let options = BuildOptions::host(mode).unwrap();
+    for options in [
+        options,
+        options.with_overflow_checks(false),
+        options.with_overflow_checks(true),
+    ] {
+        let kernel = options.overflow_checks;
+        let codes = [
+            add::build_with_options::<B>(options, add::BuildArgs {}).unwrap(),
+            B::compile(&add::ir_with_options(options).unwrap()).unwrap(),
+        ];
+        for code in &codes {
+            let actual = code.call(add::CallArgs { a: i32::MAX, b: 1 });
+            assert_eq!(
+                actual,
+                wraps(kernel.unwrap_or(fixture), i32::MIN),
+                "{options:?}"
+            );
+        }
+        // Staging arithmetic is native Rust of the fixture crate.
+        let codes = [
+            add_known::build_with_options::<B>(options, add_known::BuildArgs { a: i32::MAX })
+                .unwrap(),
+            B::compile(&add_known::ir_with_options(options, i32::MAX).unwrap()).unwrap(),
+        ];
+        for code in &codes {
+            let actual = code.call(add_known::CallArgs { flag: true });
+            assert_eq!(actual, wraps(fixture, i32::MIN), "{options:?}");
+            assert_eq!(code.call(add_known::CallArgs { flag: false }), Ok(0));
+        }
+        let codes = [
+            across_crates::build_with_options::<B>(options, across_crates::BuildArgs {}).unwrap(),
+            B::compile(&across_crates::ir_with_options(options).unwrap()).unwrap(),
+        ];
+        for code in &codes {
+            let call = |a, b, c| code.call(across_crates::CallArgs { a, b, c });
+            assert_eq!(
+                call(i32::MAX, 1, 0),
+                wraps(kernel.unwrap_or(fixture), i32::MIN),
+                "{options:?}"
+            );
+            assert_eq!(
+                call(0, 0, i32::MIN),
+                wraps(kernel.unwrap_or(here), i32::MIN),
+                "{options:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn kernels_follow_the_overflow_checks_of_their_crate() {
+    for mode in [Mode::Release, Mode::Debug] {
+        splice_testkit::each_backend!(B => check_crate_overflow::<B>(mode));
+    }
+}

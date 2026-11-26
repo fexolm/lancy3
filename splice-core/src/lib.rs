@@ -75,11 +75,21 @@ impl Mode {
 pub struct BuildOptions {
     pub mode: Mode,
     pub target: Target,
+    /// Whether kernel arithmetic traps on overflow like Rust with
+    /// `-C overflow-checks`. `None` follows each kernel's crate: its
+    /// generated code probes how that crate compiles Rust arithmetic.
+    /// Arithmetic the kernel performs while staging is native Rust and
+    /// always follows its crate.
+    pub overflow_checks: Option<bool>,
 }
 
 impl BuildOptions {
     pub const fn new(mode: Mode, target: Target) -> Self {
-        Self { mode, target }
+        Self {
+            mode,
+            target,
+            overflow_checks: None,
+        }
     }
 
     /// The given mode for the target selected by `SPLICE_SIMD` on this machine.
@@ -93,6 +103,15 @@ impl BuildOptions {
 
     pub fn with_target(self, target: Target) -> Self {
         Self { target, ..self }
+    }
+
+    /// Trap (`true`) or wrap (`false`) on overflow in every kernel of the
+    /// build, whatever its crate's `-C overflow-checks`.
+    pub fn with_overflow_checks(self, overflow_checks: bool) -> Self {
+        Self {
+            overflow_checks: Some(overflow_checks),
+            ..self
+        }
     }
 
     pub fn debug(&self) -> bool {
@@ -142,7 +161,11 @@ pub trait Codegen: Backend {
         options: BuildOptions,
     ) -> Result<Self::Output> {
         let _span = tracing::debug_span!(target: "splice::compile", "build", backend = std::any::type_name::<Self>()).entered();
-        Self::stage(signature, validate::validated(signature, body), options)
+        Self::stage(
+            signature,
+            validate::validated(signature, body, options.overflow_checks),
+            options,
+        )
     }
 }
 
