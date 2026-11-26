@@ -801,3 +801,47 @@ fn published_and_ordinary_methods_preserve_shared_slice_arguments() {
 
     splice_testkit::each_backend!(B => check::<B>(&ir));
 }
+
+#[kernel]
+fn comptime_word(totals: &mut Totals, #[comptime] scale: i32, enabled: bool) -> i32 {
+    totals.record_words(scale, enabled, 2, 3)
+}
+
+// The kernel's parameter and the local that shadows it are the same token,
+// so they share a span; the local is a `bool`, not the `i32` parameter.
+macro_rules! shadowed_comptime_word {
+    ($scale:ident) => {
+        #[kernel]
+        fn shadowed_comptime_word(totals: &mut Totals, #[comptime] $scale: i32) -> i32 {
+            let $scale = $scale > 0;
+            totals.record_words(1, $scale, 2, 3)
+        }
+    };
+}
+shadowed_comptime_word!(scale);
+
+/// MAC-18: a comptime parameter reaches a Rust operation as a word; a local
+/// that shadows it is resolved to its own declaration, not to the parameter
+/// with the same name and span.
+#[test]
+fn opaque_operations_resolve_comptime_parameters_by_declaration() {
+    fn check<B: Codegen<Output: Executable>>() {
+        let code = comptime_word::build::<B>(comptime_word::BuildArgs { scale: 4 }).unwrap();
+        let mut totals = Totals::default();
+        let result = code.call(comptime_word::CallArgs {
+            totals: &mut totals,
+            enabled: true,
+        });
+        assert_eq!(result, Ok(Totals::default().record_words(4, true, 2, 3)));
+        assert_eq!(totals.count.operands, [423]);
+        let error =
+            shadowed_comptime_word::build::<B>(shadowed_comptime_word::BuildArgs { scale: 4 })
+                .err()
+                .expect("a shadowing local is not the parameter's word");
+        assert!(
+            error.to_string().contains("materializable operands"),
+            "{error}"
+        );
+    }
+    splice_testkit::each_backend!(B => check::<B>());
+}

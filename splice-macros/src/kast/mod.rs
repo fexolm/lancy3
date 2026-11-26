@@ -48,6 +48,7 @@ enum Origin {
 
 #[derive(Debug)]
 struct Decl {
+    name: Ident,
     origin: Origin,
 }
 
@@ -131,6 +132,12 @@ impl<'a> Body<'a> {
     /// parameter or a local rather than an item.
     fn decl_of(&self, path: &ExprPath) -> Option<DeclId> {
         self.ids.uses.get(&address(path)).copied()
+    }
+
+    /// The parameter a path names, unless a local of the body shadows it.
+    pub(crate) fn parameter(&self, path: &ExprPath) -> Option<&Ident> {
+        let decl = self.decl(self.decl_of(path)?);
+        matches!(decl.origin, Origin::Param(_)).then_some(&decl.name)
     }
 
     /// Whether the generator must keep the local `let` as an IR register:

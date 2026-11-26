@@ -62,25 +62,13 @@ impl Context {
         self.hosts.push((name, kind));
     }
 
-    fn host_kind(&self, name: &Ident, lower: &Lower<'_>) -> Option<Scalar> {
-        let current = lower.debug_names.get(&name.to_string())?;
-        self.hosts.iter().find_map(|(parameter, kind)| {
-            if parameter != current {
-                return None;
-            }
-            // A local can shadow the parameter name and carry a different
-            // Rust type. Use the binding declaration, not the use-site span.
-            if proc_macro::is_available() {
-                let parameter = parameter.span().unwrap();
-                let current = current.span().unwrap();
-                if (parameter.file(), parameter.line(), parameter.column())
-                    != (current.file(), current.line(), current.column())
-                {
-                    return None;
-                }
-            }
-            Some(*kind)
-        })
+    /// The scalar kind of the comptime parameter `path` names. A local
+    /// that shadows the parameter can carry another Rust type.
+    fn host_kind(&self, path: &ExprPath, lower: &Lower<'_>) -> Option<Scalar> {
+        let parameter = lower.body.parameter(path)?;
+        self.hosts
+            .iter()
+            .find_map(|(name, kind)| (name == parameter).then_some(*kind))
     }
 
     pub(in crate::scalar) fn signature(&self, root: &Path) -> TokenStream {
@@ -643,7 +631,7 @@ impl Visit<'_> for Captures<'_, '_> {
                 self.borrow(path, buffer.elem, buffer.write);
             }
             Some(Binding::Host(_)) => {
-                if let Some(kind) = self.context.host_kind(name, self.lower) {
+                if let Some(kind) = self.context.host_kind(path, self.lower) {
                     self.operands.push(Operand {
                         path: path.clone(),
                         kind,

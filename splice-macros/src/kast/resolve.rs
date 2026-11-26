@@ -42,7 +42,10 @@ struct Resolve {
 impl Resolve {
     fn declare(&mut self, name: &Ident, origin: Origin) {
         let id = DeclId(self.decls.len() as u32);
-        self.decls.push(Decl { origin });
+        self.decls.push(Decl {
+            name: name.clone(),
+            origin,
+        });
         if let Origin::Let(local) = origin {
             self.ids.let_decls.entry(local).or_default().push(id);
         }
