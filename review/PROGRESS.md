@@ -535,3 +535,15 @@
 - Найдено, отложено: конструктор кортежной структуры с runtime-аргументом (`let l = W(c); l.0`) — вызов по пути, а не агрегат; ошибка «runtime value used in a comptime expression» вводит в заблуждение (раньше скрывалось откатом). Именованная структура (`N { v: c }`) работает. Нужна модель типов 7.2, чтобы отличить конструктор от функции.
 - Проверки: fmt, clippy `-D warnings` (x86_64 и `--target aarch64-unknown-linux-gnu`), `cargo +1.94.1 xtask ci --quick` зелёные.
 
+### Ф7.1d — `PrepareHost` как эмиттер токенов (MAC-20, коммит 82c0b78)
+- `scalar/lower/host.rs`: `PrepareHost` больше не клонирует выражение и не понижает части клона. Он обходит узлы тела и передаёт понижению (`required`, `plan_iterable`, `body.comptime`) только их; печатается копия узла, в которую подставлены переписанные дочерние узлы (`Children`/`Replace` в одном порядке обхода; дочерний узел разбирается обратно, чтобы принтер syn расставил скобки приоритета — `(*поле)[i]` в `schema_plan`).
+- `vec!`: элементы разбираются один раз в `kast` (как аргументы `comptime!`), имена внутри связаны с объявлениями; `HostCheck` и `PrepareHost` их не перепарсивают. Юнит `kast::tests::vec_elements_are_parsed_once_and_resolved`.
+- Найдено, отложено: `comptime!` внутри `vec!` в host-выражении вне host-цикла остаётся макросом («cannot find macro `comptime`»), как и до шага (не регрессия; с первой версией эмиттера это была паника — исправлено разбором `vec!` в `kast`). `required_expr` (comptime.rs) по-прежнему перепарсивает `comptime!` и держит свои `HashSet<String>` областей — это MAC-06/MAC-18.
+- Проверки: `cargo +1.94.1 xtask ci --quick` зелёный; полный `cargo +1.94.1 xtask ci` зелёный на 53cb829.
+
+### Ф7 — точка возобновления (после 7.1d; фаза не закрыта)
+1. MAC-18: `Lower.bindings`/`debug_names` с `HashMap<String, _>` на `DeclId` (теперь возможно: `PrepareHost` не отдаёт клоны). Мешают `required_expr` (свои `locals`/`inputs` по именам, `parse_body` для `comptime!`, клон `Expr::Struct`) и `evaluable` — их сначала перевести на `body.comptime`.
+2. MAC-06: один вычислитель (`required_expr`/`evaluable`/`pure_expr`) и `source.rs` → эмиттер печати над `kast`.
+3. MAC-12 остаток (`break value`, runtime-guard в known-`match`), MAC-23 (`#[cfg]` на параметрах), конструктор кортежной структуры с runtime-аргументами.
+4. 7.2 `Reg<T>` (MAC-07 остаток, MAC-02, SPL-12, MAC-13 SIMD на реестре), затем удаление `__SpliceOpaqueMethod`.
+
