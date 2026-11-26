@@ -798,9 +798,9 @@ impl Function {
     /// rejected before entering the JIT.
     pub(crate) fn interpret_buffers(
         &self,
-        args: &[crate::hir::eval::Bits],
+        args: &[crate::support::numeric::Bits],
         buffers: &mut [Vec<u8>],
-    ) -> Result<crate::hir::eval::Bits, InterpretError> {
+    ) -> Result<crate::support::numeric::Bits, InterpretError> {
         if args.len() != self.arity() {
             return Err(crate::CallError::Signature(crate::SignatureError::Arity {
                 expected: self.arity(),

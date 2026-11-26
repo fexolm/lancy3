@@ -5,12 +5,10 @@ mod divide;
 mod groups;
 mod half;
 mod inst;
-mod integer_float;
 mod isel;
 mod memory;
 mod operations;
 mod reduce;
-mod remainder;
 mod rotate;
 mod shuffle;
 mod special;
@@ -39,8 +37,6 @@ use inst::Inst;
 use regalloc2::{Allocation, Block, Edit, Function as _, InstOrEdit, PReg, RegClass};
 use splice_target::Profile;
 
-pub(crate) use operations::Site;
-
 /// The vector extension and width one compilation selects for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Config {
@@ -67,9 +63,8 @@ impl Config {
     }
 }
 
-// Status pointer, eight result words, and the address of the immutable libcall table.
-pub(crate) const SITE_POINTER: usize = 9;
-const ROOT_BYTES: usize = (SITE_POINTER + 1) * 8;
+// Status pointer and eight result words.
+const ROOT_BYTES: usize = 9 * 8;
 const ROOT_SAVES: [u8; 4] = [19, 20, 22, 30];
 const CHILD_SAVES: [u8; 3] = [19, 22, 30];
 const HOST_STACK_BYTES: u64 = 32;
@@ -78,7 +73,7 @@ const RESULT: (R, usize) = (R::X20, 8);
 pub(crate) struct Code {
     pub bytes: Vec<u8>,
     pub words: usize,
-    pub sites: Box<[Site]>,
+    pub sites: crate::lir::fallback::Sites,
     pub debug: Vec<DebugFunction>,
 }
 
@@ -248,7 +243,7 @@ fn w(a: Allocation) -> R {
 struct Emitter<'a> {
     a: &'a mut Assembler,
     frame: &'a Frame,
-    sites: &'a mut Vec<Site>,
+    sites: &'a mut crate::lir::fallback::Sites,
     entries: &'a DenseMap<FunctionId, Label>,
     config: Config,
     epilogue: Label,
@@ -493,7 +488,6 @@ impl Emitter<'_> {
                 self.half(form, n(0), extra, n(allocs.len() - 1))
             }
             Inst::HalfCast(from, to, ..) => self.half_cast(from, to, n(0), n(1)),
-            Inst::IntegerFloatCast(form, ..) => self.integer_float_cast(form, n(0), n(1)),
             Inst::IntCast(from, to, ..) => self.int_cast(from, to, n(0), n(1)),
             Inst::WideCast(from, to, ..) => self.wide_cast(from, to, n(0), n(1)),
             Inst::FloatCast(code, from, to, ..) => self.float_cast(code, from, to, n(0), n(1)),
@@ -512,7 +506,6 @@ impl Emitter<'_> {
                 self.scalar_saturate(code, size, n(0), n(1), n(2))
             }
             Inst::NeonMul64(..) => self.neon_mul64(n(0), n(1), n(2)),
-            Inst::FloatRemainder(form, ..) => self.float_remainder(form, n(0), n(1), n(2)),
             Inst::FloatSpecial(form, _, _, b) => {
                 self.float_special(form, n(0), b.map(|_| n(1)), n(allocs.len() - 1))
             }
@@ -665,8 +658,8 @@ impl Emitter<'_> {
                 self.check_status()
             }
             Inst::LibArg(ty, index, _) => self.value_access(false, ty, n(0), self.temp(index)),
-            Inst::Libcall(action, input, output, sizes) => {
-                self.primitive(action, input, output, sizes)
+            Inst::Libcall(action, input, output, args) => {
+                self.primitive(action, input, output, args)
             }
             Inst::LibResult(ty, _) => self.value_access(true, ty, n(0), self.temp(3)),
             Inst::Jump => {
@@ -750,7 +743,7 @@ fn emit_compiled(module: &Module<Compiled>, config: Config, debug: bool) -> Resu
     let _span = tracing::debug_span!(target: "lancy::compile", "emit_machine_code").entered();
     let root = module.call_graph.root();
     let mut a = Assembler::default();
-    let mut sites = Vec::new();
+    let mut sites = crate::lir::fallback::Sites::default();
     let mut debug_functions = Vec::new();
     let entries = DenseMap::from_fn(module.functions.len(), |_| a.label());
     for (id, machine) in module.functions.iter().rev() {
@@ -897,7 +890,7 @@ fn emit_compiled(module: &Module<Compiled>, config: Config, debug: bool) -> Resu
     Ok(Code {
         bytes: a.finish()?,
         words: bytes / 8,
-        sites: sites.into_boxed_slice(),
+        sites,
         debug: debug_functions,
     })
 }

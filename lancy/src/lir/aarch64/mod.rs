@@ -20,11 +20,9 @@ mod backend;
 mod instruction;
 mod operand;
 
-#[cfg(target_arch = "aarch64")]
-pub(crate) use backend::SITE_POINTER;
 #[cfg(test)]
 pub(crate) use backend::check_machine;
-pub(crate) use backend::{Site, emit, emit_debug};
+pub(crate) use backend::{emit, emit_debug};
 
 pub use instruction::{Code, EncodeError, Feature, FeatureSet, Instruction};
 pub use operand::{Arrangement, ConditionCode, Operand, PredQual, Register, ShiftKind};

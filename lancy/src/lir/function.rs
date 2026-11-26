@@ -36,7 +36,7 @@ impl<I: TargetInst> Function<I> {
     }
 
     pub fn new(machine: I::Machine, blocks: usize, vregs: usize) -> Result<Self, CompileError> {
-        if vregs > VReg::MAX || blocks > i32::MAX as usize {
+        if vregs > super::MAX_VALUES || blocks > i32::MAX as usize {
             return Err(CompileError::Unsupported(crate::Limit::Registers));
         }
         Ok(Self {
@@ -55,7 +55,7 @@ impl<I: TargetInst> Function<I> {
     }
 
     pub fn temp(&mut self, class: RegClass) -> Result<VReg, CompileError> {
-        if self.vregs == VReg::MAX {
+        if self.vregs == super::MAX_VALUES {
             return Err(CompileError::Unsupported(crate::Limit::Registers));
         }
         let reg = VReg::new(self.vregs, class);

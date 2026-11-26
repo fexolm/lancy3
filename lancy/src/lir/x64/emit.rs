@@ -5,7 +5,7 @@ use super::{
     frame::{CHILD_ARGS, Frame},
     inst::{Address, Alu, Cond, Inst, Quotient, Rhs, SelectCond, VectorMask},
 };
-use crate::hir::operation::Action;
+use crate::support::numeric::Action;
 use crate::{
     CompileError, Limit, Trap,
     hir::{Binary, Type, ssa::VerifiedBody},
@@ -123,6 +123,7 @@ pub(crate) struct Code {
     pub text_len: usize,
     pub words: usize,
     pub debug: Vec<DebugFunction>,
+    pub sites: crate::lir::Sites,
 }
 
 pub(crate) fn emit(
@@ -218,6 +219,7 @@ fn assemble(module: &Module<CompiledFunction>, debug: bool) -> Result<Code, Fail
         a.ret()
     };
     let mut constants = Vec::new();
+    let mut sites = crate::lir::Sites::default();
     let mut debug_functions = Vec::new();
     // The root (last in postorder) follows the native entry prologue.
     for (id, machine) in module.functions.iter().rev() {
@@ -237,6 +239,7 @@ fn assemble(module: &Module<CompiledFunction>, debug: bool) -> Result<Code, Fail
             exits: Exits::default(),
             debug,
             points: &mut points,
+            sites: &mut sites,
         }
         .function()?;
         if debug {
@@ -320,6 +323,7 @@ fn assemble(module: &Module<CompiledFunction>, debug: bool) -> Result<Code, Fail
         bytes,
         words: root.workspace,
         debug: debug_functions,
+        sites,
     })
 }
 
@@ -354,6 +358,7 @@ struct Emitter<'a> {
     exits: Exits,
     debug: bool,
     points: &'a mut Vec<(u32, u64)>,
+    sites: &'a mut crate::lir::Sites,
 }
 
 impl Emitter<'_> {
@@ -470,7 +475,7 @@ impl Emitter<'_> {
         allocs: &[Allocation],
     ) -> AsmResult {
         use super::inst::lanes::{self, FRAME, INPUT, OUTPUT, WORKSPACE};
-        let (width, win64) = (self.cpu.bytes, self.abi.is_win64());
+        let width = self.cpu.bytes;
         let a = &mut self.a;
         a.sub(rsp, FRAME)?;
         a.mov(qword_ptr(rsp + WORKSPACE), r11)?;
@@ -481,7 +486,7 @@ impl Emitter<'_> {
             }
         }
         let mut faults = [None; 3];
-        lanes::emit(a, width, win64, action, input, output, &mut faults)?;
+        lanes::emit(a, width, action, input, output, &mut faults)?;
         load(
             a,
             width,
@@ -509,6 +514,50 @@ impl Emitter<'_> {
             bind(a, done)?;
         }
         Ok(())
+    }
+
+    /// Call `lir::fallback` with the area below the Win64 shadow space and
+    /// report its trap code. Every generated frame enters with RSP 8 mod 16.
+    fn fallback(
+        &mut self,
+        action: Action,
+        input: Type,
+        output: Type,
+        args: [Option<Type>; 3],
+        allocs: &[Allocation],
+    ) -> AsmResult {
+        use crate::lir::fallback::{AREA_BYTES, RESULT, SLOT_BYTES, Site, entry};
+        let (width, abi) = (self.cpu.bytes, self.abi);
+        let area = abi.shadow;
+        let saved = area + AREA_BYTES as i32;
+        let frame = saved + 8;
+        let site = self
+            .sites
+            .add(Site::new(action, input, output, args, width));
+        let a = &mut *self.a;
+        a.sub(rsp, frame)?;
+        a.mov(qword_ptr(rsp + saved), r11)?;
+        let mut allocs = allocs.iter().copied();
+        for (i, arg) in args.into_iter().enumerate() {
+            if let Some(ty) = arg {
+                let at = ptr(rsp + area + (i * SLOT_BYTES) as i32);
+                store(a, width, ty, at, gpr(allocs.next().unwrap()))?;
+            }
+        }
+        let [site_arg, area_arg] = [0, 1].map(|i| R64[abi.args[i].hw_enc()]);
+        a.mov(site_arg, site)?;
+        a.lea(area_arg, ptr(rsp + area))?;
+        a.mov(r10, entry())?;
+        a.call(r10)?;
+        // The result register may be RAX: keep the code in R10D.
+        a.mov(r10d, eax)?;
+        let result = ptr(rsp + area + RESULT as i32);
+        load(a, width, output, gpr(allocs.next().unwrap()), result)?;
+        a.mov(r11, qword_ptr(rsp + saved))?;
+        a.add(rsp, frame)?;
+        let report = self.exits.report(a);
+        a.test(r10d, r10d)?;
+        a.jne(report)
     }
 
     fn instruction(&mut self, inst: Inst, allocs: &[Allocation]) -> AsmResult {
@@ -595,6 +644,19 @@ impl Emitter<'_> {
             Inst::VectorShiftImm(kind, lane, _, _, count) => {
                 simd::packed::integer::shift_dword_bits(a, cpu, kind, lane, reg(1), reg(0), count)
             }
+            Inst::Fallback {
+                action,
+                input,
+                output,
+                args,
+                ..
+            } => self.fallback(
+                action,
+                input,
+                output,
+                args.map(|arg| arg.map(|(ty, _)| ty)),
+                allocs,
+            ),
             Inst::Lanes {
                 action,
                 input,

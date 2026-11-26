@@ -3,11 +3,9 @@ pub(crate) mod conversions;
 mod rounding;
 use crate::{
     CallError, ScalarKernel, Trap,
+    hir::operation::operation,
     hir::{Binary, Function, Lane, Op, Simd, Terminator, Ternary, Type, Unary, Value},
-    hir::{
-        eval::{Bits, evaluate},
-        operation::operation,
-    },
+    support::numeric::{Bits, evaluate},
 };
 
 pub(crate) const LANES: [Lane; 16] = {

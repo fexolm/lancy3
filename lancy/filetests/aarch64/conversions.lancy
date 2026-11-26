@@ -92,8 +92,8 @@ fn main(x:i32) -> i32
   r = bitcast u16 a
   bits = cast i32 r
   ret bits
-@aarch64-isel check: IntegerFloatCast(
-@aarch64 all lacks blr
+@aarch64-isel check: Libcall(
+@aarch64 all has blr
 @run 256 -> 0x4380
 @run 257 -> 0x4380
 @run 259 -> 0x4382
@@ -109,8 +109,8 @@ fn main(x:i32) -> i32
   s = extract b last
   r = cast i32 s
   ret r
-@aarch64-isel check: IntegerFloatCast(
-@aarch64 all lacks blr
+@aarch64-isel check: Libcall(
+@aarch64 all has blr
 @run 0xbe00 -> -1
 @run 0x7bff -> 32767
 @run 0xfbff -> -32768

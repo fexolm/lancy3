@@ -20,7 +20,7 @@ use crate::{
     lir::{
         aarch64::backend::{
             inst::{Inst, class},
-            remainder, rotate, special, sve,
+            rotate, special, sve,
         },
         isel::{Context, Root},
     },
@@ -85,26 +85,6 @@ impl Rules<'_> {
         reg(self.f, v)
     }
 
-    fn float_remainder(&mut self, op: crate::hir::Binary, a: Value, b: Value) -> Option<Inst> {
-        let ty = self.ty(a);
-        let lane = ty.lane().filter(|lane| lane.float())?;
-        if op != crate::hir::Binary::Rem {
-            return None;
-        }
-        let packed = matches!(ty, Type::Vector(_));
-        let form = remainder::Form {
-            lane,
-            packed,
-            scalable: packed && sve(self.config.profile),
-        };
-        Some(Inst::FloatRemainder(
-            form,
-            self.dst(),
-            self.input(a),
-            self.input(b),
-        ))
-    }
-
     fn float_special(
         &mut self,
         action: special::Action,
@@ -150,8 +130,6 @@ impl Rules<'_> {
             | Unary::IsSubnormal
             | Unary::SignBit => special::Action::Classify(op),
             Unary::Signum => special::Action::Signum,
-            Unary::NextUp => special::Action::Next(true),
-            Unary::NextDown => special::Action::Next(false),
             _ => return None,
         };
         self.float_special(action, v, None)
@@ -241,8 +219,8 @@ impl Rules<'_> {
             Op::Ternary(Ternary::Select, mask, a, b) => return self.scalar_select(mask, a, b),
             Op::Cast(Type::Vector(to), v) => self.vector_cast(to, v),
             Op::Cast(to, v) => self.scalar_cast(to, v),
-            Op::Simd(Simd::Widen { to, high, value }) => return self.widen(to, high, value),
-            Op::Simd(Simd::Narrow(to, a, b)) => return self.narrow(to, a, b),
+            Op::Simd(Simd::Widen { to, high, value }) => self.widen(to, high, value),
+            Op::Simd(Simd::Narrow(to, a, b)) => self.narrow(to, a, b),
             Op::Simd(Simd::Iota(lane)) => return self.iota(lane),
             Op::Simd(Simd::Splat(v)) => return self.splat(v),
             Op::Simd(Simd::ExtractLane(src, index)) => return self.lane_access(src, index, None),
@@ -274,8 +252,8 @@ impl Rules<'_> {
                 self.out.push(inst);
             }
         }
-        let sizes = args.map(|arg| arg.map_or(0, |v| self.ty(v).bytes(self.config.bytes)));
-        self.out.push(Inst::Libcall(action, input, output, sizes));
+        let args = args.map(|arg| arg.map(|v| self.ty(v)));
+        self.out.push(Inst::Libcall(action, input, output, args));
         Inst::LibResult(self.ty(self.result()), self.dst())
     }
 }

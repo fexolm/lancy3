@@ -1,5 +1,6 @@
 pub mod aarch64;
 mod constants;
+mod fallback;
 mod function;
 mod inst;
 mod isel;
@@ -11,9 +12,14 @@ mod x64;
 use crate::hir::ssa::VerifiedBody;
 use crate::module::Module;
 use crate::{CompileError, jit::DebugFunction};
+pub(crate) use fallback::Sites;
 use function::Function;
 use inst::TargetInst;
 use splice_target::{Arch, Target};
+
+/// The most values one function may have: both backends number them as
+/// regalloc2 virtual registers. The inliner refuses larger expansions.
+pub(crate) const MAX_VALUES: usize = regalloc2::VReg::MAX;
 
 /// Machine code for one target, ready to install.
 pub(crate) struct Code {
@@ -21,8 +27,8 @@ pub(crate) struct Code {
     /// Workspace size in 64-bit words.
     pub words: usize,
     pub debug: Vec<DebugFunction>,
-    /// AArch64 libcall sites that the running code reads; empty on x64.
-    pub sites: Box<[aarch64::Site]>,
+    /// The numeric fallback sites the code addresses.
+    pub sites: fallback::Sites,
 }
 
 /// Both backends compile on every host; only running the code needs a
@@ -57,7 +63,7 @@ fn emit_mode(
                 bytes: code.bytes,
                 words: code.words,
                 debug: code.debug,
-                sites: Box::default(),
+                sites: code.sites,
             }
         }
         Arch::Aarch64 => {

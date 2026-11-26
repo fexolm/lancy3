@@ -113,10 +113,16 @@ fn load_covers_scaled_address_and_shift_covers_its_constant() {
 }
 
 #[test]
-fn all_scalar_casts_emit_call_free_machine_code() {
+fn all_scalar_casts_up_to_eight_bytes_emit_call_free_machine_code() {
     use iced_x86::{Decoder, DecoderOptions, Mnemonic};
-    for from in crate::jit::tests::numeric_coverage::LANES {
-        for to in crate::jit::tests::numeric_coverage::LANES {
+    // 128-bit conversions are cold: they call the shared numeric fallback.
+    let lanes = || {
+        crate::jit::tests::numeric_coverage::LANES
+            .into_iter()
+            .filter(|lane| lane.bytes() <= 8)
+    };
+    for from in lanes() {
+        for to in lanes() {
             let f = crate::jit::tests::numeric_coverage::conversions::scalar_cast(from, to);
             let module = f.verified_module().unwrap();
             let code = crate::lir::x64::emit::emit(&crate::test_target::target(), module).unwrap();

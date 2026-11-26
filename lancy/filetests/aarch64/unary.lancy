@@ -131,8 +131,8 @@ fn main(raw:i32) -> i32
   out = nextup f
   r = bitcast i32 out
   ret r
-@aarch64-isel check: FloatSpecial(
-@aarch64 all lacks blr
+@aarch64-isel check: Libcall(
+@aarch64 all has blr
 @run 0x80000000 -> 1
 @run 0x80000001 -> 0x80000000
 @run 0x80800000 -> 0x807fffff

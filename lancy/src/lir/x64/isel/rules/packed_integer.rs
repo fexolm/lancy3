@@ -1,9 +1,9 @@
 use super::Rules;
 use crate::lir::x64::Cpu;
 use crate::{
-    hir::operation::Action,
     hir::{Binary as B, Lane, Op, Simd, Ternary, Type, Unary},
     lir::x64::inst::{Inst, simd::packed::integer::Rule},
+    support::numeric::Action,
 };
 
 impl Rules<'_> {

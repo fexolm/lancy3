@@ -1,7 +1,8 @@
 use super::inst::{Alu, Inst};
 use crate::{
-    hir::{Binary, Lane, operation::Action},
+    hir::{Binary, Lane},
     lir::schedule::{Schedulable, Scheduling},
+    support::numeric::Action,
 };
 
 impl Schedulable for Inst {

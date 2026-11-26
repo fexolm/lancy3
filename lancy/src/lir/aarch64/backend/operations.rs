@@ -1,63 +1,12 @@
 use super::groups::z;
 use super::inst::{IntBinary, IntOp, Packed, Select};
-use super::{
-    A, C, Cond, Emitter, O, PredQual, R, Result, SITE_POINTER, ShiftKind, TEMP_WORD_BYTES, invert,
-};
+use super::{A, C, Cond, Emitter, O, PredQual, R, Result, ShiftKind, invert};
 use crate::{
     Trap,
     hir::{Lane, Type},
-    hir::{eval::evaluate, operation::Action},
+    lir::fallback,
+    support::numeric::Action,
 };
-
-pub(crate) struct Site {
-    action: Action,
-    input: Type,
-    output: Type,
-    sizes: [usize; 3],
-    width: usize,
-}
-
-/// Execute a numeric operation using the JIT's four-slot libcall area and
-/// return 0 or a trap code. A panic cannot unwind into native code: it stops
-/// here and reports [`Trap::Abi`], as would any other helper defect.
-unsafe extern "C" fn primitive(site: &Site, area: *mut u8) -> u32 {
-    let run = || -> std::result::Result<(), Trap> {
-        let args = std::array::from_fn(|i| {
-            let mut data = [0; TEMP_WORD_BYTES];
-            let bytes = site.sizes[i];
-            if bytes != 0 {
-                // SAFETY: isel emits the matching argument stores before this call.
-                unsafe {
-                    std::ptr::copy_nonoverlapping(
-                        area.add(i * TEMP_WORD_BYTES),
-                        data.as_mut_ptr(),
-                        bytes,
-                    )
-                };
-            }
-            data
-        });
-        let value = evaluate(site.action, site.input, site.output, &args, site.width)?;
-        // SAFETY: the compiler reserves a separate output slot of TEMP_WORD_BYTES bytes.
-        unsafe {
-            std::ptr::copy_nonoverlapping(
-                value.as_ptr(),
-                area.add(3 * TEMP_WORD_BYTES),
-                site.output.bytes(site.width),
-            )
-        };
-        Ok(())
-    };
-    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(run)) {
-        Ok(Ok(())) => 0,
-        Ok(Err(trap)) => trap.code(),
-        Err(payload) => {
-            // Only the code reaches the caller: this is a backend defect.
-            drop(splice_target::abi::panic_message(payload));
-            Trap::Abi.code()
-        }
-    }
-}
 
 impl Emitter<'_> {
     pub(super) fn fma(&mut self, code: C, arr: A, [a, b, c]: [u8; 3], dst: u8) -> Result {
@@ -461,20 +410,12 @@ impl Emitter<'_> {
         action: Action,
         input: Type,
         output: Type,
-        sizes: [usize; 3],
+        args: [Option<Type>; 3],
     ) -> Result {
-        let index = self.sites.len() * std::mem::size_of::<Site>();
-        self.sites.push(Site {
-            action,
-            input,
-            output,
-            sizes,
-            width: self.config.bytes,
-        });
-        self.a.access(true, 8, 0, (R::X20, SITE_POINTER * 8))?;
-        self.a.addr(R::X0, R::X0, index)?;
+        let site = fallback::Site::new(action, input, output, args, self.config.bytes);
+        self.a.imm(R::X0, self.sites.add(site))?;
         self.a.addr(R::X1, R::X19, self.frame.temporary)?;
-        self.a.imm(R::X16, primitive as *const () as u64)?;
+        self.a.imm(R::X16, fallback::entry())?;
         self.a.put(C::Blr_64_branch_reg, &[O::reg(R::X16)])?;
         self.byte_predicate = false;
         // W16 keeps the returned trap code for the side exit.

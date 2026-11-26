@@ -1,8 +1,8 @@
 use crate::lir::x64::Cpu;
 use crate::{
-    hir::operation::Action,
     hir::{Binary as B, Lane, Ternary, Type, Unary},
     lir::x64::inst::simd::{Native, packed::Recipe},
+    support::numeric::Action,
 };
 
 impl Native {
@@ -154,7 +154,12 @@ fn supports_mask_op(action: Action, lane_bytes: usize, cpu: Cpu) -> bool {
     match action {
         Action::AnyTrue | Action::Unary(Unary::Not) => true,
         // VPTESTMD and the 16-bit KNOTW/KORTESTW forms need only AVX-512F.
-        Action::AllTrue => cpu.bytes == 64 && (lane_bytes == 4 || signs),
+        // Narrower vectors compare with zero; PCMPEQQ needs SSE4.1.
+        Action::AllTrue => match cpu.bytes {
+            16 => lane_bytes < 8 || (lane_bytes == 8 && cpu.isa.sse41),
+            32 => lane_bytes <= 8,
+            _ => lane_bytes == 4 || signs,
+        },
         Action::Ternary(Ternary::Select) => match cpu.bytes {
             16 => lane_bytes <= 8,
             32 => lane_bytes <= 8,

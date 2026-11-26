@@ -33,6 +33,7 @@ fn opcode(inst: Inst) -> String {
         Inst::LoadArg { index, .. } => format!("arg {index}"),
         Inst::Native(n, ..) => format!("native.{:?}.{:?}", n.input, n.action),
         Inst::Lanes { input, action, .. } => format!("lanes.{input:?}.{action:?}"),
+        Inst::Fallback { input, action, .. } => format!("fallback.{input:?}.{action:?}"),
         Inst::Literal(l, n, _) => format!("literal.{l:?} {n:#x}"),
         Inst::Iota(l, _) => format!("iota.{l:?}"),
         Inst::BitMove(from, to, ..) => format!("bitcast.{from:?}.{to:?}"),

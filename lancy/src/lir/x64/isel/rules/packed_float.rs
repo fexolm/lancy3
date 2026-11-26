@@ -1,8 +1,8 @@
 use crate::lir::x64::Cpu;
 use crate::{
-    hir::operation::Action,
     hir::{Binary as B, Type, Unary},
     lir::x64::inst::simd::packed::float::Rule,
+    support::numeric::Action,
 };
 
 impl Rule {

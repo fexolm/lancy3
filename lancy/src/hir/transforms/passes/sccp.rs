@@ -1,12 +1,12 @@
 use crate::hir::transforms::ControlFlowGraph;
 use crate::hir::{
     Binary, Block, Function, Lane, Op, Simd, Terminator, Ternary, Type, Unary, Value,
-    operation::Action,
     ssa::{Edge, Inst},
 };
+use crate::support::numeric::Action;
 use crate::support::slotmap::DenseMap;
 
-use crate::hir::integer::{self, binary as integer_binary, mask as lane_mask};
+use crate::support::numeric::integer::{self, binary as integer_binary, mask as lane_mask};
 
 /// What SCCP knows about a value.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

@@ -195,100 +195,38 @@ fn bits(a: &mut CodeAssembler, action: Action, input: Type, output: Type, p: Arg
     put(a, p.out, output.lane().unwrap().bytes())
 }
 
-// Functions with no exact instruction call Rust's scalar math. The call site
-// contains only the address of the concrete function, compiled for the
-// kernel's convention; its arguments and result are plain floating point
-// values (XMM0..2 on both conventions).
-pub(super) fn math_function(action: Action, lane: Lane, win64: bool) -> Option<u64> {
-    if !lane.float() {
-        return None;
-    }
-    let single = lane == Lane::F32;
-    // One function per precision and convention. The code only runs on
-    // x86-64; elsewhere any address serves listings.
-    #[cfg(target_arch = "x86_64")]
-    macro_rules! pick {
-        (|$($x:ident),+| $body:expr) => {{
-            extern "sysv64" fn f($($x: f32),+) -> f32 {
-                $body
-            }
-            extern "sysv64" fn d($($x: f64),+) -> f64 {
-                $body
-            }
-            extern "win64" fn wf($($x: f32),+) -> f32 {
-                $body
-            }
-            extern "win64" fn wd($($x: f64),+) -> f64 {
-                $body
-            }
-            match (single, win64) {
-                (true, false) => f as *const (),
-                (false, false) => d as *const (),
-                (true, true) => wf as *const (),
-                (false, true) => wd as *const (),
-            }
-        }};
-    }
-    #[cfg(not(target_arch = "x86_64"))]
-    macro_rules! pick {
-        (|$($x:ident),+| $body:expr) => {{
-            extern "C" fn f($($x: f32),+) -> f32 {
-                $body
-            }
-            extern "C" fn d($($x: f64),+) -> f64 {
-                $body
-            }
-            let _ = win64;
-            if single { f as *const () } else { d as *const () }
-        }};
-    }
-    macro_rules! unary {
-        ($op:ident) => {
-            pick!(|x| x.$op())
-        };
-    }
-    macro_rules! binary {
-        ($op:ident) => {
-            pick!(|x, y| x.$op(y))
-        };
-    }
-    let address = match action {
-        Action::Unary(op) => match op {
-            U::Exp => unary!(exp),
-            U::Exp2 => unary!(exp2),
-            U::Ln => unary!(ln),
-            U::Log2 => unary!(log2),
-            U::Log10 => unary!(log10),
-            U::Sin => unary!(sin),
-            U::Cos => unary!(cos),
-            U::Tan => unary!(tan),
-            U::Asin => unary!(asin),
-            U::Acos => unary!(acos),
-            U::Atan => unary!(atan),
-            U::Sinh => unary!(sinh),
-            U::Cosh => unary!(cosh),
-            U::Tanh => unary!(tanh),
-            U::Asinh => unary!(asinh),
-            U::Acosh => unary!(acosh),
-            U::Atanh => unary!(atanh),
-            U::ExpM1 => unary!(exp_m1),
-            U::Ln1p => unary!(ln_1p),
-            U::Cbrt => unary!(cbrt),
-            _ => return None,
-        },
-        Action::Binary(op) => match op {
-            B::Pow => binary!(powf),
-            B::Atan2 => binary!(atan2),
-            B::Hypot => binary!(hypot),
-            B::Rem => pick!(|x, y| x % y),
-            _ => return None,
-        },
-        Action::Ternary(Ternary::MulAdd) if matches!(lane, Lane::F32 | Lane::F64) => {
-            pick!(|x, y, z| x.mul_add(y, z))
+/// Operations without an exact instruction sequence: they need a math
+/// library routine, which the shared numeric fallback provides.
+pub(super) fn needs_library(action: Action, lane: Lane) -> bool {
+    use U::*;
+    lane.float()
+        && match action {
+            Action::Unary(op) => matches!(
+                op,
+                Exp | Exp2
+                    | Ln
+                    | Log2
+                    | Log10
+                    | Sin
+                    | Cos
+                    | Tan
+                    | Asin
+                    | Acos
+                    | Atan
+                    | Sinh
+                    | Cosh
+                    | Tanh
+                    | Asinh
+                    | Acosh
+                    | Atanh
+                    | ExpM1
+                    | Ln1p
+                    | Cbrt
+            ),
+            Action::Binary(op) => matches!(op, B::Pow | B::Atan2 | B::Hypot | B::Rem),
+            Action::Ternary(Ternary::MulAdd) => matches!(lane, Lane::F32 | Lane::F64),
+            _ => false,
         }
-        _ => return None,
-    };
-    Some(address as u64)
 }
 
 // Two half significands multiply exactly in binary64. FastTwoSum recovers
@@ -478,13 +416,7 @@ pub(super) fn emit(
             return put(a, p.out, output.lane().unwrap().bytes());
         }
         Action::Ternary(Ternary::MulAdd) if half => return half_fma(a, lane, p.out),
-        _ => {
-            a.mov(
-                r10,
-                math_function(action, lane, p.win64).expect("verified scalar math operation"),
-            )?;
-            a.call(r10)?;
-        }
+        _ => unreachable!("lanes::inline sends {action:?} to the numeric fallback"),
     }
     if single {
         a.movss(dword_ptr(rsp + p.out), xmm0)

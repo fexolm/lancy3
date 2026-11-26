@@ -18,8 +18,13 @@ struct Template {
     returns: usize,
 }
 
-pub(crate) fn inline_all(module: &Module<VerifiedBody<'_>>) -> Result<Function, CompileError> {
-    check_expansion(module)?;
+/// Expand every call into its root. `max_values` is the backend's limit on
+/// values in one function (`lir::MAX_VALUES`).
+pub(crate) fn inline_all(
+    module: &Module<VerifiedBody<'_>>,
+    max_values: usize,
+) -> Result<Function, CompileError> {
+    check_expansion(module, max_values as u64)?;
     let mut uses = DenseMap::filled(module.functions.len(), 0usize);
     for id in module.functions.keys() {
         for &child in module.call_graph.callees(id) {
@@ -102,9 +107,9 @@ impl Size {
         self.args += callee.args + join * callee.returns;
     }
 
-    fn check(self) -> Result<(), CompileError> {
+    fn check(self, max_values: u64) -> Result<(), CompileError> {
         if self.insts + self.blocks > i32::MAX as u64
-            || self.values > regalloc2::VReg::MAX as u64
+            || self.values > max_values
             || self.edges > u32::MAX as u64
             || self.args > u32::MAX as u64
         {
@@ -144,7 +149,7 @@ impl Shift {
     }
 }
 
-fn check_expansion(module: &Module<VerifiedBody<'_>>) -> Result<(), CompileError> {
+fn check_expansion(module: &Module<VerifiedBody<'_>>, max_values: u64) -> Result<(), CompileError> {
     let mut sizes: DenseMap<FunctionId, Size> = DenseMap::new();
     // Frame-local bytes after inlining: own regions plus the largest callee.
     let mut frames: DenseMap<FunctionId, [u64; 2]> = DenseMap::new();
@@ -197,7 +202,7 @@ fn check_expansion(module: &Module<VerifiedBody<'_>>) -> Result<(), CompileError
                 if let Op::Call(site) = *f.op(i) {
                     let (callee, arity) = callee(site);
                     emitted.call(callee, arity, callee.returns != 1);
-                    emitted.check()?;
+                    emitted.check(max_values)?;
                     if live {
                         retained.call(callee, arity, callee.returns > 1);
                         live = callee.returns != 0;
@@ -216,7 +221,7 @@ fn check_expansion(module: &Module<VerifiedBody<'_>>) -> Result<(), CompileError
                 retained.terminator(f, term);
             }
         }
-        emitted.check()?;
+        emitted.check(max_values)?;
         sizes.insert(if prunes { retained } else { emitted });
     }
     Ok(())

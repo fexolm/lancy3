@@ -1,11 +1,11 @@
 use crate::lir::x64::Cpu;
 use crate::{
-    hir::operation::Action,
     hir::{Binary as B, Type, Unary},
     lir::x64::inst::simd::{
         Native,
         packed::{Recipe, float, integer, rearrange},
     },
+    support::numeric::Action,
 };
 
 impl Recipe {

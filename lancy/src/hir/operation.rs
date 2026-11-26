@@ -1,28 +1,6 @@
-//! Operation kinds and types shared by lowering and the HIR evaluator.
-use super::{Binary, Ternary, Type, Unary};
-
-#[derive(Clone, Copy, Debug)]
-pub(crate) enum Action {
-    Unary(Unary),
-    Binary(Binary),
-    Ternary(Ternary),
-    Cast,
-    Bitcast,
-    Splat,
-    Extract,
-    Insert,
-    Compress,
-    Expand,
-    Iota,
-    Shuffle,
-    Reduce(Binary),
-    AnyTrue,
-    AllTrue,
-    FirstLanes,
-    MaskCount,
-    Widen(bool),
-    Narrow,
-}
+//! The numeric action of an HIR operation, shared by lowering and the evaluator.
+use super::Type;
+use crate::support::numeric::Action;
 
 pub(crate) fn operation(
     op: crate::hir::Op,

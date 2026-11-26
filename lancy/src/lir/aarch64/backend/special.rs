@@ -1,6 +1,4 @@
-use super::{
-    A, C, Cond, Emitter, O, R, Result, arrangements, groups::z, integer_float::float_layout,
-};
+use super::{A, C, Cond, Emitter, O, R, Result, arrangements, groups::z};
 use crate::hir::{Lane, Unary};
 
 #[derive(Clone, Copy, Debug)]
@@ -9,7 +7,6 @@ pub(super) enum Action {
     CopySign,
     Classify(Unary),
     Signum,
-    Next(bool),
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -18,6 +15,18 @@ pub(super) struct Form {
     pub packed: bool,
     pub scalable: bool,
     pub action: Action,
+}
+
+/// Fraction bits, exponent bias and sign bit of a float lane.
+pub(super) fn float_layout(lane: Lane) -> (u64, u64, u64) {
+    let (fraction, bias) = match lane {
+        Lane::F16 => (10, 15),
+        Lane::BF16 => (7, 127),
+        Lane::F32 => (23, 127),
+        Lane::F64 => (52, 1023),
+        _ => unreachable!("selected floating type"),
+    };
+    (fraction, bias, 1 << (lane.bytes() * 8 - 1))
 }
 
 fn x(n: u8) -> O {
@@ -124,7 +133,6 @@ impl Emitter<'_> {
                 self.a
                     .put(C::Csel_64_condsel, &[out, x(15), tmp, O::cond(Cond::Hi)])
             }
-            Action::Next(up) => self.float_neighbor(sign, infinity, up),
             Action::Classify(op) => {
                 use Unary::*;
                 let (offset, limit, cond) = match op {
@@ -147,37 +155,5 @@ impl Emitter<'_> {
             }
             Action::MinMax(_) => unreachable!("handled with FP comparison"),
         }
-    }
-
-    fn float_neighbor(&mut self, sign: u64, infinity: u64, up: bool) -> Result {
-        let (a, out, mag, tmp) = (x(9), x(12), x(13), x(14));
-        let zr = x(31);
-        let unchanged = self.a.label();
-        let nonzero = self.a.label();
-        let done = self.a.label();
-        self.a.imm(R::X14, infinity)?;
-        self.a.put(C::Subs_64_addsub_shift, &[zr, mag, tmp])?;
-        self.a.jump_if(Cond::Hi, unchanged)?;
-        let toward = if up { 0 } else { sign };
-        self.a.imm(R::X14, toward | infinity)?;
-        self.a.put(C::Subs_64_addsub_shift, &[zr, a, tmp])?;
-        self.a.jump_if(Cond::Eq, unchanged)?;
-        self.a.put(C::Subs_64_addsub_imm, &[zr, mag, O::imm(0)])?;
-        self.a.jump_if(Cond::Ne, nonzero)?;
-        self.a.imm(R::X12, toward | 1)?;
-        self.a.jump(done);
-        self.a.bind(nonzero);
-        self.a.put(C::And_64_log_imm, &[mag, a, O::imm(sign)])?;
-        self.a.put(C::Subs_64_addsub_imm, &[zr, mag, O::imm(0)])?;
-        self.a.put(C::Add_64_addsub_imm, &[tmp, a, O::imm(1)])?;
-        self.a.put(C::Sub_64_addsub_imm, &[x(15), a, O::imm(1)])?;
-        let increase = if up { Cond::Eq } else { Cond::Ne };
-        self.a
-            .put(C::Csel_64_condsel, &[out, tmp, x(15), O::cond(increase)])?;
-        self.a.jump(done);
-        self.a.bind(unchanged);
-        self.a.put(C::Orr_64_log_shift, &[out, zr, a])?;
-        self.a.bind(done);
-        Ok(())
     }
 }

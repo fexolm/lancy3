@@ -2,7 +2,8 @@
 //! result or trap, and one byte buffer pair per pointer parameter.
 use super::Result;
 use crate::hir::ssa::{InterpretError, buffer_address};
-use crate::hir::{Function, Lane, Type, eval::Bits};
+use crate::hir::{Function, Lane, Type};
+use crate::support::numeric::Bits;
 use crate::{CallError, ScalarKernel, Trap};
 
 pub(crate) struct Run {
@@ -166,13 +167,13 @@ fn show(ty: Type, bits: &Bits, width: usize) -> String {
             let size = lane.bytes();
             let lanes: Vec<_> = bits[..width]
                 .chunks_exact(size)
-                .map(|chunk| format!("{:#x}", crate::hir::eval::read(chunk)))
+                .map(|chunk| format!("{:#x}", crate::support::numeric::read(chunk)))
                 .collect();
             format!("vec.{}[{}]", lane_name(lane), lanes.join(" "))
         }
         ty => format!(
             "{:#x}_{}",
-            crate::hir::eval::read(&bits[..ty.bytes(width)]),
+            crate::support::numeric::read(&bits[..ty.bytes(width)]),
             lane_name(ty.lane().unwrap())
         ),
     }

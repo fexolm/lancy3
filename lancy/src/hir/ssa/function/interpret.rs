@@ -1,8 +1,6 @@
+use crate::hir::operation::operation;
 use crate::hir::{Block, Edge, Function, Inst, Op, Simd, Terminator, Type, Value};
-use crate::hir::{
-    eval::{Bits, evaluate, read},
-    operation::operation,
-};
+use crate::support::numeric::{Bits, evaluate, read};
 use crate::support::slotmap::DenseMap;
 use crate::{CallError, Trap};
 

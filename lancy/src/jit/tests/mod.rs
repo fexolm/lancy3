@@ -38,7 +38,7 @@ fn an_unrepresentable_expansion_keeps_the_shared_graph_executable() {
     }
     let m = f.verified_module().unwrap();
     assert!(matches!(
-        passes::inline_all(&m),
+        passes::inline_all(&m, crate::lir::MAX_VALUES),
         Err(crate::CompileError::Unsupported(crate::Limit::Registers))
     ));
     let code = ScalarKernel::compile(&f, &crate::test_target::options()).unwrap();

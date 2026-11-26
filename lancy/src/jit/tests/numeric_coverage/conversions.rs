@@ -1,5 +1,5 @@
 use super::{Function, LANES, Lane, Op, ScalarKernel, Terminator, Ternary};
-use crate::hir::{eval::evaluate, operation::Action};
+use crate::support::numeric::{Action, evaluate};
 
 pub(crate) fn scalar_cast(from: Lane, to: Lane) -> Function {
     let mut f = Function::new(&[from.scalar()], to.scalar());

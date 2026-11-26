@@ -5,13 +5,13 @@ use super::wide::MathForm as WideMath;
 use super::width::{Narrow, Widen};
 use super::{A, C, Cond, Config};
 use crate::{
-    hir::operation::Action,
     hir::{Lane, RustFunction, Scale, Type, Unary},
     lir::{
         TargetInst,
         schedule::{Schedulable, Scheduling},
     },
     module::FunctionId,
+    support::numeric::Action,
 };
 use regalloc2::{MachineEnv, Operand, PReg, PRegSet, RegClass, VReg};
 use std::sync::OnceLock;
@@ -169,7 +169,6 @@ pub(super) enum Inst {
     Unary(UnaryForm, VReg, VReg),
     Half(HalfForm, VReg, VReg, [Option<VReg>; 2]),
     HalfCast(Lane, Lane, VReg, VReg),
-    IntegerFloatCast(super::integer_float::Form, VReg, VReg),
     IntCast(Type, Type, VReg, VReg),
     WideCast(Type, Type, VReg, VReg),
     FloatCast(C, Type, Type, VReg, VReg),
@@ -189,7 +188,6 @@ pub(super) enum Inst {
     Rotate(super::rotate::Form, VReg, VReg, VReg),
     ScalarSaturate(C, usize, VReg, VReg, VReg),
     NeonMul64(VReg, VReg, VReg),
-    FloatRemainder(super::remainder::Form, VReg, VReg, VReg),
     FloatSpecial(super::special::Form, VReg, VReg, Option<VReg>),
     Expand(Expand, VReg, VReg, VReg),
     Widen(Widen, VReg, VReg),
@@ -231,7 +229,7 @@ pub(super) enum Inst {
     StoreArg(Type, usize, VReg),
     Call(FunctionId, PRegSet, Type, VReg),
     LibArg(Type, usize, VReg),
-    Libcall(Action, Type, Type, [usize; 3]),
+    Libcall(Action, Type, Type, [Option<Type>; 3]),
     RustCall(&'static RustFunction, [VReg; 4], VReg),
     /// Address of the frame's scratch memory at a byte offset, with the
     /// region's size in bytes.
@@ -271,13 +269,6 @@ impl TargetInst for Inst {
             | Self::WideMaskTest(_, _, d, v)
             | Self::Splat(_, _, _, d, v) => {
                 out.extend([input(v), output(d)]);
-            }
-            Self::IntegerFloatCast(form, d, v) => {
-                if form.packed {
-                    out.extend([Operand::reg_use_at_end(v), Operand::reg_def_at_start(d)]);
-                } else {
-                    out.extend([input(v), output(d)]);
-                }
             }
             Self::Widen(Widen::Convert(..), d, v) => {
                 out.extend([Operand::reg_use_at_end(v), Operand::reg_def_at_start(d)]);
@@ -330,17 +321,6 @@ impl TargetInst for Inst {
                 ]);
             }
             Self::Rotate(_, d, a, b) => out.extend([input(a), input(b), output(d)]),
-            Self::FloatRemainder(form, d, a, b) => {
-                if form.packed {
-                    out.extend([
-                        Operand::reg_use_at_end(a),
-                        Operand::reg_use_at_end(b),
-                        Operand::reg_def_at_start(d),
-                    ]);
-                } else {
-                    out.extend([input(a), input(b), output(d)]);
-                }
-            }
             Self::FloatSpecial(form, d, a, b) => {
                 let used = if form.packed {
                     Operand::reg_use_at_end

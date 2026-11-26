@@ -183,7 +183,8 @@ impl<'a> Case<'a> {
         }
         if self.checks.contains_key("inline") || !self.runs.is_empty() {
             if self.policy.should_inline(&source) {
-                let expanded = passes::inline_all(&source).map_err(|e| format!("inline: {e}"))?;
+                let expanded = passes::inline_all(&source, crate::lir::MAX_VALUES)
+                    .map_err(|e| format!("inline: {e}"))?;
                 let module = expanded
                     .verified_module()
                     .map_err(|e| format!("inline: {e}"))?;

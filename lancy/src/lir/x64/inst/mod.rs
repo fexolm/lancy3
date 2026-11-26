@@ -4,8 +4,8 @@ pub(super) mod lanes;
 pub(super) mod simd;
 pub(super) use super::abi::SCRATCH;
 use super::abi::{MASKS, Machine, gprs, vectors};
-use crate::hir::operation::Action;
 use crate::hir::{Binary, Lane, RustFunction, Scale, Type};
+use crate::support::numeric::Action;
 use crate::{lir::TargetInst, module::FunctionId};
 use regalloc2::{MachineEnv, Operand, PReg, PRegSet, RegClass, VReg};
 use simd::Native;
@@ -166,6 +166,14 @@ pub(super) enum Inst {
         index: usize,
     },
     Native(Native, VReg, [Option<VReg>; 3], [Option<VReg>; 6]),
+    /// Call the shared numeric fallback (`lir::fallback`).
+    Fallback {
+        action: Action,
+        input: Type,
+        output: Type,
+        dst: VReg,
+        args: [Option<(Type, VReg)>; 3],
+    },
     Lanes {
         action: Action,
         input: Type,
@@ -323,7 +331,7 @@ impl TargetInst for Inst {
                 });
                 out.extend(temps.into_iter().flatten().map(O::reg_temp));
             }
-            Self::Lanes { dst, args, .. } => {
+            Self::Lanes { dst, args, .. } | Self::Fallback { dst, args, .. } => {
                 out.extend(args.into_iter().flatten().map(|(_, reg)| O::reg_use(reg)));
                 out.push(O::reg_fixed_def(dst, return_reg(dst)));
             }
@@ -518,16 +526,14 @@ impl TargetInst for Inst {
                 regs.remove(AX);
                 regs
             }
-            Self::Lanes {
-                action, input, dst, ..
-            } => {
-                // The inline expansions use only these scratch registers. A real
-                // math call may also overwrite the upper halves of Windows YMM/ZMM6..15.
-                let mut set = if lanes::calls_library(*action, *input) {
-                    callee()
-                } else {
-                    gprs(&[0, 1, 2, 8, 9]) | vectors(0, 3)
-                };
+            Self::Fallback { dst, .. } => {
+                let mut set = callee();
+                set.remove(return_reg(*dst));
+                set
+            }
+            Self::Lanes { dst, .. } => {
+                // The inline expansions use only these scratch registers.
+                let mut set = gprs(&[0, 1, 2, 8, 9]) | vectors(0, 3);
                 set.remove(return_reg(*dst));
                 set
             }

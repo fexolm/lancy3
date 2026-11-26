@@ -15,9 +15,6 @@ impl Rules<'_> {
         let lane = ty.lane().unwrap();
         let profile = self.config.profile;
         let dst = self.dst();
-        if let Some(rem) = self.float_remainder(op, a, b) {
-            return Some(rem);
-        }
         if let Some(special) = self.float_binary_special(op, a, b) {
             return Some(special);
         }

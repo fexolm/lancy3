@@ -105,7 +105,7 @@ pub(crate) fn optimize_and_lower<T>(
     };
     if inlining.should_inline(source) {
         let expanded = tracing::debug_span!(target: "lancy::compile", "inline_lancy_hir")
-            .in_scope(|| passes::inline_all(source))
+            .in_scope(|| passes::inline_all(source, crate::lir::MAX_VALUES))
             .and_then(|mut body| {
                 tracing::debug_span!(target: "lancy::compile", "optimize_lancy_hir")
                     .in_scope(|| passes::simplify(&mut body))?;

@@ -150,9 +150,9 @@ fn pack_and_expand_preserve_lane_order_for_all_byte_masks() {
 #[test]
 fn avx10_short_fp16_arithmetic_uses_the_requested_width() {
     use super::packed_code::{body, executable, host_supports, profiles, supports};
-    use crate::hir::operation::Action;
     use crate::jit::packed_test;
     use crate::lir::x64::inst::simd::Native;
+    use crate::support::numeric::Action;
 
     for bytes in [16, 32] {
         let cpu = Cpu {
@@ -959,9 +959,9 @@ fn avx512_selects_packed_permutation_reduction_and_integer_conversions() {
 #[test]
 fn selected_rearrangements_respect_feature_subsets_and_smaller_register_widths() {
     use super::packed_code::{body, executable, host_supports, profiles, supports};
-    use crate::hir::{eval::evaluate, operation::Action};
     use crate::jit::packed_test;
     use crate::lir::x64::inst::simd::Native;
+    use crate::support::numeric::{Action, evaluate};
     use iced_x86::code_asm::{CodeAssembler, rax, xmm0};
 
     let [sse2, avx2, foundation, extended] = profiles();

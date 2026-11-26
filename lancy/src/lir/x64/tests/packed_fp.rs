@@ -6,8 +6,8 @@ use super::packed_code::{body, executable, host_supports, profiles, supports};
 use crate::ScalarKernel;
 use crate::hir::{Binary, Function, Lane, Op, Simd, Terminator, Type, Unary};
 use crate::{
-    hir::operation::Action,
     lir::x64::{Cpu, inst::simd::Native},
+    support::numeric::Action,
 };
 use iced_x86::{Decoder, DecoderOptions, EncodingKind, Instruction, Mnemonic};
 use std::num::FpCategory;

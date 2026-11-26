@@ -161,7 +161,7 @@ fn main(bits:i32) -> i32
   word = bitcast u16 out
   r = cast i32 word
   ret r
-@aarch64 all lacks blr
+@aarch64 all has blr
 @run 0x8000 -> 1
 @run 0x8001 -> 0x8000
 @run 0x03ff -> 0x0400
@@ -177,7 +177,7 @@ fn main(bits:i32) -> i32
   word = bitcast u16 out
   r = cast i32 word
   ret r
-@aarch64 all lacks blr
+@aarch64 all has blr
 @run 0 -> 0x8001
 @run 1 -> 0
 @run 0x0080 -> 0x007f

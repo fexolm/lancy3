@@ -1,5 +1,5 @@
 use super::{Binary, Function, Lane, Op, ScalarKernel, Terminator, Unary};
-use crate::hir::{eval::evaluate, operation::Action};
+use crate::support::numeric::{Action, evaluate};
 
 fn layout(lane: Lane) -> (u32, u64) {
     match lane {

@@ -211,16 +211,11 @@ pub(super) fn to_float(
     } else {
         let size = from.bytes();
         a.xor(r9d, r9d)?;
-        word(a, 0, src, size.min(8), false)?;
-        if size == 16 {
-            a.mov(rdx, qword_ptr(rsp + src + 8))?;
+        word(a, 0, src, size, from.signed())?;
+        if from.signed() {
+            a.cqo()?;
         } else {
-            if from.signed() {
-                word(a, 0, src, size, true)?;
-                a.cqo()?;
-            } else {
-                a.xor(edx, edx)?;
-            }
+            a.xor(edx, edx)?;
         }
         if from.signed() {
             let positive = a.create_label();
@@ -302,13 +297,6 @@ pub(super) fn emit(a: &mut CodeAssembler, from: Lane, to: Lane, src: i32, dst: i
     }
     if !from.float() && !to.float() {
         word(a, 0, src, n, from.signed())?;
-        if d == 16 {
-            if from.signed() {
-                a.cqo()?;
-            } else {
-                a.xor(edx, edx)?;
-            }
-        }
         return put(a, dst, d);
     }
     match (from, to) {

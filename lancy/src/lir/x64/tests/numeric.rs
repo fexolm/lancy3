@@ -107,7 +107,7 @@ fn fp_results_include_signed_zero_nan_and_fused_rounding() {
             let bits: Vec<_> = out.into_iter().flat_map(u64::to_le_bytes).collect();
             bits[..bytes]
                 .chunks_exact(lane.bytes())
-                .map(|x| crate::hir::eval::read(x) as u64)
+                .map(|x| crate::support::numeric::read(x) as u64)
                 .collect::<Vec<_>>()
         };
         let sqrt = kernel(&[ty], ty, |v| Op::Unary(Unary::Sqrt, v[0]));
@@ -218,8 +218,8 @@ fn unaligned_vector_store_precedes_trap() {
 #[test]
 fn instruction_encodings_require_their_exact_isa() {
     use crate::{
-        hir::operation::Action,
         lir::x64::{Cpu, inst::simd::Native},
+        support::numeric::Action,
     };
     use iced_x86::{Code, Decoder, DecoderOptions};
     let base = Cpu {
@@ -429,7 +429,7 @@ fn instruction_encodings_require_their_exact_isa() {
 #[test]
 fn avx512_splat_reads_integer_gprs_and_floating_point_xmm_sources() {
     use super::packed_code::{body, profiles};
-    use crate::{hir::operation::Action, lir::x64::inst::simd::Native};
+    use crate::{lir::x64::inst::simd::Native, support::numeric::Action};
     use iced_x86::{Decoder, DecoderOptions, Mnemonic, Register};
 
     let [_, avx2, foundation, full] = profiles();

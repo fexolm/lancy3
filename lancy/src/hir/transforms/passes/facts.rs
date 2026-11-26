@@ -1,7 +1,8 @@
 use crate::hir::transforms::{ControlFlowGraph, DomTree};
 use crate::hir::{
-    Block, Effects, Function, Inst, Lane, MIN_VECTOR_BYTES, Op, Simd, TrapKind, Value, integer,
+    Block, Effects, Function, Inst, Lane, MIN_VECTOR_BYTES, Op, Simd, TrapKind, Value,
 };
+use crate::support::numeric::integer;
 use crate::support::slotmap::DenseMap;
 use std::ops::Range;
 

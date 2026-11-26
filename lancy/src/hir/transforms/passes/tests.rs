@@ -43,7 +43,7 @@ fn repeated_calls_clone_loops_and_each_early_return_into_its_own_continuation() 
     root.set_terminator(b, Terminator::Return(answer));
 
     let source = root.verified_module().unwrap();
-    let expanded = inline_all(&source).unwrap();
+    let expanded = inline_all(&source, crate::lir::MAX_VALUES).unwrap();
     assert_eq!(expanded.verified_module().unwrap().functions.len(), 1);
     for policy in [Inlining::Always, Inlining::Never] {
         let code =
@@ -75,7 +75,7 @@ fn non_returning_callee_removes_only_the_unreachable_continuation() {
     let no = root.add_edge(no, &[]);
     root.set_terminator(b, Terminator::Branch { cond: x, yes, no });
     let source = root.verified_module().unwrap();
-    let expanded = inline_all(&source).unwrap();
+    let expanded = inline_all(&source, crate::lir::MAX_VALUES).unwrap();
     expanded.verify().unwrap();
     assert_eq!(
         expanded
@@ -111,7 +111,7 @@ fn expansion_counts_only_the_live_parts_of_reused_templates() {
         callee = Arc::new(caller);
     }
     let source = callee.verified_module().unwrap();
-    let expanded = inline_all(&source).unwrap();
+    let expanded = inline_all(&source, crate::lir::MAX_VALUES).unwrap();
     assert_eq!(expanded.blocks().count(), 2);
     assert_eq!(expanded.verified_module().unwrap().functions.len(), 1);
 }

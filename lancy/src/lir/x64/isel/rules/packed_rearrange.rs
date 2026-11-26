@@ -2,12 +2,12 @@ use super::Rules;
 use crate::lir::x64::Cpu;
 use crate::{
     hir::Value,
-    hir::operation::Action,
     hir::{Binary as B, Lane, Op, Simd, Type},
     lir::x64::inst::{
         Inst,
         simd::packed::rearrange::{PairedShuffle, Rule},
     },
+    support::numeric::Action,
 };
 use regalloc2::RegClass;
 

@@ -1,16 +1,17 @@
 //! Integer lane semantics shared by constant folding and the reference evaluator.
-use super::{Binary, Lane, Unary, operation::Action};
+use super::Action;
 use crate::Trap;
+use crate::hir::{Binary, Lane, Unary};
 
-pub(super) fn mask(lane: Lane) -> u128 {
+pub(crate) fn mask(lane: Lane) -> u128 {
     u128::MAX >> (128 - lane.bytes() * 8)
 }
 
-pub(super) fn signed(x: u128, bits: u32) -> i128 {
+pub(crate) fn signed(x: u128, bits: u32) -> i128 {
     ((x << (128 - bits)) as i128) >> (128 - bits)
 }
 
-pub(super) fn extend(lane: Lane, x: u128) -> u128 {
+pub(crate) fn extend(lane: Lane, x: u128) -> u128 {
     if lane.signed() {
         signed(x, lane.bytes() as u32 * 8) as u128
     } else {
@@ -19,12 +20,12 @@ pub(super) fn extend(lane: Lane, x: u128) -> u128 {
 }
 
 /// Evaluate a verified integer binary operation on lane bit patterns.
-pub(super) fn binary(op: Binary, lane: Lane, x: u128, y: u128) -> Result<u128, Trap> {
+pub(crate) fn binary(op: Binary, lane: Lane, x: u128, y: u128) -> Result<u128, Trap> {
     let mask = mask(lane);
     evaluate(Action::Binary(op), lane, x & mask, y & mask, mask)
 }
 
-pub(super) fn evaluate(
+pub(crate) fn evaluate(
     action: Action,
     lane: Lane,
     x: u128,

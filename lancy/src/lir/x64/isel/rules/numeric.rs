@@ -3,7 +3,7 @@ use crate::{
     CompileError,
     hir::operation::operation,
     hir::{Op, Simd},
-    lir::x64::inst::{Inst, simd::Native},
+    lir::x64::inst::{Inst, lanes, simd::Native},
 };
 use regalloc2::RegClass;
 
@@ -44,6 +44,15 @@ impl Rules<'_> {
         let dst = self.dst();
         let Some(native) = Native::select(action, input, output, self.cpu) else {
             let args = args.map(|v| v.map(|v| (self.ty(v), self.input(v))));
+            if !lanes::inline(action, input, output) {
+                return Ok(Inst::Fallback {
+                    action,
+                    input,
+                    output,
+                    dst,
+                    args,
+                });
+            }
             return Ok(Inst::Lanes {
                 action,
                 input,

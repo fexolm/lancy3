@@ -109,12 +109,8 @@ pub struct ScalarKernel {
     result_words: usize,
     pointer_signature: bool,
     debug: Vec<super::DebugFunction>,
-    /// AArch64 libcall sites the code reads through the workspace.
-    #[cfg_attr(
-        not(target_arch = "aarch64"),
-        expect(dead_code, reason = "x64 code has no libcall sites")
-    )]
-    sites: Box<[crate::aarch64::Site]>,
+    /// The fallback sites whose addresses the code embeds.
+    _sites: crate::lir::Sites,
 }
 
 impl ScalarKernel {
@@ -166,7 +162,7 @@ impl ScalarKernel {
                 || function.param_types().contains(&Type::Ptr)
                 || function.return_type() == Type::Ptr,
             debug: code.debug,
-            sites: code.sites,
+            _sites: code.sites,
         })
     }
 
@@ -312,7 +308,6 @@ impl ScalarKernel {
         {
             // Each thread has its own SVE vector length.
             self.target.check_execution()?;
-            workspace[crate::aarch64::SITE_POINTER].write(self.sites.as_ptr() as u64);
             // SAFETY: the executable mapping was synchronized before publication.
             // ISB synchronizes the instruction stream on this calling core.
             unsafe { std::arch::asm!("isb", options(nostack, preserves_flags)) };

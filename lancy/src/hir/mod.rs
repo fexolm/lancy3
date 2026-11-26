@@ -1,6 +1,4 @@
 mod error;
-pub(crate) mod eval;
-mod integer;
 pub(crate) mod operation;
 pub mod ssa;
 pub mod text;

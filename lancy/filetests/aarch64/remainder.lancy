@@ -7,8 +7,8 @@ fn main(x:i32 y:i32) -> i32
   bits = bitcast u16 c
   r = cast i32 bits
   ret r
-@aarch64-isel check: FloatRemainder(
-@aarch64 all lacks blr
+@aarch64-isel check: Libcall(
+@aarch64 all has blr
 @run 0x4580 0x4200 -> 0x4100
 @run 0xc580 0xc200 -> 0xc100
 @run 0xc600 0x4200 -> 0x8000
@@ -35,8 +35,8 @@ fn main(x:i32 y:i32) -> i32
   bits = bitcast u16 v
   r = cast i32 bits
   ret r
-@aarch64-isel check: FloatRemainder(
-@aarch64 all lacks blr
+@aarch64-isel check: Libcall(
+@aarch64 all has blr
 @run 0x40b0 0x4040 -> 0x4020
 @run 0xc0c0 0x4040 -> 0x8000
 @run 0x0081 5 -> 4
@@ -51,8 +51,8 @@ fn main(x:i32 y:i32) -> i32
   c = rem a b
   r = bitcast i32 c
   ret r
-@aarch64-isel check: FloatRemainder(
-@aarch64 all lacks blr
+@aarch64-isel check: Libcall(
+@aarch64 all has blr
 @run 0x7f7fffff 11 -> 10
 @run 0x00800001 0x00800000 -> 1
 @run 0x80000000 0x7f800000 -> 0x80000000
@@ -66,8 +66,8 @@ fn main(p:ptr) -> i32
   bits = bitcast u64 c
   r = cast i32 bits
   ret r
-@aarch64-isel check: FloatRemainder(
-@aarch64 all lacks blr
+@aarch64-isel check: Libcall(
+@aarch64 all has blr
 @run -> 4 | ff ff ff ff ff ff ef 7f 0b 00 00 00 00 00 00 00 | ff ff ff ff ff ff ef 7f 0b 00 00 00 00 00 00 00
 ---
 fn main(x:i32 y:i32) -> i32
@@ -76,7 +76,7 @@ fn main(x:i32 y:i32) -> i32
   c = rem a b
   r = isnan c
   ret r
-@aarch64 all lacks blr
+@aarch64 all has blr
 @run 0x7f800000 0x3f800000 -> -1
 @run 0x3f800000 0x80000000 -> -1
 @run 0x7f800000 0xffc00042 -> -1

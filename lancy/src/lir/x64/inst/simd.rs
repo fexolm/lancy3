@@ -4,8 +4,8 @@ pub(in crate::lir::x64) mod packed;
 use super::VectorMask;
 use crate::lir::x64::{Cpu, emit};
 use crate::{
-    hir::operation::Action,
     hir::{Binary as B, Lane, Ternary, Type, Unary},
+    support::numeric::Action,
 };
 use iced_x86::{IcedError, code_asm::*};
 

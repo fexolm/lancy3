@@ -3,7 +3,8 @@
 //! the passes ask these functions instead of matching `Op` themselves, so a
 //! new operation is described here once.
 use super::{Binary, Lane, Op, Simd, Ternary, Type, Value};
-use crate::hir::{Function, Inst, IrError, integer};
+use crate::hir::{Function, Inst, IrError};
+use crate::support::numeric::integer;
 
 /// Why an operation may stop the program instead of producing its result.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

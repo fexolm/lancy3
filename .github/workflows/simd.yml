@@ -128,8 +128,8 @@ jobs:
       matrix:
         include:
           - { simd: sve, cpu: a64fx, vl: 32, bytes: 32 }
-          - { simd: sve2, cpu: max, vl: 64, bytes: 64 }
-          - { simd: sve2, cpu: max, vl: 48, bytes: 32 }
+          - { simd: sve2, cpu: "max,pauth-impdef=on", vl: 64, bytes: 64 }
+          - { simd: sve2, cpu: "max,pauth-impdef=on", vl: 48, bytes: 32 }
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 90
     env:

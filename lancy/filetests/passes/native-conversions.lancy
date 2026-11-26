@@ -1,19 +1,17 @@
-# The input is dynamic so all three conversions must execute.
+# The input is dynamic so all three conversions must execute. 128-bit
+# conversions are cold and call the shared numeric fallback.
 fn main(x:u128) -> i128
   half = cast bf16 x
   single = cast f32 half
   wide = cast i128 single
   ret wide
-@asm check: endbr64
-@asm not: call
-@asm check: ret
+@isel check: fallback.U128.Cast
+@isel check: fallback.F32.Cast
 ---
 fn main(x:f64) -> u128
   wide = cast u128 x
   ret wide
-@asm check: endbr64
-@asm not: call
-@asm check: ret
+@isel check: fallback.F64.Cast
 ---
 fn main(x:f16 y:f16 z:f16) -> f16
   answer = fma x y z

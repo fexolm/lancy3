@@ -1,13 +1,37 @@
-//! Portable numeric semantics used by the SSA reference and AArch64 libcalls.
-use super::{
-    integer::{evaluate as integer, extend, mask, signed},
-    operation::Action,
-};
+//! Portable numeric semantics: the reference for the HIR interpreter and
+//! constant folding, and the runtime of the backends' numeric fallback.
+pub(crate) mod integer;
+
 use crate::support::float16::Format;
 use crate::{
     Trap,
     hir::{Binary, Lane, Ternary, Type, Unary},
 };
+use integer::{evaluate as integer, extend, mask, signed};
+
+/// A numeric operation kind independent of its operand values.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum Action {
+    Unary(Unary),
+    Binary(Binary),
+    Ternary(Ternary),
+    Cast,
+    Bitcast,
+    Splat,
+    Extract,
+    Insert,
+    Compress,
+    Expand,
+    Iota,
+    Shuffle,
+    Reduce(Binary),
+    AnyTrue,
+    AllTrue,
+    FirstLanes,
+    MaskCount,
+    Widen(bool),
+    Narrow,
+}
 pub(crate) type Bits = [u8; 64];
 
 pub(crate) fn read(bytes: &[u8]) -> u128 {

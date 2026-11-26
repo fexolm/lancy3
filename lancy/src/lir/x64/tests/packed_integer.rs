@@ -1,9 +1,9 @@
 use super::packed_code::{body, executable, host_supports, profiles, supports};
 use crate::{
     hir::{Binary as B, Lane, Type, Unary as U},
-    hir::{eval::evaluate, operation::Action},
     jit::packed_test,
     lir::x64::{Cpu, inst::simd::Native},
+    support::numeric::{Action, evaluate},
 };
 use iced_x86::{Decoder, DecoderOptions, Mnemonic};
 use splice_target::X86Features;
