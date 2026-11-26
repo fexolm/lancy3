@@ -32,6 +32,35 @@ pub(crate) enum Action {
     Widen(bool),
     Narrow,
 }
+/// Spelled as the HIR operation it performs: `add`, `reduce.min`, `widenhi`.
+impl std::fmt::Display for Action {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        use crate::hir::text::{binary_name, ternary_name, unary_name};
+        f.write_str(match *self {
+            Self::Unary(op) => unary_name(op),
+            Self::Binary(op) => binary_name(op),
+            Self::Ternary(op) => ternary_name(op),
+            Self::Reduce(op) => return write!(f, "reduce.{}", binary_name(op)),
+            Self::Cast => "cast",
+            Self::Bitcast => "bitcast",
+            Self::Splat => "splat",
+            Self::Extract => "extract",
+            Self::Insert => "insert",
+            Self::Compress => "compress",
+            Self::Expand => "expand",
+            Self::Iota => "iota",
+            Self::Shuffle => "shuffle",
+            Self::AnyTrue => "any",
+            Self::AllTrue => "all",
+            Self::FirstLanes => "firstlanes",
+            Self::MaskCount => "maskcount",
+            Self::Widen(true) => "widenhi",
+            Self::Widen(false) => "widenlo",
+            Self::Narrow => "narrow",
+        })
+    }
+}
+
 pub(crate) type Bits = [u8; 64];
 
 pub(crate) fn read(bytes: &[u8]) -> u128 {

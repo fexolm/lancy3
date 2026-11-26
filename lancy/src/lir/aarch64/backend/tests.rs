@@ -1,70 +1,12 @@
-use super::compile::Compiled;
-use crate::filetests::{Case, Result};
-use crate::{hir::ssa::VerifiedBody, module::Module};
-use regalloc2::{Block, Function as _, InstOrEdit};
-use splice_target::Profile;
-use std::fmt::Write;
+//! Encodings that `@aarch64` filetests look for, and tests that execute
+//! AArch64 code.
 
-pub(crate) fn check_machine(
-    case: &mut Case<'_>,
-    target: &splice_target::Target,
-    module: Module<VerifiedBody<'_>>,
-) -> Result<()> {
-    if !["aarch64-isel", "aarch64-alloc"]
+/// The mask and value of the encoding `@aarch64` names `name`.
+pub(crate) fn encoding(name: &str) -> Option<(u32, u32)> {
+    ENCODINGS
         .iter()
-        .any(|stage| case.checks.contains_key(stage))
-        && case.encodings.is_empty()
-    {
-        return Ok(());
-    }
-    let simd = super::Config::new(target);
-    let compiled =
-        super::compile(module, simd).map_err(|error| format!("aarch64 allocation: {error}"))?;
-    let root = &compiled.functions[compiled.call_graph.root()];
-    case.check("aarch64-isel", || selected(root))?;
-    case.check("aarch64-alloc", || allocated(root))?;
-    if !case.encodings.is_empty() {
-        let code = super::emit_compiled(&compiled, simd, false).map_err(|e| e.to_string())?;
-        let select = match simd.profile {
-            Profile::Neon => "neon",
-            Profile::Sve => "sve",
-            Profile::Sve2 => "sve2",
-            profile => return Err(format!("no AArch64 encoding profile for {profile:?}")),
-        };
-        // AArch64 code has no literal pool: every emitted word is an instruction.
-        let words = code.bytes.as_chunks::<4>().0;
-        for (line, assertion) in std::mem::take(&mut case.encodings) {
-            let invalid = || format!("line {line}: invalid AArch64 assertion: {assertion}");
-            let parts: Vec<_> = assertion.split_whitespace().collect();
-            let [profile, presence, name] = parts.as_slice() else {
-                return Err(invalid());
-            };
-            let has = match *presence {
-                "has" => true,
-                "lacks" => false,
-                _ => return Err(invalid()),
-            };
-            if !matches!(*profile, "all" | "neon" | "sve" | "sve2") {
-                return Err(invalid());
-            }
-            let &(_, mask, opcode) = ENCODINGS
-                .iter()
-                .find(|(known, ..)| known == name)
-                .ok_or_else(|| format!("line {line}: unknown AArch64 encoding {name}"))?;
-            if *profile != "all" && *profile != select {
-                continue;
-            }
-            let found = words
-                .iter()
-                .any(|word| u32::from_le_bytes(*word) & mask == opcode);
-            if found != has {
-                return Err(format!(
-                    "line {line}: failed AArch64 assertion: {assertion}"
-                ));
-            }
-        }
-    }
-    Ok(())
+        .find(|(known, ..)| *known == name)
+        .map(|&(_, mask, value)| (mask, value))
 }
 
 /// `@aarch64` encodings: name, mask and value. Names follow the
@@ -150,53 +92,6 @@ fn encoding_names_are_unique_and_values_fit_their_masks() {
             "{name}"
         );
     }
-}
-
-fn selected(machine: &Compiled) -> String {
-    let mut text = String::new();
-    let body = &machine.body;
-    for i in 0..body.num_blocks() {
-        let b = Block::new(i);
-        writeln!(
-            text,
-            "{b:?} {:?} -> {:?}",
-            body.block_params(b),
-            body.block_succs(b)
-        )
-        .unwrap();
-        for inst in body.block_insns(b).iter() {
-            writeln!(
-                text,
-                "  {:?} {:?}",
-                body.insts()[inst.index()],
-                body.inst_operands(inst)
-            )
-            .unwrap();
-        }
-    }
-    text
-}
-
-fn allocated(machine: &Compiled) -> String {
-    let mut text = format!("spill words {}\n", machine.allocation.num_spillslots);
-    let body = &machine.body;
-    for i in 0..body.num_blocks() {
-        let b = Block::new(i);
-        writeln!(text, "{b:?}").unwrap();
-        for entry in machine.allocation.block_insts_and_edits(body, b) {
-            match entry {
-                InstOrEdit::Edit(edit) => writeln!(text, "  {edit:?}").unwrap(),
-                InstOrEdit::Inst(i) => writeln!(
-                    text,
-                    "  {:?} {:?}",
-                    body.insts()[i.index()],
-                    machine.allocation.inst_allocs(i)
-                )
-                .unwrap(),
-            }
-        }
-    }
-    text
 }
 
 // Executing AArch64 code needs an AArch64 host.

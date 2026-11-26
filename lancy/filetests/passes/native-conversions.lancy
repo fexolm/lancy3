@@ -5,13 +5,13 @@ fn main(x:u128) -> i128
   single = cast f32 half
   wide = cast i128 single
   ret wide
-@isel check: fallback.U128.Cast
-@isel check: fallback.F32.Cast
+@isel check: fallback.u128.cast
+@isel check: fallback.f32.cast
 ---
 fn main(x:f64) -> u128
   wide = cast u128 x
   ret wide
-@isel check: fallback.F64.Cast
+@isel check: fallback.f64.cast
 ---
 fn main(x:f16 y:f16 z:f16) -> f16
   answer = fma x y z

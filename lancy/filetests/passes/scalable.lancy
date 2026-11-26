@@ -16,9 +16,9 @@ fn main(x:i32) -> i32
 @opt not: = div
 @opt not: = mul
 @opt check: = add
-@isel check: native.Vector(F32).Binary(Add)
+@isel check: native.vec.f32.add
 @alloc regex: SIMD=[xyz]mm[0-9]+
-@alloc check: native.Vector(F32).Binary(Add) | $SIMD
+@alloc check: native.vec.f32.add | $SIMD
 @asm regex: ADDPS=v?addps
 @asm check: $ADDPS
 @run 0 -> 0
@@ -37,7 +37,7 @@ fn main(p:ptr) -> i32
   r = const 9
   ret r
 @opt check: load vec.f32
-@isel check: load.Vector(F32)
+@isel check: load.vec.f32
 ---
 fn main(p:ptr) -> i32
   v = splat p
@@ -93,8 +93,8 @@ fn main(p:ptr inactive:i32) -> i32
   first_value = extract gathered one
   result = add inactive_value first_value
   ret result
-@isel check: maskedload.Vector(I32)
-@isel check: maskedstore.Vector(I32)
+@isel check: maskedload.vec.i32
+@isel check: maskedstore.vec.i32
 @run 1 -> 120 | 77 00 00 00 | ff ff ff ff
 @run 2147483647 -> -2147483530 | 77 00 00 00 | ff ff ff ff
 ---

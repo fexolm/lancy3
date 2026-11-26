@@ -1,10 +1,10 @@
-//! `filetests` only lists code and runs on every host; the other tests
+//! `disassembly` reads code on every host for filetests; the other tests
 //! execute x64 code.
 #[cfg(target_arch = "x86_64")]
 mod arithmetic;
 #[cfg(target_arch = "x86_64")]
 mod calls;
-pub(super) mod filetests;
+pub(super) mod disassembly;
 #[cfg(target_arch = "x86_64")]
 mod isel;
 #[cfg(target_arch = "x86_64")]

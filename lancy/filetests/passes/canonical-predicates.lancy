@@ -35,7 +35,7 @@ fn main(x:i32) -> i32
   pred = lt i limit
   count = maskcount pred
   ret count
-@isel regex: COUNT=mask\.count|Reduce\(Add\)
+@isel regex: COUNT=mask\.count|reduce.add
 @isel check: $COUNT
 @run 0 -> 0
 @run 3 -> 3
@@ -56,7 +56,7 @@ fn main(out:ptr limit:i32) -> i32
   data = add i tens
   compressstore out odd data limit
   ret limit
-@isel regex: STORE=compress\.store|maskedstore\.Vector\(I32\)
+@isel regex: STORE=compress\.store|maskedstore\.vec.i32
 @isel check: $STORE
 @run 1 -> 1 | aa aa aa aa aa aa aa aa aa aa aa aa | 0b 00 00 00 aa aa aa aa aa aa aa aa
 @run 2 -> 2 | aa aa aa aa aa aa aa aa aa aa aa aa | 0b 00 00 00 0d 00 00 00 aa aa aa aa

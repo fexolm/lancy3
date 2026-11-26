@@ -152,11 +152,24 @@ fn find<T: Copy>(table: &[(T, &str)], name: &str, what: &str) -> std::result::Re
         .ok_or_else(|| format!("unknown {what} {name}"))
 }
 
-fn trap_name(trap: Trap) -> String {
+/// The spelling of operations, lanes and traps, shared with LIR listings.
+pub(crate) fn binary_name(op: Binary) -> &'static str {
+    name_of(&BINARIES, op)
+}
+
+pub(crate) fn unary_name(op: Unary) -> &'static str {
+    name_of(&UNARIES, op)
+}
+
+pub(crate) fn ternary_name(op: Ternary) -> &'static str {
+    name_of(&TERNARIES, op)
+}
+
+pub(crate) fn trap_name(trap: Trap) -> String {
     format!("{trap:?}")
 }
 
-fn lane_name(lane: Lane) -> &'static str {
+pub(crate) fn lane_name(lane: Lane) -> &'static str {
     name_of(&LANES, lane)
 }
 

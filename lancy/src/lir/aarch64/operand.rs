@@ -100,6 +100,27 @@ pub enum Arrangement {
     /// The 128-bit element of an SVE vector.
     Q,
 }
+impl Arrangement {
+    /// The assembler suffix: `4s` for a NEON vector, `s` for an element.
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::B8 => "8b",
+            Self::B16 => "16b",
+            Self::H4 => "4h",
+            Self::H8 => "8h",
+            Self::S2 => "2s",
+            Self::S4 => "4s",
+            Self::D1 => "1d",
+            Self::D2 => "2d",
+            Self::B => "b",
+            Self::H => "h",
+            Self::S => "s",
+            Self::D => "d",
+            Self::Q => "q",
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
 pub enum ShiftKind {
@@ -127,6 +148,15 @@ pub enum ConditionCode {
     Le,
     Al,
     Nv,
+}
+
+impl ConditionCode {
+    pub const fn name(self) -> &'static str {
+        [
+            "eq", "ne", "cs", "cc", "mi", "pl", "vs", "vc", "hi", "ls", "ge", "lt", "gt", "le",
+            "al", "nv",
+        ][self as usize]
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

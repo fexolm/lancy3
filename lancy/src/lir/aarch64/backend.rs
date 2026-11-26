@@ -7,6 +7,7 @@ mod half;
 mod inst;
 mod isel;
 mod memory;
+mod names;
 mod operations;
 mod reduce;
 mod rotate;
@@ -15,7 +16,7 @@ mod special;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
-pub(crate) use tests::check_machine;
+pub(crate) use tests::encoding;
 mod unary;
 mod wide;
 mod width;
@@ -24,7 +25,7 @@ use super::{
     Arrangement as A, Code as C, ConditionCode as Cond, Operand as O, PredQual, Register as R,
     ShiftKind,
 };
-use crate::lir::regalloc::Allocations;
+use crate::lir::{Code, Stage, Stages, regalloc::Allocations};
 use crate::{
     CompileError, Trap,
     hir::{Type, ssa::VerifiedBody},
@@ -70,13 +71,6 @@ const ROOT_SAVES: [u8; 4] = [19, 20, 22, 30];
 const CHILD_SAVES: [u8; 3] = [19, 22, 30];
 const HOST_STACK_BYTES: u64 = 32;
 const RESULT: (R, usize) = (R::X20, 8);
-
-pub(crate) struct Code {
-    pub bytes: Vec<u8>,
-    pub words: usize,
-    pub sites: crate::lir::fallback::Sites,
-    pub debug: Vec<DebugFunction>,
-}
 
 type Result<T = ()> = std::result::Result<T, CompileError>;
 type Label = usize;
@@ -848,20 +842,16 @@ fn invert(c: Cond) -> Cond {
 pub(crate) fn emit(
     target: &splice_target::Target,
     source: Module<VerifiedBody<'_>>,
+    debug: bool,
+    stages: Stages<'_>,
 ) -> Result<Code> {
-    emit_mode(Config::new(target), source, false)
-}
-
-pub(crate) fn emit_debug(
-    target: &splice_target::Target,
-    source: Module<VerifiedBody<'_>>,
-) -> Result<Code> {
-    emit_mode(Config::new(target), source, true)
-}
-
-fn emit_mode(config: Config, source: Module<VerifiedBody<'_>>, debug: bool) -> Result<Code> {
-    let module = compile(source, config)?;
-    emit_compiled(&module, config, debug)
+    let config = Config::new(target);
+    let module = compile(source, config, stages)?;
+    let root = &module.functions[module.call_graph.root()].body;
+    stages(Stage::Layout(&|| crate::lir::layout::listing(root)));
+    let code = emit_compiled(&module, config, debug)?;
+    stages(Stage::Assemble(&code.bytes));
+    Ok(code)
 }
 
 fn emit_compiled(module: &Module<Compiled>, config: Config, debug: bool) -> Result<Code> {

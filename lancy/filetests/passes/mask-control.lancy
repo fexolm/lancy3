@@ -9,7 +9,7 @@ fn main(x:i32) -> i32
   any = any mask
   bounds any one
   ret zero
-@isel not: AnyTrue
+@isel not: vec.i32.any |
 @isel check: bounds.mask
 @run 0 -> 0
 @run 1 -> !bounds
@@ -22,7 +22,7 @@ fn main(x:i32) -> i32
   any = any v
   bounds any zero
   ret zero
-@isel check: AnyTrue
+@isel check: vec.i32.any |
 @isel nextln: bounds |
 @run 0 -> !bounds
 @run 1 -> !bounds
@@ -38,7 +38,7 @@ block nonzero()
 block empty()
   bounds any one
   ret any
-@isel check: AnyTrue
+@isel check: vec.i32.any |
 @isel check: branch |
 @isel check: bounds |
 @run 0 -> 0
@@ -54,7 +54,7 @@ block nonzero()
 block empty()
   no = const 23
   ret no
-@isel not: AnyTrue
+@isel not: vec.i32.any |
 @isel check: branch.any
 @run 0 -> 23
 @run 1 -> 17

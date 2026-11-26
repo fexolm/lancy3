@@ -14,9 +14,9 @@ fn main(out:ptr value:i32 overflow:i32) -> i32
 @opt check: store
 @opt nextln: trap_if v2 Overflow
 @opt check: store
-@isel check: store.I32
+@isel check: store.i32
 @isel check: trap_if Overflow
-@isel check: store.I32
+@isel check: store.i32
 @run 7 0 -> 7 | aa aa aa aa bb bb bb bb | 07 00 00 00 07 00 00 00
 @run 7 -1 -> !arithmetic_overflow | aa aa aa aa bb bb bb bb | 07 00 00 00 bb bb bb bb
 ---
@@ -51,9 +51,9 @@ block rest()
 @isel check: trap_if DivisionOverflow
 @isel check: trap DivisionByZero
 @isel check: trap Bounds
-@aarch64-isel check: , DivisionOverflow) [Use: v1i reg]
-@aarch64-isel check: Trap(DivisionByZero)
-@aarch64-isel check: Trap(Bounds)
+@aarch64-isel check: trap_if DivisionOverflow | Use: v1i reg
+@aarch64-isel check: trap DivisionByZero
+@aarch64-isel check: trap Bounds
 @aarch64 all lacks blr
 @run 0 -> !bounds | aa aa aa aa | 00 00 00 00
 @run 1 -> !zero | aa aa aa aa | 01 00 00 00

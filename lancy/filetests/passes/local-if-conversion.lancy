@@ -74,7 +74,7 @@ fn main(x:i32 y:i32 yes:i32 no:i32) -> i32
 block join(v:i32)
   ret v
 @opt check: = select
-@isel not: cmp.Lt
+@isel not: cmp.lt
 @isel check: select.i32
 @asm check: cmp
 @asm nextln: cmovl

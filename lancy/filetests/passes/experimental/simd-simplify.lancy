@@ -117,7 +117,7 @@ fn main(p:ptr x:i32) -> i32
   masked = and old v
   answer = extract masked z
   ret answer
-@isel check: load.Vector(I32)
-@isel check: store.I32
-@isel not: packed.And.mem
+@isel check: load.vec.i32
+@isel check: store.i32
+@isel not: packed.and.mem
 @run 127 -> 60 | bc 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 | 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00

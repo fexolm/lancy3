@@ -12,7 +12,7 @@ use crate::{
     CompileError, Limit, Trap,
     hir::{Binary, Type, ssa::VerifiedBody},
     jit::{DebugFrame, DebugFunction},
-    lir::layout,
+    lir::{Stage, Stages, layout},
     module::{FunctionId, Module},
     support::slotmap::DenseMap,
 };
@@ -112,7 +112,7 @@ pub(super) fn bind(a: &mut CodeAssembler, mut label: CodeLabel) -> AsmResult {
 
 pub(crate) struct Code {
     pub bytes: Vec<u8>,
-    #[cfg(test)]
+    /// The instructions end here; the constant pool follows.
     pub text_len: usize,
     pub words: usize,
     pub debug: Vec<DebugFunction>,
@@ -122,20 +122,15 @@ pub(crate) struct Code {
 pub(crate) fn emit(
     target: &splice_target::Target,
     source: Module<VerifiedBody<'_>>,
+    debug: bool,
+    stages: Stages<'_>,
 ) -> Result<Code, CompileError> {
-    emit_mode(&compile(Machine::new(target), source)?, false)
-}
-
-pub(crate) fn emit_debug(
-    target: &splice_target::Target,
-    source: Module<VerifiedBody<'_>>,
-) -> Result<Code, CompileError> {
-    emit_mode(&compile(Machine::new(target), source)?, true)
-}
-
-#[cfg(test)]
-pub(super) fn emit_compiled(module: &Module<CompiledFunction>) -> Result<Code, CompileError> {
-    emit_mode(module, false)
+    let module = compile(Machine::new(target), source, stages)?;
+    let root = &module.functions[module.call_graph.root()].body;
+    stages(Stage::Layout(&|| layout::listing(root)));
+    let code = assemble(&module, debug)?;
+    stages(Stage::Assemble(&code.bytes[..code.text_len]));
+    Ok(code)
 }
 
 // The encoder translates these instruction indices after shortening branches.
@@ -165,10 +160,6 @@ impl From<Failure> for CompileError {
             Failure::Limit(limit) => limit.into(),
         }
     }
-}
-
-fn emit_mode(module: &Module<CompiledFunction>, debug: bool) -> Result<Code, CompileError> {
-    Ok(assemble(module, debug)?)
 }
 
 fn assemble(module: &Module<CompiledFunction>, debug: bool) -> Result<Code, Failure> {
@@ -280,7 +271,6 @@ fn assemble(module: &Module<CompiledFunction>, debug: bool) -> Result<Code, Fail
     if !debug {
         restore(&mut a)?;
     }
-    #[cfg(test)]
     let pool_bytes: usize = constants.iter().map(|(_, _, size)| size).sum();
     for (label, bits, size) in constants {
         bind(&mut a, label)?;
@@ -311,7 +301,6 @@ fn assemble(module: &Module<CompiledFunction>, debug: bool) -> Result<Code, Fail
         return Err(Failure::Limit(Limit::CodeSize { bytes: bytes.len() }));
     }
     Ok(Code {
-        #[cfg(test)]
         text_len: bytes.len() - pool_bytes,
         bytes,
         words: root.workspace,

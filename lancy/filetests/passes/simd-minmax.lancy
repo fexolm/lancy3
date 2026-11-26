@@ -20,8 +20,8 @@ fn main(x:i32) -> i32
 @opt check: = min
 @opt not: = select
 @opt check: ret
-@isel check: native.Vector(I32).Binary(Max)
-@isel check: native.Vector(I32).Binary(Min)
+@isel check: native.vec.i32.max
+@isel check: native.vec.i32.min
 @run 0x80000000 -> 0
 @run -1 -> 0
 @run 0 -> 0

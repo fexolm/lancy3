@@ -2,10 +2,10 @@ fn main(x:i32) -> i32
   c = const 4095
   r = add c x
   ret r
-@aarch64-isel not: Literal
-@aarch64-isel check: Imm(Add_32_addsub_imm, 4095, 0,
-@aarch64-alloc check: spill words 0
-@aarch64-alloc check: Imm(Add_32_addsub_imm, 4095, 0,
+@aarch64-isel not: literal
+@aarch64-isel check: imm add_32_addsub_imm 4095 lsl=0
+@aarch64-alloc check: spill_slots=0
+@aarch64-alloc check: imm add_32_addsub_imm 4095 lsl=0
 @aarch64 all has add.w.4095
 @run 2147483647 -> -2147479554
 ---
@@ -13,8 +13,8 @@ fn main(x:i32) -> i32
   c = const 4096
   r = sub x c
   ret r
-@aarch64-isel not: Literal
-@aarch64-isel check: Imm(Sub_32_addsub_imm, 1, 12,
+@aarch64-isel not: literal
+@aarch64-isel check: imm sub_32_addsub_imm 1 lsl=12
 @aarch64 all has sub.w.4096
 @run -2147483648 -> 2147479552
 ---
@@ -22,8 +22,8 @@ fn main(x:i32) -> i32
   c = const 4097
   r = add x c
   ret r
-@aarch64-isel check: Literal(I32, 4097,
-@aarch64-isel check: Three(Add_32_addsub_shift)
+@aarch64-isel check: literal i32 0x1001
+@aarch64-isel check: int add_32_addsub_shift
 @aarch64 all has add.w
 @run -4098 -> -1
 ---
@@ -31,8 +31,8 @@ fn main(x:i32) -> i32
   c = const 37
   r = sub c x
   ret r
-@aarch64-isel check: Literal(I32, 37,
-@aarch64-isel check: Three(Sub_32_addsub_shift)
+@aarch64-isel check: literal i32 0x25
+@aarch64-isel check: int sub_32_addsub_shift
 @aarch64 all has sub.w
 @run 12 -> 25
 @run -12 -> 49
@@ -61,8 +61,8 @@ fn main(out:ptr x:i32 d:i32) -> i32
   store next r
   ret r
 @policy never
-@aarch64-isel check: Call(
-@aarch64-alloc check: spill words
+@aarch64-isel check: call f0
+@aarch64-alloc check: spill_slots=
 @run 7 2 -> 4114 | aa aa aa aa bb bb bb bb | 07 00 00 00 12 10 00 00
 @run 7 0 -> !zero | aa aa aa aa bb bb bb bb | 07 00 00 00 bb bb bb bb
 @run -2147483648 -1 -> !overflow | aa aa aa aa bb bb bb bb | 00 00 00 80 bb bb bb bb

@@ -5,7 +5,7 @@ fn main(idx:i32 x:i32) -> i32
   before = extract v idx
   r = sub after before
   ret r
-@aarch64-isel check: LaneAccess
+@aarch64-isel check: insert i32
 @aarch64 sve has z.index.s.0.1
 @aarch64 sve2 has z.index.s.0.1
 @aarch64 all lacks blr

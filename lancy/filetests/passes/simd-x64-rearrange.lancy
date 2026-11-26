@@ -15,7 +15,7 @@ fn main(bias:i32) -> i32
   bad = ne shifted expected
   result = any bad
   ret result
-@isel regex: SHIFT=shift.dwords 1|lanes\.Vector\(I32\)\.Shuffle
+@isel regex: SHIFT=shift.dwords 1|lanes\.vec.i32\.shuffle
 @isel check: $SHIFT
 @run 19 -> 0
 @run 2147483647 -> 0
@@ -44,7 +44,7 @@ fn main(bias:i32) -> i32
   index = const 3
   result = extract table index
   ret result
-@isel check: extract.I32 3
+@isel check: extract.i32 3
 @run 5 -> 8
 @run 2147483647 -> -2147483646
 ---
@@ -54,7 +54,7 @@ fn main(x:i32) -> i32
   index = const -1
   unused = extract table index
   ret x
-@isel check: lanes.Vector(I32).Extract
+@isel check: lanes.vec.i32.extract
 @run 7 -> !bounds
 ---
 # Computing the second table can trap even when all selected lanes come from the first.
@@ -85,7 +85,7 @@ fn main(bias:i32) -> i32
   value = extract out last
   answer = sub value last
   ret answer
-@isel regex: SHUFFLE=shuffle\.Deinterleave\(true\)|lanes\.Vector\(I32\)\.Shuffle
+@isel regex: SHUFFLE=shuffle\.deinterleave\.hi|lanes\.vec.i32\.shuffle
 @isel check: $SHUFFLE
 @run 71 -> 71
 ---
@@ -105,7 +105,7 @@ fn main(bias:i32) -> i32
   value = extract out last
   ret value
 @isel check: arg 0
-@isel not: shuffle.Deinterleave
+@isel not: shuffle.deinterleave
 @isel check: ret
 @run 71 -> 0
 ---
@@ -120,7 +120,7 @@ fn main(p:ptr index:i32 replacement:i32) -> i32
   next = offset p one 4
   store next result
   ret result
-@isel regex: INSERT=insert\.dword\.checked|lanes\.Vector\(I32\)\.Insert
+@isel regex: INSERT=insert\.dword\.checked|lanes\.vec.i32\.insert
 @isel check: $INSERT
 @run 3 99 -> 96 | aa aa aa aa ff ff ff ff | 01 00 00 00 60 00 00 00
 @run -1 99 -> !bounds | aa aa aa aa ff ff ff ff | 01 00 00 00 ff ff ff ff

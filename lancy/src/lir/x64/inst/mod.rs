@@ -1,6 +1,7 @@
 //! Selected x64 instructions. R11 addresses the current workspace frame.
 //! R10 is the allocator's move scratch and is available inside a pseudo-op.
 pub(super) mod lanes;
+mod names;
 pub(super) mod simd;
 pub(super) use super::abi::SCRATCH;
 use super::abi::{MASKS, Machine, gprs, vectors};

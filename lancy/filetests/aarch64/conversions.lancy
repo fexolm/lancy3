@@ -2,7 +2,7 @@ fn main(raw:i32) -> i32
   x = bitcast f32 raw
   y = cast i32 x
   ret y
-@aarch64-isel check: FloatCast(Fcvtzs_scalar
+@aarch64-isel check: cast.float fcvtzs_scalar
 @aarch64 all lacks blr
 @run 0xbff33333 -> -1
 @run 0x3ff33333 -> 1
@@ -32,7 +32,7 @@ fn main(raw:i32) -> i32
   v = extract y z
   r = bitcast i32 v
   ret r
-@aarch64-isel check: PackedCast
+@aarch64-isel check: cast.packed
 @aarch64 all lacks blr
 @run 0xbff33333 -> 0
 @run 0x4f800000 -> -1
@@ -43,7 +43,7 @@ fn main(x:i32) -> i32
   y = cast f32 x
   r = bitcast i32 y
   ret r
-@aarch64-isel check: FloatCast(Scvtf_scalar
+@aarch64-isel check: cast.float scvtf_scalar
 @run -1 -> 0xbf800000
 @run 16777217 -> 0x4b800000
 ---
@@ -61,7 +61,7 @@ fn main(x:i32) -> i32
   sum = reduce add v
   r = cast i32 sum
   ret r
-@aarch64-isel check: Reduce(Integer(
+@aarch64-isel check: reduce 
 @aarch64 all lacks blr
 @run 127 -> -126
 @run -128 -> -125
@@ -80,7 +80,7 @@ fn main(x:i32) -> i32
   r = extract bits low
   out = xor l r
   ret out
-@aarch64-isel check: Select(
+@aarch64-isel check: select 
 @aarch64 all lacks blr
 @run 1 -> 1
 @run 0x80000001 -> 0x7ffffffe
@@ -92,7 +92,7 @@ fn main(x:i32) -> i32
   r = bitcast u16 a
   bits = cast i32 r
   ret bits
-@aarch64-isel check: Libcall(
+@aarch64-isel check: libcall 
 @aarch64 all has blr
 @run 256 -> 0x4380
 @run 257 -> 0x4380
@@ -109,7 +109,7 @@ fn main(x:i32) -> i32
   s = extract b last
   r = cast i32 s
   ret r
-@aarch64-isel check: Libcall(
+@aarch64-isel check: libcall 
 @aarch64 all has blr
 @run 0xbe00 -> -1
 @run 0x7bff -> 32767
@@ -123,7 +123,7 @@ fn main(m:i32 yes:i32 no:i32) -> i32
   sel = bitselect a b c
   r = cast i32 sel
   ret r
-@aarch64-isel check: Select(ScalarBits
+@aarch64-isel check: select bits
 @aarch64 all lacks blr
 @run 0xa5 0x96 0x3c -> 0x9c
 @run 0x25 0x96 0x3c -> 0x1c

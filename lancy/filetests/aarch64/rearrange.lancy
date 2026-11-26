@@ -29,7 +29,7 @@ fn main(extra:i32) -> i32
   last_pair = add b_offset fourth
   result = add first_pair last_pair
   ret result
-@aarch64-isel check: Shuffle(
+@aarch64-isel check: shuffle 
 @aarch64 neon has v.tbl2.16b
 @aarch64 sve has z.tbl
 @aarch64 sve2 has z.tbl
@@ -152,7 +152,7 @@ fn main(first:i32 last:i32) -> i32
   sum = add a32 upper
   result = add sum middle
   ret result
-@aarch64-isel check: Expand(
+@aarch64-isel check: expand 
 @aarch64 sve has z.splice
 @aarch64 sve2 has z.splice
 @aarch64 all lacks blr
@@ -192,7 +192,7 @@ fn main() -> i32
   first = extract result zero
   r = cast i32 first
   ret r
-@aarch64-isel check: Compact {
+@aarch64-isel check: compact 
 @aarch64 neon has v.ext.16b
 @aarch64 sve has z.compact.s
 @aarch64 sve2 has z.compact.s
@@ -210,6 +210,6 @@ fn main() -> i32
   extra = and indices mask
   result = any extra
   ret result
-@aarch64-isel check: WideMaskTest(
+@aarch64-isel check: mask.any wide
 @aarch64 all lacks blr
 @run -> 0

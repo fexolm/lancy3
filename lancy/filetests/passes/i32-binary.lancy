@@ -4,7 +4,7 @@ fn main(x:i32) -> i32
   result = saturatingadd sum one
   ret result
 
-@isel check: alu.Add imm=1
-@isel check: lanes.I32.Binary(SaturatingAdd)
+@isel check: alu.add imm=1
+@isel check: lanes.i32.saturatingadd
 @run 2147483646 -> 2147483647
 @run 2147483647 -> -2147483647

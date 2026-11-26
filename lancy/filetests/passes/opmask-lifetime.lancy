@@ -19,7 +19,7 @@ block join(pred:vec.i32)
   any_inactive = any inv
   out = add first any_inactive
   ret out
-@isel regex: MASK=mask\.not\.I32|native\.Vector\(I32\)\.Unary\(Not\)
+@isel regex: MASK=mask\.not\.i32|native\.vec.i32\.not
 @isel check: $MASK
 @run 1 1 -> 0
 @run 0 1 -> -1
@@ -48,7 +48,7 @@ block join(pred:vec.i32)
   any = any pred
   out = add first any
   ret out
-@isel check: native.Vector(I32).Ternary(Select)
+@isel check: native.vec.i32.select
 @run 1 1 -> 0
 @run 0 1 -> -1
 ---
@@ -66,8 +66,8 @@ fn main(p:ptr one:i32) -> i32
   sum = add a b
   result = extract sum z
   ret result
-@isel check: maskedload.Vector(I32)
-@isel check: maskedload.Vector(I32)
+@isel check: maskedload.vec.i32
+@isel check: maskedload.vec.i32
 @run 1 -> 20 | 07 00 00 00 0d 00 00 00 | 07 00 00 00 0d 00 00 00
 @run 0 -> 0 | 07 00 00 00 0d 00 00 00 | 07 00 00 00 0d 00 00 00
 ---
@@ -79,7 +79,7 @@ fn main(x:i32) -> i32
   all = all pred
   result = add any all
   ret result
-@isel regex: PREFIX=mask\.prefix|mask\.cmp\.I32|native\.Vector\(I32\)\.Binary\(Lt\)
+@isel regex: PREFIX=mask\.prefix|mask\.cmp\.i32|native\.vec.i32\.lt
 @isel check: $PREFIX
 @run 0 -> 0
 @run 1 -> -1
@@ -97,7 +97,7 @@ fn main(limit:i32) -> i32
   any = any mask
   result = add count any
   ret result
-@isel regex: COUNT=mask\.count|native\.Vector\(I32\)\.Reduce\(Add\)|lanes\.Vector\(I32\)\.Reduce\(Add\)
+@isel regex: COUNT=mask\.count|native\.vec.i32\.reduce.add|lanes\.vec.i32\.reduce.add
 @isel check: $COUNT
 @run 0 -> 0
 @run 1 -> 0
@@ -140,7 +140,7 @@ fn main(p:ptr capacity:i32) -> i32
   fail = any bad
   bounds fail one
   ret count
-@isel regex: STORE=compress\.store|maskedstore\.Vector\(I32\)
+@isel regex: STORE=compress\.store|maskedstore\.vec.i32
 @isel check: $STORE
 @run 1 -> !bounds | aa aa aa aa ff ff ff ff | 01 00 00 00 ff ff ff ff
 @run 0 -> !bounds | aa aa aa aa | aa aa aa aa

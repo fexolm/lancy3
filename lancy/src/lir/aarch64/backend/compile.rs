@@ -8,10 +8,10 @@ use crate::{
     CompileError,
     hir::ssa::VerifiedBody,
     lir::{
-        self,
+        self, Stage, Stages,
         fallback::AREA_BYTES,
         frame::{self, FrameRequirements, defined_registers},
-        regalloc,
+        printer, regalloc,
     },
     module::Module,
 };
@@ -38,6 +38,7 @@ pub(super) struct Compiled {
 pub(super) fn compile(
     source: Module<VerifiedBody<'_>>,
     config: Config,
+    stages: Stages<'_>,
 ) -> Result<Module<Compiled>> {
     let root = source.call_graph.root();
     let mut ctx = Ctx::default();
@@ -46,7 +47,11 @@ pub(super) fn compile(
             let id = source.callee(func);
             (id, compiled[id].written)
         })?;
+        stages(Stage::Select(&|| printer::function(id, &body, None)));
         let allocation = regalloc::allocate(&mut body, &mut ctx)?;
+        stages(Stage::Allocate(&|| {
+            printer::function(id, &body, Some(&allocation))
+        }));
         let mut written = written_nonvolatile(&body, &allocation);
         let mut child_peak = 0;
         for &child in calls {

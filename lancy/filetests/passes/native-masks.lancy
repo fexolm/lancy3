@@ -7,7 +7,7 @@ fn main(mask:i32 value:i32) -> i32
   result = any chosen
   ret result
 @isel regex: FREE_RESULT=Def: v[0-9]+v reg
-@isel check: native.Vector(I32).Ternary(Select)
+@isel check: native.vec.i32.select
 @isel sameln: $FREE_RESULT
 @asm check: endbr64
 @asm not: call
@@ -85,7 +85,7 @@ fn main(x:i32 active:i32) -> i32
   picked = select masked xs zs
   result = extract picked zero
   ret result
-@isel regex: SELECT=select\.mask\.compare\.and|native\.Vector\(I32\)\.Ternary\(Select\)
+@isel regex: SELECT=select\.mask\.compare\.and|native\.vec.i32\.select
 @isel check: $SELECT
 @run -7 1 -> 0
 @run -7 0x80000000 -> -7
@@ -100,8 +100,8 @@ fn main(x:i32) -> i32
   picked = select mask mask zs
   result = extract picked zero
   ret result
-@isel check: native.Vector(I32).Binary(Lt)
-@isel check: native.Vector(I32).Ternary(Select)
+@isel check: native.vec.i32.lt
+@isel check: native.vec.i32.select
 @run -7 -> -1
 @run 7 -> 0
 ---
@@ -114,5 +114,5 @@ fn main(p:ptr value:i32) -> i32
   data = splat value
   maskedstore p - first data
   ret value
-@isel check: maskedstore.Vector(I32)
+@isel check: maskedstore.vec.i32
 @run 7 -> 7 | aa aa aa aa | 07 00 00 00

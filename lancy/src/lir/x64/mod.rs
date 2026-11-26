@@ -9,6 +9,6 @@ mod schedule;
 mod tests;
 
 pub(crate) use abi::{Cpu, Machine};
-pub(crate) use emit::{emit, emit_debug};
+pub(crate) use emit::emit;
 #[cfg(test)]
-pub(crate) use tests::filetests::check_machine;
+pub(crate) use tests::disassembly::disassemble;

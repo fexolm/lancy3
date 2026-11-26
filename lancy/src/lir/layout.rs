@@ -124,7 +124,7 @@ pub(super) fn place<I: TargetInst>(f: &Function<I>) -> Vec<Block> {
     }
 }
 
-#[cfg(test)]
+/// Each block in emission order with its loop depth.
 pub(super) fn listing<I: TargetInst>(f: &Function<I>) -> String {
     use std::fmt::Write;
     let mut text = String::new();

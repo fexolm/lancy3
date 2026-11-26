@@ -21,7 +21,7 @@ fn main(value:i32 fail:i32) -> i32
 @opt check: store
 @opt nextln: rust_call identity_or_error
 @opt nextln: load i32
-@isel check: store.I32
+@isel check: store.i32
 @isel check: rust_call identity_or_error
 @run 7 0 -> 7
 @run 7 5 -> !rust_panic

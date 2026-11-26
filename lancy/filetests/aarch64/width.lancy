@@ -26,9 +26,9 @@ fn main(x:i32) -> i32
   bad_values = or hi_error lo_error
   result = or bad_order bad_values
   ret result
-@aarch64-isel check: Widen(
-@aarch64-isel check: Widen(
-@aarch64-isel check: Narrow(
+@aarch64-isel check: widen 
+@aarch64-isel check: widen 
+@aarch64-isel check: narrow 
 @aarch64 neon has v.xtn2
 @aarch64 sve has z.sunpklo
 @aarch64 sve2 has z.splice
@@ -67,8 +67,8 @@ fn main(x:i32) -> i32
   ext_error = xor restored x
   r = or errors ext_error
   ret r
-@aarch64-isel check: Widen(
-@aarch64-isel check: Narrow(
+@aarch64-isel check: widen 
+@aarch64-isel check: narrow 
 @aarch64 all lacks blr
 @run 0x00000001 -> 0
 @run 0x80000000 -> 0
@@ -87,8 +87,8 @@ fn main(x:i32) -> i32
   r = cast i32 first
   both = and extension_ok r
   ret both
-@aarch64-isel check: Widen(Wide
-@aarch64-isel check: Narrow(
+@aarch64-isel check: widen wide
+@aarch64-isel check: narrow 
 @aarch64 all lacks blr
 @run -2147483647 -> -2147483647
 @run 2147483647 -> 2147483647
@@ -102,7 +102,7 @@ fn main(raw:i32) -> i32
   f = extract hi zero
   r = bitcast i32 f
   ret r
-@aarch64-isel check: Widen(Convert
+@aarch64-isel check: widen convert
 @aarch64 all lacks blr
 @run 1 -> 0x00010000
 @run 0x8000 -> 0x80000000

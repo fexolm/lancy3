@@ -16,7 +16,7 @@ fn main(x:i32 y:i32) -> i32
   base = mul s32 three
   result = add base u32
   ret result
-@aarch64-isel check: Packed(
+@aarch64-isel check: packed 
 @aarch64 neon has v.smin
 @aarch64 neon has v.umax
 @aarch64 sve has z.smin
@@ -44,7 +44,7 @@ fn main(x:i32 y:i32) -> i32
   base = mul s32 three
   result = add base u32
   ret result
-@aarch64-isel check: Packed(
+@aarch64-isel check: packed 
 @aarch64 neon has v.sqadd
 @aarch64 neon has v.uqsub
 @aarch64 sve has z.sqadd
@@ -76,7 +76,7 @@ fn main(x:i32 count:i32) -> i32
   first = add left3 s32
   result = add first u32
   ret result
-@aarch64-isel check: Packed(
+@aarch64-isel check: packed 
 @aarch64 neon has v.sshl
 @aarch64 sve has z.asr
 @aarch64 sve2 has z.lsl
@@ -95,7 +95,7 @@ fn main(x:i32) -> i32
   n = extract result zero
   r = cast i32 n
   ret r
-@aarch64-isel check: PackedShiftImm(
+@aarch64-isel check: packed.shift
 @aarch64 neon has v.sshr.16b.7
 @aarch64 sve has z.asr.b.7
 @aarch64 sve2 has z.asr.b.7
@@ -112,9 +112,9 @@ fn main(x:i32) -> i32
   n = extract result one
   r = cast i32 n
   ret r
-@aarch64-isel check: Splat(
-@aarch64-isel not: Shift
-@aarch64-isel check: LaneAccess
+@aarch64-isel check: splat 
+@aarch64-isel not: shift
+@aarch64-isel check: extract i8
 @run -127 -> -127
 @run 64 -> 64
 ---
@@ -124,7 +124,7 @@ fn main(a:i32 b:i32) -> i32
   value = saturatingadd x y
   r = cast i32 value
   ret r
-@aarch64-isel check: ScalarSaturate(
+@aarch64-isel check: saturate 
 @aarch64 all has v.sqadd.16b
 @aarch64 all lacks blr
 @run 127 1 -> 127
@@ -150,7 +150,7 @@ fn main(a:i32 b:i32) -> i32
   value = rotateleft x y
   r = cast i32 value
   ret r
-@aarch64-isel check: Rotate(
+@aarch64-isel check: rotl x1
 @aarch64 all has rorv
 @aarch64 all lacks blr
 @run 0x81 1 -> 3

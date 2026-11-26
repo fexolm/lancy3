@@ -20,9 +20,9 @@ mod backend;
 mod instruction;
 mod operand;
 
+pub(crate) use backend::emit;
 #[cfg(test)]
-pub(crate) use backend::check_machine;
-pub(crate) use backend::{emit, emit_debug};
+pub(crate) use backend::encoding;
 
 pub use instruction::{Code, EncodeError, Feature, FeatureSet, Instruction};
 pub use operand::{Arrangement, ConditionCode, Operand, PredQual, Register, ShiftKind};

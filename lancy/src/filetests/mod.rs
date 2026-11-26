@@ -3,10 +3,12 @@ pub(crate) mod listing;
 mod run;
 
 use crate::hir::{self, Function, ssa::VerifiedBody, text::ParseError, transforms::passes};
+use crate::lir::{self, Stage, Stages};
 use crate::module::Module;
-use crate::{CompileError, Inlining, ScalarKernel, jit, lir};
+use crate::{CompileError, Inlining, ScalarKernel, jit};
 use filecheck::{CheckerBuilder, NO_VARIABLES};
 use run::Run;
+use splice_target::{Arch, Target};
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -14,16 +16,52 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 pub(crate) type Result<T> = std::result::Result<T, String>;
 
-const COMMON_STAGES: [&str; 5] = ["source", "cfg", "inline", "opt", "layout"];
-const X64_STAGES: [&str; 3] = ["isel", "alloc", "asm"];
-const ARM_STAGES: [&str; 2] = ["aarch64-isel", "aarch64-alloc"];
+const COMMON_STAGES: [&str; 4] = ["source", "cfg", "inline", "opt"];
+/// The directives of each machine's selection, allocation, layout and
+/// assembly. `@aarch64` checks AArch64 code by its encodings instead.
+const MACHINES: [(Arch, [Option<&str>; 4]); 2] = [
+    (
+        Arch::X86_64,
+        [Some("isel"), Some("alloc"), Some("layout"), Some("asm")],
+    ),
+    (
+        Arch::Aarch64,
+        [Some("aarch64-isel"), Some("aarch64-alloc"), None, None],
+    ),
+];
+
+/// Lower a module for a target, reporting the stages: production's
+/// `lir::emit`, or a stand-in that fails as a target limit would.
+type Emit<'e> = &'e mut dyn FnMut(
+    &Target,
+    Module<VerifiedBody<'_>>,
+    Stages<'_>,
+) -> std::result::Result<lir::Code, CompileError>;
+
+/// What one attempt at lowering produced. Production may discard an
+/// attempt and lower again without inlining, so the case checks only the
+/// attempt that succeeded.
+struct Lowered {
+    opt: String,
+    /// The optimized text reads back and interprets as the runs expect.
+    optimized: Result<()>,
+    listings: BTreeMap<&'static str, Result<String>>,
+    /// AArch64 code and the profile it was compiled for.
+    aarch64: Option<(Vec<u8>, &'static str)>,
+}
+
+fn machine_stage(stage: &str) -> bool {
+    MACHINES
+        .iter()
+        .any(|(_, stages)| stages.contains(&Some(stage)))
+}
 
 #[derive(Default)]
 pub(crate) struct Case<'a> {
     /// The IR lines of the case with their line numbers.
     ir: Vec<(usize, &'a str)>,
-    pub(crate) checks: BTreeMap<&'a str, (Vec<usize>, CheckerBuilder)>,
-    pub(crate) encodings: Vec<(usize, &'a str)>,
+    checks: BTreeMap<&'a str, (Vec<usize>, CheckerBuilder)>,
+    encodings: Vec<(usize, &'a str)>,
     runs: Vec<Run>,
     policy: Inlining,
     reject: Option<(usize, &'a str)>,
@@ -50,11 +88,7 @@ impl<'a> Case<'a> {
             "reject" if !text.is_empty() && self.reject.is_none() => self.reject = Some((n, text)),
             "run" => self.runs.push(Run::parse(n, text)?),
             "aarch64" => self.encodings.push((n, text)),
-            stage
-                if COMMON_STAGES.contains(&stage)
-                    || X64_STAGES.contains(&stage)
-                    || ARM_STAGES.contains(&stage) =>
-            {
+            stage if COMMON_STAGES.contains(&stage) || machine_stage(stage) => {
                 let (lines, builder) = self
                     .checks
                     .entry(stage)
@@ -69,7 +103,7 @@ impl<'a> Case<'a> {
         Ok(())
     }
 
-    pub(crate) fn check(&mut self, stage: &str, text: impl FnOnce() -> String) -> Result<()> {
+    fn check(&mut self, stage: &str, text: impl FnOnce() -> String) -> Result<()> {
         if let Some((lines, mut builder)) = self.checks.remove(stage) {
             let listing = text();
             if std::env::var_os("LANCY_FILETEST_DUMP").is_some() {
@@ -116,17 +150,121 @@ impl<'a> Case<'a> {
         self.runs.is_empty() && self.checks.is_empty() && self.encodings.is_empty()
     }
 
-    fn check_optimized(&mut self, module: Module<VerifiedBody<'_>>) -> Result<()> {
-        self.check("opt", || listing::hir(&module))?;
-        let root = module.functions[module.call_graph.root()].function;
+    /// The optimized root reads back as it prints and interprets as the
+    /// runs expect.
+    fn check_root(&self, root: &Function) -> Result<()> {
         // Optimized values are not numbered in text order; the text read
         // back is, and then prints the same again.
         let once = reprint(&root.to_string())?;
         if reprint(&once)? != once {
             return Err(format!("the optimized text does not read back:\n{once}"));
         }
-        self.interpret("opt", root)?;
-        lir::check_machine(self, module)
+        self.interpret("opt", root)
+    }
+
+    /// Whether any directive checks code for `arch`.
+    fn wants(&self, arch: Arch) -> bool {
+        let (_, stages) = MACHINES.iter().find(|(a, _)| *a == arch).unwrap();
+        stages
+            .iter()
+            .flatten()
+            .any(|stage| self.checks.contains_key(stage))
+            || (arch == Arch::Aarch64 && !self.encodings.is_empty())
+    }
+
+    /// Lower an optimized module for each machine the case checks, keeping
+    /// what each stage reports. Compiler errors return, so that a limit
+    /// falls back as in production; fixture failures wait in `Lowered`.
+    fn lower(
+        &self,
+        module: Module<VerifiedBody<'_>>,
+        targets: &[(Arch, Target)],
+        emit: Emit<'_>,
+    ) -> std::result::Result<Lowered, CompileError> {
+        let root = module.functions[module.call_graph.root()].function;
+        let mut lowered = Lowered {
+            opt: listing::hir(&module),
+            optimized: self.check_root(root),
+            listings: BTreeMap::new(),
+            aarch64: None,
+        };
+        let mut module = Some(module);
+        for (arch, target) in targets {
+            if !self.wants(*arch) {
+                continue;
+            }
+            // Lowering consumes the module; the root verifies to it again.
+            let module = match module.take() {
+                Some(module) => module,
+                None => root.verified_module()?,
+            };
+            let (_, names) = MACHINES.iter().find(|(a, _)| a == arch).unwrap();
+            let mut report = |stage: Stage<'_>| {
+                let (index, text) = match stage {
+                    Stage::Select(text) => (0, text),
+                    Stage::Allocate(text) => (1, text),
+                    Stage::Layout(text) => (2, text),
+                    Stage::Assemble(code) => {
+                        if let Some(name) = names[3].filter(|name| self.checks.contains_key(name)) {
+                            lowered.listings.insert(name, lir::disassemble(code));
+                        }
+                        return;
+                    }
+                };
+                if let Some(name) = names[index].filter(|name| self.checks.contains_key(name)) {
+                    let listing = lowered.listings.entry(name).or_insert(Ok(String::new()));
+                    if let Ok(listing) = listing {
+                        listing.push_str(&text());
+                    }
+                }
+            };
+            let code = emit(target, module, &mut report)?;
+            if *arch == Arch::Aarch64 {
+                let features = target.arm64().unwrap();
+                let profile = match (features.sve2, features.sve) {
+                    (true, _) => "sve2",
+                    (_, true) => "sve",
+                    _ => "neon",
+                };
+                lowered.aarch64 = Some((code.bytes, profile));
+            }
+        }
+        Ok(lowered)
+    }
+
+    /// The `@aarch64` assertions on AArch64 code compiled for `profile`.
+    fn check_encodings(&mut self, code: &[u8], profile: &str) -> Result<()> {
+        // AArch64 code has no literal pool: every emitted word is an instruction.
+        let words = code.as_chunks::<4>().0;
+        for (line, assertion) in std::mem::take(&mut self.encodings) {
+            let invalid = || format!("line {line}: invalid AArch64 assertion: {assertion}");
+            let parts: Vec<_> = assertion.split_whitespace().collect();
+            let [only, presence, name] = parts.as_slice() else {
+                return Err(invalid());
+            };
+            let has = match *presence {
+                "has" => true,
+                "lacks" => false,
+                _ => return Err(invalid()),
+            };
+            if !matches!(*only, "all" | "neon" | "sve" | "sve2") {
+                return Err(invalid());
+            }
+            let (mask, opcode) = lir::aarch64::encoding(name)
+                .ok_or_else(|| format!("line {line}: unknown AArch64 encoding {name}"))?;
+            if *only != "all" && *only != profile {
+                continue;
+            }
+            let found = words
+                .iter()
+                .any(|word| u32::from_le_bytes(*word) & mask == opcode);
+            if found != has {
+                return Err(format!(
+                    "line {line}: failed AArch64 assertion: {assertion}"
+                ));
+            }
+        }
+        Ok(())
     }
 
     /// The IR of the case, on the lines of the file it came from.
@@ -142,7 +280,11 @@ impl<'a> Case<'a> {
         text
     }
 
-    fn execute(mut self) -> Result<()> {
+    fn execute(self) -> Result<()> {
+        self.execute_with(&mut |target, module, stages| lir::emit(target, module, false, stages))
+    }
+
+    fn execute_with(mut self, emit: Emit<'_>) -> Result<()> {
         let parsed = hir::text::parse(&self.text(), &RUST_FUNCTIONS);
         if let Some((line, reason)) = self.reject {
             if !self.done() {
@@ -182,9 +324,17 @@ impl<'a> Case<'a> {
             return Ok(());
         }
         if self.checks.contains_key("inline") || !self.runs.is_empty() {
-            if self.policy.should_inline(&source) {
-                let expanded = passes::inline_all(&source, crate::lir::MAX_VALUES)
-                    .map_err(|e| format!("inline: {e}"))?;
+            // An expansion over a limit stays calls, as in production.
+            let expanded = if self.policy.should_inline(&source) {
+                match passes::inline_all(&source, crate::lir::MAX_VALUES) {
+                    Err(e) if e.is_limit() => None,
+                    Err(e) => return Err(format!("inline: {e}")),
+                    Ok(expanded) => Some(expanded),
+                }
+            } else {
+                None
+            };
+            if let Some(expanded) = expanded {
                 let module = expanded
                     .verified_module()
                     .map_err(|e| format!("inline: {e}"))?;
@@ -198,11 +348,22 @@ impl<'a> Case<'a> {
         if self.done() {
             return Ok(());
         }
-        jit::optimize_and_lower(&source, self.policy, |module| {
-            // Keep fixture assertion failures separate from compiler errors that trigger fallback.
-            Ok(self.check_optimized(module))
+        let targets = [Arch::X86_64, Arch::Aarch64]
+            .map(|arch| lir::filetest_target(arch).map(|target| (arch, target)));
+        let targets = targets.into_iter().collect::<Result<Vec<_>>>()?;
+        let lowered = jit::optimize_and_lower(&source, self.policy, |module| {
+            self.lower(module, &targets, emit)
         })
-        .map_err(|e| format!("opt: {e}"))??;
+        .map_err(|e| format!("opt: {e}"))?;
+        self.check("opt", || lowered.opt)?;
+        lowered.optimized?;
+        for (stage, listing) in lowered.listings {
+            let listing = listing?;
+            self.check(stage, || listing)?;
+        }
+        if let Some((code, profile)) = lowered.aarch64 {
+            self.check_encodings(&code, profile)?;
+        }
         self.all_checks_reached()?;
         if !self.runs.is_empty() {
             let kernel = ScalarKernel::compile(
@@ -315,7 +476,11 @@ fn filetests() {
 
 #[test]
 fn mismatches_identify_the_stage_even_when_native_execution_would_succeed() {
-    for &stage in COMMON_STAGES.iter().chain(&X64_STAGES).chain(&ARM_STAGES) {
+    for &stage in COMMON_STAGES.iter().chain(
+        MACHINES
+            .iter()
+            .flat_map(|(_, stages)| stages.iter().flatten()),
+    ) {
         let source = format!(
             "fn main(x:i32) -> i32\nret x\n@{stage} regex: ANY=.*\n@run 8 -> 8\n@{stage} check: absent_opcode"
         );
@@ -353,8 +518,7 @@ fn both_machines_are_checked_on_every_host() {
         let error = run_text(&case).unwrap_err();
         assert!(error.contains(&format!("{stage}:")), "{error}");
     }
-    run_text("fn main(x:i32) -> i32\nret x\n@isel check: ret\n@aarch64-isel check: Return")
-        .unwrap();
+    run_text("fn main(x:i32) -> i32\nret x\n@isel check: ret\n@aarch64-isel check: ret").unwrap();
 }
 
 #[test]
@@ -363,6 +527,33 @@ fn checks_that_never_reach_their_stage_are_errors() {
     case.line(1, "@opt check: ret").unwrap();
     let error = case.all_checks_reached().unwrap_err();
     assert!(error.contains("@opt checks were never reached"), "{error}");
+}
+
+/// A target limit hit while lowering the inlined body is a compiler error,
+/// not a fixture failure: the case falls back to calls, as production
+/// does, and its checks read the lowering that succeeded.
+#[test]
+fn lowering_limits_fall_back_to_calls_as_in_production() {
+    let text = "fn plus(x:i32 inc:i32) -> i32\n  sum = add x inc\n  ret sum\n\
+        fn main(x:i32) -> i32\n  one = const 1\n  r = call plus(x one)\n  ret r\n\
+        @isel check: call f0\n@aarch64-isel check: call f0\n@run 2 -> 3";
+    let mut case = Case::default();
+    for (i, line) in text.lines().enumerate() {
+        case.line(i + 1, line).unwrap();
+    }
+    let mut inlined = 0;
+    case.execute_with(&mut |target, module, stages| {
+        if module.functions.len() == 1 {
+            inlined += 1;
+            return Err(CompileError::Unsupported(crate::Limit::Registers));
+        }
+        lir::emit(target, module, false, stages)
+    })
+    .unwrap();
+    assert_eq!(
+        inlined, 1,
+        "the inlined body is lowered once, then the calls"
+    );
 }
 
 #[test]

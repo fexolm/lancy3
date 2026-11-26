@@ -15,7 +15,7 @@ fn main(p:ptr first:i32 second:i32) -> i32
   store next after
   result = extract value zero
   ret result
-@aarch64-isel check: VectorDivide(
+@aarch64-isel check: vector.
 @aarch64 neon has sdiv
 @aarch64 sve has z.sdiv
 @aarch64 sve2 has z.sdiv
@@ -41,7 +41,7 @@ fn main(p:ptr first:i32 second:i32) -> i32
   store next after
   result = extract value zero
   ret result
-@aarch64-isel check: VectorDivide(
+@aarch64-isel check: vector.
 @aarch64 neon has sdiv
 @aarch64 sve has z.sdiv
 @aarch64 sve2 has z.sdiv
@@ -65,7 +65,7 @@ fn main(x:i32 y:i32) -> i32
   lane = extract value last
   result = cast i32 lane
   ret result
-@aarch64-isel check: VectorDivide(
+@aarch64-isel check: vector.
 @aarch64 all lacks blr
 @run -7 3 -> -1
 @run 7 -3 -> 1
@@ -80,7 +80,7 @@ fn main(x:i32) -> i32
   b = splat x
   unused = div a b
   ret zero
-@aarch64-isel check: VectorDivide(
+@aarch64-isel check: vector.
 @aarch64 all lacks blr
 @run 0 -> !zero
 @run 1 -> 0

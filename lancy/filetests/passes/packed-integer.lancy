@@ -12,8 +12,8 @@ fn main(x:i32 count:i32) -> i32
 @source check: = shl
 @source check: = rotateright
 @isel check: arg 0
-@isel not: packed.I32.Shl imm=
-@isel not: packed.I32.RotateRight imm=
+@isel not: packed.i32.shl imm=
+@isel not: packed.i32.rotateright imm=
 @isel check: ret
 @asm check: endbr64
 @asm not: call
@@ -50,7 +50,7 @@ fn main(x:i32) -> i32
   lane = const 0
   result = extract shifted lane
   ret result
-@isel regex: SHR=packed\.I32\.Shr imm=1|lanes\.Vector\(I32\)\.Binary\(Shr\)
+@isel regex: SHR=packed\.i32\.shr imm=1|lanes\.vec.i32\.shr
 @isel check: $SHR
 @run 0x80000004 -> -1073741822
 @run 7 -> 3

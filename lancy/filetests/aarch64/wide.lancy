@@ -9,8 +9,8 @@ fn main(p:ptr) -> i32
   store p sum
   store second difference
   ret zero
-@aarch64-isel check: WideAdd
-@aarch64-isel check: WideAdd
+@aarch64-isel check: wide add
+@aarch64-isel check: wide sub
 @aarch64 all has adds.x
 @aarch64 all has adc.x
 @aarch64 all has subs.x
@@ -34,7 +34,7 @@ fn main(p:ptr) -> i32
   r = extract selected last
   store p r
   ret zero
-@aarch64-isel check: Select(Wide(
+@aarch64-isel check: select wide
 @aarch64 sve has z.dup.q
 @aarch64 sve2 has z.dup.q
 @aarch64 all lacks blr
@@ -58,7 +58,7 @@ fn main(p:ptr x:i32) -> i32
   narrowed = cast i32 wide
   store p wide
   ret narrowed
-@aarch64-isel check: WideCast(
+@aarch64-isel check: cast.wide
 @aarch64 all lacks blr
 @run -128 -> -128 | 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 | 80 ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff
 @run 255 -> 255 | 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 | ff 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
@@ -90,7 +90,7 @@ fn main(p:ptr x:i32) -> i32
   store p sum
   result = cast i32 r
   ret result
-@aarch64-isel check: WideMath(
+@aarch64-isel check: wide div
 @aarch64 all has umulh
 @aarch64 all lacks blr
 @run -1 -> !overflow | 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 80 | 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 80
@@ -105,8 +105,8 @@ fn main(p:ptr x:i32) -> i32
   bits = popcnt rotated
   result = cast i32 bits
   ret result
-@aarch64-isel check: WideMath(
-@aarch64-isel check: WideUnary(
+@aarch64-isel check: wide rotateleft
+@aarch64-isel check: wide popcnt
 @aarch64 all lacks blr
 @run 1 -> 5 | 06 00 00 00 00 00 00 00 03 00 00 00 00 00 00 80 | 0d 00 00 00 00 00 00 00 06 00 00 00 00 00 00 00
 @run 65 -> 5 | 06 00 00 00 00 00 00 00 03 00 00 00 00 00 00 80 | 06 00 00 00 00 00 00 00 0d 00 00 00 00 00 00 00

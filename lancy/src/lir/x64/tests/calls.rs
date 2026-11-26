@@ -22,7 +22,7 @@ fn a_small_callee_leaves_registers_available_to_its_caller() {
     let source = f.verified_module().unwrap();
     let entry = source.call_graph.root();
     let edges = source.call_graph.callees(entry).as_ptr();
-    let module = compile(crate::lir::x64::Machine::host(), source).unwrap();
+    let module = compile(crate::lir::x64::Machine::host(), source, &mut |_| {}).unwrap();
     assert_eq!(module.call_graph.callees(entry).as_ptr(), edges);
     assert_eq!(
         module.functions[module.call_graph.root()]
@@ -127,7 +127,7 @@ fn shared_calls_preserve_live_registers_and_spilled_arguments() {
     f.set_terminator(b, Terminator::Return(v));
     let source = f.verified_module().unwrap();
     assert_eq!(
-        compile(crate::lir::x64::Machine::host(), source)
+        compile(crate::lir::x64::Machine::host(), source, &mut |_| {})
             .unwrap()
             .functions
             .len(),

@@ -8,6 +8,14 @@ pub(in crate::lir::x64) enum PairedShuffle {
 }
 
 impl PairedShuffle {
+    /// The listing name and whether the form takes the high halves.
+    pub fn parts(self) -> (&'static str, bool) {
+        match self {
+            Self::Interleave(high) => ("interleave", high),
+            Self::Deinterleave(high) => ("deinterleave", high),
+        }
+    }
+
     pub fn index(self, i: usize, lanes: usize) -> usize {
         match self {
             Self::Interleave(high) => i / 2 + i % 2 * lanes + usize::from(high) * lanes / 2,

@@ -31,7 +31,7 @@ fn main(x:i32) -> i32
   carry = shr lane sixty_four
   result = cast i32 carry
   ret result
-@aarch64-isel check: WideAdd
+@aarch64-isel check: wide add
 @aarch64 neon has adc.x
 @aarch64 sve has p.trn1
 @aarch64 sve2 has p.trn1
@@ -71,8 +71,8 @@ fn main(x:i32 y:i32) -> i32
   qq = cast i32 q
   r = add pp qq
   ret r
-@aarch64-isel check: Packed(
-@aarch64-isel check: Packed(
+@aarch64-isel check: packed 
+@aarch64-isel check: packed 
 @aarch64 all lacks z.eor3
 @run 170 84 -> 426
 @run 85 84 -> 84

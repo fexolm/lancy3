@@ -4,7 +4,7 @@ fn main(bits:i32) -> i32
   sum = reduce add v
   r = bitcast i32 sum
   ret r
-@aarch64-isel check: Reduce(FloatAdd(
+@aarch64-isel check: reduce fadd
 @aarch64 sve has z.fadda
 @aarch64 sve2 has z.fadda
 @aarch64 all lacks blr
@@ -66,7 +66,7 @@ fn main(x:i32) -> i32
   check = or first second
   r = or check third
   ret r
-@aarch64-isel check: Reduce(
+@aarch64-isel check: reduce 
 @aarch64 sve has z.orv
 @aarch64 sve2 has z.andv
 @aarch64 all lacks blr
@@ -95,7 +95,7 @@ fn main(raw:i32) -> i32
   b = bitcast u16 x
   r = cast i32 b
   ret r
-@aarch64-isel check: Reduce(Ordered(Mul, BF16,
+@aarch64-isel check: reduce ordered mul bf16
 @aarch64 all lacks blr
 @run 0 -> 0
 @run 0xbf80 -> 0x3f80

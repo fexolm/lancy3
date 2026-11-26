@@ -6,6 +6,7 @@ mod function;
 mod inst;
 mod isel;
 mod layout;
+mod printer;
 mod regalloc;
 mod schedule;
 mod x64;
@@ -17,6 +18,8 @@ pub(crate) use fallback::Sites;
 use function::Function;
 use inst::TargetInst;
 use splice_target::{Arch, Target};
+#[cfg(test)]
+pub(crate) use x64::disassemble;
 
 /// The most values one function may have: both backends number them as
 /// regalloc2 virtual registers. The inliner refuses larger expansions.
@@ -32,34 +35,46 @@ pub(crate) struct Code {
     pub sites: fallback::Sites,
 }
 
+/// A step of machine lowering, reported as it happens so that filetests
+/// read the same lowering that production runs. A listing is built only
+/// when the receiver asks for it.
+pub(crate) enum Stage<'a> {
+    /// One function after instruction selection.
+    Select(&'a dyn Fn() -> String),
+    /// One function after register allocation.
+    Allocate(&'a dyn Fn() -> String),
+    /// The block order of the root function.
+    Layout(&'a dyn Fn() -> String),
+    /// The machine instructions of the module, without the constant pool.
+    Assemble(&'a [u8]),
+}
+
+/// Where lowering reports its stages.
+pub(crate) type Stages<'a> = &'a mut dyn FnMut(Stage<'_>);
+
+/// The stages as `lancy::lir` trace events; a listing is printed only when
+/// the event is enabled.
+pub(crate) fn trace(stage: Stage<'_>) {
+    const TARGET: &str = "lancy::lir";
+    match stage {
+        Stage::Select(text) => tracing::trace!(target: TARGET, "selected\n{}", text()),
+        Stage::Allocate(text) => tracing::trace!(target: TARGET, "allocated\n{}", text()),
+        Stage::Layout(text) => tracing::trace!(target: TARGET, "layout\n{}", text()),
+        Stage::Assemble(code) => tracing::trace!(target: TARGET, bytes = code.len(), "assembled"),
+    }
+}
+
 /// Both backends compile on every host; only running the code needs a
-/// matching machine.
+/// matching machine. `debug` keeps source points and outlined calls.
 pub(crate) fn emit(
     target: &Target,
     source: Module<VerifiedBody<'_>>,
-) -> Result<Code, CompileError> {
-    emit_mode(target, source, false)
-}
-
-pub(crate) fn emit_debug(
-    target: &Target,
-    source: Module<VerifiedBody<'_>>,
-) -> Result<Code, CompileError> {
-    emit_mode(target, source, true)
-}
-
-fn emit_mode(
-    target: &Target,
-    source: Module<VerifiedBody<'_>>,
     debug: bool,
+    stages: Stages<'_>,
 ) -> Result<Code, CompileError> {
     Ok(match target.arch() {
         Arch::X86_64 => {
-            let code = if debug {
-                x64::emit_debug(target, source)?
-            } else {
-                x64::emit(target, source)?
-            };
+            let code = x64::emit(target, source, debug, stages)?;
             Code {
                 bytes: code.bytes,
                 words: code.words,
@@ -67,26 +82,14 @@ fn emit_mode(
                 sites: code.sites,
             }
         }
-        Arch::Aarch64 => {
-            let code = if debug {
-                aarch64::emit_debug(target, source)?
-            } else {
-                aarch64::emit(target, source)?
-            };
-            Code {
-                bytes: code.bytes,
-                words: code.words,
-                debug: code.debug,
-                sites: code.sites,
-            }
-        }
+        Arch::Aarch64 => aarch64::emit(target, source, debug, stages)?,
     })
 }
 
 /// The targets whose machine listings filetests check: this machine's for
 /// its own architecture, a fixed one for the other.
 #[cfg(test)]
-fn filetest_target(arch: Arch) -> Result<Target, String> {
+pub(crate) fn filetest_target(arch: Arch) -> Result<Target, String> {
     if Arch::host() == Some(arch) {
         return Target::host().map_err(|error| error.to_string());
     }
@@ -101,19 +104,4 @@ fn filetest_target(arch: Arch) -> Result<Target, String> {
         ),
     };
     target.map_err(|error| error.to_string())
-}
-
-/// Check the x64 and AArch64 listings of an optimized module. `@layout`
-/// follows the x64 blocks.
-#[cfg(test)]
-pub(crate) fn check_machine(
-    case: &mut crate::filetests::Case<'_>,
-    module: Module<VerifiedBody<'_>>,
-) -> crate::filetests::Result<()> {
-    let root = module.functions[module.call_graph.root()].function;
-    x64::check_machine(case, &filetest_target(Arch::X86_64)?, module)?;
-    let module = root
-        .verified_module()
-        .map_err(|error| format!("verify: {error}"))?;
-    aarch64::check_machine(case, &filetest_target(Arch::Aarch64)?, module)
 }

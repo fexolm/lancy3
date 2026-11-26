@@ -7,9 +7,9 @@ use super::{
 use crate::{
     CompileError, hir,
     lir::{
-        self, TargetInst,
+        self, Stage, Stages, TargetInst,
         frame::{self, FrameRequirements, defined_registers},
-        regalloc,
+        printer, regalloc,
     },
     module::Module,
 };
@@ -30,6 +30,7 @@ pub(super) struct CompiledFunction {
 pub(super) fn compile(
     machine: Machine,
     source: Module<hir::ssa::VerifiedBody<'_>>,
+    stages: Stages<'_>,
 ) -> Result<Module<CompiledFunction>, CompileError> {
     let entry = source.call_graph.root();
     let width = machine.cpu.bytes;
@@ -42,7 +43,11 @@ pub(super) fn compile(
             let id = src.callee(callee);
             (id, compiled[id].written)
         })?;
+        stages(Stage::Select(&|| printer::function(id, &body, None)));
         let allocation = regalloc::allocate(&mut body, &mut ctx)?;
+        stages(Stage::Allocate(&|| {
+            printer::function(id, &body, Some(&allocation))
+        }));
         let (written, defined) = written_regs(&body, &allocation);
         let mut saved = defined & machine.abi.saved;
         for &callee in calls {
@@ -107,7 +112,7 @@ fn foreign_calls(machine: Machine) -> CompileError {
     CompileError::Target(splice_target::TargetError::HostCalls(convention))
 }
 
-pub(super) fn written_regs(f: &lir::Function<Inst>, allocation: &Output) -> (PRegSet, PRegSet) {
+fn written_regs(f: &lir::Function<Inst>, allocation: &Output) -> (PRegSet, PRegSet) {
     let defined = defined_registers(f, allocation);
     let mut written = defined;
     for op in f.insts() {

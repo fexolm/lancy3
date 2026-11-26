@@ -45,6 +45,13 @@ macro_rules! codes {
         }
 
         impl Code {
+            /// The encoding's name in the Arm architecture description.
+            pub const fn name(self) -> &'static str {
+                match self {
+                    $(Self::$code => stringify!($code),)*
+                }
+            }
+
             pub const fn required_feature(self) -> Option<Feature> {
                 match self {
                     $(Self::$code => codes!(@feature $feature),)*

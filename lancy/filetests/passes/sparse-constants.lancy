@@ -16,7 +16,7 @@ block join(divisor:i32)
 @opt not: br
 @opt not: copy
 @opt check: = div
-@isel check: idiv.imm=123 Reciprocal
+@isel check: idiv.imm=123 reciprocal
 @run 246 -> 2
 @run -246 -> -2
 
@@ -31,7 +31,7 @@ fn main(x:i32) -> i32
 block join(d:i32)
   v = div x d
   ret v
-@isel check: idiv.imm=123 Reciprocal
+@isel check: idiv.imm=123 reciprocal
 @run 246 -> 2
 
 ---
@@ -78,7 +78,7 @@ block exit(divisor:i32)
   q = div x divisor
   ret q
 @opt not: br
-@isel check: idiv.imm=7 Reciprocal
+@isel check: idiv.imm=7 reciprocal
 @run 21 0 -> 3
 @run -21 3 -> -3
 

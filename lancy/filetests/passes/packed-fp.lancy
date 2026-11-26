@@ -4,17 +4,17 @@ fn main(x:vec.f32 y:vec.f32) -> vec.f32
   mag = abs y
   out = copysign mag neg
   ret out
-@isel check: native.Vector(F32).Unary(Neg)
-@isel check: native.Vector(F32).Unary(Abs)
-@isel check: native.Vector(F32).Binary(CopySign)
+@isel check: native.vec.f32.neg
+@isel check: native.vec.f32.abs
+@isel check: native.vec.f32.copysign
 ---
 fn main(x:vec.f64 y:vec.f64) -> vec.i64
   a = ordered x y
   b = unordered y x
   mask = or a b
   ret mask
-@isel check: native.Vector(F64).Binary(Ordered)
-@isel check: native.Vector(F64).Binary(Unordered)
+@isel check: native.vec.f64.ordered
+@isel check: native.vec.f64.unordered
 ---
 fn main(x:vec.f32) -> vec.i32
   finite = isfinite x
@@ -23,16 +23,16 @@ fn main(x:vec.f32) -> vec.i32
   non_subnormal = xor finite sub
   result = and sign non_subnormal
   ret result
-@isel check: native.Vector(F32).Unary(IsFinite)
-@isel check: native.Vector(F32).Unary(IsSubnormal)
-@isel check: native.Vector(F32).Unary(SignBit)
+@isel check: native.vec.f32.isfinite
+@isel check: native.vec.f32.issubnormal
+@isel check: native.vec.f32.signbit
 ---
 fn main(x:vec.f32) -> vec.f32
   i = cast vec.i32 x
   y = cast vec.f32 i
   ret y
-@isel check: native.Vector(F32).Cast
-@isel check: native.Vector(I32).Cast
+@isel check: native.vec.f32.cast
+@isel check: native.vec.i32.cast
 @asm regex: TO_INT=v?cvttps2dqs?
 @asm regex: TO_FLOAT=v?cvtdq2ps
 @asm check: $TO_INT
@@ -43,9 +43,9 @@ fn main(x:vec.f32) -> vec.f32
   high = widenhi f64 x
   swapped = narrow f32 high low
   ret swapped
-@isel check: native.Vector(F32).Widen(false)
-@isel check: native.Vector(F32).Widen(true)
-@isel check: native.Vector(F64).Narrow
+@isel check: native.vec.f32.widenlo
+@isel check: native.vec.f32.widenhi
+@isel check: native.vec.f64.narrow
 @asm regex: WIDEN=v?cvtps2pd
 @asm regex: NARROW=v?cvtpd2ps
 @asm check: $WIDEN

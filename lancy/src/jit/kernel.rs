@@ -131,10 +131,10 @@ impl ScalarKernel {
         // Its raw caller must ensure initialization and bound every access.
         let has_scratch = source.functions.values().any(|body| body.has_call_scratch);
         let code = if options.debug {
-            crate::lir::emit_debug(&target, source)?
+            crate::lir::emit(&target, source, true, &mut crate::lir::trace)?
         } else {
             super::optimize_and_lower(&source, options.inlining, |module| {
-                crate::lir::emit(&target, module)
+                crate::lir::emit(&target, module, false, &mut crate::lir::trace)
             })?
         };
         let memory = tracing::debug_span!(target: "lancy::compile", "install_code")

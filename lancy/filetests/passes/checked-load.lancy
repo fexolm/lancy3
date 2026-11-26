@@ -12,7 +12,7 @@ fn main(base:ptr i:i32 len:i32) -> i32
 @opt check: offset
 @isel check: bounds
 @isel nextln: movsxd
-@isel nextln: load.I32 scale=4 disp=0
+@isel nextln: load.i32 scale=4 disp=0
 @isel not: lea
 @asm check: cmp
 @asm check: jae
