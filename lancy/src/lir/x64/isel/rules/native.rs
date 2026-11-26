@@ -1,7 +1,7 @@
 use crate::lir::x64::Cpu;
 use crate::{
     hir::{Binary as B, Lane, Ternary, Type, Unary},
-    lir::x64::inst::simd::{Native, packed::Recipe},
+    lir::x64::inst::simd::{Native, lanewise::Lanewise, packed::Recipe},
     support::numeric::Action,
 };
 
@@ -49,6 +49,11 @@ impl Native {
                         | Action::Ternary(Ternary::MulAdd)
                 );
             return supported.then_some(direct);
+        }
+        if let Action::Binary(op) = action
+            && let Some(form) = Lanewise::of(op, lane)
+        {
+            return form.supports(bytes, cpu).then_some(direct);
         }
         let int = packed && (bytes != 64 || lane.bytes() >= 4 || cpu.isa.bw);
         let supported = match action {
@@ -98,17 +103,6 @@ impl Native {
             Action::Unary(Unary::Floor | Unary::Ceil | Unary::Trunc | Unary::Nearest) => {
                 lane.float() && (cpu.isa.sse41 || bytes >= 32)
             }
-            Action::Binary(B::SaturatingAdd | B::SaturatingSub) => int && lane.bytes() <= 2,
-            Action::Binary(B::Min | B::Max) => {
-                int && !lane.float()
-                    && match lane.bytes() {
-                        1 => !lane.signed() || bytes != 16 || cpu.isa.sse41,
-                        2 => lane.signed() || bytes != 16 || cpu.isa.sse41,
-                        4 => bytes != 16 || cpu.isa.sse41,
-                        8 => bytes == 64,
-                        _ => false,
-                    }
-            }
             Action::Binary(op @ (B::Eq | B::Ne | B::Lt | B::Le | B::Gt | B::Ge))
                 if packed && lane.float() =>
             {
@@ -125,19 +119,7 @@ impl Native {
                             )
                     )
             }
-            Action::Binary(B::Add | B::Sub) => lane.float() || (int && lane.bytes() <= 8),
-            Action::Binary(B::Mul) => {
-                lane.float()
-                    || (int
-                        && match lane.bytes() {
-                            2 => true,
-                            4 => bytes != 16 || cpu.isa.sse41,
-                            8 => bytes == 64 && cpu.isa.dq,
-                            _ => false,
-                        })
-            }
-            Action::Binary(B::Div) | Action::Unary(Unary::Sqrt) => lane.float(),
-            Action::Binary(B::And | B::Or | B::Xor) => packed,
+            Action::Unary(Unary::Sqrt) => lane.float(),
             Action::Ternary(Ternary::MulAdd) => lane.float() && (cpu.isa.fma || bytes == 64),
             _ => false,
         };

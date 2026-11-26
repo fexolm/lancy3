@@ -1,4 +1,5 @@
 //! Native arithmetic and unaligned moves for each physical SIMD width.
+pub(in crate::lir::x64) mod lanewise;
 pub(in crate::lir::x64) mod opmask;
 pub(in crate::lir::x64) mod packed;
 use super::VectorMask;
@@ -97,26 +98,6 @@ impl Native {
         let src = regs[0];
         let rhs = regs[1];
         let dst = *regs.last().unwrap();
-        macro_rules! packed {
-            ($sse:ident,$avx:ident,$evex:ident) => {
-                match self.bytes {
-                    16 => a.$sse(XMM[dst], XMM[rhs]),
-                    32 => a.$avx(YMM[dst], YMM[src], YMM[rhs]),
-                    64 => a.$evex(ZMM[dst], ZMM[src], ZMM[rhs]),
-                    _ => unreachable!(),
-                }
-            };
-        }
-        macro_rules! float_bin {
-            ($ss:ident,$sd:ident,$ps:ident,$pd:ident,$vps:ident,$vpd:ident) => {
-                match self.input {
-                    Type::F32 => a.$ss(XMM[dst], XMM[rhs]),
-                    Type::F64 => a.$sd(XMM[dst], XMM[rhs]),
-                    Type::Vector(Lane::F32) => packed!($ps, $vps, $vps),
-                    _ => packed!($pd, $vpd, $vpd),
-                }
-            };
-        }
         let lane = self.input.lane().unwrap();
         let scratch = super::SCRATCH;
         match self.action {
@@ -218,6 +199,11 @@ impl Native {
                 }
                 _ => unreachable!("selected FP16 operation"),
             };
+        }
+        if let Action::Binary(op) = self.action
+            && let Some(form) = lanewise::Lanewise::of(op, lane)
+        {
+            return form.emit(a, self.bytes, [dst, src, rhs]);
         }
         match self.action {
             Action::Splat => {
@@ -379,42 +365,6 @@ impl Native {
                     _ => unreachable!(),
                 }
             }
-            Action::Binary(B::SaturatingAdd) => match (lane.bytes(), lane.signed()) {
-                (1, false) => packed!(paddusb, vpaddusb, vpaddusb),
-                (1, true) => packed!(paddsb, vpaddsb, vpaddsb),
-                (2, false) => packed!(paddusw, vpaddusw, vpaddusw),
-                (2, true) => packed!(paddsw, vpaddsw, vpaddsw),
-                _ => unreachable!(),
-            },
-            Action::Binary(B::SaturatingSub) => match (lane.bytes(), lane.signed()) {
-                (1, false) => packed!(psubusb, vpsubusb, vpsubusb),
-                (1, true) => packed!(psubsb, vpsubsb, vpsubsb),
-                (2, false) => packed!(psubusw, vpsubusw, vpsubusw),
-                (2, true) => packed!(psubsw, vpsubsw, vpsubsw),
-                _ => unreachable!(),
-            },
-            Action::Binary(B::Min) => match (lane.bytes(), lane.signed()) {
-                (1, false) => packed!(pminub, vpminub, vpminub),
-                (1, true) => packed!(pminsb, vpminsb, vpminsb),
-                (2, false) => packed!(pminuw, vpminuw, vpminuw),
-                (2, true) => packed!(pminsw, vpminsw, vpminsw),
-                (4, false) => packed!(pminud, vpminud, vpminud),
-                (4, true) => packed!(pminsd, vpminsd, vpminsd),
-                (8, false) => a.vpminuq(ZMM[dst], ZMM[src], ZMM[rhs]),
-                (8, true) => a.vpminsq(ZMM[dst], ZMM[src], ZMM[rhs]),
-                _ => unreachable!(),
-            },
-            Action::Binary(B::Max) => match (lane.bytes(), lane.signed()) {
-                (1, false) => packed!(pmaxub, vpmaxub, vpmaxub),
-                (1, true) => packed!(pmaxsb, vpmaxsb, vpmaxsb),
-                (2, false) => packed!(pmaxuw, vpmaxuw, vpmaxuw),
-                (2, true) => packed!(pmaxsw, vpmaxsw, vpmaxsw),
-                (4, false) => packed!(pmaxud, vpmaxud, vpmaxud),
-                (4, true) => packed!(pmaxsd, vpmaxsd, vpmaxsd),
-                (8, false) => a.vpmaxuq(ZMM[dst], ZMM[src], ZMM[rhs]),
-                (8, true) => a.vpmaxsq(ZMM[dst], ZMM[src], ZMM[rhs]),
-                _ => unreachable!(),
-            },
             Action::Cast => {
                 if !matches!(self.input, Type::Vector(_)) {
                     let from = lane.bytes();
@@ -453,36 +403,6 @@ impl Native {
                     0xc0 | (dst as u8 & 7) << 3 | (src as u8 & 7),
                 ])
             }
-            Action::Binary(B::Add) if lane.float() => {
-                float_bin!(addss, addsd, addps, addpd, vaddps, vaddpd)
-            }
-            Action::Binary(B::Sub) if lane.float() => {
-                float_bin!(subss, subsd, subps, subpd, vsubps, vsubpd)
-            }
-            Action::Binary(B::Mul) if lane.float() => {
-                float_bin!(mulss, mulsd, mulps, mulpd, vmulps, vmulpd)
-            }
-            Action::Binary(B::Div) => float_bin!(divss, divsd, divps, divpd, vdivps, vdivpd),
-            Action::Binary(B::Add) => match lane.bytes() {
-                1 => packed!(paddb, vpaddb, vpaddb),
-                2 => packed!(paddw, vpaddw, vpaddw),
-                4 => packed!(paddd, vpaddd, vpaddd),
-                _ => packed!(paddq, vpaddq, vpaddq),
-            },
-            Action::Binary(B::Sub) => match lane.bytes() {
-                1 => packed!(psubb, vpsubb, vpsubb),
-                2 => packed!(psubw, vpsubw, vpsubw),
-                4 => packed!(psubd, vpsubd, vpsubd),
-                _ => packed!(psubq, vpsubq, vpsubq),
-            },
-            Action::Binary(B::Mul) => match lane.bytes() {
-                2 => packed!(pmullw, vpmullw, vpmullw),
-                4 => packed!(pmulld, vpmulld, vpmulld),
-                _ => a.vpmullq(ZMM[dst], ZMM[src], ZMM[rhs]),
-            },
-            Action::Binary(B::And) => packed!(andps, vandps, vpandd),
-            Action::Binary(B::Or) => packed!(orps, vorps, vpord),
-            Action::Binary(B::Xor) => packed!(xorps, vxorps, vpxord),
             Action::Unary(Unary::Sqrt) => match (lane, self.bytes) {
                 (Lane::F32, 4) => a.sqrtss(XMM[dst], XMM[src]),
                 (Lane::F64, 8) => a.sqrtsd(XMM[dst], XMM[src]),
