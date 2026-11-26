@@ -111,3 +111,15 @@ error: union fields do not have a known active variant
     |
 133 | union Bits {
     |       ^^^^
+
+error: a kernel accepts at most 4 #[cfg]/#[cfg_attr] parameter attributes
+   --> tests/ui/declarations.rs:139:1
+    |
+139 | / fn many_conditions(
+140 | |     #[cfg(test)] a: i32,
+141 | |     #[cfg(test)] b: i32,
+142 | |     #[cfg(test)] c: i32,
+143 | |     #[cfg(test)] d: i32,
+144 | |     #[cfg(test)] e: i32,
+145 | | ) -> i32 {
+    | |________^

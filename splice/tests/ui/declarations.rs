@@ -134,4 +134,16 @@ union Bits {
     a: u32,
 }
 
+// MAC-23: each condition doubles the expanded variants.
+#[splice::kernel]
+fn many_conditions(
+    #[cfg(test)] a: i32,
+    #[cfg(test)] b: i32,
+    #[cfg(test)] c: i32,
+    #[cfg(test)] d: i32,
+    #[cfg(test)] e: i32,
+) -> i32 {
+    0
+}
+
 fn main() {}

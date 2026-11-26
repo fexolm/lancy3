@@ -20,6 +20,12 @@ pub(crate) fn expand(root: Path, print: bool, tokens: TokenStream) -> Result<Tok
         }
         item => item?,
     };
+    if let Some(variants) = configured_parameters(&item)? {
+        return variants
+            .into_iter()
+            .map(|variant| expand(root.clone(), print, variant.into_token_stream()))
+            .collect();
+    }
     match item {
         Item::Fn(mut function) => {
             if method_context(&function.attrs, &function.sig) {
@@ -395,6 +401,176 @@ fn prepare_method(
         native_body(body)?;
     }
     Ok(())
+}
+
+/// At most this many `#[cfg]`/`#[cfg_attr]` parameter attributes per
+/// function: each doubles the number of expanded variants.
+const CONFIGURED_PARAMETERS: usize = 4;
+
+/// The variants of an item whose function parameters carry `#[cfg(..)]` or
+/// `#[cfg_attr(..)]`: one copy per assignment of the conditions, gated by
+/// `#[cfg(..)]` on the function, with each condition applied. Every
+/// generated parameter list then matches the one rustc keeps. `None` if no
+/// parameter is configured.
+fn configured_parameters(item: &Item) -> Result<Option<Vec<Item>>> {
+    fn variants(sig: &Signature) -> Result<Option<Vec<(Attribute, Signature)>>> {
+        let mut conditions = Vec::new();
+        for (index, arg) in sig.inputs.iter().enumerate() {
+            let attrs = match arg {
+                FnArg::Typed(arg) => &arg.attrs,
+                FnArg::Receiver(arg) => &arg.attrs,
+            };
+            for (position, attr) in attrs.iter().enumerate() {
+                if let Some(condition) = condition(attr)? {
+                    conditions.push((index, position, condition));
+                }
+            }
+        }
+        if conditions.is_empty() {
+            return Ok(None);
+        }
+        if conditions.len() > CONFIGURED_PARAMETERS {
+            return Err(Error::new_spanned(
+                sig,
+                format!(
+                    "a kernel accepts at most {CONFIGURED_PARAMETERS} #[cfg]/#[cfg_attr] parameter attributes"
+                ),
+            ));
+        }
+        let mut result = Vec::new();
+        for choice in 0..1u32 << conditions.len() {
+            let enabled = |n: usize| choice & (1 << n) != 0;
+            let predicates = conditions.iter().enumerate().map(|(n, (_, _, c))| {
+                let predicate = &c.predicate;
+                if enabled(n) {
+                    quote!(#predicate)
+                } else {
+                    quote!(not(#predicate))
+                }
+            });
+            let gate: Attribute = syn::parse_quote!(#[cfg(all(#(#predicates),*))]);
+            let mut variant = sig.clone();
+            let mut removed = Vec::new();
+            // Apply later attributes first so that earlier positions stay valid.
+            for (n, (index, position, condition)) in conditions.iter().enumerate().rev() {
+                let attrs = match &mut variant.inputs[*index] {
+                    FnArg::Typed(arg) => &mut arg.attrs,
+                    FnArg::Receiver(arg) => &mut arg.attrs,
+                };
+                let applied = match (&condition.then, enabled(n)) {
+                    (None, true) | (Some(_), false) => Some(Vec::new()),
+                    (None, false) => None,
+                    (Some(then), true) => Some(then.clone()),
+                };
+                match applied {
+                    Some(replacement) => {
+                        attrs.splice(*position..=*position, replacement);
+                    }
+                    None => removed.push(*index),
+                }
+            }
+            removed.sort_unstable();
+            removed.dedup();
+            variant.inputs = std::mem::take(&mut variant.inputs)
+                .into_iter()
+                .enumerate()
+                .filter(|(index, _)| !removed.contains(index))
+                .map(|(_, arg)| arg)
+                .collect();
+            result.push((gate, variant));
+        }
+        Ok(Some(result))
+    }
+
+    Ok(match item {
+        Item::Fn(function) => variants(&function.sig)?.map(|variants| {
+            variants
+                .into_iter()
+                .map(|(gate, sig)| {
+                    let mut copy = function.clone();
+                    copy.attrs.insert(0, gate);
+                    copy.sig = sig;
+                    Item::Fn(copy)
+                })
+                .collect()
+        }),
+        Item::Impl(implementation) => {
+            let mut changed = false;
+            let mut copy = implementation.clone();
+            copy.items.clear();
+            for member in &implementation.items {
+                if let syn::ImplItem::Fn(method) = member
+                    && let Some(variants) = variants(&method.sig)?
+                {
+                    changed = true;
+                    for (gate, sig) in variants {
+                        let mut method = method.clone();
+                        method.attrs.insert(0, gate);
+                        method.sig = sig;
+                        copy.items.push(syn::ImplItem::Fn(method));
+                    }
+                } else {
+                    copy.items.push(member.clone());
+                }
+            }
+            changed.then(|| vec![Item::Impl(copy)])
+        }
+        Item::Trait(declaration) => {
+            let mut changed = false;
+            let mut copy = declaration.clone();
+            copy.items.clear();
+            for member in &declaration.items {
+                if let syn::TraitItem::Fn(method) = member
+                    && let Some(variants) = variants(&method.sig)?
+                {
+                    changed = true;
+                    for (gate, sig) in variants {
+                        let mut method = method.clone();
+                        method.attrs.insert(0, gate);
+                        method.sig = sig;
+                        copy.items.push(syn::TraitItem::Fn(method));
+                    }
+                } else {
+                    copy.items.push(member.clone());
+                }
+            }
+            changed.then(|| vec![Item::Trait(copy)])
+        }
+        _ => None,
+    })
+}
+
+/// A conditional parameter attribute: `#[cfg(predicate)]` keeps the
+/// parameter only if `predicate` holds (`then` is `None`: the parameter
+/// goes); `#[cfg_attr(predicate, a, b)]` becomes `#[a] #[b]` if it holds.
+struct Condition {
+    predicate: TokenStream,
+    then: Option<Vec<Attribute>>,
+}
+
+fn condition(attr: &Attribute) -> Result<Option<Condition>> {
+    let Meta::List(list) = &attr.meta else {
+        return Ok(None);
+    };
+    if list.path.is_ident("cfg") {
+        return Ok(Some(Condition {
+            predicate: list.tokens.clone(),
+            then: None,
+        }));
+    }
+    if !list.path.is_ident("cfg_attr") {
+        return Ok(None);
+    }
+    let args = list
+        .parse_args_with(syn::punctuated::Punctuated::<Meta, syn::Token![,]>::parse_terminated)?;
+    let mut args = args.into_iter();
+    let predicate = args
+        .next()
+        .ok_or_else(|| Error::new_spanned(list, "expected a cfg condition"))?;
+    Ok(Some(Condition {
+        predicate: predicate.into_token_stream(),
+        then: Some(args.map(|meta| syn::parse_quote!(#[#meta])).collect()),
+    }))
 }
 
 /// Move lint attributes (`#[allow(..)]` and friends) from parameters to the

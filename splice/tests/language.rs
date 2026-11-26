@@ -187,6 +187,59 @@ fn comptime_in_host_vec_elements_is_evaluated() {
     splice_testkit::each_backend!(B => check::<B>());
 }
 
+/// MAC-23: `#[cfg]` and `#[cfg_attr]` on parameters apply to every
+/// generated parameter list, as rustc applies them to the function.
+#[kernel]
+fn configured(
+    #[cfg(not(test))] absent: i32,
+    #[cfg(test)] value: i32,
+    #[cfg_attr(test, comptime)] scale: i32,
+    #[cfg_attr(not(test), comptime)] offset: i32,
+) -> i32 {
+    value * scale + offset
+}
+
+struct Configured;
+
+#[kernel]
+impl Configured {
+    fn scaled(
+        #[cfg(not(test))] absent: bool,
+        #[cfg_attr(test, comptime)] scale: i32,
+        value: i32,
+    ) -> i32 {
+        value * scale
+    }
+}
+
+#[kernel]
+fn configured_method(value: i32) -> i32 {
+    Configured::scaled(3, value)
+}
+
+#[test]
+fn configured_parameters_follow_their_conditions() {
+    fn check<B: Codegen<Output: Executable>>() {
+        let portable = B::compile(&configured::ir(3).unwrap()).unwrap();
+        let direct = configured::build::<B>(configured::BuildArgs { scale: 3 }).unwrap();
+        for code in [direct, portable] {
+            let args = configured::CallArgs {
+                value: 4,
+                offset: 5,
+            };
+            assert_eq!(code.call(args).unwrap(), configured(4, 3, 5));
+        }
+        let method = B::compile(&configured_method::ir().unwrap()).unwrap();
+        assert_eq!(
+            method
+                .call(configured_method::CallArgs { value: 4 })
+                .unwrap(),
+            configured_method(4)
+        );
+    }
+    splice_testkit::each_backend!(B => check::<B>());
+}
+
 #[kernel]
 fn floor(#[comptime] plan: &Plan, value: i32) -> i32 {
     let threshold = comptime!({
