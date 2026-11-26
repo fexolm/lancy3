@@ -181,13 +181,6 @@ fn checked_operator(op: &str) -> Option<&'static str> {
     })
 }
 
-fn vec_macro(path: &Path) -> bool {
-    path.is_ident("vec")
-        || (path.segments.len() == 2
-            && (path.segments[0].ident == "std" || path.segments[0].ident == "alloc")
-            && path.segments[1].ident == "vec")
-}
-
 impl Lower<'_> {
     /// A label `'__splice_{kind}_{n}` distinct from every other label of
     /// this expansion.
@@ -832,7 +825,7 @@ impl Lower<'_> {
             Expr::Cast(x) => self.cast(x),
             Expr::MethodCall(x) => self.method(x, hint),
             Expr::Reference(x) => self.reference(x),
-            Expr::Macro(m) if vec_macro(&m.mac.path) => {
+            Expr::Macro(m) if crate::kast::vec_macro(&m.mac.path) => {
                 Ok(Value::new(Stage::Host, self.host_raw(e)?))
             }
             Expr::Macro(m) if m.mac.path.is_ident("comptime") => {

@@ -120,3 +120,25 @@ fn comptime_arguments_are_parsed_once_and_resolved() {
     let malformed: Block = parse_quote!({ comptime!(let) });
     assert!(Body::new(&malformed, &[]).is_err());
 }
+
+#[test]
+fn vec_elements_are_parsed_once_and_resolved() {
+    let block: Block = parse_quote!({
+        let k = 2;
+        vec![k; 3]
+    });
+    let body = Body::new(&block, &[]).unwrap();
+    let Stmt::Expr(Expr::Macro(mac), _) = &block.stmts[1] else {
+        panic!()
+    };
+    let Expr::Repeat(repeat) = body.vec_elements(&mac.mac) else {
+        panic!()
+    };
+    let Expr::Path(k) = &*repeat.expr else {
+        panic!()
+    };
+    assert_eq!(
+        body.decl(body.decl_of(k).unwrap()).origin,
+        Origin::Let(body.ids.locals[&address(local(&block, 0))])
+    );
+}

@@ -1,5 +1,5 @@
 //! The kernel body as one normalized model. A body is parsed once:
-//! `comptime!` arguments become expressions, every expression, local and
+//! `comptime!` arguments and `vec!` elements become expressions, every expression, local and
 //! loop gets a [`NodeId`], and every use of a local or parameter is linked to
 //! its declaration through a scope tree ([`resolve`]). The staging analysis
 //! ([`stage`]) and the integer type inference ([`types`]) work on these ids,
@@ -84,9 +84,10 @@ pub(crate) struct Body<'a> {
     block: &'a Block,
     ids: Ids,
     decls: Vec<Decl>,
-    /// Parsed `comptime!` arguments by the id of their macro. Boxed so that
-    /// the ids of their nodes stay valid.
-    comptime: HashMap<NodeId, Box<Expr>>,
+    /// Parsed `comptime!` arguments and `vec!` elements (an array or repeat
+    /// expression) by the id of their macro. Boxed so that the ids of their
+    /// nodes stay valid.
+    macros: HashMap<NodeId, Box<Expr>>,
     stages: stage::Stages,
     usize_decls: Vec<bool>,
 }
@@ -94,12 +95,12 @@ pub(crate) struct Body<'a> {
 impl<'a> Body<'a> {
     /// Normalize `block`, the body of a kernel with `params` in order.
     pub(crate) fn new(block: &'a Block, params: &[(Ident, Param)]) -> Result<Self> {
-        let (ids, decls, comptime) = resolve::resolve(block, params)?;
+        let (ids, decls, macros) = resolve::resolve(block, params)?;
         let mut body = Self {
             block,
             ids,
             decls,
-            comptime,
+            macros,
             stages: stage::Stages::default(),
             usize_decls: Vec::new(),
         };
@@ -125,7 +126,13 @@ impl<'a> Body<'a> {
 
     /// The parsed argument of a `comptime!` invocation in the body.
     pub(crate) fn comptime(&self, mac: &Macro) -> &Expr {
-        &self.comptime[&Self::lookup(&self.ids.macros, mac)]
+        &self.macros[&Self::lookup(&self.ids.macros, mac)]
+    }
+
+    /// The elements of a `vec!` invocation in the body: an array or a
+    /// repeat expression.
+    pub(crate) fn vec_elements(&self, mac: &Macro) -> &Expr {
+        &self.macros[&Self::lookup(&self.ids.macros, mac)]
     }
 
     /// The declaration a single-identifier path names, if it names a
@@ -171,6 +178,14 @@ impl<'a> Body<'a> {
     fn decl(&self, id: DeclId) -> &Decl {
         &self.decls[id.0 as usize]
     }
+}
+
+/// Whether `path` names the standard `vec!` macro.
+pub(crate) fn vec_macro(path: &syn::Path) -> bool {
+    path.is_ident("vec")
+        || (path.segments.len() == 2
+            && (path.segments[0].ident == "std" || path.segments[0].ident == "alloc")
+            && path.segments[1].ident == "vec")
 }
 
 #[cfg(test)]

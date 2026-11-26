@@ -20,7 +20,7 @@ pub(super) fn resolve(block: &Block, params: &[(Ident, Param)]) -> Result<Resolv
     walk.visit_block(block);
     match walk.error {
         Some(error) => Err(error),
-        None => Ok((walk.ids, walk.decls, walk.comptime)),
+        None => Ok((walk.ids, walk.decls, walk.macros)),
     }
 }
 
@@ -35,7 +35,7 @@ struct Resolve {
     binding: Option<NodeId>,
     /// Inside a pattern whose declarations are already being recorded.
     nested: bool,
-    comptime: HashMap<NodeId, Box<Expr>>,
+    macros: HashMap<NodeId, Box<Expr>>,
     error: Option<Error>,
 }
 
@@ -159,17 +159,23 @@ impl<'ast> Visit<'ast> for Resolve {
     }
 
     fn visit_macro(&mut self, mac: &'ast syn::Macro) {
-        if !mac.path.is_ident("comptime") {
+        let parsed = if mac.path.is_ident("comptime") {
+            mac.parse_body::<Expr>()
+        } else if super::vec_macro(&mac.path) {
+            // The elements of `vec![a, b]` or `vec![v; n]`, as an array.
+            let tokens = &mac.tokens;
+            syn::parse2::<Expr>(quote::quote!([#tokens]))
+        } else {
             // Other macros own their tokens.
             return;
-        }
+        };
         let id = self.ids.fresh();
         self.ids.macros.insert(address(mac), id);
-        match mac.parse_body::<Expr>() {
+        match parsed {
             Ok(expr) => {
                 let expr = Box::new(expr);
                 self.visit_expr(&expr);
-                self.comptime.insert(id, expr);
+                self.macros.insert(id, expr);
             }
             Err(error) => {
                 self.error.get_or_insert(error);
