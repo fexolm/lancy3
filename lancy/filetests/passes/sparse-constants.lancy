@@ -54,7 +54,7 @@ block exit(divisor:i32)
   ret q
 @opt check: br
 @isel not: idiv.imm
-@isel check: idiv
+@isel check: div.i32
 @run 21 0 -> 3
 @run 21 1 -> 7
 @run 21 3 -> 7

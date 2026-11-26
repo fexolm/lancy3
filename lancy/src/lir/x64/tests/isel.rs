@@ -30,7 +30,7 @@ fn branch_covers_a_single_use_comparison_and_retains_a_shared_mask() {
         assert_eq!(
             insts
                 .iter()
-                .any(|i| matches!(i, Inst::BrCmp(_, _, Rhs::Imm(1)))),
+                .any(|i| matches!(i, Inst::BrCmp(_, _, _, Rhs::Imm(1)))),
             !shared
         );
         assert_eq!(insts.iter().any(|i| matches!(i, Inst::Compare(..))), shared);
@@ -93,7 +93,7 @@ fn load_covers_scaled_address_and_shift_covers_its_constant() {
     assert!(insts.iter().any(|i| matches!(
         i,
         Inst::Shift {
-            count: Rhs::Imm(48),
+            count: Rhs::Imm(16),
             ..
         }
     )));
@@ -141,6 +141,103 @@ fn all_scalar_casts_up_to_eight_bytes_emit_call_free_machine_code() {
                     inst.ip()
                 );
             }
+        }
+    }
+}
+
+/// Scalars of at most eight bytes select machine instructions (X64-01).
+/// Only cold operations call the numeric fallback: library math, the float
+/// neighbours and `signum`, arithmetic of 16-bit floats (x86 has it
+/// only for AVX512-FP16 vectors), and what SSE2 lacks: rounding and FMA.
+#[test]
+fn scalar_operations_up_to_eight_bytes_select_machine_instructions() {
+    use crate::hir::{Ternary, Unary as U, Value};
+    use crate::jit::tests::numeric_coverage::{BINARY, LANES, UNARY};
+    use crate::support::numeric::Action;
+    use Binary as B;
+    let isa = crate::lir::x64::Cpu::host().isa;
+    let cold = |action: Action, lane: Lane| {
+        let half = matches!(lane, Lane::F16 | Lane::BF16);
+        match action {
+            Action::Unary(
+                U::Exp
+                | U::Exp2
+                | U::Ln
+                | U::Log2
+                | U::Log10
+                | U::Sin
+                | U::Cos
+                | U::Tan
+                | U::Asin
+                | U::Acos
+                | U::Atan
+                | U::Sinh
+                | U::Cosh
+                | U::Tanh
+                | U::Asinh
+                | U::Acosh
+                | U::Atanh
+                | U::ExpM1
+                | U::Ln1p
+                | U::Cbrt
+                | U::NextUp
+                | U::NextDown
+                | U::Signum,
+            )
+            | Action::Binary(B::Pow | B::Atan2 | B::Hypot) => true,
+            Action::Binary(B::Rem) => lane.float(),
+            Action::Unary(U::Floor | U::Ceil | U::Trunc | U::Nearest | U::Round | U::Fract) => {
+                half || !isa.sse41
+            }
+            Action::Ternary(Ternary::MulAdd) => half || !isa.fma,
+            Action::Unary(
+                U::Not
+                | U::Neg
+                | U::Abs
+                | U::SignBit
+                | U::IsNan
+                | U::IsInfinite
+                | U::IsFinite
+                | U::IsNormal
+                | U::IsSubnormal,
+            )
+            | Action::Binary(B::And | B::Or | B::Xor | B::CopySign)
+            | Action::Ternary(Ternary::Select | Ternary::BitSelect)
+            | Action::Cast => false,
+            _ => half,
+        }
+    };
+    let check = |params: &[Type], make: &dyn Fn(&[Value]) -> Op| {
+        // The parameters' values are the same in any function of this signature.
+        let probe = Function::new(params, Type::I32);
+        let op = make(probe.params(probe.entry()));
+        let (action, input, output, _) =
+            crate::hir::operation::operation(op, |v| probe.value_type(v)).unwrap();
+        let mut f = Function::new(params, output);
+        let b = f.entry();
+        let v = f.append(b, op).unwrap();
+        f.set_terminator(b, Terminator::Return(v));
+        let lane = input.lane().unwrap();
+        let falls = selected(&f).iter().any(|i| matches!(i, Inst::Fallback(_)));
+        assert_eq!(falls, cold(action, lane), "{op:?} on {lane:?}");
+    };
+    for lane in LANES.into_iter().filter(|lane| lane.bytes() <= 8) {
+        let ty = lane.scalar();
+        for op in UNARY.into_iter().filter(|op| op.supports(ty)) {
+            check(&[ty], &|p| Op::Unary(op, p[0]));
+        }
+        for op in BINARY.into_iter().filter(|op| op.supports(ty)) {
+            check(&[ty, ty], &|p| Op::Bin(op, p[0], p[1]));
+        }
+        for op in [Ternary::Select, Ternary::BitSelect, Ternary::MulAdd] {
+            if op == Ternary::MulAdd && !lane.float() {
+                continue;
+            }
+            let first = if op == Ternary::Select { Type::I32 } else { ty };
+            check(&[first, ty, ty], &|p| Op::Ternary(op, p[0], p[1], p[2]));
+        }
+        for to in LANES.into_iter().filter(|to| to.bytes() <= 8) {
+            check(&[ty], &|p| Op::Cast(to.scalar(), p[0]));
         }
     }
 }

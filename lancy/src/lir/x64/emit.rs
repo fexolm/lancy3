@@ -4,7 +4,8 @@ use super::{
     compile::{CompiledFunction, compile},
     frame::{CHILD_ARGS, Frame},
     inst::{
-        Address, Alu, Cond, Expansion, Inst, MaskSelect, NativeInst, Quotient, Rhs, SelectCond,
+        Address, Cond, Expansion, Inst, MaskSelect, NativeInst, Quotient, Rhs, SelectCond,
+        int::{self, Src},
     },
 };
 use crate::lir::regalloc::Allocations;
@@ -16,7 +17,7 @@ use crate::{
     module::{FunctionId, Module},
     support::slotmap::DenseMap,
 };
-use iced_x86::{BlockEncoderOptions, IcedError, code_asm::*};
+use iced_x86::{BlockEncoder, BlockEncoderOptions, IcedError, InstructionBlock, code_asm::*};
 use regalloc2::RegClass;
 use regalloc2::{Allocation, Edit, Function as _, InstOrEdit, VReg};
 use simd::{K, XMM, YMM, ZMM, opmask};
@@ -50,8 +51,16 @@ impl Frame {
         slot(self.spill_base + a.as_stack().expect("allocated spill").index())
     }
 
-    fn spill32(&self, a: Allocation) -> AsmMemoryOperand {
-        dword_ptr(r11 + disp(self.spill_base + a.as_stack().expect("allocated spill").index()))
+    /// An integer operand where it was allocated: x86's r/m operand can
+    /// read a spilled value directly.
+    fn source(&self, allocs: Allocations, rhs: Rhs) -> Src {
+        match rhs {
+            Rhs::Imm(n) => Src::Imm(n),
+            Rhs::Reg(v) => match allocs.get(v) {
+                at if at.is_stack() => Src::Mem(self.spill(at)),
+                at => Src::Reg(at.as_reg().expect("allocated register").hw_enc()),
+            },
+        }
     }
 
     fn emit_move(
@@ -191,8 +200,14 @@ fn assemble(module: &Module<CompiledFunction>, debug: bool) -> Result<Code, Fail
             a.mov(mem, R64[reg.hw_enc()])?;
         }
     }
+    // AVX code leaves the upper vector state dirty; the host's SSE code
+    // would pay a transition or a false dependency for it (X64-02).
+    let avx = root.body.machine().cpu.isa.avx;
     let restore = |a: &mut CodeAssembler| {
         bind(a, epilogue)?;
+        if avx {
+            a.vzeroupper()?;
+        }
         for (mem, reg) in saves() {
             if reg.class() == RegClass::Vector {
                 simd::load(a, reg.hw_enc(), mem, 16)?;
@@ -281,7 +296,15 @@ fn assemble(module: &Module<CompiledFunction>, debug: bool) -> Result<Code, Fail
     } else {
         0
     };
-    let assembly = a.assemble_options(0, options)?.inner;
+    let mut instructions = a.take_instructions();
+    if avx {
+        for instruction in &mut instructions {
+            if let Some(vex) = super::vex::encode(instruction) {
+                *instruction = vex;
+            }
+        }
+    }
+    let assembly = BlockEncoder::encode(64, InstructionBlock::new(&instructions, 0), options)?;
     if debug {
         let offset = |index: u64| u64::from(assembly.new_instruction_offsets[index as usize]);
         for (i, f) in debug_functions.iter_mut().enumerate() {
@@ -388,8 +411,9 @@ impl Emitter<'_> {
                                         }
                                         Cond::Eq
                                     }
-                                    Inst::BrCmp(cc, lhs, rhs) => {
-                                        cmp(self.a, &self.machine.frame, allocs, lhs, rhs)?;
+                                    Inst::BrCmp(cc, bytes, lhs, rhs) => {
+                                        let src = self.machine.frame.source(allocs, rhs);
+                                        int::compare(self.a, bytes, allocs.reg(lhs), src)?;
                                         cc
                                     }
                                     Inst::Branch(v) => {
@@ -400,9 +424,9 @@ impl Emitter<'_> {
                                     _ => unreachable!("matched as a branch"),
                                 };
                                 if Some(yes) == next {
-                                    jcc(self.a, condition.inverse(), labels[no])?;
+                                    condition.inverse().jump(self.a, labels[no])?;
                                 } else {
-                                    jcc(self.a, condition, labels[yes])?;
+                                    condition.jump(self.a, labels[yes])?;
                                     if Some(no) != next {
                                         self.a.jmp(labels[no])?;
                                     }
@@ -451,49 +475,6 @@ impl Emitter<'_> {
         Ok(())
     }
 
-    fn lanes(&mut self, expansion: Expansion, allocs: Allocations) -> AsmResult {
-        let Expansion {
-            action,
-            input,
-            output,
-            dst,
-            args,
-        } = expansion;
-        use super::inst::lanes::{self, FRAME, INPUT, OUTPUT, WORKSPACE};
-        let width = self.cpu.bytes;
-        let a = &mut self.a;
-        a.sub(rsp, FRAME)?;
-        a.mov(qword_ptr(rsp + WORKSPACE), r11)?;
-        for (arg, offset) in args.into_iter().zip(INPUT) {
-            if let Some((ty, v)) = arg {
-                store(a, width, ty, ptr(rsp + offset), allocs.reg(v))?;
-            }
-        }
-        let mut faults = [None; 3];
-        lanes::emit(a, width, action, input, output, &mut faults)?;
-        load(a, width, output, allocs.reg(dst), ptr(rsp + OUTPUT))?;
-        a.mov(r11, qword_ptr(rsp + WORKSPACE))?;
-        a.add(rsp, FRAME)?;
-        if faults.iter().any(Option::is_some) {
-            let done = a.create_label();
-            a.jmp(done)?;
-            for (i, local) in faults.into_iter().enumerate() {
-                if let Some(label) = local {
-                    bind(a, label)?;
-                    a.mov(r11, qword_ptr(rsp + WORKSPACE))?;
-                    a.add(rsp, FRAME)?;
-                    let fail = self.exits.trap(
-                        a,
-                        [Trap::Bounds, Trap::DivisionByZero, Trap::DivisionOverflow][i],
-                    );
-                    a.jmp(fail)?;
-                }
-            }
-            bind(a, done)?;
-        }
-        Ok(())
-    }
-
     /// Call `lir::fallback` with the area below the Win64 shadow space and
     /// report its trap code. Every generated frame enters with RSP 8 mod 16.
     fn fallback(&mut self, expansion: Expansion, allocs: Allocations) -> AsmResult {
@@ -526,6 +507,9 @@ impl Emitter<'_> {
         a.mov(site_arg, site)?;
         a.lea(area_arg, ptr(rsp + area))?;
         a.mov(r10, entry())?;
+        if self.cpu.isa.avx {
+            a.vzeroupper()?;
+        }
         a.call(r10)?;
         // The result register may be RAX: keep the code in R10D.
         a.mov(r10d, eax)?;
@@ -547,17 +531,6 @@ impl Emitter<'_> {
         let reg = |v: VReg| allocs.reg(v);
         let r = |v| R32[reg(v)];
         let q = |v| R64[reg(v)];
-        // x86's r/m operand can directly consume a spilled RHS.
-        macro_rules! rm32 {
-            ($op:ident, $lhs:expr, $rhs:expr) => {{
-                let rhs = allocs.get($rhs);
-                if let Some(p) = rhs.as_reg() {
-                    a.$op($lhs, R32[p.hw_enc()])
-                } else {
-                    a.$op($lhs, frame.spill32(rhs))
-                }
-            }};
-        }
         match inst {
             Inst::Argv(_) | Inst::Copy(..) => Ok(()), // incoming fixed def / tied operands
             Inst::LoadArg {
@@ -593,7 +566,7 @@ impl Emitter<'_> {
             Inst::PairedShuffle(form, dst, x, y) => {
                 form.emit(a, self.constants, width, [reg(dst), reg(x), reg(y)])
             }
-            Inst::DwordLane {
+            Inst::DynamicLane {
                 lane,
                 checked,
                 dst,
@@ -604,11 +577,25 @@ impl Emitter<'_> {
             } => {
                 if checked {
                     let fail = self.exits.trap(a, Trap::Bounds);
-                    a.cmp(r(index), (width / 4) as i32)?;
+                    a.cmp(r(index), (width / lane.bytes()) as i32)?;
                     a.jae(fail)?;
                 }
                 let registers = [reg(dst), reg(value), reg(index)];
-                if let Some(replacement) = replacement {
+                if lane.bytes() != 4 {
+                    // Through a vector of stack below RSP, addressed by lane.
+                    let scalar = lane.scalar();
+                    let at = ptr(rsp + r10 * lane.bytes() as i32);
+                    a.mov(r10d, r(index))?;
+                    a.sub(rsp, width as i32)?;
+                    store(a, width, Type::Vector(lane), ptr(rsp), reg(value))?;
+                    if let Some(replacement) = replacement {
+                        store(a, width, scalar, at, reg(replacement))?;
+                        load(a, width, Type::Vector(lane), reg(dst), ptr(rsp))?;
+                    } else {
+                        load(a, width, scalar, reg(dst), at)?;
+                    }
+                    a.add(rsp, width as i32)
+                } else if let Some(replacement) = replacement {
                     simd::packed::rearrange::insert_dword(
                         a,
                         self.constants,
@@ -619,7 +606,14 @@ impl Emitter<'_> {
                         temp.map(reg),
                     )
                 } else {
-                    simd::packed::rearrange::extract_dword(a, width, lane, registers)
+                    simd::packed::rearrange::extract_dword(
+                        a,
+                        self.constants,
+                        width,
+                        lane,
+                        registers,
+                        temp.map(reg),
+                    )
                 }
             }
             Inst::VectorShiftImm(kind, lane, dst, src, count) => {
@@ -627,7 +621,6 @@ impl Emitter<'_> {
                 simd::packed::integer::shift_dword_bits(a, cpu, kind, lane, dst, src, count)
             }
             Inst::Fallback(id) => self.fallback(details.expansions[id], allocs),
-            Inst::Lanes(id) => self.lanes(details.expansions[id], allocs),
             Inst::Literal(l, bits, dst) => match l.bytes() {
                 16 => {
                     let label = a.create_label();
@@ -660,115 +653,113 @@ impl Emitter<'_> {
                 (RegClass::Int, 8) => a.movq(q(dst), simd::XMM[reg(src)]),
                 _ => unreachable!(),
             },
-            // The destination reuses the left operand's register.
-            Inst::IntBinary(op, ty, dst, _, rhs) => {
-                use crate::hir::Binary;
-                let size = ty.lane().unwrap().bytes();
-                macro_rules! integer {
-                    ($mn:ident) => {
-                        if size == 8 {
-                            a.$mn(q(dst), q(rhs))
-                        } else {
-                            a.$mn(r(dst), r(rhs))
-                        }
-                    };
-                }
-                // Narrow results keep the carry-out above their size (see `Inst`).
-                match op {
-                    Binary::Add => integer!(add),
-                    Binary::Sub => integer!(sub),
-                    Binary::Mul => integer!(imul_2),
-                    Binary::And => integer!(and),
-                    Binary::Or => integer!(or),
-                    Binary::Xor => integer!(xor),
-                    _ => unreachable!(),
-                }
-            }
             Inst::Imm(dst, n) => a.mov(r(dst), n),
-            // The destination reuses the left operand's register.
-            Inst::Alu(op, dst, _, Rhs::Imm(n)) => match op {
-                Alu::Add => a.add(r(dst), n),
-                Alu::Sub => a.sub(r(dst), n),
-                Alu::And => a.and(r(dst), n),
-                Alu::Or => a.or(r(dst), n),
-                Alu::Xor => a.xor(r(dst), n),
-                Alu::Mul => a.imul_3(r(dst), r(dst), n),
-                Alu::Min | Alu::Max => unreachable!("cmov requires a register or memory"),
-            },
-            Inst::Alu(op, dst, _, Rhs::Reg(rhs)) => match op {
-                Alu::Add => rm32!(add, r(dst), rhs),
-                Alu::Sub => rm32!(sub, r(dst), rhs),
-                Alu::And => rm32!(and, r(dst), rhs),
-                Alu::Or => rm32!(or, r(dst), rhs),
-                Alu::Xor => rm32!(xor, r(dst), rhs),
-                Alu::Mul => rm32!(imul_2, r(dst), rhs),
-                Alu::Min | Alu::Max => {
-                    rm32!(cmp, r(dst), rhs)?;
-                    if matches!(op, Alu::Min) {
-                        rm32!(cmovg, r(dst), rhs)
-                    } else {
-                        rm32!(cmovl, r(dst), rhs)
-                    }
-                }
-            },
+            // Two-address forms: the destination reuses the left operand's register.
+            Inst::Alu(op, ty, dst, _, rhs) => op.emit(a, ty, reg(dst), frame.source(allocs, rhs)),
             Inst::Shift {
-                left, dst, count, ..
-            } => match (left, count) {
-                (true, Rhs::Reg(_)) => a.shl(r(dst), cl),
-                (false, Rhs::Reg(_)) => a.sar(r(dst), cl),
-                (true, Rhs::Imm(n)) => a.shl(r(dst), n & 31),
-                (false, Rhs::Imm(n)) => a.sar(r(dst), n & 31),
-            },
-            Inst::Compare(cc, dst, lhs, rhs) => {
-                cmp(a, frame, allocs, lhs, rhs)?;
+                op,
+                int,
+                dst,
+                count,
+                ..
+            } => {
+                let count = match count {
+                    Rhs::Imm(n) => Some(n),
+                    Rhs::Reg(_) => None,
+                };
+                op.emit(a, int, reg(dst), count)
+            }
+            Inst::IntUnary(op, ty, dst, _, temp) => {
+                op.emit(a, cpu.isa, ty, reg(dst), temp.map(reg))
+            }
+            Inst::Saturating {
+                sub, int, dst, rhs, ..
+            } => int::saturating(a, sub, int, reg(dst), reg(rhs)),
+            Inst::Convert {
+                from,
+                to,
+                dst,
+                src,
+                temp,
+            } => super::inst::convert::emit(a, from, to, reg(dst), reg(src), temp.map(reg)),
+            Inst::Classify(op, lane, dst, _) => {
+                let fraction = if lane == crate::hir::Lane::F16 { 10 } else { 7 };
+                int::classify_half(a, op, fraction, reg(dst))
+            }
+            Inst::Extend(ty, dst, src) => int::extend(a, ty, reg(dst), reg(src)),
+            Inst::Compare(cc, bytes, dst, lhs, rhs) => {
+                int::compare(a, bytes, reg(lhs), frame.source(allocs, rhs))?;
                 let byte = R8[reg(dst)];
-                match cc {
-                    Cond::Eq => a.sete(byte),
-                    Cond::Ne => a.setne(byte),
-                    Cond::Lt => a.setl(byte),
-                    Cond::Le => a.setle(byte),
-                    Cond::Gt => a.setg(byte),
-                    Cond::Ge => a.setge(byte),
-                }?;
+                cc.set(a, byte)?;
                 a.movzx(r(dst), byte)?;
                 a.neg(r(dst))
             }
             // The destination reuses the register of `no`.
-            Inst::SelectI32 { dst, cond, yes, .. } => {
+            Inst::Select {
+                wide,
+                dst,
+                cond,
+                yes,
+                ..
+            } => {
                 let cc = match cond {
                     SelectCond::Nonzero(v) => {
                         a.test(r(v), r(v))?;
                         Cond::Ne
                     }
-                    SelectCond::Compare(cc, lhs, rhs) => {
-                        cmp(a, frame, allocs, lhs, rhs)?;
+                    SelectCond::Compare(cc, bytes, lhs, rhs) => {
+                        int::compare(a, bytes, reg(lhs), frame.source(allocs, rhs))?;
                         cc
                     }
                 };
-                let dst = r(dst);
-                match cc {
-                    Cond::Eq => rm32!(cmove, dst, yes),
-                    Cond::Ne => rm32!(cmovne, dst, yes),
-                    Cond::Lt => rm32!(cmovl, dst, yes),
-                    Cond::Le => rm32!(cmovle, dst, yes),
-                    Cond::Gt => rm32!(cmovg, dst, yes),
-                    Cond::Ge => rm32!(cmovge, dst, yes),
-                }
+                cc.select(a, wide, reg(dst), frame.source(allocs, Rhs::Reg(yes)))
             }
-            Inst::Cdq { .. } => a.cdq(),
-            Inst::IDiv { divisor, .. } => {
+            // The destination reuses the register of `no`.
+            Inst::SelectVector { dst, cond, yes, .. } => {
+                let keep = a.create_label();
+                a.test(r(cond), r(cond))?;
+                a.je(keep)?;
+                simd::copy(a, reg(dst), reg(yes), width)?;
+                bind(a, keep)
+            }
+            Inst::DivideHigh { int, .. } => match (int.signed, int.wide()) {
+                (true, true) => a.cqo(),
+                (true, false) => a.cdq(),
+                (false, _) => a.xor(edx, edx),
+            },
+            Inst::Divide { int, divisor, .. } => {
                 let zero = self.exits.trap(a, Trap::DivisionByZero);
-                let overflow = self.exits.trap(a, Trap::DivisionOverflow);
-                let divide = a.create_label();
-                let divisor = r(divisor);
-                a.test(divisor, divisor)?;
+                let divisor = reg(divisor);
+                if int.wide() {
+                    a.test(R64[divisor], R64[divisor])?;
+                } else {
+                    a.test(R32[divisor], R32[divisor])?;
+                }
                 a.jz(zero)?;
-                a.cmp(divisor, -1)?;
-                a.jne(divide)?;
-                a.cmp(eax, i32::MIN)?;
-                a.je(overflow)?;
-                bind(a, divide)?;
-                a.idiv(divisor)
+                if int.signed {
+                    // MIN / -1 overflows the type, also when it fits 32 bits.
+                    let overflow = self.exits.trap(a, Trap::DivisionOverflow);
+                    let divide = a.create_label();
+                    let (min, _) = int.range();
+                    if int.wide() {
+                        a.cmp(R64[divisor], -1)?;
+                        a.jne(divide)?;
+                        a.mov(r10, min)?;
+                        a.cmp(rax, r10)?;
+                    } else {
+                        a.cmp(R32[divisor], -1)?;
+                        a.jne(divide)?;
+                        a.cmp(eax, min as i32)?;
+                    }
+                    a.je(overflow)?;
+                    bind(a, divide)?;
+                }
+                match (int.signed, int.wide()) {
+                    (true, true) => a.idiv(R64[divisor]),
+                    (true, false) => a.idiv(R32[divisor]),
+                    (false, true) => a.div(R64[divisor]),
+                    (false, false) => a.div(R32[divisor]),
+                }
             }
             Inst::DivImm {
                 remainder,
@@ -885,7 +876,7 @@ impl Emitter<'_> {
             }
             Inst::CheckBounds(index, length) => {
                 let fail = self.exits.trap(a, Trap::Bounds);
-                rm32!(cmp, r(index), length)?;
+                int::compare(a, 4, reg(index), frame.source(allocs, Rhs::Reg(length)))?;
                 a.jae(fail)
             }
             Inst::TrapIf(v, trap) => {
@@ -897,7 +888,6 @@ impl Emitter<'_> {
                 let fail = self.exits.trap(a, trap);
                 a.jmp(fail)
             }
-            Inst::Movsxd(dst, src) => a.movsxd(q(dst), r(src)),
             Inst::Lea(dst, addr) => a.lea(q(dst), memory(addr, allocs)),
             Inst::Masked(id) => details.masked[id].map(reg).emit(a, cpu),
             Inst::Load(ty, dst, addr) => load(a, width, ty, reg(dst), memory(addr, allocs)),
@@ -995,6 +985,10 @@ impl Emitter<'_> {
                 a.sub(rsp, shadow + 8)?;
                 a.mov(qword_ptr(rsp + shadow), r11)?;
                 a.mov(r10, function.entry as usize as u64)?;
+                // Calls clobber every vector register's upper lanes.
+                if cpu.isa.avx {
+                    a.vzeroupper()?;
+                }
                 a.call(r10)?;
                 a.mov(r11, qword_ptr(rsp + shadow))?;
                 a.add(rsp, shadow + 8)?;
@@ -1109,35 +1103,6 @@ fn memory(addr: Address, allocs: Allocations) -> AsmMemoryOperand {
             ptr(base + R64[allocs.reg(index)] * (1i32 << scale as u8) + addr.disp)
         }
         None => ptr(base + addr.disp),
-    }
-}
-
-/// Compare `lhs` with `rhs`, which may stay in its spill slot.
-fn cmp(
-    a: &mut CodeAssembler,
-    frame: &Frame,
-    allocs: Allocations,
-    lhs: VReg,
-    rhs: Rhs,
-) -> AsmResult {
-    let lhs = R32[allocs.reg(lhs)];
-    match rhs {
-        Rhs::Imm(n) => a.cmp(lhs, n),
-        Rhs::Reg(v) => match allocs.get(v).as_reg() {
-            Some(p) => a.cmp(lhs, R32[p.hw_enc()]),
-            None => a.cmp(lhs, frame.spill32(allocs.get(v))),
-        },
-    }
-}
-
-fn jcc(a: &mut CodeAssembler, cc: Cond, label: CodeLabel) -> AsmResult {
-    match cc {
-        Cond::Eq => a.je(label),
-        Cond::Ne => a.jne(label),
-        Cond::Lt => a.jl(label),
-        Cond::Le => a.jle(label),
-        Cond::Gt => a.jg(label),
-        Cond::Ge => a.jge(label),
     }
 }
 

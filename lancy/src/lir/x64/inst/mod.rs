@@ -1,6 +1,7 @@
 //! Selected x64 instructions. R11 addresses the current workspace frame.
 //! R10 is the allocator's move scratch and is available inside a pseudo-op.
-pub(super) mod lanes;
+pub(super) mod convert;
+pub(super) mod int;
 mod names;
 pub(super) mod simd;
 pub(super) use super::abi::SCRATCH;
@@ -12,6 +13,7 @@ use crate::{
     lir::{TargetInst, frame::FrameUse},
     module::FunctionId,
 };
+pub(super) use int::{Alu, Cond, Int, IntUnary, Shift};
 use regalloc2::{MachineEnv, Operand, PReg, PRegSet, RegClass, VReg};
 use simd::packed::rearrange::PairedShuffle;
 use simd::{MaskedMemory, Native};
@@ -85,41 +87,6 @@ fn return_reg(v: VReg) -> PReg {
 }
 
 #[derive(Clone, Copy, Debug)]
-pub(super) enum Alu {
-    Add,
-    Sub,
-    Mul,
-    And,
-    Or,
-    Xor,
-    Min,
-    Max,
-}
-
-#[derive(Clone, Copy, Debug)]
-pub(super) enum Cond {
-    Eq,
-    Ne,
-    Lt,
-    Le,
-    Gt,
-    Ge,
-}
-
-impl Cond {
-    pub fn inverse(self) -> Self {
-        match self {
-            Self::Eq => Self::Ne,
-            Self::Ne => Self::Eq,
-            Self::Lt => Self::Ge,
-            Self::Ge => Self::Lt,
-            Self::Gt => Self::Le,
-            Self::Le => Self::Gt,
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug)]
 pub(super) enum Rhs {
     Reg(VReg),
     Imm(i32),
@@ -158,15 +125,16 @@ impl Address {
 #[derive(Clone, Copy, Debug)]
 pub(super) enum SelectCond {
     Nonzero(VReg),
-    Compare(Cond, VReg, Rhs),
+    /// An integer comparison of the operand size in bytes.
+    Compare(Cond, u8, VReg, Rhs),
 }
 
 /// A scalar integer narrower than its register holds its value in the low
 /// `size` bytes only; the upper bits are undefined. Producers leave whatever
 /// is convenient there (a signed `Cast` sign-extends, a load zero-extends,
-/// `IntBinary` keeps the carry-out), and every consumer reads just the low
-/// bytes: a narrow store, a `Cast` through `movsx`/`movzx`, lanes inserted
-/// by size, and a root return the caller truncates to the result type.
+/// `Alu` keeps the carry-out), and every consumer reads just the low
+/// bytes: a narrow store, a `Cast` through `movsx`/`movzx`, an operation at
+/// the type's operand size or after extending in place, lanes inserted by size, and a root return the caller truncates to the result type.
 #[derive(Clone, Copy, Debug)]
 pub(super) enum Inst {
     Argv(VReg),
@@ -179,33 +147,67 @@ pub(super) enum Inst {
     Native(NativeId),
     /// Call the shared numeric fallback (`lir::fallback`).
     Fallback(ExpansionId),
-    Lanes(ExpansionId),
     Literal(Lane, u128, VReg),
     Iota(Lane, VReg),
     BitMove(Type, Type, VReg, VReg),
-    IntBinary(Binary, Type, VReg, VReg, VReg),
     Imm(VReg, i32),
     Copy(VReg, VReg),
-    Alu(Alu, VReg, VReg, Rhs),
+    Alu(Alu, Int, VReg, VReg, Rhs),
     Shift {
-        left: bool,
+        op: Shift,
+        int: Int,
         dst: VReg,
         value: VReg,
         count: Rhs,
     },
-    Compare(Cond, VReg, VReg, Rhs),
-    SelectI32 {
+    IntUnary(IntUnary, Int, VReg, VReg, Option<VReg>),
+    Saturating {
+        sub: bool,
+        int: Int,
+        dst: VReg,
+        lhs: VReg,
+        rhs: VReg,
+    },
+    /// A cast from or to a float scalar (see [`convert`]).
+    Convert {
+        from: Lane,
+        to: Lane,
+        dst: VReg,
+        src: VReg,
+        temp: Option<VReg>,
+    },
+    /// The class of a 16-bit float, in place, as an `i32` mask.
+    Classify(crate::hir::Unary, Lane, VReg, VReg),
+    /// Sign- or zero-extend an integer to the whole register.
+    Extend(Int, VReg, VReg),
+    /// The comparison of integers of the given size, as a mask.
+    Compare(Cond, u8, VReg, VReg, Rhs),
+    /// Choose between general registers, of 64 bits when `wide`.
+    Select {
+        wide: bool,
         dst: VReg,
         no: VReg,
         cond: SelectCond,
         yes: VReg,
     },
-    BrCmp(Cond, VReg, Rhs),
-    Cdq {
+    /// Choose between vector registers by a scalar condition.
+    SelectVector {
+        dst: VReg,
+        no: VReg,
+        cond: VReg,
+        yes: VReg,
+    },
+    BrCmp(Cond, u8, VReg, Rhs),
+    /// The high half of a dividend: its sign, or zero when unsigned.
+    DivideHigh {
+        int: Int,
         lo: VReg,
         hi: VReg,
     },
-    IDiv {
+    /// Hardware division of operands extended to 32 or 64 bits; the type
+    /// decides signedness and the overflowing dividend.
+    Divide {
+        int: Int,
         remainder: bool,
         dst: VReg,
         lo: VReg,
@@ -245,7 +247,6 @@ pub(super) enum Inst {
         limit: VReg,
         temps: [VReg; 2],
     },
-    Movsxd(VReg, VReg),
     Lea(VReg, Address),
     Load(Type, VReg, Address),
     PackedMemory(Binary, Lane, VReg, VReg, Address),
@@ -254,7 +255,7 @@ pub(super) enum Inst {
     ExtractLane(Lane, VReg, VReg, u8),
     ShiftDwords(VReg, VReg, u8),
     PairedShuffle(PairedShuffle, VReg, VReg, VReg),
-    DwordLane {
+    DynamicLane {
         lane: Lane,
         checked: bool,
         dst: VReg,
@@ -298,8 +299,8 @@ pub(super) struct NativeInst {
     pub temps: [Option<VReg>; 6],
 }
 
-/// An operation computed out of line: by the numeric fallback or by the
-/// inline lane expansion, from typed arguments.
+/// An operation computed out of line by the numeric fallback, from typed
+/// arguments.
 #[derive(Clone, Copy, Debug)]
 pub(super) struct Expansion {
     pub action: Action,
@@ -336,9 +337,6 @@ impl Details {
     }
     pub fn fallback(&mut self, expansion: Expansion) -> Inst {
         Inst::Fallback(self.expansions.insert(expansion))
-    }
-    pub fn lanes(&mut self, expansion: Expansion) -> Inst {
-        Inst::Lanes(self.expansions.insert(expansion))
     }
     pub fn select(&mut self, select: MaskSelect) -> Inst {
         Inst::SelectMask(self.selects.insert(select))
@@ -385,22 +383,42 @@ impl TargetInst for Inst {
                 });
                 out.extend(temps.into_iter().flatten().map(O::reg_temp));
             }
-            Self::Lanes(id) | Self::Fallback(id) => {
+            Self::Fallback(id) => {
                 let Expansion { dst, args, .. } = details.expansions[id];
                 out.extend(args.into_iter().flatten().map(|(_, reg)| O::reg_use(reg)));
                 out.push(O::reg_fixed_def(dst, return_reg(dst)));
             }
             Self::Literal(_, _, d) | Self::Iota(_, d) => out.push(O::reg_def(d)),
             Self::BitMove(_, _, d, a) => out.extend([O::reg_use(a), O::reg_def(d)]),
-            Self::IntBinary(_, _, d, a, b) => {
-                out.extend([O::reg_use(a), O::reg_use(b), O::reg_reuse_def(d, 0)])
-            }
             Self::Imm(d, _) => out.push(O::reg_def(d)),
             Self::Copy(d, a) => out.extend([O::reg_use(a), O::reg_reuse_def(d, 0)]),
-            Self::Alu(_, d, a, b) => {
+            Self::Alu(_, _, d, a, b) => {
                 out.push(O::reg_use(a));
                 b.operands(out);
                 out.push(O::reg_reuse_def(d, 0));
+            }
+            Self::IntUnary(_, _, d, a, temp) => {
+                out.extend([O::reg_use(a), O::reg_reuse_def(d, 0)]);
+                out.extend(temp.map(O::reg_temp));
+            }
+            Self::Convert {
+                from,
+                to,
+                dst,
+                src,
+                temp,
+            } => {
+                out.push(O::reg_use(src));
+                out.push(if convert::soft(from, to) && dst.class() == RegClass::Int {
+                    O::reg_fixed_def(dst, AX)
+                } else {
+                    O::reg_def(dst)
+                });
+                out.extend(temp.map(O::reg_temp));
+            }
+            Self::Classify(_, _, d, a) => out.extend([O::reg_use(a), O::reg_reuse_def(d, 0)]),
+            Self::Saturating { dst, lhs, rhs, .. } => {
+                out.extend([O::reg_use(lhs), O::reg_use(rhs), O::reg_reuse_def(dst, 0)])
             }
             Self::Shift {
                 dst, value, count, ..
@@ -411,35 +429,44 @@ impl TargetInst for Inst {
                 }
                 out.push(O::reg_reuse_def(dst, 0));
             }
-            Self::Compare(_, d, a, b) => {
+            Self::Compare(_, _, d, a, b) => {
                 out.push(O::reg_use(a));
                 b.operands(out);
                 out.push(O::reg_def(d));
             }
-            Self::SelectI32 { dst, no, cond, yes } => {
+            Self::Select {
+                dst, no, cond, yes, ..
+            } => {
                 out.extend([O::reg_use(no), O::any_use(yes)]);
                 match cond {
                     SelectCond::Nonzero(v) => out.push(O::reg_use(v)),
-                    SelectCond::Compare(_, a, b) => {
+                    SelectCond::Compare(_, _, a, b) => {
                         out.push(O::reg_use(a));
                         b.operands(out);
                     }
                 }
                 out.push(O::reg_reuse_def(dst, 0));
             }
-            Self::BrCmp(_, a, b) => {
+            Self::SelectVector { dst, no, cond, yes } => out.extend([
+                O::reg_use(no),
+                O::reg_use(yes),
+                O::reg_use(cond),
+                O::reg_reuse_def(dst, 0),
+            ]),
+            Self::BrCmp(_, _, a, b) => {
                 out.push(O::reg_use(a));
                 b.operands(out);
             }
-            Self::Cdq { lo, hi } => {
+            Self::DivideHigh { lo, hi, .. } => {
                 out.extend([O::reg_fixed_use(lo, AX), O::reg_fixed_def(hi, DX)])
             }
-            Self::IDiv {
+            Self::Divide {
                 remainder,
                 dst,
                 lo,
                 hi,
                 divisor,
+                ..
             } => out.extend([
                 O::reg_fixed_use(lo, AX),
                 O::reg_fixed_use(hi, DX),
@@ -451,7 +478,7 @@ impl TargetInst for Inst {
             }
             Self::CheckBounds(i, n) => out.extend([O::reg_use(i), O::any_use(n)]),
             Self::TrapIf(v, _) => out.push(O::reg_use(v)),
-            Self::Movsxd(d, a) => out.extend([O::reg_use(a), O::reg_def(d)]),
+            Self::Extend(_, d, a) => out.extend([O::reg_use(a), O::reg_def(d)]),
             Self::Lea(d, addr) | Self::Load(_, d, addr) | Self::BroadcastMemory(_, d, addr) => {
                 addr.operands(out);
                 out.push(O::reg_def(d));
@@ -488,7 +515,7 @@ impl TargetInst for Inst {
                 out.extend([O::reg_use(count), O::reg_def(d), O::reg_temp(temp)]);
             }
             Self::MaskImmediate(d, _) => out.push(O::reg_def(d)),
-            Self::DwordLane {
+            Self::DynamicLane {
                 dst,
                 value,
                 index,
@@ -588,13 +615,16 @@ impl TargetInst for Inst {
                 set.remove(return_reg(details.expansions[*id].dst));
                 set
             }
-            Self::Lanes(id) => {
-                // The inline expansions use only these scratch registers.
-                let mut set = gprs(&[0, 1, 2, 8, 9]) | vectors(0, 3);
-                set.remove(return_reg(details.expansions[*id].dst));
+            Self::Divide { remainder, .. } => {
+                PRegSet::empty().with(if *remainder { AX } else { DX })
+            }
+            Self::Convert { from, to, dst, .. } if convert::soft(*from, *to) => {
+                let mut set = gprs(&[0, 1, 2, 8, 9]);
+                if dst.class() == RegClass::Int {
+                    set.remove(AX);
+                }
                 set
             }
-            Self::IDiv { remainder, .. } => PRegSet::empty().with(if *remainder { AX } else { DX }),
             _ => PRegSet::empty(),
         }
     }
@@ -607,7 +637,7 @@ impl TargetInst for Inst {
                 FrameUse::Scratch(offset as usize + bytes as usize)
             }
             // Outgoing arguments go to the callee's frame above this one;
-            // the fallback and lane expansions reserve stack below RSP.
+            // the fallback and dynamic lane accesses reserve stack below RSP.
             _ => return None,
         })
     }

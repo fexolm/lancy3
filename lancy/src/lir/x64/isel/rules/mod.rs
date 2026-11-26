@@ -12,10 +12,11 @@ mod packed;
 mod packed_float;
 mod packed_integer;
 mod packed_rearrange;
+mod scalar;
 
 pub(in crate::lir::x64) use packed::packed_half;
 
-use super::super::inst::{Cond, Inst, SelectCond, class};
+use super::super::inst::{Inst, SelectCond, class};
 use super::masks::{Masks, native_compress_store, native_count};
 use crate::lir::x64::Cpu;
 use crate::{
@@ -27,7 +28,7 @@ use crate::{
     },
     module::FunctionId,
 };
-use regalloc2::{PRegSet, VReg};
+use regalloc2::{PRegSet, RegClass, VReg};
 
 /// Whether `inst`, a canonical predicate operation, has a rule here:
 /// its predicate operands and result live in mask registers, and the
@@ -108,19 +109,32 @@ impl Rules<'_> {
             Op::Bin(kind, a, b) if !matches!(self.ty(a), Type::Vector(_)) => {
                 self.binary(kind, a, b)?
             }
-            Op::Ternary(Ternary::Select, cond, yes, no) if self.ty(yes) == Type::I32 => {
+            Op::Ternary(Ternary::Select, cond, yes, no)
+                if !matches!(self.ty(cond), Type::Vector(_))
+                    && class(self.ty(yes)) == RegClass::Int =>
+            {
                 let cond = if let Some(Op::Bin(kind, a, b)) = self.ctx.single_use(cond)
-                    && self.ty(a) == Type::I32
-                    && let Some(cc) = Cond::from_binary(kind)
+                    && let Some((cc, int)) = self.integer_condition(kind, a)
                 {
-                    SelectCond::Compare(cc, self.input(a), self.rhs(b))
+                    SelectCond::Compare(cc, int.bytes, self.input(a), self.rhs(b))
                 } else {
                     SelectCond::Nonzero(self.input(cond))
                 };
-                Inst::SelectI32 {
+                Inst::Select {
+                    wide: self.ty(yes).bytes(self.cpu.bytes) == 8,
                     dst: self.dst(),
                     no: self.input(no),
                     cond,
+                    yes: self.input(yes),
+                }
+            }
+            Op::Ternary(Ternary::Select, cond, yes, no)
+                if !matches!(self.ty(cond), Type::Vector(_)) =>
+            {
+                Inst::SelectVector {
+                    dst: self.dst(),
+                    no: self.input(no),
+                    cond: self.input(cond),
                     yes: self.input(yes),
                 }
             }

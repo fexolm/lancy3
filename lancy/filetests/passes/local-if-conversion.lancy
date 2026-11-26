@@ -9,7 +9,7 @@ block join(value:i32)
   ret value
 @opt not: br
 @opt check: = select
-@isel check: select.i32
+@isel check: select.32
 @asm check: cmovne
 @run 0 17 31 -> 31
 @run 2 17 31 -> 17
@@ -74,8 +74,8 @@ fn main(x:i32 y:i32 yes:i32 no:i32) -> i32
 block join(v:i32)
   ret v
 @opt check: = select
-@isel not: cmp.lt
-@isel check: select.i32
+@isel not: cmp.lt.32
+@isel check: select.32
 @asm check: cmp
 @asm nextln: cmovl
 @run -2 7 11 37 -> 11

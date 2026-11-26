@@ -14,12 +14,12 @@ block work()
   t6 = mul t4 t3
   answer = sub t6 t5
   ret answer
-@isel check: alu.sub
-@isel check: alu.xor imm=17
-@isel check: alu.or
-@alloc check: alu.or
-@alloc check: alu.sub
-@alloc check: alu.xor imm=17
+@isel check: alu.i32.sub
+@isel check: alu.i32.xor imm=17
+@isel check: alu.i32.or
+@alloc check: alu.i32.or
+@alloc check: alu.i32.sub
+@alloc check: alu.i32.xor imm=17
 @run 0 4 3 2 5 8 -> 3
 @run -2 4 3 2 5 8 -> -131
 
@@ -58,10 +58,10 @@ block latch()
   jump head(next)
 block done()
   ret i
-@alloc check: alu.mul
-@alloc check: alu.sub
-@alloc check: alu.xor imm=17
-@alloc check: alu.or
+@alloc check: alu.i32.mul
+@alloc check: alu.i32.sub
+@alloc check: alu.i32.xor imm=17
+@alloc check: alu.i32.or
 @alloc check: store.i32
 @run 0 3 -> 0 | aa aa aa aa | aa aa aa aa
 @run 1 3 -> 1 | aa aa aa aa | 7d ff ff ff
@@ -90,9 +90,9 @@ block plain()
 block merge(sum:i32 carried:i32)
   result = add sum carried
   ret result
-@alloc check: alu.sub
-@alloc check: alu.xor imm=17
-@alloc check: alu.or
+@alloc check: alu.i32.sub
+@alloc check: alu.i32.xor imm=17
+@alloc check: alu.i32.or
 @run 0 1 4 3 2 5 8 -> 10
 @run -2 0 4 3 2 5 8 -> -131
 @run -2 -1 4 3 2 5 8 -> -128
@@ -113,9 +113,9 @@ fn main(a:i32 b:i32 c:i32 d:i32 e:i32 divisor:i32) -> i32
   quot = div answer divisor
   result = add quot b
   ret result
-@alloc check: alu.sub
-@alloc check: alu.xor imm=17
-@alloc check: alu.or
-@alloc check: idiv
+@alloc check: alu.i32.sub
+@alloc check: alu.i32.xor imm=17
+@alloc check: alu.i32.or
+@alloc check: div.i32
 @run 4 3 2 5 8 2 -> -62
 @run 4 3 2 5 8 0 -> !zero

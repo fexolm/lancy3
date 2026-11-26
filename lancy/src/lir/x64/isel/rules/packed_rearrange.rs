@@ -12,20 +12,17 @@ use crate::{
 use regalloc2::RegClass;
 
 impl Rules<'_> {
-    pub(super) fn dynamic_dword_lane(
-        &mut self,
-        op: Op,
-    ) -> Result<Option<Inst>, crate::CompileError> {
+    pub(super) fn dynamic_lane(&mut self, op: Op) -> Result<Option<Inst>, crate::CompileError> {
         let (value, index, replacement) = match op {
             Op::Simd(Simd::ExtractLane(x, i)) => (x, i, None),
             Op::Simd(Simd::InsertLane(x, i, y)) => (x, i, Some(y)),
             _ => return Ok(None),
         };
         let lane = self.ty(value).lane().unwrap();
-        if lane.bytes() != 4 || self.cpu.bytes == 16 {
+        if lane.bytes() > 8 {
             return Ok(None);
         }
-        let count = self.cpu.bytes as u32 / 4;
+        let count = (self.cpu.bytes / lane.bytes()) as u32;
         let constant = self.dword_constant(index);
         if constant.is_some_and(|n| n >= count) {
             return Ok(None);
@@ -33,12 +30,15 @@ impl Rules<'_> {
         let masked = matches!(self.ctx.defining_op(index), Some(Op::Bin(B::And, a, b))
             if [a, b].into_iter().any(|v| self.dword_constant(v).is_some_and(|n| n < count)));
         let checked = !masked && constant.is_none();
-        let temp = if replacement.is_some() && self.cpu.bytes == 32 {
-            Some(self.body.temp(RegClass::Vector)?)
-        } else {
-            None
-        };
-        Ok(Some(Inst::DwordLane {
+        // SSE2 selects the lane by an equality mask and folds it in a temporary.
+        let dword = lane.bytes() == 4;
+        let temp =
+            if dword && (self.cpu.bytes == 16 || replacement.is_some() && self.cpu.bytes == 32) {
+                Some(self.body.temp(RegClass::Vector)?)
+            } else {
+                None
+            };
+        Ok(Some(Inst::DynamicLane {
             lane,
             checked,
             dst: self.dst(),
@@ -159,7 +159,7 @@ impl Rule {
                     && (matches!(n, 4 | 8)
                         || n == 2 && c.isa.bw
                         || n == 1 && c.isa.bw && c.isa.vbmi)
-                    || c.bytes == 32 && n == 4 =>
+                    || c.bytes <= 32 && n == 4 =>
             {
                 Self::Shuffle
             }
@@ -180,6 +180,9 @@ impl Rule {
                     && (c.bytes != 64 || n >= 4 || c.isa.bw) =>
             {
                 Self::Narrow
+            }
+            Action::Reduce(op @ (B::Add | B::Mul)) if matches!(e, Lane::F32 | Lane::F64) => {
+                Self::Reduce(op)
             }
             Action::Reduce(op)
                 if !e.float()

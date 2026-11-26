@@ -177,7 +177,7 @@ impl Native {
             }
             _ => {}
         }
-        if lane == Lane::F16 {
+        if lane == Lane::F16 && !matches!(self.action, Action::Splat) {
             macro_rules! ph {
                 ($op:ident,$($r:ident),+) => {
                     match self.bytes {
@@ -207,8 +207,10 @@ impl Native {
         }
         match self.action {
             Action::Splat => {
-                // The scalar lives either in a GPR or in the low lane of an XMM.
-                if !lane.float() && self.bytes == 64 {
+                // The scalar lives either in a GPR or in the low lane of an
+                // XMM; 16-bit floats live in GPRs.
+                let general = !matches!(lane, Lane::F32 | Lane::F64);
+                if general && self.bytes == 64 {
                     return match lane.bytes() {
                         1 => a.vpbroadcastb(ZMM[dst], emit::R32[src]),
                         2 => a.vpbroadcastw(ZMM[dst], emit::R32[src]),
@@ -216,14 +218,14 @@ impl Native {
                         _ => a.vpbroadcastq(ZMM[dst], emit::R64[src]),
                     };
                 }
-                if !lane.float() {
+                if general {
                     if lane.bytes() == 8 {
                         a.movq(XMM[dst], emit::R64[src])?;
                     } else {
                         a.movd(XMM[dst], emit::R32[src])?;
                     }
                 }
-                let x = if lane.float() { XMM[src] } else { XMM[dst] };
+                let x = if general { XMM[dst] } else { XMM[src] };
                 match (self.bytes, lane.bytes()) {
                     (16, 1) => {
                         a.punpcklbw(XMM[dst], x)?;

@@ -7,6 +7,7 @@ mod isel;
 mod schedule;
 #[cfg(test)]
 mod tests;
+mod vex;
 
 pub(crate) use abi::{Cpu, Machine};
 pub(crate) use emit::emit;

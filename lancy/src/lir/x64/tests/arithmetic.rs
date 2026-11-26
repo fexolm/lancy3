@@ -63,7 +63,7 @@ fn selection_uses_an_immediate_and_drops_an_unused_multiply() {
         module.functions[module.call_graph.root()].body.insts(),
         [
             Inst::Imm(_, 2),
-            Inst::Alu(Alu::Add, _, _, Rhs::Imm(2)),
+            Inst::Alu(Alu::Add, _, _, _, Rhs::Imm(2)),
             Inst::Ret(_)
         ]
     ));

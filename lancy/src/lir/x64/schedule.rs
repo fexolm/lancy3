@@ -1,4 +1,4 @@
-use super::inst::{Alu, Details, Inst};
+use super::inst::{Alu, Details, Inst, convert};
 use crate::{
     hir::{Binary, Lane},
     lir::schedule::{Schedulable, Scheduling},
@@ -25,8 +25,8 @@ impl Schedulable for Inst {
             | Self::Store(..)
             | Self::CompactStore { .. }
             | Self::StoreArg(..) => Ordered(1),
-            Self::DwordLane { checked: true, .. } => Ordered(4),
-            Self::DwordLane { .. } | Self::CompactLookup(..) => Compute(5),
+            Self::DynamicLane { checked: true, .. } => Ordered(4),
+            Self::DynamicLane { .. } | Self::CompactLookup(..) => Compute(5),
             Self::MaskCompare(..)
             | Self::MaskCompact(..)
             | Self::PairedShuffle(..)
@@ -35,7 +35,11 @@ impl Schedulable for Inst {
             | Self::AnyMask(..)
             | Self::AllMask(..)
             | Self::SelectMask(_) => Compute(3),
-            Self::Alu(Alu::Mul, ..) | Self::IntBinary(Binary::Mul, ..) => Compute(3),
+            Self::Alu(Alu::Mul, ..) => Compute(3),
+            Self::IntUnary(..) | Self::Saturating { .. } | Self::Classify(..) => Compute(3),
+            // Soft casts write fixed registers.
+            Self::Convert { from, to, .. } if convert::soft(from, to) => Barrier,
+            Self::Convert { .. } => Compute(5),
             Self::Native(id) => {
                 let native = details.natives[id].native;
                 match native.action {
@@ -51,7 +55,8 @@ impl Schedulable for Inst {
             Self::BroadcastLane(..)
             | Self::ExtractLane(..)
             | Self::Iota(..)
-            | Self::SelectI32 { .. } => Compute(3),
+            | Self::Select { .. }
+            | Self::SelectVector { .. } => Compute(3),
             Self::Imm(..)
             | Self::Literal(..)
             | Self::Copy(..)
@@ -64,17 +69,14 @@ impl Schedulable for Inst {
             | Self::MaskLogic(..)
             | Self::MaskNot(..)
             | Self::MaskImmediate(..)
-            | Self::Movsxd(..)
+            | Self::Extend(..)
             | Self::Lea(..)
-            | Self::IntBinary(..)
             | Self::CallScratch(..) => Compute(1),
-            // Hardware division faults, and CDQ feeds it in fixed registers;
-            // inline lane expansions and calls use
-            // stack areas and fixed registers. Entry arguments, debug state
-            // and terminators keep their place.
-            Self::IDiv { .. }
-            | Self::Cdq { .. }
-            | Self::Lanes(_)
+            // Hardware division faults, and its high half is in a fixed register;
+            // calls use stack areas and fixed registers. Entry arguments,
+            // debug state and terminators keep their place.
+            Self::Divide { .. }
+            | Self::DivideHigh { .. }
             | Self::Fallback(_)
             | Self::Call { .. }
             | Self::RustCall(..)

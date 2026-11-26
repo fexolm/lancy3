@@ -3,7 +3,7 @@ use crate::{
     CompileError,
     hir::{Op, Scale, Simd, Type, Value, VectorAddress},
     lir::x64::inst::{
-        Address, Inst, VectorMask,
+        Address, Inst, Int, VectorMask,
         simd::{MaskedMemory, evex_masked_memory},
     },
 };
@@ -132,7 +132,7 @@ impl Rules<'_> {
         }
         let wide = self.body.temp(RegClass::Int)?;
         let index = self.input(index);
-        self.out.push(Inst::Movsxd(wide, index));
+        self.out.push(Inst::Extend(Int::I32, wide, index));
         Ok(Address {
             base,
             index: Some((wide, scale)),

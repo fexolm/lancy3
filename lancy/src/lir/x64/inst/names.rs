@@ -1,7 +1,7 @@
 //! How x64 instructions read in listings: HIR spellings for types,
 //! lanes and operations, assembler names for registers.
-use super::{Address, Alu, Cond, Details, Inst, Quotient, Rhs, VectorMask};
-use crate::hir::text::{TypeName, binary_name, lane_name, trap_name};
+use super::{Address, Details, Inst, Int, Quotient, Rhs, VectorMask};
+use crate::hir::text::{TypeName, binary_name, lane_name, trap_name, unary_name};
 use crate::lir::{printer::Named, x64::abi::Machine};
 use regalloc2::{PReg, RegClass};
 
@@ -10,32 +10,8 @@ const GPRS: [&str; 16] = [
     "r14", "r15",
 ];
 
-impl Alu {
-    fn name(self) -> &'static str {
-        match self {
-            Self::Add => "add",
-            Self::Sub => "sub",
-            Self::Mul => "mul",
-            Self::And => "and",
-            Self::Or => "or",
-            Self::Xor => "xor",
-            Self::Min => "min",
-            Self::Max => "max",
-        }
-    }
-}
-
-impl Cond {
-    fn name(self) -> &'static str {
-        match self {
-            Self::Eq => "eq",
-            Self::Ne => "ne",
-            Self::Lt => "lt",
-            Self::Le => "le",
-            Self::Gt => "gt",
-            Self::Ge => "ge",
-        }
-    }
+fn int(t: Int) -> String {
+    format!("{}{}", if t.signed { "i" } else { "u" }, t.bits())
 }
 
 fn rhs(arg: Rhs) -> String {
@@ -75,10 +51,6 @@ impl Named for Inst {
                 let n = details.natives[id].native;
                 format!("native.{}.{}", ty(n.input), n.action)
             }
-            Self::Lanes(id) => {
-                let e = details.expansions[id];
-                format!("lanes.{}.{}", ty(e.input), e.action)
-            }
             Self::Fallback(id) => {
                 let e = details.expansions[id];
                 format!("fallback.{}.{}", ty(e.input), e.action)
@@ -86,16 +58,31 @@ impl Named for Inst {
             Self::Literal(lane, n, _) => format!("literal.{} {n:#x}", lane_name(lane)),
             Self::Iota(lane, _) => format!("iota.{}", lane_name(lane)),
             Self::BitMove(from, to, ..) => format!("bitcast.{}.{}", ty(from), ty(to)),
-            Self::IntBinary(op, t, ..) => format!("alu.{}.{}", ty(t), binary_name(op)),
             Self::Imm(_, n) => format!("imm {n}"),
             Self::Copy(..) => "copy".into(),
-            Self::Alu(op, _, _, arg) => format!("alu.{}{}", op.name(), rhs(arg)),
-            Self::Shift { left, count, .. } => {
-                format!("{}{}", which(left, "shl", "sar"), rhs(count))
+            Self::Alu(op, t, _, _, arg) => format!("alu.{}.{}{}", int(t), op.name(), rhs(arg)),
+            Self::Shift {
+                op, int: t, count, ..
+            } => format!("{}.{}{}", op.name(), int(t), rhs(count)),
+            Self::IntUnary(op, t, ..) => format!("{}.{}", op.name(), int(t)),
+            Self::Saturating { sub, int: t, .. } => {
+                format!("{}.{}", which(sub, "subsat", "addsat"), int(t))
             }
-            Self::Compare(cc, _, _, arg) => format!("cmp.{}{}", cc.name(), rhs(arg)),
-            Self::SelectI32 { .. } => "select.i32".into(),
-            Self::BrCmp(cc, _, arg) => format!("brcmp.{}{}", cc.name(), rhs(arg)),
+            Self::Convert { from, to, .. } => {
+                format!("convert.{}.{}", lane_name(from), lane_name(to))
+            }
+            Self::Classify(op, lane, ..) => {
+                format!("classify.{} {}", lane_name(lane), unary_name(op))
+            }
+            Self::Extend(t, ..) => format!("extend.{}", int(t)),
+            Self::Compare(cc, bytes, _, _, arg) => {
+                format!("cmp.{}.{}{}", cc.name(), bytes * 8, rhs(arg))
+            }
+            Self::SelectVector { .. } => "select.vector".into(),
+            Self::Select { wide, .. } => which(wide, "select.64", "select.32").into(),
+            Self::BrCmp(cc, bytes, _, arg) => {
+                format!("brcmp.{}.{}{}", cc.name(), bytes * 8, rhs(arg))
+            }
             Self::CheckMask(mask) => format!("bounds.mask{}", mask_kind(mask)),
             Self::BranchAny(mask) => format!("branch.any{}", mask_kind(mask)),
             Self::AnyMask(_, mask) => format!("any.mask{}", mask_kind(mask)),
@@ -124,8 +111,10 @@ impl Named for Inst {
             Self::Trap(trap) => format!("trap {}", trap_name(trap)),
             Self::RustCall(function, ..) => format!("rust_call {}", function.name),
             Self::CallScratch(offset, bytes, _) => format!("call_scratch {offset} {bytes}"),
-            Self::Cdq { .. } => "cdq".into(),
-            Self::IDiv { remainder, .. } => which(remainder, "irem", "idiv").into(),
+            Self::DivideHigh { int: t, .. } => format!("divide.high.{}", int(t)),
+            Self::Divide {
+                remainder, int: t, ..
+            } => format!("{}.{}", which(remainder, "rem", "div"), int(t)),
             Self::DivImm {
                 remainder,
                 divisor,
@@ -143,7 +132,6 @@ impl Named for Inst {
                     which(remainder, "irem", "idiv")
                 )
             }
-            Self::Movsxd(..) => "movsxd".into(),
             Self::Lea(_, a) => format!("lea {}", address(a)),
             Self::Masked(id) => {
                 let access = details.masked[id];
@@ -166,13 +154,15 @@ impl Named for Inst {
                 let (name, high) = form.parts();
                 format!("shuffle.{name}.{}", which(high, "hi", "lo"))
             }
-            Self::DwordLane {
+            Self::DynamicLane {
+                lane,
                 checked,
                 replacement,
                 ..
             } => format!(
-                "{}.dword{}",
+                "{}.{}{}",
                 which(replacement.is_some(), "insert", "extract"),
+                lane_name(lane),
                 which(checked, ".checked", "")
             ),
             Self::VectorShiftImm(op, lane, _, _, count) => {

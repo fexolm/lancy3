@@ -14,7 +14,7 @@ fn main(out:ptr x:i32 divisor:i32) -> i32
 @opt nextln: = div
 @opt check: store
 @isel check: store.i32
-@isel check: idiv
+@isel check: div.i32
 @isel check: store.i32
 @run 7 0 -> !zero | aa aa aa aa bb bb bb bb | 07 00 00 00 bb bb bb bb
 @run -2147483648 -1 -> !overflow | aa aa aa aa bb bb bb bb | 00 00 00 80 bb bb bb bb

@@ -37,7 +37,7 @@ impl Native {
         if packed && supports_mask_op(action, lane.bytes(), cpu) {
             return Some(direct);
         }
-        if matches!(lane, Lane::F16 | Lane::BF16) {
+        if matches!(lane, Lane::F16 | Lane::BF16) && !matches!(action, Action::Splat) {
             let supported = lane == Lane::F16
                 && packed
                 && cpu.isa.fp16

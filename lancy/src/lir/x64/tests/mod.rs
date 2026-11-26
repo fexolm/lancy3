@@ -6,6 +6,8 @@ mod arithmetic;
 mod calls;
 pub(super) mod disassembly;
 #[cfg(target_arch = "x86_64")]
+mod encoding;
+#[cfg(target_arch = "x86_64")]
 mod isel;
 #[cfg(target_arch = "x86_64")]
 mod masked_memory;
