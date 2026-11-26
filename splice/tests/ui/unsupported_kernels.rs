@@ -1,23 +1,6 @@
 // MAC-01: a body Splice cannot lower is a compile error, not a Rust fallback.
 use splice::kernel;
 
-pub struct Plan {
-    pub min: i32,
-}
-
-// A loop with a value (labeled loops lower; MAC-12).
-#[kernel]
-fn loop_value(#[comptime] plan: &Plan, x: i32) -> i32 {
-    let mut n = 0;
-    let last = loop {
-        n += 1;
-        if n > 3 {
-            break n;
-        }
-    };
-    plan.min + x + last
-}
-
 #[kernel]
 fn wide(x: i64) -> i32 {
     x as i32

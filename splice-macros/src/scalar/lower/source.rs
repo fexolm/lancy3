@@ -131,21 +131,7 @@ impl Lower<'_> {
             Expr::Match(m) => {
                 let value = self.expr(&m.expr)?;
                 if value.stage.is_host() {
-                    let mut arms = Vec::new();
-                    for arm in &m.arms {
-                        let pat = &arm.pat;
-                        let attrs = &arm.attrs;
-                        let scope = self.with_pattern(pat);
-                        let guard = arm
-                            .guard
-                            .as_ref()
-                            .map(|(_, g)| scope.host_raw(g))
-                            .transpose()?;
-                        let guard = guard.map(|g| emit!(if #g));
-                        let body = scope.source_expr(&arm.body, hint)?;
-                        arms.push(emit!(#(#attrs)* #pat #guard => #body,));
-                    }
-                    return Ok(emit!(match #value { #(#arms)* }));
+                    return self.source_known_match(m, value, hint);
                 }
                 let test = self.source_expr(&m.expr, None)?;
                 let scope = self.nested_region();
@@ -353,6 +339,72 @@ impl Lower<'_> {
             }));
         }
         self.source_syntax(e)
+    }
+
+    /// A `match` on a known value. With runtime guards, the arms the
+    /// generator selects print as an `if` chain of those guards.
+    fn source_known_match(
+        &self,
+        m: &syn::ExprMatch,
+        value: Value,
+        hint: Option<Scalar>,
+    ) -> Result<TokenStream> {
+        let root = self.root;
+        let mut guards = Vec::new();
+        for arm in &m.arms {
+            let scope = self.with_pattern(&arm.pat);
+            let guard = match &arm.guard {
+                Some((_, g)) => Some(scope.expr(g)?),
+                None => None,
+            };
+            guards.push((scope, guard));
+        }
+        let runtime = guards
+            .iter()
+            .any(|(_, guard)| guard.as_ref().is_some_and(|g| !g.stage.is_host()));
+        if !runtime {
+            let mut arms = Vec::new();
+            for (arm, (scope, guard)) in m.arms.iter().zip(guards) {
+                let (attrs, pat) = (&arm.attrs, &arm.pat);
+                let guard = guard.map(|g| emit!(if #g));
+                let body = scope.source_expr(&arm.body, hint)?;
+                arms.push(emit!(#(#attrs)* #pat #guard => #body,));
+            }
+            return Ok(emit!(match #value { #(#arms)* }));
+        }
+        let selection = self.fresh_label("source_arms");
+        let mut chain = Vec::new();
+        for (arm, (scope, guard)) in m.arms.iter().zip(guards) {
+            let (attrs, pat) = (&arm.attrs, &arm.pat);
+            let scope = scope.nested_region();
+            let body = scope.isolated_expr(&arm.body, hint)?;
+            chain.push(match guard {
+                Some(g) if !g.stage.is_host() => {
+                    let guard =
+                        scope.isolated_expr(&arm.guard.as_ref().unwrap().1, Some(Scalar::Bool))?;
+                    emit!(#[allow(unreachable_patterns)] match __splice_subject {
+                        #(#attrs)* #pat => arms.push((::core::option::Option::Some(#guard), #body)),
+                        _ => {}
+                    })
+                }
+                guard => {
+                    let guard = guard.map(|g| emit!(if #g));
+                    emit!(#[allow(unreachable_patterns)] match __splice_subject {
+                        #(#attrs)* #pat #guard => {
+                            arms.push((::core::option::Option::None, #body));
+                            break #selection;
+                        }
+                        _ => {}
+                    })
+                }
+            });
+        }
+        Ok(emit!({
+            let __splice_subject = #value;
+            let mut arms = ::std::vec::Vec::new();
+            #selection: { #(#chain)* }
+            #root::frontend::source::guarded_arms(&arms)
+        }))
     }
 
     fn isolated_expr(&self, expr: &Expr, hint: Option<Scalar>) -> Result<TokenStream> {

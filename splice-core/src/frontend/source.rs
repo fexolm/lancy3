@@ -103,6 +103,27 @@ impl<T: std::fmt::Debug> Argument for super::scalar::Host<T> {
     }
 }
 
+/// The arms of a `match` on a known value that its runtime guards leave
+/// open, in order, as an `if` chain: each `(guard, body)` with a runtime
+/// guard, then the arm that is selected when they all fail (no guard).
+pub fn guarded_arms(arms: &[(Option<String>, String)]) -> String {
+    let mut text = String::new();
+    for (guard, body) in arms {
+        match guard {
+            Some(guard) => text.push_str(&format!("if {guard} {} else ", block(body))),
+            None => {
+                text.push_str(&if text.is_empty() {
+                    body.clone()
+                } else {
+                    block(body)
+                });
+                break;
+            }
+        }
+    }
+    text
+}
+
 pub fn literal<T: std::fmt::Debug>(value: T) -> String {
     let repr = format!("{value:?}");
     match repr.as_str() {

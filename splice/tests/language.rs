@@ -1504,3 +1504,101 @@ fn exhaustive_runtime_matches_need_no_wildcard() {
     }
     splice_testkit::each_backend!(B => check::<B>());
 }
+
+/// MAC-12: `break value` leaves a runtime `loop` with its value, also from
+/// a nested loop by label.
+#[kernel(print)]
+fn loop_values(xs: &[i32], target: i32) -> i32 {
+    let mut i = 0;
+    let found = loop {
+        if i == xs.len() {
+            break -1;
+        }
+        if xs[i] == target {
+            break i as i32;
+        }
+        i += 1;
+    };
+    let mut j = 0;
+    let first_negative = 'search: loop {
+        while j < xs.len() {
+            if xs[j] < 0 {
+                break 'search xs[j];
+            }
+            j += 1;
+        }
+        if j == xs.len() {
+            break 0;
+        }
+    };
+    let mut n = 0;
+    // A loop of the generator: its value is known.
+    let steps = loop {
+        n += 1;
+        if n > 3 {
+            break n;
+        }
+    };
+    found * 100 + first_negative + comptime!(steps) * 1000
+}
+
+#[test]
+fn break_values_leave_runtime_loops() {
+    fn check<B: Codegen<Output: Executable>>() {
+        let built = loop_values::build::<B>(loop_values::BuildArgs {}).unwrap();
+        let compiled = B::compile(&loop_values::ir().unwrap()).unwrap();
+        for code in [built, compiled] {
+            for xs in [&[][..], &[3, 5, 7], &[4, -2, 5, -9]] {
+                for target in [5, 6] {
+                    assert_eq!(
+                        code.call(loop_values::CallArgs { xs, target }),
+                        Ok(loop_values(xs, target))
+                    );
+                }
+            }
+        }
+    }
+    splice_testkit::each_backend!(B => check::<B>());
+    let printed = loop_values::print().unwrap();
+    assert!(printed.contains("break 'search"), "{printed}");
+}
+
+/// MAC-12: a guard with a runtime condition in a `match` on a known value
+/// tests the guard at run time and falls through to the next arm whose
+/// pattern matches.
+#[kernel(print)]
+fn known_match_guards(#[comptime] mode: i32, x: i32) -> i32 {
+    match mode {
+        0 if x > 10 => x - 10,
+        0 | 1 if x < 0 => -x,
+        2 => 7,
+        n if x == n => 1000,
+        n => n + x,
+    }
+}
+
+#[test]
+fn known_match_runtime_guards_fall_through() {
+    fn check<B: Codegen<Output: Executable>>() {
+        for mode in [0, 1, 2, 3] {
+            let built =
+                known_match_guards::build::<B>(known_match_guards::BuildArgs { mode }).unwrap();
+            let compiled = B::compile(&known_match_guards::ir(mode).unwrap()).unwrap();
+            for code in [built, compiled] {
+                for x in [-4, 0, 3, 12] {
+                    assert_eq!(
+                        code.call(known_match_guards::CallArgs { x }),
+                        Ok(known_match_guards(mode, x)),
+                        "mode {mode}, x {x}"
+                    );
+                }
+            }
+        }
+    }
+    splice_testkit::each_backend!(B => check::<B>());
+    let printed = known_match_guards::print(0).unwrap();
+    assert!(printed.contains("if x > 10"), "{printed}");
+    let printed = known_match_guards::print(3).unwrap();
+    assert!(printed.contains("if x == 3"), "{printed}");
+    assert!(!printed.contains("x > 10"), "{printed}");
+}

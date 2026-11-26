@@ -128,6 +128,10 @@ pub(super) struct LoopFrame {
     end: Ident,
     reaches_next: Ident,
     reaches_end: Ident,
+    /// The register of a `loop`'s value and its type, set by the first
+    /// `break value` that leaves it.
+    value: Ident,
+    value_type: std::rc::Rc<std::cell::Cell<Option<Scalar>>>,
 }
 
 #[derive(Clone)]
@@ -209,6 +213,8 @@ impl Lower<'_> {
             end: name("loop_end"),
             reaches_next: name("reaches_next"),
             reaches_end: name("reaches_end"),
+            value: name("loop_value"),
+            value_type: std::rc::Rc::default(),
         };
         self.loops.push(frame.clone());
         frame
@@ -758,8 +764,8 @@ impl Lower<'_> {
                 self.staged_loop(e, || self.loop_expr(x.label.as_ref(), None, &x.body))
             }
             Expr::ForLoop(x) => self.staged_loop(e, || self.for_expr(x)),
-            Expr::Continue(x) => self.loop_jump(e, x.label.as_ref(), true),
-            Expr::Break(x) if x.expr.is_none() => self.loop_jump(e, x.label.as_ref(), false),
+            Expr::Continue(x) => self.loop_jump(e, x.label.as_ref(), None),
+            Expr::Break(x) => self.loop_jump(e, x.label.as_ref(), Some(x.expr.as_deref())),
             Expr::Return(x) => {
                 let value = match &x.expr {
                     Some(arg) => self.expr_with_hint(arg, Some(self.result_type))?,
