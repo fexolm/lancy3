@@ -25,6 +25,25 @@ impl Masks {
                     Type::Vector(lane) => !lane.float() && simd::mask_lanes(cpu, lane),
                     _ => false,
                 });
+                let form = result
+                    .filter(|_| result_is_mask)
+                    .and_then(|v| mask_form(f.op(i), lane(v), lane, |v| literals[v.index()]));
+                if let Some(form) = form {
+                    let v = result.unwrap();
+                    match form {
+                        MaskForm::Copy(a) | MaskForm::Not(a) => groups.join(v, a),
+                        MaskForm::Logic(_, a, b) => {
+                            groups.join(v, a);
+                            groups.join(v, b);
+                        }
+                        MaskForm::Compare(_, _, a, b) => {
+                            groups.reject(a);
+                            groups.reject(b);
+                        }
+                        MaskForm::Constant(_) => {}
+                    }
+                    continue;
+                }
                 match *f.op(i) {
                     Op::Const(n) => {
                         literals[result.unwrap().index()] = Some(u128::from(n as u32));
@@ -33,33 +52,6 @@ impl Masks {
                     Op::Literal(_, bits) => {
                         literals[result.unwrap().index()] = Some(bits);
                         groups.reject(result.unwrap());
-                    }
-                    Op::Simd(Simd::Splat(v))
-                        if result_is_mask
-                            && literals[v.index()]
-                                .and_then(|bits| constant_predicate(lane(v), bits))
-                                .is_some() => {}
-                    Op::Copy(v)
-                        if result_is_mask
-                            && !lane(v).float()
-                            && lane(v).bytes() == lane(result.unwrap()).bytes() =>
-                    {
-                        groups.join(result.unwrap(), v);
-                    }
-                    Op::Bin(Binary::And | Binary::Or | Binary::Xor, a, b) if result_is_mask => {
-                        groups.join(result.unwrap(), a);
-                        groups.join(result.unwrap(), b);
-                    }
-                    Op::Unary(Unary::Not, v) if result_is_mask => {
-                        groups.join(result.unwrap(), v);
-                    }
-                    Op::Bin(op, a, b)
-                        if result_is_mask
-                            && !matches!(lane(a), Lane::F16 | Lane::BF16)
-                            && simd::comparison_predicate(lane(a), op).is_some() =>
-                    {
-                        groups.reject(a);
-                        groups.reject(b);
                     }
                     Op::Simd(Simd::AnyTrue(_) | Simd::AllTrue(_)) => {}
                     // A predicate producer, like a comparison; its count is a scalar.
@@ -145,6 +137,42 @@ impl Masks {
         };
         VReg::new(v.index(), class)
     }
+}
+
+/// How a predicate result is computed in a k-register. The analysis keeps a
+/// value in k-registers exactly when the selection rules have a form for it.
+#[derive(Clone, Copy)]
+pub(super) enum MaskForm {
+    /// Same predicate in another value of equal lane size.
+    Copy(Value),
+    Not(Value),
+    Logic(Binary, Value, Value),
+    /// A comparison with its `vpcmp` predicate.
+    Compare(Lane, i32, Value, Value),
+    /// A splat of all-zero or all-one lanes.
+    Constant(bool),
+}
+
+/// The k-register form of `op` producing a predicate with `result` lanes,
+/// given each value's lane and the bits of its constant definition.
+pub(super) fn mask_form(
+    op: &Op,
+    result: Lane,
+    lane: impl Fn(Value) -> Lane,
+    constant: impl Fn(Value) -> Option<u128>,
+) -> Option<MaskForm> {
+    Some(match *op {
+        Op::Copy(v) if !lane(v).float() && lane(v).bytes() == result.bytes() => MaskForm::Copy(v),
+        Op::Unary(Unary::Not, v) => MaskForm::Not(v),
+        Op::Bin(kind @ (Binary::And | Binary::Or | Binary::Xor), a, b) => {
+            MaskForm::Logic(kind, a, b)
+        }
+        Op::Bin(kind, a, b) if !matches!(lane(a), Lane::F16 | Lane::BF16) => {
+            MaskForm::Compare(lane(a), simd::comparison_predicate(lane(a), kind)?, a, b)
+        }
+        Op::Simd(Simd::Splat(v)) => MaskForm::Constant(constant_predicate(lane(v), constant(v)?)?),
+        _ => return None,
+    })
 }
 
 pub(super) fn constant_predicate(lane: Lane, bits: u128) -> Option<bool> {

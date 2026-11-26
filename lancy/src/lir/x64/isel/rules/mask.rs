@@ -1,8 +1,8 @@
-use super::super::masks::constant_predicate;
+use super::super::masks::{MaskForm, mask_form};
 use super::Rules;
 use crate::{
     CompileError,
-    hir::{Binary, Lane, Op, Simd, Ternary, Type, Unary, Value},
+    hir::{Binary, Lane, Op, Simd, Ternary, Type, Value},
     lir::x64::inst::{Inst, VectorMask, simd::comparison_predicate},
 };
 use regalloc2::{RegClass, VReg};
@@ -15,45 +15,47 @@ impl Rules<'_> {
     }
 
     pub(super) fn masked_numeric(&mut self, op: Op) -> Option<Inst> {
-        if self.result.is_some_and(|v| self.masks.contains(v)) {
-            match op {
-                Op::Bin(kind @ (Binary::And | Binary::Or | Binary::Xor), x, y) => {
+        if let Some(result) = self.result.filter(|&v| self.masks.contains(v)) {
+            let lane = |v| self.ty(v).lane().unwrap();
+            let constant = |v| match self.ctx.defining_op(v)? {
+                Op::Const(n) => Some(u128::from(n as u32)),
+                Op::Literal(_, bits) => Some(bits),
+                _ => None,
+            };
+            match mask_form(&op, lane(result), lane, constant) {
+                Some(MaskForm::Logic(kind, x, y)) => {
                     return Some(Inst::MaskLogic(
-                        self.ty(x).lane()?,
+                        lane(x),
                         kind,
                         self.dst(),
                         self.input(x),
                         self.input(y),
                     ));
                 }
-                Op::Bin(kind, x, y) => {
-                    let lane = self.ty(x).lane()?;
+                Some(MaskForm::Compare(lane, predicate, x, y)) => {
                     return Some(Inst::MaskCompare(
                         lane,
-                        comparison_predicate(lane, kind)?,
+                        predicate,
                         self.dst(),
                         self.input(x),
                         self.input(y),
                     ));
                 }
-                Op::Unary(Unary::Not, x) => {
-                    return Some(Inst::MaskNot(self.ty(x).lane()?, self.dst(), self.input(x)));
+                Some(MaskForm::Not(x)) => {
+                    return Some(Inst::MaskNot(lane(x), self.dst(), self.input(x)));
                 }
-                Op::Simd(Simd::Splat(x)) => {
-                    let lane = self.ty(x).lane()?;
-                    let bits = match self.ctx.defining_op(x)? {
-                        Op::Const(n) => u128::from(n as u32),
-                        Op::Literal(_, bits) => bits,
-                        _ => return None,
+                Some(MaskForm::Constant(all)) => {
+                    let Op::Simd(Simd::Splat(x)) = op else {
+                        unreachable!("a constant predicate is a splat")
                     };
-                    let bits = if constant_predicate(lane, bits)? {
-                        u64::MAX >> (64 - self.cpu.bytes / lane.bytes())
+                    let bits = if all {
+                        u64::MAX >> (64 - self.cpu.bytes / lane(x).bytes())
                     } else {
                         0
                     };
                     return Some(Inst::MaskImmediate(self.dst(), bits));
                 }
-                _ => {}
+                Some(MaskForm::Copy(_)) | None => {}
             }
         }
         match op {
