@@ -231,6 +231,47 @@ mod tests {
         }
     }
 
+    /// MAC-10: the expansion of a small kernel pair stays within a token
+    /// budget, so growth of the generated code is a reviewed change. The
+    /// probe is the review's `size.rs`: a helper and a loop calling it.
+    #[test]
+    fn expansion_size_stays_within_its_budget() {
+        fn tokens(stream: TokenStream) -> usize {
+            stream
+                .into_iter()
+                .map(|tree| match tree {
+                    proc_macro2::TokenTree::Group(group) => 1 + tokens(group.stream()),
+                    _ => 1,
+                })
+                .sum()
+        }
+        let probe = [
+            quote!(
+                fn helper(x: i32) -> i32 {
+                    x * 2 + 1
+                }
+            ),
+            quote!(
+                fn body(#[comptime] k: i32, xs: &[i32]) -> i32 {
+                    let mut s = 0;
+                    for &x in xs {
+                        s += helper(x) + k * 3;
+                    }
+                    s
+                }
+            ),
+        ];
+        let total: usize = probe
+            .into_iter()
+            .map(|item| {
+                tokens(expand(syn::parse_quote!(::splice), Lowering::Ir, false, item).unwrap())
+            })
+            .sum();
+        // 7 213 tokens at the commit that introduced the budget.
+        const BUDGET: usize = 7_400;
+        assert!(total <= BUDGET, "{total} tokens, budget {BUDGET}");
+    }
+
     #[test]
     fn methods_must_be_published_by_their_block() {
         for item in [
