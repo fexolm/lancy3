@@ -1631,3 +1631,38 @@ fn labeled_loops_lower_to_ir() {
     assert!(printed.contains("'outer: while"), "{printed}");
     assert!(printed.contains("break 'outer"), "{printed}");
 }
+
+/// MAC-12: a runtime `match` that rustc accepts as exhaustive needs no
+/// final `_` arm.
+#[kernel]
+fn exhaustive_matches(flag: bool, x: i32) -> i32 {
+    let base = match flag {
+        true => 10,
+        false => 20,
+    };
+    let sign = match x {
+        i32::MIN..=-1 => -1,
+        0 => 0,
+        1..=i32::MAX => 1,
+    };
+    base + sign
+}
+
+#[test]
+fn exhaustive_runtime_matches_need_no_wildcard() {
+    fn check<B: Codegen<Output: Executable>>() {
+        let built = exhaustive_matches::build::<B>(exhaustive_matches::BuildArgs {}).unwrap();
+        let compiled = B::compile(&exhaustive_matches::ir().unwrap()).unwrap();
+        for code in [built, compiled] {
+            for flag in [false, true] {
+                for x in [i32::MIN, -3, 0, 5, i32::MAX] {
+                    assert_eq!(
+                        code.call(exhaustive_matches::CallArgs { flag, x }),
+                        Ok(exhaustive_matches(flag, x))
+                    );
+                }
+            }
+        }
+    }
+    splice_testkit::each_backend!(B => check::<B>());
+}

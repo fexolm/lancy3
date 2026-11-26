@@ -424,13 +424,14 @@ impl Lower<'_> {
         let Stage::Reg(t) = test.stage else {
             return err(&m.expr, "expected a value in match");
         };
-        if !m
+        // rustc has checked that the arms are exhaustive (`true`/`false`,
+        // ranges covering the type): without a final `_`, falling past
+        // the last arm cannot happen.
+        let exhausted = (!m
             .arms
             .last()
-            .is_some_and(|a| matches!(a.pat, Pat::Wild(_)) && a.guard.is_none())
-        {
-            return err(m, "a runtime match requires a final unguarded _ arm");
-        }
+            .is_some_and(|a| matches!(a.pat, Pat::Wild(_)) && a.guard.is_none()))
+        .then(|| emit!(__splice_builder.trap_bounds()?;));
         let mut body = TokenStream::new();
         for (arm, guard, point, _, value) in arms {
             if !arm.attrs.is_empty() {
@@ -458,6 +459,7 @@ impl Lower<'_> {
                 #init
                 let __splice_join = __splice_builder.label()?;
                 #body
+                #exhausted
                 __splice_builder.mark(__splice_join)?;
                 #result
             }),
