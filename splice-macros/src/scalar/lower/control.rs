@@ -627,7 +627,7 @@ impl Lower<'_> {
                 };
                 let mut pred = None;
                 if let Some(start) = &r.start {
-                    let v = self.host_raw(start)?;
+                    let v = self.host_code(start)?;
                     pred = Some(self.bin(
                         "Ge",
                         emit!(__splice_subject),
@@ -635,7 +635,7 @@ impl Lower<'_> {
                     ));
                 }
                 if let Some(stop) = &r.end {
-                    let v = self.host_raw(stop)?;
+                    let v = self.host_code(stop)?;
                     let upper = self.bin(
                         cmp,
                         emit!(__splice_subject),

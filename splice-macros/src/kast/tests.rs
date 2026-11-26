@@ -172,3 +172,31 @@ fn vec_elements_are_parsed_once_and_resolved() {
         Origin::Let(body.ids.locals[&address(local(&block, 0))])
     );
 }
+
+/// A call's result is deferred to build time: a branch on it writes a
+/// register, a mutable local it initializes is a register, and an
+/// immutable one is deferred, not known.
+#[test]
+fn call_results_are_not_known_to_the_generator() {
+    let block = parse_quote!({
+        let mut s = 0;
+        if f(1) > 0 {
+            s = 1;
+        }
+        let mut y = f(2);
+        let z = f(3);
+        z + s + y
+    });
+    let body = Body::new(&block, &[]).unwrap();
+    assert!(body.runtime_local(local(&block, 0)));
+    assert!(body.runtime_local(local(&block, 2)));
+    assert!(!body.runtime_local(local(&block, 3)));
+    let Some(init) = &local(&block, 3).init else {
+        unreachable!()
+    };
+    assert!(!body.known(&init.expr));
+    let Stmt::Expr(Expr::If(branch), _) = &block.stmts[1] else {
+        unreachable!()
+    };
+    assert!(!body.known(&branch.cond));
+}

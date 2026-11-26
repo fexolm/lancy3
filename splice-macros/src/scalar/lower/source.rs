@@ -1,4 +1,9 @@
-use super::{Binding, LoopKind, Lower, Scalar, Stage, Value, err};
+//! The printer: the generator code of `print`, which renders the
+//! specialized kernel as Rust. It walks the body once: a value the
+//! generator knows ([`crate::kast::Body::known`]) is computed as the IR
+//! lowering computes it ([`Lower::known_value`]) and printed as a literal;
+//! every other node is printed as written, with its operands rendered.
+use super::{Binding, LoopKind, Lower, Scalar, Stage, err};
 use proc_macro2::{Ident, TokenStream};
 use quote::{ToTokens, format_ident};
 use syn::visit::{self, Visit};
@@ -15,50 +20,46 @@ impl Lower<'_> {
         for (i, stmt) in block.stmts.iter().enumerate() {
             let rendered = match stmt {
                 Stmt::Local(local) => {
-                    let init = local.init.as_ref().expect("validated local");
+                    let Some(init) = &local.init else {
+                        return err(local, "initialize kernel locals at their declaration");
+                    };
+                    let pat = &local.pat;
                     if let Some(literal) = super::aggregate::Literal::of(&scope, local, &init.expr)
                     {
                         let value = scope.source_syntax(&init.expr)?;
-                        let pat = &local.pat;
-                        let binding = scope.aggregate_local(pat, &literal)?;
-                        statements.push(binding);
-                        let line =
-                            emit!(::std::format!("let {} = {};", ::core::stringify!(#pat), #value));
-                        statements.push(
-                            emit!({ __splice_text.push_str(&#line); __splice_text.push('\n'); }),
-                        );
-                        continue;
+                        statements.push(scope.source_aggregate(pat, &literal)?);
+                        emit!(::std::format!("let {} = {};", ::core::stringify!(#pat), #value))
+                    } else {
+                        let hint = match pat {
+                            syn::Pat::Type(p) => Scalar::from_type(&p.ty, scope.types),
+                            _ => None,
+                        };
+                        if scope.body.known(&init.expr) && !scope.body.runtime_local(local) {
+                            // The generator holds the value; its uses print it.
+                            let value = scope.known_operand(&init.expr, hint)?;
+                            scope.bind(pat, Binding::Host(scope.region_depth));
+                            statements.push(emit!(let #pat = #value;));
+                            continue;
+                        }
+                        let value = scope.source_expr(&init.expr, hint)?;
+                        // A value only the listing shows.
+                        scope.bind(pat, Binding::Reg(Scalar::Inferred, false));
+                        emit!(::std::format!("let {} = {};", ::core::stringify!(#pat), #value))
                     }
-                    let hint = match &local.pat {
-                        syn::Pat::Type(p) => Scalar::from_type(&p.ty, scope.types),
-                        _ => None,
-                    };
-                    let val = scope.expr_with_hint(&init.expr, hint)?;
-                    if val.stage.is_host() && !scope.body.runtime_local(local) {
-                        let binding = scope.local(local)?;
-                        statements.push(binding);
-                        continue;
-                    }
-                    let value = scope.source_expr(&init.expr, hint)?;
-                    let pat = &local.pat;
-                    scope.local(local)?;
-                    emit!(::std::format!("let {} = {};", ::core::stringify!(#pat), #value))
                 }
                 Stmt::Expr(expr, semi) => {
                     let last = i + 1 == block.stmts.len() && semi.is_none();
                     if !last
                         && matches!(
                             expr,
-                            Expr::MethodCall(_) | Expr::Call(_) | Expr::Assign(_) | Expr::Binary(_)
+                            Expr::MethodCall(_) | Expr::Assign(_) | Expr::Binary(_)
                         )
-                        && scope.host_only(expr)
+                        && scope.body.known(expr)
                     {
-                        let value = scope.expr(expr)?;
-                        if matches!(value.stage, Stage::Host | Stage::Unit) {
-                            // Use the same checked host operation as the executable factory.
-                            statements.push(emit!(#value;));
-                            continue;
-                        }
+                        // The same checked host operation as the IR lowering.
+                        let value = scope.known_operand(expr, None)?;
+                        statements.push(emit!(#value;));
+                        continue;
                     }
                     let rendered = scope.source_expr(expr, last.then_some(result_type))?;
                     if last {
@@ -99,13 +100,13 @@ impl Lower<'_> {
         match e {
             Expr::Block(b) => return Ok(braces(self.source_body(&b.block)?)),
             Expr::If(i) => {
-                let (cond, scope) = self.condition(&i.cond)?;
+                let (known, scope) = self.source_condition(&i.cond)?;
                 let yes = braces(scope.source_body(&i.then_branch)?);
                 let no = i
                     .else_branch
                     .as_ref()
                     .map(|(_, e)| {
-                        if cond.stage.is_host() {
+                        if known.is_some() {
                             self.source_expr(e, hint)
                         } else {
                             let no = scope.isolated_expr(e, hint)?;
@@ -117,7 +118,7 @@ impl Lower<'_> {
                         }
                     })
                     .transpose()?;
-                if cond.stage.is_host() {
+                if let Some(cond) = known {
                     let no = no.unwrap_or_else(|| emit!(::std::borrow::ToOwned::to_owned("{}")));
                     return Ok(emit!(if #cond { #yes } else { #no }));
                 }
@@ -129,9 +130,9 @@ impl Lower<'_> {
                 });
             }
             Expr::Match(m) => {
-                let value = self.expr(&m.expr)?;
-                if value.stage.is_host() {
-                    return self.source_known_match(m, value, hint);
+                if self.body.known(&m.expr) {
+                    let value = self.known_operand(&m.expr, None)?;
+                    return self.source_known_match(m, value.code, hint);
                 }
                 let test = self.source_expr(&m.expr, None)?;
                 let scope = self.nested_region();
@@ -155,7 +156,9 @@ impl Lower<'_> {
             }
             Expr::ForLoop(f) => {
                 let pat = &f.pat;
-                if !matches!(&*f.expr, Expr::Range(_)) && self.iterated_buffer(&f.expr).is_none() {
+                // A known iterator other than a range is unrolled; a
+                // runtime one is a slice.
+                if !matches!(&*f.expr, Expr::Range(_)) && self.body.known(&f.expr) {
                     let iter = self.plan_iterable(&f.expr)?;
                     let mut scope = self.with_pattern(pat);
                     scope.enter_loop(f.label.as_ref(), LoopKind::Unrolled);
@@ -211,7 +214,7 @@ impl Lower<'_> {
                         .as_ref()
                         .and_then(|args| super::simd::element_argument(args, self.types))
                 {
-                    let slot = self.host(self.expr(&index.index)?, &index.index)?;
+                    let slot = self.source_known(&index.index)?;
                     let element = elem.tokens(root, self.types);
                     let ty = elem.ty(root, self.types);
                     return Ok(emit!({
@@ -231,20 +234,15 @@ impl Lower<'_> {
                 if super::simd::constructor_arity(&p.path).is_some() {
                     return self.source_syntax(e);
                 }
-                let args = call
-                    .args
-                    .iter()
-                    .map(|arg| self.expr(arg))
-                    .collect::<Result<Vec<_>>>()?;
-                if !args.iter().all(|v| v.stage.is_host()) {
+                if !call.args.iter().all(|arg| self.body.known(arg)) {
                     let mut path = p.path.clone();
                     let fish = std::mem::take(&mut path.segments.last_mut().unwrap().arguments);
                     let args = call
                         .args
                         .iter()
-                        .zip(args)
-                        .map(|(arg, value)| {
-                            if value.stage.is_host() {
+                        .map(|arg| {
+                            if self.body.known(arg) {
+                                let value = self.known_operand(arg, None)?;
                                 Ok(emit!(#root::frontend::scalar::Host(#value)))
                             } else {
                                 self.source_expr(arg, None)
@@ -300,8 +298,8 @@ impl Lower<'_> {
                 );
             }
             Expr::Binary(binary) if matches!(binary.op, syn::BinOp::And(_) | syn::BinOp::Or(_)) => {
-                let lhs = self.expr(&binary.left)?;
-                if lhs.stage.is_host() {
+                if self.body.known(&binary.left) {
+                    let lhs = self.known_operand(&binary.left, Some(Scalar::Bool))?;
                     let rhs = self.source_expr(&binary.right, Some(Scalar::Bool))?;
                     return Ok(if matches!(binary.op, syn::BinOp::And(_)) {
                         emit!(if #lhs { #rhs } else { ::std::borrow::ToOwned::to_owned("false") })
@@ -323,18 +321,45 @@ impl Lower<'_> {
             }
             _ => {}
         }
-        if let Ok(Value {
-            stage: Stage::Host,
-            code,
-        }) = self.expr_with_hint(e, hint)
+        // A literal prints as written.
+        if self.body.known(e)
+            && let Some(value) = self.known_value(e, hint)?
+            && value.stage == Stage::Host
         {
             return Ok(emit!({
                 use #support::TryLiteral as _;
-                let value = &(#code);
+                let value = &(#value);
                 (&#support::Literal(value)).try_literal()?
             }));
         }
         self.source_syntax(e)
+    }
+
+    /// The condition of an `if`: its Rust code if the generator knows it,
+    /// and the scope of the branch it guards.
+    fn source_condition(&self, cond: &Expr) -> Result<(Option<TokenStream>, Self)> {
+        if let Expr::Let(binding) = cond {
+            let value = self.source_known(&binding.expr)?;
+            let pattern = &binding.pat;
+            return Ok((
+                Some(emit!(let #pattern = #value)),
+                self.with_pattern(pattern),
+            ));
+        }
+        Ok(if self.body.known(cond) {
+            let value = self.known_operand(cond, Some(Scalar::Bool))?;
+            (Some(value.code), self.clone())
+        } else {
+            (None, self.nested_region())
+        })
+    }
+
+    /// The value of `e`, which the generator must know.
+    fn source_known(&self, e: &Expr) -> Result<TokenStream> {
+        if !self.body.known(e) {
+            return err(e, "expected a comptime value; found a runtime expression");
+        }
+        Ok(self.known_operand(e, None)?.code)
     }
 
     /// A `match` on a known value. With runtime guards, the arms the
@@ -342,27 +367,29 @@ impl Lower<'_> {
     fn source_known_match(
         &self,
         m: &syn::ExprMatch,
-        value: Value,
+        value: TokenStream,
         hint: Option<Scalar>,
     ) -> Result<TokenStream> {
         let root = self.root;
         let mut guards = Vec::new();
         for arm in &m.arms {
             let scope = self.with_pattern(&arm.pat);
+            // A known guard is its code; a runtime one is printed.
             let guard = match &arm.guard {
-                Some((_, g)) => Some(scope.expr(g)?),
+                Some((_, g)) if self.body.known(g) => {
+                    Some(Some(scope.known_operand(g, Some(Scalar::Bool))?.code))
+                }
+                Some(_) => Some(None),
                 None => None,
             };
             guards.push((scope, guard));
         }
-        let runtime = guards
-            .iter()
-            .any(|(_, guard)| guard.as_ref().is_some_and(|g| !g.stage.is_host()));
+        let runtime = guards.iter().any(|(_, guard)| matches!(guard, Some(None)));
         if !runtime {
             let mut arms = Vec::new();
             for (arm, (scope, guard)) in m.arms.iter().zip(guards) {
                 let (attrs, pat) = (&arm.attrs, &arm.pat);
-                let guard = guard.map(|g| emit!(if #g));
+                let guard = guard.flatten().map(|g| emit!(if #g));
                 let body = scope.source_expr(&arm.body, hint)?;
                 arms.push(emit!(#(#attrs)* #pat #guard => #body,));
             }
@@ -375,7 +402,7 @@ impl Lower<'_> {
             let scope = scope.nested_region();
             let body = scope.isolated_expr(&arm.body, hint)?;
             chain.push(match guard {
-                Some(g) if !g.stage.is_host() => {
+                Some(None) => {
                     let guard =
                         scope.isolated_expr(&arm.guard.as_ref().unwrap().1, Some(Scalar::Bool))?;
                     emit!(#[allow(unreachable_patterns)] match __splice_subject {
@@ -384,7 +411,7 @@ impl Lower<'_> {
                     })
                 }
                 guard => {
-                    let guard = guard.map(|g| emit!(if #g));
+                    let guard = guard.flatten().map(|g| emit!(if #g));
                     emit!(#[allow(unreachable_patterns)] match __splice_subject {
                         #(#attrs)* #pat #guard => {
                             arms.push((::core::option::Option::None, #body));

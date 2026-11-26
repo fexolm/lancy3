@@ -184,6 +184,7 @@ impl Lower<'_> {
                         Scalar::Index | Scalar::Length => emit!(usize),
                         _ => emit!(i32),
                     };
+                    // The printer has no registers: a runtime value is unknown.
                     if self.source_fault.is_some() {
                         emit!(::core::result::Result::Err::<#ty,#support::BuildError>(#support::BuildError::staging("runtime argument read in comptime!"))?)
                     } else {
@@ -206,13 +207,9 @@ impl Lower<'_> {
                     } else {
                         emit!(i32)
                     };
-                    if self.source_fault.is_some() {
-                        emit!(::core::result::Result::Err::<#ty,#support::BuildError>(#support::BuildError::staging("runtime value in comptime!"))?)
-                    } else {
-                        emit!(<#ty as #support::frontend::scalar::ImportWord>::from_constant(
-                            #support::frontend::scalar::RunArg::known(&#path).ok_or_else(|| #support::BuildError::staging("runtime value in comptime!"))?
-                        ))
-                    }
+                    emit!(<#ty as #support::frontend::scalar::ImportWord>::from_constant(
+                        #support::frontend::scalar::RunArg::known(&#path).ok_or_else(|| #support::BuildError::staging("runtime value in comptime!"))?
+                    ))
                 }
                 Some(
                     Binding::Columns
@@ -341,6 +338,7 @@ impl Lower<'_> {
                 let (word, _, constructor) = self
                     .aggregate_field(field)
                     .ok_or_else(|| syn::Error::new_spanned(field, "missing aggregate field"))?;
+                // The printer keeps the known constants of an aggregate.
                 let known = if self.source_fault.is_some() {
                     word
                 } else {

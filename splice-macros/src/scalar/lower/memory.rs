@@ -84,41 +84,6 @@ impl Lower<'_> {
                 )
             });
         }
-        if receiver.stage.is_host() {
-            let args = m
-                .args
-                .iter()
-                .map(|arg| self.expr(arg))
-                .collect::<Result<Vec<_>>>()?;
-            if args.iter().all(|arg| arg.stage.is_host()) {
-                let root = self.root;
-                let name = &m.method;
-                let raw_name = name.to_string();
-                if matches!(raw_name.as_str(), "len" | "is_empty") && args.is_empty() {
-                    let empty = (name == "is_empty").then(|| emit!(== 0));
-                    return Ok(Value::new(
-                        Stage::Host,
-                        emit!({
-                            use #root::frontend::evaluation::{ReadLength as _, Operand};
-                            let receiver = &(#receiver);
-                            (&Operand::of(receiver)).length(receiver)? #empty
-                        }),
-                    ));
-                }
-                if primitive_method(&raw_name) {
-                    return Ok(Value::new(Stage::Host, {
-                        let (value, arg) =
-                            (self.primitive(emit!(&value)), self.primitive(emit!(&arg)));
-                        emit!({
-                            let value = #receiver;
-                            #value
-                            value.#name(#({let arg = #args; #arg arg}),*)
-                        })
-                    }));
-                }
-                return Ok(Value::new(Stage::Host, self.required(e, hint)?));
-            }
-        }
         let kind = match receiver.stage {
             Stage::Reg(t) | Stage::Word(t) if t.is_number() || t == Scalar::Inferred => t.base(),
             // A host receiver with runtime arguments, such as `k.min(x)`,
@@ -173,18 +138,7 @@ impl Lower<'_> {
                 return self.call(call, Some(Scalar::I32), Some(&cast.ty));
             }
         }
-        let value = self.expr(&cast.expr).or_else(|error| {
-            if super::simd::uses_lane(&cast.expr) {
-                return Err(error);
-            }
-            self.host_raw(&cast.expr)
-                .map(|code| Value::new(Stage::Host, code))
-                .map_err(|_| error)
-        })?;
-        if value.stage.is_host() {
-            let ty = &cast.ty;
-            return Ok(Value::new(Stage::Host, emit!((#value) as #ty)));
-        }
+        let value = self.expr(&cast.expr)?;
         let Some(kind) = Scalar::from_type(&cast.ty, self.types).filter(|t| t.is_number()) else {
             return err(&cast.ty, "a runtime cast converts to a number type");
         };
@@ -246,26 +200,15 @@ impl Lower<'_> {
     }
 
     pub(super) fn index(&self, index: &ExprIndex) -> Result<Value> {
-        let receiver = self.expr(&index.expr)?;
-        if receiver.stage.is_host() {
-            let offset = self.expr(&index.index)?;
-            if !offset.stage.is_host() {
-                let root = self.root;
-                return Ok(Value::new(
-                    Stage::Reg(Scalar::I32),
-                    emit!(
-                        ::core::result::Result::Err::<#root::hir::Reg, #root::BuildError>(#root::BuildError::staging("runtime index requires a runtime slice"))?
-                    ),
-                ));
-            }
-            let read = self.known_index(receiver.code, offset.code);
-            let fail = self.bounds_failure();
+        // A known element is a known value; a known slice with an index
+        // the generator does not know has no runtime element.
+        if self.expr(&index.expr)?.stage.is_host() {
+            let root = self.root;
             return Ok(Value::new(
-                Stage::Host,
-                emit!({
-                    let ::core::option::Option::Some(value) = (#read) else { #fail };
-                    value
-                }),
+                Stage::Reg(Scalar::I32),
+                emit!(
+                    ::core::result::Result::Err::<#root::hir::Reg, #root::BuildError>(#root::BuildError::staging("runtime index requires a runtime slice"))?
+                ),
             ));
         }
         let (_, slice, offset, element) = self.index_operands(index)?;

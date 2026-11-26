@@ -15,7 +15,7 @@ pub(super) type Resolved = (Ids, Vec<Decl>, HashMap<NodeId, Box<Expr>>);
 pub(super) fn resolve(block: &Block, params: &[(Ident, Param)]) -> Result<Resolved> {
     let mut walk = Resolve::default();
     for (name, param) in params {
-        walk.declare(name, Origin::Param(*param));
+        walk.declare(name, Origin::Param(*param), false);
     }
     walk.visit_block(block);
     match walk.error {
@@ -40,11 +40,12 @@ struct Resolve {
 }
 
 impl Resolve {
-    fn declare(&mut self, name: &Ident, origin: Origin) -> DeclId {
+    fn declare(&mut self, name: &Ident, origin: Origin, mutable: bool) -> DeclId {
         let id = DeclId(self.decls.len() as u32);
         self.decls.push(Decl {
             name: name.clone(),
             origin,
+            mutable,
         });
         if let Origin::Let(local) = origin {
             self.ids.let_decls.entry(local).or_default().push(id);
@@ -102,7 +103,7 @@ impl<'ast> Visit<'ast> for Resolve {
 
     fn visit_pat_ident(&mut self, pat: &'ast syn::PatIdent) {
         let origin = self.binding.map_or(Origin::Pattern, Origin::Let);
-        let decl = self.declare(&pat.ident, origin);
+        let decl = self.declare(&pat.ident, origin, pat.mutability.is_some());
         self.ids.bindings.insert(address(pat), decl);
         if let Some((_, sub)) = &pat.subpat {
             self.visit_pat(sub);

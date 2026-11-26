@@ -105,15 +105,6 @@ impl Lower<'_> {
     }
 
     pub(super) fn aggregate_local(&mut self, pat: &Pat, literal: &Literal) -> Result<TokenStream> {
-        let pattern = match pat {
-            Pat::Type(p) => &*p.pat,
-            p => p,
-        };
-        let name = super::super::named(pattern)?;
-        let id = &name.ident;
-        if literal.has_rest() {
-            return err(literal.at, "struct update requires an owned Rust value");
-        }
         let root = self.root;
         let mut fields = Vec::with_capacity(literal.fields.len());
         let mut words = Vec::with_capacity(literal.fields.len());
@@ -126,23 +117,63 @@ impl Lower<'_> {
             };
             fields.push((member.clone(), kind));
             // A formal register can carry a known scalar from an enclosing call.
-            let word = if self.source_fault.is_some() {
-                if value.stage.is_host() {
-                    emit!(::core::option::Option::Some(#root::frontend::scalar::ScalarConstant::constant(#value)))
-                } else {
-                    emit!(::core::option::Option::None)
-                }
-            } else if matches!(value.stage, Stage::Reg(_)) {
+            words.push(if matches!(value.stage, Stage::Reg(_)) {
                 emit!({
                     let reg = #value;
                     #root::frontend::scalar::Word::input(reg, __splice_inputs)
                 })
             } else {
                 self.word(value, expr)?
-            };
-            words.push(word);
+            });
         }
-        let constructor = literal.constructor(root, pat);
+        let (id, constructor) = self.bind_aggregate(pat, literal, fields)?;
+        Ok(emit!(
+            let #id = #root::frontend::scalar::aggregate(
+                [#(#words),*], #constructor, __splice_builder
+            )?;
+        ))
+    }
+
+    /// The aggregate local of the printer: the constants of its fields, all
+    /// of them if the generator knows every field and none otherwise.
+    pub(super) fn source_aggregate(&mut self, pat: &Pat, literal: &Literal) -> Result<TokenStream> {
+        let root = self.root;
+        let mut fields = Vec::with_capacity(literal.fields.len());
+        let mut words = Vec::with_capacity(literal.fields.len());
+        for (member, expr) in &literal.fields {
+            fields.push((member.clone(), Scalar::Inferred));
+            words.push(if self.body.known(expr) {
+                let value = self.known_operand(expr, None)?;
+                emit!(::core::option::Option::Some(#root::frontend::scalar::ScalarConstant::constant(#value)))
+            } else {
+                emit!(::core::option::Option::None)
+            });
+        }
+        let (id, _) = self.bind_aggregate(pat, literal, fields)?;
+        let count = words.len();
+        Ok(emit!(
+            let mut #id: [::core::option::Option<#root::hir::Constant>; #count] = [#(#words),*];
+            if #id.iter().any(::core::option::Option::is_none) { #id.fill(::core::option::Option::None); }
+        ))
+    }
+
+    /// Bind the aggregate local `pat` to the layout of `fields`: its name
+    /// and the constructor that fixes its Rust type.
+    fn bind_aggregate(
+        &mut self,
+        pat: &Pat,
+        literal: &Literal,
+        fields: Vec<(Member, Scalar)>,
+    ) -> Result<(syn::Ident, TokenStream)> {
+        let pattern = match pat {
+            Pat::Type(p) => &*p.pat,
+            p => p,
+        };
+        let name = super::super::named(pattern)?;
+        if literal.has_rest() {
+            return err(literal.at, "struct update requires an owned Rust value");
+        }
+        let constructor = literal.constructor(self.root, pat);
         let mut layouts = self.aggregates.borrow_mut();
         self.bindings
             .insert(self.body.binding(name), Binding::Aggregate(layouts.len()));
@@ -150,19 +181,8 @@ impl Lower<'_> {
             fields,
             constructor: constructor.clone(),
         });
-        self.debug_names.remove(&id.to_string());
-        if self.source_fault.is_some() {
-            let count = words.len();
-            return Ok(emit!(
-                let mut #id: [::core::option::Option<#root::hir::Constant>; #count] = [#(#words),*];
-                if #id.iter().any(::core::option::Option::is_none) { #id.fill(::core::option::Option::None); }
-            ));
-        }
-        Ok(emit!(
-            let #id = #root::frontend::scalar::aggregate(
-                [#(#words),*], #constructor, __splice_builder
-            )?;
-        ))
+        self.debug_names.remove(&name.ident.to_string());
+        Ok((name.ident.clone(), constructor))
     }
 
     pub(super) fn aggregate_field(

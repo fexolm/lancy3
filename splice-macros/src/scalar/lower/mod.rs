@@ -8,7 +8,6 @@ pub(super) use comptime::foldable_signature;
 pub(crate) use comptime::uses_stage_requirements;
 pub(super) use context::Context;
 mod host;
-use host::guarded_negation;
 pub(crate) use host::overflow_prologue;
 mod memory;
 pub(crate) mod simd;
@@ -22,7 +21,7 @@ use proc_macro2::{Ident, TokenStream};
 use quote::ToTokens;
 use std::collections::HashMap;
 use syn::spanned::Spanned;
-use syn::{BinOp, Block, Error, Expr, Lit, Pat, Path, Result, Stmt, UnOp};
+use syn::{BinOp, Block, Error, Expr, Pat, Path, Result, Stmt, UnOp};
 
 /// A runtime number type other than `usize`.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -226,6 +225,7 @@ pub(super) struct Lower<'a> {
     /// Enclosing loops, innermost last.
     pub(super) loops: Vec<LoopFrame>,
     pub(super) region_depth: usize,
+    /// The label a fault in printed code breaks to: set only by the printer.
     pub(super) source_fault: Option<syn::Lifetime>,
     /// The mandatory evaluator being generated, if any.
     pub(super) evaluation: Option<std::rc::Rc<Evaluation>>,
@@ -557,19 +557,17 @@ impl Lower<'_> {
 
     fn capture_pattern(&mut self, pat: &Pat) -> TokenStream {
         let mut captures = TokenStream::new();
-        if self.source_fault.is_none() {
-            super::visit_bindings(pat, &mut |pat| {
-                let name = pat.ident.to_string();
-                // A bare identifier can name a constant or a variant.
-                // A ref binding or an @ binding is explicit.
-                if pat.mutability.is_some() || (pat.by_ref.is_none() && pat.subpat.is_none()) {
-                    self.debug_names.remove(&name);
-                } else {
-                    captures.extend(self.capture_constant(&pat.ident));
-                    self.debug_names.insert(name, self.body.binding(pat));
-                }
-            });
-        }
+        super::visit_bindings(pat, &mut |pat| {
+            let name = pat.ident.to_string();
+            // A bare identifier can name a constant or a variant.
+            // A ref binding or an @ binding is explicit.
+            if pat.mutability.is_some() || (pat.by_ref.is_none() && pat.subpat.is_none()) {
+                self.debug_names.remove(&name);
+            } else {
+                captures.extend(self.capture_constant(&pat.ident));
+                self.debug_names.insert(name, self.body.binding(pat));
+            }
+        });
         captures
     }
 
@@ -656,9 +654,6 @@ impl Lower<'_> {
         }
     }
     fn debug_point(&self, span: proc_macro2::Span) -> TokenStream {
-        if self.source_fault.is_some() {
-            return TokenStream::new();
-        }
         let root = self.root;
         let (file, directory, line, column) = if proc_macro::is_available() {
             let source = span.unwrap();
@@ -768,8 +763,7 @@ impl Lower<'_> {
                 Pat::Type(t) => (&*t.pat, Some(&*t.ty)),
                 p => (p, None),
             };
-            if self.source_fault.is_none()
-                && let Pat::Ident(name) = binding
+            if let Pat::Ident(name) = binding
                 && name.mutability.is_none()
                 && name.by_ref.is_none()
                 && name.subpat.is_none()
@@ -848,8 +842,7 @@ impl Lower<'_> {
     }
 
     fn expr_with_hint(&self, e: &Expr, hint: Option<Scalar>) -> Result<Value> {
-        if self.source_fault.is_none()
-            && let Some(context) = self.context
+        if let Some(context) = self.context
             && let Some(value) = context.lower(self, e, hint)?
         {
             return Ok(value);
@@ -857,22 +850,12 @@ impl Lower<'_> {
         if let Some(v) = self.simd_constructor(e, hint)? {
             return Ok(v);
         }
-        if matches!(e, Expr::Reference(_))
-            && !simd::uses_lane(e)
-            && let Ok(code) = self.host_raw(e)
+        if self.body.known(e)
+            && let Some(value) = self.known_value(e, hint)?
         {
-            return Ok(Value::new(Stage::Host, code));
+            return Ok(value);
         }
         match e {
-            Expr::Lit(l) => Ok(Value::new(
-                match &l.lit {
-                    Lit::Int(int) => literal_stage(int.suffix(), false, hint),
-                    Lit::Float(float) => literal_stage(float.suffix(), true, hint),
-                    Lit::Bool(_) => Stage::Literal(Scalar::Bool),
-                    _ => Stage::Host,
-                },
-                e,
-            )),
             Expr::Path(p) if matches!(self.binding(p), Some(Binding::Columns)) => err(
                 p,
                 "use columns[comptime_index].as_slice::<T>() to bind a typed column",
@@ -912,26 +895,8 @@ impl Lower<'_> {
             Expr::Unary(x) => {
                 let v = self.expr(&x.expr)?;
                 let op = &x.op;
-                let t = match v.stage {
-                    Stage::Reg(t) => t,
-                    Stage::Host | Stage::Literal(_) => {
-                        let stage = if matches!(op, UnOp::Deref(_)) {
-                            Stage::Host
-                        } else {
-                            v.stage
-                        };
-                        let code = if matches!(op, UnOp::Deref(_)) {
-                            self.known_deref(v)
-                        } else if matches!(op, UnOp::Not(_)) {
-                            self.host_not(v)
-                        } else if guarded_negation(x) {
-                            self.host_negation(v)
-                        } else {
-                            emit!(#op (#v))
-                        };
-                        return Ok(Value::new(stage, code));
-                    }
-                    _ => return err(x, "expected an operand"),
+                let Stage::Reg(t) = v.stage else {
+                    return err(x, "expected an operand");
                 };
                 if matches!(t, Scalar::Vector(_) | Scalar::Mask(_)) {
                     return self.simd_unary(t, op, v, x);
@@ -953,18 +918,13 @@ impl Lower<'_> {
             Expr::Cast(x) => self.cast(x),
             Expr::MethodCall(_) => self.method(e, hint),
             Expr::Reference(x) => self.reference(x),
-            Expr::Macro(m) if crate::kast::vec_macro(&m.mac.path) => {
-                Ok(Value::new(Stage::Host, self.host_raw(e)?))
-            }
-            Expr::Macro(m) if m.mac.path.is_ident("comptime") => {
-                let expr = self.body.comptime(&m.mac);
-                Ok(Value::new(Stage::Host, self.required(expr, hint)?))
-            }
             Expr::Field(field) => match self.aggregate_field(field) {
                 Some((value, kind, _)) => Ok(Value::new(Stage::Word(kind), value)),
-                None => Ok(Value::new(Stage::Host, self.host_raw(e)?)),
+                // Reports the runtime value the field reads.
+                None => Ok(Value::new(Stage::Host, self.host_code(e)?)),
             },
-            Expr::Tuple(_) => Ok(Value::new(Stage::Host, self.host_raw(e)?)),
+            // Reports the runtime value the tuple holds.
+            Expr::Tuple(_) => Ok(Value::new(Stage::Host, self.host_code(e)?)),
             _ => err(
                 e,
                 "unsupported scalar kernel expression; use comptime!(...) for host calculations",
@@ -979,10 +939,8 @@ impl Lower<'_> {
         op: Option<(&str, &BinOp)>,
     ) -> Result<Value> {
         if let Expr::Index(index) = left {
-            if !simd::uses_lane(expr)
-                && let Ok(code) = self.host_raw(expr)
-            {
-                return Ok(Value::new(Stage::Host, code));
+            if self.body.known(expr) {
+                return Ok(Value::new(Stage::Host, self.host_code(expr)?));
             }
             return self.store(index, right, op);
         }
@@ -1039,9 +997,6 @@ impl Lower<'_> {
             (Stage::Reg(t), Stage::Reg(Scalar::Inferred))
             | (_, Stage::Reg(t))
             | (Stage::Reg(t), _) => t,
-            (Stage::Host | Stage::Literal(_), Stage::Literal(_) | Stage::Host) => {
-                return Ok(Value::new(Stage::Host, self.host_binary(left, op, right)));
-            }
             _ => return err(x, "expected scalar operands"),
         };
         if matches!(t, Scalar::Vector(_) | Scalar::Mask(_)) {

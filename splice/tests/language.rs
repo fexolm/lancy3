@@ -1774,3 +1774,81 @@ fn kernel_calls_pass_and_return_wide_scalars() {
     }
     splice_testkit::each_backend!(B => check::<B>());
 }
+
+mod deferred_values {
+    use splice::kernel;
+
+    pub(super) fn rust_twice(x: i32) -> i32 {
+        x * 2 + 1
+    }
+
+    #[kernel]
+    pub(super) fn kernel_twice(x: i32) -> i32 {
+        x * 2 + 1
+    }
+
+    /// A Rust call's result is known only when the kernel runs: the branch
+    /// it selects is a runtime branch, so `s` is a register.
+    #[kernel(print)]
+    pub(super) fn rust_condition(x: i32) -> i32 {
+        let mut s = 0;
+        if rust_twice(1) > 100 {
+            s = 5;
+        }
+        if kernel_twice(1) < 100 {
+            s += 2;
+        }
+        s + x
+    }
+
+    /// A mutable local initialized by a kernel call is a register, and so
+    /// is the loop that updates it.
+    #[kernel]
+    pub(super) fn call_counter(x: i32) -> i32 {
+        let mut y = kernel_twice(3);
+        for i in 0..3 {
+            y += i;
+        }
+        let mut z = rust_twice(2);
+        z += x;
+        y + z
+    }
+}
+
+/// Values the generator learns only at build time (kernel and Rust call
+/// results) stage the locals and branches that depend on them.
+#[test]
+fn deferred_values_stage_what_depends_on_them() {
+    use deferred_values::{call_counter, rust_condition};
+    fn check<B: Codegen<Output: Executable>>() {
+        let built = rust_condition::build::<B>(rust_condition::BuildArgs {}).unwrap();
+        let compiled = B::compile(&rust_condition::ir().unwrap()).unwrap();
+        for code in [built, compiled] {
+            for x in [0, 1, -9] {
+                assert_eq!(
+                    code.call(rust_condition::CallArgs { x }),
+                    Ok(rust_condition(x))
+                );
+            }
+        }
+        let built = call_counter::build::<B>(call_counter::BuildArgs {}).unwrap();
+        let compiled = B::compile(&call_counter::ir().unwrap()).unwrap();
+        for code in [built, compiled] {
+            for x in [0, 4, -9] {
+                assert_eq!(code.call(call_counter::CallArgs { x }), Ok(call_counter(x)));
+            }
+        }
+    }
+    splice_testkit::each_backend!(B => check::<B>());
+    // The listing keeps the runtime branches and the register they write.
+    let printed = rust_condition::print().unwrap();
+    for line in [
+        "let mut s = 0;",
+        "if rust_twice(1) > 100 {",
+        "s = 5;",
+        "s += 2;",
+        "s + x",
+    ] {
+        assert!(printed.contains(line), "{printed}");
+    }
+}

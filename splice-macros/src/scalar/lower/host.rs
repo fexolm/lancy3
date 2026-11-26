@@ -1,6 +1,6 @@
 //! Prepare Rust expressions used during specialization and preserve the
 //! control-flow location of failures in residual code or printed source.
-use super::{Binding, Lower};
+use super::{Binding, Lower, Scalar, Stage, Value};
 use crate::kast::vec_macro;
 use proc_macro2::{Ident, TokenStream};
 use quote::ToTokens;
@@ -491,8 +491,120 @@ impl Lower<'_> {
         })
     }
 
-    pub(super) fn host_raw(&self, e: &Expr) -> Result<TokenStream> {
-        self.host_code(e)
+    /// The value of an expression the generator knows
+    /// ([`crate::kast::Body::known`]): the Rust code that computes it while
+    /// the generator runs. The IR lowering and the printer both take a
+    /// known value from here. `None` for a block, branch, loop, assignment
+    /// or jump, whose parts the caller visits itself.
+    pub(super) fn known_value(&self, e: &Expr, hint: Option<Scalar>) -> Result<Option<Value>> {
+        let operand = |e: &Expr, hint: Option<Scalar>| self.known_operand(e, hint);
+        Ok(Some(match e {
+            Expr::Lit(l) => Value::new(
+                match &l.lit {
+                    syn::Lit::Int(int) => super::literal_stage(int.suffix(), false, hint),
+                    syn::Lit::Float(float) => super::literal_stage(float.suffix(), true, hint),
+                    syn::Lit::Bool(_) => Stage::Literal(Scalar::Bool),
+                    _ => Stage::Host,
+                },
+                e,
+            ),
+            Expr::Path(path) => Value::new(Stage::Host, path),
+            Expr::Paren(inner) => return self.known_value(&inner.expr, hint),
+            Expr::Group(inner) => return self.known_value(&inner.expr, hint),
+            Expr::Unary(unary) => {
+                let value = operand(&unary.expr, None)?;
+                let op = &unary.op;
+                match op {
+                    UnOp::Deref(_) => Value::new(Stage::Host, self.known_deref(value)),
+                    UnOp::Not(_) => Value::new(value.stage, self.host_not(value)),
+                    _ if guarded_negation(unary) => {
+                        Value::new(value.stage, self.host_negation(value))
+                    }
+                    _ => Value::new(value.stage, emit!(#op (#value))),
+                }
+            }
+            Expr::Binary(binary) if super::super::compound_op(&binary.op).is_none() => {
+                let (left, right) = (operand(&binary.left, hint)?, operand(&binary.right, hint)?);
+                Value::new(Stage::Host, self.host_binary(left, &binary.op, right))
+            }
+            Expr::Index(index) => {
+                let (receiver, offset) =
+                    (operand(&index.expr, None)?, operand(&index.index, None)?);
+                let read = self.known_index(receiver.code, offset.code);
+                let fail = self.bounds_failure();
+                Value::new(
+                    Stage::Host,
+                    emit!({
+                        let ::core::option::Option::Some(value) = (#read) else { #fail };
+                        value
+                    }),
+                )
+            }
+            Expr::MethodCall(method) => self.known_method(e, method, hint)?,
+            Expr::Cast(cast) => {
+                let (value, ty) = (operand(&cast.expr, None)?, &cast.ty);
+                Value::new(Stage::Host, emit!((#value) as #ty))
+            }
+            Expr::Macro(m) if m.mac.path.is_ident("comptime") => Value::new(
+                Stage::Host,
+                self.required(self.body.comptime(&m.mac), hint)?,
+            ),
+            Expr::Macro(_) | Expr::Field(_) | Expr::Reference(_) | Expr::Tuple(_) => {
+                Value::new(Stage::Host, self.host_code(e)?)
+            }
+            _ => return Ok(None),
+        }))
+    }
+
+    /// A known operand: a known value, or the Rust code of a known block,
+    /// branch or loop.
+    pub(super) fn known_operand(&self, e: &Expr, hint: Option<Scalar>) -> Result<Value> {
+        match self.known_value(e, hint)? {
+            Some(value) => Ok(value),
+            None => Ok(Value::new(Stage::Host, self.host_code(e)?)),
+        }
+    }
+
+    /// The method call `e` (`m`) on known operands.
+    fn known_method(
+        &self,
+        e: &Expr,
+        m: &syn::ExprMethodCall,
+        hint: Option<Scalar>,
+    ) -> Result<Value> {
+        let root = self.root;
+        let name = &m.method;
+        let raw_name = name.to_string();
+        if matches!(raw_name.as_str(), "len" | "is_empty") && m.args.is_empty() {
+            let receiver = self.known_operand(&m.receiver, None)?;
+            let empty = (name == "is_empty").then(|| emit!(== 0));
+            return Ok(Value::new(
+                Stage::Host,
+                emit!({
+                    use #root::frontend::evaluation::{ReadLength as _, Operand};
+                    let receiver = &(#receiver);
+                    (&Operand::of(receiver)).length(receiver)? #empty
+                }),
+            ));
+        }
+        if super::memory::primitive_method(&raw_name) {
+            let receiver = self.known_operand(&m.receiver, None)?;
+            let args = m
+                .args
+                .iter()
+                .map(|arg| self.known_operand(arg, None))
+                .collect::<Result<Vec<_>>>()?;
+            let (value, arg) = (self.primitive(emit!(&value)), self.primitive(emit!(&arg)));
+            return Ok(Value::new(
+                Stage::Host,
+                emit!({
+                    let value = #receiver;
+                    #value
+                    value.#name(#({let arg = #args; #arg arg}),*)
+                }),
+            ));
+        }
+        Ok(Value::new(Stage::Host, self.required(e, hint)?))
     }
 
     pub(super) fn host_only(&self, e: &Expr) -> bool {

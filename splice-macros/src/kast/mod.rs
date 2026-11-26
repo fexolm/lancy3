@@ -62,6 +62,7 @@ enum Origin {
 struct Decl {
     name: Ident,
     origin: Origin,
+    mutable: bool,
 }
 
 /// The node addresses of one owned block. Kept private so that only this
@@ -205,6 +206,12 @@ impl<'a> Body<'a> {
             .contains(&Self::lookup(&self.ids.locals, local))
     }
 
+    /// Whether the generator knows the value of `expr` while it expands the
+    /// kernel ([`stage`]): it runs the expression as Rust.
+    pub(crate) fn known(&self, expr: &Expr) -> bool {
+        self.stages.exprs[self.expr(expr).0 as usize] == stage::Level::Known
+    }
+
     /// Whether the loop whose body is `body` must be lowered by the
     /// generator (as a runtime loop or unrolled) instead of running as Rust.
     pub(crate) fn staged_loop(&self, loop_expr: &Expr) -> bool {
@@ -233,6 +240,11 @@ impl<'a> Body<'a> {
     /// The declarations a binding pattern of the body introduces.
     fn pattern_decls(&self, pat: &syn::Pat) -> impl Iterator<Item = DeclId> {
         Self::lookup(&self.ids.patterns, pat).map(DeclId)
+    }
+
+    /// Whether the declaration is a `mut` binding.
+    fn mutable(&self, decl: DeclId) -> bool {
+        self.decl(decl).mutable
     }
 
     fn decl(&self, id: DeclId) -> &Decl {

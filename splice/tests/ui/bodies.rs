@@ -29,6 +29,17 @@ fn vector_remainder(xs: &[i32], out: &mut [i32]) -> i32 {
     0
 }
 
+fn tick() -> i32 {
+    1
+}
+
+// A call's result is known only when the kernel runs; it has no place to borrow.
+#[kernel]
+fn borrowed_call(value: i32) -> i32 {
+    let delta = &tick();
+    value.wrapping_add(*delta)
+}
+
 fn pair(x: i32) -> (i32, i32) {
     (x, x)
 }

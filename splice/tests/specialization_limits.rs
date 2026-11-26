@@ -167,16 +167,9 @@ fn only_specialization_obeys_the_iteration_and_expansion_budgets() {
     splice_testkit::each_backend!(B => check_limits::<B>());
 }
 
-#[kernel]
-fn borrowed_call(value: i32) -> i32 {
-    let delta = &tick();
-    value.wrapping_add(*delta)
-}
-
 #[test]
 fn opaque_calls_are_not_executed_in_host_loops() {
     assert!(opaque_in_host_loop::ir(1).is_err());
-    assert!(borrowed_call::ir().is_err());
     assert!(
         opaque_in_host_loop::build::<Lancy>(opaque_in_host_loop::BuildArgs { iterations: 1 })
             .is_err()
