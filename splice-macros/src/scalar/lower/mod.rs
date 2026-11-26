@@ -38,7 +38,7 @@ pub(super) enum Scalar {
     Mask(Elem),
 }
 impl Scalar {
-    fn base(self) -> Self {
+    pub(in crate::scalar) fn base(self) -> Self {
         if self == Self::Length {
             Self::Index
         } else {
@@ -359,6 +359,13 @@ impl Lower<'_> {
                 ..a
             })),
             (Reg(t), Literal(u)) | (Literal(u), Reg(t)) if t == u => Ok(Reg(t)),
+            // rustc typed both arms alike: an integer literal beside a
+            // `usize` is a `usize`.
+            (Reg(t), Literal(Scalar::Int)) | (Literal(Scalar::Int), Reg(t))
+                if t.base() == Scalar::Index =>
+            {
+                Ok(Reg(Scalar::Index))
+            }
             (Reg(Scalar::Inferred), Reg(t) | Literal(t))
             | (Reg(t) | Literal(t), Reg(Scalar::Inferred)) => Ok(Reg(t.base())),
             (Host, Literal(_)) | (Literal(_), Host) => Ok(Host),
@@ -573,10 +580,12 @@ impl Lower<'_> {
         if let Expr::Struct(literal) = &*init.expr {
             return self.aggregate_local(&local.pat, literal);
         }
-        let hint = if let Pat::Type(t) = &local.pat {
-            Scalar::from_type(&t.ty, self.types)
-        } else {
-            None
+        let hint = match &local.pat {
+            Pat::Type(t) => Scalar::from_type(&t.ty, self.types),
+            Pat::Ident(name) if self.flow.usize_locals.contains(&name.ident.to_string()) => {
+                Some(Scalar::Index)
+            }
+            _ => None,
         };
         let value = self.expr_with_hint(&init.expr, hint)?;
         let pat = &local.pat;
@@ -637,6 +646,8 @@ impl Lower<'_> {
         } else {
             let annotation = ty.and_then(|ty| Scalar::from_type(ty, self.types));
             let scalar = match value.stage {
+                // An integer literal has the type Rust infers for the local.
+                Stage::Literal(Scalar::Int) if hint == Some(Scalar::Index) => Scalar::Index,
                 Stage::Reg(t) | Stage::Word(t) | Stage::Literal(t) => t,
                 Stage::Host => match annotation {
                     Some(t @ (Scalar::Int | Scalar::Bool)) => t,
@@ -911,5 +922,13 @@ impl Lower<'_> {
             Stage::Reg(output),
             self.operator_bin(operation, lhs, rhs),
         ))
+    }
+}
+
+/// The name of a local or parameter that `e` reads.
+pub(in crate::scalar) fn path_name(e: &Expr) -> Option<String> {
+    match e {
+        Expr::Path(p) if p.qself.is_none() => p.path.get_ident().map(ToString::to_string),
+        _ => None,
     }
 }

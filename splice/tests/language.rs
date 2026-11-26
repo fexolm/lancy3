@@ -1183,6 +1183,49 @@ mod index_arithmetic {
         if i > 5 { 1 } else { 0 }
     }
 
+    // MAC-07: an unannotated literal local takes the `usize` type Rust
+    // infers from its uses; an annotated mutable one keeps its annotation.
+    #[kernel]
+    pub(super) fn sum_while(xs: &[i32]) -> i32 {
+        let mut i = 0;
+        let mut sum: i32 = 0;
+        while i < xs.len() {
+            sum = sum.wrapping_add(xs[i]);
+            i += 1;
+        }
+        sum
+    }
+
+    #[kernel]
+    pub(super) fn sum_annotated(xs: &[i32]) -> i32 {
+        let mut i: usize = 0;
+        let mut sum: i32 = 0;
+        while i < xs.len() {
+            sum = sum.wrapping_add(xs[i]);
+            i += 1;
+        }
+        sum
+    }
+
+    // `back` is a `usize` only through `back - 1 < xs.len()`; below zero it
+    // wraps in release and panics in debug, as in Rust.
+    #[kernel]
+    pub(super) fn last_before(xs: &[i32], skip: i32) -> i32 {
+        let mut back = 0;
+        back += skip as usize;
+        if back - 1 < xs.len() {
+            xs[back - 1]
+        } else {
+            -1
+        }
+    }
+
+    // A literal arm joins a `usize` arm.
+    #[kernel]
+    pub(super) fn length_or_zero(xs: &[i32], empty: bool) -> usize {
+        if empty { 0 } else { xs.len() }
+    }
+
     // A `usize` parameter and result cross the entry as 64-bit words.
     #[kernel]
     pub(super) fn shift_index(base: usize, xs: &[i32], past: bool) -> usize {
@@ -1242,6 +1285,43 @@ fn compound_index_assignment_matches_rust_usize() {
         expect::<B>(|| double_len(&one, i32::MAX), jit, "2^31 * 2");
     }
 
+    splice_testkit::each_backend!(B => check::<B>());
+}
+
+#[test]
+fn literal_locals_and_arms_take_the_usize_type_rust_infers() {
+    use index_arithmetic::{last_before, length_or_zero, sum_annotated, sum_while};
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+    fn check<B: Codegen<Output: Executable>>() {
+        let backend = std::any::type_name::<B>();
+        let while_kernel = sum_while::build::<B>(sum_while::BuildArgs {}).unwrap();
+        let annotated = sum_annotated::build::<B>(sum_annotated::BuildArgs {}).unwrap();
+        let last = last_before::build::<B>(last_before::BuildArgs {}).unwrap();
+        let length = length_or_zero::build::<B>(length_or_zero::BuildArgs {}).unwrap();
+        for xs in [&[][..], &[4], &[1, 2, i32::MAX]] {
+            assert_eq!(
+                while_kernel.call(sum_while::CallArgs { xs }),
+                Ok(sum_while(xs))
+            );
+            assert_eq!(
+                annotated.call(sum_annotated::CallArgs { xs }),
+                Ok(sum_annotated(xs))
+            );
+            for empty in [false, true] {
+                assert_eq!(
+                    length.call(length_or_zero::CallArgs { xs, empty }),
+                    Ok(length_or_zero(xs, empty))
+                );
+            }
+            for skip in [0, 1, 3] {
+                let jit = last.call(last_before::CallArgs { xs, skip });
+                match catch_unwind(AssertUnwindSafe(|| last_before(xs, skip))) {
+                    Ok(value) => assert_eq!(jit, Ok(value), "{backend} {xs:?} {skip}"),
+                    Err(_) => assert!(jit.is_err(), "{backend} {xs:?} {skip}: {jit:?}"),
+                }
+            }
+        }
+    }
     splice_testkit::each_backend!(B => check::<B>());
 }
 
