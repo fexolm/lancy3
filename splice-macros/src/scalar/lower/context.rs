@@ -16,14 +16,14 @@ pub(in crate::scalar) struct Context {
 }
 
 struct Child {
-    key: usize,
+    key: crate::kast::NodeId,
     target: ExprPath,
     method: bool,
     witness: TokenStream,
 }
 
 struct Operation {
-    key: usize,
+    key: crate::kast::NodeId,
     expr: Expr,
     operands: Vec<Operand>,
     borrowed: Vec<SliceOperand>,
@@ -313,7 +313,7 @@ impl Context {
             })
             .collect::<Vec<_>>();
         let mut operations = self.operations.borrow_mut();
-        let key = crate::scalar::flow::key(expr);
+        let key = lower.body.expr(expr);
         let ordinal =
             if let Some(ordinal) = operations.iter().position(|operation| operation.key == key) {
                 ordinal as u32
@@ -375,7 +375,7 @@ impl Context {
         let frame = if recursive {
             emit!(__splice_context_frame)
         } else {
-            let child = self.child(call, target, true, &witness);
+            let child = self.child(lower, expr, target, true, &witness);
             emit!(__splice_context_frame.child(#child)?)
         };
         let fallback = if recursive {
@@ -438,7 +438,7 @@ impl Context {
                 let frame = if recursive {
                     emit!(__splice_context_frame)
                 } else {
-                    let child = self.child(call, target, false, &witness);
+                    let child = self.child(lower, expr, target, false, &witness);
                     emit!(__splice_context_frame.child(#child)?)
                 };
                 emit!(#item::__splice_stage_context #generics (#(#arguments,)* #witness, #frame, __splice_builder)?)
@@ -462,13 +462,14 @@ impl Context {
 
     fn child(
         &self,
-        call: &syn::ExprCall,
+        lower: &Lower<'_>,
+        expr: &Expr,
         target: &ExprPath,
         method: bool,
         witness: &TokenStream,
     ) -> u32 {
         let mut children = self.children.borrow_mut();
-        let key = crate::scalar::flow::key(call);
+        let key = lower.body.expr(expr);
         children
             .iter()
             .position(|child| child.key == key)

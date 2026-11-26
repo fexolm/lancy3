@@ -33,9 +33,7 @@ impl Lower<'_> {
                         _ => None,
                     };
                     let val = scope.expr_with_hint(&init.expr, hint)?;
-                    if val.stage.is_host()
-                        && !scope.flow.locals.contains(&crate::scalar::flow::key(local))
-                    {
+                    if val.stage.is_host() && !scope.body.runtime_local(local) {
                         let binding = scope.local(local)?;
                         statements.push(binding);
                         continue;
@@ -92,14 +90,8 @@ impl Lower<'_> {
         let root = self.root;
         let support = emit!(#root::frontend::source);
         let braces = |body: TokenStream| emit!(#support::block(&#body));
-        let loop_body = match e {
-            Expr::ForLoop(f) => Some(&f.body),
-            Expr::While(w) => Some(&w.body),
-            Expr::Loop(l) => Some(&l.body),
-            _ => None,
-        };
-        if let Some(body) = loop_body
-            && let Some(code) = self.host_loop(e, body)?
+        if matches!(e, Expr::ForLoop(_) | Expr::While(_) | Expr::Loop(_))
+            && let Some(code) = self.host_loop(e)?
         {
             return Ok(emit!({ #code; ::std::string::String::new() }));
         }

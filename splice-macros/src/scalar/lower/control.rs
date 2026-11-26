@@ -10,16 +10,15 @@ impl Lower<'_> {
     pub(super) fn staged_loop(
         &self,
         expr: &Expr,
-        body: &Block,
         runtime: impl FnOnce() -> Result<Value>,
     ) -> Result<Value> {
-        if let Some(code) = self.host_loop(expr, body)? {
+        if let Some(code) = self.host_loop(expr)? {
             return Ok(Value::unit(code));
         }
         runtime()
     }
-    pub(super) fn host_loop(&self, expr: &Expr, body: &Block) -> Result<Option<TokenStream>> {
-        if self.flow.loops.contains(&crate::scalar::flow::key(body)) {
+    pub(super) fn host_loop(&self, expr: &Expr) -> Result<Option<TokenStream>> {
+        if self.body.staged_loop(expr) {
             return Ok(None);
         }
         self.host_code(expr, true).map(Some)

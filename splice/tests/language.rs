@@ -1196,6 +1196,21 @@ mod index_arithmetic {
         sum
     }
 
+    // A counter compared with a `usize` local, and a name the body binds
+    // twice: each declaration takes its own type.
+    #[kernel]
+    pub(super) fn sum_shadowed(xs: &[i32]) -> i32 {
+        let n = xs.len();
+        let mut i = 0;
+        let mut sum: i32 = 0;
+        while i < n {
+            sum = sum.wrapping_add(xs[i]);
+            i += 1;
+        }
+        let i = 2;
+        sum.wrapping_mul(i)
+    }
+
     #[kernel]
     pub(super) fn sum_annotated(xs: &[i32]) -> i32 {
         let mut i: usize = 0;
@@ -1290,12 +1305,13 @@ fn compound_index_assignment_matches_rust_usize() {
 
 #[test]
 fn literal_locals_and_arms_take_the_usize_type_rust_infers() {
-    use index_arithmetic::{last_before, length_or_zero, sum_annotated, sum_while};
+    use index_arithmetic::{last_before, length_or_zero, sum_annotated, sum_shadowed, sum_while};
     use std::panic::{AssertUnwindSafe, catch_unwind};
     fn check<B: Codegen<Output: Executable>>() {
         let backend = std::any::type_name::<B>();
         let while_kernel = sum_while::build::<B>(sum_while::BuildArgs {}).unwrap();
         let annotated = sum_annotated::build::<B>(sum_annotated::BuildArgs {}).unwrap();
+        let shadowed = sum_shadowed::build::<B>(sum_shadowed::BuildArgs {}).unwrap();
         let last = last_before::build::<B>(last_before::BuildArgs {}).unwrap();
         let length = length_or_zero::build::<B>(length_or_zero::BuildArgs {}).unwrap();
         for xs in [&[][..], &[4], &[1, 2, i32::MAX]] {
@@ -1306,6 +1322,10 @@ fn literal_locals_and_arms_take_the_usize_type_rust_infers() {
             assert_eq!(
                 annotated.call(sum_annotated::CallArgs { xs }),
                 Ok(sum_annotated(xs))
+            );
+            assert_eq!(
+                shadowed.call(sum_shadowed::CallArgs { xs }),
+                Ok(sum_shadowed(xs))
             );
             for empty in [false, true] {
                 assert_eq!(

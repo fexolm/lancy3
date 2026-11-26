@@ -7,9 +7,9 @@ macro_rules! emit {
 }
 
 pub(crate) mod abi;
-mod flow;
-mod lower;
+pub(crate) mod lower;
 pub(crate) mod methods;
+pub(crate) use lower::simd::constructor_arity;
 use lower::{Binding, BufferType, Lower, Scalar};
 pub(crate) use lower::{Elem, select_free, uses_stage_requirements};
 use proc_macro2::{Ident, TokenStream};
@@ -306,7 +306,7 @@ pub(super) fn expand(root: Path, native: &mut ItemFn, print: bool) -> Result<Tok
     let unpack = emit!(#(let #reg_names = #support::RunArg::reg(#reg_names, __splice_builder)?;)*);
     let mut lowered_block = native.block.clone();
     lowered_block.stmts.splice(0..0, pattern_decls);
-    let flow = flow::analyze(&lowered_block, &bindings);
+    let body = crate::kast::Body::new(&lowered_block, &stage_params(&parameters))?;
     let lower = Lower {
         generics: generic,
         root: &root,
@@ -319,7 +319,7 @@ pub(super) fn expand(root: Path, native: &mut ItemFn, print: bool) -> Result<Tok
         aggregates: &Default::default(),
         labels: &Default::default(),
         debug_names,
-        flow: &flow,
+        body: &body,
         fish: emit!(#fish),
         loop_kind: None,
         region_depth: 0,
@@ -727,6 +727,26 @@ fn calls_itself(block: &syn::Block, name: &Ident) -> bool {
     let mut calls = Calls(name, false);
     calls.visit_block(block);
     calls.1
+}
+
+/// The parameters of a kernel as its body's staging analysis sees them.
+fn stage_params(parameters: &[abi::Parameter<'_>]) -> Vec<(Ident, crate::kast::Param)> {
+    parameters
+        .iter()
+        .map(|parameter| (parameter.name.clone(), stage_param(parameter.binding)))
+        .collect()
+}
+
+fn stage_param(binding: Binding) -> crate::kast::Param {
+    use crate::kast::Param;
+    match binding {
+        Binding::Host(_) => Param::Known,
+        Binding::Reg(t, _) | Binding::Word(t) => Param::Scalar {
+            index: t.base() == Scalar::Index,
+        },
+        Binding::Buffer(_) => Param::Slice,
+        Binding::Columns | Binding::Context | Binding::Aggregate(_) => Param::Object,
+    }
 }
 
 fn context_slice_types(

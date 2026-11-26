@@ -13,7 +13,7 @@ use host::guarded_negation;
 pub(crate) use host::overflow_prologue;
 mod memory;
 mod owned;
-pub(super) mod simd;
+pub(crate) mod simd;
 mod source;
 mod word;
 pub(super) use simd::BufferType;
@@ -142,7 +142,7 @@ pub(super) struct Lower<'a> {
     pub(super) region_depth: usize,
     pub(super) source_fault: Option<syn::Lifetime>,
     pub(super) evaluator_return: Option<syn::Lifetime>,
-    pub(super) flow: &'a super::flow::Flow,
+    pub(super) body: &'a crate::kast::Body<'a>,
     pub(super) context: Option<&'a Context>,
 }
 
@@ -582,9 +582,7 @@ impl Lower<'_> {
         }
         let hint = match &local.pat {
             Pat::Type(t) => Scalar::from_type(&t.ty, self.types),
-            Pat::Ident(name) if self.flow.usize_locals.contains(&name.ident.to_string()) => {
-                Some(Scalar::Index)
-            }
+            Pat::Ident(_) if self.body.usize_local(local) => Some(Scalar::Index),
             _ => None,
         };
         let value = self.expr_with_hint(&init.expr, hint)?;
@@ -592,7 +590,7 @@ impl Lower<'_> {
         if matches!(pat, Pat::Wild(_)) {
             return Ok(emit!(let _ = #value;));
         }
-        if value.stage.is_host() && !self.flow.locals.contains(&super::flow::key(local)) {
+        if value.stage.is_host() && !self.body.runtime_local(local) {
             super::bind_pattern(&mut self.bindings, pat, Binding::Host(self.region_depth));
             let (binding, ty) = match pat {
                 Pat::Type(t) => (&*t.pat, Some(&*t.ty)),
@@ -715,14 +713,12 @@ impl Lower<'_> {
             Expr::If(x) => self.if_expr(x, hint),
             Expr::Match(x) => self.match_expr(x, hint),
             Expr::While(x) if x.label.is_none() => {
-                self.staged_loop(e, &x.body, || self.loop_expr(Some(&x.cond), &x.body))
+                self.staged_loop(e, || self.loop_expr(Some(&x.cond), &x.body))
             }
             Expr::Loop(x) if x.label.is_none() => {
-                self.staged_loop(e, &x.body, || self.loop_expr(None, &x.body))
+                self.staged_loop(e, || self.loop_expr(None, &x.body))
             }
-            Expr::ForLoop(x) if x.label.is_none() => {
-                self.staged_loop(e, &x.body, || self.for_expr(x))
-            }
+            Expr::ForLoop(x) if x.label.is_none() => self.staged_loop(e, || self.for_expr(x)),
             Expr::Continue(x) if x.label.is_none() => self.loop_jump(e, true),
             Expr::Break(x) if x.label.is_none() && x.expr.is_none() => self.loop_jump(e, false),
             Expr::Return(x) => {
@@ -794,8 +790,8 @@ impl Lower<'_> {
                 Ok(Value::new(Stage::Host, self.host_raw(e)?))
             }
             Expr::Macro(m) if m.mac.path.is_ident("comptime") => {
-                let expr = m.mac.parse_body::<Expr>()?;
-                Ok(Value::new(Stage::Host, self.required(&expr, hint)?))
+                let expr = self.body.comptime(&m.mac);
+                Ok(Value::new(Stage::Host, self.required(expr, hint)?))
             }
             Expr::Field(field) => match self.aggregate_field(field) {
                 Some((value, kind, _)) => Ok(Value::new(Stage::Word(kind), value)),
@@ -922,13 +918,5 @@ impl Lower<'_> {
             Stage::Reg(output),
             self.operator_bin(operation, lhs, rhs),
         ))
-    }
-}
-
-/// The name of a local or parameter that `e` reads.
-pub(in crate::scalar) fn path_name(e: &Expr) -> Option<String> {
-    match e {
-        Expr::Path(p) if p.qself.is_none() => p.path.get_ident().map(ToString::to_string),
-        _ => None,
     }
 }

@@ -1,6 +1,6 @@
 //! Lower published inherent methods with represented operands in the caller's
 //! builder. They use the same expression lowering as free functions.
-use super::{Binding, Lower, Scalar, abi, flow, parameter};
+use super::{Binding, Lower, Scalar, abi, parameter};
 use proc_macro2::{Ident, Span, TokenStream};
 use quote::format_ident;
 use std::collections::HashMap;
@@ -140,7 +140,14 @@ pub(crate) fn publish(
         bindings.insert(id.to_string(), param.binding);
     }
 
-    let analysis = flow::analyze(&body, &bindings);
+    let stage_params = params
+        .iter()
+        .map(|param| {
+            super::named(param.pattern)
+                .map(|pat| (pat.ident.clone(), super::stage_param(param.binding)))
+        })
+        .collect::<syn::Result<Vec<_>>>()?;
+    let analysis = crate::kast::Body::new(&body, &stage_params)?;
     let debug_names = params
         .iter()
         .map(|param| (param.name.to_string(), param.name.clone()))
@@ -157,7 +164,7 @@ pub(crate) fn publish(
         aggregates: &Default::default(),
         labels: &Default::default(),
         debug_names,
-        flow: &analysis,
+        body: &analysis,
         fish: TokenStream::new(),
         loop_kind: None,
         region_depth: 0,
