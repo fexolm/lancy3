@@ -32,7 +32,7 @@ impl Rules<'_> {
                                 || !lane.float() && matches!(lane.bytes(), 4 | 8))
                         {
                             let addr = self.address(ptr)?;
-                            self.ctx.cover_adjacent_load(loaded);
+                            self.ctx.cover(loaded);
                             return Ok(Some(Inst::PackedMemory(
                                 kind,
                                 lane,
@@ -49,7 +49,7 @@ impl Rules<'_> {
                         && matches!(lane.bytes(), 4 | 8)
                     {
                         let addr = self.address(ptr)?;
-                        self.ctx.cover_adjacent_load(v);
+                        self.ctx.cover(v);
                         return Ok(Some(Inst::BroadcastMemory(lane, self.dst(), addr)));
                     }
                 }

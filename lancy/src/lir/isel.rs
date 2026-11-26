@@ -131,6 +131,7 @@ struct Definition {
 pub(super) struct Context {
     defs: DenseMap<Value, Definition>,
     current: Block,
+    /// The value defined right before the root being selected, if any.
     previous: Option<(Value, Op)>,
     covered: Option<Value>,
 }
@@ -157,18 +158,23 @@ impl Context {
         (b == self.current && def.uses == 1 && def.pure).then_some(op)
     }
 
+    /// The definition of `v` if it is the instruction right before the
+    /// root and the root is its only use: nothing executes between them, so
+    /// the root may perform it, even a memory access, after [`Self::cover`].
     pub fn adjacent_single_use(&self, v: Value) -> Option<Op> {
         let (previous, op) = self.previous?;
         (previous == v && self.defs[v].uses == 1).then_some(op)
     }
 
-    pub fn cover_adjacent_load(&mut self, v: Value) {
-        debug_assert!(matches!(self.adjacent_single_use(v), Some(Op::Load(..))));
+    /// The root performs the adjacent definition of `v` itself; selection
+    /// skips that instruction.
+    pub fn cover(&mut self, v: Value) {
+        debug_assert!(self.adjacent_single_use(v).is_some());
         self.covered = Some(v);
     }
 }
 
-pub(super) fn select<I>(
+pub(super) fn select<I: Copy>(
     f: &Function,
     cfg: &ControlFlowGraph,
     mut rule: impl FnMut(&mut Context, Root, &mut Vec<I>) -> Result<(), CompileError>,
@@ -201,15 +207,25 @@ pub(super) fn select<I>(
     }
     let mut blocks = DenseMap::from_fn(f.block_capacity(), |_| Vec::new());
     let mut instructions = Vec::new();
+    // Roots are selected from the terminator backwards; each rule appends
+    // its instructions in execution order, and the groups are then laid out
+    // in program order.
+    let mut selected = Vec::new();
+    let mut groups = Vec::new();
     for &b in cfg.reverse_postorder().iter().rev() {
         ctx.current = b;
-        let out: &mut Vec<I> = &mut blocks[b];
+        selected.clear();
+        groups.clear();
         let mut emit = |ctx: &mut Context, root| -> Result<(), CompileError> {
-            let first = out.len();
-            rule(ctx, root, out)?;
-            out[first..].reverse();
+            let first = selected.len();
+            rule(ctx, root, &mut selected)?;
+            groups.push(first..selected.len());
             Ok(())
         };
+        ctx.previous = f
+            .instructions(b)
+            .last()
+            .and_then(|i| Some((f.result(i)?, *f.op(i))));
         emit(&mut ctx, Root::Term(*f.terminator(b)))?;
         instructions.extend(f.instructions(b));
         while let Some(i) = instructions.pop() {
@@ -217,12 +233,9 @@ pub(super) fn select<I>(
                 debug_assert_eq!(f.result(i), Some(covered));
                 continue;
             }
-            #[cfg(feature = "experimental-simd")]
-            {
-                ctx.previous = instructions
-                    .last()
-                    .and_then(|&prev| Some((f.result(prev)?, *f.op(prev))));
-            }
+            ctx.previous = instructions
+                .last()
+                .and_then(|&prev| Some((f.result(prev)?, *f.op(prev))));
             if f.result(i)
                 .is_some_and(|v| !ctx.defs[v].register && ctx.defs[v].pure)
             {
@@ -230,11 +243,11 @@ pub(super) fn select<I>(
             }
             emit(&mut ctx, Root::Inst(i))?;
         }
-        #[cfg(feature = "experimental-simd")]
-        {
-            ctx.previous = None;
+        let out = &mut blocks[b];
+        out.reserve(selected.len());
+        for group in groups.iter().rev() {
+            out.extend_from_slice(&selected[group.clone()]);
         }
-        out.reverse();
     }
     Ok(blocks)
 }

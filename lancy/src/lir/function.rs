@@ -63,6 +63,8 @@ impl<I: TargetInst> Function<I> {
         Ok(reg)
     }
 
+    /// Append an instruction to the open block: the one the next
+    /// [`Self::end_block`] closes. Blocks are numbered in the order they close.
     pub fn push(&mut self, inst: I) {
         inst.operands(&self.machine, &mut self.operands);
         self.operand_ends.push(self.operands.len());
@@ -101,6 +103,8 @@ impl<I: TargetInst> Function<I> {
         self.backedges[self.blocks[block.index()].edges.start + edge]
     }
 
+    /// Add a successor edge of the open block, in the order of its branch's
+    /// targets.
     pub fn edge(&mut self, target: Block, args: impl IntoIterator<Item = VReg>, backedge: bool) {
         self.predecessors[target.index()].push(Block::new(self.blocks.len()));
         self.successors.push(target);
@@ -124,6 +128,21 @@ impl<I: TargetInst> Function<I> {
             .last()
             .map_or(Inst::new(0), |b| b.insts.last().next());
         let edge_start = self.blocks.last().map_or(0, |b| b.edges.end);
+        if cfg!(debug_assertions) {
+            // The open block ends with its only control transfer, and only a
+            // branch has edges.
+            let insts = &self.insts[first.index()..];
+            let last = insts.last().expect("a block ends with a branch or return");
+            assert!(last.is_branch() || last.is_ret(), "a block ends with a branch or return");
+            assert!(
+                insts[..insts.len() - 1].iter().all(|i| !i.is_branch() && !i.is_ret()),
+                "a control transfer ends its block"
+            );
+            assert!(
+                last.is_branch() || self.successors.len() == edge_start,
+                "a return has no edges"
+            );
+        }
         let start = self.block_values.len();
         self.block_values.extend(params);
         self.blocks.push(BlockData {
