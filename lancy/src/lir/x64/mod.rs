@@ -5,6 +5,7 @@ mod frame;
 mod inst;
 mod isel;
 mod schedule;
+mod vex;
 #[cfg(test)]
 mod tests;
 

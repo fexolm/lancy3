@@ -1,8 +1,8 @@
 use super::Rules;
 use crate::lir::frame::argument_words;
 use crate::{
-    hir::{Call, Op, Simd, Terminator, Type},
-    lir::x64::inst::{Cond, Inst},
+    hir::{Binary, Call, Op, Simd, Terminator, Value},
+    lir::x64::inst::{Cond, Inst, Int},
     module::FunctionId,
 };
 use regalloc2::PRegSet;
@@ -13,6 +13,10 @@ impl Rules<'_> {
             Terminator::Return(v) => Inst::Ret(self.input(v)),
             Terminator::Jump(_) => Inst::Jump,
             Terminator::Branch { cond, .. } => match self.ctx.single_use(cond) {
+                Some(Op::Bin(kind, a, b)) if self.integer_condition(kind, a).is_some() => {
+                    let (cc, int) = self.integer_condition(kind, a).unwrap();
+                    Inst::BrCmp(cc, int.bytes, self.input(a), self.rhs(b))
+                }
                 Some(Op::Simd(Simd::AnyTrue(v))) => Inst::BranchAny(self.vector_mask(v)),
                 Some(Op::Simd(Simd::AllTrue(v))) if self.masks.contains(v) => {
                     Inst::BranchAll(self.ty(v).lane().unwrap(), self.input(v))
@@ -20,16 +24,15 @@ impl Rules<'_> {
                 Some(Op::Simd(Simd::AllTrue(v))) if cfg!(feature = "experimental-simd") => self
                     .experimental_all_true(v)
                     .unwrap_or_else(|| Inst::Branch(self.input(cond))),
-                Some(Op::Bin(kind, a, b)) if self.ty(a) == Type::I32 => {
-                    if let Some(cc) = Cond::from_binary(kind) {
-                        Inst::BrCmp(cc, self.input(a), self.rhs(b))
-                    } else {
-                        Inst::Branch(self.input(cond))
-                    }
-                }
                 _ => Inst::Branch(self.input(cond)),
             },
         }
+    }
+
+    /// The condition code of an integer comparison.
+    pub(super) fn integer_condition(&self, kind: Binary, lhs: Value) -> Option<(Cond, Int)> {
+        let int = Int::of(self.ty(lhs))?;
+        Some((Cond::from_binary(kind, int.signed)?, int))
     }
 
     pub(super) fn call(

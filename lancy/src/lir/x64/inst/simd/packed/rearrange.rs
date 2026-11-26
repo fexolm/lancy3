@@ -88,14 +88,48 @@ impl PairedShuffle {
     }
 }
 
+/// SCRATCH = the SSE2 mask of the dword lane that the `index` register
+/// names. The pool is unaligned, so the lane numbers load into `temp`.
+fn lane_mask(
+    a: &mut CodeAssembler,
+    pool: &mut emit::Constants,
+    index: usize,
+    temp: usize,
+) -> Result {
+    let x = XMM[SCRATCH];
+    let label = a.create_label();
+    pool.push((label, crate::lir::constants::iota_bytes(Lane::I32, 16), 16));
+    a.movdqu(XMM[temp], xmmword_ptr(label))?;
+    a.movd(x, emit::R32[index])?;
+    a.pshufd(x, x, 0)?;
+    a.pcmpeqd(x, XMM[temp])
+}
+
 pub(in crate::lir::x64) fn extract_dword(
     a: &mut CodeAssembler,
+    pool: &mut emit::Constants,
     width: usize,
     lane: Lane,
     [dst, src, index]: [usize; 3],
+    temp: Option<usize>,
 ) -> Result {
     use emit::R32;
     let x = XMM[SCRATCH];
+    if width == 16 {
+        let temp = temp.expect("SSE2 lane temporary");
+        let t = XMM[temp];
+        lane_mask(a, pool, index, temp)?;
+        a.pand(x, XMM[src])?;
+        a.pshufd(t, x, 0x4e)?;
+        a.por(x, t)?;
+        a.pshufd(t, x, 0xb1)?;
+        a.por(x, t)?;
+        return if lane.float() {
+            a.movaps(XMM[dst], x)
+        } else {
+            a.movd(R32[dst], x)
+        };
+    }
     a.vmovd(x, R32[index])?;
     if width == 32 {
         a.vpermd(YMM[SCRATCH], YMM[SCRATCH], YMM[src])?;
@@ -119,6 +153,22 @@ pub(in crate::lir::x64) fn insert_dword(
     temp: Option<usize>,
 ) -> Result {
     use emit::R32;
+    if width == 16 {
+        // dst = src & !mask | splat(replacement) & mask
+        let temp = temp.expect("SSE2 lane temporary");
+        let (x, t) = (XMM[SCRATCH], XMM[temp]);
+        lane_mask(a, pool, index, temp)?;
+        if lane.float() {
+            a.pshufd(t, XMM[replacement], 0)?;
+        } else {
+            a.movd(t, R32[replacement])?;
+            a.pshufd(t, t, 0)?;
+        }
+        a.pand(t, x)?;
+        a.pandn(x, XMM[src])?;
+        a.por(x, t)?;
+        return a.movaps(XMM[dst], x);
+    }
     let label = a.create_label();
     pool.push((
         label,
@@ -334,6 +384,21 @@ impl Rule {
                     _ => width!(vpcmpuq, vpermt2q),
                 }
             }
+            Self::Shuffle if v.width == 16 => {
+                // Each source lane j of x:y lands where the index equals j;
+                // other indices match no lane and leave zero.
+                let (i, t, s) = (r[2], t[0], crate::lir::x64::inst::SCRATCH);
+                v.zero(d)?;
+                for j in 0..8u8 {
+                    let from = if j < 4 { x } else { y };
+                    v.splat(t, 4, u64::from(j))?;
+                    v.a.pcmpeqd(XMM[t], XMM[i])?;
+                    v.a.pshufd(XMM[s], XMM[from], i32::from(j % 4) * 0x55)?;
+                    v.a.pand(XMM[t], XMM[s])?;
+                    v.a.por(XMM[d], XMM[t])?;
+                }
+                Ok(())
+            }
             Self::Shuffle => {
                 let i = r[2];
                 let (a, b, c) = (t[0], t[1], t[2]);
@@ -445,6 +510,7 @@ impl Rule {
                 }
                 Ok(())
             }
+            Self::Reduce(op) if e.float() => ordered_reduce(v, op, n, d, x, t),
             Self::Reduce(op) => {
                 // These operations are associative modulo the lane width. Strict FP folds use the ordered emitter.
                 let a = t[0];
@@ -505,6 +571,55 @@ impl Rule {
         }
     }
 }
+/// Fold lanes into lane 0 of `d` in increasing order, one rounding each.
+fn ordered_reduce(v: &mut Vector, op: B, n: usize, d: usize, x: usize, t: &[usize]) -> Result {
+    let vex = v.cpu.isa.avx;
+    let (lane, chunk) = (t[0], t[1]);
+    for c in 0..v.width / 16 {
+        let part = match (c, v.width) {
+            (0, _) => x,
+            (_, 32) => {
+                v.a.vextractf128(XMM[chunk], YMM[x], c as i32)?;
+                chunk
+            }
+            _ => {
+                v.a.vextractf32x4(XMM[chunk], ZMM[x], c as i32)?;
+                chunk
+            }
+        };
+        for j in 0..16 / n {
+            if c == 0 && j == 0 {
+                v.mov(d, x)?;
+                continue;
+            }
+            let from = if j == 0 {
+                part
+            } else {
+                // Move lane j of the part to position 0.
+                let order = if n == 4 { j as i32 } else { 0xee };
+                if vex {
+                    v.a.vpshufd(XMM[lane], XMM[part], order)?;
+                } else {
+                    v.a.pshufd(XMM[lane], XMM[part], order)?;
+                }
+                lane
+            };
+            let (d, f) = (XMM[d], XMM[from]);
+            match (op, n, vex) {
+                (B::Add, 4, false) => v.a.addss(d, f),
+                (B::Add, 4, true) => v.a.vaddss(d, d, f),
+                (B::Add, _, false) => v.a.addsd(d, f),
+                (B::Add, _, true) => v.a.vaddsd(d, d, f),
+                (_, 4, false) => v.a.mulss(d, f),
+                (_, 4, true) => v.a.vmulss(d, d, f),
+                (_, _, false) => v.a.mulsd(d, f),
+                (_, _, true) => v.a.vmulsd(d, d, f),
+            }?;
+        }
+    }
+    Ok(())
+}
+
 fn upper(v: &mut Vector, d: usize, x: usize) -> Result {
     match v.width {
         16 => {

@@ -13,19 +13,18 @@ fn main(x:f64) -> u128
   ret wide
 @isel check: fallback.f64.cast
 ---
+# 16-bit fused multiply-add has no x86 form below AVX512-FP16 and is cold:
+# it calls the fallback, which rounds once.
 fn main(x:f16 y:f16 z:f16) -> f16
   answer = fma x y z
   ret answer
-@asm check: endbr64
-@asm not: call
-@asm check: ret
+@isel check: fallback.f16.fma
+@run 0x3c00_f16 0x3c00_f16 0x3c00_f16 -> 0x4000_f16
 ---
 fn main(x:vec.bf16 y:vec.bf16 z:vec.bf16) -> vec.bf16
   answer = fma x y z
   ret answer
-@asm check: endbr64
-@asm not: call
-@asm check: ret
+@isel check: fallback.vec.bf16.fma
 ---
 # Exposing the low address bits permits alignment arithmetic on a slice.
 fn main(base:ptr i:i32) -> i32

@@ -1,0 +1,100 @@
+# Scalar integers of every size select general-register instructions, not
+# the out-of-line lane expansion. Narrow operands carry undefined upper bits,
+# so each sequence that reads them extends first.
+fn main(x:u32 y:u32) -> u32
+  m = min x y
+  ret m
+@isel check: alu.u32.min
+@isel not: lanes
+@run 4294967295 1 -> 1
+@run 3 4294967294 -> 3
+---
+fn main(x:i8 y:i8) -> i8
+  m = max x y
+  ret m
+@isel check: alu.i8.max
+@run -128 127 -> 127
+@run -1 -2 -> -1
+---
+fn main(x:i64 y:i64) -> i32
+  l = lt x y
+  ret l
+@isel check: cmp.lt.64
+@run -9223372036854775808 0 -> -1
+@run 1 -1 -> 0
+---
+fn main(x:u64 y:u64) -> u64
+  q = div x y
+  ret q
+@isel check: divide.high.u64
+@isel check: div.u64
+@run 18446744073709551615 2 -> 9223372036854775807
+---
+fn main(x:i8 y:i8) -> i8
+  q = div x y
+  ret q
+@isel check: extend.i8
+@run -128 -1 -> !overflow
+@run -128 2 -> -64
+@run 7 0 -> !zero
+---
+# The value is the count: the 8-bit shift reduces CL and keeps the result.
+fn main(x:i8) -> i8
+  s = shl x x
+  ret s
+@isel check: shl.i8
+@run 9 -> 18
+@run 3 -> 24
+---
+fn main(x:u16 y:u16) -> u16
+  s = shr x y
+  ret s
+@run 32768 17 -> 16384
+@run 65535 15 -> 1
+---
+fn main(x:i16 y:i16) -> i16
+  s = saturatingsub x y
+  ret s
+@isel check: subsat.i16
+@run -32768 1 -> -32768
+@run 32767 -1 -> 32767
+---
+fn main(x:i32) -> i32
+  n = neg x
+  ret n
+@isel check: neg.i32
+@run -2147483648 -> -2147483648
+@run 5 -> -5
+---
+fn main(x:i8) -> i8
+  n = abs x
+  ret n
+@isel check: abs.i8
+@run -128 -> -128
+@run -5 -> 5
+---
+fn main(x:u16) -> u16
+  n = leadingzeros x
+  ret n
+@isel check: clz.u16
+@run 0 -> 16
+@run 1 -> 15
+---
+fn main(x:u8) -> u8
+  n = trailingzeros x
+  ret n
+@run 0 -> 8
+@run 128 -> 7
+---
+fn main(x:i64) -> i64
+  n = popcnt x
+  ret n
+@run -1 -> 64
+@run 0 -> 0
+---
+fn main(c:i32 x:i64 y:i64) -> i64
+  s = select c x y
+  ret s
+@isel check: select.64
+@run -1 -9223372036854775808 1 -> -9223372036854775808
+@run 0 -9223372036854775808 1 -> 1

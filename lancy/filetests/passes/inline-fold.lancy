@@ -21,9 +21,9 @@ fn main(x:i32) -> i32
 @opt check: const 7
 @opt nextln: = add
 @opt nextln: ret
-@isel check: alu.add imm=7
-@isel not: alu.mul
-@alloc check: alu.add imm=7
+@isel check: alu.i32.add imm=7
+@isel not: alu.i32.mul
+@alloc check: alu.i32.add imm=7
 @asm check: add
 @asm sameln: ,7
 @run -7 -> 0

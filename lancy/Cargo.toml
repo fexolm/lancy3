@@ -16,7 +16,7 @@ splice-target = { path = "../splice-target", version = "0.1.0" }
 regalloc2 = "0.15.3"
 thiserror = "2"
 # Both backends build on every host; only executing code needs a match.
-iced-x86 = { version = "1.21", default-features = false, features = ["std", "code_asm"] }
+iced-x86 = { version = "1.21", default-features = false, features = ["std", "code_asm", "op_code_info"] }
 
 [dev-dependencies]
 filecheck = "0.5"

@@ -69,7 +69,7 @@ fn main(out:ptr x:i32) -> i32
   store next x
   ret x
 @isel check: store.i32
-@isel check: irem
+@isel check: rem.i32
 @isel check: store.i32
 @asm check: idiv
 @run -2147483648 -> !overflow | aa aa aa aa bb bb bb bb | 00 00 00 80 bb bb bb bb
@@ -81,6 +81,6 @@ fn main(x:i32) -> i32
   d = const 0
   q = div x d
   ret q
-@isel check: idiv
+@isel check: div.i32
 @asm check: idiv
 @run 7 -> !zero

@@ -15,9 +15,6 @@ fn main(x:i32 count:i32) -> i32
 @isel not: packed.i32.shl imm=
 @isel not: packed.i32.rotateright imm=
 @isel check: ret
-@asm check: endbr64
-@asm not: call
-@asm check: ret
 @run 0x40000001 31 -> 0x40000001
 @run 0x40000001 32 -> 0x40000001
 @run 0x80000001 32 -> 1

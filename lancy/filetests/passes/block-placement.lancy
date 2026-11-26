@@ -12,7 +12,7 @@ block body()
   jump head(next)
 block done()
   ret i
-@isel check: brcmp.lt
+@isel check: brcmp.lt.32
 @asm check: jge
 @run 0 -> 0 | ff ff ff ff | ff ff ff ff
 @run 1 -> 1 | ff ff ff ff | 01 00 00 00

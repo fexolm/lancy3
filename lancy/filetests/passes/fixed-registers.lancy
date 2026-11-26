@@ -5,13 +5,13 @@ fn main(x:i32 y:i32) -> i32
 
 @opt check: = rem
 @opt nextln: = shl
-@isel check: cdq
-@isel nextln: irem
+@isel check: divide.high.i32
+@isel nextln: rem.i32
 @isel nextln: shl
-@alloc check: cdq | rax rdx
-@alloc check: irem | rax rdx
+@alloc check: divide.high.i32 | rax rdx
+@alloc check: rem.i32 | rax rdx
 @alloc sameln: rdx
-@alloc check: shl |
+@alloc check: shl.i32 |
 @alloc sameln: rcx
 @asm check: cdq
 @asm check: idiv

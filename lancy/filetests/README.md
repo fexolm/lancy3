@@ -21,7 +21,7 @@ fn main(x:i32) -> i32
 
 @source check: = add
 @opt check: const 7
-@isel check: alu.add imm=7
+@isel check: alu.i32.add imm=7
 @run -7 -> 0
 @run 2147483647 -> -2147483642
 ```
