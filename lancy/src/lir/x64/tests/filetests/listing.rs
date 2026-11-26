@@ -1,14 +1,14 @@
 use crate::filetests::listing::list;
 use crate::lir::{
     self,
-    x64::inst::{Address, Inst, Rhs, VectorMask},
+    x64::inst::{Address, Details, Inst, Rhs, VectorMask},
 };
 use crate::module::FunctionId;
 use iced_x86::{Decoder, DecoderOptions, Formatter, IntelFormatter};
 use regalloc2::{Allocation, Edit, Function as _, InstOrEdit, Output};
 use std::fmt::Write;
 
-fn opcode(inst: Inst) -> String {
+fn opcode(inst: Inst, details: &Details) -> String {
     let rhs = |arg| match arg {
         Rhs::Imm(i) => format!(" imm={i}"),
         Rhs::Reg(_) => String::new(),
@@ -31,9 +31,18 @@ fn opcode(inst: Inst) -> String {
     match inst {
         Inst::Argv(_) => "argv".into(),
         Inst::LoadArg { index, .. } => format!("arg {index}"),
-        Inst::Native(n, ..) => format!("native.{:?}.{:?}", n.input, n.action),
-        Inst::Lanes { input, action, .. } => format!("lanes.{input:?}.{action:?}"),
-        Inst::Fallback { input, action, .. } => format!("fallback.{input:?}.{action:?}"),
+        Inst::Native(id) => {
+            let n = details.natives[id].native;
+            format!("native.{:?}.{:?}", n.input, n.action)
+        }
+        Inst::Lanes(id) => {
+            let e = details.expansions[id];
+            format!("lanes.{:?}.{:?}", e.input, e.action)
+        }
+        Inst::Fallback(id) => {
+            let e = details.expansions[id];
+            format!("fallback.{:?}.{:?}", e.input, e.action)
+        }
         Inst::Literal(l, n, _) => format!("literal.{l:?} {n:#x}"),
         Inst::Iota(l, _) => format!("iota.{l:?}"),
         Inst::BitMove(from, to, ..) => format!("bitcast.{from:?}.{to:?}"),
@@ -51,7 +60,7 @@ fn opcode(inst: Inst) -> String {
         Inst::BranchAny(mask) => format!("branch.any{}", mask_kind(mask)),
         Inst::AnyMask(_, mask) => format!("any.mask{}", mask_kind(mask)),
         Inst::AllMask(lane, ..) => format!("all.mask.{lane:?}"),
-        Inst::SelectMask { mask, .. } => format!("select.mask{}", mask_kind(mask)),
+        Inst::SelectMask(id) => format!("select.mask{}", mask_kind(details.selects[id].mask)),
         Inst::MaskCompare(lane, cc, ..) => format!("mask.cmp.{lane:?} {cc}"),
         Inst::MaskLogic(lane, op, ..) => format!("mask.{op:?}.{lane:?}"),
         Inst::MaskNot(lane, ..) => format!("mask.not.{lane:?}"),
@@ -90,11 +99,19 @@ fn opcode(inst: Inst) -> String {
         ),
         Inst::Movsxd(..) => "movsxd".into(),
         Inst::Lea(_, a) => format!("lea {}", addr(a)),
-        Inst::Masked { ty, dst, mask, .. } => format!(
-            "masked{}.{ty:?}{}",
-            if dst.is_some() { "load" } else { "store" },
-            mask_kind(mask)
-        ),
+        Inst::Masked(id) => {
+            let access = details.masked[id];
+            format!(
+                "masked{}.{:?}{}",
+                if access.dst.is_some() {
+                    "load"
+                } else {
+                    "store"
+                },
+                access.ty,
+                mask_kind(access.mask)
+            )
+        }
         Inst::Load(t, _, a) => format!("load.{t:?} {}", addr(a)),
         Inst::PackedMemory(kind, _, _, _, a) => format!("packed.{kind:?}.mem {}", addr(a)),
         Inst::BroadcastMemory(lane, _, a) => format!("broadcast.{lane:?}.mem {}", addr(a)),
@@ -124,7 +141,11 @@ fn opcode(inst: Inst) -> String {
         Inst::StoreArg(i, ..) => format!("store_arg {i}"),
         Inst::Call {
             target, clobbers, ..
-        } => format!("call f{} clobbers={clobbers:?}", target.index()),
+        } => format!(
+            "call f{} clobbers={:?}",
+            target.index(),
+            details.clobbers[clobbers]
+        ),
         Inst::Jump => "jump".into(),
         Inst::Branch(_) => "branch".into(),
         Inst::Ret(_) => "ret".into(),
@@ -165,7 +186,7 @@ pub(super) fn lir(
     for i in 0..f.num_blocks() {
         let b = regalloc2::Block::new(i);
         writeln!(out, "b{i}({})", list(f.block_params(b))).unwrap();
-        let inst = |i: regalloc2::Inst| opcode(f.insts()[i.index()]);
+        let inst = |i: regalloc2::Inst| opcode(f.insts()[i.index()], f.details());
         if let Some(a) = allocation {
             for item in a.block_insts_and_edits(f, b) {
                 match item {

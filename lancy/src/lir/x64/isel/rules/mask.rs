@@ -3,7 +3,7 @@ use super::Rules;
 use crate::{
     CompileError,
     hir::{Binary, Lane, Op, Simd, Ternary, Type, Value},
-    lir::x64::inst::{Inst, VectorMask, simd::comparison_predicate},
+    lir::x64::inst::{Inst, MaskSelect, VectorMask, simd::comparison_predicate},
 };
 use regalloc2::{RegClass, VReg};
 
@@ -59,13 +59,16 @@ impl Rules<'_> {
             }
         }
         match op {
-            Op::Ternary(Ternary::Select, cond, yes, no) => Some(Inst::SelectMask {
-                lane: self.ty(yes).lane()?,
-                mask: self.opmask(cond).or_else(|| self.comparison_mask(cond))?,
-                yes: self.input(yes),
-                no: self.input(no),
-                dst: self.dst(),
-            }),
+            Op::Ternary(Ternary::Select, cond, yes, no) => {
+                let select = MaskSelect {
+                    lane: self.ty(yes).lane()?,
+                    mask: self.opmask(cond).or_else(|| self.comparison_mask(cond))?,
+                    yes: self.input(yes),
+                    no: self.input(no),
+                    dst: self.dst(),
+                };
+                Some(self.body.details_mut().select(select))
+            }
             Op::Simd(Simd::AnyTrue(value)) => Some(Inst::AnyMask(
                 self.dst(),
                 self.opmask(value).or_else(|| self.comparison_mask(value))?,

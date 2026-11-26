@@ -1,4 +1,4 @@
-use super::inst::{Alu, Inst};
+use super::inst::{Alu, Details, Inst};
 use crate::{
     hir::{Binary, Lane},
     lir::schedule::{Schedulable, Scheduling},
@@ -6,21 +6,23 @@ use crate::{
 };
 
 impl Schedulable for Inst {
-    fn scheduling(&self) -> Scheduling {
+    fn scheduling(&self, details: &Details) -> Scheduling {
         use Scheduling::{Barrier, Compute, Load, Ordered};
         match *self {
             Self::Load(..) | Self::PackedMemory(..) | Self::BroadcastMemory(..) => Load(5),
-            Self::Masked {
-                dst: Some(_),
-                indices,
-                ..
-            } => Load(if indices.is_some() { 9 } else { 5 }),
+            Self::Masked(id) => {
+                let access = details.masked[id];
+                match (access.dst, access.index) {
+                    (Some(_), Some(_)) => Load(9),
+                    (Some(_), None) => Load(5),
+                    (None, _) => Ordered(1),
+                }
+            }
             Self::CheckBounds(..)
             | Self::TrapIf(..)
             | Self::Trap(_)
             | Self::CheckMask(..)
             | Self::Store(..)
-            | Self::Masked { dst: None, .. }
             | Self::CompactStore { .. }
             | Self::StoreArg(..) => Ordered(1),
             Self::DwordLane { checked: true, .. } => Ordered(4),
@@ -32,16 +34,19 @@ impl Schedulable for Inst {
             | Self::MaskCount(..)
             | Self::AnyMask(..)
             | Self::AllMask(..)
-            | Self::SelectMask { .. } => Compute(3),
+            | Self::SelectMask(_) => Compute(3),
             Self::Alu(Alu::Mul, ..) | Self::IntBinary(Binary::Mul, ..) => Compute(3),
-            Self::Native(native, ..) => match native.action {
-                Action::Binary(Binary::Div) if native.input.lane().is_some_and(Lane::float) => {
-                    Compute(12)
+            Self::Native(id) => {
+                let native = details.natives[id].native;
+                match native.action {
+                    Action::Binary(Binary::Div) if native.input.lane().is_some_and(Lane::float) => {
+                        Compute(12)
+                    }
+                    Action::Binary(Binary::Div | Binary::Rem) => Barrier,
+                    Action::Binary(Binary::Mul) | Action::Ternary(_) => Compute(4),
+                    _ => Compute(if native.separate_output() { 4 } else { 1 }),
                 }
-                Action::Binary(Binary::Div | Binary::Rem) => Barrier,
-                Action::Binary(Binary::Mul) | Action::Ternary(_) => Compute(4),
-                _ => Compute(if native.separate_output() { 4 } else { 1 }),
-            },
+            }
             Self::DivImm { .. } => Compute(5),
             Self::BroadcastLane(..)
             | Self::ExtractLane(..)
@@ -69,8 +74,8 @@ impl Schedulable for Inst {
             // and terminators keep their place.
             Self::IDiv { .. }
             | Self::Cdq { .. }
-            | Self::Lanes { .. }
-            | Self::Fallback { .. }
+            | Self::Lanes(_)
+            | Self::Fallback(_)
             | Self::Call { .. }
             | Self::RustCall(..)
             | Self::Argv(_)

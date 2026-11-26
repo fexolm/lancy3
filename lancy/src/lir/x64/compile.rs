@@ -111,7 +111,7 @@ pub(super) fn written_regs(f: &lir::Function<Inst>, allocation: &Output) -> (PRe
     let defined = defined_registers(f, allocation);
     let mut written = defined;
     for op in f.insts() {
-        written.union_from(op.clobbers(f.machine()));
+        written.union_from(op.clobbers(f.machine(), f.details()));
     }
     // Move resolution may also write R10, which is reserved throughout
     // the internal ABI and cannot hold a caller value across a call.

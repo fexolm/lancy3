@@ -2,7 +2,10 @@ use super::Rules;
 use crate::{
     CompileError,
     hir::{Op, Scale, Simd, Type, Value, VectorAddress},
-    lir::x64::inst::{Address, Inst, VectorMask, simd::evex_masked_memory},
+    lir::x64::inst::{
+        Address, Inst, VectorMask,
+        simd::{MaskedMemory, evex_masked_memory},
+    },
 };
 use regalloc2::RegClass;
 
@@ -70,15 +73,16 @@ impl Rules<'_> {
             && (evex || vex)
             && matches!(self.ctx.defining_op(value), Some(Op::Simd(Simd::Splat(x))) if
                 matches!(self.ctx.defining_op(x), Some(Op::Const(0) | Op::Literal(_, 0))));
-        Ok(Inst::Masked {
+        let access = MaskedMemory {
             ty,
             base,
-            indices,
+            index: indices,
             temp,
             mask,
             value: (!zero).then(|| self.input(value)),
             dst,
-        })
+        };
+        Ok(self.body.details_mut().masked(access))
     }
 
     /// `canonical::expand` leaves a compressing store only where

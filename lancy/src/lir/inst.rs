@@ -5,10 +5,13 @@ pub(super) trait TargetInst: Copy {
     /// What operands and clobbers depend on: the calling convention and the
     /// vector width the function is compiled for.
     type Machine: Copy;
+    /// The function's table of instruction payloads too large to keep in
+    /// the instruction itself, which holds an index into it.
+    type Details: Default;
     /// Append one operand per value the instruction reads or writes; the
     /// emitter finds each allocation by its value (`regalloc::Allocations`).
-    fn operands(&self, machine: &Self::Machine, out: &mut Vec<Operand>);
-    fn clobbers(&self, machine: &Self::Machine) -> PRegSet;
+    fn operands(&self, machine: &Self::Machine, details: &Self::Details, out: &mut Vec<Operand>);
+    fn clobbers(&self, machine: &Self::Machine, details: &Self::Details) -> PRegSet;
     /// The frame-local region this instruction addresses, if any.
     fn frame_use(&self, machine: &Self::Machine) -> Option<super::frame::FrameUse>;
     fn is_branch(&self) -> bool;

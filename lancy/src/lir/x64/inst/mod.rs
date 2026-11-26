@@ -6,13 +6,14 @@ pub(super) use super::abi::SCRATCH;
 use super::abi::{MASKS, Machine, gprs, vectors};
 use crate::hir::{Binary, Lane, RustFunction, Scale, Type};
 use crate::support::numeric::Action;
+use crate::support::slotmap::DenseMap;
 use crate::{
     lir::{TargetInst, frame::FrameUse},
     module::FunctionId,
 };
 use regalloc2::{MachineEnv, Operand, PReg, PRegSet, RegClass, VReg};
-use simd::Native;
 use simd::packed::rearrange::PairedShuffle;
+use simd::{MaskedMemory, Native};
 
 #[derive(Clone, Copy, Debug)]
 pub(super) enum VectorMask<R> {
@@ -174,22 +175,10 @@ pub(super) enum Inst {
         ty: Type,
         index: usize,
     },
-    Native(Native, VReg, [Option<VReg>; 3], [Option<VReg>; 6]),
+    Native(NativeId),
     /// Call the shared numeric fallback (`lir::fallback`).
-    Fallback {
-        action: Action,
-        input: Type,
-        output: Type,
-        dst: VReg,
-        args: [Option<(Type, VReg)>; 3],
-    },
-    Lanes {
-        action: Action,
-        input: Type,
-        output: Type,
-        dst: VReg,
-        args: [Option<(Type, VReg)>; 3],
-    },
+    Fallback(ExpansionId),
+    Lanes(ExpansionId),
     Literal(Lane, u128, VReg),
     Iota(Lane, VReg),
     BitMove(Type, Type, VReg, VReg),
@@ -237,13 +226,7 @@ pub(super) enum Inst {
     BranchAll(Lane, VReg),
     AllMask(Lane, VReg, VReg),
     AnyMask(VReg, VectorMask<VReg>),
-    SelectMask {
-        lane: Lane,
-        mask: VectorMask<VReg>,
-        yes: VReg,
-        no: VReg,
-        dst: VReg,
-    },
+    SelectMask(SelectId),
     MaskCompare(Lane, i32, VReg, VReg, VReg),
     MaskLogic(Lane, Binary, VReg, VReg, VReg),
     MaskNot(Lane, VReg, VReg),
@@ -280,15 +263,7 @@ pub(super) enum Inst {
         temp: Option<VReg>,
     },
     VectorShiftImm(Binary, Lane, VReg, VReg, u8),
-    Masked {
-        ty: Type,
-        base: VReg,
-        indices: Option<VReg>,
-        temp: Option<VReg>,
-        mask: VectorMask<VReg>,
-        value: Option<VReg>,
-        dst: Option<VReg>,
-    },
+    Masked(MaskedId),
     Store(Type, Address, VReg),
     DebugStore(Type, u32, VReg),
     DebugPoint(u32),
@@ -296,7 +271,7 @@ pub(super) enum Inst {
     Call {
         target: FunctionId,
         dst: VReg,
-        clobbers: PRegSet,
+        clobbers: ClobberId,
     },
     RustCall(&'static RustFunction, [VReg; 4], VReg),
     /// Address of the frame's scratch memory at a byte offset, with the
@@ -307,21 +282,84 @@ pub(super) enum Inst {
     Ret(VReg),
 }
 
-impl Inst {
-    pub fn call(target: FunctionId, dst: VReg, mut written: PRegSet) -> Self {
+crate::slot_key!(pub(super) NativeId);
+crate::slot_key!(pub(super) ExpansionId);
+crate::slot_key!(pub(super) SelectId);
+crate::slot_key!(pub(super) MaskedId);
+crate::slot_key!(pub(super) ClobberId);
+
+/// An operation with a native vector or scalar form.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct NativeInst {
+    pub native: Native,
+    pub dst: VReg,
+    pub args: [Option<VReg>; 3],
+    pub temps: [Option<VReg>; 6],
+}
+
+/// An operation computed out of line: by the numeric fallback or by the
+/// inline lane expansion, from typed arguments.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct Expansion {
+    pub action: Action,
+    pub input: Type,
+    pub output: Type,
+    pub dst: VReg,
+    pub args: [Option<(Type, VReg)>; 3],
+}
+
+/// A lane select by a vector mask.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct MaskSelect<R = VReg> {
+    pub lane: Lane,
+    pub mask: VectorMask<R>,
+    pub yes: R,
+    pub no: R,
+    pub dst: R,
+}
+
+/// The function's instruction payloads too large to keep in [`Inst`],
+/// which holds their keys. Selection stores a payload and pushes the key.
+#[derive(Default)]
+pub(super) struct Details {
+    pub natives: DenseMap<NativeId, NativeInst>,
+    pub expansions: DenseMap<ExpansionId, Expansion>,
+    pub selects: DenseMap<SelectId, MaskSelect>,
+    pub masked: DenseMap<MaskedId, MaskedMemory<VReg>>,
+    pub clobbers: DenseMap<ClobberId, PRegSet>,
+}
+
+impl Details {
+    pub fn native(&mut self, native: NativeInst) -> Inst {
+        Inst::Native(self.natives.insert(native))
+    }
+    pub fn fallback(&mut self, expansion: Expansion) -> Inst {
+        Inst::Fallback(self.expansions.insert(expansion))
+    }
+    pub fn lanes(&mut self, expansion: Expansion) -> Inst {
+        Inst::Lanes(self.expansions.insert(expansion))
+    }
+    pub fn select(&mut self, select: MaskSelect) -> Inst {
+        Inst::SelectMask(self.selects.insert(select))
+    }
+    pub fn masked(&mut self, access: MaskedMemory<VReg>) -> Inst {
+        Inst::Masked(self.masked.insert(access))
+    }
+    /// A call writes what the callee writes, except its result register.
+    pub fn call(&mut self, target: FunctionId, dst: VReg, mut written: PRegSet) -> Inst {
         written.remove(return_reg(dst));
-        let clobbers = written;
-        Self::Call {
+        Inst::Call {
             target,
             dst,
-            clobbers,
+            clobbers: self.clobbers.insert(written),
         }
     }
 }
 
 impl TargetInst for Inst {
     type Machine = Machine;
-    fn operands(&self, machine: &Machine, out: &mut Vec<Operand>) {
+    type Details = Details;
+    fn operands(&self, machine: &Machine, details: &Details, out: &mut Vec<Operand>) {
         use Operand as O;
         match *self {
             Self::Argv(v) => out.push(O::reg_fixed_def(v, machine.abi.args[0])),
@@ -329,7 +367,13 @@ impl TargetInst for Inst {
                 out.extend(argv.map(O::reg_use));
                 out.push(O::reg_def(dst));
             }
-            Self::Native(native, d, args, temps) => {
+            Self::Native(id) => {
+                let NativeInst {
+                    native,
+                    dst: d,
+                    args,
+                    temps,
+                } = details.natives[id];
                 out.extend(args.into_iter().flatten().map(O::reg_use));
                 out.push(if native.separate_output() {
                     O::reg_def_at_start(d)
@@ -340,7 +384,8 @@ impl TargetInst for Inst {
                 });
                 out.extend(temps.into_iter().flatten().map(O::reg_temp));
             }
-            Self::Lanes { dst, args, .. } | Self::Fallback { dst, args, .. } => {
+            Self::Lanes(id) | Self::Fallback(id) => {
+                let Expansion { dst, args, .. } = details.expansions[id];
                 out.extend(args.into_iter().flatten().map(|(_, reg)| O::reg_use(reg)));
                 out.push(O::reg_fixed_def(dst, return_reg(dst)));
             }
@@ -422,9 +467,10 @@ impl TargetInst for Inst {
                 mask.operands(out);
                 out.push(O::reg_def(d));
             }
-            Self::SelectMask {
-                mask, yes, no, dst, ..
-            } => {
+            Self::SelectMask(id) => {
+                let MaskSelect {
+                    mask, yes, no, dst, ..
+                } = details.selects[id];
                 mask.operands(out);
                 out.extend([O::reg_use(yes), O::reg_use(no), O::reg_def(dst)]);
             }
@@ -478,17 +524,18 @@ impl TargetInst for Inst {
                 O::reg_temp(bits),
                 O::reg_temp(prefix),
             ]),
-            Self::Masked {
-                base,
-                indices,
-                temp,
-                mask,
-                value,
-                dst,
-                ..
-            } => {
+            Self::Masked(id) => {
+                let MaskedMemory {
+                    base,
+                    index,
+                    temp,
+                    mask,
+                    value,
+                    dst,
+                    ..
+                } = details.masked[id];
                 out.push(O::reg_use(base));
-                out.extend(indices.map(O::reg_use));
+                out.extend(index.map(O::reg_use));
                 mask.operands(out);
                 out.extend(value.map(O::reg_use));
                 out.extend(dst.map(O::reg_def));
@@ -517,7 +564,7 @@ impl TargetInst for Inst {
             Self::Jump | Self::DebugPoint(_) | Self::Trap(_) => {}
         }
     }
-    fn clobbers(&self, machine: &Machine) -> PRegSet {
+    fn clobbers(&self, machine: &Machine, details: &Details) -> PRegSet {
         let abi = machine.abi;
         // A wider value in a preserved vector register loses its upper lanes.
         let wide = machine.cpu.bytes > 16;
@@ -529,21 +576,21 @@ impl TargetInst for Inst {
             regs
         };
         match self {
-            Self::Call { clobbers, .. } => *clobbers,
+            Self::Call { clobbers, .. } => details.clobbers[*clobbers],
             Self::RustCall(..) => {
                 let mut regs = callee();
                 regs.remove(AX);
                 regs
             }
-            Self::Fallback { dst, .. } => {
+            Self::Fallback(id) => {
                 let mut set = callee();
-                set.remove(return_reg(*dst));
+                set.remove(return_reg(details.expansions[*id].dst));
                 set
             }
-            Self::Lanes { dst, .. } => {
+            Self::Lanes(id) => {
                 // The inline expansions use only these scratch registers.
                 let mut set = gprs(&[0, 1, 2, 8, 9]) | vectors(0, 3);
-                set.remove(return_reg(*dst));
+                set.remove(return_reg(details.expansions[*id].dst));
                 set
             }
             Self::IDiv { remainder, .. } => PRegSet::empty().with(if *remainder { AX } else { DX }),
@@ -586,4 +633,15 @@ impl TargetInst for Inst {
             1
         }
     }
+}
+
+#[cfg(test)]
+#[test]
+fn instructions_stay_small() {
+    // `Function` stores and the scheduler permutes instructions by value.
+    assert!(
+        std::mem::size_of::<Inst>() <= 32,
+        "{}",
+        std::mem::size_of::<Inst>()
+    );
 }

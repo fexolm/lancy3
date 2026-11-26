@@ -13,6 +13,7 @@ struct BlockData {
 
 pub(super) struct Function<I: TargetInst> {
     machine: I::Machine,
+    details: I::Details,
     insts: Vec<I>,
     blocks: Vec<BlockData>,
     predecessors: Vec<Vec<Block>>,
@@ -35,12 +36,22 @@ impl<I: TargetInst> Function<I> {
         &self.machine
     }
 
+    pub fn details(&self) -> &I::Details {
+        &self.details
+    }
+
+    /// Where selection stores an instruction's payload before pushing it.
+    pub fn details_mut(&mut self) -> &mut I::Details {
+        &mut self.details
+    }
+
     pub fn new(machine: I::Machine, blocks: usize, vregs: usize) -> Result<Self, CompileError> {
         if vregs > super::MAX_VALUES || blocks > i32::MAX as usize {
             return Err(CompileError::Unsupported(crate::Limit::Registers));
         }
         Ok(Self {
             machine,
+            details: I::Details::default(),
             insts: Vec::new(),
             blocks: Vec::with_capacity(blocks),
             predecessors: vec![Vec::new(); blocks],
@@ -66,7 +77,7 @@ impl<I: TargetInst> Function<I> {
     /// Append an instruction to the open block: the one the next
     /// [`Self::end_block`] closes. Blocks are numbered in the order they close.
     pub fn push(&mut self, inst: I) {
-        inst.operands(&self.machine, &mut self.operands);
+        inst.operands(&self.machine, &self.details, &mut self.operands);
         self.operand_ends.push(self.operands.len());
         self.insts.push(inst);
     }
@@ -87,7 +98,7 @@ impl<I: TargetInst> Function<I> {
         let mut at = self.operand_ends[start];
         for i in start..end {
             operands.clear();
-            self.insts[i].operands(&self.machine, operands);
+            self.insts[i].operands(&self.machine, &self.details, operands);
             self.operands[at..at + operands.len()].copy_from_slice(operands);
             at += operands.len();
             self.operand_ends[i + 1] = at;
@@ -196,7 +207,7 @@ impl<I: TargetInst> regalloc2::Function for Function<I> {
         &self.operands[self.operand_ends[i.index()]..self.operand_ends[i.index() + 1]]
     }
     fn inst_clobbers(&self, i: Inst) -> PRegSet {
-        self.insts[i.index()].clobbers(&self.machine)
+        self.insts[i.index()].clobbers(&self.machine, &self.details)
     }
     fn num_vregs(&self) -> usize {
         self.vregs

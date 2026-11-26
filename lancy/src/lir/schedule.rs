@@ -28,8 +28,8 @@ pub(super) enum Scheduling {
     Barrier,
 }
 
-pub(super) trait Schedulable {
-    fn scheduling(&self) -> Scheduling;
+pub(super) trait Schedulable: TargetInst {
+    fn scheduling(&self, details: &Self::Details) -> Scheduling;
 }
 
 fn members(mut mask: u64) -> impl Iterator<Item = usize> {
@@ -265,7 +265,7 @@ impl Workspace {
                     nodes[p].successors |= bit;
                 }
             };
-            nodes[n].latency = u16::from(match f.insts()[i].scheduling() {
+            nodes[n].latency = u16::from(match f.insts()[i].scheduling(f.details()) {
                 Scheduling::Load(latency) => {
                     follow(nodes, ordered);
                     loads |= bit;
@@ -356,7 +356,7 @@ pub(super) fn run<I: TargetInst + Schedulable>(f: &mut Function<I>) {
             let kind = if i == end {
                 Scheduling::Barrier
             } else {
-                f.insts()[i].scheduling()
+                f.insts()[i].scheduling(f.details())
             };
             if matches!(kind, Scheduling::Barrier) || i - start == WINDOW {
                 if i - start >= MIN_REGION && total >= 4 {

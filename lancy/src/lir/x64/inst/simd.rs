@@ -869,14 +869,30 @@ pub(in crate::lir::x64) fn evex_masked_memory(cpu: Cpu, size: usize, indexed: bo
     evex(cpu) && (matches!(size, 4 | 8) || !indexed && size <= 2 && cpu.isa.bw)
 }
 
-pub(in crate::lir::x64) struct MaskedMemory {
+/// A masked contiguous or indexed access through `base`: a load when it
+/// has `dst` (`value` fills the inactive lanes), otherwise a store of `value`.
+#[derive(Clone, Copy, Debug)]
+pub(in crate::lir::x64) struct MaskedMemory<R = usize> {
     pub ty: Type,
-    pub base: usize,
-    pub index: Option<usize>,
-    pub mask: VectorMask<usize>,
-    pub value: Option<usize>,
-    pub dst: Option<usize>,
-    pub temp: Option<usize>,
+    pub base: R,
+    pub index: Option<R>,
+    pub mask: VectorMask<R>,
+    pub value: Option<R>,
+    pub dst: Option<R>,
+    pub temp: Option<R>,
+}
+impl<R> MaskedMemory<R> {
+    pub(in crate::lir::x64) fn map<T>(self, mut reg: impl FnMut(R) -> T) -> MaskedMemory<T> {
+        MaskedMemory {
+            ty: self.ty,
+            base: reg(self.base),
+            index: self.index.map(&mut reg),
+            mask: self.mask.map(&mut reg),
+            value: self.value.map(&mut reg),
+            dst: self.dst.map(&mut reg),
+            temp: self.temp.map(reg),
+        }
+    }
 }
 impl MaskedMemory {
     pub(in crate::lir::x64) fn emit(

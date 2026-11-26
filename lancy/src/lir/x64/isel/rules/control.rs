@@ -45,6 +45,7 @@ impl Rules<'_> {
             self.out.push(Inst::StoreArg(index, ty, value));
         }
         let (target, written) = callee(site);
-        Inst::call(target, self.dst(), written)
+        let dst = self.dst();
+        self.body.details_mut().call(target, dst, written)
     }
 }

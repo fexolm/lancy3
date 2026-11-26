@@ -28,11 +28,12 @@ enum Kind {
 
 impl TargetInst for Fake {
     type Machine = ();
-    fn operands(&self, _: &(), out: &mut Vec<Operand>) {
+    type Details = ();
+    fn operands(&self, _: &(), _: &(), out: &mut Vec<Operand>) {
         out.extend(self.uses.iter().flatten().map(|&v| Operand::reg_use(v)));
         out.extend(self.def.map(Operand::reg_def));
     }
-    fn clobbers(&self, _: &()) -> PRegSet {
+    fn clobbers(&self, _: &(), _: &()) -> PRegSet {
         PRegSet::empty()
     }
     fn frame_use(&self, _: &()) -> Option<crate::lir::frame::FrameUse> {
@@ -65,7 +66,7 @@ impl TargetInst for Fake {
 }
 
 impl Schedulable for Fake {
-    fn scheduling(&self) -> Scheduling {
+    fn scheduling(&self, _: &()) -> Scheduling {
         match self.kind {
             Kind::Compute => Scheduling::Compute(1 + (self.id % 4) as u8),
             Kind::Load => Scheduling::Load(4),

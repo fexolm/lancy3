@@ -243,7 +243,8 @@ pub(super) enum Inst {
 
 impl TargetInst for Inst {
     type Machine = Config;
-    fn operands(&self, _: &Config, out: &mut Vec<Operand>) {
+    type Details = ();
+    fn operands(&self, _: &Config, _: &(), out: &mut Vec<Operand>) {
         let input = Operand::reg_use;
         let output = Operand::reg_def;
         match *self {
@@ -438,7 +439,7 @@ impl TargetInst for Inst {
         }
     }
 
-    fn clobbers(&self, _: &Config) -> PRegSet {
+    fn clobbers(&self, _: &Config, _: &()) -> PRegSet {
         match *self {
             Self::Call(_, written, ty, _) => {
                 let mut regs = call_clobbers() | written;
@@ -534,7 +535,7 @@ impl TargetInst for Inst {
 }
 
 impl Schedulable for Inst {
-    fn scheduling(&self) -> Scheduling {
+    fn scheduling(&self, _: &()) -> Scheduling {
         use Scheduling::{Barrier, Compute, Load, Ordered};
         match *self {
             Self::Load(..) => Load(5),

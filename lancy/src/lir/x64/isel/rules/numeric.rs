@@ -3,7 +3,7 @@ use crate::{
     CompileError,
     hir::operation::operation,
     hir::{Op, Simd},
-    lir::x64::inst::{Inst, lanes, simd::Native},
+    lir::x64::inst::{Expansion, Inst, NativeInst, lanes, simd::Native},
 };
 use regalloc2::RegClass;
 
@@ -44,21 +44,18 @@ impl Rules<'_> {
         let dst = self.dst();
         let Some(native) = Native::select(action, input, output, self.cpu) else {
             let args = args.map(|v| v.map(|v| (self.ty(v), self.input(v))));
-            if !lanes::inline(action, input, output) {
-                return Ok(Inst::Fallback {
-                    action,
-                    input,
-                    output,
-                    dst,
-                    args,
-                });
-            }
-            return Ok(Inst::Lanes {
+            let expansion = Expansion {
                 action,
                 input,
                 output,
                 dst,
                 args,
+            };
+            let details = self.body.details_mut();
+            return Ok(if lanes::inline(action, input, output) {
+                details.lanes(expansion)
+            } else {
+                details.fallback(expansion)
             });
         };
         let args = args.map(|v| v.map(|v| self.input(v)));
@@ -66,6 +63,11 @@ impl Rules<'_> {
         for temp in &mut temps[..native.temporaries()] {
             *temp = Some(self.body.temp(RegClass::Vector)?);
         }
-        Ok(Inst::Native(native, dst, args, temps))
+        Ok(self.body.details_mut().native(NativeInst {
+            native,
+            dst,
+            args,
+            temps,
+        }))
     }
 }

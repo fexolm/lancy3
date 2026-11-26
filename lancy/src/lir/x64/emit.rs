@@ -3,10 +3,11 @@ use super::{Cpu, Machine, abi::Abi, inst::class, inst::simd};
 use super::{
     compile::{CompiledFunction, compile},
     frame::{CHILD_ARGS, Frame},
-    inst::{Address, Alu, Cond, Inst, Quotient, Rhs, SelectCond},
+    inst::{
+        Address, Alu, Cond, Expansion, Inst, MaskSelect, NativeInst, Quotient, Rhs, SelectCond,
+    },
 };
 use crate::lir::regalloc::Allocations;
-use crate::support::numeric::Action;
 use crate::{
     CompileError, Limit, Trap,
     hir::{Binary, Type, ssa::VerifiedBody},
@@ -461,15 +462,14 @@ impl Emitter<'_> {
         Ok(())
     }
 
-    fn lanes(
-        &mut self,
-        action: Action,
-        input: Type,
-        output: Type,
-        args: [Option<(Type, VReg)>; 3],
-        dst: VReg,
-        allocs: Allocations,
-    ) -> AsmResult {
+    fn lanes(&mut self, expansion: Expansion, allocs: Allocations) -> AsmResult {
+        let Expansion {
+            action,
+            input,
+            output,
+            dst,
+            args,
+        } = expansion;
         use super::inst::lanes::{self, FRAME, INPUT, OUTPUT, WORKSPACE};
         let width = self.cpu.bytes;
         let a = &mut self.a;
@@ -507,15 +507,14 @@ impl Emitter<'_> {
 
     /// Call `lir::fallback` with the area below the Win64 shadow space and
     /// report its trap code. Every generated frame enters with RSP 8 mod 16.
-    fn fallback(
-        &mut self,
-        action: Action,
-        input: Type,
-        output: Type,
-        args: [Option<(Type, VReg)>; 3],
-        dst: VReg,
-        allocs: Allocations,
-    ) -> AsmResult {
+    fn fallback(&mut self, expansion: Expansion, allocs: Allocations) -> AsmResult {
+        let Expansion {
+            action,
+            input,
+            output,
+            dst,
+            args,
+        } = expansion;
         use crate::lir::fallback::{AREA_BYTES, RESULT, SLOT_BYTES, Site, entry};
         let (width, abi) = (self.cpu.bytes, self.abi);
         let area = abi.shadow;
@@ -555,6 +554,7 @@ impl Emitter<'_> {
         let width = cpu.bytes;
         let a = &mut *self.a;
         let frame = &self.machine.frame;
+        let details = self.machine.body.details();
         let reg = |v: VReg| allocs.reg(v);
         let r = |v| R32[reg(v)];
         let q = |v| R64[reg(v)];
@@ -583,7 +583,13 @@ impl Emitter<'_> {
                 ty,
                 index,
             } => load(a, width, ty, reg(dst), slot(CHILD_ARGS + index)),
-            Inst::Native(native, dst, args, temps) => {
+            Inst::Native(id) => {
+                let NativeInst {
+                    native,
+                    dst,
+                    args,
+                    temps,
+                } = details.natives[id];
                 let operands: Vec<usize> =
                     args.into_iter().flatten().chain([dst]).map(reg).collect();
                 let temps: Vec<usize> = temps.into_iter().flatten().map(reg).collect();
@@ -631,20 +637,8 @@ impl Emitter<'_> {
                 let (dst, src) = (reg(dst), reg(src));
                 simd::packed::integer::shift_dword_bits(a, cpu, kind, lane, dst, src, count)
             }
-            Inst::Fallback {
-                action,
-                input,
-                output,
-                args,
-                dst,
-            } => self.fallback(action, input, output, args, dst, allocs),
-            Inst::Lanes {
-                action,
-                input,
-                output,
-                args,
-                dst,
-            } => self.lanes(action, input, output, args, dst, allocs),
+            Inst::Fallback(id) => self.fallback(details.expansions[id], allocs),
+            Inst::Lanes(id) => self.lanes(details.expansions[id], allocs),
             Inst::Literal(l, bits, dst) => match l.bytes() {
                 16 => {
                     let label = a.create_label();
@@ -847,13 +841,16 @@ impl Emitter<'_> {
                 a.sete(R8[reg(dst)])?;
                 a.neg(r(dst))
             }
-            Inst::SelectMask {
-                lane,
-                mask,
-                yes,
-                no,
-                dst,
-            } => simd::blend_comparison(a, cpu, lane, mask.map(reg), reg(dst), reg(yes), reg(no)),
+            Inst::SelectMask(id) => {
+                let MaskSelect {
+                    lane,
+                    mask,
+                    yes,
+                    no,
+                    dst,
+                } = details.selects[id];
+                simd::blend_comparison(a, cpu, lane, mask.map(reg), reg(dst), reg(yes), reg(no))
+            }
             Inst::MaskCompare(lane, cc, dst, x, y) => {
                 simd::compare_mask(a, width, K[reg(dst)], lane, reg(x), reg(y), cc)
             }
@@ -913,24 +910,7 @@ impl Emitter<'_> {
             }
             Inst::Movsxd(dst, src) => a.movsxd(q(dst), r(src)),
             Inst::Lea(dst, addr) => a.lea(q(dst), memory(addr, allocs)),
-            Inst::Masked {
-                ty,
-                base,
-                indices,
-                temp,
-                mask,
-                value,
-                dst,
-            } => simd::MaskedMemory {
-                ty,
-                base: reg(base),
-                index: indices.map(reg),
-                mask: mask.map(reg),
-                value: value.map(reg),
-                dst: dst.map(reg),
-                temp: temp.map(reg),
-            }
-            .emit(a, self.cpu),
+            Inst::Masked(id) => details.masked[id].map(reg).emit(a, cpu),
             Inst::Load(ty, dst, addr) => load(a, width, ty, reg(dst), memory(addr, allocs)),
             Inst::PackedMemory(kind, lane, dst, src, addr) => {
                 let src = reg(src);
