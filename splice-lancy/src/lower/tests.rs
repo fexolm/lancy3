@@ -238,43 +238,6 @@ fn static_rust_packets_carry_words_in_order_in_both_staging_paths() {
 }
 
 #[test]
-fn reuses_shared_loads_across_writes_in_both_staging_paths() {
-    fn body(b: &mut dyn KernelBuilder) -> splice_core::Result<()> {
-        let zero = b.constant(Constant::from(0usize))?;
-        let before = b.load(Buffer(0), zero)?;
-        let at = b.cast(b.arg(0)?, ScalarType::Index)?;
-        b.store(Buffer(1), at, before)?;
-        let zero = b.constant(Constant::from(0usize))?;
-        let after = b.load(Buffer(0), zero)?;
-        let sum = b.binary(Binary::Add, before, after)?;
-        b.ret(sum)?;
-        Ok(())
-    }
-
-    for input in [BufferKind::Read, BufferKind::Write] {
-        let kinds = [input, BufferKind::Write];
-        let direct = build(
-            Signature::new(&[ScalarType::I32; 1], ScalarType::I32, &kinds),
-            Box::new(body),
-        )
-        .unwrap();
-        let portable = splice_core::frontend::materialize(
-            Signature::new(&[ScalarType::I32; 1], ScalarType::I32, &kinds),
-            Box::new(body),
-            options(),
-        )
-        .unwrap();
-        for graph in [direct, lower(&portable, &options().target).unwrap()] {
-            let count = graph
-                .instructions(graph.entry())
-                .filter(|&i| matches!(graph.op(i), Op::Load(..)))
-                .count();
-            assert_eq!(count, if input.writable() { 2 } else { 1 });
-        }
-    }
-}
-
-#[test]
 fn portable_calls_share_one_lowered_body_and_preserve_argument_reassignment() {
     use splice_core::hir::FunctionBuilder;
 

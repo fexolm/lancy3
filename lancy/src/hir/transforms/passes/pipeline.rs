@@ -4,8 +4,9 @@
 use super::bounds::{self, Bounds};
 use super::facts::Facts;
 use super::{checkpoint, dead, loops, memory, simplify};
+use crate::Trap;
 use crate::hir::transforms::{ControlFlowGraph, DomTree};
-use crate::hir::{Block, Function, IrError, Op};
+use crate::hir::{Block, Function, IrError, Op, Value};
 use std::collections::HashMap;
 
 /// What a pass left valid.
@@ -151,7 +152,8 @@ const PIPELINE: &[Pass] = &[
     Pass {
         name: "redundant checks",
         run: |f, a| {
-            remove_redundant_checks(f, a.graph(f)?.1);
+            let s = a.all(f)?;
+            remove_redundant_checks(f, s.dom, s.facts);
             Ok(Preserved::All)
         },
     },
@@ -187,18 +189,28 @@ pub(super) fn optimize(f: &mut Function, mut analyses: Analyses<'_>) -> Result<(
     Ok(())
 }
 
-/// Remove a bounds check that a dominating identical check already made.
-fn remove_redundant_checks(f: &mut Function, dom: &DomTree) {
+/// Remove a check that a dominating check of the same values already made:
+/// a bounds check, or a conditional trap of the same kind. Values compare by
+/// their facts root, so checks through forwarded parameters match (HIR-18).
+fn remove_redundant_checks(f: &mut Function, dom: &DomTree, facts: &Facts) {
+    #[derive(PartialEq, Eq, Hash)]
+    enum Check {
+        Bounds(Value, Value),
+        Trap(Value, Trap),
+    }
     let mut checks = HashMap::new();
     for &b in dom.preorder() {
         f.rewrite_instructions(b, |op, _, _| {
-            if let Op::BoundsCheck(i, n) = op {
-                let previous = checks.entry((i, n)).or_insert(Block::INVALID);
-                if dom.dominates(*previous, b) {
-                    return None;
-                }
-                *previous = b;
+            let check = match op {
+                Op::BoundsCheck(i, n) => Check::Bounds(facts.root(i), facts.root(n)),
+                Op::TrapIf(c, trap) => Check::Trap(facts.root(c), trap),
+                _ => return Some(op),
+            };
+            let previous = checks.entry(check).or_insert(Block::INVALID);
+            if dom.dominates(*previous, b) {
+                return None;
             }
+            *previous = b;
             Some(op)
         });
     }

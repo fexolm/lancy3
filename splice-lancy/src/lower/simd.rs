@@ -389,15 +389,13 @@ impl memory::Primitives for Builder<'_> {
             self.effect(Op::TrapIf(condition, Trap::Bounds));
             return Ok(());
         };
-        self.within(|this| {
-            let (fail, next) = (this.block(), this.block());
-            this.end(super::Exit::Branch(condition, fail, next));
-            this.current = Some(fail);
-            before_trap(this)?;
-            this.effect(Op::Trap(Trap::Bounds));
-            this.begin(next);
-            Ok(())
-        })
+        let (fail, next) = (self.block(), self.block());
+        self.end(super::Exit::Branch(condition, fail, next));
+        self.current = Some(fail);
+        before_trap(self)?;
+        self.effect(Op::Trap(Trap::Bounds));
+        self.begin(next);
+        Ok(())
     }
     fn load(
         &mut self,

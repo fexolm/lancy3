@@ -102,7 +102,7 @@ impl Bounds {
                     && (matches!(i, Index::Constant(_))
                         || matches!(i, Index::Ssa(v) if facts.available(v, preheader, dom).is_some()))
                 {
-                    moves.push((preheader, inst, base, i, scale, ty));
+                    moves.push((block, preheader, inst, base, i, scale, ty));
                 }
             }
             if !redundant.is_empty() {
@@ -129,8 +129,11 @@ impl Bounds {
             }
         }
 
+        // The hoisted load replaces the loop's load by substitution, so no
+        // `Copy` reaches isel (HIR-08).
         let mut hoisted = HashMap::new();
-        for (target, inst, base, i, scale, ty) in moves {
+        let mut replaced = Vec::new();
+        for (block, target, inst, base, i, scale, ty) in moves {
             let value = *hoisted
                 .entry((target, base, i, scale, ty))
                 .or_insert_with(|| {
@@ -141,7 +144,21 @@ impl Bounds {
                     let addr = facts.append(f, target, Op::PtrOffset(base, i, scale));
                     facts.append(f, target, Op::Load(ty, addr))
                 });
-            f.replace_op_preserving_type(inst, Op::Copy(value));
+            replaced.push((block, f.result(inst).unwrap(), value));
+        }
+        if !replaced.is_empty() {
+            let mut aliases = DenseMap::from_fn(f.value_count(), |value| value);
+            for &(_, old, new) in &replaced {
+                aliases[old] = new;
+            }
+            facts.forward_loads(f, cfg, dom, &aliases);
+            replaced.sort_unstable();
+            replaced.dedup_by_key(|&mut (block, _, _)| block);
+            for (block, _, _) in replaced {
+                f.rewrite_instructions(block, |op, result, _| {
+                    result.is_none_or(|v| aliases[v] == v).then_some(op)
+                });
+            }
         }
         changed_cfg
     }

@@ -194,12 +194,7 @@ impl<'a> Builder<'a> {
             observed: HashMap::new(),
             unassigned: HashSet::new(),
             labels: Vec::new(),
-            has_shared: kinds
-                .iter()
-                .any(|kind| !kind.writable() && kind.context_signature().is_none()),
-            constants: HashMap::new(),
             indices: HashMap::new(),
-            shared_loads: HashMap::new(),
             debug,
             marker: 0,
         };
@@ -296,13 +291,8 @@ struct Builder<'a> {
     /// Placeholders for a register that is unassigned on some path.
     unassigned: HashSet<Value>,
     labels: Vec<Option<Block>>,
-    /// Whether a read-only slice can share loads at one index.
-    has_shared: bool,
-    /// The `i32` constants of the open block.
-    constants: HashMap<Value, i32>,
     /// The `i32` form of `Index` values (see `index32`).
     indices: HashMap<Value, Narrow>,
-    shared_loads: HashMap<(Buffer, LoadIndex), Value>,
     /// The source points of a debug build, shared by its functions.
     debug: Option<Vec<DebugSource>>,
     /// This function's entry in `debug`.
@@ -330,12 +320,6 @@ enum Narrow {
     /// parameter of an `Index` has one as its own parameter, so the narrow
     /// form survives control flow.
     Bounded(Value),
-}
-
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
-enum LoadIndex {
-    Constant(i32),
-    Value(Value),
 }
 
 impl Builder<'_> {
@@ -370,11 +354,7 @@ impl Builder<'_> {
         }
     }
     fn const32(&mut self, n: i32) -> Value {
-        let v = self.value(Op::Const(n));
-        if self.has_shared {
-            self.constants.insert(v, n);
-        }
-        v
+        self.value(Op::Const(n))
     }
     /// The `i32` that `index` sign-extends, and whether it is nonnegative.
     fn exact32(&mut self, index: Value) -> Option<(Value, bool)> {
@@ -625,39 +605,12 @@ impl Builder<'_> {
     }
     fn define(&mut self, r: Reg, op: Op) {
         let v = self.value(op);
-        if let Op::Const(n) = op
-            && self.has_shared
-        {
-            self.constants.insert(v, n);
-        }
         self.bind(r, v);
     }
     fn define_load(&mut self, dst: Reg, buffer: Buffer, index: Value) {
-        let shared = !self.kinds[buffer.index()].writable();
-        let key = if shared {
-            // A Splice shared slice cannot be modified via another parameter
-            // or a callee. The first load already checked this index.
-            let index = self
-                .constants
-                .get(&index)
-                .copied()
-                .map_or(LoadIndex::Value(index), LoadIndex::Constant);
-            let key = (buffer, index);
-            if let Some(&value) = self.shared_loads.get(&key) {
-                self.bind(dst, value);
-                return;
-            }
-            Some(key)
-        } else {
-            None
-        };
         let address = self.address(buffer, index);
         let ty = scalar_type(self.scalar(dst));
         self.define(dst, Op::Load(ty, address));
-        if let Some(key) = key {
-            let block = self.current.expect("open block");
-            self.shared_loads.insert(key, self.blocks[block].defs[&dst]);
-        }
     }
     fn call(
         &mut self,
@@ -709,8 +662,6 @@ impl Builder<'_> {
     fn end(&mut self, exit: Exit) {
         if let Some(b) = self.current.take() {
             self.blocks[b].exit = Some(exit);
-            self.constants.clear();
-            self.shared_loads.clear();
         }
     }
     fn effect(&mut self, op: Op) {
@@ -724,17 +675,6 @@ impl Builder<'_> {
         let state = self.blocks.insert(State::default());
         debug_assert_eq!(state, block);
         block
-    }
-    /// Lower control flow inside one operation. `body` leaves open a block
-    /// that the open block dominates, so the constants and shared loads
-    /// known here stay valid there.
-    fn within<R>(&mut self, body: impl FnOnce(&mut Self) -> R) -> R {
-        let constants = std::mem::take(&mut self.constants);
-        let shared_loads = std::mem::take(&mut self.shared_loads);
-        let result = body(self);
-        self.constants.extend(constants);
-        self.shared_loads.extend(shared_loads);
-        result
     }
     /// Continue in `block`, falling through from the open block.
     fn begin(&mut self, block: Block) {
@@ -943,8 +883,6 @@ impl KernelBuilder for Builder<'_> {
             return Ok(dst);
         }
         let plan = target.plan(self.kinds, args.len(), slices);
-        // The callee may write any borrowed slice.
-        self.shared_loads.clear();
         let packet = self.value(Op::CallScratch {
             offset: 0,
             bytes: plan.bytes,

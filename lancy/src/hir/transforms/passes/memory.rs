@@ -183,6 +183,17 @@ struct Known {
     removable_store: Option<(Block, usize)>,
 }
 
+impl Known {
+    /// A read inside a read-only slice: no store or call of the kernel can
+    /// change it while the kernel runs (BE-09).
+    fn immutable(&self, f: &Function) -> bool {
+        self.read.is_some()
+            && self.range.in_slice
+            && f.slice_param(self.range.location.address.base)
+                .is_some_and(|slice| !slice.writable)
+    }
+}
+
 enum Exit {
     Unseen,
     Traps,
@@ -300,6 +311,7 @@ pub(super) fn optimize(
     let mut addresses = DenseMap::filled(f.value_count(), None);
     let mut exits = DenseMap::from_fn(f.block_capacity(), |_| Exit::Unseen);
     let mut removed = Vec::new();
+    let mut in_bounds = Vec::new();
     let mut forwarded = false;
     for &block in cfg.reverse_postorder() {
         checks.clear();
@@ -338,7 +350,11 @@ pub(super) fn optimize(
                             entry.removable_store = None;
                         }
                     }
-                    _ if op.effects(f).writes => known.clear(),
+                    Op::Trap(_) => {
+                        traps = true;
+                        break;
+                    }
+                    _ if op.effects(f).writes => known.retain(|entry| entry.immutable(f)),
                     _ if !facts.is_total(f, inst) => {
                         // A check or arithmetic trap may expose completed stores.
                         for entry in &mut known {
@@ -382,6 +398,9 @@ pub(super) fn optimize(
             let entry = match kind {
                 Access::Read(passthrough) => {
                     let value = result.unwrap();
+                    if range.in_slice && matches!(op, Op::Load(..)) {
+                        in_bounds.push(value);
+                    }
                     for entry in &mut known {
                         if entry.removable_store.is_some() && range.may_overlap(entry.range, f) {
                             entry.removable_store = None;
@@ -398,7 +417,7 @@ pub(super) fn optimize(
                         if location.overwrites(entry.range.location) {
                             removed.extend(entry.removable_store);
                         }
-                        !range.may_overlap(entry.range, f)
+                        entry.immutable(f) || !range.may_overlap(entry.range, f)
                     });
                     // A scatter may overwrite an earlier lane at the same index.
                     // Only full stores supply a ready-to-use value for a load.
@@ -423,6 +442,9 @@ pub(super) fn optimize(
         } else {
             Exit::Known(known)
         };
+    }
+    for value in in_bounds {
+        facts.load_in_bounds(value);
     }
     if removed.is_empty() {
         return;

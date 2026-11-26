@@ -37,11 +37,15 @@ block done()
   ret acc
 block reject()
   ret zero
+# The hoisted load replaces the loop's load without a copy, so the sum of
+# an invariant collapses (HIR-08).
 @opt not: bounds
 @opt check: load
-@opt nextln: jump
+@opt nextln: max
+@opt nextln: mul
 @opt not: load
 @opt not: bounds
+@opt not: lt
 @opt check: ret
 @run 5 3 -> 21 | 01 00 00 00 02 00 00 00 03 00 00 00 04 00 00 00 07 00 00 00 | 01 00 00 00 02 00 00 00 03 00 00 00 04 00 00 00 07 00 00 00
 @run 4 3 -> 0 | 01 00 00 00 02 00 00 00 03 00 00 00 04 00 00 00 | 01 00 00 00 02 00 00 00 03 00 00 00 04 00 00 00

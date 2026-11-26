@@ -4,6 +4,7 @@ use crate::hir::{
 };
 use crate::support::numeric::integer;
 use crate::support::slotmap::DenseMap;
+use std::collections::HashSet;
 use std::ops::Range;
 
 #[derive(Clone, Copy)]
@@ -219,13 +220,25 @@ fn forward_cyclic(
 pub(super) struct Facts {
     pub(super) defs: DenseMap<Value, Definition>,
     roots: DenseMap<Value, Value>,
+    /// Loads the memory pass proved inside a declared slice: they cannot
+    /// trap, so an unused one is dead (HIR-19).
+    in_bounds_loads: HashSet<Value>,
 }
 
 impl Facts {
     pub(super) fn new(f: &Function, cfg: &ControlFlowGraph, dom: &DomTree) -> Self {
         let defs = definitions(f);
         let roots = forwarded_params(f, cfg, dom, &defs);
-        Self { defs, roots }
+        Self {
+            defs,
+            roots,
+            in_bounds_loads: HashSet::new(),
+        }
+    }
+
+    /// Record that the load defining `value` stays inside a declared slice.
+    pub(super) fn load_in_bounds(&mut self, value: Value) {
+        self.in_bounds_loads.insert(value);
     }
 
     pub(super) fn root(&self, v: Value) -> Value {
@@ -320,6 +333,11 @@ impl Facts {
         let effects = op.effects(f);
         if effects.is_none() {
             return true;
+        }
+        if let Op::Load(..) = op {
+            return f
+                .result(inst)
+                .is_some_and(|value| self.in_bounds_loads.contains(&value));
         }
         // Only a trap that the operands rule out can be skipped.
         if effects

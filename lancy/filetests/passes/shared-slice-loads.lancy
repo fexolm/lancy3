@@ -1,0 +1,129 @@
+# A read-only slice cannot change during the call, so the memory pass
+# forwards its loads across a store to another slice, the short-store path
+# of a vector store, and a Rust call (BE-09; Splice's adapter used to cache
+# these loads itself). This is the HIR Splice lowers a vector store to.
+fn main(v0:i32 v1:ptr v2:i32 v3:ptr v4:i32) -> i32
+  slice v1 v2 read4
+  slice v3 v4 write4
+  v6:i32 = const 0
+  bounds v6 v2
+  v7:ptr = offset v1 v6 4
+  v8:i32 = load i32 v7
+  v9:i32 = const 1
+  v10:vec.i32 = splat v9
+  bounds v0 v4
+  v12:i32 = lanes i32
+  v13:i32 = sub v4 v0
+  v14:i32 = lt v13 v12
+  br v14 b1() | b2(v8)
+block b1()
+  v15:i32 = const 0
+  v16:i32 = ge v0 v15
+  v17:i32 = sub v4 v0
+  v18:i32 = and v17 v16
+  v19:i32 = max v18 v15
+  v20:i32 = lanes i32
+  v21:i32 = min v19 v20
+  v22:vec.i32 = firstlanes i32 v21
+  v23:ptr = offset v3 v0 4
+  maskedstore v23 - v22 v10
+  trap Bounds
+  jump b2(v8)
+block b2(v29:i32)
+  v24:ptr = offset v3 v0 4
+  store v24 v10
+  v26:i32 = const 0
+  bounds v26 v2
+  v27:ptr = offset v1 v26 4
+  v28:i32 = load i32 v27
+  v30:i32 = add v29 v28
+  ret v30
+@opt check: load i32
+@opt not: load i32
+
+---
+
+# A Rust call may write a writable slice but not a read-only one.
+fn main(p:ptr len:i32 q:ptr room:i32 value:i32 fail:i32) -> i32
+  slice p len read4
+  slice q room write4
+  zero = const 0
+  bounds zero len
+  at = offset p zero 4
+  before = load i32 at
+  bounds zero room
+  out = offset q zero 4
+  stored = load i32 out
+  scratch = call_scratch 0 8
+  ignored = rust_call identity_or_error scratch value scratch fail
+  again = load i32 at
+  later = load i32 out
+  a = add before again
+  b = add a stored
+  c = add b later
+  ret c
+@opt check: $(p=v[0-9]+):ptr = offset v0
+@opt nextln: load i32 $p
+@opt check: $(q=v[0-9]+):ptr = offset v2
+@opt nextln: load i32 $q
+@opt check: rust_call
+@opt not: load i32 $p
+@opt check: load i32 $q
+@opt not: load
+@opt check: ret
+
+---
+
+# A scalar store to another slice keeps a read-only load available.
+fn main(i:i32 p:ptr len:i32 q:ptr room:i32) -> i32
+  slice p len read4
+  slice q room write4
+  zero = const 0
+  bounds zero len
+  at = offset p zero 4
+  before = load i32 at
+  bounds i room
+  out = offset q i 4
+  store out before
+  bounds zero len
+  again = offset p zero 4
+  after = load i32 again
+  sum = add before after
+  ret sum
+@opt check: load i32
+@opt check: store
+@opt not: load
+@opt check: ret
+
+---
+
+# Disjoint slices forward even when both are writable; a store into the
+# same writable slice at an unknown index keeps the second load.
+fn main(i:i32 p:ptr len:i32 q:ptr room:i32) -> i32
+  slice p len write4
+  slice q room write4
+  zero = const 0
+  bounds zero len
+  at = offset p zero 4
+  before = load i32 at
+  bounds i room
+  out = offset q i 4
+  store out before
+  bounds zero len
+  again = offset p zero 4
+  after = load i32 again
+  bounds i len
+  mine = offset p i 4
+  store mine after
+  bounds zero len
+  last = offset p zero 4
+  final = load i32 last
+  sum = add before after
+  total = add sum final
+  ret total
+@opt check: load i32
+@opt check: store
+@opt not: load
+@opt check: store
+@opt check: load i32
+@opt check: ret
