@@ -638,12 +638,21 @@ fn wide_local(local: &syn::Local) -> bool {
 }
 
 /// Whether a call with known arguments may fold through the evaluator: one
-/// that takes only `i32` and `bool` parameters.
+/// that takes and returns only `i32` and `bool` words.
 pub(in crate::scalar) fn foldable_signature(sig: &syn::Signature) -> bool {
-    sig.inputs.iter().all(|arg| {
-        matches!(arg, FnArg::Typed(a)
-        if matches!(Scalar::from_type(&a.ty, &[]), Some(Scalar::I32 | Scalar::Bool)))
-    })
+    let word = |ty: &syn::Type| {
+        matches!(Scalar::from_type(ty, &[]), Some(Scalar::I32 | Scalar::Bool))
+            || matches!(ty, syn::Type::Tuple(unit) if unit.elems.is_empty())
+    };
+    let result = match &sig.output {
+        syn::ReturnType::Default => true,
+        syn::ReturnType::Type(_, ty) => word(ty),
+    };
+    result
+        && sig
+            .inputs
+            .iter()
+            .all(|arg| matches!(arg, FnArg::Typed(a) if word(&a.ty)))
 }
 
 pub(crate) fn uses_stage_requirements(block: &syn::Block) -> bool {

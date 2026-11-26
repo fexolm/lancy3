@@ -40,8 +40,9 @@ impl Lower<'_> {
         let output = if recursive {
             self.result_type
         } else {
+            // The callee's result type is the builder's.
             hint.filter(|t| matches!(t, Scalar::Bool | Scalar::Vector(_) | Scalar::Mask(_)))
-                .unwrap_or(Scalar::I32)
+                .unwrap_or(Scalar::Inferred)
         };
         let mut check = TokenStream::new();
         let target = if recursive {
@@ -84,7 +85,11 @@ impl Lower<'_> {
         } else {
             let mut path = p.path.clone();
             let fish = std::mem::take(&mut path.segments.last_mut().unwrap().arguments);
-            let expected = output.value_type(root, self.types);
+            let expected = if output == Scalar::Inferred {
+                emit!(#root::hir::ValueType::Scalar(_))
+            } else {
+                output.value_type(root, self.types)
+            };
             check = emit!(const {::core::assert!(::core::matches!(#path::__SPLICE_RETURN,#expected),"annotate the kernel helper result with its Lane<T> or Mask<T> type")};);
             emit!(#path::__splice_call #fish)
         };
@@ -115,21 +120,11 @@ impl Lower<'_> {
                         "runtime value passed to a comptime parameter",
                     ));
                 }),
-                (
-                    None,
-                    Stage::Reg(
-                        Scalar::I32
-                        | Scalar::Bool
-                        | Scalar::Inferred
-                        | Scalar::Vector(_)
-                        | Scalar::Mask(_),
-                    )
-                    | Stage::Buffer(_),
-                ) => value.code,
+                (None, Stage::Reg(_) | Stage::Buffer(_)) => value.code,
                 _ => {
                     return err(
                         expr,
-                        "expected a comptime value, a runtime i32, or a runtime slice",
+                        "expected a comptime value, a runtime scalar, or a runtime slice",
                     );
                 }
             };

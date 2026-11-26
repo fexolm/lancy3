@@ -339,7 +339,6 @@ impl Lower<'_> {
         let combine = op.map(|(op, _)| {
             let combined = self.operator_bin(
                 op,
-                element,
                 emit!(__splice_builder.load(buffer, __splice_index)?),
                 emit!(__splice_value),
             );

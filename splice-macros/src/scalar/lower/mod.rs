@@ -461,25 +461,43 @@ impl Lower<'_> {
         let op = Ident::new(op, proc_macro2::Span::call_site());
         emit!({let (a,z)=(#x,#y); __splice_builder.binary(#root::hir::Binary::#op,a,z)?})
     }
-    /// The Rust operator `op` on operands of type `t`: integer arithmetic
-    /// checks overflow when the kernel does.
-    fn operator_bin(&self, op: &str, t: Scalar, x: TokenStream, y: TokenStream) -> TokenStream {
-        let Some(checked) = checked_operator(op).filter(|_| !t.is_float()) else {
-            return self.bin(op, x, y);
-        };
+    /// The Rust operator `op`: integer arithmetic checks overflow when the
+    /// kernel does.
+    fn operator_bin(&self, op: &str, x: TokenStream, y: TokenStream) -> TokenStream {
+        self.operator_pair(op, emit!((#x, #y)))
+    }
+    /// `op` on the operand pair `operands` evaluates to.
+    fn operator_pair(&self, op: &str, operands: TokenStream) -> TokenStream {
         let root = self.root;
         let op = Ident::new(op, proc_macro2::Span::call_site());
-        let checked = Ident::new(checked, proc_macro2::Span::call_site());
         let checks = host::kernel_overflow_checks();
         emit!({
-            let (a, b) = (#x, #y);
-            let op = if #checks {
-                #root::hir::Binary::#checked
-            } else {
-                #root::hir::Binary::#op
-            };
-            __splice_builder.binary(op, a, b)?
+            let (a, b) = #operands;
+            let checks = #checks;
+            #root::frontend::scalar::arithmetic(__splice_builder, #root::hir::Binary::#op, checks, a, b)?
         })
+    }
+    /// The operand pair of a binary operator whose register operand has a
+    /// type only the builder knows and whose other operand is a number
+    /// literal, which rustc gave that type.
+    fn beside_inferred(&self, left: &Value, right: &Value) -> Option<TokenStream> {
+        let root = self.root;
+        let like = |literal: &Value| match literal.stage {
+            Stage::Literal(t) if t.is_float() => Some(emit!(#root::frontend::scalar::float_like)),
+            Stage::Literal(t) if t.is_number() => Some(emit!(#root::frontend::scalar::int_like)),
+            _ => None,
+        };
+        match (left.stage, right.stage) {
+            (Stage::Reg(Scalar::Inferred), Stage::Literal(_)) => {
+                let like = like(right)?;
+                Some(emit!({let a = #left; let z = #like(__splice_builder, a, #right)?; (a, z)}))
+            }
+            (Stage::Literal(_), Stage::Reg(Scalar::Inferred)) => {
+                let like = like(left)?;
+                Some(emit!({let z = #right; let a = #like(__splice_builder, z, #left)?; (a, z)}))
+            }
+            _ => None,
+        }
     }
     fn stage_join(&self, a: Stage, z: Stage, at: impl ToTokens) -> Result<Stage> {
         use Stage::*;
@@ -918,22 +936,14 @@ impl Lower<'_> {
                 if matches!(t, Scalar::Vector(_) | Scalar::Mask(_)) {
                     return self.simd_unary(t, op, v, x);
                 }
-                let ty = t.rust_type();
+                let root = self.root;
+                let support = emit!(#root::frontend::scalar);
                 let code = match op {
-                    // `0.0 - x` is not `-x` for a zero `x`.
-                    UnOp::Neg(_) if t.is_float() => {
-                        self.bin("Mul", v.code, self.constant(emit!(-1 as #ty)))
-                    }
                     UnOp::Neg(_) if t != Scalar::Bool => {
-                        self.operator_bin("Sub", t, self.constant(emit!(0 as #ty)), v.code)
+                        let checks = host::kernel_overflow_checks();
+                        emit!({let (x, checks) = (#v, #checks); #support::negate(__splice_builder, x, checks)?})
                     }
-                    UnOp::Not(_) => {
-                        let ones = match t.base() {
-                            Scalar::Bool => emit!(true),
-                            _ => emit!(!(0 as #ty)),
-                        };
-                        self.bin("Xor", v.code, self.constant(ones))
-                    }
+                    UnOp::Not(_) => emit!({let x = #v; #support::not(__splice_builder, x)?}),
                     _ => return err(x, "unsupported runtime unary operator"),
                 };
                 Ok(Value::new(Stage::Reg(t.base()), code))
@@ -999,7 +1009,7 @@ impl Lower<'_> {
                 self.simd_operator(t, op, vec![emit!(#left), rhs], left)?
                     .code
             } else {
-                self.operator_bin(op, t, emit!(#left), rhs)
+                self.operator_bin(op, emit!(#left), rhs)
             }
         } else {
             rhs
@@ -1042,7 +1052,7 @@ impl Lower<'_> {
             .any(|s| matches!(s, Stage::Reg(Scalar::Index | Scalar::Length)));
         let number = if index {
             Scalar::Index
-        } else if let Scalar::Number(_) = t {
+        } else if let Scalar::Number(_) | Scalar::Inferred = t {
             t
         } else {
             Scalar::I32
@@ -1077,11 +1087,19 @@ impl Lower<'_> {
             _ => return err(op, "unsupported runtime operator"),
         };
         let input = if index { Scalar::Index } else { input };
+        if input == Scalar::Inferred
+            && let Some(operands) = self.beside_inferred(&left, &right)
+        {
+            return Ok(Value::new(
+                Stage::Reg(output),
+                self.operator_pair(operation, operands),
+            ));
+        }
         let lhs = self.reg(left, input, &x.left)?;
         let rhs = self.reg(right, input, &x.right)?;
         Ok(Value::new(
             Stage::Reg(output),
-            self.operator_bin(operation, input, lhs, rhs),
+            self.operator_bin(operation, lhs, rhs),
         ))
     }
 }

@@ -285,15 +285,18 @@ pub(super) fn expand(root: Path, native: &mut ItemFn, print: bool) -> Result<Tok
     // Only a scalar kernel has a Signature: a SIMD helper expands into its caller.
     let scalar_signature =
         |t| lower::scalar_type(&root, t).unwrap_or_else(|| emit!(#hir::ScalarType::I32));
-    let param_types = formals.iter().filter_map(|formal| match *formal {
-        Binding::Reg(t, _) => Some(scalar_signature(t)),
-        _ => None,
-    });
+    let param_types: Vec<_> = formals
+        .iter()
+        .filter_map(|formal| match *formal {
+            Binding::Reg(t, _) => Some(scalar_signature(t)),
+            _ => None,
+        })
+        .collect();
     let params = emit!(&[#(#param_types),*]);
     let result = scalar_signature(result_type);
     let host_decls = emit!(#(#host_names: #host_types,)*);
     let outer_host_decls = emit!(#(#host_names: #outer_host_types,)*);
-    let unpack = emit!(#(let #reg_names = #support::RunArg::reg(#reg_names, __splice_builder)?;)*);
+    let unpack = emit!(#(let #reg_names = #support::RunArg::param(#reg_names, #param_types, __splice_builder)?;)*);
     let mut lowered_block = native.block.clone();
     lowered_block.stmts.splice(0..0, pattern_decls);
     let body = crate::kast::Body::new(&lowered_block, &stage_params(&parameters))?;
@@ -671,7 +674,7 @@ pub(super) fn expand(root: Path, native: &mut ItemFn, print: bool) -> Result<Tok
                 let __splice_guard = #support::enter_expansion()?;
                 #overflow
                 let __splice_wants_debug = __splice_builder.debug_enabled();
-                let __splice_input_values: [::core::option::Option<#hir::Constant>; #arity] = [#(#support::RunArg::known(&#reg_names)),*];
+                let __splice_input_values: [::core::option::Option<#hir::Constant>; #arity] = [#(#support::RunArg::known_as(&#reg_names, #param_types)),*];
                 #recursion
                 #unpack
                 #dropless

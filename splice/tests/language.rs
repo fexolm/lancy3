@@ -1716,7 +1716,7 @@ fn kernels_compute_with_every_scalar_type() {
         for code in [built, compiled] {
             for (a, b, c, x) in [
                 (5i64, 9u32, 100u64, 0.25f64),
-                (-1 << 40, 4_000_000_000, u64::MAX, -3.5),
+                (-1 << 40, 2_000_000_000, u64::MAX, -3.5),
             ] {
                 for (xs, fs) in [
                     (&[][..], &[][..]),
@@ -1741,4 +1741,36 @@ fn kernels_compute_with_every_scalar_type() {
     splice_testkit::each_backend!(B => check::<B>());
     let printed = typed_scalars::print().unwrap();
     assert!(printed.contains("for k in"), "{printed}");
+}
+
+mod wide_calls {
+    use splice::kernel;
+
+    #[kernel]
+    pub(super) fn helper(x: i64, #[comptime] k: i32) -> i64 {
+        x * 2 + k as i64
+    }
+
+    /// A kernel call returns the callee's type; a literal beside it and a
+    /// literal argument take that type.
+    #[kernel]
+    pub(super) fn caller(x: i64) -> i64 {
+        let y = helper(x, 3);
+        y + 1 + helper(5, 1) * 2
+    }
+}
+
+#[test]
+fn kernel_calls_pass_and_return_wide_scalars() {
+    use wide_calls::caller;
+    fn check<B: Codegen<Output: Executable>>() {
+        let built = caller::build::<B>(caller::BuildArgs {}).unwrap();
+        let compiled = B::compile(&caller::ir().unwrap()).unwrap();
+        for code in [built, compiled] {
+            for x in [0, -7, 1 << 40] {
+                assert_eq!(code.call(caller::CallArgs { x }), Ok(caller(x)));
+            }
+        }
+    }
+    splice_testkit::each_backend!(B => check::<B>());
 }

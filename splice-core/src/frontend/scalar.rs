@@ -33,6 +33,21 @@ pub trait RunArg {
         None
     }
     fn reg(self, builder: &mut dyn KernelBuilder) -> crate::Result<Reg>;
+    /// The known value as an argument of a parameter of type `ty`: rustc
+    /// gave an unsuffixed literal argument the parameter's type.
+    fn known_as(&self, ty: ScalarType) -> Option<Constant> {
+        self.known().and_then(|value| value.cast(ty))
+    }
+    /// The value as the register of a parameter of type `ty`.
+    fn param(self, ty: ScalarType, b: &mut dyn KernelBuilder) -> crate::Result<Reg>
+    where
+        Self: Sized,
+    {
+        match self.known_as(ty) {
+            Some(value) if self.known().is_some_and(|known| known.ty() != ty) => b.constant(value),
+            _ => self.typed(ty, b),
+        }
+    }
     /// The value as a register of type `ty`. A Rust call returns an `i32`
     /// word: a `bool` result is a nonzero word.
     fn typed(self, ty: ScalarType, b: &mut dyn KernelBuilder) -> crate::Result<Reg>
@@ -91,7 +106,25 @@ impl Word {
         {
             return Ok(Self::Known(value));
         }
-        let (mut a, mut z) = (self.reg(b)?, rhs.reg(b)?);
+        // rustc gave both operands of an operator other than a shift one
+        // type, so a known operand of another type is an unsuffixed literal.
+        let shift = matches!(
+            op,
+            Binary::Shl | Binary::Shr | Binary::CheckedShl | Binary::CheckedShr
+        );
+        let retyped = |known: Self, runtime: Self, b: &dyn KernelBuilder| match (known, runtime) {
+            (Self::Known(value), Self::Runtime(r)) if !shift && value.ty() != ScalarType::Bool => {
+                match b.reg_type(r) {
+                    Some(ValueType::Scalar(ty)) if ty != ScalarType::Bool => {
+                        value.cast(ty).map_or(known, Self::Known)
+                    }
+                    _ => known,
+                }
+            }
+            _ => known,
+        };
+        let (lhs, rhs) = (retyped(self, rhs, b), retyped(rhs, self, b));
+        let (mut a, mut z) = (lhs.reg(b)?, rhs.reg(b)?);
         // A Rust call returns an i32 word: it meets a bool operand as a bool.
         let bool = Some(ValueType::Scalar(ScalarType::Bool));
         if b.reg_type(a) == bool {
@@ -182,7 +215,7 @@ impl<T: ImportWord> KnownArg<T> for Word {
     }
 }
 
-impl RunArg for Host<bool> {
+impl<T: crate::KernelScalar> RunArg for Host<T> {
     fn known(&self) -> Option<Constant> {
         Some(self.0.into())
     }
@@ -190,13 +223,91 @@ impl RunArg for Host<bool> {
         b.constant(self.0.into())
     }
 }
-impl RunArg for Host<i32> {
-    fn known(&self) -> Option<Constant> {
-        Some(self.0.into())
+
+fn scalar_type(b: &dyn KernelBuilder, r: Reg, operation: &str) -> crate::Result<ScalarType> {
+    match b.reg_type(r) {
+        Some(ValueType::Scalar(ty)) => Ok(ty),
+        _ => Err(crate::BuildError::staging(format!(
+            "{operation} requires a runtime scalar"
+        ))),
     }
-    fn reg(self, b: &mut dyn KernelBuilder) -> crate::Result<Reg> {
-        b.constant(self.0.into())
+}
+
+/// An unsuffixed integer literal beside the register `like`: rustc gave it
+/// `like`'s type, which only the builder knows.
+pub fn int_like(b: &mut dyn KernelBuilder, like: Reg, value: u64) -> crate::Result<Reg> {
+    let ty = scalar_type(b, like, "an integer literal")?;
+    let constant = Constant::from(value)
+        .cast(ty)
+        .ok_or_else(|| crate::BuildError::staging("an integer literal beside a non-number"))?;
+    b.constant(constant)
+}
+
+/// An unsuffixed float literal beside the register `like`.
+pub fn float_like(b: &mut dyn KernelBuilder, like: Reg, value: f64) -> crate::Result<Reg> {
+    let ty = scalar_type(b, like, "a float literal")?;
+    if !ty.is_float() {
+        return Err(crate::BuildError::staging(
+            "a float literal beside an integer",
+        ));
     }
+    b.constant(
+        Constant::from(value)
+            .cast(ty)
+            .expect("a float converts to a float"),
+    )
+}
+
+/// Rust's binary operator `op` on two operands of one type: integer `+`,
+/// `-`, `*`, `<<` and `>>` check overflow when `checks` is set.
+pub fn arithmetic(
+    b: &mut dyn KernelBuilder,
+    op: Binary,
+    checks: bool,
+    lhs: Reg,
+    rhs: Reg,
+) -> crate::Result<Reg> {
+    let checked = match op {
+        Binary::Add => Binary::CheckedAdd,
+        Binary::Sub => Binary::CheckedSub,
+        Binary::Mul => Binary::CheckedMul,
+        Binary::Shl => Binary::CheckedShl,
+        Binary::Shr => Binary::CheckedShr,
+        op => op,
+    };
+    let op = if checks && scalar_type(b, lhs, "arithmetic")?.is_integer() {
+        checked
+    } else {
+        op
+    };
+    b.binary(op, lhs, rhs)
+}
+
+/// Rust's `-x`. A float is multiplied by `-1.0`: `0.0 - x` loses the sign of
+/// a zero `x`.
+pub fn negate(b: &mut dyn KernelBuilder, x: Reg, checks: bool) -> crate::Result<Reg> {
+    let ty = scalar_type(b, x, "negation")?;
+    if ty.is_float() {
+        let minus_one = float_like(b, x, -1.0)?;
+        return b.binary(Binary::Mul, x, minus_one);
+    }
+    let zero = b.constant(Constant::new(ty, 0))?;
+    arithmetic(b, Binary::Sub, checks, zero, x)
+}
+
+/// Rust's `!x` on a `bool` or an integer.
+pub fn not(b: &mut dyn KernelBuilder, x: Reg) -> crate::Result<Reg> {
+    let ty = scalar_type(b, x, "`!`")?;
+    let ones = if ty == ScalarType::Bool {
+        Constant::from(true)
+    } else {
+        Constant::from(u64::MAX)
+            .cast(ty)
+            .filter(|_| ty.is_integer())
+            .ok_or_else(|| crate::BuildError::staging("`!` on a float"))?
+    };
+    let ones = b.constant(ones)?;
+    b.binary(Binary::Xor, x, ones)
 }
 
 /// Whether the crate of `module` (a `module_path!()`) compiles Rust
