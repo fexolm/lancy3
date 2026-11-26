@@ -452,6 +452,9 @@ impl Lower<'_> {
         }
         self.simd_operator(t, "Not", vec![v.code], at)
     }
+    /// A method of the vector or mask `receiver`: the registry
+    /// (`frontend::intrinsics::simd_method`) stages it on the operands,
+    /// typed by the builder. The macro gives the result its stage.
     pub(super) fn simd_method(
         &self,
         t: Scalar,
@@ -462,223 +465,96 @@ impl Lower<'_> {
         let (Scalar::Mask(e) | Scalar::Vector(e)) = t else {
             unreachable!()
         };
-        let is_mask = matches!(t, Scalar::Mask(_));
-        let v = Scalar::Vector(e);
-        let mask = Scalar::Mask(e);
-        let idx = Scalar::Vector(e.index());
+        let root = self.root;
         let method = m.method.to_string();
-        let args = &m.args;
-        let op = |j: usize, t| self.simd_operand(&args[j], t);
-        let recv = emit!(__splice_receiver);
-        let mut pre = emit!(let __splice_receiver=#receiver;);
-        let mut value = match (method.as_str(), args.len(), is_mask) {
-            (
-                "interleave_low" | "interleave_high" | "deinterleave_even" | "deinterleave_odd",
-                1,
-                false,
-            ) if e == Elem::I32 => {
-                let order = format_ident!(
-                    "{}",
-                    match method.as_str() {
-                        "interleave_low" => "InterleaveLow",
-                        "interleave_high" => "InterleaveHigh",
-                        "deinterleave_even" => "DeinterleaveEven",
-                        _ => "DeinterleaveOdd",
-                    }
-                );
-                let root = self.root;
-                self.vector_op(
-                    e,
-                    emit!(Shuffle(#root::simd::Shuffle::#order)),
-                    vec![recv, op(0, v)?],
-                    Some(v),
-                )
+        // The element of a conversion's result or of the selected data.
+        let data = m
+            .turbofish
+            .as_ref()
+            .and_then(|args| element_argument(args, self.types))
+            .map(Scalar::Vector)
+            .or(hint.filter(|t| matches!(t, Scalar::Vector(_))));
+        let mut stages = Vec::new();
+        let mut operands = Vec::new();
+        if method == "select" && m.args.len() == 2 {
+            // Either data operand can type an unqualified Lane constructor.
+            let (yes, no) =
+                self.paired_operands(&m.args[0], &m.args[1], data, Some(Scalar::Vector(e)))?;
+            let Stage::Reg(ty @ Scalar::Vector(_)) = yes.stage else {
+                return err(m, "mask.select requires two vectors");
+            };
+            let no = self.reg(no, ty, &m.args[1])?;
+            let operand = emit!(#root::frontend::intrinsics::Operand::Reg);
+            stages.push(yes.stage);
+            operands.extend([emit!(#operand(#yes)), emit!(#operand(#no))]);
+        } else {
+            let hint = data.unwrap_or(Scalar::Vector(e));
+            for arg in &m.args {
+                let (stage, operand) = self.simd_argument(arg, hint)?;
+                stages.push(stage);
+                operands.push(operand);
             }
-            ("compress", 1, false) if e == Elem::I32 => {
-                self.vector_op(e, emit!(Compress), vec![recv, op(0, mask)?], Some(v))
+        }
+        let result = match method.as_str() {
+            "simd_eq" | "simd_ne" | "simd_lt" | "simd_le" | "simd_gt" | "simd_ge" => {
+                Some(Scalar::Mask(e))
             }
-            ("expand", 2, false) if e == Elem::I32 => self.vector_op(
-                e,
-                emit!(Expand),
-                vec![recv, op(0, mask)?, op(1, v)?],
-                Some(v),
-            ),
-            ("swizzle", 1, false) if e == Elem::I32 => {
-                self.vector_op(e, emit!(Swizzle), vec![recv, op(0, v)?], Some(v))
-            }
-            ("rotate_left", 1, false) if matches!(e, Elem::I32 | Elem::U32) => {
-                let count = self.host(self.expr(&args[0])?, &args[0])?;
-                self.vector_op(
-                    e,
-                    emit!(RotateLeft({let count:u32=#count;count & 31})),
-                    vec![recv],
-                    Some(v),
-                )
-            }
-            ("simd_min" | "simd_max", 1, false) if matches!(e, Elem::I32 | Elem::U32) => {
-                let operation = if method == "simd_min" {
-                    emit!(Min)
-                } else {
-                    emit!(Max)
-                };
-                self.vector_op(e, operation, vec![recv, op(0, v)?], Some(v))
-            }
-            ("sqrt", 0, false) => self.vector_op(e, emit!(Sqrt), vec![recv], Some(v)),
-            ("mul_add", 2, false) => {
-                self.vector_op(e, emit!(MulAdd), vec![recv, op(0, v)?, op(1, v)?], Some(v))
-            }
-            ("reduce_sum", 0, false) if e == Elem::I32 => {
-                self.vector_op(e, emit!(ReduceSum), vec![recv], Some(Scalar::I32))
-            }
-            ("cast" | "widen_low" | "widen_high", 0, false) | ("narrow", 1, false) => {
-                let Some(Scalar::Vector(to)) = m
-                    .turbofish
-                    .as_ref()
-                    .and_then(|a| element_argument(a, self.types))
-                    .map(Scalar::Vector)
-                    .or(hint)
-                else {
-                    return err(m, "specify the output lane type");
-                };
-                let output = to.tokens(self.root, self.types);
-                let mut inputs = vec![recv];
-                let kind = match method.as_str() {
-                    "cast" => emit!(Cast(#output)),
-                    "narrow" => {
-                        inputs.push(op(0, v)?);
-                        emit!(Narrow(#output))
-                    }
-                    _ => {
-                        let high = method == "widen_high";
-                        emit!(Widen { to: #output, high: #high })
-                    }
-                };
-                self.vector_op(e, kind, inputs, Some(Scalar::Vector(to)))
-            }
-            ("prefix_sum", 0, false) if e == Elem::I32 => {
-                self.vector_op(e, emit!(PrefixSum), vec![recv], Some(v))
-            }
-            ("count", 0, true) if e == Elem::I32 => {
-                self.vector_op(e, emit!(Count), vec![recv], Some(Scalar::I32))
-            }
-            ("extract_wrapping", 1, false) if e == Elem::I32 => self.vector_op(
-                e,
-                emit!(ExtractWrapping),
-                vec![recv, op(0, Scalar::I32)?],
-                Some(Scalar::I32),
-            ),
-            ("replace_wrapping", 2, false) if e == Elem::I32 => self.vector_op(
-                e,
-                emit!(ReplaceWrapping),
-                vec![recv, op(0, Scalar::I32)?, op(1, Scalar::I32)?],
-                Some(v),
-            ),
-            ("last", 0, false) if e == Elem::I32 => {
-                self.vector_op(e, emit!(Last), vec![recv], Some(Scalar::I32))
-            }
-            ("any" | "all", 0, true) => {
-                let f = if method == "any" {
-                    emit!(Any)
-                } else {
-                    emit!(All)
-                };
-                self.vector_op(e, f, vec![recv], Some(Scalar::Bool))
-            }
-            ("select", 2, true) => {
-                let data_type = m
-                    .turbofish
-                    .as_ref()
-                    .and_then(|args| element_argument(args, self.types))
-                    .map(Scalar::Vector);
-                let (first, second) =
-                    self.paired_operands(&args[0], &args[1], data_type.or(hint), Some(v))?;
-                let Stage::Reg(ty @ Scalar::Vector(element)) = first.stage else {
-                    return err(m, "mask.select requires two vectors");
-                };
-                if element.index() != e.index() {
-                    return err(m, "mask and data must have the same lane count");
-                }
-                self.vector_op(
-                    element,
-                    emit!(Select),
-                    vec![recv, first.code, self.reg(second, ty, &args[1])?],
-                    Some(ty),
-                )
-            }
-            ("simd_eq" | "simd_ne" | "simd_lt" | "simd_le" | "simd_gt" | "simd_ge", 1, false) => {
-                let name = match method.as_str() {
-                    "simd_eq" => "Eq",
-                    "simd_ne" => "Ne",
-                    "simd_lt" => "Lt",
-                    "simd_le" => "Le",
-                    "simd_gt" => "Gt",
-                    _ => "Ge",
-                };
-                self.simd_operator(t, name, vec![recv, op(0, v)?], m)?
-            }
-            ("add_masked", 3, false) => {
-                let (a, b, f) = (op(0, mask)?, op(1, v)?, op(2, v)?);
-                pre.extend(emit!(let (mask,rhs,fallback)=(#a,#b,#f);));
-                let sum = self.vector_op(e, emit!(Add), vec![recv, emit!(rhs)], Some(v));
-                self.vector_op(
-                    e,
-                    emit!(Select),
-                    vec![emit!(mask), sum.code, emit!(fallback)],
-                    Some(v),
-                )
-            }
-            ("store" | "scatter", 2, false)
-            | ("store_select" | "scatter_select" | "compress_store", 3, false) => {
-                let buf = self.expr(&args[0])?;
-                let Stage::Buffer(b) = buf.stage else {
-                    return err(m, "expected a mutable runtime slice");
-                };
-                if !b.write || b.elem != e {
-                    return err(
-                        m,
-                        "SIMD store requires a writable slice of the vector element type",
-                    );
-                }
-                pre.extend(emit!(let buffer=#buf;));
-                match method.as_str() {
-                    "store" => self.vector_op(
-                        e,
-                        emit!(Store(buffer)),
-                        vec![self.operand(&args[1], Scalar::Index)?, recv],
-                        None,
-                    ),
-                    "compress_store" if e != Elem::I32 => {
-                        return err(m, "compress_store requires i32 lanes");
-                    }
-                    "store_select" | "compress_store" => self.vector_op(
-                        e,
-                        if method == "compress_store" {
-                            emit!(CompressStore(buffer))
-                        } else {
-                            emit!(StoreSelect(buffer))
-                        },
-                        vec![self.operand(&args[1], Scalar::Index)?, op(2, mask)?, recv],
-                        None,
-                    ),
-                    "scatter" => {
-                        self.vector_op(e, emit!(Scatter(buffer)), vec![op(1, idx)?, recv], None)
-                    }
-                    _ => {
-                        let m = op(1, mask)?;
-                        pre.extend(emit!(let mask=#m;));
-                        self.vector_op(
-                            e,
-                            emit!(ScatterSelect(buffer)),
-                            vec![op(2, idx)?, emit!(mask), recv],
-                            None,
-                        )
-                    }
-                }
-            }
-            _ => return err(m, "unknown SIMD method or wrong operand count"),
+            "any" | "all" => Some(Scalar::Bool),
+            "count" | "reduce_sum" | "extract_wrapping" | "last" => Some(Scalar::I32),
+            "cast" | "widen_low" | "widen_high" | "narrow" => match data {
+                Some(to) => Some(to),
+                None => return err(m, "specify the output lane type"),
+            },
+            "select" => match stages.first() {
+                Some(Stage::Reg(ty @ Scalar::Vector(_))) => Some(*ty),
+                _ => return err(m, "mask.select requires two vectors"),
+            },
+            "store" | "store_select" | "scatter" | "scatter_select" | "compress_store" => None,
+            _ => Some(Scalar::Vector(e)),
         };
-        let code = value.code;
-        value.code = emit!({#pre #code});
-        Ok(value)
+        let output = match data {
+            Some(Scalar::Vector(to)) => {
+                let to = to.tokens(root, self.types);
+                emit!(::core::option::Option::Some(#to))
+            }
+            _ => emit!(::core::option::Option::None),
+        };
+        // rustc checks that `Lane`/`Mask` has the method; the registry
+        // stages it or reports a method it does not have.
+        let call = emit!({
+            let receiver = #receiver;
+            let operands = [#(#operands),*];
+            #root::frontend::intrinsics::simd_method(__splice_builder, #method, receiver, &operands, #output)?
+        });
+        Ok(match result {
+            Some(ty) => Value::new(
+                Stage::Reg(ty),
+                emit!(#call.ok_or_else(|| #root::BuildError::staging("missing SIMD result"))?),
+            ),
+            None => Value::unit(emit!({ #call; })),
+        })
+    }
+
+    /// An argument of a SIMD method: its stage and its registry operand.
+    fn simd_argument(&self, arg: &Expr, hint: Scalar) -> Result<(Stage, TokenStream)> {
+        let root = self.root;
+        let operand = emit!(#root::frontend::intrinsics::Operand);
+        if self.body.known(arg) {
+            let value = self.known_operand(arg, None)?;
+            return Ok((
+                Stage::Host,
+                emit!(#operand::Known(#root::frontend::scalar::ScalarConstant::constant(#value))),
+            ));
+        }
+        let value = self.expr_with_hint(arg, Some(hint))?;
+        Ok(match value.stage {
+            Stage::Buffer(_) => (value.stage, emit!(#operand::Buffer(#value))),
+            Stage::Reg(_) => (value.stage, emit!(#operand::Reg(#value))),
+            Stage::Word(t) => {
+                let reg = self.reg(value, t, arg)?;
+                (Stage::Reg(t), emit!(#operand::Reg(#reg)))
+            }
+            _ => return err(arg, "expected a SIMD operand"),
+        })
     }
 }

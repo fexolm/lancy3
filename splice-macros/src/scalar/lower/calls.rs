@@ -70,6 +70,12 @@ impl Lower<'_> {
             let parameters = (0..values.len())
                 .map(|i| quote::format_ident!("__SpliceArg{i}"))
                 .collect::<Vec<_>>();
+            // Only rustc knows whether `Type::m` is a method of a `#[kernel]
+            // impl. Its inherent stage entry takes precedence over this
+            // blanket fallback, which leaves an ordinary method to the Rust
+            // call below. Stable Rust has no other way to ask: an
+            // associated function cannot be imported (the selector of free
+            // functions) and inherent associated types are unstable.
             check = emit! {
                 trait __SpliceOpaqueMethod {
                     fn #published() -> bool { false }
