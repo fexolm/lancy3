@@ -29,14 +29,18 @@ struct Operation {
     borrowed: Vec<SliceOperand>,
 }
 
+/// A captured slice or scalar: a path of the body and what it is bound to
+/// where the operation reads it.
 struct SliceOperand {
     path: ExprPath,
+    binding: Option<Binding>,
     element: Elem,
     writable: bool,
 }
 
 struct Operand {
     path: ExprPath,
+    binding: Option<Binding>,
     kind: Scalar,
 }
 
@@ -280,7 +284,7 @@ impl Context {
             .operands
             .iter()
             .map(|operand| {
-                let value = lower.path(&operand.path);
+                let value = lower.bound_path(&operand.path, operand.binding);
                 let reg = lower.reg(value, operand.kind, &operand.path)?;
                 // A Rust operation receives i32 words; a length fits one.
                 Ok(match operand.kind {
@@ -295,7 +299,7 @@ impl Context {
             .borrowed
             .iter()
             .map(|slice| {
-                let buffer = lower.path(&slice.path).code;
+                let buffer = lower.bound_path(&slice.path, slice.binding).code;
                 let writable = slice.writable;
                 emit!(#root::hir::ContextSlice { buffer: #buffer, writable: #writable })
             })
@@ -307,12 +311,14 @@ impl Context {
                 ordinal as u32
             } else {
                 let ordinal = operations.len() as u32;
-                let mut expr = expr.clone();
-                ReplaceObject {
+                let mut objects = FindObjects {
                     lower,
                     name: &self.argument,
-                }
-                .visit_expr_mut(&mut expr);
+                    found: Vec::new(),
+                };
+                objects.visit_expr(expr);
+                let mut expr = expr.clone();
+                ReplaceObject(objects.found.into_iter()).visit_expr_mut(&mut expr);
                 operations.push(Operation {
                     key,
                     expr,
@@ -595,6 +601,7 @@ impl Captures<'_, '_> {
         } else {
             self.borrowed.push(SliceOperand {
                 path: path.clone(),
+                binding: self.lower.binding(path),
                 element,
                 writable,
             });
@@ -624,6 +631,7 @@ impl Visit<'_> for Captures<'_, '_> {
             {
                 self.operands.push(Operand {
                     path: path.clone(),
+                    binding: self.lower.binding(path),
                     kind,
                 });
             }
@@ -634,6 +642,7 @@ impl Visit<'_> for Captures<'_, '_> {
                 if let Some(kind) = self.context.host_kind(path, self.lower) {
                     self.operands.push(Operand {
                         path: path.clone(),
+                        binding: self.lower.binding(path),
                         kind,
                     });
                 } else {
@@ -681,14 +690,30 @@ impl Visit<'_> for Captures<'_, '_> {
     }
 }
 
-struct ReplaceObject<'a, 'ast> {
+/// Whether each path of an expression, in walk order, names the context
+/// object.
+struct FindObjects<'a, 'ast> {
     lower: &'a Lower<'ast>,
     name: &'a Ident,
+    found: Vec<bool>,
 }
 
-impl VisitMut for ReplaceObject<'_, '_> {
+impl Visit<'_> for FindObjects<'_, '_> {
+    fn visit_expr_path(&mut self, path: &ExprPath) {
+        let object = is_object(path, self.lower, self.name);
+        self.found.push(object);
+        if !object {
+            visit::visit_expr_path(self, path);
+        }
+    }
+}
+
+/// Replace the paths [`FindObjects`] found in a copy of the expression.
+struct ReplaceObject(std::vec::IntoIter<bool>);
+
+impl VisitMut for ReplaceObject {
     fn visit_expr_path_mut(&mut self, path: &mut ExprPath) {
-        if is_object(path, self.lower, self.name) {
+        if self.0.next().expect("a path of the original expression") {
             *path = syn::parse2(emit!(__splice_object)).expect("a generated object binding");
         } else {
             visit_mut::visit_expr_path_mut(self, path);

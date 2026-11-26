@@ -180,11 +180,7 @@ impl Lower<'_> {
                 let mut scope = self.nested_region();
                 scope.enter_loop(f.label.as_ref(), LoopKind::Runtime);
                 let label = label_text(f.label.as_ref());
-                crate::scalar::bind_pattern(
-                    &mut scope.bindings,
-                    pat,
-                    Binding::Reg(Scalar::Int, false),
-                );
+                scope.bind(pat, Binding::Reg(Scalar::Int, false));
                 let range = self.source_syntax(&f.expr)?;
                 let body = isolate(braces(scope.source_body(&f.body)?));
                 return Ok(emit!(

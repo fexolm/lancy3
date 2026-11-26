@@ -1,17 +1,15 @@
 //! Prepare Rust expressions used during specialization and preserve the
 //! control-flow location of failures in residual code or printed source.
 use super::{Binding, Lower};
-use crate::kast::{self, vec_macro};
+use crate::kast::vec_macro;
 use proc_macro2::{Ident, TokenStream};
 use quote::ToTokens;
-use std::collections::HashMap;
 use syn::visit::Visit;
 use syn::visit_mut::VisitMut;
 use syn::{BinOp, Block, Error, Expr, Path, Result, UnOp};
 
 struct HostCheck<'a> {
-    body: &'a kast::Body<'a>,
-    names: &'a HashMap<String, Binding>,
+    lower: &'a Lower<'a>,
     region: usize,
     outer: Vec<Ident>,
     error: Option<Error>,
@@ -41,8 +39,8 @@ impl<'ast, 'a: 'ast> Visit<'ast> for HostCheck<'a> {
     }
     fn visit_expr_path(&mut self, p: &'ast syn::ExprPath) {
         if let Some(id) = p.path.get_ident() {
-            match self.names.get(&id.to_string()) {
-                Some(Binding::Host(depth)) if *depth < self.region && !self.outer.contains(id) => {
+            match self.lower.binding(p) {
+                Some(Binding::Host(depth)) if depth < self.region && !self.outer.contains(id) => {
                     self.outer.push(id.clone());
                 }
                 Some(
@@ -70,7 +68,7 @@ impl<'ast, 'a: 'ast> Visit<'ast> for HostCheck<'a> {
             return;
         }
         if vec_macro(&m.path) {
-            self.visit_expr(self.body.vec_elements(m));
+            self.visit_expr(self.lower.body.vec_elements(m));
             return;
         }
         self.error = Some(Error::new_spanned(
@@ -418,7 +416,7 @@ impl Lower<'_> {
     /// The optional evaluator of a call with known arguments gives up on an
     /// unsupported type and the call stages at run time; staging itself
     /// rejects the kernel when it compiles.
-    fn optional(&self) -> bool {
+    pub(super) fn optional(&self) -> bool {
         self.evaluator_return.is_some()
     }
 
@@ -503,8 +501,7 @@ impl Lower<'_> {
 
     fn host_check(&self, e: &Expr) -> Result<HostCheck<'_>> {
         let mut check = HostCheck {
-            body: self.body,
-            names: &self.bindings,
+            lower: self,
             region: self.region_depth,
             outer: Vec::new(),
             error: None,

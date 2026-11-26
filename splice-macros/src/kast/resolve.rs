@@ -40,7 +40,7 @@ struct Resolve {
 }
 
 impl Resolve {
-    fn declare(&mut self, name: &Ident, origin: Origin) {
+    fn declare(&mut self, name: &Ident, origin: Origin) -> DeclId {
         let id = DeclId(self.decls.len() as u32);
         self.decls.push(Decl {
             name: name.clone(),
@@ -50,6 +50,7 @@ impl Resolve {
             self.ids.let_decls.entry(local).or_default().push(id);
         }
         self.names.push((name.to_string(), id));
+        id
     }
 
     fn scoped(&mut self, visit: impl FnOnce(&mut Self)) {
@@ -101,28 +102,31 @@ impl<'ast> Visit<'ast> for Resolve {
 
     fn visit_pat_ident(&mut self, pat: &'ast syn::PatIdent) {
         let origin = self.binding.map_or(Origin::Pattern, Origin::Let);
-        self.declare(&pat.ident, origin);
+        let decl = self.declare(&pat.ident, origin);
+        self.ids.bindings.insert(address(pat), decl);
         if let Some((_, sub)) = &pat.subpat {
             self.visit_pat(sub);
         }
     }
 
     fn visit_expr_path(&mut self, path: &'ast syn::ExprPath) {
-        if path.qself.is_none()
-            && let Some(name) = path.path.get_ident()
-        {
-            let name = name.to_string();
-            if let Some((_, decl)) = self.names.iter().rev().find(|(n, _)| *n == name) {
-                self.ids.uses.insert(address(path), *decl);
-            }
-        }
+        let decl = path
+            .path
+            .get_ident()
+            .filter(|_| path.qself.is_none())
+            .and_then(|name| {
+                let name = name.to_string();
+                self.names.iter().rev().find(|(n, _)| *n == name)
+            })
+            .map(|(_, decl)| *decl);
+        self.ids.uses.insert(address(path), decl);
         visit::visit_expr_path(self, path);
     }
 
     fn visit_expr_field(&mut self, field: &'ast syn::ExprField) {
         visit::visit_expr_field(self, field);
         if let Expr::Path(base) = &*field.base
-            && let Some(decl) = self.ids.uses.get(&address(base))
+            && let Some(Some(decl)) = self.ids.uses.get(&address(base))
         {
             self.ids.projected.insert(*decl);
         }

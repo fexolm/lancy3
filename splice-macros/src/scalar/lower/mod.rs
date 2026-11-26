@@ -17,6 +17,7 @@ mod word;
 pub(super) use simd::BufferType;
 pub(crate) use simd::Elem;
 
+use crate::kast::DeclId;
 use proc_macro2::{Ident, TokenStream};
 use quote::ToTokens;
 use std::collections::HashMap;
@@ -143,11 +144,13 @@ pub(super) struct Lower<'a> {
     pub(super) result_type: Scalar,
     pub(super) unit_result: bool,
     pub(super) formals: &'a [Binding],
-    pub(super) bindings: HashMap<String, Binding>,
+    /// The lowering of each declaration in scope.
+    pub(super) bindings: HashMap<DeclId, Binding>,
     pub(super) aggregates: &'a std::cell::RefCell<Vec<aggregate::Layout>>,
     /// Numbers generated labels in expansion order, so output is deterministic.
     pub(super) labels: &'a std::cell::Cell<u32>,
-    pub(super) debug_names: std::collections::BTreeMap<String, Ident>,
+    /// The declarations a debugger sees, by name.
+    pub(super) debug_names: std::collections::BTreeMap<String, DeclId>,
     pub(super) fish: TokenStream,
     /// Enclosing loops, innermost last.
     pub(super) loops: Vec<LoopFrame>,
@@ -418,9 +421,23 @@ impl Lower<'_> {
             _ => err(at, "branch arms have different result types"),
         }
     }
+    /// Bind every name `pat` introduces to `binding`.
+    pub(super) fn bind(&mut self, pat: &Pat, binding: Binding) {
+        super::visit_bindings(pat, &mut |pat| {
+            self.bindings.insert(self.body.binding(pat), binding);
+        });
+    }
+
+    /// Bind the named declaration `pat` and show it to a debugger.
+    pub(super) fn declare(&mut self, pat: &syn::PatIdent, binding: Binding) {
+        let decl = self.body.binding(pat);
+        self.bindings.insert(decl, binding);
+        self.debug_names.insert(pat.ident.to_string(), decl);
+    }
+
     fn with_pattern(&self, pat: &Pat) -> Self {
         let mut scope = self.clone();
-        super::bind_pattern(&mut scope.bindings, pat, Binding::Host(self.region_depth));
+        scope.bind(pat, Binding::Host(self.region_depth));
         super::visit_bindings(pat, &mut |pat| {
             scope.debug_names.remove(&pat.ident.to_string());
         });
@@ -444,7 +461,7 @@ impl Lower<'_> {
                     self.debug_names.remove(&name);
                 } else {
                     captures.extend(self.capture_constant(&pat.ident));
-                    self.debug_names.insert(name, pat.ident.clone());
+                    self.debug_names.insert(name, self.body.binding(pat));
                 }
             });
         }
@@ -452,11 +469,16 @@ impl Lower<'_> {
     }
 
     fn binding(&self, p: &syn::ExprPath) -> Option<Binding> {
-        self.bindings.get(&p.path.get_ident()?.to_string()).copied()
+        self.bindings.get(&self.body.decl_of(p)?).copied()
     }
 
     fn path(&self, p: &syn::ExprPath) -> Value {
-        match self.binding(p) {
+        self.bound_path(p, self.binding(p))
+    }
+
+    /// The value of path `p` bound to `binding`.
+    fn bound_path(&self, p: &syn::ExprPath, binding: Option<Binding>) -> Value {
+        match binding {
             Some(Binding::Reg(t, true)) => {
                 // A later operand can assign this variable. Snapshot its value
                 // at the Rust evaluation point before constructing the RHS.
@@ -560,10 +582,10 @@ impl Lower<'_> {
                 column: #column,
             }
         );
-        let variables = self.debug_names.iter().filter_map(|(name, ident)| {
+        let variables = self.debug_names.iter().filter_map(|(name, decl)| {
             let name = name.trim_start_matches("r#");
-            let binding = self.bindings.get(&ident.to_string())?;
-            let mut ident = ident.clone();
+            let binding = self.bindings.get(decl)?;
+            let mut ident = self.body.name(*decl).clone();
             ident.set_span(ident.span().located_at(proc_macro2::Span::mixed_site()));
             let value = match binding {
                 Binding::Word(_) => return None,
@@ -636,7 +658,7 @@ impl Lower<'_> {
             return Ok(emit!(let _ = #value;));
         }
         if value.stage.is_host() && !self.body.runtime_local(local) {
-            super::bind_pattern(&mut self.bindings, pat, Binding::Host(self.region_depth));
+            self.bind(pat, Binding::Host(self.region_depth));
             let (binding, ty) = match pat {
                 Pat::Type(t) => (&*t.pat, Some(&*t.ty)),
                 p => (p, None),
@@ -651,7 +673,8 @@ impl Lower<'_> {
                 // name a unit variant, so evaluating its identifier as an
                 // expression could lose the original type context.
                 let id = &name.ident;
-                self.debug_names.insert(id.to_string(), id.clone());
+                self.debug_names
+                    .insert(id.to_string(), self.body.binding(name));
                 let ty = ty.map(|ty| emit!(: #ty));
                 let capture = self.capture_value(id, emit!(__splice_host_value));
                 return Ok(emit! {
@@ -713,8 +736,7 @@ impl Lower<'_> {
                 rhs,
             )
         };
-        self.bindings.insert(id.to_string(), binding);
-        self.debug_names.insert(id.to_string(), id.clone());
+        self.declare(name, binding);
         Ok(emit!(let #id = #rhs;))
     }
 
@@ -829,7 +851,7 @@ impl Lower<'_> {
             Expr::Call(x) => self.call(x, hint, None),
             Expr::Index(x) => self.index(x),
             Expr::Cast(x) => self.cast(x),
-            Expr::MethodCall(x) => self.method(x, hint),
+            Expr::MethodCall(_) => self.method(e, hint),
             Expr::Reference(x) => self.reference(x),
             Expr::Macro(m) if crate::kast::vec_macro(&m.mac.path) => {
                 Ok(Value::new(Stage::Host, self.host_raw(e)?))

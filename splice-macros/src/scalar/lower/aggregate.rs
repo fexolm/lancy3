@@ -145,7 +145,7 @@ impl Lower<'_> {
         let constructor = literal.constructor(root, pat);
         let mut layouts = self.aggregates.borrow_mut();
         self.bindings
-            .insert(id.to_string(), Binding::Aggregate(layouts.len()));
+            .insert(self.body.binding(name), Binding::Aggregate(layouts.len()));
         layouts.push(Layout {
             fields,
             constructor: constructor.clone(),

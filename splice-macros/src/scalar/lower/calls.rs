@@ -13,10 +13,7 @@ impl Lower<'_> {
         let Expr::Path(p) = &*c.func else {
             return err(&c.func, "expected a kernel function path");
         };
-        if p.path
-            .get_ident()
-            .is_some_and(|name| self.bindings.contains_key(&name.to_string()))
-        {
+        if self.body.decl_of(p).is_some() {
             return err(
                 &c.func,
                 "a Splice kernel calls functions by path, not through a local function value",

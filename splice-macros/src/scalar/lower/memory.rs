@@ -2,7 +2,7 @@
 //! Only lengths, element accesses, and scalar computations become instructions.
 use super::{Lower, Scalar, Stage, Value, err};
 use proc_macro2::TokenStream;
-use syn::{BinOp, Expr, ExprCast, ExprIndex, ExprMethodCall, ExprReference, Result, UnOp};
+use syn::{BinOp, Expr, ExprCast, ExprIndex, ExprReference, Result, UnOp};
 
 pub(super) fn primitive_method(name: &str) -> bool {
     matches!(
@@ -25,7 +25,11 @@ pub(super) fn primitive_method(name: &str) -> bool {
 }
 
 impl Lower<'_> {
-    pub(super) fn method(&self, m: &ExprMethodCall, hint: Option<Scalar>) -> Result<Value> {
+    /// The method call `e`.
+    pub(super) fn method(&self, e: &Expr, hint: Option<Scalar>) -> Result<Value> {
+        let Expr::MethodCall(m) = e else {
+            unreachable!("a method call")
+        };
         if let Expr::Index(index) = &*m.receiver
             && let Expr::Path(table) = &*index.expr
             && matches!(self.binding(table), Some(super::Binding::Columns))
@@ -112,8 +116,7 @@ impl Lower<'_> {
                         })
                     }));
                 }
-                let expression = Expr::MethodCall(m.clone());
-                return Ok(Value::new(Stage::Host, self.required(&expression, hint)?));
+                return Ok(Value::new(Stage::Host, self.required(e, hint)?));
             }
         }
         let kind = match receiver.stage {

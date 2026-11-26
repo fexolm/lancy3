@@ -24,6 +24,18 @@ pub(crate) struct NodeId(u32);
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct DeclId(u32);
 
+impl PartialOrd for DeclId {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for DeclId {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.0.cmp(&other.0)
+    }
+}
+
 /// How a parameter takes part in staging.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Param {
@@ -59,7 +71,11 @@ struct Ids {
     exprs: HashMap<usize, NodeId>,
     locals: HashMap<usize, NodeId>,
     macros: HashMap<usize, NodeId>,
-    uses: HashMap<usize, DeclId>,
+    /// Every path expression of the body: the declaration it names, or
+    /// `None` for an item.
+    uses: HashMap<usize, Option<DeclId>>,
+    /// The declaration each binding identifier of a pattern introduces.
+    bindings: HashMap<usize, DeclId>,
     /// The declarations each `let` binds.
     let_decls: HashMap<NodeId, Vec<DeclId>>,
     /// The declarations bound by the pattern of a `match` arm, `for`,
@@ -115,9 +131,14 @@ impl<'a> Body<'a> {
         self.block
     }
 
-    fn lookup<T: Clone, N>(map: &HashMap<usize, T>, node: &N) -> T {
+    fn lookup<T: Clone, N: quote::ToTokens>(map: &HashMap<usize, T>, node: &N) -> T {
         map.get(&address(node))
-            .expect("internal error: a node outside the normalized kernel body")
+            .unwrap_or_else(|| {
+                panic!(
+                    "internal error: a node outside the normalized kernel body: {}",
+                    node.to_token_stream()
+                )
+            })
             .clone()
     }
 
@@ -137,10 +158,37 @@ impl<'a> Body<'a> {
         &self.macros[&Self::lookup(&self.ids.macros, mac)]
     }
 
-    /// The declaration a single-identifier path names, if it names a
-    /// parameter or a local rather than an item.
-    fn decl_of(&self, path: &ExprPath) -> Option<DeclId> {
-        self.ids.uses.get(&address(path)).copied()
+    /// The declaration a path of the body names, if it names a parameter
+    /// or a local rather than an item.
+    pub(crate) fn decl_of(&self, path: &ExprPath) -> Option<DeclId> {
+        Self::lookup(&self.ids.uses, path)
+    }
+
+    /// The declaration a binding identifier of a pattern of the body introduces.
+    pub(crate) fn binding(&self, pat: &syn::PatIdent) -> DeclId {
+        Self::lookup(&self.ids.bindings, pat)
+    }
+
+    /// The declaration of parameter `index` of the kernel.
+    pub(crate) fn param(index: usize) -> DeclId {
+        DeclId(index as u32)
+    }
+
+    /// The name a declaration binds.
+    pub(crate) fn name(&self, decl: DeclId) -> &Ident {
+        &self.decl(decl).name
+    }
+
+    /// Whether the kernel has parameters.
+    pub(crate) fn has_params(&self) -> bool {
+        self.decls
+            .first()
+            .is_some_and(|decl| matches!(decl.origin, Origin::Param(_)))
+    }
+
+    /// Whether the declaration is a parameter of the kernel.
+    pub(crate) fn is_param(&self, decl: DeclId) -> bool {
+        matches!(self.decl(decl).origin, Origin::Param(_))
     }
 
     /// The parameter a path names, unless a local of the body shadows it.

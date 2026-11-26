@@ -272,8 +272,9 @@ pub(super) fn expand(root: Path, native: &mut ItemFn, print: bool) -> Result<Tok
         } else {
             decl.clone()
         });
-        bindings.insert(id.to_string(), formal);
-        debug_names.insert(id.to_string(), id.clone());
+        let decl = crate::kast::Body::param(formals.len());
+        bindings.insert(decl, formal);
+        debug_names.insert(id.to_string(), decl);
         formals.push(formal);
     }
     if let Some(context) = &mut context {
@@ -837,12 +838,6 @@ pub(super) fn compound_op(op: &syn::BinOp) -> Option<&'static str> {
         ShrAssign(_) => Some("Shr"),
         _ => None,
     }
-}
-
-fn bind_pattern<T: Copy>(names: &mut HashMap<String, T>, pat: &Pat, binding: T) {
-    visit_bindings(pat, &mut |pat| {
-        names.insert(pat.ident.to_string(), binding);
-    });
 }
 
 fn visit_bindings(pat: &Pat, visit: &mut impl FnMut(&syn::PatIdent)) {

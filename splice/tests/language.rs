@@ -1602,3 +1602,48 @@ fn known_match_runtime_guards_fall_through() {
     assert!(printed.contains("if x == 3"), "{printed}");
     assert!(!printed.contains("x > 10"), "{printed}");
 }
+
+/// MAC-18: names resolve to their declarations. A local of a `comptime!`
+/// block shadows the runtime parameter of the same name.
+#[kernel]
+fn shadowed_by_declarations(#[comptime] steps: &[i32], x: i32) -> i32 {
+    let total = comptime!({
+        let x = steps.len() as i32 * 2;
+        x + 1
+    });
+    x + total
+}
+
+/// MAC-18: a closure parameter shadows the runtime parameter `x`: the
+/// closure is an opaque operation, not a read of `x`.
+#[kernel]
+fn closure_shadow(#[comptime] steps: &[i32], x: i32) -> i32 {
+    comptime!(steps.iter().map(|x| x + 1).sum::<i32>()) + x
+}
+
+#[test]
+fn closure_and_block_locals_shadow_runtime_parameters() {
+    fn check<B: Codegen<Output: Executable>>() {
+        let steps = [1, 2, 3];
+        let built = shadowed_by_declarations::build::<B>(shadowed_by_declarations::BuildArgs {
+            steps: &steps,
+        })
+        .unwrap();
+        let compiled = B::compile(&shadowed_by_declarations::ir(&steps).unwrap()).unwrap();
+        for code in [built, compiled] {
+            for x in [-4, 0, 7] {
+                assert_eq!(
+                    code.call(shadowed_by_declarations::CallArgs { x }),
+                    Ok(shadowed_by_declarations(&steps, x))
+                );
+            }
+        }
+        let error = closure_shadow::build::<B>(closure_shadow::BuildArgs { steps: &steps });
+        assert!(
+            matches!(&error, Err(BuildError::Staging(message)) if message.contains("opaque operation")),
+            "{:?}",
+            error.err()
+        );
+    }
+    splice_testkit::each_backend!(B => check::<B>());
+}

@@ -342,11 +342,7 @@ impl Lower<'_> {
     ) -> Result<Value> {
         let mut scope = self.nested_region();
         let LoopFrame { next, end, .. } = scope.enter_loop(f.label.as_ref(), LoopKind::Runtime);
-        let id = &pat.ident;
-        scope
-            .bindings
-            .insert(id.to_string(), Binding::Reg(kind, false));
-        scope.debug_names.insert(id.to_string(), id.clone());
+        scope.declare(pat, Binding::Reg(kind, false));
         let point = scope.debug_point(f.for_token.span);
         let body = scope.block(&f.body)?.code;
         let root = self.root;

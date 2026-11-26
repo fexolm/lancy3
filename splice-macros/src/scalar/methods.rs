@@ -136,21 +136,29 @@ pub(crate) fn publish(
             }
         };
         declarations.push(declaration);
+        bindings.insert(crate::kast::Body::param(formals.len()), param.binding);
         formals.push(param.binding);
-        bindings.insert(id.to_string(), param.binding);
     }
 
-    let stage_params = params
-        .iter()
-        .map(|param| {
-            super::named(param.pattern)
-                .map(|pat| (pat.ident.clone(), super::stage_param(param.binding)))
-        })
-        .collect::<syn::Result<Vec<_>>>()?;
+    // An evaluated-only method reads its parameters as evaluator inputs.
+    let stage_params = if eval_only {
+        abi::parameter_names(&signature)
+            .map(|name| (name, crate::kast::Param::Known))
+            .collect()
+    } else {
+        params
+            .iter()
+            .map(|param| {
+                super::named(param.pattern)
+                    .map(|pat| (pat.ident.clone(), super::stage_param(param.binding)))
+            })
+            .collect::<syn::Result<Vec<_>>>()?
+    };
     let analysis = crate::kast::Body::new(&body, &stage_params)?;
     let debug_names = params
         .iter()
-        .map(|param| (param.name.to_string(), param.name.clone()))
+        .enumerate()
+        .map(|(index, param)| (param.name.to_string(), crate::kast::Body::param(index)))
         .collect();
     let lower = Lower {
         generics: &signature.generics,

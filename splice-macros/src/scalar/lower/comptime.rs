@@ -56,12 +56,7 @@ impl Lower<'_> {
             let mut evaluator = self.clone();
             let label = syn::Lifetime::new("'__splice_evaluated", proc_macro2::Span::mixed_site());
             evaluator.evaluator_return = Some(label.clone());
-            let body = evaluator.required_block(
-                block,
-                Some(self.result_type),
-                &HashSet::new(),
-                &inputs,
-            )?;
+            let body = evaluator.required_block(block, Some(self.result_type))?;
             emit!(#[allow(unused_labels)] #label: { #body })
         } else {
             emit!(
@@ -84,19 +79,37 @@ impl Lower<'_> {
         })
     }
 
-    pub(super) fn required(&self, expr: &Expr, hint: Option<Scalar>) -> Result<TokenStream> {
-        self.required_expr(expr, hint, &HashSet::new(), &HashSet::new())
+    /// Whether the parameters are `Option`s of their values: the mandatory
+    /// evaluator of a kernel with parameters.
+    fn inputs(&self) -> bool {
+        self.optional() && self.body.has_params()
     }
 
-    fn required_expr(
-        &self,
-        expr: &Expr,
-        hint: Option<Scalar>,
-        locals: &HashSet<String>,
-        inputs: &HashSet<String>,
-    ) -> Result<TokenStream> {
+    /// Whether `path` names a parameter that the evaluator reads as an input.
+    fn input(&self, path: &syn::ExprPath) -> bool {
+        self.inputs()
+            && self
+                .body
+                .decl_of(path)
+                .is_some_and(|decl| self.body.is_param(decl))
+    }
+
+    /// Whether `path` names a local of the evaluated Rust: one the lowering
+    /// has not bound (it is declared inside the evaluated expression).
+    fn evaluated_local(&self, path: &syn::ExprPath) -> bool {
+        self.body
+            .decl_of(path)
+            .is_some_and(|decl| !self.bindings.contains_key(&decl))
+            && !self.input(path)
+    }
+
+    pub(super) fn required(&self, expr: &Expr, hint: Option<Scalar>) -> Result<TokenStream> {
+        self.required_expr(expr, hint)
+    }
+
+    fn required_expr(&self, expr: &Expr, hint: Option<Scalar>) -> Result<TokenStream> {
         let support = &self.root;
-        let visit = |e: &Expr| self.required_expr(e, None, locals, inputs);
+        let visit = |e: &Expr| self.required_expr(e, None);
         let primitive = |value: TokenStream| {
             let check = self.primitive(emit!(&value));
             emit!({
@@ -108,7 +121,7 @@ impl Lower<'_> {
         let rejected = || {
             // An unevaluated operand supplies the Rust result type when all
             // names have their original type in the specialization factory.
-            if inputs.is_empty() && !super::simd::uses_lane(expr) && self.host_only(expr) {
+            if !self.inputs() && !super::simd::uses_lane(expr) && self.host_only(expr) {
                 emit!(if false { #expr } else { return ::core::result::Result::Err(#support::BuildError::staging("opaque operation in comptime!")) })
             } else {
                 let ty = match hint {
@@ -121,21 +134,10 @@ impl Lower<'_> {
         };
         Ok(match expr {
             Expr::Lit(_) => emit!(#expr),
-            Expr::Path(path)
-                if path.path.get_ident().is_some_and(|id| {
-                    inputs.contains(&id.to_string()) && !locals.contains(&id.to_string())
-                }) =>
-            {
+            Expr::Path(path) if self.input(path) => {
                 emit!((#path).ok_or_else(|| #support::BuildError::staging("runtime argument read in comptime!"))?)
             }
-            Expr::Path(path)
-                if path
-                    .path
-                    .get_ident()
-                    .is_some_and(|id| locals.contains(&id.to_string())) =>
-            {
-                emit!(#path)
-            }
+            Expr::Path(path) if self.evaluated_local(path) => emit!(#path),
             Expr::Path(path) => match self.binding(path) {
                 Some(Binding::Reg(ty, _)) => {
                     let ty = match ty {
@@ -195,16 +197,25 @@ impl Lower<'_> {
                 emit!([#(#elements),*])
             }
             Expr::Struct(literal) => {
-                let mut result = literal.clone();
-                for field in &mut result.fields {
-                    let value = visit(&field.expr)?;
-                    field.colon_token = Some(Default::default());
-                    field.expr = syn::parse2(value)?;
-                }
-                if let Some(rest) = &mut result.rest {
-                    **rest = syn::parse2(visit(rest)?)?;
-                }
-                self.dropless(result)
+                let fields = literal
+                    .fields
+                    .iter()
+                    .map(|field| {
+                        let (member, value) = (&field.member, visit(&field.expr)?);
+                        Ok(emit!(#member: #value))
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                let rest = literal
+                    .rest
+                    .as_deref()
+                    .map(|rest| visit(rest).map(|rest| emit!(.. #rest)))
+                    .transpose()?;
+                let path = syn::ExprPath {
+                    attrs: literal.attrs.clone(),
+                    qself: literal.qself.clone(),
+                    path: literal.path.clone(),
+                };
+                self.dropless(emit!(#path { #(#fields,)* #rest }))
             }
             Expr::Index(i) => {
                 let read = self.known_index(visit(&i.expr)?, visit(&i.index)?);
@@ -236,8 +247,7 @@ impl Lower<'_> {
                 let op = &b.op;
                 let rhs = primitive(visit(&b.right)?);
                 if let Some(kind) = super::super::compound_op(op) {
-                    if matches!(&*b.left,Expr::Path(p) if p.path.get_ident().is_some_and(|n|locals.contains(&n.to_string())))
-                    {
+                    if matches!(&*b.left, Expr::Path(p) if self.evaluated_local(p)) {
                         let lhs = &b.left;
                         let check = comptime_fault(support, kind, emit!(&(&#lhs, &right)));
                         let primitive = self.primitive(emit!(&#lhs));
@@ -284,11 +294,10 @@ impl Lower<'_> {
                     rejected()
                 }
             }
-            Expr::Block(b) => self.required_block(&b.block, hint, locals, inputs)?,
+            Expr::Block(b) => self.required_block(&b.block, hint)?,
             Expr::Field(field)
                 if matches!(&*field.base, Expr::Path(path)
-                if path.path.get_ident().is_some_and(|id| !locals.contains(&id.to_string()))
-                && matches!(self.binding(path), Some(Binding::Aggregate(_)))) =>
+                    if matches!(self.binding(path), Some(Binding::Aggregate(_)))) =>
             {
                 let (word, _, constructor) = self
                     .aggregate_field(field)
@@ -301,33 +310,27 @@ impl Lower<'_> {
                 let member = &field.member;
                 emit!(#support::frontend::scalar::known_field(#constructor, |v| &v.#member, #known)?)
             }
-            Expr::Field(field)
-                if matches!(&*field.base, Expr::Path(path)
-                    if path.path.get_ident().is_some_and(|id|
-                        inputs.contains(&id.to_string()) && !locals.contains(&id.to_string()))) =>
-            {
+            Expr::Field(field) if matches!(&*field.base, Expr::Path(path) if self.input(path)) => {
                 let base = &field.base;
                 let place = emit!(*#base.as_ref().ok_or_else(|| #support::BuildError::staging("runtime argument read in comptime!"))?);
                 self.known_field(place, &field.member)
             }
-            Expr::Field(field) if self.host_only(expr) || !inputs.is_empty() => {
+            Expr::Field(field) if self.host_only(expr) || self.inputs() => {
                 self.known_field(visit(&field.base)?, &field.member)
             }
             Expr::If(i) => {
-                let mut bindings = locals.clone();
                 let cond = if let Expr::Let(binding) = &*i.cond {
                     let value = visit(&binding.expr)?;
                     let pattern = &binding.pat;
-                    bind_locals(&mut bindings, pattern);
                     emit!(let #pattern = #value)
                 } else {
-                    self.required_expr(&i.cond, Some(Scalar::Bool), locals, inputs)?
+                    self.required_expr(&i.cond, Some(Scalar::Bool))?
                 };
-                let yes = self.required_block(&i.then_branch, hint, &bindings, inputs)?;
+                let yes = self.required_block(&i.then_branch, hint)?;
                 let no = i
                     .else_branch
                     .as_ref()
-                    .map(|(_, e)| self.required_expr(e, hint, locals, inputs))
+                    .map(|(_, e)| self.required_expr(e, hint))
                     .transpose()?
                     .map(|e| emit!(else {#e}));
                 emit!(if #cond {#yes} #no)
@@ -336,18 +339,16 @@ impl Lower<'_> {
                 let value = visit(&m.expr)?;
                 let mut arms = Vec::with_capacity(m.arms.len());
                 for arm in &m.arms {
-                    let mut bindings = locals.clone();
                     let pat = &arm.pat;
-                    bind_locals(&mut bindings, pat);
                     let guard = arm
                         .guard
                         .as_ref()
                         .map(|(_, guard)| {
-                            self.required_expr(guard, Some(Scalar::Bool), &bindings, inputs)
+                            self.required_expr(guard, Some(Scalar::Bool))
                                 .map(|test| emit!(if #test))
                         })
                         .transpose()?;
-                    let body = self.required_expr(&arm.body, hint, &bindings, inputs)?;
+                    let body = self.required_expr(&arm.body, hint)?;
                     let attrs = &arm.attrs;
                     arms.push(emit!(#(#attrs)* #pat #guard => { #body },));
                 }
@@ -355,13 +356,13 @@ impl Lower<'_> {
             }
             Expr::While(w) => {
                 let label = &w.label;
-                let cond = self.required_expr(&w.cond, Some(Scalar::Bool), locals, inputs)?;
-                let body = self.required_block(&w.body, None, locals, inputs)?;
+                let cond = self.required_expr(&w.cond, Some(Scalar::Bool))?;
+                let body = self.required_block(&w.body, None)?;
                 emit!(#label while #cond { #support::frontend::scalar::specialization_step()?; #body; })
             }
             Expr::Loop(l) => {
                 let label = &l.label;
-                let body = self.required_block(&l.body, None, locals, inputs)?;
+                let body = self.required_block(&l.body, None)?;
                 emit!(#label loop { #support::frontend::scalar::specialization_step()?; #body; })
             }
             Expr::ForLoop(f) => {
@@ -373,11 +374,7 @@ impl Lower<'_> {
                     let start = primitive(visit(start)?);
                     let end = primitive(visit(end)?);
                     let pat = &f.pat;
-                    let mut locals = locals.clone();
-                    crate::scalar::visit_bindings(pat, &mut |binding| {
-                        locals.insert(binding.ident.to_string());
-                    });
-                    let body = self.required_block(&f.body, None, &locals, inputs)?;
+                    let body = self.required_block(&f.body, None)?;
                     emit!(#label for #pat in (#start) #limits (#end) {
                         #support::frontend::scalar::specialization_step()?;
                         #body;
@@ -396,7 +393,7 @@ impl Lower<'_> {
                 let value = r
                     .expr
                     .as_deref()
-                    .map(|e| self.required_expr(e, Some(self.result_type), locals, inputs))
+                    .map(|e| self.required_expr(e, Some(self.result_type)))
                     .transpose()?;
                 emit!(break #label #value)
             }
@@ -421,12 +418,9 @@ impl Lower<'_> {
                     .args
                     .iter()
                     .map(|arg| {
-                        if let Expr::Path(path) = arg
-                            && let Some(id) = path.path.get_ident()
-                            && !locals.contains(&id.to_string())
-                        {
-                            if inputs.contains(&id.to_string()) {
-                                return Ok(emit!(#id));
+                        if let Expr::Path(path) = arg {
+                            if self.input(path) {
+                                return Ok(emit!(#path));
                             }
                             if matches!(
                                 self.binding(path),
@@ -477,12 +471,9 @@ impl Lower<'_> {
                     .args
                     .iter()
                     .map(|a| {
-                        if let Expr::Path(p) = a
-                            && let Some(id) = p.path.get_ident()
-                            && !locals.contains(&id.to_string())
-                        {
-                            if inputs.contains(&id.to_string()) {
-                                return Ok(emit!(#id));
+                        if let Expr::Path(p) = a {
+                            if self.input(p) {
+                                return Ok(emit!(#p));
                             }
                             if matches!(
                                 self.binding(p),
@@ -511,21 +502,14 @@ impl Lower<'_> {
                 )
             }
             Expr::Macro(m) if m.mac.path.is_ident("comptime") => {
-                self.required_expr(&m.mac.parse_body()?, hint, locals, inputs)?
+                self.required_expr(self.body.comptime(&m.mac), hint)?
             }
             _ => rejected(),
         })
     }
 
-    fn required_block(
-        &self,
-        block: &syn::Block,
-        hint: Option<Scalar>,
-        outer: &HashSet<String>,
-        inputs: &HashSet<String>,
-    ) -> Result<TokenStream> {
+    fn required_block(&self, block: &syn::Block, hint: Option<Scalar>) -> Result<TokenStream> {
         let root = self.root;
-        let mut locals = outer.clone();
         let mut code = TokenStream::new();
         for stmt in &block.stmts {
             match stmt {
@@ -538,32 +522,26 @@ impl Lower<'_> {
                             let args = call
                                 .args
                                 .iter()
-                                .map(|arg| self.required_expr(arg, None, &locals, inputs))
+                                .map(|arg| self.required_expr(arg, None))
                                 .collect::<Result<Vec<_>>>()?;
                             emit!(#func(#(#args),*))
                         }
-                        init => self.required_expr(init, None, &locals, inputs)?,
+                        init => self.required_expr(init, None)?,
                     };
                     let otherwise = init
                         .diverge
                         .as_ref()
                         .map(|(_, expr)| {
-                            self.required_expr(expr, None, &locals, inputs)
+                            self.required_expr(expr, None)
                                 .map(|expr| emit!(else { #expr }))
                         })
                         .transpose()?;
                     let pat = &local.pat;
-                    bind_locals(&mut locals, pat);
                     let value = self.dropless(value);
                     code.extend(emit!(let #pat = #value #otherwise;));
                 }
                 Stmt::Expr(e, semi) => {
-                    let value = self.required_expr(
-                        e,
-                        if semi.is_some() { None } else { hint },
-                        &locals,
-                        inputs,
-                    )?;
+                    let value = self.required_expr(e, if semi.is_some() { None } else { hint })?;
                     code.extend(emit!(#value #semi));
                 }
                 _ => {
@@ -577,12 +555,6 @@ impl Lower<'_> {
         }
         Ok(emit!({#code}))
     }
-}
-
-fn bind_locals(locals: &mut HashSet<String>, pattern: &Pat) {
-    crate::scalar::visit_bindings(pattern, &mut |binding| {
-        locals.insert(binding.ident.to_string());
-    });
 }
 
 fn pure_wide_body(sig: &syn::Signature, block: &syn::Block, inputs: &HashSet<String>) -> bool {
