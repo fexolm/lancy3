@@ -133,9 +133,14 @@ impl<I: TargetInst> Function<I> {
             // branch has edges.
             let insts = &self.insts[first.index()..];
             let last = insts.last().expect("a block ends with a branch or return");
-            assert!(last.is_branch() || last.is_ret(), "a block ends with a branch or return");
             assert!(
-                insts[..insts.len() - 1].iter().all(|i| !i.is_branch() && !i.is_ret()),
+                last.is_branch() || last.is_ret(),
+                "a block ends with a branch or return"
+            );
+            assert!(
+                insts[..insts.len() - 1]
+                    .iter()
+                    .all(|i| !i.is_branch() && !i.is_ret()),
                 "a control transfer ends its block"
             );
             assert!(

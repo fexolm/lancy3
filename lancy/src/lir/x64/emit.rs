@@ -3,8 +3,9 @@ use super::{Cpu, Machine, abi::Abi, inst::class, inst::simd};
 use super::{
     compile::{CompiledFunction, compile},
     frame::{CHILD_ARGS, Frame},
-    inst::{Address, Alu, Cond, Inst, Quotient, Rhs, SelectCond, VectorMask},
+    inst::{Address, Alu, Cond, Inst, Quotient, Rhs, SelectCond},
 };
+use crate::lir::regalloc::Allocations;
 use crate::support::numeric::Action;
 use crate::{
     CompileError, Limit, Trap,
@@ -22,16 +23,6 @@ use simd::{K, XMM, YMM, ZMM, opmask};
 pub(super) type Constants = Vec<(CodeLabel, [u8; 64], usize)>;
 type AsmResult = Result<(), IcedError>;
 
-fn allocate_mask(mask: VectorMask<VReg>, regs: &[Allocation]) -> (VectorMask<usize>, usize) {
-    let mut next = 0;
-    let mask = mask.map(|_| {
-        let reg = gpr(regs[next]);
-        next += 1;
-        reg
-    });
-    (mask, next)
-}
-
 pub(super) const R64: [AsmRegister64; 16] = [
     rax, rcx, rdx, rbx, rsp, rbp, rsi, rdi, r8, r9, r10, r11, r12, r13, r14, r15,
 ];
@@ -45,9 +36,6 @@ pub(super) const R8: [AsmRegister8; 16] = [
     al, cl, dl, bl, spl, bpl, sil, dil, r8b, r9b, r10b, r11b, r12b, r13b, r14b, r15b,
 ];
 
-fn gpr(a: Allocation) -> usize {
-    a.as_reg().expect("register-constrained operand").hw_enc()
-}
 // Compilation bounds both the complete workspace and root argument table by disp32.
 fn disp(index: usize) -> i32 {
     (index * 8) as i32
@@ -59,6 +47,10 @@ fn slot(index: usize) -> AsmMemoryOperand {
 impl Frame {
     fn spill(&self, a: Allocation) -> AsmMemoryOperand {
         slot(self.spill_base + a.as_stack().expect("allocated spill").index())
+    }
+
+    fn spill32(&self, a: Allocation) -> AsmMemoryOperand {
+        dword_ptr(r11 + disp(self.spill_base + a.as_stack().expect("allocated spill").index()))
     }
 
     fn emit_move(
@@ -377,7 +369,7 @@ impl Emitter<'_> {
                         self.machine.frame.emit_move(self.cpu, self.a, from, to)?
                     }
                     InstOrEdit::Inst(j) => {
-                        let allocs = self.machine.allocation.inst_allocs(j);
+                        let allocs = Allocations::of(body, &self.machine.allocation, j);
                         match body.insts()[j.index()] {
                             Inst::Jump => {
                                 let target = body.block_succs(b)[0].index();
@@ -391,28 +383,31 @@ impl Emitter<'_> {
                             | Inst::BrCmp(..)) => {
                                 let succ = body.block_succs(b);
                                 let (yes, no) = (succ[0].index(), succ[1].index());
-                                let condition = if let Inst::BranchAny(mask) = inst {
-                                    simd::test_vector_mask(
-                                        self.a,
-                                        self.cpu,
-                                        allocate_mask(mask, allocs).0,
-                                    )?;
-                                    Cond::Ne
-                                } else if let Inst::BranchAll(lane, mask) = inst {
-                                    let cpu = self.cpu;
-                                    if mask.class() == RegClass::Float {
-                                        opmask::test_all(self.a, cpu, lane, gpr(allocs[0]))?;
-                                    } else {
-                                        simd::test_all(self.a, cpu, lane, gpr(allocs[0]))?;
+                                let condition = match inst {
+                                    Inst::BranchAny(mask) => {
+                                        let mask = mask.map(|v| allocs.reg(v));
+                                        simd::test_vector_mask(self.a, self.cpu, mask)?;
+                                        Cond::Ne
                                     }
-                                    Cond::Eq
-                                } else if let Inst::BrCmp(cc, _, rhs) = inst {
-                                    cmp(self.a, &self.machine.frame, allocs, rhs)?;
-                                    cc
-                                } else {
-                                    let r = R32[gpr(allocs[0])];
-                                    self.a.test(r, r)?;
-                                    Cond::Ne
+                                    Inst::BranchAll(lane, mask) => {
+                                        let (cpu, mask_reg) = (self.cpu, allocs.reg(mask));
+                                        if mask.class() == RegClass::Float {
+                                            opmask::test_all(self.a, cpu, lane, mask_reg)?;
+                                        } else {
+                                            simd::test_all(self.a, cpu, lane, mask_reg)?;
+                                        }
+                                        Cond::Eq
+                                    }
+                                    Inst::BrCmp(cc, lhs, rhs) => {
+                                        cmp(self.a, &self.machine.frame, allocs, lhs, rhs)?;
+                                        cc
+                                    }
+                                    Inst::Branch(v) => {
+                                        let r = R32[allocs.reg(v)];
+                                        self.a.test(r, r)?;
+                                        Cond::Ne
+                                    }
+                                    _ => unreachable!("matched as a branch"),
                                 };
                                 if Some(yes) == next {
                                     jcc(self.a, condition.inverse(), labels[no])?;
@@ -471,29 +466,23 @@ impl Emitter<'_> {
         action: Action,
         input: Type,
         output: Type,
-        args: [Option<Type>; 3],
-        allocs: &[Allocation],
+        args: [Option<(Type, VReg)>; 3],
+        dst: VReg,
+        allocs: Allocations,
     ) -> AsmResult {
         use super::inst::lanes::{self, FRAME, INPUT, OUTPUT, WORKSPACE};
         let width = self.cpu.bytes;
         let a = &mut self.a;
         a.sub(rsp, FRAME)?;
         a.mov(qword_ptr(rsp + WORKSPACE), r11)?;
-        let mut allocs = allocs.iter().copied();
         for (arg, offset) in args.into_iter().zip(INPUT) {
-            if let Some(ty) = arg {
-                store(a, width, ty, ptr(rsp + offset), gpr(allocs.next().unwrap()))?;
+            if let Some((ty, v)) = arg {
+                store(a, width, ty, ptr(rsp + offset), allocs.reg(v))?;
             }
         }
         let mut faults = [None; 3];
         lanes::emit(a, width, action, input, output, &mut faults)?;
-        load(
-            a,
-            width,
-            output,
-            gpr(allocs.next().unwrap()),
-            ptr(rsp + OUTPUT),
-        )?;
+        load(a, width, output, allocs.reg(dst), ptr(rsp + OUTPUT))?;
         a.mov(r11, qword_ptr(rsp + WORKSPACE))?;
         a.add(rsp, FRAME)?;
         if faults.iter().any(Option::is_some) {
@@ -523,25 +512,26 @@ impl Emitter<'_> {
         action: Action,
         input: Type,
         output: Type,
-        args: [Option<Type>; 3],
-        allocs: &[Allocation],
+        args: [Option<(Type, VReg)>; 3],
+        dst: VReg,
+        allocs: Allocations,
     ) -> AsmResult {
         use crate::lir::fallback::{AREA_BYTES, RESULT, SLOT_BYTES, Site, entry};
         let (width, abi) = (self.cpu.bytes, self.abi);
         let area = abi.shadow;
         let saved = area + AREA_BYTES as i32;
         let frame = saved + 8;
+        let types = args.map(|arg| arg.map(|(ty, _)| ty));
         let site = self
             .sites
-            .add(Site::new(action, input, output, args, width));
+            .add(Site::new(action, input, output, types, width));
         let a = &mut *self.a;
         a.sub(rsp, frame)?;
         a.mov(qword_ptr(rsp + saved), r11)?;
-        let mut allocs = allocs.iter().copied();
         for (i, arg) in args.into_iter().enumerate() {
-            if let Some(ty) = arg {
+            if let Some((ty, v)) = arg {
                 let at = ptr(rsp + area + (i * SLOT_BYTES) as i32);
-                store(a, width, ty, at, gpr(allocs.next().unwrap()))?;
+                store(a, width, ty, at, allocs.reg(v))?;
             }
         }
         let [site_arg, area_arg] = [0, 1].map(|i| R64[abi.args[i].hw_enc()]);
@@ -552,7 +542,7 @@ impl Emitter<'_> {
         // The result register may be RAX: keep the code in R10D.
         a.mov(r10d, eax)?;
         let result = ptr(rsp + area + RESULT as i32);
-        load(a, width, output, gpr(allocs.next().unwrap()), result)?;
+        load(a, width, output, allocs.reg(dst), result)?;
         a.mov(r11, qword_ptr(rsp + saved))?;
         a.add(rsp, frame)?;
         let report = self.exits.report(a);
@@ -560,157 +550,143 @@ impl Emitter<'_> {
         a.jne(report)
     }
 
-    fn instruction(&mut self, inst: Inst, allocs: &[Allocation]) -> AsmResult {
+    fn instruction(&mut self, inst: Inst, allocs: Allocations) -> AsmResult {
         let (cpu, abi) = (self.cpu, self.abi);
         let width = cpu.bytes;
         let a = &mut *self.a;
         let frame = &self.machine.frame;
-        let reg = |i: usize| gpr(allocs[i]);
-        let r = |i| R32[reg(i)];
-        let q = |i| R64[reg(i)];
+        let reg = |v: VReg| allocs.reg(v);
+        let r = |v| R32[reg(v)];
+        let q = |v| R64[reg(v)];
         // x86's r/m operand can directly consume a spilled RHS.
         macro_rules! rm32 {
-            ($op:ident, $lhs:expr, $index:expr) => {{
-                let rhs = allocs[$index];
+            ($op:ident, $lhs:expr, $rhs:expr) => {{
+                let rhs = allocs.get($rhs);
                 if let Some(p) = rhs.as_reg() {
                     a.$op($lhs, R32[p.hw_enc()])
                 } else {
-                    a.$op(
-                        $lhs,
-                        dword_ptr(r11 + disp(frame.spill_base + rhs.as_stack().unwrap().index())),
-                    )
+                    a.$op($lhs, frame.spill32(rhs))
                 }
             }};
         }
         match inst {
             Inst::Argv(_) | Inst::Copy(..) => Ok(()), // incoming fixed def / tied operands
             Inst::LoadArg {
-                argv: Some(_),
+                argv: Some(argv),
+                dst,
                 ty,
                 index,
-                ..
-            } => load(a, width, ty, reg(1), ptr(q(0) + disp(index))),
+            } => load(a, width, ty, reg(dst), ptr(q(argv) + disp(index))),
             Inst::LoadArg {
                 argv: None,
+                dst,
                 ty,
                 index,
-                ..
-            } => load(a, width, ty, reg(0), slot(CHILD_ARGS + index)),
-            Inst::Native(native, ..) => {
-                let mut regs = [0; 10];
-                for (dst, &loc) in regs.iter_mut().zip(allocs) {
-                    *dst = gpr(loc);
-                }
-                let (operands, temps) =
-                    regs[..allocs.len()].split_at(allocs.len() - native.temporaries());
-                native.emit_allocated(a, operands, temps, self.constants)
+            } => load(a, width, ty, reg(dst), slot(CHILD_ARGS + index)),
+            Inst::Native(native, dst, args, temps) => {
+                let operands: Vec<usize> =
+                    args.into_iter().flatten().chain([dst]).map(reg).collect();
+                let temps: Vec<usize> = temps.into_iter().flatten().map(reg).collect();
+                native.emit_allocated(a, &operands, &temps, self.constants)
             }
-            Inst::ExtractLane(lane, _, _, index) => {
-                simd::packed::rearrange::extract_lane(a, cpu, lane, reg(1), reg(0), index)
+            Inst::ExtractLane(lane, dst, src, index) => {
+                simd::packed::rearrange::extract_lane(a, cpu, lane, reg(dst), reg(src), index)
             }
-            Inst::ShiftDwords(_, _, count) => {
-                simd::packed::rearrange::shift_dwords(a, width, reg(1), reg(0), count)
+            Inst::ShiftDwords(dst, src, count) => {
+                simd::packed::rearrange::shift_dwords(a, width, reg(dst), reg(src), count)
             }
-            Inst::PairedShuffle(form, ..) => {
-                form.emit(a, self.constants, width, [reg(2), reg(0), reg(1)])
+            Inst::PairedShuffle(form, dst, x, y) => {
+                form.emit(a, self.constants, width, [reg(dst), reg(x), reg(y)])
             }
             Inst::DwordLane {
                 lane,
                 checked,
+                dst,
+                value,
+                index,
                 replacement,
                 temp,
-                ..
             } => {
                 if checked {
                     let fail = self.exits.trap(a, Trap::Bounds);
-                    a.cmp(r(1), (width / 4) as i32)?;
+                    a.cmp(r(index), (width / 4) as i32)?;
                     a.jae(fail)?;
                 }
-                let registers = [reg(2 + usize::from(replacement.is_some())), reg(0), reg(1)];
-                if replacement.is_some() {
+                let registers = [reg(dst), reg(value), reg(index)];
+                if let Some(replacement) = replacement {
                     simd::packed::rearrange::insert_dword(
                         a,
                         self.constants,
                         width,
                         lane,
                         registers,
-                        reg(2),
-                        temp.map(|_| reg(4)),
+                        reg(replacement),
+                        temp.map(reg),
                     )
                 } else {
                     simd::packed::rearrange::extract_dword(a, width, lane, registers)
                 }
             }
-            Inst::VectorShiftImm(kind, lane, _, _, count) => {
-                simd::packed::integer::shift_dword_bits(a, cpu, kind, lane, reg(1), reg(0), count)
+            Inst::VectorShiftImm(kind, lane, dst, src, count) => {
+                let (dst, src) = (reg(dst), reg(src));
+                simd::packed::integer::shift_dword_bits(a, cpu, kind, lane, dst, src, count)
             }
             Inst::Fallback {
                 action,
                 input,
                 output,
                 args,
-                ..
-            } => self.fallback(
-                action,
-                input,
-                output,
-                args.map(|arg| arg.map(|(ty, _)| ty)),
-                allocs,
-            ),
+                dst,
+            } => self.fallback(action, input, output, args, dst, allocs),
             Inst::Lanes {
                 action,
                 input,
                 output,
                 args,
-                ..
-            } => self.lanes(
-                action,
-                input,
-                output,
-                args.map(|arg| arg.map(|(ty, _)| ty)),
-                allocs,
-            ),
-            Inst::Literal(l, bits, _) => match l.bytes() {
+                dst,
+            } => self.lanes(action, input, output, args, dst, allocs),
+            Inst::Literal(l, bits, dst) => match l.bytes() {
                 16 => {
                     let label = a.create_label();
                     let mut data = [0; 64];
                     data[..16].copy_from_slice(&bits.to_le_bytes());
                     self.constants.push((label, data, 16));
-                    simd::load(a, reg(0), ptr(label), 16)
+                    simd::load(a, reg(dst), ptr(label), 16)
                 }
                 8 if l.float() => {
                     a.mov(r10, bits as u64)?;
-                    a.movq(simd::XMM[reg(0)], r10)
+                    a.movq(simd::XMM[reg(dst)], r10)
                 }
                 4 if l.float() => {
                     a.mov(r10d, bits as u32)?;
-                    a.movd(simd::XMM[reg(0)], r10d)
+                    a.movd(simd::XMM[reg(dst)], r10d)
                 }
-                8 => a.mov(q(0), bits as u64),
-                size => a.mov(r(0), (bits & (u128::MAX >> (128 - size * 8))) as u32),
+                8 => a.mov(q(dst), bits as u64),
+                size => a.mov(r(dst), (bits & (u128::MAX >> (128 - size * 8))) as u32),
             },
-            Inst::Iota(l, _) => {
+            Inst::Iota(l, dst) => {
                 let label = a.create_label();
                 let bits = super::super::constants::iota_bytes(l, width);
                 self.constants.push((label, bits, width));
-                simd::load(a, reg(0), ptr(label), width)
+                simd::load(a, reg(dst), ptr(label), width)
             }
-            Inst::BitMove(from, to, ..) => match (class(to), from.bytes(width)) {
-                (RegClass::Vector, 4) => a.movd(simd::XMM[reg(1)], r(0)),
-                (RegClass::Vector, 8) => a.movq(simd::XMM[reg(1)], q(0)),
-                (RegClass::Int, 4) => a.movd(r(1), simd::XMM[reg(0)]),
-                (RegClass::Int, 8) => a.movq(q(1), simd::XMM[reg(0)]),
+            Inst::BitMove(from, to, dst, src) => match (class(to), from.bytes(width)) {
+                (RegClass::Vector, 4) => a.movd(simd::XMM[reg(dst)], r(src)),
+                (RegClass::Vector, 8) => a.movq(simd::XMM[reg(dst)], q(src)),
+                (RegClass::Int, 4) => a.movd(r(dst), simd::XMM[reg(src)]),
+                (RegClass::Int, 8) => a.movq(q(dst), simd::XMM[reg(src)]),
                 _ => unreachable!(),
             },
-            Inst::IntBinary(op, ty, ..) => {
+            // The destination reuses the left operand's register.
+            Inst::IntBinary(op, ty, dst, _, rhs) => {
                 use crate::hir::Binary;
                 let size = ty.lane().unwrap().bytes();
                 macro_rules! integer {
                     ($mn:ident) => {
                         if size == 8 {
-                            a.$mn(q(0), q(1))
+                            a.$mn(q(dst), q(rhs))
                         } else {
-                            a.$mn(r(0), r(1))
+                            a.$mn(r(dst), r(rhs))
                         }
                     };
                 }
@@ -724,46 +700,48 @@ impl Emitter<'_> {
                     _ => unreachable!(),
                 }?;
                 match size {
-                    1 => a.movzx(r(0), R8[reg(0)]),
-                    2 => a.movzx(r(0), R16[reg(0)]),
+                    1 => a.movzx(r(dst), R8[reg(dst)]),
+                    2 => a.movzx(r(dst), R16[reg(dst)]),
                     _ => Ok(()),
                 }
             }
-            Inst::Imm(_, n) => a.mov(r(0), n),
-            Inst::Alu(op, _, _, Rhs::Imm(n)) => match op {
-                Alu::Add => a.add(r(0), n),
-                Alu::Sub => a.sub(r(0), n),
-                Alu::And => a.and(r(0), n),
-                Alu::Or => a.or(r(0), n),
-                Alu::Xor => a.xor(r(0), n),
-                Alu::Mul => a.imul_3(r(0), r(0), n),
+            Inst::Imm(dst, n) => a.mov(r(dst), n),
+            // The destination reuses the left operand's register.
+            Inst::Alu(op, dst, _, Rhs::Imm(n)) => match op {
+                Alu::Add => a.add(r(dst), n),
+                Alu::Sub => a.sub(r(dst), n),
+                Alu::And => a.and(r(dst), n),
+                Alu::Or => a.or(r(dst), n),
+                Alu::Xor => a.xor(r(dst), n),
+                Alu::Mul => a.imul_3(r(dst), r(dst), n),
                 Alu::Min | Alu::Max => unreachable!("cmov requires a register or memory"),
             },
-            Inst::Alu(op, _, _, Rhs::Reg(_)) => match op {
-                Alu::Add => rm32!(add, r(2), 1),
-                Alu::Sub => rm32!(sub, r(2), 1),
-                Alu::And => rm32!(and, r(2), 1),
-                Alu::Or => rm32!(or, r(2), 1),
-                Alu::Xor => rm32!(xor, r(2), 1),
-                Alu::Mul => rm32!(imul_2, r(2), 1),
+            Inst::Alu(op, dst, _, Rhs::Reg(rhs)) => match op {
+                Alu::Add => rm32!(add, r(dst), rhs),
+                Alu::Sub => rm32!(sub, r(dst), rhs),
+                Alu::And => rm32!(and, r(dst), rhs),
+                Alu::Or => rm32!(or, r(dst), rhs),
+                Alu::Xor => rm32!(xor, r(dst), rhs),
+                Alu::Mul => rm32!(imul_2, r(dst), rhs),
                 Alu::Min | Alu::Max => {
-                    rm32!(cmp, r(2), 1)?;
+                    rm32!(cmp, r(dst), rhs)?;
                     if matches!(op, Alu::Min) {
-                        rm32!(cmovg, r(2), 1)
+                        rm32!(cmovg, r(dst), rhs)
                     } else {
-                        rm32!(cmovl, r(2), 1)
+                        rm32!(cmovl, r(dst), rhs)
                     }
                 }
             },
-            Inst::Shift { left, count, .. } => match (left, count) {
-                (true, Rhs::Reg(_)) => a.shl(r(0), cl),
-                (false, Rhs::Reg(_)) => a.sar(r(0), cl),
-                (true, Rhs::Imm(n)) => a.shl(r(0), n & 31),
-                (false, Rhs::Imm(n)) => a.sar(r(0), n & 31),
+            Inst::Shift {
+                left, dst, count, ..
+            } => match (left, count) {
+                (true, Rhs::Reg(_)) => a.shl(r(dst), cl),
+                (false, Rhs::Reg(_)) => a.sar(r(dst), cl),
+                (true, Rhs::Imm(n)) => a.shl(r(dst), n & 31),
+                (false, Rhs::Imm(n)) => a.sar(r(dst), n & 31),
             },
-            Inst::Compare(cc, _, _, rhs) => {
-                cmp(a, frame, allocs, rhs)?;
-                let dst = allocs.len() - 1;
+            Inst::Compare(cc, dst, lhs, rhs) => {
+                cmp(a, frame, allocs, lhs, rhs)?;
                 let byte = R8[reg(dst)];
                 match cc {
                     Cond::Eq => a.sete(byte),
@@ -776,67 +754,71 @@ impl Emitter<'_> {
                 a.movzx(r(dst), byte)?;
                 a.neg(r(dst))
             }
-            Inst::SelectI32 { cond, .. } => {
+            // The destination reuses the register of `no`.
+            Inst::SelectI32 { dst, cond, yes, .. } => {
                 let cc = match cond {
-                    SelectCond::Nonzero(_) => {
-                        a.test(r(2), r(2))?;
+                    SelectCond::Nonzero(v) => {
+                        a.test(r(v), r(v))?;
                         Cond::Ne
                     }
-                    SelectCond::Compare(cc, _, rhs) => {
-                        cmp(a, frame, &allocs[2..], rhs)?;
+                    SelectCond::Compare(cc, lhs, rhs) => {
+                        cmp(a, frame, allocs, lhs, rhs)?;
                         cc
                     }
                 };
-                let dst = r(allocs.len() - 1);
+                let dst = r(dst);
                 match cc {
-                    Cond::Eq => rm32!(cmove, dst, 1),
-                    Cond::Ne => rm32!(cmovne, dst, 1),
-                    Cond::Lt => rm32!(cmovl, dst, 1),
-                    Cond::Le => rm32!(cmovle, dst, 1),
-                    Cond::Gt => rm32!(cmovg, dst, 1),
-                    Cond::Ge => rm32!(cmovge, dst, 1),
+                    Cond::Eq => rm32!(cmove, dst, yes),
+                    Cond::Ne => rm32!(cmovne, dst, yes),
+                    Cond::Lt => rm32!(cmovl, dst, yes),
+                    Cond::Le => rm32!(cmovle, dst, yes),
+                    Cond::Gt => rm32!(cmovg, dst, yes),
+                    Cond::Ge => rm32!(cmovge, dst, yes),
                 }
             }
             Inst::Cdq { .. } => a.cdq(),
-            Inst::IDiv { .. } => {
+            Inst::IDiv { divisor, .. } => {
                 let zero = self.exits.trap(a, Trap::DivisionByZero);
                 let overflow = self.exits.trap(a, Trap::DivisionOverflow);
                 let divide = a.create_label();
-                a.test(r(2), r(2))?;
+                let divisor = r(divisor);
+                a.test(divisor, divisor)?;
                 a.jz(zero)?;
-                a.cmp(r(2), -1)?;
+                a.cmp(divisor, -1)?;
                 a.jne(divide)?;
                 a.cmp(eax, i32::MIN)?;
                 a.je(overflow)?;
                 bind(a, divide)?;
-                a.idiv(r(2))
+                a.idiv(divisor)
             }
             Inst::DivImm {
                 remainder,
+                dst: result,
+                value,
                 divisor,
                 quotient,
-                ..
             } => {
-                let input = r(0);
-                let dst = r(1);
+                let input = r(value);
+                let dst = r(result);
                 match quotient {
                     Quotient::PowerOfTwo(shift) => {
                         let bias = ((1u32 << shift) - 1) as i32;
-                        a.lea(dst, ptr(q(0) + bias))?;
+                        a.lea(dst, ptr(q(value) + bias))?;
                         a.test(input, input)?;
                         a.cmovns(dst, input)?;
                         a.sar(dst, shift)?;
                     }
                     Quotient::Reciprocal { multiplier, shift } => {
-                        a.movsxd(q(1), input)?;
+                        let wide = q(result);
+                        a.movsxd(wide, input)?;
                         if let Ok(multiplier) = i32::try_from(multiplier) {
-                            a.imul_3(q(1), q(1), multiplier)?;
+                            a.imul_3(wide, wide, multiplier)?;
                         } else {
                             // R10 is reserved for scratch and cannot hold an input.
                             a.mov(r10d, multiplier)?;
-                            a.imul_2(q(1), r10)?;
+                            a.imul_2(wide, r10)?;
                         }
-                        a.sar(q(1), shift)?;
+                        a.sar(wide, shift)?;
                         a.mov(r10d, input)?;
                         a.shr(r10d, 31)?;
                         a.add(dst, r10d)?;
@@ -854,115 +836,109 @@ impl Emitter<'_> {
             }
             Inst::CheckMask(mask) => {
                 let fail = self.exits.trap(a, Trap::Bounds);
-                simd::test_vector_mask(a, cpu, allocate_mask(mask, allocs).0)?;
+                simd::test_vector_mask(a, cpu, mask.map(reg))?;
                 a.jne(fail)
             }
-            Inst::AnyMask(_, mask) => {
-                let (mask, dst) = allocate_mask(mask, allocs);
-                simd::test_vector_mask(a, cpu, mask)?;
+            Inst::AnyMask(dst, mask) => {
+                simd::test_vector_mask(a, cpu, mask.map(reg))?;
                 a.mov(r(dst), 0)?;
                 a.setne(R8[reg(dst)])?;
                 a.neg(r(dst))
             }
-            Inst::AllMask(lane, ..) => {
-                opmask::test_all(a, cpu, lane, reg(0))?;
-                a.mov(r(1), 0)?;
-                a.sete(R8[reg(1)])?;
-                a.neg(r(1))
+            Inst::AllMask(lane, dst, mask) => {
+                opmask::test_all(a, cpu, lane, reg(mask))?;
+                a.mov(r(dst), 0)?;
+                a.sete(R8[reg(dst)])?;
+                a.neg(r(dst))
             }
-            Inst::SelectMask { lane, mask, .. } => {
-                let (mask, first) = allocate_mask(mask, allocs);
-                simd::blend_comparison(
-                    a,
-                    cpu,
-                    lane,
-                    mask,
-                    reg(first + 2),
-                    reg(first),
-                    reg(first + 1),
-                )
+            Inst::SelectMask {
+                lane,
+                mask,
+                yes,
+                no,
+                dst,
+            } => simd::blend_comparison(a, cpu, lane, mask.map(reg), reg(dst), reg(yes), reg(no)),
+            Inst::MaskCompare(lane, cc, dst, x, y) => {
+                simd::compare_mask(a, width, K[reg(dst)], lane, reg(x), reg(y), cc)
             }
-            Inst::MaskCompare(lane, cc, ..) => {
-                simd::compare_mask(a, width, K[reg(2)], lane, reg(0), reg(1), cc)
+            Inst::MaskLogic(lane, kind, dst, x, y) => {
+                opmask::logic(a, width / lane.bytes(), kind, reg(dst), reg(x), reg(y))
             }
-            Inst::MaskLogic(lane, kind, ..) => {
-                opmask::logic(a, width / lane.bytes(), kind, reg(2), reg(0), reg(1))
+            Inst::MaskNot(lane, dst, x) => opmask::not(a, cpu, lane, reg(dst), reg(x)),
+            Inst::MaskImmediate(dst, bits) => opmask::immediate(a, reg(dst), bits),
+            Inst::MaskPrefix(lanes, dst, count, temp) => {
+                prefix_bits(a, r(temp), r(count), lanes)?;
+                a.kmovw(K[reg(dst)], r10d)
             }
-            Inst::MaskNot(lane, ..) => opmask::not(a, cpu, lane, reg(1), reg(0)),
-            Inst::MaskImmediate(_, bits) => opmask::immediate(a, reg(0), bits),
-            Inst::MaskPrefix(lanes, ..) => {
-                prefix_bits(a, r(2), r(0), lanes)?;
-                a.kmovw(K[reg(1)], r10d)
+            Inst::MaskCount(dst, mask) => {
+                a.kmovw(r(dst), K[reg(mask)])?;
+                a.popcnt(r(dst), r(dst))
             }
-            Inst::MaskCount(..) => {
-                a.kmovw(r(1), K[reg(0)])?;
-                a.popcnt(r(1), r(1))
+            Inst::MaskCompact(lane, expand, dst, x, y) => {
+                simd::compact(a, width, lane, expand, reg(dst), reg(x), reg(y))
             }
-            Inst::MaskCompact(lane, expand, ..) => {
-                simd::compact(a, width, lane, expand, reg(2), reg(0), reg(1))
+            Inst::CompactLookup(expand, dst, x, mask, index) => {
+                let registers = [reg(dst), reg(x), reg(mask), reg(index)];
+                simd::packed::compact::emit(a, cpu, expand, registers)
             }
-            Inst::CompactLookup(expand, ..) => {
-                simd::packed::compact::emit(a, cpu, expand, [reg(2), reg(0), reg(1), reg(3)])
-            }
-            Inst::CompactStore { .. } => {
+            Inst::CompactStore {
+                base,
+                data,
+                mask,
+                limit,
+                temps: [bits, prefix],
+            } => {
                 // Deposit the written prefix on the mask lanes, so the
                 // compressing store writes the first `limit` active lanes.
-                prefix_bits(a, r(5), r(3), (width / 4) as u8)?;
-                a.kmovw(r(4), K[reg(2)])?;
-                a.pdep(r10d, r10d, r(4))?;
+                prefix_bits(a, r(prefix), r(limit), (width / 4) as u8)?;
+                a.kmovw(r(bits), K[reg(mask)])?;
+                a.pdep(r10d, r10d, r(bits))?;
                 a.kmovw(k1, r10d)?;
-                let address = ptr(q(0)).k1();
+                let address = ptr(q(base)).k1();
                 match width {
-                    16 => a.vpcompressd(address, XMM[reg(1)]),
-                    32 => a.vpcompressd(address, YMM[reg(1)]),
-                    _ => a.vpcompressd(address, ZMM[reg(1)]),
+                    16 => a.vpcompressd(address, XMM[reg(data)]),
+                    32 => a.vpcompressd(address, YMM[reg(data)]),
+                    _ => a.vpcompressd(address, ZMM[reg(data)]),
                 }
             }
-            Inst::CheckBounds(..) => {
+            Inst::CheckBounds(index, length) => {
                 let fail = self.exits.trap(a, Trap::Bounds);
-                rm32!(cmp, r(0), 1)?;
+                rm32!(cmp, r(index), length)?;
                 a.jae(fail)
             }
-            Inst::TrapIf(_, trap) => {
+            Inst::TrapIf(v, trap) => {
                 let fail = self.exits.trap(a, trap);
-                a.test(r(0), r(0))?;
+                a.test(r(v), r(v))?;
                 a.jne(fail)
             }
             Inst::Trap(trap) => {
                 let fail = self.exits.trap(a, trap);
                 a.jmp(fail)
             }
-            Inst::Movsxd(..) => a.movsxd(q(1), r(0)),
-            Inst::Lea(_, addr) => a.lea(q(allocs.len() - 1), memory(addr, allocs)),
+            Inst::Movsxd(dst, src) => a.movsxd(q(dst), r(src)),
+            Inst::Lea(dst, addr) => a.lea(q(dst), memory(addr, allocs)),
             Inst::Masked {
                 ty,
+                base,
                 indices,
-                dst,
                 temp,
                 mask,
                 value,
-                ..
-            } => {
-                let i = 1 + usize::from(indices.is_some());
-                let (mask, operands) = allocate_mask(mask, &allocs[i..]);
-                let first = i + operands;
-                simd::MaskedMemory {
-                    ty,
-                    base: reg(0),
-                    index: indices.map(|_| reg(1)),
-                    mask,
-                    value: value.map(|_| reg(first)),
-                    dst: dst.map(|_| reg(first + usize::from(value.is_some()))),
-                    temp: temp.map(|_| reg(allocs.len() - 1)),
-                }
-                .emit(a, self.cpu)
+                dst,
+            } => simd::MaskedMemory {
+                ty,
+                base: reg(base),
+                index: indices.map(reg),
+                mask: mask.map(reg),
+                value: value.map(reg),
+                dst: dst.map(reg),
+                temp: temp.map(reg),
             }
-            Inst::Load(ty, _, addr) => {
-                load(a, width, ty, reg(allocs.len() - 1), memory(addr, allocs))
-            }
-            Inst::PackedMemory(kind, lane, _, _, addr) => {
-                let src = reg(allocs.len() - 2);
-                let dst = reg(allocs.len() - 1);
+            .emit(a, self.cpu),
+            Inst::Load(ty, dst, addr) => load(a, width, ty, reg(dst), memory(addr, allocs)),
+            Inst::PackedMemory(kind, lane, dst, src, addr) => {
+                let src = reg(src);
+                let dst = reg(dst);
                 let addr = memory(addr, allocs);
                 if kind == Binary::Add {
                     return match (width, lane.bytes()) {
@@ -983,8 +959,8 @@ impl Emitter<'_> {
                     _ => unreachable!(),
                 }
             }
-            Inst::BroadcastMemory(lane, _, addr) => {
-                let dst = reg(allocs.len() - 1);
+            Inst::BroadcastMemory(lane, dst, addr) => {
+                let dst = reg(dst);
                 let addr = memory(addr, allocs);
                 match (width, lane.bytes()) {
                     (32, 4) => a.vpbroadcastd(YMM[dst], addr),
@@ -994,9 +970,9 @@ impl Emitter<'_> {
                     _ => unreachable!(),
                 }
             }
-            Inst::BroadcastLane(_, _, lane) => {
-                let src = reg(0);
-                let dst = reg(1);
+            Inst::BroadcastLane(dst, src, lane) => {
+                let src = reg(src);
+                let dst = reg(dst);
                 let imm = i32::from(lane % 4) * 0x55;
                 if width == 16 {
                     return a.pshufd(XMM[dst], XMM[src], imm);
@@ -1024,15 +1000,13 @@ impl Emitter<'_> {
                     a.vpbroadcastd(ZMM[dst], lane)
                 }
             }
-            Inst::Store(ty, addr, _) => {
-                store(a, width, ty, memory(addr, allocs), reg(allocs.len() - 1))
-            }
-            Inst::DebugStore(ty, offset, _) => store(
+            Inst::Store(ty, addr, value) => store(a, width, ty, memory(addr, allocs), reg(value)),
+            Inst::DebugStore(ty, offset, value) => store(
                 a,
                 width,
                 ty,
                 ptr(r11 + (disp(frame.debug_base) + offset as i32)),
-                reg(0),
+                reg(value),
             ),
             // A debug point gets its own address for the line table; release
             // code emits nothing.
@@ -1041,12 +1015,13 @@ impl Emitter<'_> {
                 a.nop()
             }
             Inst::DebugPoint(_) => Ok(()),
-            Inst::StoreArg(i, ty, _) => {
-                store(a, width, ty, slot(frame.slots + CHILD_ARGS + i), reg(0))
+            Inst::StoreArg(i, ty, value) => {
+                store(a, width, ty, slot(frame.slots + CHILD_ARGS + i), reg(value))
             }
-            Inst::CallScratch(offset, ..) => {
-                a.lea(q(0), ptr(r11 + (disp(frame.scratch_base) + offset as i32)))
-            }
+            Inst::CallScratch(offset, _, dst) => a.lea(
+                q(dst),
+                ptr(r11 + (disp(frame.scratch_base) + offset as i32)),
+            ),
             Inst::RustCall(function, ..) => {
                 // Every generated frame enters with RSP 8 mod 16. Leave the
                 // Win64 shadow space intact and save the volatile workspace
@@ -1162,24 +1137,30 @@ fn store(
     }
 }
 
-fn memory(addr: Address, allocs: &[Allocation]) -> AsmMemoryOperand {
-    let base = R64[gpr(allocs[0])];
+fn memory(addr: Address, allocs: Allocations) -> AsmMemoryOperand {
+    let base = R64[allocs.reg(addr.base)];
     match addr.index {
-        Some((_, scale)) => ptr(base + R64[gpr(allocs[1])] * (1i32 << scale as u8) + addr.disp),
+        Some((index, scale)) => {
+            ptr(base + R64[allocs.reg(index)] * (1i32 << scale as u8) + addr.disp)
+        }
         None => ptr(base + addr.disp),
     }
 }
 
-fn cmp(a: &mut CodeAssembler, frame: &Frame, allocs: &[Allocation], rhs: Rhs) -> AsmResult {
-    let lhs = R32[gpr(allocs[0])];
+/// Compare `lhs` with `rhs`, which may stay in its spill slot.
+fn cmp(
+    a: &mut CodeAssembler,
+    frame: &Frame,
+    allocs: Allocations,
+    lhs: VReg,
+    rhs: Rhs,
+) -> AsmResult {
+    let lhs = R32[allocs.reg(lhs)];
     match rhs {
         Rhs::Imm(n) => a.cmp(lhs, n),
-        Rhs::Reg(_) => match allocs[1].as_reg() {
+        Rhs::Reg(v) => match allocs.get(v).as_reg() {
             Some(p) => a.cmp(lhs, R32[p.hw_enc()]),
-            None => a.cmp(
-                lhs,
-                dword_ptr(r11 + disp(frame.spill_base + allocs[1].as_stack().unwrap().index())),
-            ),
+            None => a.cmp(lhs, frame.spill32(allocs.get(v))),
         },
     }
 }

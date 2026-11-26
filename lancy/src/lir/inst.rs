@@ -5,7 +5,8 @@ pub(super) trait TargetInst: Copy {
     /// What operands and clobbers depend on: the calling convention and the
     /// vector width the function is compiled for.
     type Machine: Copy;
-    /// Append operands in the same order in which the emitter consumes allocations.
+    /// Append one operand per value the instruction reads or writes; the
+    /// emitter finds each allocation by its value (`regalloc::Allocations`).
     fn operands(&self, machine: &Self::Machine, out: &mut Vec<Operand>);
     fn clobbers(&self, machine: &Self::Machine) -> PRegSet;
     /// The frame-local region this instruction addresses, if any.
