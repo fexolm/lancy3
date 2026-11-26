@@ -60,6 +60,67 @@ fn unroll_until(#[comptime] steps: &[i32], mut x: i32) -> i32 {
     x
 }
 
+// The comptime `stop` must select the inner runtime `if` on its own.
+#[allow(clippy::collapsible_if)]
+#[kernel]
+fn unroll_runtime_control(#[comptime] steps: &[i32], x: i32, #[comptime] stop: bool) -> i32 {
+    let mut total = 0;
+    for step in steps {
+        if x == *step {
+            continue;
+        }
+        if stop {
+            if x < *step {
+                break;
+            }
+        }
+        total += *step;
+    }
+    total
+}
+
+#[kernel]
+fn unroll_nested(#[comptime] outer: &[i32], #[comptime] inner: &[i32], x: i32) -> i32 {
+    let mut total = 0;
+    for a in outer {
+        for b in inner {
+            if x == *b {
+                break;
+            }
+            total += *a * *b;
+        }
+    }
+    total
+}
+
+/// MAC-25: a runtime `continue` in an unrolled loop leaves its iteration's
+/// block and a runtime `break` leaves the loop's block; each block is
+/// labeled exactly when something leaves it.
+#[test]
+fn unrolled_runtime_transfers_label_the_blocks_they_leave() -> splice::Result<()> {
+    let both = unroll_runtime_control::print(&[1, 2], true)?;
+    assert_eq!(both.matches("'__splice_iteration: {").count(), 2, "{both}");
+    assert_eq!(both.matches("'__splice_unrolled: {").count(), 1, "{both}");
+    let only_continue = unroll_runtime_control::print(&[1, 2], false)?;
+    assert_eq!(
+        only_continue.matches("'__splice_iteration: {").count(),
+        2,
+        "{only_continue}"
+    );
+    assert!(
+        !only_continue.contains("'__splice_unrolled"),
+        "{only_continue}"
+    );
+    // The inner loops break; the outer loop is left only by falling through.
+    let nested = unroll_nested::print(&[1, 2, 3], &[4, 5])?;
+    assert_eq!(
+        nested.matches("'__splice_unrolled: {").count(),
+        3,
+        "{nested}"
+    );
+    Ok(())
+}
+
 #[test]
 fn rust_source_prunes_host_transfers_but_keeps_runtime_control() -> splice::Result<()> {
     let early = stop_early::print(true)?;

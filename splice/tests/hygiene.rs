@@ -3,9 +3,8 @@
 //! expansion used to rely on, and must still compile and run. Taking `print`
 //! asserts that a kernel was lowered rather than kept as a Rust import.
 //!
-//! Still open until the phase 7 emitter stops moving signatures into the
-//! generated module: a user type named `Signature`, `BuildArgs` or `CallArgs`
-//! in a kernel signature, and a user `mod foo` beside `#[kernel] fn foo`.
+//! A user `mod foo` beside `#[kernel] fn foo` stays a name conflict by design:
+//! the kernel's API is the module `foo` (`foo::build`, `foo::BuildArgs`).
 use splice_lancy::Lancy;
 
 /// Variants that shadow `Ok` and `Err` from the prelude.
@@ -140,4 +139,45 @@ fn parameter_attributes_pass_through() {
     let code = attributes::ignore::build::<Lancy>(attributes::ignore::BuildArgs { k: 9 }).unwrap();
     assert_eq!(code.call(attributes::ignore::CallArgs { x: 1 }), Ok(9));
     assert_eq!(attributes::ignore(1, 9), 9);
+}
+
+/// User types named like the generated `BuildArgs`, `CallArgs` and
+/// `Signature`, in scalar kernel and `#[kernel(rust)]` signatures.
+mod generated_names {
+    use splice::kernel;
+
+    #[derive(splice::ComptimeKey, splice::KernelType)]
+    pub struct Signature {
+        pub scale: i32,
+    }
+    #[derive(splice::ComptimeKey, splice::KernelType)]
+    pub struct BuildArgs(pub i32);
+    #[derive(Clone, Copy)]
+    pub struct CallArgs(pub i32);
+
+    #[kernel]
+    pub fn scaled(#[comptime] s: &Signature, #[comptime] b: BuildArgs, x: i32) -> i32 {
+        s.scale * x + b.0
+    }
+
+    #[kernel(rust)]
+    pub fn opaque(#[comptime] b: BuildArgs, c: CallArgs) -> i32 {
+        let local: CallArgs = c;
+        local.0 + b.0
+    }
+}
+
+#[test]
+fn user_types_named_like_generated_items() {
+    use generated_names::{BuildArgs, CallArgs, Signature, opaque, scaled};
+    let _lowered = scaled::print;
+    let s = Signature { scale: 3 };
+    let code = scaled::build::<Lancy>(scaled::BuildArgs {
+        s: &s,
+        b: BuildArgs(1),
+    })
+    .unwrap();
+    assert_eq!(code.call(scaled::CallArgs { x: 5 }), Ok(16));
+    let code = opaque::build::<Lancy>(opaque::BuildArgs { b: BuildArgs(2) }).unwrap();
+    assert_eq!(code.call(opaque::CallArgs { c: CallArgs(4) }), Ok(6));
 }

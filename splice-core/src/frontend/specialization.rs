@@ -31,6 +31,23 @@ impl Specialization {
     pub fn signature(&self) -> super::Signature<'static> {
         self.signature
     }
+
+    /// Also key on which runtime arguments are known constants, and their
+    /// values: an inlined body folds on them.
+    #[doc(hidden)]
+    pub fn with_known(mut self, known: &[Option<crate::hir::Constant>]) -> Self {
+        for constant in known {
+            match constant {
+                Some(constant) => {
+                    self.values.push(1);
+                    self.values.push(constant.ty() as u8);
+                    self.values.extend(constant.bits().to_le_bytes());
+                }
+                None => self.values.push(0),
+            }
+        }
+        self
+    }
 }
 
 // Autoref fallback keeps opaque host values usable without assuming identity

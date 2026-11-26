@@ -111,7 +111,7 @@ fn expand(root: &Path, mut function: ItemFn, checks: Vec<Check>) -> Result<Token
             block: (*function.block).clone(),
         })
     };
-    crate::declaration::rebase_expression(&mut expr);
+    crate::declaration::rebase_expression(&mut expr, &sig.generics);
     let semi =
         matches!(function.block.stmts.as_slice(), [Stmt::Expr(_, Some(_))]).then(|| quote!(;));
     let captures = captures::rewrite(&mut expr, &sig, &names);

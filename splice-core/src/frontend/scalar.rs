@@ -442,6 +442,45 @@ thread_local! {
 #[doc(hidden)]
 pub struct ExpansionGuard(PhantomData<Rc<()>>);
 
+thread_local! {
+    static INLINED: std::cell::RefCell<Vec<super::Specialization>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Inlines in progress of self-recursive kernels, keyed by specialization
+/// and known runtime arguments.
+#[doc(hidden)]
+pub struct InlineGuard(bool);
+
+/// Enter the inline expansion of a self-recursive kernel. Expanding the
+/// same key inside itself would never end: report it as recursion at once.
+/// A kernel whose comptime arguments have no key (`None`) is bounded by
+/// [`enter_expansion`] only.
+#[doc(hidden)]
+pub fn enter_inline(key: Option<super::Specialization>) -> crate::Result<InlineGuard> {
+    let Some(key) = key else {
+        return Ok(InlineGuard(false));
+    };
+    INLINED.with_borrow_mut(|inlined| {
+        if inlined.contains(&key) {
+            return Err(crate::BuildError::staging(
+                "a kernel calls itself with the same specialization arguments; \
+                 recursion must change a #[comptime] argument and end at specialization",
+            ));
+        }
+        inlined.push(key);
+        Ok(InlineGuard(true))
+    })
+}
+
+impl Drop for InlineGuard {
+    fn drop(&mut self) {
+        if self.0 {
+            INLINED.with_borrow_mut(Vec::pop);
+        }
+    }
+}
+
 #[doc(hidden)]
 pub fn enter_expansion() -> crate::Result<ExpansionGuard> {
     EXPANSION.with(|slot| {

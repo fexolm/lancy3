@@ -32,7 +32,7 @@ pub(crate) fn publication(
 
 pub(super) fn in_child_module(path: ExprPath) -> ExprPath {
     let mut expression = Expr::Path(path);
-    rebase_expression(&mut expression);
+    rebase_expression(&mut expression, &syn::Generics::default());
     let Expr::Path(path) = expression else {
         unreachable!()
     };

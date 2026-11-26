@@ -315,6 +315,7 @@ pub(super) fn expand(root: Path, native: &mut ItemFn) -> Result<TokenStream> {
         formals: &formals,
         bindings,
         aggregates: &Default::default(),
+        labels: &Default::default(),
         debug_names,
         flow: &flow,
         fish: emit!(#fish),
@@ -461,6 +462,26 @@ pub(super) fn expand(root: Path, native: &mut ItemFn) -> Result<TokenStream> {
         #((&#frontend::KeyArgument::<#type_args>::for_type()).add_type(&mut __splice_key);)*
         #((&#frontend::KeyArgument::for_value(&#value_args)).add_value(&#value_args, &mut __splice_key);)*
     };
+    // A body that calls itself expands inline; the same specialization
+    // inside itself is unbounded recursion.
+    let recursion = calls_itself(&native.block, name).then(|| {
+        let type_args = generic.type_params().map(|p| &p.ident);
+        let value_args = host_names
+            .iter()
+            .copied()
+            .chain(generic.const_params().map(|p| &p.ident));
+        emit! {
+            #[allow(unused_mut)]
+            let mut __splice_key = ::core::option::Option::Some(#frontend::Specialization::new::<Self>(#frontend::Signature::new(#params, #result, #kinds)));
+            {
+                #[allow(unused_imports)]
+                use #frontend::MaybeKey as _;
+                #((&#frontend::KeyArgument::<#type_args>::for_type()).add_type(&mut __splice_key);)*
+                #((&#frontend::KeyArgument::for_value(&#value_args)).add_value(&#value_args, &mut __splice_key);)*
+            }
+            let __splice_recursion = #support::enter_inline(__splice_key.map(|key| key.with_known(&__splice_input_values)))?;
+        }
+    });
     let result_value_type = result_type.value_type(&root, &types);
     let source = emit! {
         __splice_builder.set_source(&#root::frontend::KernelSource {
@@ -514,7 +535,7 @@ pub(super) fn expand(root: Path, native: &mut ItemFn) -> Result<TokenStream> {
                 "a column-table entry point requires the scalar calling convention",
             ));
         }
-        crate::declaration::rebase_expression(&mut layout);
+        crate::declaration::rebase_expression(&mut layout, &sig.generics);
         let base = buffer_names.len() as u32;
         let setup = emit! {
             let __splice_layout = #layout;
@@ -649,6 +670,7 @@ pub(super) fn expand(root: Path, native: &mut ItemFn) -> Result<TokenStream> {
                 #overflow
                 let __splice_wants_debug = __splice_builder.debug_enabled();
                 let __splice_input_values: [::core::option::Option<#hir::Constant>; #arity] = [#(#support::RunArg::known(&#reg_names)),*];
+                #recursion
                 #unpack
                 #owned_scope;
                 let __splice_inputs: &[(#hir::Reg, ::core::option::Option<#hir::Constant>)] = &[#((#reg_names, __splice_input_values[#reg_indices])),*];
@@ -677,6 +699,21 @@ pub(super) fn expand(root: Path, native: &mut ItemFn) -> Result<TokenStream> {
     }
     native.attrs.push(syn::parse_quote!(#[allow(dead_code)]));
     Ok(emit!(#native #generated))
+}
+
+/// Whether `block` calls the function `name` by its bare name.
+fn calls_itself(block: &syn::Block, name: &Ident) -> bool {
+    struct Calls<'a>(&'a Ident, bool);
+    impl<'ast> Visit<'ast> for Calls<'_> {
+        fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
+            self.1 |= matches!(&*call.func, syn::Expr::Path(p) if p.qself.is_none() && p.path.is_ident(self.0));
+            syn::visit::visit_expr_call(self, call);
+        }
+        fn visit_item(&mut self, _: &'ast syn::Item) {}
+    }
+    let mut calls = Calls(name, false);
+    calls.visit_block(block);
+    calls.1
 }
 
 fn context_slice_types(

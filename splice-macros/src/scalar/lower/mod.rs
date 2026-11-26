@@ -134,6 +134,8 @@ pub(super) struct Lower<'a> {
     pub(super) formals: &'a [Binding],
     pub(super) bindings: HashMap<String, Binding>,
     pub(super) aggregates: &'a std::cell::RefCell<Vec<aggregate::Layout>>,
+    /// Numbers generated labels in expansion order, so output is deterministic.
+    pub(super) labels: &'a std::cell::Cell<u32>,
     pub(super) debug_names: std::collections::BTreeMap<String, Ident>,
     pub(super) fish: TokenStream,
     pub(super) loop_kind: Option<LoopKind>,
@@ -179,6 +181,16 @@ fn vec_macro(path: &Path) -> bool {
 }
 
 impl Lower<'_> {
+    /// A label `'__splice_{kind}_{n}` distinct from every other label of
+    /// this expansion.
+    fn fresh_label(&self, kind: &str) -> syn::Lifetime {
+        let n = self.labels.get();
+        self.labels.set(n + 1);
+        syn::Lifetime::new(
+            &format!("'__splice_{kind}_{n}"),
+            proc_macro2::Span::mixed_site(),
+        )
+    }
     // Each runtime arm builds independently. A host-selected return, break
     // or continue can skip the rest of that arm without skipping its siblings.
     fn region(&self) -> syn::Lifetime {

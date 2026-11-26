@@ -151,6 +151,7 @@ pub(crate) fn publish(
         formals: &formals,
         bindings,
         aggregates: &Default::default(),
+        labels: &Default::default(),
         debug_names,
         flow: &analysis,
         fish: TokenStream::new(),

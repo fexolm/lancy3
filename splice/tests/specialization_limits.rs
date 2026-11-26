@@ -328,3 +328,61 @@ fn checking_a_field_does_not_invoke_custom_deref() {
     assert_eq!(indirect_steps(&plan, 5), 8);
     assert_eq!(plan.reads.get(), 1);
 }
+
+#[kernel]
+fn countdown(#[comptime] step: i32, value: i32) -> i32 {
+    if value > 0 {
+        countdown(step, value - step)
+    } else {
+        value
+    }
+}
+
+#[kernel]
+fn unrolled_countdown(#[comptime] step: i32, #[comptime] value: i32, x: i32) -> i32 {
+    if value > 0 {
+        unrolled_countdown(step, value - step, x) + 1
+    } else {
+        x
+    }
+}
+
+#[kernel]
+fn known_countdown(x: i32) -> i32 {
+    countdown(1, 3) + x
+}
+
+/// A kernel that calls itself directly expands inline. Expanding the same
+/// specialization inside itself is reported as recursion at once, while
+/// recursion that changes a comptime argument still unrolls.
+#[test]
+fn direct_recursion_with_the_same_specialization_is_reported_as_recursion() {
+    fn check<B: Codegen<Output: Executable>>() {
+        let Err(error) = countdown::build::<B>(countdown::BuildArgs { step: 1 }) else {
+            panic!("unbounded recursion built");
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("calls itself with the same specialization"),
+            "{error}"
+        );
+        let code =
+            unrolled_countdown::build::<B>(unrolled_countdown::BuildArgs { step: 1, value: 30 })
+                .unwrap();
+        assert_eq!(code.call(unrolled_countdown::CallArgs { x: 2 }), Ok(32));
+        // Known runtime arguments fold the condition, so each step differs.
+        let code = known_countdown::build::<B>(known_countdown::BuildArgs {}).unwrap();
+        assert_eq!(code.call(known_countdown::CallArgs { x: 5 }), Ok(5));
+    }
+    splice_testkit::each_backend!(B => check::<B>());
+    let Err(error) = countdown::ir(1) else {
+        panic!("unbounded recursion staged");
+    };
+    assert!(
+        error
+            .to_string()
+            .contains("calls itself with the same specialization"),
+        "{error}"
+    );
+}

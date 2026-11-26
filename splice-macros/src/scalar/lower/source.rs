@@ -1,5 +1,5 @@
 use super::{Binding, LoopKind, Lower, Scalar, Stage, Value, err};
-use proc_macro2::{Ident, Span, TokenStream};
+use proc_macro2::{Ident, TokenStream};
 use quote::{ToTokens, format_ident};
 use syn::visit::{self, Visit};
 use syn::visit_mut::{self, VisitMut};
@@ -10,10 +10,7 @@ impl Lower<'_> {
         let mut scope = self.clone();
         let result_type = self.result_type;
         let mut statements = Vec::new();
-        let end = syn::Lifetime::new(
-            &format!("'__splice_source_{}", crate::scalar::flow::key(block)),
-            Span::mixed_site(),
-        );
+        let end = self.fresh_label("source");
         scope.source_fault = Some(end.clone());
         for (i, stmt) in block.stmts.iter().enumerate() {
             let rendered = match stmt {
@@ -185,12 +182,12 @@ impl Lower<'_> {
                     scope.loop_kind = Some(LoopKind::Unrolled);
                     let body = scope.source_body(&f.body)?;
                     return Ok(emit!({ let mut text = ::std::string::String::new();
+                        let enclosing = __splice_source.enter_unrolled();
                         for #pat in #iter {
                             #root::frontend::scalar::specialization_step()?;
                             let body = #body;
-                            let block = #support::block(&body);
-                            if body.contains("break '__splice_iteration") { text.push_str("'__splice_iteration: "); }
-                            text.push_str(&block); text.push_str(";\n");
+                            text.push_str(__splice_source.iteration_label());
+                            text.push_str(&#support::block(&body)); text.push_str(";\n");
                             match __splice_source.transfer {
                                 ::core::option::Option::Some(#support::Transfer::Break) => { __splice_source.transfer = ::core::option::Option::None; break; }
                                 ::core::option::Option::Some(#support::Transfer::Continue) => __splice_source.transfer = ::core::option::Option::None,
@@ -198,9 +195,7 @@ impl Lower<'_> {
                                 ::core::option::Option::None => {}
                             }
                         }
-                        if text.contains("break '__splice_unrolled") {
-                            ::std::format!("'__splice_unrolled: {}", #support::block(&text))
-                        } else { #support::block(&text) }
+                        __splice_source.exit_unrolled(enclosing, &text)
                     }));
                 }
                 let mut scope = self.nested_region();
@@ -290,13 +285,13 @@ impl Lower<'_> {
             Expr::Return(_) | Expr::Break(_) | Expr::Continue(_) => {
                 let (transfer, label) = match e {
                     Expr::Return(_) => (emit!(Return), None),
-                    Expr::Break(_) => (emit!(Break), Some("break '__splice_unrolled")),
-                    _ => (emit!(Continue), Some("break '__splice_iteration")),
+                    Expr::Break(_) => (emit!(Break), Some(emit!(break_unrolled))),
+                    _ => (emit!(Continue), Some(emit!(continue_unrolled))),
                 };
                 let text = if let Some(label) = label
                     && matches!(self.loop_kind, Some(LoopKind::Unrolled))
                 {
-                    emit!(::std::borrow::ToOwned::to_owned(#label))
+                    emit!(__splice_source.#label())
                 } else {
                     self.source_syntax(e)?
                 };
@@ -352,10 +347,7 @@ impl Lower<'_> {
         }
         // A fault in this operand must preserve earlier operands in the listing.
         let mut scope = self.clone();
-        let label = syn::Lifetime::new(
-            &format!("'__splice_source_expr_{}", crate::scalar::flow::key(expr)),
-            Span::mixed_site(),
-        );
+        let label = self.fresh_label("source_expr");
         scope.source_fault = Some(label.clone());
         let code = scope.source_expr(expr, hint)?;
         Ok(emit!({ #[allow(unused_labels)] #label: { #code } }))
@@ -417,10 +409,7 @@ impl Lower<'_> {
         if self.region_depth == 0 {
             return Ok(emit!(::std::format!(#format, #(#args),*)));
         }
-        let label = syn::Lifetime::new(
-            &format!("'__splice_source_operands_{}", crate::scalar::flow::key(e)),
-            Span::mixed_site(),
-        );
+        let label = self.fresh_label("source_operands");
         let root = self.root;
         let indices = 0..args.len();
         Ok(emit!(#label: {

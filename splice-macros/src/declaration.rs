@@ -173,13 +173,45 @@ mod tests {
             use crate::root;
             offset() + self::f(1) + super::g()
         });
-        rebase_expression(&mut body);
+        rebase_expression(&mut body, &syn::Generics::default());
         let text = quote::ToTokens::to_token_stream(&body).to_string();
         assert!(text.contains("use super :: super :: offset ;"), "{text}");
         assert!(text.contains("use super :: inner :: { a , b } ;"), "{text}");
         assert!(text.contains("use crate :: root ;"), "{text}");
         assert!(text.contains("super :: f (1)"), "{text}");
         assert!(text.contains("super :: super :: g ()"), "{text}");
+    }
+
+    /// MAC-11: generated names do not depend on memory addresses or on how
+    /// many items the process expanded before.
+    #[test]
+    fn expansion_is_deterministic() {
+        let items = [
+            quote!(
+                fn total(#[comptime] k: i32, xs: &[i32], flag: bool) -> i32 {
+                    let mut sum = 0;
+                    for &x in xs {
+                        if flag {
+                            sum += x * k;
+                        }
+                    }
+                    sum + comptime!(k + 1)
+                }
+            ),
+            quote!(
+                pub trait Rule {
+                    fn apply(value: i32) -> i32;
+                }
+            ),
+        ];
+        for item in items {
+            let expand = || {
+                expand(syn::parse_quote!(::splice), Lowering::Ir, item.clone())
+                    .unwrap()
+                    .to_string()
+            };
+            assert_eq!(expand(), expand());
+        }
     }
 
     #[test]
@@ -484,11 +516,73 @@ pub(crate) fn nested_visibility(visibility: &Visibility) -> Visibility {
     }
 }
 
-struct RebasePaths;
+/// Rewrites paths of a user signature or expression moved into the
+/// generated `mod <fn>`: `self::` and `super::` gain a level, and a type
+/// the module itself declares (`BuildArgs`, `CallArgs`, `Signature`,
+/// `OpaqueKernel`) is the user's item outside it, unless the name is a
+/// generic parameter or an item declared inside the expression.
+struct RebasePaths {
+    local: std::collections::HashSet<String>,
+}
+
+/// Types the generated module declares; they shadow its `use super::*`.
+const MODULE_TYPES: [&str; 4] = ["BuildArgs", "CallArgs", "Signature", "OpaqueKernel"];
+
+impl RebasePaths {
+    fn new(generics: &syn::Generics) -> Self {
+        let local = generics
+            .params
+            .iter()
+            .filter_map(|param| match param {
+                syn::GenericParam::Type(ty) => Some(ty.ident.to_string()),
+                syn::GenericParam::Const(c) => Some(c.ident.to_string()),
+                syn::GenericParam::Lifetime(_) => None,
+            })
+            .collect();
+        Self { local }
+    }
+
+    /// Also keep the names of items declared inside `expr`.
+    fn declared_in(mut self, expr: &syn::Expr) -> Self {
+        struct Items<'a>(&'a mut std::collections::HashSet<String>);
+        impl<'ast> Visit<'ast> for Items<'_> {
+            fn visit_item(&mut self, item: &'ast Item) {
+                let name = match item {
+                    Item::Struct(i) => Some(&i.ident),
+                    Item::Enum(i) => Some(&i.ident),
+                    Item::Union(i) => Some(&i.ident),
+                    Item::Type(i) => Some(&i.ident),
+                    Item::Trait(i) => Some(&i.ident),
+                    _ => None,
+                };
+                self.0.extend(name.map(ToString::to_string));
+                if let Item::Use(item) = item {
+                    self.visit_use_tree(&item.tree);
+                }
+            }
+            fn visit_use_name(&mut self, name: &'ast syn::UseName) {
+                self.0.insert(name.ident.to_string());
+            }
+            fn visit_use_rename(&mut self, rename: &'ast syn::UseRename) {
+                self.0.insert(rename.rename.to_string());
+            }
+        }
+        Items(&mut self.local).visit_expr(expr);
+        self
+    }
+}
 
 impl VisitMut for RebasePaths {
     fn visit_path_mut(&mut self, path: &mut Path) {
         syn::visit_mut::visit_path_mut(self, path);
+        let first = &path.segments[0].ident;
+        if path.leading_colon.is_none()
+            && MODULE_TYPES.iter().any(|name| first == name)
+            && !self.local.contains(&first.to_string())
+        {
+            *path = syn::parse_quote!(super::#path);
+            return;
+        }
         if path.segments.len() < 2 {
             return;
         }
@@ -521,10 +615,13 @@ impl VisitMut for RebasePaths {
     }
 }
 
-pub(crate) fn rebase_expression(expr: &mut syn::Expr) {
-    RebasePaths.visit_expr_mut(expr);
+/// Rebase `expr` of a function with `generics` into its generated module.
+pub(crate) fn rebase_expression(expr: &mut syn::Expr, generics: &syn::Generics) {
+    RebasePaths::new(generics)
+        .declared_in(expr)
+        .visit_expr_mut(expr);
 }
 
 pub(crate) fn rebase_signature(sig: &mut Signature) {
-    RebasePaths.visit_signature_mut(sig);
+    RebasePaths::new(&sig.generics).visit_signature_mut(sig);
 }

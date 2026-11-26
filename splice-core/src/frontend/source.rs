@@ -5,6 +5,16 @@ pub struct Source {
     pub functions: Vec<String>,
     pub transfer: Option<Transfer>,
     entry_name: String,
+    /// The current unrolled loop has a `continue`, printed as a break out of
+    /// its iteration block, or a `break`, printed as a break out of the loop.
+    labels: UnrolledLabels,
+}
+
+/// Which labels the printed iterations of an unrolled loop need.
+#[derive(Clone, Copy, Default)]
+pub struct UnrolledLabels {
+    iteration: bool,
+    loop_: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -24,6 +34,42 @@ pub fn block(body: &str) -> String {
 }
 
 impl Source {
+    /// Print `continue` in an unrolled loop as a break out of its iteration.
+    pub fn continue_unrolled(&mut self) -> String {
+        self.labels.iteration = true;
+        "break '__splice_iteration".to_owned()
+    }
+
+    /// Print `break` in an unrolled loop as a break out of the loop.
+    pub fn break_unrolled(&mut self) -> String {
+        self.labels.loop_ = true;
+        "break '__splice_unrolled".to_owned()
+    }
+
+    /// Start printing an unrolled loop; returns the enclosing loop's labels.
+    pub fn enter_unrolled(&mut self) -> UnrolledLabels {
+        std::mem::take(&mut self.labels)
+    }
+
+    /// The label prefix of the iteration just printed.
+    pub fn iteration_label(&mut self) -> &'static str {
+        if std::mem::take(&mut self.labels.iteration) {
+            "'__splice_iteration: "
+        } else {
+            ""
+        }
+    }
+
+    /// Finish the unrolled loop `body`, labeled if it breaks.
+    pub fn exit_unrolled(&mut self, enclosing: UnrolledLabels, body: &str) -> String {
+        let labeled = std::mem::replace(&mut self.labels, enclosing).loop_;
+        if labeled {
+            format!("'__splice_unrolled: {}", block(body))
+        } else {
+            block(body)
+        }
+    }
+
     pub fn function(&mut self, name: &str) -> (usize, String) {
         let id = self.functions.len();
         self.functions.push(String::new());
