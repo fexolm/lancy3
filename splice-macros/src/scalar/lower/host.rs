@@ -342,22 +342,54 @@ impl Lower<'_> {
         })
     }
 
+    /// The optional evaluator of a call with known arguments gives up on an
+    /// unsupported type and the call stages at run time; staging itself
+    /// rejects the kernel when it compiles.
+    fn optional(&self) -> bool {
+        self.evaluator_return.is_some()
+    }
+
+    /// Require `operand` (a `&T`) to be a Rust primitive.
+    pub(super) fn primitive(&self, operand: impl ToTokens) -> TokenStream {
+        let root = self.root;
+        if self.optional() {
+            emit!({
+                use #root::frontend::evaluation::{CheckPrimitive as _, Operand};
+                (&Operand::of(#operand)).check()?;
+            })
+        } else {
+            emit!(#root::frontend::evaluation::primitive(#operand);)
+        }
+    }
+
+    /// Require a value constructed during specialization to have no drop glue.
+    pub(super) fn dropless(&self, value: impl ToTokens) -> TokenStream {
+        let root = self.root;
+        if self.optional() {
+            emit!(#root::frontend::evaluation::Dropless::check()?.bind(#value))
+        } else {
+            emit!(#root::frontend::evaluation::dropless(#value))
+        }
+    }
+
     pub(super) fn known_deref(&self, base: impl ToTokens) -> TokenStream {
         let root = self.root;
-        emit!(*{
-            use #root::frontend::evaluation::{CheckReference as _, Operand};
-            let receiver = &(#base);
-            (&Operand::of(receiver)).check_reference()?;
-            &**receiver
-        })
+        if self.optional() {
+            return emit!(*{
+                use #root::frontend::evaluation::{CheckReference as _, Operand};
+                let receiver = &(#base);
+                (&Operand::of(receiver)).check_reference()?;
+                &**receiver
+            });
+        }
+        emit!(*#root::frontend::evaluation::deref(&(#base)))
     }
 
     pub(super) fn host_not(&self, operand: impl ToTokens) -> TokenStream {
-        let root = self.root;
+        let check = self.primitive(emit!(&operand));
         emit!({
-            use #root::frontend::evaluation::{CheckPrimitive as _, Operand};
             let operand = #operand;
-            (&Operand::of(&operand)).check()?;
+            #check
             !operand
         })
     }
@@ -368,13 +400,22 @@ impl Lower<'_> {
             syn::Member::Named(id) => id.to_string().trim_start_matches("r#").to_owned(),
             syn::Member::Unnamed(index) => index.index.to_string(),
         };
-        emit!(*{
-            use #root::frontend::evaluation::{OwnField as _, ReferentField as _, Operand};
+        let check = if self.optional() {
+            emit!({
+                use #root::frontend::evaluation::Layout as _;
+                let owner = (&Operand::of(receiver)).owner();
+                let layout = (&owner).layout();
+                owner.declares(layout, #name)?;
+            })
+        } else {
+            emit!(#root::frontend::evaluation::field((&Operand::of(receiver)).owner(), #name)?;)
+        };
+        // The layout requirement is reported at the field the kernel reads.
+        let at = proc_macro2::Span::mixed_site().located_at(syn::spanned::Spanned::span(member));
+        quote::quote_spanned!(at=> *{
+            use #root::frontend::evaluation::{Operand, Projection as _};
             let receiver = &(#base);
-            let operand = Operand::of(receiver);
-            if !(&operand).own_field(#name) && !(&operand).referent_field(#name) {
-                return ::core::result::Result::Err(#root::BuildError::staging("field has no Splice layout description"));
-            }
+            #check
             &receiver.#member
         })
     }
@@ -440,14 +481,16 @@ impl Lower<'_> {
         op: &BinOp,
         kind: &str,
     ) -> TokenStream {
-        let root = self.root;
         let check = self.host_operator_check(kind, emit!(&(&*place, &operand)));
+        let (place_check, operand_check) = (
+            self.primitive(emit!(place)),
+            self.primitive(emit!(&operand)),
+        );
         emit!({
-            use #root::frontend::evaluation::{CheckPrimitive as _, Operand};
             let operand = #right;
             let place = &mut #left;
-            (&Operand::of(place)).check()?;
-            (&Operand::of(&operand)).check()?;
+            #place_check
+            #operand_check
             #check
             *place #op operand;
         })
@@ -459,7 +502,6 @@ impl Lower<'_> {
         op: &BinOp,
         rhs: impl ToTokens,
     ) -> TokenStream {
-        let root = self.root;
         let kind = match op {
             BinOp::Eq(_)
             | BinOp::Ne(_)
@@ -468,11 +510,14 @@ impl Lower<'_> {
             | BinOp::Gt(_)
             | BinOp::Ge(_) => {
                 // Comparison operands are implicitly borrowed by Rust.
+                let (left, right) = (
+                    self.primitive(emit!(operands.0)),
+                    self.primitive(emit!(operands.1)),
+                );
                 return emit!({
                     let operands = (&(#lhs), &(#rhs));
-                    use #root::frontend::evaluation::{CheckPrimitive as _, Operand};
-                    (&Operand::of(operands.0)).check()?;
-                    (&Operand::of(operands.1)).check()?;
+                    #left
+                    #right
                     *operands.0 #op *operands.1
                 });
             }
@@ -480,23 +525,25 @@ impl Lower<'_> {
             _ => operator_kind(op),
         };
         let check = kind.and_then(|kind| self.host_operator_check(kind, emit!(&operands)));
+        let (left, right) = (
+            self.primitive(emit!(&operands.0)),
+            self.primitive(emit!(&operands.1)),
+        );
         emit!({
             let operands = (#lhs, #rhs);
-            use #root::frontend::evaluation::{CheckPrimitive as _, Operand};
-            (&Operand::of(&operands.0)).check()?;
-            (&Operand::of(&operands.1)).check()?;
+            #left
+            #right
             #check
             operands.0 #op operands.1
         })
     }
 
     pub(super) fn host_negation(&self, value: impl ToTokens) -> TokenStream {
-        let root = self.root;
         let check = self.host_fault_check(emit!((&(&operand,)).negation_fault()), false);
+        let primitive = self.primitive(emit!(&operand));
         emit!({
             let operand = #value;
-            use #root::frontend::evaluation::{CheckPrimitive as _, Operand};
-            (&Operand::of(&operand)).check()?;
+            #primitive
             #check
             -operand
         })

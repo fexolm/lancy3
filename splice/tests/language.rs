@@ -173,24 +173,6 @@ fn portable_and_direct_specializations_outlive_the_plan_and_its_changes() {
 
 static BUILD_EFFECTS: AtomicUsize = AtomicUsize::new(0);
 
-struct DropProbe(i32);
-
-impl Drop for DropProbe {
-    fn drop(&mut self) {
-        BUILD_EFFECTS.fetch_add(1, Ordering::Relaxed);
-    }
-}
-
-const OWNED_PROBE: DropProbe = DropProbe(10);
-
-#[kernel]
-fn destructure_owner(runtime: i32) -> i32 {
-    comptime!({
-        let DropProbe(value) = OWNED_PROBE;
-        value + runtime
-    })
-}
-
 fn record(value: i32) -> i32 {
     BUILD_EFFECTS.fetch_add(1, Ordering::Relaxed);
     value
@@ -213,10 +195,6 @@ fn assert_build_error<T>(result: Result<T, BuildError>) {
 
 #[test]
 fn opaque_rust_effects_run_only_during_call() {
-    assert_build_error(destructure_owner::ir());
-    assert_build_error(destructure_owner::build::<Lancy>(
-        destructure_owner::BuildArgs {},
-    ));
     assert_build_error(opaque_requirement::ir(7));
     splice_testkit::each_backend!(B => assert_build_error(opaque_requirement::build::<B>(
         opaque_requirement::BuildArgs { value: 7 },
@@ -808,11 +786,6 @@ impl std::ops::Add for AddOperand {
     }
 }
 
-#[kernel]
-fn require_overloaded_add(#[comptime] arg: AddOperand) -> i32 {
-    comptime!(arg + arg)
-}
-
 #[kernel(rust)]
 fn overloaded_add(#[comptime] arg: AddOperand) -> i32 {
     arg + arg
@@ -824,10 +797,6 @@ fn overload_resolution_does_not_make_custom_add_pure() {
         ($backend:ty) => {{
             let before = ADD_CALLS.load(Ordering::Relaxed);
             let arg = AddOperand(9);
-            assert_build_error(require_overloaded_add::ir(arg));
-            assert_build_error(require_overloaded_add::build::<$backend>(
-                require_overloaded_add::BuildArgs { arg },
-            ));
             let direct =
                 overloaded_add::build::<$backend>(overloaded_add::BuildArgs { arg }).unwrap();
             let portable = <$backend>::compile(&overloaded_add::ir(arg).unwrap()).unwrap();

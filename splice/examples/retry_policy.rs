@@ -1,7 +1,7 @@
 use splice::kernel;
 use splice_lancy::Lancy;
 
-#[derive(splice::ComptimeKey)]
+#[derive(splice::ComptimeKey, splice::KernelType)]
 struct RetryPolicy {
     base_ms: i32,
     max_ms: i32,

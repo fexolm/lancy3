@@ -1,9 +1,26 @@
 //! Type-directed checks for operations supported by the build-time evaluator.
-//! Autoref selects the rejection for other Rust types without invoking user code.
+//!
+//! Each check has two forms. Staging (`__splice_inline`, `comptime!`,
+//! `print`) requires it, so a failing type is a compile error: a trait bound
+//! or a `const` assertion. The optional evaluator of a call with known
+//! arguments only gives up, and the call stages at run time: autoref selects
+//! an `Err` for other Rust types without invoking user code.
 use std::marker::PhantomData;
 
-/// In `Dropless::check()?.bind(expr)`, Rust checks the type before evaluating
-/// the argument. Even constructing a named constant could schedule a user Drop.
+/// A value staging constructs: dropping it would run a user `Drop` during
+/// specialization, so the kernel does not compile.
+pub fn dropless<T>(value: T) -> T {
+    const {
+        assert!(
+            !std::mem::needs_drop::<T>(),
+            "a comptime value with drop glue would run a destructor during specialization"
+        );
+    }
+    value
+}
+
+/// In `Dropless::check()?.bind(expr)`, the evaluator checks the type before
+/// evaluating the argument.
 pub struct Dropless<T>(PhantomData<fn() -> T>);
 
 impl<T> Dropless<T> {
@@ -83,7 +100,11 @@ impl<T: ?Sized, I, V: ?Sized> ReadIndex<T, I, V> for &&Operand<T> {
         ))
     }
 }
-trait Primitive {}
+#[diagnostic::on_unimplemented(
+    message = "`{Self}` is not a Rust primitive",
+    label = "specialization runs no user-defined operation"
+)]
+pub trait Primitive {}
 macro_rules! primitives {
     ($($ty:ty),*) => {$(impl Primitive for $ty {})*}
 }
@@ -114,15 +135,37 @@ impl<T: ?Sized, I> CheckOwnedIndex<I> for &&Operand<T> {
     }
 }
 
+/// The built-in references: staging dereferences no other type, since a
+/// user `Deref` would run user code.
+#[diagnostic::on_unimplemented(
+    message = "specialization cannot dereference `{Self}`",
+    label = "only `&T` and `&mut T` are dereferenced without running user code"
+)]
+pub trait BuiltinReference {
+    type Target: ?Sized;
+    fn target(&self) -> &Self::Target;
+}
+impl<T: ?Sized> BuiltinReference for &T {
+    type Target = T;
+    fn target(&self) -> &T {
+        self
+    }
+}
+impl<T: ?Sized> BuiltinReference for &mut T {
+    type Target = T;
+    fn target(&self) -> &T {
+        self
+    }
+}
+
+pub fn deref<R: BuiltinReference>(reference: &R) -> &R::Target {
+    reference.target()
+}
+
 pub trait CheckReference {
     fn check_reference(self) -> crate::Result<()>;
 }
-impl<T: ?Sized> CheckReference for &Operand<&T> {
-    fn check_reference(self) -> crate::Result<()> {
-        Ok(())
-    }
-}
-impl<T: ?Sized> CheckReference for &Operand<&mut T> {
+impl<T: BuiltinReference> CheckReference for &Operand<T> {
     fn check_reference(self) -> crate::Result<()> {
         Ok(())
     }
@@ -134,6 +177,9 @@ impl<T: ?Sized> CheckReference for &&Operand<T> {
         ))
     }
 }
+
+/// Staging evaluates an operator only on Rust primitives.
+pub fn primitive<T: Primitive + ?Sized>(_: &T) {}
 
 pub trait CheckPrimitive {
     fn check(self) -> crate::Result<()>;
@@ -150,6 +196,68 @@ impl<T: ?Sized> CheckPrimitive for &&Operand<T> {
         ))
     }
 }
+
+/// The type whose field a projection reads: the referent of a built-in
+/// reference, or the value itself.
+pub trait Projection {
+    type Owner: ?Sized;
+    fn owner(self) -> Operand<Self::Owner>;
+}
+impl<T: ?Sized> Projection for &Operand<&T> {
+    type Owner = T;
+    fn owner(self) -> Operand<T> {
+        Operand(PhantomData)
+    }
+}
+impl<T: ?Sized> Projection for &Operand<&mut T> {
+    type Owner = T;
+    fn owner(self) -> Operand<T> {
+        Operand(PhantomData)
+    }
+}
+impl<T: ?Sized> Projection for &&Operand<T> {
+    type Owner = T;
+    fn owner(self) -> Operand<T> {
+        Operand(PhantomData)
+    }
+}
+
+/// Staging reads a field only of a type with a Splice layout.
+pub fn field<T: crate::KernelType + ?Sized>(owner: Operand<T>, name: &str) -> crate::Result<()> {
+    owner.declares(Some(T::FIELDS), name)
+}
+
+pub trait Layout {
+    fn layout(self) -> Option<&'static [crate::KernelField]>;
+}
+impl<T: crate::KernelType + ?Sized> Layout for &Operand<T> {
+    fn layout(self) -> Option<&'static [crate::KernelField]> {
+        Some(T::FIELDS)
+    }
+}
+impl<T: ?Sized> Layout for &&Operand<T> {
+    fn layout(self) -> Option<&'static [crate::KernelField]> {
+        None
+    }
+}
+
+impl<T: ?Sized> Operand<T> {
+    /// A layout lists the fields Rust declares on `T`: a field missing from
+    /// it would be reached through a user `Deref`.
+    pub fn declares(self, layout: Option<&[crate::KernelField]>, name: &str) -> crate::Result<()> {
+        match layout {
+            Some(fields) if fields.iter().any(|field| field.name == name) => Ok(()),
+            Some(_) => Err(crate::BuildError::staging(format!(
+                "`{}` declares no field `{name}`; reading it would call a user Deref",
+                std::any::type_name::<T>()
+            ))),
+            None => Err(crate::BuildError::staging(
+                "field has no Splice layout description",
+            )),
+        }
+    }
+}
+
 pub trait ReadLength<T: ?Sized> {
     fn length(self, value: &T) -> crate::Result<usize>;
 }
@@ -184,38 +292,6 @@ impl<T: Length + ?Sized> ReadLength<T> for &Operand<T> {
 impl<T: ?Sized> ReadLength<T> for &&Operand<T> {
     fn length(self, _: &T) -> crate::Result<usize> {
         Err(crate::BuildError::staging("opaque length in comptime!"))
-    }
-}
-
-pub trait OwnField {
-    fn own_field(self, name: &str) -> bool;
-}
-impl<T: crate::KernelType> OwnField for &Operand<T> {
-    fn own_field(self, name: &str) -> bool {
-        T::FIELDS.iter().any(|f| f.name == name)
-    }
-}
-impl<T: ?Sized> OwnField for &&Operand<T> {
-    fn own_field(self, _: &str) -> bool {
-        false
-    }
-}
-pub trait ReferentField {
-    fn referent_field(self, name: &str) -> bool;
-}
-impl<T: crate::KernelType> ReferentField for &Operand<&T> {
-    fn referent_field(self, name: &str) -> bool {
-        T::FIELDS.iter().any(|f| f.name == name)
-    }
-}
-impl<T: crate::KernelType> ReferentField for &Operand<&mut T> {
-    fn referent_field(self, name: &str) -> bool {
-        T::FIELDS.iter().any(|f| f.name == name)
-    }
-}
-impl<T: ?Sized> ReferentField for &&Operand<T> {
-    fn referent_field(self, _: &str) -> bool {
-        false
     }
 }
 

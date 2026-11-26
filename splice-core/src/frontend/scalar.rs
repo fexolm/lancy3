@@ -110,11 +110,6 @@ pub fn aggregate<T, const N: usize>(
     _constructor: fn() -> T,
     builder: &mut dyn KernelBuilder,
 ) -> crate::Result<[Word; N]> {
-    if std::mem::needs_drop::<T>() {
-        return Err(crate::BuildError::staging(
-            "a Rust aggregate with drop glue requires a Rust call",
-        ));
-    }
     if fields.iter().any(|field| matches!(field, Word::Runtime(_))) {
         for field in &mut fields {
             *field = Word::Runtime(field.reg(builder)?);
@@ -125,6 +120,17 @@ pub fn aggregate<T, const N: usize>(
 
 pub fn has_destructor<T>(_: fn() -> T) -> bool {
     std::mem::needs_drop::<T>()
+}
+
+/// An aggregate of a kernel that cannot run as a Rust call: its destructor
+/// would be skipped, so the kernel does not compile.
+pub fn dropless_aggregate<T>(_: fn() -> T) {
+    const {
+        assert!(
+            !std::mem::needs_drop::<T>(),
+            "a Rust aggregate with drop glue requires a Rust call, and this kernel cannot run as one"
+        );
+    }
 }
 
 pub fn known_field<T, F: ImportWord>(

@@ -19,6 +19,7 @@ fn catches_slice_panic(xs: &[u8], index: i32) -> bool {
     std::panic::catch_unwind(|| xs[index as usize]).is_err()
 }
 
+#[derive(splice::KernelType)]
 struct Matcher {
     value: i32,
     calls: Cell<usize>,

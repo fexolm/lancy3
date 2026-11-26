@@ -98,10 +98,10 @@ impl Lower<'_> {
         let support = &self.root;
         let visit = |e: &Expr| self.required_expr(e, None, locals, inputs);
         let primitive = |value: TokenStream| {
+            let check = self.primitive(emit!(&value));
             emit!({
-                use #support::frontend::evaluation::{CheckPrimitive as _, Operand};
                 let value = #value;
-                (&Operand::of(&value)).check()?;
+                #check
                 value
             })
         };
@@ -182,7 +182,7 @@ impl Lower<'_> {
                 Some(Binding::Host(_)) => emit!(#path),
                 // A const path constructs a fresh value, including in a
                 // match scrutinee. Check its type before evaluating it.
-                None => emit!(#support::frontend::evaluation::Dropless::check()?.bind(#path)),
+                None => self.dropless(path),
             },
             Expr::Paren(p) => visit(&p.expr)?,
             Expr::Group(p) => visit(&p.expr)?,
@@ -204,7 +204,7 @@ impl Lower<'_> {
                 if let Some(rest) = &mut result.rest {
                     **rest = syn::parse2(visit(rest)?)?;
                 }
-                emit!(#support::frontend::evaluation::Dropless::check()?.bind(#result))
+                self.dropless(result)
             }
             Expr::Index(i) => {
                 let read = self.known_index(visit(&i.expr)?, visit(&i.index)?);
@@ -240,9 +240,9 @@ impl Lower<'_> {
                     {
                         let lhs = &b.left;
                         let check = comptime_fault(support, kind, emit!(&(&#lhs, &right)));
+                        let primitive = self.primitive(emit!(&#lhs));
                         emit!({
-                            use #support::frontend::evaluation::{CheckPrimitive as _, Operand};
-                            (&Operand::of(&#lhs)).check()?;
+                            #primitive
                             let right = #rhs;
                             #check
                             #lhs #op right;
@@ -542,7 +542,8 @@ impl Lower<'_> {
                         .transpose()?;
                     let pat = &local.pat;
                     bind_locals(&mut locals, pat);
-                    code.extend(emit!(let #pat = #root::frontend::evaluation::Dropless::check()?.bind(#value) #otherwise;));
+                    let value = self.dropless(value);
+                    code.extend(emit!(let #pat = #value #otherwise;));
                 }
                 Stmt::Expr(e, semi) => {
                     let value = self.required_expr(

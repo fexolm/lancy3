@@ -36,11 +36,10 @@ impl Lower<'_> {
             return TokenStream::new();
         }
         let owners = layouts.iter().map(|layout| &layout.constructor);
-        let Some(checks) = crate::import::scope_checks(root, function) else {
-            return TokenStream::new();
-        };
-        let Some(call) = self.owned_call(&function.sig) else {
-            return TokenStream::new();
+        let rust_call =
+            crate::import::scope_checks(root, function).zip(self.owned_call(&function.sig));
+        let Some((checks, call)) = rust_call else {
+            return emit!(#(#root::frontend::scalar::dropless_aggregate(#owners);)*);
         };
         emit!({
             if false #(|| #root::frontend::scalar::has_destructor(#owners))* {

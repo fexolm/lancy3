@@ -30,6 +30,11 @@ pub struct KernelField {
     pub offset: usize,
     pub type_name: fn() -> &'static str,
 }
+#[diagnostic::on_unimplemented(
+    message = "`{Self}` has no Splice layout description",
+    label = "a field of this type is read during specialization",
+    note = "derive `splice::KernelType` for `{Self}`"
+)]
 pub trait KernelType {
     const FIELDS: &'static [KernelField];
 }

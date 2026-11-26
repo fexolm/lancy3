@@ -102,15 +102,15 @@ impl Lower<'_> {
                     ));
                 }
                 if primitive_method(&raw_name) {
-                    return Ok(Value::new(
-                        Stage::Host,
+                    return Ok(Value::new(Stage::Host, {
+                        let (value, arg) =
+                            (self.primitive(emit!(&value)), self.primitive(emit!(&arg)));
                         emit!({
-                            use #root::frontend::evaluation::{CheckPrimitive as _, Operand};
                             let value = #receiver;
-                            (&Operand::of(&value)).check()?;
-                            value.#name(#({let arg = #args; (&Operand::of(&arg)).check()?; arg}),*)
-                        }),
-                    ));
+                            #value
+                            value.#name(#({let arg = #args; #arg arg}),*)
+                        })
+                    }));
                 }
                 let expression = Expr::MethodCall(m.clone());
                 return Ok(Value::new(Stage::Host, self.required(&expression, hint)?));

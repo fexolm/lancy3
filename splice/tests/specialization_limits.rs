@@ -252,6 +252,9 @@ struct Steps {
     values: [i32; 1],
 }
 
+// A described type lists its own fields, so `plan.values` (a field of the
+// `Deref` target) is rejected without calling `deref`.
+#[derive(splice::KernelType)]
 struct IndirectSteps {
     reads: Cell<usize>,
     steps: Steps,
@@ -298,12 +301,6 @@ fn described_step(#[comptime] plan: &Steps) -> i32 {
     comptime!((*values)[0])
 }
 
-#[kernel]
-fn indirect_deref(#[comptime] plan: &IndirectSteps) -> i32 {
-    let steps = &**plan;
-    steps.values[0]
-}
-
 #[test]
 fn checking_a_field_does_not_invoke_custom_deref() {
     let plan = IndirectSteps {
@@ -315,7 +312,6 @@ fn checking_a_field_does_not_invoke_custom_deref() {
     assert!(indirect_steps::print(&plan).is_err());
     assert!(indirect_field::ir(&plan).is_err());
     assert!(indirect_field::build::<Lancy>(indirect_field::BuildArgs { plan: &plan }).is_err());
-    assert!(indirect_deref::ir(&plan).is_err());
     assert!(discarded_method::print(&plan).is_err());
     assert_eq!(
         described_step::build::<Lancy>(described_step::BuildArgs { plan: &plan.steps })
