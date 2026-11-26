@@ -55,7 +55,7 @@ impl Lower<'_> {
                     matches!(t, syn::Type::Reference(reference) if reference.mutability.is_none())
                         || matches!(
                             Scalar::from_type(t, self.types),
-                            Some(Scalar::Int | Scalar::Bool | Scalar::Index)
+                            Some(Scalar::I32 | Scalar::Bool | Scalar::Index)
                         )
                 })
         };
@@ -520,7 +520,7 @@ impl Lower<'_> {
                             ) {
                                 let ty = match self.binding(p) {
                                     Some(Binding::Reg(Scalar::Bool, _)) => emit!(bool),
-                                    Some(Binding::Reg(Scalar::Int | Scalar::Inferred, _)) => {
+                                    Some(Binding::Reg(Scalar::I32 | Scalar::Inferred, _)) => {
                                         emit!(i32)
                                     }
                                     _ => return Ok(emit!(::core::option::Option::None)),
@@ -642,7 +642,7 @@ fn wide_local(local: &syn::Local) -> bool {
 pub(in crate::scalar) fn foldable_signature(sig: &syn::Signature) -> bool {
     sig.inputs.iter().all(|arg| {
         matches!(arg, FnArg::Typed(a)
-        if matches!(Scalar::from_type(&a.ty, &[]), Some(Scalar::Int | Scalar::Bool)))
+        if matches!(Scalar::from_type(&a.ty, &[]), Some(Scalar::I32 | Scalar::Bool)))
     })
 }
 

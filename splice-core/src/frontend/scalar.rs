@@ -11,16 +11,16 @@ pub struct Host<T>(pub T);
 pub trait ScalarConstant {
     fn constant(self) -> Constant;
 }
-impl ScalarConstant for i32 {
-    fn constant(self) -> Constant {
-        self.into()
-    }
+macro_rules! scalar_constant {
+    ($($ty:ty)*) => {$(
+        impl ScalarConstant for $ty {
+            fn constant(self) -> Constant {
+                self.into()
+            }
+        }
+    )*};
 }
-impl ScalarConstant for bool {
-    fn constant(self) -> Constant {
-        self.into()
-    }
-}
+scalar_constant!(bool i32 u32 i64 u64 usize f32 f64);
 impl<T: ScalarConstant + Copy> ScalarConstant for &T {
     fn constant(self) -> Constant {
         (*self).constant()

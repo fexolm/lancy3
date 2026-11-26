@@ -43,6 +43,27 @@ impl Elem {
             _ => return None,
         })
     }
+    /// The primitive type of a named element.
+    pub(in crate::scalar) fn primitive(self) -> Option<crate::kast::types::Primitive> {
+        match self {
+            Self::Param(_) | Self::Index(_) => None,
+            _ => crate::kast::types::Primitive::named(self.names().0),
+        }
+    }
+    /// The register an element of a slice loads into: a generic element's
+    /// type is the builder's.
+    pub(super) fn scalar(self) -> Option<Scalar> {
+        use super::Number;
+        Some(match self {
+            Self::U32 => Scalar::Number(Number::U32),
+            Self::I32 => Scalar::I32,
+            Self::I64 => Scalar::Number(Number::I64),
+            Self::F32 => Scalar::Number(Number::F32),
+            Self::F64 => Scalar::Number(Number::F64),
+            Self::Param(_) => Scalar::Inferred,
+            Self::U16 | Self::Index(_) => return None,
+        })
+    }
     pub(crate) fn parse(t: &Type, types: &[&Ident]) -> Option<Self> {
         if let Some(primitive) = crate::kast::types::Primitive::of(t) {
             return Self::of(primitive);
@@ -164,12 +185,9 @@ impl Scalar {
                 emit!(#root::hir::ValueType::Mask(#e))
             }
             scalar => {
-                let ty = match scalar.base() {
-                    Self::Bool => emit!(Bool),
-                    Self::Index => emit!(Index),
-                    _ => emit!(I32),
-                };
-                emit!(#root::hir::ValueType::Scalar(#root::hir::ScalarType::#ty))
+                let ty = super::scalar_type(root, scalar)
+                    .unwrap_or_else(|| emit!(#root::hir::ScalarType::I32));
+                emit!(#root::hir::ValueType::Scalar(#ty))
             }
         }
     }
@@ -249,7 +267,7 @@ impl Lower<'_> {
         };
         let runtime_i32 = runtime_splat
             .as_ref()
-            .filter(|v| matches!(v.stage, Stage::Reg(Scalar::Int | Scalar::Inferred)))
+            .filter(|v| matches!(v.stage, Stage::Reg(Scalar::I32 | Scalar::Inferred)))
             .map(|_| Elem::I32);
         let elem = explicit
             .or_else(|| buffer.as_ref().map(|b| b.0))
@@ -287,7 +305,7 @@ impl Lower<'_> {
             "splat" => {
                 let arg = runtime_splat.unwrap();
                 if elem == Elem::I32 && matches!(arg.stage, Stage::Reg(_)) {
-                    let reg = self.reg(arg, Scalar::Int, &c.args[0])?;
+                    let reg = self.reg(arg, Scalar::I32, &c.args[0])?;
                     self.vector_op(elem, emit!(SplatScalar), vec![reg], Some(v))
                 } else {
                     let val = self.host(arg, &c.args[0])?;
@@ -510,7 +528,7 @@ impl Lower<'_> {
                 self.vector_op(e, emit!(MulAdd), vec![recv, op(0, v)?, op(1, v)?], Some(v))
             }
             ("reduce_sum", 0, false) if e == Elem::I32 => {
-                self.vector_op(e, emit!(ReduceSum), vec![recv], Some(Scalar::Int))
+                self.vector_op(e, emit!(ReduceSum), vec![recv], Some(Scalar::I32))
             }
             ("cast" | "widen_low" | "widen_high", 0, false) | ("narrow", 1, false) => {
                 let Some(Scalar::Vector(to)) = m
@@ -541,22 +559,22 @@ impl Lower<'_> {
                 self.vector_op(e, emit!(PrefixSum), vec![recv], Some(v))
             }
             ("count", 0, true) if e == Elem::I32 => {
-                self.vector_op(e, emit!(Count), vec![recv], Some(Scalar::Int))
+                self.vector_op(e, emit!(Count), vec![recv], Some(Scalar::I32))
             }
             ("extract_wrapping", 1, false) if e == Elem::I32 => self.vector_op(
                 e,
                 emit!(ExtractWrapping),
-                vec![recv, op(0, Scalar::Int)?],
-                Some(Scalar::Int),
+                vec![recv, op(0, Scalar::I32)?],
+                Some(Scalar::I32),
             ),
             ("replace_wrapping", 2, false) if e == Elem::I32 => self.vector_op(
                 e,
                 emit!(ReplaceWrapping),
-                vec![recv, op(0, Scalar::Int)?, op(1, Scalar::Int)?],
+                vec![recv, op(0, Scalar::I32)?, op(1, Scalar::I32)?],
                 Some(v),
             ),
             ("last", 0, false) if e == Elem::I32 => {
-                self.vector_op(e, emit!(Last), vec![recv], Some(Scalar::Int))
+                self.vector_op(e, emit!(Last), vec![recv], Some(Scalar::I32))
             }
             ("any" | "all", 0, true) => {
                 let f = if method == "any" {

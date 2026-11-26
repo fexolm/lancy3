@@ -132,7 +132,7 @@ impl Lower<'_> {
         if host {
             // A known condition selects one arm during specialization, so a
             // scalar result is known exactly when that arm is: a Word.
-            if let Stage::Reg(t @ (Scalar::Int | Scalar::Bool)) = stage
+            if let Stage::Reg(t @ (Scalar::I32 | Scalar::Bool)) = stage
                 && yes.stage != Stage::Never
                 && no.stage != Stage::Never
             {
@@ -268,7 +268,7 @@ impl Lower<'_> {
     }
     pub(super) fn for_expr(&self, f: &syn::ExprForLoop) -> Result<Value> {
         let Expr::Range(range) = &*f.expr else {
-            let Some(slice) = self.iterated_buffer(&f.expr) else {
+            let Some((slice, element)) = self.iterated_buffer(&f.expr) else {
                 return self.unroll(f);
             };
             let Pat::Reference(pattern) = &*f.pat else {
@@ -288,7 +288,7 @@ impl Lower<'_> {
                 let (__splice_start, __splice_one) = (#start, #one);
                 let __splice_limit = __splice_builder.buffer_len(buffer)?;);
             let read = emit!(let #id = __splice_builder.load(buffer, #index)?;);
-            return self.counted_loop(f, binding, Scalar::Int, &index, setup, read);
+            return self.counted_loop(f, binding, element, &index, setup, read);
         };
         let (Some(start), Some(stop)) = (&range.start, &range.end) else {
             return err(range, "expected start..end");
@@ -307,7 +307,11 @@ impl Lower<'_> {
                 (Scalar::Length, emit!(1usize))
             }
             Stage::Reg(Scalar::Index | Scalar::Length) => (Scalar::Index, emit!(1usize)),
-            _ => (Scalar::Int, emit!(1i32)),
+            Stage::Reg(t @ Scalar::Number(_)) if !t.is_float() => {
+                let ty = t.rust_type();
+                (t, emit!(1 as #ty))
+            }
+            _ => (Scalar::I32, emit!(1i32)),
         };
         let initial = self.operand(start, kind)?;
         let bound = self.reg(stop_value, kind, stop)?;
@@ -317,7 +321,12 @@ impl Lower<'_> {
         self.counted_loop(f, pat, kind, &pat.ident, setup, TokenStream::new())
     }
 
-    pub(super) fn iterated_buffer<'a>(&self, iterable: &'a Expr) -> Option<&'a syn::ExprPath> {
+    /// A runtime slice a `for` loop reads element by element, and the
+    /// element's register.
+    pub(super) fn iterated_buffer<'a>(
+        &self,
+        iterable: &'a Expr,
+    ) -> Option<(&'a syn::ExprPath, Scalar)> {
         let operand = match iterable {
             Expr::MethodCall(call) if call.method == "iter" && call.args.is_empty() => {
                 &*call.receiver
@@ -327,8 +336,10 @@ impl Lower<'_> {
         let Expr::Path(path) = operand else {
             return None;
         };
-        matches!(self.binding(path), Some(Binding::Buffer(ty)) if ty.elem == super::Elem::I32)
-            .then_some(path)
+        match self.binding(path) {
+            Some(Binding::Buffer(ty)) => Some((path, ty.elem.scalar()?)),
+            _ => None,
+        }
     }
 
     fn counted_loop(
@@ -589,8 +600,9 @@ impl Lower<'_> {
         match p {
             Pat::Lit(l) => {
                 let lit = match (&l.lit, t) {
-                    (Lit::Int(_), Scalar::Int | Scalar::Inferred) => {
-                        self.constant(emit!({let __splice_value: i32 = #l; __splice_value}))
+                    (Lit::Int(_), t) if t.is_number() || t == Scalar::Inferred => {
+                        let ty = t.rust_type().unwrap_or_else(|| quote::format_ident!("i32"));
+                        self.constant(emit!({let __splice_value: #ty = #l; __splice_value}))
                     }
                     (Lit::Bool(_), Scalar::Bool | Scalar::Inferred) => self.constant(emit!(#l)),
                     _ => return err(l, "pattern type differs from match subject"),
@@ -607,6 +619,7 @@ impl Lower<'_> {
                 Ok(pred)
             }
             Pat::Range(r) if t != Scalar::Bool => {
+                let ty = t.rust_type().unwrap_or_else(|| quote::format_ident!("i32"));
                 let cmp = if matches!(r.limits, syn::RangeLimits::Closed(_)) {
                     "Le"
                 } else {
@@ -618,7 +631,7 @@ impl Lower<'_> {
                     pred = Some(self.bin(
                         "Ge",
                         emit!(__splice_subject),
-                        self.constant(emit!({let __splice_value: i32 = #v; __splice_value})),
+                        self.constant(emit!({let __splice_value: #ty = #v; __splice_value})),
                     ));
                 }
                 if let Some(stop) = &r.end {
@@ -626,7 +639,7 @@ impl Lower<'_> {
                     let upper = self.bin(
                         cmp,
                         emit!(__splice_subject),
-                        self.constant(emit!({let __splice_value: i32 = #v; __splice_value})),
+                        self.constant(emit!({let __splice_value: #ty = #v; __splice_value})),
                     );
                     pred = Some(match pred {
                         Some(lower) => self.bin("And", lower, upper),

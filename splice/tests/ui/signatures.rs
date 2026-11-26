@@ -7,7 +7,7 @@ use splice::BufferArg;
 async fn asynchronous() {}
 
 #[kernel]
-fn wide_result() -> i64 {
+fn wide_result() -> i128 {
     0
 }
 

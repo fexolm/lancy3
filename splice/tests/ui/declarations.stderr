@@ -4,11 +4,11 @@ error: put #[kernel] only on the enclosing impl or trait; keep a Rust method in 
 7 |     #[kernel]
   |     ^^^^^^^^^
 
-error: runtime parameters must be i32, bool, usize or a slice of u16, u32, i32, i64, f32, or f64
-  --> tests/ui/declarations.rs:16:24
+error: a Splice method parameter is #[comptime], i32, bool, a slice, or the &mut self receiver
+  --> tests/ui/declarations.rs:16:21
    |
 16 |     fn method_param(x: i64) -> i32 {
-   |                        ^^^
+   |                     ^
 
 error: expected a named binding
   --> tests/ui/declarations.rs:24:32
@@ -76,11 +76,11 @@ error: one #[intrinsic("name")] is allowed on a kernel method with a body
 101 |     #[intrinsic("b")]
     |     ^^^^^^^^^^^^^^^^^
 
-error: runtime parameters must be i32, bool, usize or a slice of u16, u32, i32, i64, f32, or f64
-   --> tests/ui/declarations.rs:109:16
+error: a Splice trait method parameter is #[comptime], i32, bool or a slice
+   --> tests/ui/declarations.rs:109:13
     |
 109 |     fn area(x: i64) -> i32;
-    |                ^^^
+    |             ^
 
 error: expected a free function, impl or trait
    --> tests/ui/declarations.rs:113:1

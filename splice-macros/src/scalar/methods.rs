@@ -66,8 +66,8 @@ pub(crate) fn publish(
     };
     let result_type = match &signature.output {
         ReturnType::Type(_, ty) if !unit_result => match Scalar::from_type(ty, &types) {
-            Some(result @ (Scalar::Int | Scalar::Bool)) => result,
-            _ if eval_only => Scalar::Int,
+            Some(result @ (Scalar::I32 | Scalar::Bool)) => result,
+            _ if eval_only => Scalar::I32,
             _ => {
                 return Err(syn::Error::new_spanned(
                     ty,
@@ -75,7 +75,7 @@ pub(crate) fn publish(
                 ));
             }
         },
-        _ => Scalar::Int,
+        _ => Scalar::I32,
     };
     let params = if eval_only {
         Vec::new()
@@ -109,14 +109,14 @@ pub(crate) fn publish(
             Binding::Host(_)
                 if matches!(
                     Scalar::from_type(ty, &types),
-                    Some(Scalar::Int | Scalar::Bool | Scalar::Index)
+                    Some(Scalar::I32 | Scalar::Bool | Scalar::Index)
                 ) =>
             {
                 host_args.push(id);
                 emit!(#id: impl #support::KnownArg<#ty>)
             }
             Binding::Host(_) => emit!(#support::Host(#id): #support::Host<#ty>),
-            Binding::Reg(Scalar::Int | Scalar::Bool, write) => {
+            Binding::Reg(Scalar::I32 | Scalar::Bool, write) => {
                 scalar_args.push(id);
                 if write {
                     mutable_args.push(id);

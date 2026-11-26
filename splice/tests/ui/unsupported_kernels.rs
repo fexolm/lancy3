@@ -2,7 +2,7 @@
 use splice::kernel;
 
 #[kernel]
-fn wide(x: i64) -> i32 {
+fn wide(x: i128) -> i32 {
     x as i32
 }
 

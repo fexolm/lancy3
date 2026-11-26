@@ -4,11 +4,11 @@ error: expected a safe synchronous kernel with Rust ABI and fixed arity
 7 | async fn asynchronous() {}
   | ^^^^^^^^^^^^^^^^^^^^^^^
 
-error: expected (), i32, bool, usize, Lane<T> or Mask<T>
+error: expected (), bool, i32, u32, i64, u64, usize, f32, f64, Lane<T> or Mask<T>
   --> tests/ui/signatures.rs:10:21
    |
-10 | fn wide_result() -> i64 {
-   |                     ^^^
+10 | fn wide_result() -> i128 {
+   |                     ^^^^
 
 error: a kernel cannot return vectors or masks with generic elements
   --> tests/ui/signatures.rs:15:36

@@ -41,10 +41,10 @@ impl Ord for DeclId {
 pub(crate) enum Param {
     /// A `#[comptime]` value the generator knows.
     Known,
-    /// A runtime scalar; `usize` when `index`.
-    Scalar { index: bool },
-    /// A runtime slice.
-    Slice,
+    /// A runtime scalar of a primitive type, if it has one.
+    Scalar(Option<types::Primitive>),
+    /// A runtime slice, and the primitive type of its elements if it has one.
+    Slice(Option<types::Primitive>),
     /// Another runtime object (context, column table).
     Object,
 }
@@ -107,7 +107,7 @@ pub(crate) struct Body<'a> {
     /// nodes stay valid.
     macros: HashMap<NodeId, Box<Expr>>,
     stages: stage::Stages,
-    usize_decls: Vec<bool>,
+    local_types: Vec<Option<types::Primitive>>,
 }
 
 impl<'a> Body<'a> {
@@ -120,10 +120,10 @@ impl<'a> Body<'a> {
             decls,
             macros,
             stages: stage::Stages::default(),
-            usize_decls: Vec::new(),
+            local_types: Vec::new(),
         };
         body.stages = stage::analyze(&body);
-        body.usize_decls = types::usize_decls(&body);
+        body.local_types = types::local_types(&body);
         Ok(body)
     }
 
@@ -211,13 +211,14 @@ impl<'a> Body<'a> {
         self.stages.loops.contains(&self.expr(loop_expr))
     }
 
-    /// Whether Rust infers `usize` for the unannotated integer local `let`.
-    pub(crate) fn usize_local(&self, local: &Local) -> bool {
+    /// The type Rust infers from its uses for the unannotated local `let`.
+    pub(crate) fn literal_type(&self, local: &Local) -> Option<types::Primitive> {
         let id = Self::lookup(&self.ids.locals, local);
         self.ids
             .let_decls
-            .get(&id)
-            .is_some_and(|decls| decls.iter().any(|decl| self.usize_decls[decl.0 as usize]))
+            .get(&id)?
+            .iter()
+            .find_map(|decl| self.local_types[decl.0 as usize])
     }
 
     /// Whether the body reads a field of a name the `let` binds.

@@ -24,11 +24,37 @@ use std::collections::HashMap;
 use syn::spanned::Spanned;
 use syn::{BinOp, Block, Error, Expr, Lit, Pat, Path, Result, Stmt, UnOp};
 
+/// A runtime number type other than `usize`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(in crate::scalar) enum Number {
+    I32,
+    U32,
+    I64,
+    U64,
+    F32,
+    F64,
+}
+impl Number {
+    fn name(self) -> &'static str {
+        match self {
+            Self::I32 => "i32",
+            Self::U32 => "u32",
+            Self::I64 => "i64",
+            Self::U64 => "u64",
+            Self::F32 => "f32",
+            Self::F64 => "f64",
+        }
+    }
+    fn is_float(self) -> bool {
+        matches!(self, Self::F32 | Self::F64)
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum Scalar {
-    Int,
+    Number(Number),
     Bool,
-    /// A usize used for indexing. Native slice lengths fit in i32.
+    /// A `usize`.
     Index,
     /// A usize known to fit a nonnegative i32 (slice length or SIMD lane count).
     Length,
@@ -37,6 +63,7 @@ pub(super) enum Scalar {
     Mask(Elem),
 }
 impl Scalar {
+    pub(in crate::scalar) const I32: Self = Self::Number(Number::I32);
     pub(in crate::scalar) fn base(self) -> Self {
         if self == Self::Length {
             Self::Index
@@ -48,13 +75,49 @@ impl Scalar {
         if let Some(t) = simd::vector_type(ty, types) {
             return Some(t);
         }
+        Self::of(crate::kast::types::Primitive::of(ty)?)
+    }
+    /// The runtime scalar of a primitive Rust type.
+    pub(in crate::scalar) fn of(primitive: crate::kast::types::Primitive) -> Option<Self> {
         use crate::kast::types::Primitive;
-        match Primitive::of(ty)? {
-            Primitive::I32 => Some(Self::Int),
-            Primitive::Bool => Some(Self::Bool),
-            Primitive::Usize => Some(Self::Index),
-            _ => None,
-        }
+        Some(match primitive {
+            Primitive::Bool => Self::Bool,
+            Primitive::I32 => Self::I32,
+            Primitive::U32 => Self::Number(Number::U32),
+            Primitive::I64 => Self::Number(Number::I64),
+            Primitive::U64 => Self::Number(Number::U64),
+            Primitive::F32 => Self::Number(Number::F32),
+            Primitive::F64 => Self::Number(Number::F64),
+            Primitive::Usize => Self::Index,
+            _ => return None,
+        })
+    }
+    /// The primitive Rust type of a scalar register.
+    pub(in crate::scalar) fn primitive(self) -> Option<crate::kast::types::Primitive> {
+        crate::kast::types::Primitive::named(&self.rust_type()?.to_string())
+    }
+    /// The Rust type of a scalar register, unless only the builder knows it.
+    pub(in crate::scalar) fn rust_type(self) -> Option<Ident> {
+        let name = match self.base() {
+            Self::Number(n) => n.name(),
+            Self::Bool => "bool",
+            Self::Index => "usize",
+            _ => return None,
+        };
+        Some(Ident::new(name, proc_macro2::Span::call_site()))
+    }
+    /// A scalar a kernel signature can carry.
+    pub(in crate::scalar) fn is_scalar(self) -> bool {
+        matches!(
+            self,
+            Self::Number(_) | Self::Bool | Self::Index | Self::Length
+        )
+    }
+    fn is_float(self) -> bool {
+        matches!(self, Self::Number(n) if n.is_float())
+    }
+    fn is_number(self) -> bool {
+        matches!(self, Self::Number(_) | Self::Index | Self::Length)
     }
 }
 
@@ -174,12 +237,28 @@ pub(super) struct Lower<'a> {
 /// scalar whose type only the builder knows.
 pub(super) fn scalar_type(root: &Path, t: Scalar) -> Option<TokenStream> {
     let ty = match t.base() {
-        Scalar::Int => emit!(I32),
-        Scalar::Bool => emit!(Bool),
-        Scalar::Index => emit!(Index),
+        Scalar::Number(n) => Ident::new(&n.name().to_uppercase(), proc_macro2::Span::call_site()),
+        Scalar::Bool => Ident::new("Bool", proc_macro2::Span::call_site()),
+        Scalar::Index => Ident::new("Index", proc_macro2::Span::call_site()),
         _ => return None,
     };
     Some(emit!(#root::hir::ScalarType::#ty))
+}
+
+/// The stage of a number literal: its suffix, else the number type its use
+/// expects, else Rust's default. A literal of a type registers cannot hold
+/// is a host value.
+fn literal_stage(suffix: &str, float: bool, hint: Option<Scalar>) -> Stage {
+    if !suffix.is_empty() {
+        return crate::kast::types::Primitive::named(suffix)
+            .and_then(Scalar::of)
+            .map_or(Stage::Host, Stage::Literal);
+    }
+    Stage::Literal(match hint.map(Scalar::base) {
+        Some(t) if t.is_number() && t.is_float() == float => t,
+        _ if float => Scalar::Number(Number::F64),
+        _ => Scalar::I32,
+    })
 }
 
 fn err<T>(at: impl ToTokens, msg: &str) -> Result<T> {
@@ -314,35 +393,32 @@ impl Lower<'_> {
                     },
                 );
             }
-            (Stage::Host | Stage::Literal(Scalar::Int), Scalar::Index) => {
-                emit!(<#root::hir::Constant as ::core::convert::From<_>>::from(*::core::borrow::Borrow::<usize>::borrow(&(#v))))
-            }
-            (Stage::Literal(Scalar::Int), Scalar::Int | Scalar::Inferred) => {
-                emit!({let __splice_value: i32 = #v; <#root::hir::Constant as ::core::convert::From<_>>::from(__splice_value)})
-            }
-            (Stage::Literal(Scalar::Bool), Scalar::Bool | Scalar::Inferred) => {
-                emit!(<#root::hir::Constant as ::core::convert::From<_>>::from(#v))
-            }
-            (Stage::Host, Scalar::Int) => {
-                emit!(<#root::hir::Constant as ::core::convert::From<_>>::from(*::core::borrow::Borrow::<i32>::borrow(&(#v))))
-            }
-            (Stage::Host, Scalar::Bool) => {
-                emit!(<#root::hir::Constant as ::core::convert::From<_>>::from(*::core::borrow::Borrow::<bool>::borrow(&(#v))))
+            (Stage::Literal(t), want)
+                if t.base() == want
+                    || want == Scalar::Inferred
+                    || (t.is_number() && want.is_number() && t.is_float() == want.is_float()) =>
+            {
+                // rustc gave an unsuffixed literal the type its use expects.
+                let ty = if want == Scalar::Inferred { t } else { want };
+                let ty = ty.rust_type();
+                emit!({let __splice_value: #ty = #v; <#root::hir::Constant as ::core::convert::From<_>>::from(__splice_value)})
             }
             (Stage::Host, Scalar::Inferred) => {
                 emit!(#root::frontend::scalar::ScalarConstant::constant(#v))
             }
+            (Stage::Host, want) if want.is_scalar() => {
+                let ty = want.rust_type();
+                emit!(<#root::hir::Constant as ::core::convert::From<_>>::from(*::core::borrow::Borrow::<#ty>::borrow(&(#v))))
+            }
             _ => {
-                return err(
-                    at,
-                    match want {
-                        Scalar::Int => "expected a runtime i32",
-                        Scalar::Index | Scalar::Length => "expected a usize slice index",
-                        Scalar::Bool => "expected a runtime bool condition",
-                        Scalar::Inferred => "expected a runtime scalar",
-                        Scalar::Vector(_) | Scalar::Mask(_) => "SIMD operand type mismatch",
-                    },
-                );
+                let message = match want {
+                    Scalar::Number(n) => format!("expected a runtime {}", n.name()),
+                    Scalar::Index | Scalar::Length => "expected a usize slice index".into(),
+                    Scalar::Bool => "expected a runtime bool condition".into(),
+                    Scalar::Inferred => "expected a runtime scalar".into(),
+                    Scalar::Vector(_) | Scalar::Mask(_) => "SIMD operand type mismatch".into(),
+                };
+                return err(at, &message);
             }
         };
         Ok(emit!({let __splice_constant = #bits; __splice_builder.constant(__splice_constant)?}))
@@ -385,8 +461,10 @@ impl Lower<'_> {
         let op = Ident::new(op, proc_macro2::Span::call_site());
         emit!({let (a,z)=(#x,#y); __splice_builder.binary(#root::hir::Binary::#op,a,z)?})
     }
-    fn operator_bin(&self, op: &str, x: TokenStream, y: TokenStream) -> TokenStream {
-        let Some(checked) = checked_operator(op) else {
+    /// The Rust operator `op` on operands of type `t`: integer arithmetic
+    /// checks overflow when the kernel does.
+    fn operator_bin(&self, op: &str, t: Scalar, x: TokenStream, y: TokenStream) -> TokenStream {
+        let Some(checked) = checked_operator(op).filter(|_| !t.is_float()) else {
             return self.bin(op, x, y);
         };
         let root = self.root;
@@ -416,12 +494,12 @@ impl Lower<'_> {
                 ..a
             })),
             (Reg(t), Literal(u)) | (Literal(u), Reg(t)) if t == u => Ok(Reg(t)),
-            // rustc typed both arms alike: an integer literal beside a
-            // `usize` is a `usize`.
-            (Reg(t), Literal(Scalar::Int)) | (Literal(Scalar::Int), Reg(t))
-                if t.base() == Scalar::Index =>
+            // rustc typed both arms alike: a number literal beside a
+            // register has the register's type.
+            (Reg(t), Literal(u)) | (Literal(u), Reg(t))
+                if t.is_number() && u.is_number() && t.is_float() == u.is_float() =>
             {
-                Ok(Reg(Scalar::Index))
+                Ok(Reg(t.base()))
             }
             (Reg(Scalar::Inferred), Reg(t) | Literal(t))
             | (Reg(t) | Literal(t), Reg(Scalar::Inferred)) => Ok(Reg(t.base())),
@@ -658,7 +736,7 @@ impl Lower<'_> {
         }
         let hint = match &local.pat {
             Pat::Type(t) => Scalar::from_type(&t.ty, self.types),
-            Pat::Ident(_) if self.body.usize_local(local) => Some(Scalar::Index),
+            Pat::Ident(_) => self.body.literal_type(local).and_then(Scalar::of),
             _ => None,
         };
         let value = self.expr_with_hint(&init.expr, hint)?;
@@ -721,11 +799,9 @@ impl Lower<'_> {
         } else {
             let annotation = ty.and_then(|ty| Scalar::from_type(ty, self.types));
             let scalar = match value.stage {
-                // An integer literal has the type Rust infers for the local.
-                Stage::Literal(Scalar::Int) if hint == Some(Scalar::Index) => Scalar::Index,
                 Stage::Reg(t) | Stage::Word(t) | Stage::Literal(t) => t,
                 Stage::Host => match annotation {
-                    Some(t @ (Scalar::Int | Scalar::Bool)) => t,
+                    Some(t) if t.is_scalar() => t.base(),
                     _ => Scalar::Inferred,
                 },
                 _ => return err(pat, "initializer must produce a scalar value"),
@@ -771,8 +847,9 @@ impl Lower<'_> {
         }
         match e {
             Expr::Lit(l) => Ok(Value::new(
-                match l.lit {
-                    Lit::Int(_) => Stage::Literal(Scalar::Int),
+                match &l.lit {
+                    Lit::Int(int) => literal_stage(int.suffix(), false, hint),
+                    Lit::Float(float) => literal_stage(float.suffix(), true, hint),
                     Lit::Bool(_) => Stage::Literal(Scalar::Bool),
                     _ => Stage::Host,
                 },
@@ -841,15 +918,19 @@ impl Lower<'_> {
                 if matches!(t, Scalar::Vector(_) | Scalar::Mask(_)) {
                     return self.simd_unary(t, op, v, x);
                 }
+                let ty = t.rust_type();
                 let code = match op {
+                    // `0.0 - x` is not `-x` for a zero `x`.
+                    UnOp::Neg(_) if t.is_float() => {
+                        self.bin("Mul", v.code, self.constant(emit!(-1 as #ty)))
+                    }
                     UnOp::Neg(_) if t != Scalar::Bool => {
-                        self.operator_bin("Sub", self.constant(emit!(0i32)), v.code)
+                        self.operator_bin("Sub", t, self.constant(emit!(0 as #ty)), v.code)
                     }
                     UnOp::Not(_) => {
                         let ones = match t.base() {
                             Scalar::Bool => emit!(true),
-                            Scalar::Index => emit!(usize::MAX),
-                            _ => emit!(-1i32),
+                            _ => emit!(!(0 as #ty)),
                         };
                         self.bin("Xor", v.code, self.constant(ones))
                     }
@@ -918,7 +999,7 @@ impl Lower<'_> {
                 self.simd_operator(t, op, vec![emit!(#left), rhs], left)?
                     .code
             } else {
-                self.operator_bin(op, emit!(#left), rhs)
+                self.operator_bin(op, t, emit!(#left), rhs)
             }
         } else {
             rhs
@@ -945,7 +1026,9 @@ impl Lower<'_> {
             return self.word_binary(x, left, right);
         }
         let t = match (left.stage, right.stage) {
-            (Stage::Reg(t), _) | (_, Stage::Reg(t)) => t,
+            (Stage::Reg(t), Stage::Reg(Scalar::Inferred))
+            | (_, Stage::Reg(t))
+            | (Stage::Reg(t), _) => t,
             (Stage::Host | Stage::Literal(_), Stage::Literal(_) | Stage::Host) => {
                 return Ok(Value::new(Stage::Host, self.host_binary(left, op, right)));
             }
@@ -957,7 +1040,13 @@ impl Lower<'_> {
         let index = [left.stage, right.stage]
             .iter()
             .any(|s| matches!(s, Stage::Reg(Scalar::Index | Scalar::Length)));
-        let number = if index { Scalar::Index } else { Scalar::Int };
+        let number = if index {
+            Scalar::Index
+        } else if let Scalar::Number(_) = t {
+            t
+        } else {
+            Scalar::I32
+        };
         let t = if index { Scalar::Index } else { t };
         let (operation, input, output) = match op {
             Add(_) => ("Add", number, number),
@@ -992,7 +1081,7 @@ impl Lower<'_> {
         let rhs = self.reg(right, input, &x.right)?;
         Ok(Value::new(
             Stage::Reg(output),
-            self.operator_bin(operation, lhs, rhs),
+            self.operator_bin(operation, input, lhs, rhs),
         ))
     }
 }

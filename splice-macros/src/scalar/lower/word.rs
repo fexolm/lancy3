@@ -72,7 +72,7 @@ impl Lower<'_> {
         };
         let left = self.word(left, &expr.left)?;
         let right = self.word(right, &expr.right)?;
-        let kind = if predicate { Scalar::Bool } else { Scalar::Int };
+        let kind = if predicate { Scalar::Bool } else { Scalar::I32 };
         Ok(Value::new(
             Stage::Word(kind),
             emit!({

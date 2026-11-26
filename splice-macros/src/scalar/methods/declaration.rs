@@ -16,7 +16,7 @@ impl TraitMethodKind {
         match output {
             ReturnType::Default => Self::Word,
             ReturnType::Type(_, ty) => match Scalar::from_type(ty, &[]) {
-                Some(Scalar::Int) => Self::Word,
+                Some(Scalar::I32) => Self::Word,
                 Some(Scalar::Bool) => Self::Bool,
                 _ if matches!(ty.as_ref(), Type::Tuple(tuple) if tuple.elems.is_empty()) => {
                     Self::Word
@@ -95,7 +95,7 @@ pub(crate) fn trait_defaults(
             Binding::Host(_)
                 if matches!(
                     Scalar::from_type(ty, &types),
-                    Some(Scalar::Int | Scalar::Bool | Scalar::Index)
+                    Some(Scalar::I32 | Scalar::Bool | Scalar::Index)
                 ) =>
             {
                 if matches!(Scalar::from_type(ty, &types), Some(Scalar::Index)) {
@@ -109,7 +109,7 @@ pub(crate) fn trait_defaults(
                 materializable = false;
                 emit!(#id: #support::Host<#ty>)
             }
-            Binding::Reg(Scalar::Int | Scalar::Bool, _) => emit!(#id: impl #support::RunArg),
+            Binding::Reg(Scalar::I32 | Scalar::Bool, _) => emit!(#id: impl #support::RunArg),
             Binding::Buffer(_) => {
                 materializable = false;
                 emit!(#id: #hir::Buffer)

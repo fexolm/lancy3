@@ -1,7 +1,8 @@
-//! Integer types Rust infers for unannotated literal locals. rustc has
-//! already checked the kernel's Rust function, so a use beside a `usize`
-//! operand (`.len()` of a slice argument, `as usize`, a `usize` argument or
-//! local, a `usize` literal) or as a slice index makes the literal local a
+//! Number types Rust infers for unannotated literal locals. rustc has
+//! already checked the kernel's Rust function, so a literal local used
+//! beside an operand of a known type (a typed parameter or local, `.len()` of
+//! a slice argument, a cast, a suffixed literal) in a comparison, arithmetic
+//! or an assignment has that type, and one that indexes a slice argument is a
 //! `usize`: `let mut i = 0; while i < xs.len()`. Declarations are resolved,
 //! so a shadowed name is a different local.
 use super::{Body, DeclId, Origin, Param};
@@ -80,60 +81,78 @@ impl Primitive {
     }
 }
 
-pub(super) fn usize_decls(body: &Body<'_>) -> Vec<bool> {
+/// The type of each declaration that has one Rust infers from its uses.
+pub(super) fn local_types(body: &Body<'_>) -> Vec<Option<Primitive>> {
     let mut collect = Collect {
         body,
-        literal: vec![false; body.decls.len()],
+        literal: vec![None; body.decls.len()],
         initialized: Vec::new(),
         uses: Vec::new(),
         indices: Vec::new(),
+        elements: Vec::new(),
     };
     collect.visit_block(body.block());
-    let mut found: Vec<bool> = body
+    let mut found: Vec<Option<Primitive>> = body
         .decls
         .iter()
-        .map(|decl| decl.origin == Origin::Param(Param::Scalar { index: true }))
+        .map(|decl| match decl.origin {
+            Origin::Param(Param::Scalar(ty)) => ty,
+            _ => None,
+        })
         .collect();
+    for (decl, element) in &collect.elements {
+        found[decl.0 as usize] = Some(*element);
+    }
     loop {
         let mut marks = Vec::new();
-        let known = |e: &Expr| is_usize(body, &found, e);
+        let known = |e: &Expr| type_of(body, &found, e);
         for (decl, init) in &collect.initialized {
-            if !found[decl.0 as usize] && known(init) {
-                marks.push(*decl);
+            if found[decl.0 as usize].is_none()
+                && let Some(ty) = known(init)
+            {
+                marks.push((*decl, ty));
             }
         }
         let mut operands = Vec::new();
         for (left, right) in &collect.uses {
-            if known(right) {
-                operands.push(*left);
-            } else if known(left) {
-                operands.push(*right);
+            if let Some(ty) = known(right) {
+                operands.push((*left, ty));
+            } else if let Some(ty) = known(left) {
+                operands.push((*right, ty));
             }
         }
-        operands.extend(collect.indices.iter().copied());
-        for operand in operands {
-            mark(body, operand, &collect.literal, &mut marks);
+        operands.extend(
+            collect
+                .indices
+                .iter()
+                .map(|index| (*index, Primitive::Usize)),
+        );
+        for (operand, ty) in operands {
+            mark(body, operand, ty, &collect.literal, &mut marks);
         }
-        marks.retain(|decl| !found[decl.0 as usize]);
+        marks.retain(|(decl, _)| found[decl.0 as usize].is_none());
         if marks.is_empty() {
             return found;
         }
-        for decl in marks {
-            found[decl.0 as usize] = true;
+        for (decl, ty) in marks {
+            found[decl.0 as usize] = Some(ty);
         }
     }
 }
 
 struct Collect<'b, 'a> {
     body: &'b Body<'a>,
-    /// Declarations of `let [mut] x = <unsuffixed integer literal>`.
-    literal: Vec<bool>,
+    /// Declarations of `let [mut] x = <unsuffixed number literal>`: whether
+    /// the literal is a float.
+    literal: Vec<Option<bool>>,
     /// A single-name `let` and its initializer.
     initialized: Vec<(DeclId, &'b Expr)>,
     /// Operand pairs Rust types alike.
     uses: Vec<(&'b Expr, &'b Expr)>,
     /// Indices of slice arguments.
     indices: Vec<&'b Expr>,
+    /// Bindings of slice elements a `for` loop reads.
+    elements: Vec<(DeclId, Primitive)>,
 }
 
 impl<'b> Visit<'b> for Collect<'b, '_> {
@@ -151,7 +170,11 @@ impl<'b> Visit<'b> for Collect<'b, '_> {
             match &*init.expr {
                 Expr::Lit(literal) if matches!(&literal.lit, Lit::Int(int) if int.suffix().is_empty()) =>
                 {
-                    self.literal[decl.0 as usize] = true;
+                    self.literal[decl.0 as usize] = Some(false);
+                }
+                Expr::Lit(literal) if matches!(&literal.lit, Lit::Float(float) if float.suffix().is_empty()) =>
+                {
+                    self.literal[decl.0 as usize] = Some(true);
                 }
                 init => self.initialized.push((decl, init)),
             }
@@ -176,6 +199,24 @@ impl<'b> Visit<'b> for Collect<'b, '_> {
         self.uses.push((&assign.left, &assign.right));
         syn::visit::visit_expr_assign(self, assign);
     }
+    fn visit_expr_for_loop(&mut self, f: &'b syn::ExprForLoop) {
+        match (&*f.pat, &*f.expr) {
+            (Pat::Ident(name), Expr::Range(range)) if name.subpat.is_none() => {
+                if let Some(end) = &range.end {
+                    self.initialized.push((self.body.binding(name), end));
+                }
+            }
+            (Pat::Reference(reference), iterable) => {
+                if let Pat::Ident(name) = &*reference.pat
+                    && let Some(element) = iterated_element(self.body, iterable)
+                {
+                    self.elements.push((self.body.binding(name), element));
+                }
+            }
+            _ => {}
+        }
+        syn::visit::visit_expr_for_loop(self, f);
+    }
     fn visit_expr_index(&mut self, index: &'b syn::ExprIndex) {
         if slice(self.body, &index.expr) {
             self.indices.push(&index.index);
@@ -199,7 +240,20 @@ fn param(body: &Body<'_>, e: &Expr) -> Option<Param> {
 }
 
 fn slice(body: &Body<'_>, e: &Expr) -> bool {
-    param(body, e) == Some(Param::Slice)
+    matches!(param(body, e), Some(Param::Slice(_)))
+}
+
+/// The element type of the slice argument a `for` loop reads, as in
+/// `for &x in xs` or `for &x in xs.iter()`.
+fn iterated_element(body: &Body<'_>, e: &Expr) -> Option<Primitive> {
+    let e = match e {
+        Expr::MethodCall(call) if call.method == "iter" && call.args.is_empty() => &*call.receiver,
+        e => e,
+    };
+    match param(body, e)? {
+        Param::Slice(element) => element,
+        _ => None,
+    }
 }
 
 fn arithmetic(op: &BinOp) -> bool {
@@ -216,35 +270,70 @@ fn arithmetic(op: &BinOp) -> bool {
     )
 }
 
-fn is_usize(body: &Body<'_>, found: &[bool], e: &Expr) -> bool {
+/// The type rustc gives `e`, when its operands name it.
+fn type_of(body: &Body<'_>, found: &[Option<Primitive>], e: &Expr) -> Option<Primitive> {
     match e {
-        Expr::Paren(p) => is_usize(body, found, &p.expr),
-        Expr::Group(g) => is_usize(body, found, &g.expr),
-        Expr::Cast(c) => Primitive::of(&c.ty) == Some(Primitive::Usize),
-        Expr::Lit(l) => matches!(&l.lit, Lit::Int(int) if int.suffix() == "usize"),
-        Expr::MethodCall(m) => m.method == "len" && m.args.is_empty() && slice(body, &m.receiver),
-        Expr::Binary(b) if arithmetic(&b.op) => {
-            is_usize(body, found, &b.left) || is_usize(body, found, &b.right)
+        Expr::Paren(p) => type_of(body, found, &p.expr),
+        Expr::Group(g) => type_of(body, found, &g.expr),
+        Expr::Unary(u) if matches!(u.op, syn::UnOp::Neg(_) | syn::UnOp::Not(_)) => {
+            type_of(body, found, &u.expr)
         }
-        Expr::Path(path) => body.decl_of(path).is_some_and(|d| found[d.0 as usize]),
-        _ => false,
+        Expr::Cast(c) => Primitive::of(&c.ty),
+        Expr::Lit(l) => match &l.lit {
+            Lit::Int(int) => Primitive::named(int.suffix()),
+            Lit::Float(float) => Primitive::named(float.suffix()),
+            _ => None,
+        },
+        Expr::MethodCall(m)
+            if m.method == "len" && m.args.is_empty() && slice(body, &m.receiver) =>
+        {
+            Some(Primitive::Usize)
+        }
+        Expr::Binary(b) if arithmetic(&b.op) => {
+            type_of(body, found, &b.left).or_else(|| type_of(body, found, &b.right))
+        }
+        Expr::Path(path) => body.decl_of(path).and_then(|d| found[d.0 as usize]),
+        Expr::Index(index) => match param(body, &index.expr)? {
+            Param::Slice(element) => element,
+            _ => None,
+        },
+        _ => None,
     }
 }
 
-/// Mark the literal locals that `e`, a `usize` operand, consists of.
-fn mark(body: &Body<'_>, e: &Expr, literal: &[bool], marks: &mut Vec<DeclId>) {
+impl Primitive {
+    fn is_float(self) -> bool {
+        matches!(self, Self::F32 | Self::F64)
+    }
+    fn is_number(self) -> bool {
+        !matches!(self, Self::Bool | Self::Char)
+    }
+}
+
+/// Mark the literal locals that `e`, an operand of type `ty`, consists of.
+fn mark(
+    body: &Body<'_>,
+    e: &Expr,
+    ty: Primitive,
+    literal: &[Option<bool>],
+    marks: &mut Vec<(DeclId, Primitive)>,
+) {
     match e {
-        Expr::Paren(p) => mark(body, &p.expr, literal, marks),
-        Expr::Group(g) => mark(body, &g.expr, literal, marks),
+        Expr::Paren(p) => mark(body, &p.expr, ty, literal, marks),
+        Expr::Group(g) => mark(body, &g.expr, ty, literal, marks),
+        Expr::Unary(u) if matches!(u.op, syn::UnOp::Neg(_) | syn::UnOp::Not(_)) => {
+            mark(body, &u.expr, ty, literal, marks);
+        }
         Expr::Binary(b) if arithmetic(&b.op) => {
-            mark(body, &b.left, literal, marks);
-            mark(body, &b.right, literal, marks);
+            mark(body, &b.left, ty, literal, marks);
+            mark(body, &b.right, ty, literal, marks);
         }
         Expr::Path(path) => {
             if let Some(decl) = body.decl_of(path)
-                && literal[decl.0 as usize]
+                && ty.is_number()
+                && literal[decl.0 as usize] == Some(ty.is_float())
             {
-                marks.push(decl);
+                marks.push((decl, ty));
             }
         }
         _ => {}

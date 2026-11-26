@@ -41,7 +41,7 @@ impl Lower<'_> {
             self.result_type
         } else {
             hint.filter(|t| matches!(t, Scalar::Bool | Scalar::Vector(_) | Scalar::Mask(_)))
-                .unwrap_or(Scalar::Int)
+                .unwrap_or(Scalar::I32)
         };
         let mut check = TokenStream::new();
         let target = if recursive {
@@ -118,7 +118,7 @@ impl Lower<'_> {
                 (
                     None,
                     Stage::Reg(
-                        Scalar::Int
+                        Scalar::I32
                         | Scalar::Bool
                         | Scalar::Inferred
                         | Scalar::Vector(_)

@@ -59,21 +59,15 @@ pub(super) fn expand(root: Path, native: &mut ItemFn, print: bool) -> Result<Tok
     let unit_result = matches!(ty, Type::Tuple(tuple) if tuple.elems.is_empty());
     let types: Vec<_> = sig.generics.type_params().map(|ty| &ty.ident).collect();
     let result_type = if unit_result {
-        Scalar::Int
+        Scalar::I32
     } else {
         Scalar::from_type(ty, &types)
-            .filter(|t| {
-                matches!(
-                    t,
-                    Scalar::Int
-                        | Scalar::Bool
-                        | Scalar::Index
-                        | Scalar::Vector(_)
-                        | Scalar::Mask(_)
-                )
-            })
+            .filter(|t| t.is_scalar() || matches!(t, Scalar::Vector(_) | Scalar::Mask(_)))
             .ok_or_else(|| {
-                Error::new_spanned(ty, "expected (), i32, bool, usize, Lane<T> or Mask<T>")
+                Error::new_spanned(
+                    ty,
+                    "expected (), bool, i32, u32, i64, u64, usize, f32, f64, Lane<T> or Mask<T>",
+                )
             })?
     };
     if matches!(
@@ -161,7 +155,7 @@ pub(super) fn expand(root: Path, native: &mut ItemFn, print: bool) -> Result<Tok
         if matches!(formal, Binding::Host(_)) {
             if matches!(
                 Scalar::from_type(ty, &types),
-                Some(Scalar::Int | Scalar::Bool | Scalar::Index)
+                Some(Scalar::I32 | Scalar::Bool | Scalar::Index)
             ) {
                 source_decls.push(emit!(#id:impl #support::KnownArg<#ty>));
                 extract_known.push(emit!(let #id=#support::KnownArg::require(#id)?;));
@@ -280,7 +274,7 @@ pub(super) fn expand(root: Path, native: &mut ItemFn, print: bool) -> Result<Tok
     if let Some(context) = &mut context {
         for parameter in &parameters {
             if matches!(parameter.binding, Binding::Host(_))
-                && let Some(kind @ (Scalar::Int | Scalar::Bool)) =
+                && let Some(kind @ (Scalar::I32 | Scalar::Bool)) =
                     Scalar::from_type(parameter.ty, &types)
             {
                 context.register_host(parameter.name.clone(), kind);
@@ -736,10 +730,8 @@ fn stage_param(binding: Binding) -> crate::kast::Param {
     use crate::kast::Param;
     match binding {
         Binding::Host(_) => Param::Known,
-        Binding::Reg(t, _) | Binding::Word(t) => Param::Scalar {
-            index: t.base() == Scalar::Index,
-        },
-        Binding::Buffer(_) => Param::Slice,
+        Binding::Reg(t, _) | Binding::Word(t) => Param::Scalar(t.primitive()),
+        Binding::Buffer(buffer) => Param::Slice(buffer.elem.primitive()),
         Binding::Columns | Binding::Context | Binding::Aggregate(_) => Param::Object,
     }
 }
@@ -781,10 +773,8 @@ fn parameter<'a>(arg: &'a FnArg, types: &[&Ident], name: Ident) -> Result<abi::P
             }
             Binding::Columns
         }
-        [] if matches!(
-            Scalar::from_type(&arg.ty, types),
-            Some(Scalar::Int | Scalar::Bool | Scalar::Index | Scalar::Vector(_) | Scalar::Mask(_))
-        ) =>
+        [] if Scalar::from_type(&arg.ty, types)
+            .is_some_and(|t| t.is_scalar() || matches!(t, Scalar::Vector(_) | Scalar::Mask(_))) =>
         {
             Binding::Reg(Scalar::from_type(&arg.ty, types).unwrap(), mutable)
         }
@@ -797,7 +787,7 @@ fn parameter<'a>(arg: &'a FnArg, types: &[&Ident], name: Ident) -> Result<abi::P
             let writable = slice_type(&arg.ty, types).ok_or_else(|| {
                 Error::new_spanned(
                     &arg.ty,
-                    "runtime parameters must be i32, bool, usize or a slice of u16, u32, i32, i64, f32, or f64",
+                    "runtime parameters must be bool, i32, u32, i64, u64, usize, f32, f64 or a slice of u16, u32, i32, i64, f32, or f64",
                 )
             })?;
             if mutable {
@@ -932,7 +922,11 @@ mod tests {
             fn edit(column: &[i32]) -> i32 { column[0] = 1; 0 }
         };
         let error = expand(parse_quote!(::splice), &mut f, false).unwrap_err();
-        assert!(error.to_string().contains("requires &mut [i32]"));
+        assert!(
+            error
+                .to_string()
+                .contains("requires a &mut slice parameter")
+        );
     }
 
     #[test]

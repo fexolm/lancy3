@@ -626,7 +626,7 @@ impl Visit<'_> for Captures<'_, '_> {
             Some(Binding::Reg(kind, _) | Binding::Word(kind))
                 if matches!(
                     kind,
-                    Scalar::Bool | Scalar::Int | Scalar::Inferred | Scalar::Length
+                    Scalar::Bool | Scalar::I32 | Scalar::Inferred | Scalar::Length
                 ) =>
             {
                 self.operands.push(Operand {

@@ -1676,3 +1676,69 @@ fn the_evaluator_reads_known_slices() {
     }
     splice_testkit::each_backend!(B => check::<B>());
 }
+
+/// MAC-07, CORE-01: runtime parameters, locals, literals, slice elements and
+/// results of every kernel scalar type, with the types rustc infers for
+/// unsuffixed literals.
+#[kernel(print)]
+fn typed_scalars(a: i64, b: u32, c: u64, x: f64, xs: &[i64], fs: &[f32], out: &mut [u32]) -> i64 {
+    let mut sum = 0;
+    let mut i = 0;
+    while i < xs.len() {
+        sum += xs[i] * 3 - 1;
+        i += 1;
+    }
+    let mut total = 0.0;
+    for &f in fs {
+        total += f * 2.5;
+    }
+    let mut written = 0;
+    let mut j = 0;
+    while j < out.len() {
+        out[j] = (b >> 1) + j as u32;
+        written += out[j];
+        j += 1;
+    }
+    for k in 0..c % 4 {
+        written += k as u32;
+    }
+    let neg = -x;
+    let scaled = if neg < 0.5 { neg * 2.0 } else { 1.5 };
+    let wide = c / 3 + !c % 7;
+    sum + a + written as i64 + wide as i64 + scaled as i64 + total as i64 + 1i64
+}
+
+#[test]
+fn kernels_compute_with_every_scalar_type() {
+    fn check<B: Codegen<Output: Executable>>() {
+        let built = typed_scalars::build::<B>(typed_scalars::BuildArgs {}).unwrap();
+        let compiled = B::compile(&typed_scalars::ir().unwrap()).unwrap();
+        for code in [built, compiled] {
+            for (a, b, c, x) in [
+                (5i64, 9u32, 100u64, 0.25f64),
+                (-1 << 40, 4_000_000_000, u64::MAX, -3.5),
+            ] {
+                for (xs, fs) in [
+                    (&[][..], &[][..]),
+                    (&[1i64 << 35, -7, 4][..], &[0.5f32, -1.25][..]),
+                ] {
+                    let (mut out, mut expected) = ([0u32; 3], [0u32; 3]);
+                    let result = code.call(typed_scalars::CallArgs {
+                        a,
+                        b,
+                        c,
+                        x,
+                        xs,
+                        fs,
+                        out: &mut out,
+                    });
+                    assert_eq!(result, Ok(typed_scalars(a, b, c, x, xs, fs, &mut expected)));
+                    assert_eq!(out, expected);
+                }
+            }
+        }
+    }
+    splice_testkit::each_backend!(B => check::<B>());
+    let printed = typed_scalars::print().unwrap();
+    assert!(printed.contains("for k in"), "{printed}");
+}

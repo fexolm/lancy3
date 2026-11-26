@@ -22,7 +22,14 @@ fn short_circuit_rhs_promotes_the_local_it_conditionally_writes() {
         };
         visited
     });
-    let body = Body::new(&block, &[(ident("x"), Param::Scalar { index: false })]).unwrap();
+    let body = Body::new(
+        &block,
+        &[(
+            ident("x"),
+            Param::Scalar(Some(super::types::Primitive::I32)),
+        )],
+    )
+    .unwrap();
     assert!(body.runtime_local(local(&block, 0)));
 }
 
@@ -37,7 +44,14 @@ fn return_operands_propagate_conditional_writes() {
             a
         };
     });
-    let body = Body::new(&block, &[(ident("x"), Param::Scalar { index: false })]).unwrap();
+    let body = Body::new(
+        &block,
+        &[(
+            ident("x"),
+            Param::Scalar(Some(super::types::Primitive::I32)),
+        )],
+    )
+    .unwrap();
     assert!(body.runtime_local(local(&block, 0)));
 }
 
@@ -57,7 +71,14 @@ fn assignments_stage_the_local_they_resolve_to() {
         let c = a;
         c + b
     });
-    let body = Body::new(&block, &[(ident("x"), Param::Scalar { index: false })]).unwrap();
+    let body = Body::new(
+        &block,
+        &[(
+            ident("x"),
+            Param::Scalar(Some(super::types::Primitive::I32)),
+        )],
+    )
+    .unwrap();
     assert!(!body.runtime_local(local(&block, 0)));
     assert!(body.runtime_local(local(&block, 1)));
     assert!(!body.runtime_local(local(&block, 3)));
@@ -88,12 +109,21 @@ fn literal_locals_take_the_usize_type_of_their_uses() {
         (j + k) as i32 + n + t + i
     });
     let params = [
-        (ident("xs"), Param::Slice),
-        (ident("x"), Param::Scalar { index: false }),
+        (
+            ident("xs"),
+            Param::Slice(Some(super::types::Primitive::I32)),
+        ),
+        (
+            ident("x"),
+            Param::Scalar(Some(super::types::Primitive::I32)),
+        ),
     ];
     let body = Body::new(&block, &params).unwrap();
     let usize_at: Vec<_> = (0..block.stmts.len())
-        .filter(|&i| matches!(block.stmts[i], Stmt::Local(_)) && body.usize_local(local(&block, i)))
+        .filter(|&i| {
+            matches!(block.stmts[i], Stmt::Local(_))
+                && body.literal_type(local(&block, i)) == Some(super::types::Primitive::Usize)
+        })
         .collect();
     // i, j, k, the `xs.len()` local m and q, which is added to m.
     assert_eq!(usize_at, [0, 1, 2, 8, 9]);
