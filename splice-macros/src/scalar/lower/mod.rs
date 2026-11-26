@@ -4,7 +4,7 @@ mod calls;
 mod comptime;
 mod context;
 mod control;
-pub(super) use comptime::can_fold;
+pub(super) use comptime::foldable_signature;
 pub(crate) use comptime::uses_stage_requirements;
 pub(super) use context::Context;
 mod host;
@@ -135,6 +135,14 @@ pub(super) struct LoopFrame {
     value_type: std::rc::Rc<std::cell::Cell<Option<Scalar>>>,
 }
 
+/// The mandatory evaluator of a body: its exit label, whether it evaluates
+/// a wide result, and whether it met a node it cannot run.
+pub(super) struct Evaluation {
+    exit: syn::Lifetime,
+    wide: bool,
+    unevaluable: std::cell::Cell<bool>,
+}
+
 #[derive(Clone)]
 pub(super) struct Lower<'a> {
     pub(super) root: &'a Path,
@@ -156,7 +164,8 @@ pub(super) struct Lower<'a> {
     pub(super) loops: Vec<LoopFrame>,
     pub(super) region_depth: usize,
     pub(super) source_fault: Option<syn::Lifetime>,
-    pub(super) evaluator_return: Option<syn::Lifetime>,
+    /// The mandatory evaluator being generated, if any.
+    pub(super) evaluation: Option<std::rc::Rc<Evaluation>>,
     pub(super) body: &'a crate::kast::Body<'a>,
     pub(super) context: Option<&'a Context>,
 }

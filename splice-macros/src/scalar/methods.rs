@@ -177,7 +177,7 @@ pub(crate) fn publish(
         loops: Vec::new(),
         region_depth: 0,
         source_fault: None,
-        evaluator_return: None,
+        evaluation: None,
         context: context.as_ref(),
     };
     let eval_name = entry_name(
@@ -189,12 +189,11 @@ pub(crate) fn publish(
         name,
     );
     if eval_only {
-        return Ok(vec![lower.evaluator(
-            &signature,
-            &body,
-            visibility,
-            Some(&eval_name),
-        )?]);
+        return Ok(vec![
+            lower
+                .evaluator(&signature, &body, visibility, Some(&eval_name))?
+                .0,
+        ]);
     }
     let code = lower.kernel_body(&body)?;
     let stage_name = entry_name(
@@ -277,7 +276,11 @@ pub(crate) fn publish(
         let marker = entry_name("published", name);
         items.push(emit!(#[doc(hidden)] #visibility fn #marker() -> bool { true }));
     }
-    items.push(lower.evaluator(&signature, &body, visibility, Some(&eval_name))?);
+    items.push(
+        lower
+            .evaluator(&signature, &body, visibility, Some(&eval_name))?
+            .0,
+    );
     Ok(items)
 }
 

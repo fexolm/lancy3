@@ -320,10 +320,10 @@ pub(super) fn expand(root: Path, native: &mut ItemFn, print: bool) -> Result<Tok
         loops: Vec::new(),
         region_depth: 0,
         source_fault: None,
-        evaluator_return: None,
+        evaluation: None,
         context: context.as_ref(),
     };
-    let evaluator = lower.evaluator(&native.sig, &lowered_block, module_vis, None)?;
+    let (evaluator, evaluable) = lower.evaluator(&native.sig, &lowered_block, module_vis, None)?;
     let code = lower.kernel_body(&lowered_block)?;
     let dropless = lower.dropless_aggregates();
     let debug_arguments = host_names.iter().map(|id| lower.capture_constant(id));
@@ -641,7 +641,7 @@ pub(super) fn expand(root: Path, native: &mut ItemFn, print: bool) -> Result<Tok
     };
     let reg_indices = 0..reg_names.len();
     let needs_stages = uses_stage_requirements(&lowered_block);
-    let foldable = lower::can_fold(sig, &lowered_block);
+    let foldable = evaluable && lower::foldable_signature(sig);
     let fold_macro = if foldable {
         emit!(#root::__splice_choose_kernel)
     } else {

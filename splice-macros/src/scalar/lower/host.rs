@@ -417,7 +417,7 @@ impl Lower<'_> {
     /// unsupported type and the call stages at run time; staging itself
     /// rejects the kernel when it compiles.
     pub(super) fn optional(&self) -> bool {
-        self.evaluator_return.is_some()
+        self.evaluation.is_some()
     }
 
     /// Require `operand` (a `&T`) to be a Rust primitive.

@@ -295,9 +295,10 @@ impl Lower<'_> {
         }
     }
 
+    /// The element of a known slice, copied while the receiver (possibly a
+    /// temporary, such as an evaluator input) lives.
     pub(super) fn known_index(&self, receiver: TokenStream, offset: TokenStream) -> TokenStream {
-        let read = self.known_index_reference(receiver, offset);
-        emit!((#read)?.copied())
+        self.read_known_index(receiver, offset, emit!(?.copied()))
     }
 
     pub(super) fn known_index_reference(
@@ -305,12 +306,21 @@ impl Lower<'_> {
         receiver: TokenStream,
         offset: TokenStream,
     ) -> TokenStream {
+        self.read_known_index(receiver, offset, TokenStream::new())
+    }
+
+    fn read_known_index(
+        &self,
+        receiver: TokenStream,
+        offset: TokenStream,
+        then: TokenStream,
+    ) -> TokenStream {
         let root = self.root;
         emit!({
             use #root::frontend::evaluation::{Operand, ReadIndex as _};
             let receiver = &(#receiver);
             let index = #offset;
-            (&Operand::of(receiver)).read_index(receiver, index, |values, index| &values[index])
+            (&Operand::of(receiver)).read_index(receiver, index, |values, index| &values[index]) #then
         })
     }
 

@@ -1,18 +1,21 @@
 //! Generate the mandatory build-time evaluation of an expression. Each
 //! operand is checked where Rust would evaluate it, including short circuits.
-use super::{Binding, Lower, Scalar};
+use super::{Binding, Evaluation, Lower, Scalar};
 use proc_macro2::{Ident, TokenStream};
-use std::collections::HashSet;
 use syn::{BinOp, Expr, FnArg, Pat, Result, Stmt};
 
 impl Lower<'_> {
+    /// The mandatory evaluator of a kernel (`__splice_eval`) or method
+    /// (`method`), and whether it evaluates the body: a body with a node the
+    /// evaluator cannot run on its `Option` inputs returns a staging error.
     pub(in crate::scalar) fn evaluator(
         &self,
         sig: &syn::Signature,
         block: &syn::Block,
         vis: &syn::Visibility,
         method: Option<&Ident>,
-    ) -> Result<TokenStream> {
+    ) -> Result<(TokenStream, bool)> {
+        use crate::scalar::methods::{TraitMethodKind, primitive_type};
         let name = match method {
             Some(name) => emit!(#name),
             None => emit!(__splice_eval),
@@ -39,25 +42,35 @@ impl Lower<'_> {
             syn::ReturnType::Type(_, ty) => emit!(#ty),
             _ => emit!(()),
         };
-        let inputs = names.iter().map(ToString::to_string).collect();
+        // A wide result stays in Rust during mandatory evaluation: only owned
+        // primitives and expressions without opaque operands or calls.
         let wide = method.is_some()
-            && crate::scalar::methods::TraitMethodKind::for_result(&sig.output)
-                == crate::scalar::methods::TraitMethodKind::EvalOnly;
-        let body = if block.stmts.iter().all(evaluable_statement)
-            && (!wide || pure_wide_body(sig, block, &inputs))
-            && (method.is_some()
+            && TraitMethodKind::for_result(&sig.output) == TraitMethodKind::EvalOnly;
+        let parameters = if wide {
+            sig.inputs.iter().all(|arg| matches!(arg, FnArg::Typed(arg)
+                if primitive_type(&arg.ty) && matches!(arg.pat.as_ref(), Pat::Ident(pat) if pat.by_ref.is_none() && pat.subpat.is_none())))
+        } else {
+            method.is_some()
                 || types.iter().all(|t| {
                     matches!(t, syn::Type::Reference(reference) if reference.mutability.is_none())
                         || matches!(
                             Scalar::from_type(t, self.types),
                             Some(Scalar::Int | Scalar::Bool | Scalar::Index)
                         )
-                })) {
-            let mut evaluator = self.clone();
-            let label = syn::Lifetime::new("'__splice_evaluated", proc_macro2::Span::mixed_site());
-            evaluator.evaluator_return = Some(label.clone());
-            let body = evaluator.required_block(block, Some(self.result_type))?;
-            emit!(#[allow(unused_labels)] #label: { #body })
+                })
+        };
+        let mut evaluator = self.clone();
+        let exit = syn::Lifetime::new("'__splice_evaluated", proc_macro2::Span::mixed_site());
+        let evaluation = std::rc::Rc::new(Evaluation {
+            exit: exit.clone(),
+            wide,
+            unevaluable: std::cell::Cell::new(!parameters),
+        });
+        evaluator.evaluation = Some(evaluation.clone());
+        let body = evaluator.required_block(block, Some(self.result_type))?;
+        let evaluable = !evaluation.unevaluable.get();
+        let body = if evaluable {
+            emit!(#[allow(unused_labels)] #exit: { #body })
         } else {
             emit!(
                 return ::core::result::Result::Err(#root::BuildError::staging(
@@ -66,17 +79,29 @@ impl Lower<'_> {
             )
         };
         let overflow = super::overflow_prologue(root);
-        Ok(emit! {
-            #[doc(hidden)]
-            #[allow(unused_variables,unreachable_code,clippy::type_complexity)]
-            #vis fn #name #generics ((#(#names,)*): (#(::core::option::Option<#types>,)*))
-                -> #root::Result<#ty> #where_clause {
-                let _depth=#root::frontend::scalar::enter_expansion()?;
-                #overflow
-                #(#checks)*
-                ::core::result::Result::Ok(#body)
-            }
-        })
+        Ok((
+            emit! {
+                #[doc(hidden)]
+                #[allow(unused_variables,unreachable_code,clippy::type_complexity)]
+                #vis fn #name #generics ((#(#names,)*): (#(::core::option::Option<#types>,)*))
+                    -> #root::Result<#ty> #where_clause {
+                    let _depth=#root::frontend::scalar::enter_expansion()?;
+                    #overflow
+                    #(#checks)*
+                    ::core::result::Result::Ok(#body)
+                }
+            },
+            evaluable,
+        ))
+    }
+
+    /// Give up on evaluating the body: a node the evaluator cannot run.
+    /// The returned code is never emitted.
+    fn unevaluable(&self) -> TokenStream {
+        if let Some(evaluation) = &self.evaluation {
+            evaluation.unevaluable.set(true);
+        }
+        TokenStream::new()
     }
 
     /// Whether the parameters are `Option`s of their values: the mandatory
@@ -108,6 +133,9 @@ impl Lower<'_> {
     }
 
     fn required_expr(&self, expr: &Expr, hint: Option<Scalar>) -> Result<TokenStream> {
+        if self.evaluation.as_ref().is_some_and(|e| e.wide) && !wide_node(expr) {
+            return Ok(self.unevaluable());
+        }
         let support = &self.root;
         let visit = |e: &Expr| self.required_expr(e, None);
         let primitive = |value: TokenStream| {
@@ -118,7 +146,9 @@ impl Lower<'_> {
                 value
             })
         };
-        let rejected = || {
+        // The error of an operation the evaluator does not run, where Rust
+        // reaches it: the Rust function a call path selects.
+        let opaque = || {
             // An unevaluated operand supplies the Rust result type when all
             // names have their original type in the specialization factory.
             if !self.inputs() && !super::simd::uses_lane(expr) && self.host_only(expr) {
@@ -130,6 +160,15 @@ impl Lower<'_> {
                     _ => emit!(i32),
                 };
                 emit!(::core::result::Result::Err::<#ty,#support::BuildError>(#support::BuildError::staging("value unavailable at specialization"))?)
+            }
+        };
+        // A node the evaluator does not run. Its inputs are `Option`s, where
+        // the Rust expression does not type-check: the body is unevaluable.
+        let rejected = || {
+            if self.inputs() {
+                self.unevaluable()
+            } else {
+                opaque()
             }
         };
         Ok(match expr {
@@ -388,8 +427,8 @@ impl Lower<'_> {
                 let value = b.expr.as_ref().map(|value| visit(value)).transpose()?;
                 emit!(break #label #value)
             }
-            Expr::Return(r) if self.evaluator_return.is_some() => {
-                let label = self.evaluator_return.as_ref().unwrap();
+            Expr::Return(r) if self.evaluation.is_some() => {
+                let label = &self.evaluation.as_ref().unwrap().exit;
                 let value = r
                     .expr
                     .as_deref()
@@ -449,7 +488,7 @@ impl Lower<'_> {
                         &owner,
                         method,
                         emit!(#target((#(#args,)*))?),
-                        rejected(),
+                        opaque(),
                     )
                 } else {
                     emit!({
@@ -498,7 +537,7 @@ impl Lower<'_> {
                 self.dispatch_call(
                     path,
                     emit!(#item::__SpliceDefinition::__splice_eval #generics ((#(#args,)*))?),
-                    rejected(),
+                    opaque(),
                 )
             }
             Expr::Macro(m) if m.mac.path.is_ident("comptime") => {
@@ -515,6 +554,9 @@ impl Lower<'_> {
             match stmt {
                 Stmt::Local(local) if local.init.is_some() => {
                     let init = local.init.as_ref().unwrap();
+                    if self.evaluation.as_ref().is_some_and(|e| e.wide) && !wide_local(local) {
+                        return Ok(self.unevaluable());
+                    }
                     let value = match &*init.expr {
                         // A tuple struct's constructor runs as Rust.
                         Expr::Call(call) if self.body.projected_local(local) => {
@@ -544,6 +586,7 @@ impl Lower<'_> {
                     let value = self.required_expr(e, if semi.is_some() { None } else { hint })?;
                     code.extend(emit!(#value #semi));
                 }
+                _ if self.inputs() => return Ok(self.unevaluable()),
                 _ => {
                     return Ok(emit!({
                         return ::core::result::Result::Err(#root::BuildError::staging(
@@ -557,156 +600,50 @@ impl Lower<'_> {
     }
 }
 
-fn pure_wide_body(sig: &syn::Signature, block: &syn::Block, inputs: &HashSet<String>) -> bool {
-    use crate::scalar::methods::primitive_type;
-
-    fn pure_block(block: &syn::Block, names: &HashSet<String>) -> bool {
-        let mut names = names.clone();
-        block.stmts.iter().all(|stmt| match stmt {
-            Stmt::Expr(expr, _) => pure_expr(expr, &names),
-            Stmt::Local(local) => {
-                let Some(init) = &local.init else {
-                    return false;
-                };
-                if init.diverge.is_some()
-                    || !local.attrs.is_empty()
-                    || !pure_expr(&init.expr, &names)
-                {
-                    return false;
-                }
-                let pattern = match &local.pat {
-                    Pat::Type(pattern) if primitive_type(&pattern.ty) => pattern.pat.as_ref(),
-                    pat => pat,
-                };
-                match pattern {
-                    Pat::Ident(pattern) if pattern.by_ref.is_none() && pattern.subpat.is_none() => {
-                        names.insert(pattern.ident.to_string());
-                        true
-                    }
-                    Pat::Wild(_) => true,
-                    _ => false,
-                }
-            }
-            _ => false,
-        })
-    }
-
-    fn pure_expr(expr: &Expr, names: &HashSet<String>) -> bool {
-        let pure = |expr: &Expr| pure_expr(expr, names);
-        match expr {
-            Expr::Lit(literal) => matches!(
-                literal.lit,
-                syn::Lit::Bool(_) | syn::Lit::Char(_) | syn::Lit::Int(_) | syn::Lit::Float(_)
-            ),
-            Expr::Path(path) => {
-                path.qself.is_none()
-                    && path
-                        .path
-                        .get_ident()
-                        .is_some_and(|name| names.contains(&name.to_string()))
-            }
-            Expr::Paren(expr) => pure(&expr.expr),
-            Expr::Group(expr) => pure(&expr.expr),
-            Expr::Cast(cast) => primitive_type(&cast.ty) && pure(&cast.expr),
-            Expr::Unary(expr) => {
-                matches!(expr.op, syn::UnOp::Neg(_) | syn::UnOp::Not(_)) && pure(&expr.expr)
-            }
-            Expr::Binary(expr) => {
-                crate::scalar::compound_op(&expr.op).is_none()
-                    && pure(&expr.left)
-                    && pure(&expr.right)
-            }
-            Expr::Block(expr) => pure_block(&expr.block, names),
-            Expr::If(expr) => {
-                pure(&expr.cond)
-                    && pure_block(&expr.then_branch, names)
-                    && expr
-                        .else_branch
-                        .as_ref()
-                        .is_none_or(|(_, alternate)| pure(alternate))
-            }
-            Expr::Return(expr) => expr.expr.as_deref().is_some_and(pure),
-            Expr::Macro(expr) if expr.mac.path.is_ident("comptime") => {
-                expr.mac.parse_body::<Expr>().is_ok_and(|body| pure(&body))
-            }
-            _ => false,
-        }
-    }
-
-    // A wide result stays in Rust during mandatory evaluation. Limit this
-    // path to owned primitives and expressions with no opaque operands or
-    // calls, and use the regular evaluator to check the actual operations.
-    sig.inputs.iter().all(|arg| matches!(arg, FnArg::Typed(arg)
-        if primitive_type(&arg.ty) && matches!(arg.pat.as_ref(), Pat::Ident(pat) if pat.by_ref.is_none() && pat.subpat.is_none())))
-        && pure_block(block, inputs)
-}
-
-fn evaluable_statement(statement: &Stmt) -> bool {
-    match statement {
-        Stmt::Expr(e, _) => evaluable(e),
-        Stmt::Local(l) => l.init.as_ref().is_some_and(|i| {
-            evaluable(&i.expr) && i.diverge.as_ref().is_none_or(|(_, e)| evaluable(e))
-        }),
-        _ => false,
-    }
-}
-fn evaluable(expr: &Expr) -> bool {
+/// The nodes the evaluator of a wide result runs in Rust.
+fn wide_node(expr: &Expr) -> bool {
     match expr {
-        Expr::Path(_) | Expr::Lit(_) => true,
-        Expr::Tuple(t) => t.elems.iter().all(evaluable),
-        Expr::Array(a) => a.elems.iter().all(evaluable),
-        Expr::Struct(s) => {
-            s.fields.iter().all(|f| evaluable(&f.expr)) && s.rest.as_deref().is_none_or(evaluable)
-        }
-        Expr::Let(l) => evaluable(&l.expr),
-        Expr::Match(m) => {
-            evaluable(&m.expr)
-                && m.arms.iter().all(|a| {
-                    a.guard.as_ref().is_none_or(|(_, guard)| evaluable(guard)) && evaluable(&a.body)
-                })
-        }
-        Expr::Paren(p) => evaluable(&p.expr),
-        Expr::Group(p) => evaluable(&p.expr),
-        Expr::Call(call) => {
-            matches!(&*call.func, Expr::Path(_))
-                && !super::simd::uses_lane(&call.func)
-                && call.args.iter().all(evaluable)
-        }
-        Expr::Field(field) => evaluable(&field.base),
-        Expr::Cast(cast) => evaluable(&cast.expr),
-        Expr::Binary(b) => evaluable(&b.left) && evaluable(&b.right),
-        Expr::Unary(u) => evaluable(&u.expr),
-        Expr::MethodCall(call) => {
-            let name = call.method.to_string();
-            (matches!(name.as_str(), "len" | "is_empty") || super::memory::primitive_method(&name))
-                && evaluable(&call.receiver)
-                && call.args.iter().all(evaluable)
-        }
-        Expr::Block(b) => b.block.stmts.iter().all(evaluable_statement),
-        Expr::If(i) => {
-            evaluable(&i.cond)
-                && i.then_branch.stmts.iter().all(evaluable_statement)
-                && i.else_branch.as_ref().is_none_or(|(_, e)| evaluable(e))
-        }
-        Expr::While(w) => evaluable(&w.cond) && w.body.stmts.iter().all(evaluable_statement),
-        Expr::Loop(l) => l.body.stmts.iter().all(evaluable_statement),
-        Expr::ForLoop(f) => {
-            matches!(&*f.expr, Expr::Range(r) if r.start.as_ref().is_some_and(|e| evaluable(e)) && r.end.as_ref().is_some_and(|e| evaluable(e)))
-                && f.body.stmts.iter().all(evaluable_statement)
-        }
-        Expr::Return(r) => r.expr.as_deref().is_none_or(evaluable),
-        Expr::Break(b) => b.expr.as_ref().is_none_or(|e| evaluable(e)),
-        Expr::Continue(_) => true,
-        Expr::Macro(m) if m.mac.path.is_ident("comptime") => {
-            m.mac.parse_body::<Expr>().is_ok_and(|e| evaluable(&e))
-        }
+        Expr::Lit(literal) => matches!(
+            literal.lit,
+            syn::Lit::Bool(_) | syn::Lit::Char(_) | syn::Lit::Int(_) | syn::Lit::Float(_)
+        ),
+        Expr::Path(path) => path.qself.is_none() && path.path.get_ident().is_some(),
+        Expr::Cast(cast) => crate::scalar::methods::primitive_type(&cast.ty),
+        Expr::Unary(unary) => matches!(unary.op, syn::UnOp::Neg(_) | syn::UnOp::Not(_)),
+        Expr::Binary(binary) => crate::scalar::compound_op(&binary.op).is_none(),
+        Expr::Return(ret) => ret.expr.is_some(),
+        Expr::Macro(m) => m.mac.path.is_ident("comptime"),
+        Expr::Paren(_) | Expr::Group(_) | Expr::Block(_) | Expr::If(_) => true,
         _ => false,
     }
 }
 
-pub(in crate::scalar) fn can_fold(sig: &syn::Signature, block: &syn::Block) -> bool {
-    sig.inputs.iter().all(|arg|matches!(arg,FnArg::Typed(a) if matches!(Scalar::from_type(&a.ty,&[]), Some(Scalar::Int|Scalar::Bool)))) &&
-    block.stmts.iter().all(evaluable_statement)
+/// A local the evaluator of a wide result binds: a named or `_` pattern,
+/// at most annotated with a primitive type.
+fn wide_local(local: &syn::Local) -> bool {
+    let pattern = match &local.pat {
+        Pat::Type(pattern) if crate::scalar::methods::primitive_type(&pattern.ty) => &*pattern.pat,
+        pat => pat,
+    };
+    local.attrs.is_empty()
+        && local
+            .init
+            .as_ref()
+            .is_some_and(|init| init.diverge.is_none())
+        && match pattern {
+            Pat::Ident(pattern) => pattern.by_ref.is_none() && pattern.subpat.is_none(),
+            Pat::Wild(_) => true,
+            _ => false,
+        }
+}
+
+/// Whether a call with known arguments may fold through the evaluator: one
+/// that takes only `i32` and `bool` parameters.
+pub(in crate::scalar) fn foldable_signature(sig: &syn::Signature) -> bool {
+    sig.inputs.iter().all(|arg| {
+        matches!(arg, FnArg::Typed(a)
+        if matches!(Scalar::from_type(&a.ty, &[]), Some(Scalar::Int | Scalar::Bool)))
+    })
 }
 
 pub(crate) fn uses_stage_requirements(block: &syn::Block) -> bool {

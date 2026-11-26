@@ -1647,3 +1647,32 @@ fn closure_and_block_locals_shadow_runtime_parameters() {
     }
     splice_testkit::each_backend!(B => check::<B>());
 }
+
+/// MAC-06: one evaluator decides what a body evaluates: an index into a
+/// known slice evaluates at specialization like the other nodes.
+#[kernel]
+fn element(#[comptime] table: &[i32], index: usize) -> i32 {
+    table[index]
+}
+
+const TABLE: &[i32] = &[4, 5, 6];
+
+#[kernel]
+fn known_element(x: i32) -> i32 {
+    comptime!(element(TABLE, 1)) + x
+}
+
+#[test]
+fn the_evaluator_reads_known_slices() {
+    fn check<B: Codegen<Output: Executable>>() {
+        let built = known_element::build::<B>(known_element::BuildArgs {}).unwrap();
+        let compiled = B::compile(&known_element::ir().unwrap()).unwrap();
+        for code in [built, compiled] {
+            assert_eq!(
+                code.call(known_element::CallArgs { x: 2 }),
+                Ok(known_element(2))
+            );
+        }
+    }
+    splice_testkit::each_backend!(B => check::<B>());
+}
