@@ -4,6 +4,7 @@ use super::unary::Form as UnaryForm;
 use super::wide::MathForm as WideMath;
 use super::width::{Narrow, Widen};
 use super::{A, C, Cond, Config};
+use crate::lir::frame::FrameUse;
 use crate::{
     hir::{Lane, RustFunction, Scale, Type, Unary},
     lir::{
@@ -508,6 +509,21 @@ impl TargetInst for Inst {
         machine_env()
     }
 
+    fn frame_use(&self, config: &Config) -> Option<FrameUse> {
+        Some(match *self {
+            Self::DebugStore(ty, offset, _) => {
+                FrameUse::Debug(offset as usize + ty.bytes(config.bytes))
+            }
+            Self::CallScratch(offset, bytes, _) => {
+                FrameUse::Scratch(offset as usize + bytes as usize)
+            }
+            Self::StoreArg(ty, offset, _) => {
+                FrameUse::Arguments(offset + ty.bytes(config.bytes).next_multiple_of(8))
+            }
+            Self::Libcall(..) | Self::LaneAccess { .. } => FrameUse::Fallback,
+            _ => return None,
+        })
+    }
     fn spillslot_size(config: &Config, class: RegClass) -> usize {
         if class == RegClass::Vector {
             config.bytes / 8

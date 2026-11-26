@@ -35,6 +35,9 @@ impl TargetInst for Fake {
     fn clobbers(&self, _: &()) -> PRegSet {
         PRegSet::empty()
     }
+    fn frame_use(&self, _: &()) -> Option<crate::lir::frame::FrameUse> {
+        None
+    }
     fn is_branch(&self) -> bool {
         self.kind == Kind::Branch
     }

@@ -8,6 +8,8 @@ pub(super) trait TargetInst: Copy {
     /// Append operands in the same order in which the emitter consumes allocations.
     fn operands(&self, machine: &Self::Machine, out: &mut Vec<Operand>);
     fn clobbers(&self, machine: &Self::Machine) -> PRegSet;
+    /// The frame-local region this instruction addresses, if any.
+    fn frame_use(&self, machine: &Self::Machine) -> Option<super::frame::FrameUse>;
     fn is_branch(&self) -> bool;
     fn is_ret(&self) -> bool;
     fn machine_env(machine: &Self::Machine) -> &'static MachineEnv;

@@ -7,13 +7,15 @@ use super::{
 use crate::{
     CompileError,
     hir::ssa::VerifiedBody,
-    lir::{self, regalloc},
+    lir::{
+        self,
+        fallback::AREA_BYTES,
+        frame::{self, FrameRequirements, defined_registers},
+        regalloc,
+    },
     module::Module,
 };
-use regalloc2::{Ctx, Edit, Function as _, OperandKind, Output, PRegSet};
-
-pub(super) const TEMP_WORD_BYTES: usize = 64;
-const TEMP_BYTES: usize = 4 * TEMP_WORD_BYTES;
+use regalloc2::{Ctx, Output, PRegSet};
 
 pub(super) struct Frame {
     pub spills: usize,
@@ -51,62 +53,29 @@ pub(super) fn compile(
             written.union_from(compiled[child].written);
             child_peak = child_peak.max(compiled[child].peak);
         }
-        let mut arg_bytes = 0;
-        let mut scratch_bytes = 0;
-        let mut needs_temp = false;
-        for inst in body.insts() {
-            match *inst {
-                Inst::StoreArg(ty, off, _) => {
-                    arg_bytes = arg_bytes.max(off + ty.bytes(config.bytes).next_multiple_of(8));
-                }
-                Inst::Libcall(..) | Inst::LaneAccess { .. } => needs_temp = true,
-                Inst::CallScratch(offset, bytes, _) => {
-                    scratch_bytes = scratch_bytes.max(offset as usize + bytes as usize);
-                }
-                _ => {}
-            }
-        }
+        let needs = FrameRequirements::scan(&body);
         let spills = if id == root {
             0
         } else {
             super::CHILD_SAVES.len() * 8
         };
-        let outgoing = allocation
+        let spill_bytes = allocation
             .num_spillslots
             .checked_mul(8)
-            .and_then(|n| n.checked_add(spills))
             .ok_or(CompileError::Unsupported(crate::Limit::Frame))?;
-        let temporary = outgoing
-            .checked_add(arg_bytes)
-            .ok_or(CompileError::Unsupported(crate::Limit::Frame))?;
-        let saves = temporary
-            .checked_add(if needs_temp { TEMP_BYTES } else { 0 })
-            .ok_or(CompileError::Unsupported(crate::Limit::Frame))?;
-        let debug_base = saves
-            .checked_add(if id == root {
-                written.into_iter().count() * 8
-            } else {
-                0
-            })
-            .ok_or(CompileError::Unsupported(crate::Limit::Frame))?;
-        let debug_size = body
-            .insts()
-            .iter()
-            .filter_map(|inst| match *inst {
-                Inst::DebugStore(ty, offset, _) => Some(offset as usize + ty.bytes(config.bytes)),
-                _ => None,
-            })
-            .max()
-            .unwrap_or(0);
-        let scratch_base = debug_base
-            .checked_add(debug_size.next_multiple_of(8))
-            .ok_or(CompileError::Unsupported(crate::Limit::Frame))?;
-        let bytes = scratch_base
-            .checked_add(scratch_bytes.next_multiple_of(8))
-            .ok_or(CompileError::Unsupported(crate::Limit::Frame))?;
-        let peak = bytes
-            .checked_add(child_peak)
-            .ok_or(CompileError::Unsupported(crate::Limit::Frame))?;
+        let outgoing = frame::sum([spills, spill_bytes])?;
+        let temporary = frame::sum([outgoing, needs.arguments])?;
+        let fallback = if needs.fallback { AREA_BYTES } else { 0 };
+        let saves = frame::sum([temporary, fallback])?;
+        let root_saves = if id == root {
+            written.into_iter().count() * 8
+        } else {
+            0
+        };
+        let debug_base = frame::sum([saves, root_saves])?;
+        let scratch_base = frame::sum([debug_base, needs.debug.next_multiple_of(8)])?;
+        let bytes = frame::sum([scratch_base, needs.scratch.next_multiple_of(8)])?;
+        let peak = frame::sum([bytes, child_peak])?;
         Ok(Compiled {
             body,
             allocation,
@@ -126,25 +95,5 @@ pub(super) fn compile(
 }
 
 fn written_nonvolatile(body: &lir::Function<Inst>, allocation: &Output) -> PRegSet {
-    let mut written = PRegSet::empty();
-    for index in 0..body.num_insts() {
-        let inst = regalloc2::Inst::new(index);
-        for (operand, alloc) in body
-            .inst_operands(inst)
-            .iter()
-            .zip(allocation.inst_allocs(inst))
-        {
-            if operand.kind() == OperandKind::Def
-                && let Some(reg) = alloc.as_reg()
-            {
-                written.add(reg);
-            }
-        }
-    }
-    for (_, Edit::Move { to, .. }) in &allocation.edits {
-        if let Some(reg) = to.as_reg() {
-            written.add(reg);
-        }
-    }
-    written & nonvolatile()
+    defined_registers(body, allocation) & nonvolatile()
 }

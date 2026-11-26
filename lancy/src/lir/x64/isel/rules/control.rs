@@ -1,4 +1,5 @@
 use super::Rules;
+use crate::lir::frame::argument_words;
 use crate::{
     hir::{Call, Op, Simd, Terminator, Type},
     lir::x64::inst::{Cond, Inst},
@@ -37,12 +38,11 @@ impl Rules<'_> {
         callee: impl Fn(Call) -> (FunctionId, PRegSet),
     ) -> Inst {
         let (_, args) = self.f.call(site);
-        let mut index = 0;
-        for &arg in args {
-            let ty = self.ty(arg);
+        let types = args.iter().map(|&v| self.ty(v));
+        let words: Vec<_> = argument_words(types, self.cpu.bytes).collect();
+        for (&arg, (ty, index)) in args.iter().zip(words) {
             let value = self.input(arg);
             self.out.push(Inst::StoreArg(index, ty, value));
-            index += ty.bytes(self.cpu.bytes).div_ceil(8);
         }
         let (target, written) = callee(site);
         Inst::call(target, self.dst(), written)

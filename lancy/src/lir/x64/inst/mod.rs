@@ -6,7 +6,10 @@ pub(super) use super::abi::SCRATCH;
 use super::abi::{MASKS, Machine, gprs, vectors};
 use crate::hir::{Binary, Lane, RustFunction, Scale, Type};
 use crate::support::numeric::Action;
-use crate::{lir::TargetInst, module::FunctionId};
+use crate::{
+    lir::{TargetInst, frame::FrameUse},
+    module::FunctionId,
+};
 use regalloc2::{MachineEnv, Operand, PReg, PRegSet, RegClass, VReg};
 use simd::Native;
 use simd::packed::rearrange::PairedShuffle;
@@ -540,6 +543,19 @@ impl TargetInst for Inst {
             Self::IDiv { remainder, .. } => PRegSet::empty().with(if *remainder { AX } else { DX }),
             _ => PRegSet::empty(),
         }
+    }
+    fn frame_use(&self, machine: &Machine) -> Option<FrameUse> {
+        Some(match *self {
+            Self::DebugStore(ty, offset, _) => {
+                FrameUse::Debug(offset as usize + ty.bytes(machine.cpu.bytes))
+            }
+            Self::CallScratch(offset, bytes, _) => {
+                FrameUse::Scratch(offset as usize + bytes as usize)
+            }
+            // Outgoing arguments go to the callee's frame above this one;
+            // the fallback and lane expansions reserve stack below RSP.
+            _ => return None,
+        })
     }
     fn is_branch(&self) -> bool {
         matches!(

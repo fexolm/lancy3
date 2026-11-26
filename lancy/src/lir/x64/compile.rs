@@ -1,10 +1,19 @@
-use super::{Machine, frame::Frame, inst::Inst, isel};
+use super::{
+    Machine,
+    frame::{Frame, save_words},
+    inst::Inst,
+    isel,
+};
 use crate::{
     CompileError, hir,
-    lir::{self, TargetInst, regalloc},
+    lir::{
+        self, TargetInst,
+        frame::{self, FrameRequirements, defined_registers},
+        regalloc,
+    },
     module::Module,
 };
-use regalloc2::{Ctx, Edit, Function as _, OperandKind, Output, PRegSet};
+use regalloc2::{Ctx, Output, PRegSet};
 
 pub(super) struct CompiledFunction {
     pub body: lir::Function<Inst>,
@@ -24,12 +33,8 @@ pub(super) fn compile(
 ) -> Result<Module<CompiledFunction>, CompileError> {
     let entry = source.call_graph.root();
     let width = machine.cpu.bytes;
-    let arg_words = |f: &hir::Function| {
-        f.param_types()
-            .iter()
-            .map(|ty| ty.bytes(width).div_ceil(8))
-            .sum()
-    };
+    let arg_words =
+        |f: &hir::Function| frame::argument_size(f.param_types().iter().copied(), width);
     let arity = arg_words(source.functions[entry].function);
     let mut ctx = Ctx::default();
     let module = source.try_map_functions::<CompiledFunction>(|id, src, calls, compiled| {
@@ -54,47 +59,27 @@ pub(super) fn compile(
             frame.spill_base += words;
             frame.slots += words;
         }
+        if machine.abi.is_foreign() && body.insts().iter().any(|i| matches!(i, Inst::RustCall(..)))
+        {
+            return Err(foreign_calls(machine));
+        }
+        let needs = FrameRequirements::scan(&body);
         frame.debug_base = frame.slots;
-        let mut debug_words = 0;
-        let mut scratch_words = 0;
-        for inst in body.insts() {
-            match *inst {
-                Inst::DebugStore(ty, offset, _) => {
-                    debug_words = debug_words.max((offset as usize + ty.bytes(width)).div_ceil(8));
-                }
-                Inst::CallScratch(offset, bytes, _) => {
-                    scratch_words =
-                        scratch_words.max((offset as usize + bytes as usize).div_ceil(8))
-                }
-                Inst::RustCall(..) if machine.abi.is_foreign() => {
-                    return Err(foreign_calls(machine));
-                }
-                _ => {}
-            }
-        }
-        frame.slots += debug_words;
-        frame.scratch_base = frame.slots;
-        frame.slots = frame
-            .slots
-            .checked_add(scratch_words)
-            .ok_or(CompileError::Unsupported(crate::Limit::Frame))?;
-        if id == entry {
-            // Save the host's nonvolatile registers once, including those
-            // written by descendants. Normal and trapping exits restore them.
-            frame.slots += saved
-                .into_iter()
-                .map(super::frame::save_words)
-                .sum::<usize>();
-        }
+        frame.scratch_base = frame::sum([frame.debug_base, needs.debug.div_ceil(8)])?;
+        // The root saves the host's nonvolatile registers once, including
+        // those written by descendants. Normal and trapping exits restore them.
+        let saves = if id == entry {
+            saved.into_iter().map(save_words).sum()
+        } else {
+            0
+        };
+        frame.slots = frame::sum([frame.scratch_base, needs.scratch.div_ceil(8), saves])?;
         let child_peak = calls
             .iter()
             .map(|&c| compiled[c].workspace)
             .max()
             .unwrap_or(0);
-        let workspace = frame
-            .slots
-            .checked_add(child_peak)
-            .ok_or(CompileError::Unsupported(crate::Limit::Frame))?;
+        let workspace = frame::sum([frame.slots, child_peak])?;
         Ok(CompiledFunction {
             body,
             allocation,
@@ -123,29 +108,15 @@ fn foreign_calls(machine: Machine) -> CompileError {
 }
 
 pub(super) fn written_regs(f: &lir::Function<Inst>, allocation: &Output) -> (PRegSet, PRegSet) {
-    let mut defined = PRegSet::empty();
-    let mut written = PRegSet::empty();
-    for (i, op) in f.insts().iter().enumerate() {
-        let i = regalloc2::Inst::new(i);
+    let defined = defined_registers(f, allocation);
+    let mut written = defined;
+    for op in f.insts() {
         written.union_from(op.clobbers(f.machine()));
-        for (operand, loc) in f.inst_operands(i).iter().zip(allocation.inst_allocs(i)) {
-            if operand.kind() == OperandKind::Def
-                && let Some(r) = loc.as_reg()
-            {
-                defined.add(r);
-            }
-        }
-    }
-    for (_, Edit::Move { to, .. }) in &allocation.edits {
-        if let Some(r) = to.as_reg() {
-            defined.add(r);
-        }
     }
     // Move resolution may also write R10, which is reserved throughout
     // the internal ABI and cannot hold a caller value across a call.
     let machine = f.machine();
     let regs = &Inst::machine_env(machine).preferred_regs_by_class;
-    written.union_from(defined);
     written.intersect_from(regs[0] | regs[1] | regs[2] | machine.abi.saved);
     (written, defined)
 }

@@ -4,6 +4,7 @@ mod rules;
 pub(super) use rules::packed_half;
 
 use super::{Machine, inst::Inst};
+use crate::lir::frame::argument_words;
 use crate::{
     CompileError,
     hir::{Call, ssa::VerifiedBody, transforms::canonical},
@@ -50,16 +51,15 @@ pub(super) fn select(
             } else {
                 None
             };
-            let mut index = 0;
-            for &arg in f.params(b) {
-                let ty = f.value_type(arg);
+            let params = f.params(b);
+            let types = params.iter().map(|&v| f.value_type(v));
+            for (&arg, (ty, index)) in params.iter().zip(argument_words(types, cpu.bytes)) {
                 body.push(Inst::LoadArg {
                     dst: reg(arg),
                     argv,
                     ty,
                     index,
                 });
-                index += ty.bytes(cpu.bytes).div_ceil(8);
             }
         }
         for op in blocks[b].drain(..) {

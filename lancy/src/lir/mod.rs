@@ -1,6 +1,7 @@
 pub mod aarch64;
 mod constants;
 mod fallback;
+mod frame;
 mod function;
 mod inst;
 mod isel;

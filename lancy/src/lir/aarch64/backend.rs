@@ -32,7 +32,7 @@ use crate::{
     module::{FunctionId, Module},
     support::slotmap::DenseMap,
 };
-use compile::{Compiled, Frame, TEMP_WORD_BYTES, compile};
+use compile::{Compiled, Frame, compile};
 use inst::Inst;
 use regalloc2::{Allocation, Block, Edit, Function as _, InstOrEdit, PReg, RegClass};
 use splice_target::Profile;
@@ -694,7 +694,10 @@ impl Emitter<'_> {
         }
     }
     fn temp(&self, index: usize) -> (R, usize) {
-        (R::X19, self.frame.temporary + index * TEMP_WORD_BYTES)
+        (
+            R::X19,
+            self.frame.temporary + index * crate::lir::fallback::SLOT_BYTES,
+        )
     }
 }
 

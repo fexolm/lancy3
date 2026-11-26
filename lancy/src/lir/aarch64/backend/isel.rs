@@ -2,6 +2,7 @@ mod rules;
 
 use super::{Result, inst::Inst};
 use crate::lir::aarch64::backend::Config;
+use crate::lir::frame::argument_words;
 use crate::{
     hir::{Call, ssa::VerifiedBody, transforms::canonical},
     lir::{
@@ -35,11 +36,10 @@ pub(super) fn select(
     let mut body = edges.function(config)?;
     for &b in cfg.reverse_postorder() {
         if b == f.entry() {
-            let mut offset = 0;
-            for &v in f.params(b) {
-                let ty = f.value_type(v);
-                body.push(Inst::Arg(ty, offset, reg(v)));
-                offset += ty.bytes(config.bytes).next_multiple_of(8);
+            let params = f.params(b);
+            let types = params.iter().map(|&v| f.value_type(v));
+            for (&v, (ty, word)) in params.iter().zip(argument_words(types, config.bytes)) {
+                body.push(Inst::Arg(ty, word * 8, reg(v)));
             }
         }
         for inst in selected[b].drain(..) {
