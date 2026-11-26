@@ -96,7 +96,7 @@ impl<'a> Edges<'a> {
         for e in term.edges() {
             let (target, args) = self.f.edge(e);
             if self.split(b, target) {
-                body.push(jump());
+                body.push(jump())?;
                 let backedge = self.dom.dominates(target, b);
                 body.edge(
                     self.mapping[target],

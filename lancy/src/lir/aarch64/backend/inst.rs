@@ -9,6 +9,7 @@ use crate::{
     hir::{Lane, RustFunction, Scale, Type, Unary},
     lir::{
         TargetInst,
+        inst::Temp,
         schedule::{Schedulable, Scheduling},
     },
     module::FunctionId,
@@ -300,7 +301,7 @@ impl TargetInst for Inst {
                 out.extend(args.map(input).into_iter().chain([output(d)]));
             }
             Self::Shuffle(Shuffle::Neon(..) | Shuffle::Wide(_), d, args) => {
-                // The emitter uses the output and, for wider lanes, V17 as scratch.
+                // The emitter writes the output before reading every input.
                 out.extend(args.map(Operand::reg_use_at_end));
                 out.push(Operand::reg_def_at_start(d));
             }
@@ -452,38 +453,39 @@ impl TargetInst for Inst {
                 regs.remove(return_reg(Type::I32));
                 regs
             }
-            Self::Half(form, ..) if matches!(form.action, super::half::Action::MulAdd) => {
-                registers(RegClass::Vector, 17..=19)
-            }
-            Self::Half(..) => registers(RegClass::Vector, [17]),
-            Self::ScalarSaturate(..)
-            | Self::Rotate(super::rotate::Form { packed: true, .. }, ..) => {
-                registers(RegClass::Vector, [17])
-            }
-            Self::FloatSpecial(
+            _ => PRegSet::empty(),
+        }
+    }
+
+    fn temps(&self, _: &Config) -> &'static [Temp] {
+        const VECTOR: Temp = Temp::Any(RegClass::Vector);
+        const ONE: &[Temp] = &[VECTOR];
+        const TWO: &[Temp] = &[VECTOR; 2];
+        const THREE: &[Temp] = &[VECTOR; 3];
+        // TBL2 reads the table {V16, V17}.
+        const TABLE: &[Temp] = &[Temp::Fixed(PReg::new(17, RegClass::Vector))];
+        // The root returns a float's bits in X0.
+        const RESULT: &[Temp] = &[Temp::Fixed(PReg::new(0, RegClass::Int))];
+        match *self {
+            Self::Return(Type::F32 | Type::F64, _, true) => RESULT,
+            Self::Half(form, ..) if matches!(form.action, super::half::Action::MulAdd) => THREE,
+            Self::Half(..)
+            | Self::ScalarSaturate(..)
+            | Self::Rotate(super::rotate::Form { packed: true, .. }, ..)
+            | Self::FloatSpecial(
                 super::special::Form {
                     action: super::special::Action::MinMax(_),
                     ..
                 },
                 ..,
-            ) => registers(RegClass::Vector, [17]),
-            Self::Reduce(ReduceForm::Ordered(_, Lane::F16 | Lane::BF16, _), ..) => {
-                registers(RegClass::Vector, [17])
-            }
-            Self::VectorDivide(
-                VectorDivide {
-                    size: 1 | 2,
-                    scalable: true,
-                    ..
-                },
-                ..,
-            ) => registers(RegClass::Vector, [17, 18]),
-            Self::Compact {
+            )
+            | Self::Reduce(ReduceForm::Ordered(_, Lane::F16 | Lane::BF16, _), ..)
+            | Self::Compact {
                 size: 1 | 2,
                 scalable: true,
                 ..
-            } => registers(RegClass::Vector, [17]),
-            Self::Masked {
+            }
+            | Self::Masked {
                 kind: Masked::SveNarrow(_),
                 ..
             }
@@ -491,10 +493,19 @@ impl TargetInst for Inst {
                 kind: Masked::SveWide(_),
                 indices: Some(_),
                 ..
-            } => registers(RegClass::Vector, [17]),
-            Self::Shuffle(Shuffle::Neon(_, 2..) | Shuffle::Wide(true), ..)
-            | Self::WideMaskTest(true, true, ..) => registers(RegClass::Vector, [17]),
-            _ => PRegSet::empty(),
+            }
+            | Self::Shuffle(Shuffle::Wide(true), ..)
+            | Self::WideMaskTest(true, true, ..) => ONE,
+            Self::VectorDivide(
+                VectorDivide {
+                    size: 1 | 2,
+                    scalable: true,
+                    ..
+                },
+                ..,
+            ) => TWO,
+            Self::Shuffle(Shuffle::Neon(_, 2..), ..) => TABLE,
+            _ => &[],
         }
     }
 

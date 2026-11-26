@@ -18,10 +18,11 @@ impl Emitter<'_> {
         let (neon, scalable) = arrangements(form.size);
         if form.scalable {
             let lane = |n| z(n, scalable);
-            let (acc, data, counts) = (lane(dst), lane(16), lane(17));
+            let temp = self.temp(0);
+            let (acc, data, counts) = (lane(dst), lane(16), lane(temp));
             self.copy_vec(16, src, true)?;
             self.copy_vec(dst, src, true)?;
-            self.copy_vec(17, count, true)?;
+            self.copy_vec(temp, count, true)?;
             self.a.put(C::And_z_zi, &[counts, O::imm(bits - 1)])?;
             self.predicate(R::P1, scalable, self.config.bytes / form.size)?;
             let active = O::pred(R::P1, PredQual::Merge);
@@ -39,18 +40,20 @@ impl Emitter<'_> {
                 .put(C::Orr_z_zz_, &[z(dst, A::D), z(dst, A::D), z(16, A::D)]);
         }
         let v = |n, arr| O::vec(R::v(n).unwrap(), arr);
-        let (acc, data, counts, constant) = (v(dst, neon), v(src, neon), v(16, neon), v(17, neon));
+        let temp = self.temp(0);
+        let (acc, data, counts, constant) =
+            (v(dst, neon), v(src, neon), v(16, neon), v(temp, neon));
         let raw = |n| v(n, A::B16);
-        self.neon_splat_int(neon, bits - 1, 17)?;
+        self.neon_splat_int(neon, bits - 1, temp)?;
         self.a
-            .put(C::And_asimdsame_only, &[raw(16), raw(count), raw(17)])?;
+            .put(C::And_asimdsame_only, &[raw(16), raw(count), raw(temp)])?;
         if form.right {
             self.a.put(C::Neg_asimd, &[counts, counts])?;
             self.a
-                .put(C::And_asimdsame_only, &[raw(16), raw(16), raw(17)])?;
+                .put(C::And_asimdsame_only, &[raw(16), raw(16), raw(temp)])?;
         }
         self.a.put(C::Ushl_asimd, &[acc, data, counts])?;
-        self.neon_splat_int(neon, bits, 17)?;
+        self.neon_splat_int(neon, bits, temp)?;
         self.a
             .put(C::Sub_asimdsame_only, &[counts, counts, constant])?;
         self.a.put(C::Ushl_asimd, &[counts, data, counts])?;
@@ -125,10 +128,11 @@ impl Emitter<'_> {
     ) -> Result {
         let ty = if size == 8 { Type::F64 } else { Type::F32 };
         self.float_move(ty, true, 16, a)?;
-        self.float_move(ty, true, 17, b)?;
+        let rhs = self.temp(0);
+        self.float_move(ty, true, rhs, b)?;
         let arr = arrangements(size).0;
         let d = O::vec(R::V16, arr);
-        self.a.put(code, &[d, d, O::vec(R::V17, arr)])?;
+        self.a.put(code, &[d, d, O::vec(R::v(rhs).unwrap(), arr)])?;
         self.neon_lane_to_int(16, dst, size, 0)
     }
 

@@ -38,6 +38,8 @@ pub(super) fn allocate<I: TargetInst + Schedulable>(
 pub(super) struct Allocations<'a> {
     operands: &'a [regalloc2::Operand],
     allocs: &'a [regalloc2::Allocation],
+    /// The registers of [`TargetInst::temps`], in order.
+    temps: &'a [regalloc2::Allocation],
 }
 
 impl<'a> Allocations<'a> {
@@ -47,10 +49,29 @@ impl<'a> Allocations<'a> {
         inst: regalloc2::Inst,
     ) -> Self {
         use regalloc2::Function as _;
+        let allocs = output.inst_allocs(inst);
+        let temps = f.insts()[inst.index()].temps(f.machine()).len();
         Self {
             operands: f.inst_operands(inst),
-            allocs: output.inst_allocs(inst),
+            allocs,
+            temps: &allocs[allocs.len() - temps..],
         }
+    }
+
+    /// The register encoding of the instruction's `i`-th temporary.
+    pub fn temp(self, i: usize) -> usize {
+        self.temps[i]
+            .as_reg()
+            .expect("a register temporary")
+            .hw_enc()
+    }
+
+    /// Each operand with its allocation, temporaries included.
+    pub fn iter(self) -> impl Iterator<Item = (regalloc2::Operand, regalloc2::Allocation)> + 'a {
+        self.operands
+            .iter()
+            .copied()
+            .zip(self.allocs.iter().copied())
     }
 
     /// Where `v` is. Two uses of one value read the same bits, so a

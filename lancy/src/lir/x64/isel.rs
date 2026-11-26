@@ -46,7 +46,7 @@ pub(super) fn select(
         if entry {
             let argv = if root && f.arity() != 0 {
                 let addr = body.temp(RegClass::Int)?;
-                body.push(Inst::Argv(addr));
+                body.push(Inst::Argv(addr))?;
                 Some(addr)
             } else {
                 None
@@ -59,11 +59,11 @@ pub(super) fn select(
                     argv,
                     ty,
                     index,
-                });
+                })?;
             }
         }
         for op in blocks[b].drain(..) {
-            body.push(op);
+            body.push(op)?;
         }
         edges.finish(&mut body, b, reg, || Inst::Jump)?;
     }

@@ -109,8 +109,9 @@ impl Emitter<'_> {
             let ty = form.lane.scalar();
             let arr = if form.lane == Lane::F32 { A::S } else { A::D };
             self.float_move(ty, true, 16, 9)?;
-            self.float_move(ty, true, 17, 10)?;
-            self.ordered_minmax(min, O::vec(R::V16, arr), O::vec(R::V17, arr))?;
+            let rhs = self.temp(0);
+            self.float_move(ty, true, rhs, 10)?;
+            self.ordered_minmax(min, O::vec(R::V16, arr), O::vec(R::v(rhs).unwrap(), arr))?;
             return self.float_move(ty, false, 16, 12);
         }
         if matches!(form.action, Action::Classify(Unary::SignBit)) {

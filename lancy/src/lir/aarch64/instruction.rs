@@ -340,20 +340,20 @@ codes! {
     Csel_32_condsel =      0x1a800000, Base, w, Select;
     Csel_64_condsel =      0x9a800000, Base, x, Select;
     Csinv_32_condsel =     0x5a800000, Base, w, Select;
-    Ldr_32_ldst_pos =      0xb9400000, Base, w, Memory(4);
-    Ldr_64_ldst_pos =      0xf9400000, Base, x, Memory(8);
-    Str_32_ldst_pos =      0xb9000000, Base, w, Memory(4);
-    Str_64_ldst_pos =      0xf9000000, Base, x, Memory(8);
-    Ldrb_32_ldst_pos =     0x39400000, Base, w, Memory(1);
-    Strb_32_ldst_pos =     0x39000000, Base, w, Memory(1);
-    Ldrh_32_ldst_pos =     0x79400000, Base, w, Memory(2);
-    Strh_32_ldst_pos =     0x79000000, Base, w, Memory(2);
-    Ldr_q_ldst_pos =       0x3dc00000, Neon, w, Memory(16);
-    Str_q_ldst_pos =       0x3d800000, Neon, w, Memory(16);
-    Ldr_s_ldst_pos =       0xbd400000, Base, _, FloatMemory(4);
-    Str_s_ldst_pos =       0xbd000000, Base, _, FloatMemory(4);
-    Ldr_d_ldst_pos =       0xfd400000, Base, _, FloatMemory(8);
-    Str_d_ldst_pos =       0xfd000000, Base, _, FloatMemory(8);
+    Ldr_32_ldst_pos =      0xb9400000, Base, w, Load(4);
+    Ldr_64_ldst_pos =      0xf9400000, Base, x, Load(8);
+    Str_32_ldst_pos =      0xb9000000, Base, w, Store(4);
+    Str_64_ldst_pos =      0xf9000000, Base, x, Store(8);
+    Ldrb_32_ldst_pos =     0x39400000, Base, w, Load(1);
+    Strb_32_ldst_pos =     0x39000000, Base, w, Store(1);
+    Ldrh_32_ldst_pos =     0x79400000, Base, w, Load(2);
+    Strh_32_ldst_pos =     0x79000000, Base, w, Store(2);
+    Ldr_q_ldst_pos =       0x3dc00000, Neon, w, Load(16);
+    Str_q_ldst_pos =       0x3d800000, Neon, w, Store(16);
+    Ldr_s_ldst_pos =       0xbd400000, Base, _, FloatLoad(4);
+    Str_s_ldst_pos =       0xbd000000, Base, _, FloatStore(4);
+    Ldr_d_ldst_pos =       0xfd400000, Base, _, FloatLoad(8);
+    Str_d_ldst_pos =       0xfd000000, Base, _, FloatStore(8);
     Nop_HI_hints =         0xd503201f, Base, _, None;
     B_only_branch_imm =    0x14000000, Base, _, Branch(BranchKind::Direct);
     Bl_only_branch_imm =   0x94000000, Base, _, Branch(BranchKind::Direct);
@@ -498,6 +498,17 @@ impl Code {
         Ok(word | branch.map_or(Ok(0), |branch| branch.field(pc))?)
     }
 
+    /// The register the instruction writes, if it writes one.
+    pub(super) fn written(self, operands: &[O]) -> Option<super::Register> {
+        if !self.row().2.writes_first() {
+            return None;
+        }
+        match operands.first()? {
+            O::Register(r) | O::Vector(r, _) => Some(*r),
+            _ => None,
+        }
+    }
+
     pub fn is_available(self, features: FeatureSet) -> bool {
         self.required_feature().is_none_or(|f| features.contains(f))
     }
@@ -521,7 +532,10 @@ enum Form {
     AddImm(bool),
     Shift(bool),
     LogicalImmediate,
-    VectorShiftImmediate { sve: bool, left: bool },
+    VectorShiftImmediate {
+        sve: bool,
+        left: bool,
+    },
     Three,
     Multiply,
     Move,
@@ -569,8 +583,12 @@ enum Form {
     SveIndexed(A, PredQual),
     Bitfield,
     Select,
-    Memory(i64),
-    FloatMemory(i64),
+    /// A general or Q register and a scaled unsigned offset.
+    Load(i64),
+    Store(i64),
+    /// An S or D register and a scaled unsigned offset.
+    FloatLoad(i64),
+    FloatStore(i64),
     Branch(BranchKind),
     Indirect,
     Neon(bool),
@@ -693,6 +711,23 @@ fn logical_immediate(value: u64, width: u32) -> Option<u32> {
 }
 
 impl Form {
+    /// The first operand is a register the instruction writes. Stores,
+    /// comparisons into flags and branches only read their operands.
+    fn writes_first(&self) -> bool {
+        !matches!(
+            self,
+            Self::None
+                | Self::Indirect
+                | Self::Branch(_)
+                | Self::PredTest
+                | Self::FloatCompare
+                | Self::Store(_)
+                | Self::FloatStore(_)
+                | Self::SveIndexed(_, PredQual::None)
+                | Self::SveMemory(_, PredQual::None)
+        )
+    }
+
     fn fields(self, o: &[O], wide: bool) -> Result<Encoded, EncodeError> {
         let expected = match self {
             Self::None => 0,
@@ -701,8 +736,10 @@ impl Form {
             | Self::RegPair(..)
             | Self::ArrangedPair(..)
             | Self::Dup(_)
-            | Self::Memory(_)
-            | Self::FloatMemory(_)
+            | Self::Load(_)
+            | Self::Store(_)
+            | Self::FloatLoad(_)
+            | Self::FloatStore(_)
             | Self::Branch(_)
             | Self::Ptrue
             | Self::FloatCompare
@@ -1295,14 +1332,18 @@ impl Form {
                 }
                 r(0)? | r(1)? << 5 | (a as u32) << 16 | (b as u32) << 10
             }
-            Self::Memory(scale) | Self::FloatMemory(scale) => {
+            Self::Load(scale)
+            | Self::Store(scale)
+            | Self::FloatLoad(scale)
+            | Self::FloatStore(scale) => {
                 let O::Memory(base, offset) = o[1] else {
                     return Err(EncodeError::Operand(1));
                 };
                 if offset < 0 || offset % scale != 0 || offset / scale > 4095 {
                     return Err(EncodeError::Operand(1));
                 }
-                let rt = if scale == 16 || matches!(self, Self::FloatMemory(_)) {
+                let rt = if scale == 16 || matches!(self, Self::FloatLoad(_) | Self::FloatStore(_))
+                {
                     reg(o[0], Bank::V, false, 0)?
                 } else {
                     r(0)?

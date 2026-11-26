@@ -39,11 +39,11 @@ pub(super) fn select(
             let params = f.params(b);
             let types = params.iter().map(|&v| f.value_type(v));
             for (&v, (ty, word)) in params.iter().zip(argument_words(types, config.bytes)) {
-                body.push(Inst::Arg(ty, word * 8, reg(v)));
+                body.push(Inst::Arg(ty, word * 8, reg(v)))?;
             }
         }
         for inst in selected[b].drain(..) {
-            body.push(inst);
+            body.push(inst)?;
         }
         edges.finish(&mut body, b, reg, || Inst::Jump)?;
     }

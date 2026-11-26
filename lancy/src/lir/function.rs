@@ -1,7 +1,10 @@
 //! A function in SSA form after target instruction selection.
-use super::TargetInst;
+use super::{TargetInst, inst::Temp};
 use crate::CompileError;
-use regalloc2::{Block, Inst, InstRange, Operand, PRegSet, RegClass, VReg};
+use regalloc2::{
+    Block, Inst, InstRange, Operand, OperandConstraint, OperandKind, OperandPos, PRegSet, RegClass,
+    VReg,
+};
 use std::ops::Range;
 
 struct BlockData {
@@ -76,10 +79,23 @@ impl<I: TargetInst> Function<I> {
 
     /// Append an instruction to the open block: the one the next
     /// [`Self::end_block`] closes. Blocks are numbered in the order they close.
-    pub fn push(&mut self, inst: I) {
+    pub fn push(&mut self, inst: I) -> Result<(), CompileError> {
         inst.operands(&self.machine, &self.details, &mut self.operands);
+        for &temp in inst.temps(&self.machine) {
+            let operand = match temp {
+                Temp::Any(class) => Operand::reg_temp(self.temp(class)?),
+                Temp::Fixed(reg) => Operand::new(
+                    self.temp(reg.class())?,
+                    OperandConstraint::FixedReg(reg),
+                    OperandKind::Def,
+                    OperandPos::Early,
+                ),
+            };
+            self.operands.push(operand);
+        }
         self.operand_ends.push(self.operands.len());
         self.insts.push(inst);
+        Ok(())
     }
 
     pub(super) fn reorder(
@@ -94,15 +110,24 @@ impl<I: TargetInst> Function<I> {
         scratch.extend(order.iter().map(|&i| self.insts[start + i]));
         self.insts[start..end].copy_from_slice(scratch);
 
-        // A permutation leaves the total operand count and other blocks' offsets intact.
-        let mut at = self.operand_ends[start];
-        for i in start..end {
-            operands.clear();
-            self.insts[i].operands(&self.machine, &self.details, operands);
-            self.operands[at..at + operands.len()].copy_from_slice(operands);
-            at += operands.len();
-            self.operand_ends[i + 1] = at;
+        // A permutation leaves the total operand count and other blocks'
+        // offsets intact; each instruction keeps its operands and temporaries.
+        let first = self.operand_ends[start];
+        operands.clear();
+        for &i in order {
+            let range = self.operand_ends[start + i]..self.operand_ends[start + i + 1];
+            operands.extend_from_slice(&self.operands[range]);
         }
+        let lengths: Vec<usize> = order
+            .iter()
+            .map(|&i| self.operand_ends[start + i + 1] - self.operand_ends[start + i])
+            .collect();
+        let mut at = first;
+        for (k, length) in lengths.into_iter().enumerate() {
+            at += length;
+            self.operand_ends[start + k + 1] = at;
+        }
+        self.operands[first..at].copy_from_slice(operands);
     }
 
     pub fn loop_depth(&self, block: Block) -> usize {

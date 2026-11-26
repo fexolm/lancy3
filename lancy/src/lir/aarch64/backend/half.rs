@@ -75,10 +75,10 @@ impl Emitter<'_> {
         use Unary::*;
         let lane = form.lane;
         let d = f(16, A::D);
-        let rhs = f(17, A::D);
+        let rhs = f(self.temp(0), A::D);
         self.decode_half(lane, a, 16)?;
         if let Some(b) = b {
-            self.decode_half(lane, b, 17)?;
+            self.decode_half(lane, b, self.temp(0))?;
         }
         match form.action {
             // FMINNM/FMAXNM alone would turn a signaling NaN operand into NaN.
@@ -114,14 +114,15 @@ impl Emitter<'_> {
             }
             Action::Cast(to) => return self.encode_half(to, 16, dst),
             Action::MulAdd => {
-                self.decode_half(lane, c.unwrap(), 18)?;
-                let addend = f(18, A::D);
+                self.decode_half(lane, c.unwrap(), self.temp(1))?;
+                let addend = f(self.temp(1), A::D);
                 self.a.put(C::Fmul_scalar, &[d, d, rhs])?;
                 if lane == Lane::F16 {
                     self.a.put(C::Fadd_scalar, &[d, d, addend])?;
                 } else {
-                    self.a.put(C::Fadd_scalar, &[f(19, A::D), d, addend])?;
-                    return self.encode_bfloat(19, dst, true);
+                    let sum = self.temp(2);
+                    self.a.put(C::Fadd_scalar, &[f(sum, A::D), d, addend])?;
+                    return self.encode_bfloat(sum, dst, true);
                 }
             }
         }
@@ -200,7 +201,7 @@ impl Emitter<'_> {
         self.a.bind(ordered);
         // Round to odd before dropping the low halfword, so the final nearest-even
         // rounding can still distinguish an exact midpoint from its neighbors.
-        let tmp = if from_fma { 17 } else { 16 };
+        let tmp = if from_fma { self.temp(0) } else { 16 };
         self.a.put(C::Fcvtxn_s_d, &[f(tmp, A::S), d])?;
         self.float_move(Type::F32, false, tmp, 13)?;
         if from_fma {
@@ -233,7 +234,14 @@ impl Emitter<'_> {
         // The low bit of an inexact FCVTXN result is odd, so a midpoint
         // reaching this branch was represented exactly in binary32. TwoSum
         // recovers the tail lost in the preceding binary64 addition.
-        let (p, b, c, s) = (f(16, A::D), f(17, A::D), f(18, A::D), f(19, A::D));
+        // The product, the multiplicand's register, the addend and the sum
+        // of `half_lane`'s fused multiply-add.
+        let (p, b, c, s) = (
+            f(16, A::D),
+            f(self.temp(0), A::D),
+            f(self.temp(1), A::D),
+            f(self.temp(2), A::D),
+        );
         self.a.put(C::Fsub_scalar, &[b, s, p])?;
         self.a.put(C::Fsub_scalar, &[c, c, b])?;
         self.a.put(C::Fsub_scalar, &[b, s, b])?;

@@ -93,12 +93,29 @@ fn arrangements(bytes: usize) -> (A, A) {
     )
 }
 
+/// The allocator's register for `reg`, if the allocator assigns it.
+fn allocatable(reg: R) -> Option<PReg> {
+    use super::operand::Bank;
+    let class = match reg.bank {
+        Bank::X | Bank::W if reg.number < 31 => RegClass::Int,
+        Bank::V | Bank::Z => RegClass::Vector,
+        _ => return None,
+    };
+    let preg = PReg::new(reg.number.into(), class);
+    (inst::call_clobbers() | inst::nonvolatile())
+        .contains(preg)
+        .then_some(preg)
+}
+
 struct Assembler {
     words: Vec<u32>,
     labels: Vec<Option<u64>>,
     fixups: Vec<(usize, C, Label)>,
     /// The extensions selection may use.
     features: super::FeatureSet,
+    /// In debug builds, while one instruction is emitted: the allocatable
+    /// registers it may write, its outputs, temporaries and clobbers.
+    writable: Option<regalloc2::PRegSet>,
 }
 
 impl Assembler {
@@ -109,6 +126,7 @@ impl Assembler {
             words: Vec::new(),
             labels: Vec::new(),
             fixups: Vec::new(),
+            writable: None,
             features: match profile {
                 Profile::Sve2 => base.with(Feature::Sve2),
                 Profile::Sve => base.with(Feature::Sve),
@@ -123,6 +141,15 @@ impl Assembler {
             "{code:?} needs {:?}",
             code.required_feature()
         );
+        if let Some(writable) = self.writable
+            && let Some(reg) = code.written(operands)
+            && let Some(preg) = allocatable(reg)
+        {
+            assert!(
+                writable.contains(preg),
+                "{code:?} writes {reg:?}, which its instruction does not declare"
+            );
+        }
         self.words.push(
             code.encode(operands, self.words.len() as u64 * 4)
                 .map_err(super::Error::from)?,
@@ -276,6 +303,9 @@ struct Emitter<'a> {
     failures: [Option<Label>; Trap::ALL.len()],
     /// The shared tail of every side exit: report the trap code in W16.
     report: Option<Label>,
+    /// The registers of the current instruction's temporaries.
+    temps: [u8; 3],
+    temp_count: usize,
 }
 
 impl Emitter<'_> {
@@ -472,6 +502,46 @@ impl Emitter<'_> {
     }
 
     fn inst(
+        &mut self,
+        op: Inst,
+        allocs: Allocations,
+        succs: &[Block],
+        labels: &[Label],
+        next: Option<Block>,
+    ) -> Result {
+        use crate::lir::TargetInst;
+        self.temp_count = op.temps(&self.config).len();
+        for (i, temp) in self.temps[..self.temp_count].iter_mut().enumerate() {
+            *temp = allocs.temp(i) as u8;
+        }
+        if cfg!(debug_assertions) {
+            let mut writable = op.clobbers(&self.config, &());
+            for (operand, alloc) in allocs.iter() {
+                if operand.kind() == regalloc2::OperandKind::Def
+                    && let Some(reg) = alloc.as_reg()
+                {
+                    writable.add(reg);
+                }
+            }
+            self.a.writable = Some(writable);
+        }
+        let result = self.selected(op, allocs, succs, labels, next);
+        self.a.writable = None;
+        result
+    }
+
+    /// The `i`-th scratch register the instruction declares in
+    /// [`TargetInst::temps`](crate::lir::TargetInst::temps).
+    fn temp(&self, i: usize) -> u8 {
+        assert!(
+            i < self.temp_count,
+            "the instruction declares {} temporaries",
+            self.temp_count
+        );
+        self.temps[i]
+    }
+
+    fn selected(
         &mut self,
         op: Inst,
         allocs: Allocations,
@@ -704,11 +774,13 @@ impl Emitter<'_> {
                 self.byte_predicate = false;
                 self.check_status()
             }
-            Inst::LibArg(ty, index, v) => self.value_access(false, ty, n(v), self.temp(index)),
+            Inst::LibArg(ty, index, v) => {
+                self.value_access(false, ty, n(v), self.fallback_slot(index))
+            }
             Inst::Libcall(action, input, output, args) => {
                 self.primitive(action, input, output, args)
             }
-            Inst::LibResult(ty, d) => self.value_access(true, ty, n(d), self.temp(3)),
+            Inst::LibResult(ty, d) => self.value_access(true, ty, n(d), self.fallback_slot(3)),
             Inst::Jump => {
                 if Some(succs[0]) != next {
                     self.a.jump(labels[succs[0].index()]);
@@ -742,7 +814,8 @@ impl Emitter<'_> {
             }
         }
     }
-    fn temp(&self, index: usize) -> (R, usize) {
+    /// The `index`-th 64-byte slot of the frame's fallback area.
+    fn fallback_slot(&self, index: usize) -> (R, usize) {
         (
             R::X19,
             self.frame.temporary + index * crate::lir::fallback::SLOT_BYTES,
@@ -851,6 +924,8 @@ fn emit_compiled(module: &Module<Compiled>, config: Config, debug: bool) -> Resu
             byte_predicate: false,
             failures: [None; Trap::ALL.len()],
             report: None,
+            temps: [0; 3],
+            temp_count: 0,
         };
         let order = layout::place(&machine.body);
         for (index, &block) in order.iter().enumerate() {

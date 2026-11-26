@@ -116,14 +116,16 @@ fn scheduling_keeps_data_ordered_and_barrier_dependencies() {
                 def,
                 uses,
                 kind,
-            });
+            })
+            .unwrap();
         }
         f.push(Fake {
             id: len,
             def: None,
             uses: [defined.last().copied(), None],
             kind: Kind::Ret,
-        });
+        })
+        .unwrap();
         f.end_block([], 0).unwrap();
         let before = f.insts().to_vec();
         run(&mut f);
@@ -277,7 +279,7 @@ fn liveness_matches_iterative_dataflow() {
         let mut f = Function::<Fake>::new((), blocks, owner.len()).unwrap();
         for b in 0..blocks {
             for &inst in &code[b] {
-                f.push(inst);
+                f.push(inst).unwrap();
             }
             let kind = if succs[b].is_empty() {
                 Kind::Ret
@@ -289,7 +291,8 @@ fn liveness_matches_iterative_dataflow() {
                 def: None,
                 uses: [None; 2],
                 kind,
-            });
+            })
+            .unwrap();
             id += 1;
             for &t in &succs[b] {
                 f.edge(Block::new(t), [], t <= b);

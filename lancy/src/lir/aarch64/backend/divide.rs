@@ -34,11 +34,12 @@ impl Emitter<'_> {
         let arr = arrangements(form.size).1;
         let lanes = self.config.bytes / 4;
         self.predicate(R::P4, A::S, lanes)?;
+        let (divisor, quotient) = (self.temp(0), self.temp(1));
         // The groups execute in increasing lane order, including their trap checks.
         for offset in (0..self.config.bytes).step_by(lanes * form.size) {
             self.sve_widen_group(a, 16, form.size, offset, form.signed)?;
-            self.sve_widen_group(b, 17, form.size, offset, form.signed)?;
-            self.sve_divide_group(form, A::S, [16, 17], 16, 18)?;
+            self.sve_widen_group(b, divisor, form.size, offset, form.signed)?;
+            self.sve_divide_group(form, A::S, [16, divisor], 16, quotient)?;
             self.sve_narrow_group(16, form.size)?;
             if offset == 0 {
                 self.copy_vec(dst, 16, true)?;

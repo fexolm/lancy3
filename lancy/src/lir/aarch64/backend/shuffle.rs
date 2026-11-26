@@ -40,7 +40,8 @@ impl Emitter<'_> {
             return Ok(());
         }
         let indices = z(indices, A::D);
-        let index = z(17, A::D);
+        let temp = self.temp(0);
+        let index = z(temp, A::D);
         let scratch = z(dst, A::D);
         let p = |r| O::vec(r, A::D);
         let lanes = self.config.bytes / 8;
@@ -65,7 +66,7 @@ impl Emitter<'_> {
         self.a.put(C::And_z_zi, &[scratch, O::imm(1)])?;
         self.a.put(C::Add_z_zz_, &[index, index, index])?;
         self.a.put(C::Add_z_zz_, &[index, index, scratch])?;
-        self.sve_shuffle(A::D, [a, b, 17], dst)?;
+        self.sve_shuffle(A::D, [a, b, temp], dst)?;
         self.a.put(
             C::Cpy_z_p_i,
             &[scratch, O::pred(R::P5, PredQual::Merge), O::imm(0)],
@@ -132,8 +133,9 @@ impl Emitter<'_> {
         )?;
         self.a.put(C::Orr_asimdsame_only, &[out, out, scratch])?;
         self.copy_vec(16, a, false)?;
-        self.copy_vec(17, b, false)?;
-        // TBL2 also reads the implicit register immediately following V16.
+        // TBL2 also reads the register after V16: the instruction's fixed
+        // temporary V17.
+        self.copy_vec(self.temp(0), b, false)?;
         self.a.put(C::Tbl2_asimd, &[out, scratch, out])
     }
 

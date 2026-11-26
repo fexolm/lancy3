@@ -32,14 +32,15 @@ impl Emitter<'_> {
         let active = |p| O::pred(p, PredQual::None);
         self.predicate(R::P4, A::S, lanes)?;
         self.a.imm(R::X13, 0)?;
+        let wide_mask = self.temp(0);
         for offset in (0..self.config.bytes).step_by(lanes * size) {
-            self.sve_widen_group(mask, 17, size, offset, true)?;
+            self.sve_widen_group(mask, wide_mask, size, offset, true)?;
             self.a.put(
                 C::Cmplt_p_p_zi,
                 &[
                     O::vec(R::P1, A::S),
                     O::pred(R::P4, PredQual::Zero),
-                    z(17, A::S),
+                    z(wide_mask, A::S),
                     O::imm(0),
                 ],
             )?;

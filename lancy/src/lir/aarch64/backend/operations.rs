@@ -310,7 +310,7 @@ impl Emitter<'_> {
             return self.mask_test(false, A::D, src, dst);
         }
         let input = z(src, A::D);
-        let (low, high) = (z(16, A::D), z(17, A::D));
+        let (low, high) = (z(16, A::D), z(self.temp(0), A::D));
         self.a.put(C::Trn1_z_zz, &[low, input, input])?;
         self.a.put(C::Trn2_z_zz, &[high, input, input])?;
         self.a.put(C::Orr_z_zz_, &[low, low, high])?;
@@ -332,7 +332,7 @@ impl Emitter<'_> {
             &[O::reg(R::WZR), O::reg(index), O::imm((width / size) as u64)],
         )?;
         self.trap_if(Cond::Cs, Trap::Bounds)?;
-        let temp = self.temp(0);
+        let temp = self.fallback_slot(0);
         self.access(false, width, src, temp)?;
         self.a.addr(R::X10, temp.0, temp.1)?;
         self.a.put(
