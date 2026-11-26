@@ -97,6 +97,8 @@ pub enum Arrangement {
     H,
     S,
     D,
+    /// The 128-bit element of an SVE vector.
+    Q,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
@@ -158,6 +160,10 @@ impl Operand {
     }
     pub const fn imm(v: u64) -> Self {
         Self::Immediate(v)
+    }
+    /// A signed immediate, for the forms whose field is two's complement.
+    pub const fn simm(v: i64) -> Self {
+        Self::Immediate(v as u64)
     }
     pub const fn imm_lsl(v: u64, shift: u8) -> Self {
         Self::ShiftedImmediate(v, shift)

@@ -429,8 +429,10 @@ impl Emitter<'_> {
             // Carry/borrow from each even doubleword affects only its paired odd doubleword.
             self.a.put(C::Pfalse_p, &[O::vec(R::P3, A::B)])?;
             self.a.put(C::Trn1_p_pp, &[p(R::P1), p(R::P3), p(R::P1)])?;
-            self.a
-                .put(C::Cpy_one_z_p, &[z(dst), O::pred(R::P1, PredQual::Zero)])?;
+            self.a.put(
+                C::Cpy_z_p_i,
+                &[z(dst), O::pred(R::P1, PredQual::Zero), O::imm(1)],
+            )?;
             return self.a.put(code, &[z(dst), scratch, z(dst)]);
         }
         self.pair_to_gpr(a, 9, 10)?;
@@ -474,16 +476,24 @@ impl Emitter<'_> {
     pub(super) fn pair_to_gpr(&mut self, src: u8, low: u8, high: u8) -> Result {
         self.float_move(Type::F64, false, src, low)?;
         self.a.put(
-            C::Mov_x_v_d1,
-            &[O::reg(R::x(high).unwrap()), O::reg(R::v(src).unwrap())],
+            C::Umov_lane,
+            &[
+                O::reg(R::x(high).unwrap()),
+                O::vec(R::v(src).unwrap(), A::D2),
+                O::imm(1),
+            ],
         )
     }
 
     pub(super) fn pair_from_gpr(&mut self, dst: u8, low: u8, high: u8) -> Result {
         self.float_move(Type::F64, true, dst, low)?;
         self.a.put(
-            C::Mov_v_d1_x,
-            &[O::reg(R::v(dst).unwrap()), O::reg(R::x(high).unwrap())],
+            C::Ins_lane,
+            &[
+                O::vec(R::v(dst).unwrap(), A::D2),
+                O::reg(R::x(high).unwrap()),
+                O::imm(1),
+            ],
         )
     }
 }

@@ -76,7 +76,7 @@ impl Emitter<'_> {
                 );
             }
             let v = |n| O::vec(R::v(n).unwrap(), neon);
-            return self.a.put(C::Sshr_sign_asimdshf, &[v(dst), v(src)]);
+            return self.a.sign_fill(v(dst), v(src));
         }
         if form.scalable {
             return self.sve_each_lane(scalable, |e| {

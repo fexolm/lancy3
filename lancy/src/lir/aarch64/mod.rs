@@ -82,17 +82,7 @@ impl<'a> Encoder<'a> {
 
     /// Append an instruction and return its byte offset.
     pub fn push(&mut self, code: Code, operands: &[Operand]) -> Result<usize, Error> {
-        self.push_with_suffix(code, 0, operands)
-    }
-
-    /// Append an instruction with a suffix from its encoding's suffix table.
-    pub fn push_with_suffix(
-        &mut self,
-        code: Code,
-        suffix: u8,
-        operands: &[Operand],
-    ) -> Result<usize, Error> {
-        self.append(|pc| word(code, suffix, operands, pc))
+        self.append(|pc| word(code, operands, pc))
     }
 
     /// Encode a previously validated instruction at the current PC.
@@ -120,32 +110,15 @@ impl<'a> Encoder<'a> {
     /// Replace an emitted instruction at the same PC. On error the bytes
     /// and cursor are unchanged.
     pub fn patch(&mut self, offset: usize, code: Code, operands: &[Operand]) -> Result<(), Error> {
-        self.patch_with_suffix(offset, code, 0, operands)
-    }
-
-    /// Replace an emitted instruction with an encoding that has a suffix.
-    pub fn patch_with_suffix(
-        &mut self,
-        offset: usize,
-        code: Code,
-        suffix: u8,
-        operands: &[Operand],
-    ) -> Result<(), Error> {
         if offset >= self.len || !offset.is_multiple_of(WORD_BYTES) {
             return Err(Error::InvalidPatch(offset));
         }
         let pc = self.start_pc + offset as u64;
-        self.buffer[offset..offset + WORD_BYTES]
-            .copy_from_slice(&word(code, suffix, operands, pc)?);
+        self.buffer[offset..offset + WORD_BYTES].copy_from_slice(&word(code, operands, pc)?);
         Ok(())
     }
 }
 
-fn word(
-    code: Code,
-    suffix: u8,
-    operands: &[Operand],
-    pc: u64,
-) -> Result<[u8; WORD_BYTES], EncodeError> {
-    Ok(code.encode(suffix, operands, pc)?.to_le_bytes())
+fn word(code: Code, operands: &[Operand], pc: u64) -> Result<[u8; WORD_BYTES], EncodeError> {
+    Ok(code.encode(operands, pc)?.to_le_bytes())
 }

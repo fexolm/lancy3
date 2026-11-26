@@ -38,9 +38,8 @@ fn a64_neon_sve_and_sve2_match_llvm_mc() {
         )
         .unwrap();
     encoder
-        .push_with_suffix(
-            Code::Saddl_asimddiff_L,
-            1,
+        .push(
+            Code::Saddl2_asimd,
             &[
                 Operand::vec(R::V0, A::S4),
                 Operand::vec(R::V1, A::H8),
@@ -310,7 +309,11 @@ fn wide_arithmetic_and_permutations_match_llvm_mc() {
     let imm = Operand::imm;
     let cases: &[(Code, &[Operand], u32)] = &[
         (Adc_64, &[r(R::X0), r(R::X1), r(R::X2)], 0x9a02_0020),
-        (Dup_q0_z, &[r(R::Z0), r(R::Z1)], 0x0530_2020),
+        (
+            Dup_z_zi,
+            &[v(R::Z0, A::Q), v(R::Z1, A::Q), imm(0)],
+            0x0530_2020,
+        ),
         (
             Bsl_z_zzz_,
             &[
@@ -367,8 +370,121 @@ fn wide_arithmetic_and_permutations_match_llvm_mc() {
     assert!(Instruction::with(Sshr_asimd_imm, &[out, src, imm(33)], 0).is_err());
     assert!(Instruction::with(Orr_32_log_imm, &[r(R::W0), r(R::W1), imm(0)], 0).is_err());
     let sve = FeatureSet::NONE.with(Feature::Sve);
-    assert!(Dup_q0_z.is_available(sve));
+    assert!(Dup_z_zi.is_available(sve));
     assert!(!Histcnt_z_p_zz.is_available(sve));
     assert!(!Bsl_z_zzz_.is_available(sve));
     assert!(Bsl_z_zzz_.is_available(sve.with(Feature::Sve2)));
+}
+
+#[test]
+fn lane_and_immediate_operands_match_llvm_mc() {
+    use Code::*;
+    let r = Operand::reg;
+    let v = Operand::vec;
+    let p = Operand::pred;
+    let imm = Operand::imm;
+    let simm = Operand::simm;
+    let cases: &[(Code, &[Operand], u32)] = &[
+        (
+            Cpy_z_p_i,
+            &[v(R::Z0, A::S), p(R::P1, PredQual::Zero), simm(-1)],
+            0x0591_1fe0,
+        ),
+        (
+            Cpy_z_p_i,
+            &[v(R::Z3, A::H), p(R::P2, PredQual::Merge), imm(0)],
+            0x0552_4003,
+        ),
+        (
+            Cpy_z_p_i,
+            &[v(R::Z4, A::B), p(R::P15, PredQual::Zero), imm(127)],
+            0x051f_0fe4,
+        ),
+        (
+            Cpy_z_p_i,
+            &[v(R::Z5, A::D), p(R::P0, PredQual::Zero), simm(-128)],
+            0x05d0_1005,
+        ),
+        (Index_z_ii, &[v(R::Z0, A::S), imm(0), imm(1)], 0x04a1_4000),
+        (
+            Index_z_ii,
+            &[v(R::Z1, A::D), simm(-16), imm(15)],
+            0x04ef_4201,
+        ),
+        (
+            Cmpeq_p_p_zi,
+            &[
+                v(R::P1, A::S),
+                p(R::P4, PredQual::Zero),
+                v(R::Z2, A::S),
+                simm(-1),
+            ],
+            0x259f_9041,
+        ),
+        (
+            Cmplt_p_p_zi,
+            &[
+                v(R::P1, A::D),
+                p(R::P2, PredQual::Zero),
+                v(R::Z3, A::D),
+                imm(0),
+            ],
+            0x25c0_2861,
+        ),
+        (
+            Cmpne_p_p_zi,
+            &[
+                v(R::P7, A::B),
+                p(R::P7, PredQual::Zero),
+                v(R::Z31, A::B),
+                imm(15),
+            ],
+            0x250f_9ff7,
+        ),
+        (
+            Dup_z_zi,
+            &[v(R::Z0, A::Q), v(R::Z1, A::Q), imm(3)],
+            0x05f0_2020,
+        ),
+        (
+            Dup_z_zi,
+            &[v(R::Z2, A::S), v(R::Z3, A::S), imm(15)],
+            0x05fc_2062,
+        ),
+        (
+            Dup_z_zi,
+            &[v(R::Z0, A::B), v(R::Z1, A::B), imm(63)],
+            0x05ff_2020,
+        ),
+        (
+            Umov_lane,
+            &[r(R::W9), v(R::V16, A::B16), imm(0)],
+            0x0e01_3e09,
+        ),
+        (Umov_lane, &[r(R::X1), v(R::V2, A::D2), imm(1)], 0x4e18_3c41),
+        (Ins_lane, &[v(R::V2, A::D2), r(R::X3), imm(1)], 0x4e18_1c62),
+        (
+            Sshr_asimd_imm,
+            &[v(R::V0, A::D2), v(R::V1, A::D2), imm(63)],
+            0x4f41_0420,
+        ),
+    ];
+    for &(code, operands, expected) in cases {
+        assert_eq!(
+            Instruction::with(code, operands, 0).unwrap().encode(),
+            Ok(expected),
+            "{code:?}"
+        );
+    }
+    let z0 = v(R::Z0, A::S);
+    for (code, operands) in [
+        (Cpy_z_p_i, vec![z0, p(R::P1, PredQual::Zero), imm(128)]),
+        (Cpy_z_p_i, vec![z0, p(R::P1, PredQual::None), imm(1)]),
+        (Index_z_ii, vec![z0, imm(16), imm(1)]),
+        (Index_z_ii, vec![z0, simm(-17), imm(1)]),
+        (Dup_z_zi, vec![v(R::Z0, A::Q), v(R::Z1, A::Q), imm(4)]),
+        (Dup_z_zi, vec![z0, v(R::Z1, A::D), imm(0)]),
+    ] {
+        assert!(Instruction::with(code, &operands, 0).is_err(), "{code:?}");
+    }
 }

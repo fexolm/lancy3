@@ -62,8 +62,10 @@ impl Emitter<'_> {
         let p = |n| O::vec(n, arr);
         let zero = |n| O::pred(n, PredQual::Zero);
         let active = |n| O::pred(n, PredQual::None);
-        self.a
-            .put(C::Cmpeq_p_p_zi0, &[p(R::P1), zero(R::P4), z(b, arr)])?;
+        self.a.put(
+            C::Cmpeq_p_p_zi,
+            &[p(R::P1), zero(R::P4), z(b, arr), O::imm(0)],
+        )?;
         let zero_divisor_prefix = if form.signed {
             let min = i64::MIN >> (64 - 8 * form.size);
             let bits = if arr == A::S {
@@ -72,8 +74,10 @@ impl Emitter<'_> {
                 min as u64
             };
             self.a.put(C::Dupm_z, &[z(scratch, arr), O::imm(bits)])?;
-            self.a
-                .put(C::Cmpeq_minus1_p_p_z, &[p(R::P2), zero(R::P4), z(b, arr)])?;
+            self.a.put(
+                C::Cmpeq_p_p_zi,
+                &[p(R::P2), zero(R::P4), z(b, arr), O::simm(-1)],
+            )?;
             self.a.put(
                 C::Cmpeq_p_p_zz,
                 &[p(R::P2), zero(R::P2), z(a, arr), z(scratch, arr)],

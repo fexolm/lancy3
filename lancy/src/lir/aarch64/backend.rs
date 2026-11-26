@@ -93,20 +93,55 @@ fn arrangements(bytes: usize) -> (A, A) {
     )
 }
 
-#[derive(Default)]
 struct Assembler {
     words: Vec<u32>,
     labels: Vec<Option<u64>>,
     fixups: Vec<(usize, C, Label)>,
+    /// The extensions selection may use.
+    features: super::FeatureSet,
 }
 
 impl Assembler {
+    fn new(profile: Profile) -> Self {
+        use super::{Feature, FeatureSet};
+        let base = FeatureSet::NONE.with(Feature::Neon);
+        Self {
+            words: Vec::new(),
+            labels: Vec::new(),
+            fixups: Vec::new(),
+            features: match profile {
+                Profile::Sve2 => base.with(Feature::Sve2),
+                Profile::Sve => base.with(Feature::Sve),
+                _ => base,
+            },
+        }
+    }
+
     fn put(&mut self, code: C, operands: &[O]) -> Result {
+        debug_assert!(
+            code.is_available(self.features),
+            "{code:?} needs {:?}",
+            code.required_feature()
+        );
         self.words.push(
-            code.encode(0, operands, self.words.len() as u64 * 4)
+            code.encode(operands, self.words.len() as u64 * 4)
                 .map_err(super::Error::from)?,
         );
         Ok(())
+    }
+
+    /// Fill each NEON lane with its sign bit: `sshr` by the lane width less one.
+    fn sign_fill(&mut self, dst: O, src: O) -> Result {
+        let O::Vector(_, arr) = dst else {
+            unreachable!("a NEON vector operand")
+        };
+        let bits = match arr {
+            A::B8 | A::B16 => 8,
+            A::H4 | A::H8 => 16,
+            A::S2 | A::S4 => 32,
+            _ => 64,
+        };
+        self.put(C::Sshr_asimd_imm, &[dst, src, O::imm(bits - 1)])
     }
 
     fn label(&mut self) -> Label {
@@ -145,7 +180,7 @@ impl Assembler {
         for (at, code, label) in self.fixups {
             let target = self.labels[label].expect("branch target emitted");
             let pc = at as u64 * 4;
-            self.words[at] = code.encode(0, &[O::label(target)], pc).map_err(|error| {
+            self.words[at] = code.encode(&[O::label(target)], pc).map_err(|error| {
                 if matches!(error, super::EncodeError::Branch { .. }) {
                     CompileError::from(crate::Limit::BranchRange {
                         offset: pc as usize,
@@ -423,8 +458,10 @@ impl Emitter<'_> {
                 self.a.imm(R::X10, (bits >> 64) as u64)?;
                 self.a
                     .put(C::Fmov_d_x, &[O::reg(R::v(n).unwrap()), O::reg(R::X9)])?;
-                self.a
-                    .put(C::Mov_v_d1_x, &[O::reg(R::v(n).unwrap()), O::reg(R::X10)])
+                self.a.put(
+                    C::Ins_lane,
+                    &[O::vec(R::v(n).unwrap(), A::D2), O::reg(R::X10), O::imm(1)],
+                )
             }
             8 => self.a.imm(R::x(n).unwrap(), bits as u64),
             _ => self.a.imm(
@@ -549,8 +586,12 @@ impl Emitter<'_> {
                 self.a.put(code, &[O::vec(dst, arr), r(src)])
             }
             Inst::SveSplat128(d, v) => self.a.put(
-                C::Dup_q0_z,
-                &[r(R::z(n(d)).unwrap()), r(R::z(n(v)).unwrap())],
+                C::Dup_z_zi,
+                &[
+                    O::vec(R::z(n(d)).unwrap(), A::Q),
+                    O::vec(R::z(n(v)).unwrap(), A::Q),
+                    O::imm(0),
+                ],
             ),
             Inst::Packed(op, d, a, b) => self.packed(op, n(a), n(b), n(d)),
             Inst::PackedShiftImm(code, arr, count, d, v) => {
@@ -753,7 +794,7 @@ fn emit_mode(config: Config, source: Module<VerifiedBody<'_>>, debug: bool) -> R
 fn emit_compiled(module: &Module<Compiled>, config: Config, debug: bool) -> Result<Code> {
     let _span = tracing::debug_span!(target: "lancy::compile", "emit_machine_code").entered();
     let root = module.call_graph.root();
-    let mut a = Assembler::default();
+    let mut a = Assembler::new(config.profile);
     let mut sites = crate::lir::fallback::Sites::default();
     let mut debug_functions = Vec::new();
     let entries = DenseMap::from_fn(module.functions.len(), |_| a.label());

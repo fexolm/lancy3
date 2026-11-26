@@ -35,11 +35,12 @@ impl Emitter<'_> {
     pub(super) fn sign_predicate(&mut self, arr: A, mask: u8) -> Result {
         self.predicate(R::P2, arr, self.config.bytes / sve_lane_bytes(arr))?;
         self.a.put(
-            C::Cmplt_p_p_zi0,
+            C::Cmplt_p_p_zi,
             &[
                 O::vec(R::P1, arr),
                 O::pred(R::P2, PredQual::Zero),
                 O::vec(R::z(mask).unwrap(), arr),
+                O::imm(0),
             ],
         )
     }
@@ -104,8 +105,7 @@ impl Emitter<'_> {
             }
             Select::Neon(arr) => {
                 if let Some(arr) = arr {
-                    self.a
-                        .put(C::Sshr_sign_asimdshf, &[v(16, arr), v(mask, arr)])?;
+                    self.a.sign_fill(v(16, arr), v(mask, arr))?;
                 } else {
                     self.copy_vec(16, mask, false)?;
                 }
@@ -154,7 +154,7 @@ impl Emitter<'_> {
         let size = lane.bytes();
         let arr = super::arrangements(size.min(8)).1;
         let d = O::vec(R::z(dst).unwrap(), arr);
-        self.a.put(C::Index_0_1_z, &[d])?;
+        self.a.put(C::Index_z_ii, &[d, O::imm(0), O::imm(1)])?;
         if size == 16 {
             let zero = O::vec(R::Z16, A::D);
             self.a.put(C::Eor_z_zz_, &[zero, zero, zero])?;
@@ -176,8 +176,10 @@ impl Emitter<'_> {
                 self.a.put(C::Dup_z_r, &[bias, O::reg(R::W9)])?;
                 self.a.put(C::Add_z_zz_, &[d, d, bias])?;
                 self.predicate(R::P1, A::H, 1)?;
-                self.a
-                    .put(C::Cpy_zero_z_p, &[d, O::pred(R::P1, PredQual::Merge)])?;
+                self.a.put(
+                    C::Cpy_z_p_i,
+                    &[d, O::pred(R::P1, PredQual::Merge), O::imm(0)],
+                )?;
             }
         }
         Ok(())
@@ -266,9 +268,9 @@ impl Emitter<'_> {
         if matches!(arr, A::B | A::H | A::S | A::D) {
             self.predicate(R::P2, arr, self.config.bytes / sve_lane_bytes(arr))?;
             let code = if all {
-                C::Cmpeq_p_p_zi0
+                C::Cmpeq_p_p_zi
             } else {
-                C::Cmpne_p_p_zi0
+                C::Cmpne_p_p_zi
             };
             self.a.put(
                 code,
@@ -276,6 +278,7 @@ impl Emitter<'_> {
                     O::vec(R::P1, arr),
                     O::pred(R::P2, PredQual::Zero),
                     O::vec(R::z(src).unwrap(), arr),
+                    O::imm(0),
                 ],
             )?;
         } else {
@@ -285,8 +288,12 @@ impl Emitter<'_> {
                     .put(C::Cmeq0_asimdmisc, &[O::vec(R::V16, arr), O::vec(v, arr)])?;
                 v = R::V16;
             }
-            self.a.put(C::Umaxv_b, &[O::reg(R::V16), O::reg(v)])?;
-            self.a.put(C::Umov_w_b0, &[O::reg(R::W9), O::reg(R::V16)])?;
+            self.a
+                .put(C::Umaxv_asimd, &[O::reg(R::V16), O::vec(v, A::B16)])?;
+            self.a.put(
+                C::Umov_lane,
+                &[O::reg(R::W9), O::vec(R::V16, A::B16), O::imm(0)],
+            )?;
             self.a.put(
                 C::Subs_32_addsub_imm,
                 &[O::reg(R::WZR), O::reg(R::W9), O::imm(0)],
@@ -580,8 +587,8 @@ impl Emitter<'_> {
                         )?;
                     }
                     return self.a.put(
-                        C::Cpy_minus1_z_p,
-                        &[z(d, arr), O::pred(R::P1, PredQual::Zero)],
+                        C::Cpy_z_p_i,
+                        &[z(d, arr), O::pred(R::P1, PredQual::Zero), O::simm(-1)],
                     );
                 }
                 self.a
@@ -622,8 +629,8 @@ impl Emitter<'_> {
                     ],
                 )?;
                 self.a.put(
-                    C::Cpy_minus1_z_p,
-                    &[z(d, arr), O::pred(R::P1, PredQual::Zero)],
+                    C::Cpy_z_p_i,
+                    &[z(d, arr), O::pred(R::P1, PredQual::Zero), O::simm(-1)],
                 )
             }
             Packed::SveDestructive(code, arr, commutative) => {

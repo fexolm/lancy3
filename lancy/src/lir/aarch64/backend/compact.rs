@@ -35,11 +35,12 @@ impl Emitter<'_> {
         for offset in (0..self.config.bytes).step_by(lanes * size) {
             self.sve_widen_group(mask, 17, size, offset, true)?;
             self.a.put(
-                C::Cmplt_p_p_zi0,
+                C::Cmplt_p_p_zi,
                 &[
                     O::vec(R::P1, A::S),
                     O::pred(R::P4, PredQual::Zero),
                     z(17, A::S),
+                    O::imm(0),
                 ],
             )?;
             self.sve_widen_group(value, 16, size, offset, false)?;
