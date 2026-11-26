@@ -491,3 +491,10 @@
 - Тесты: `language.rs::literal_locals_and_arms_take_the_usize_type_rust_infers` (`while i < xs.len()`, `let mut i: usize = 0`, `back - 1` ниже нуля — паника в debug и перенос в release как в Rust, ветви `0`/`xs.len()`; 4 бэкенда, cargo debug и release; до исправления все четыре ядра не компилировались); юнит `flow::tests::literal_locals_take_the_usize_type_of_their_uses` (контрпримеры: затенённое имя, `i32`-счётчик, суффиксный литерал).
 - Остаётся на 7.2 (`Reg<T>`): литералы других типов (`let x = 0` рядом с `u8`/`i64`), вывод через вызовы и возвращаемые значения, слова пакетов шире `i32`, `debug::Constant` vs `hir::Constant`, SIMD на реестре.
 - Проверки: `cargo +1.94.1 xtask ci --quick` зелёный.
+
+### Ф7 — точка возобновления (фаза не закрыта)
+- Сделано: 7.6 (b0c2b20), 7.1a гигиена/детерминизм/рекурсия (5fabc5a), 7.4 (51b1920), 7.3 (78402e6), 7.5 частично (bfc59c0), 7.2a (5cfb6e9). Полный `cargo +1.94.1 xtask ci` на 5cfb6e9 зелёный.
+- Осталось, по порядку:
+  1. **7.1 нормализатор `kast/`** (MAC-06, MAC-09, MAC-12, MAC-18, MAC-20, MAC-21, MAC-23, MAC-24): один разбор тела в нормализованное дерево с `NodeId`, `resolve.rs`, `types.rs`, `stage.rs`, эмиттеры `emit/{ir,eval,print}.rs`; удалить `scalar/flow.rs` (включая `flow::key` по адресу; `usize_locals` из 7.2a перенести в `types.rs`), `scalar/lower/source.rs`, `import/region.rs::Collect`; trybuild на каждый неподдерживаемый узел. Там же MAC-19 (`api.rs`, один `PublicApi` для `scalar/abi.rs` и `import.rs`) и остаток MAC-10 (сжатые отладочные точки, тест-бенчмарк размера развёртки: проба helper+body = 40 399 байт на 5cfb6e9).
+  2. **7.2 `Reg<T>`** (MAC-07 остаток, MAC-02, SPL-12): литералы и локалы других целых типов, слова пакетов Rust-вызова шире `i32`, слияние `debug::Constant`/`hir::Constant`, SIMD-методы на реестре `frontend::intrinsics` (MAC-13 остаток).
+  3. `__SpliceOpaqueMethod` — убрать после модели типов 7.2.
