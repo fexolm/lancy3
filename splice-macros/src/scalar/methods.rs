@@ -166,7 +166,7 @@ pub(crate) fn publish(
         debug_names,
         body: &analysis,
         fish: TokenStream::new(),
-        loop_kind: None,
+        loops: Vec::new(),
         region_depth: 0,
         source_fault: None,
         evaluator_return: None,

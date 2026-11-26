@@ -23,6 +23,7 @@ pub(super) fn analyze(body: &Body<'_>) -> Stages {
         body,
         stages: Stages::default(),
         patterns: vec![false; body.decls.len()],
+        loops: Vec::new(),
     };
     loop {
         let before = pass.stages.locals.len() + pass.stages.loops.len();
@@ -38,6 +39,8 @@ struct Pass<'b, 'a> {
     stages: Stages,
     /// The stage of each pattern-bound declaration in the current pass.
     patterns: Vec<bool>,
+    /// The labels and ids of the enclosing loops, innermost last.
+    loops: Vec<(Option<String>, NodeId)>,
 }
 
 impl Pass<'_, '_> {
@@ -133,10 +136,12 @@ impl Pass<'_, '_> {
                 }
                 result
             }
-            Expr::Loop(repeat) => self.staged_loop(e, &repeat.body, control, false),
+            Expr::Loop(repeat) => {
+                self.staged_loop(e, repeat.label.as_ref(), &repeat.body, control, false)
+            }
             Expr::While(repeat) => {
                 let cond = self.expr(&repeat.cond, control);
-                self.staged_loop(e, &repeat.body, control, cond)
+                self.staged_loop(e, repeat.label.as_ref(), &repeat.body, control, cond)
             }
             Expr::ForLoop(repeat) => {
                 let iterable = self.expr(&repeat.expr, control);
@@ -147,7 +152,7 @@ impl Pass<'_, '_> {
                     || (matches!(&*repeat.expr, Expr::Range(_))
                         && self.stages.loops.contains(&self.body.expr(e)));
                 self.bind(&repeat.pat, induction);
-                self.staged_loop(e, &repeat.body, control, iterable)
+                self.staged_loop(e, repeat.label.as_ref(), &repeat.body, control, iterable)
             }
             Expr::Call(call) => {
                 self.operands(&call.args, control)
@@ -163,7 +168,11 @@ impl Pass<'_, '_> {
                 // A return leaves the generated function through the IR.
                 true
             }
-            Expr::Break(exit) => exit.expr.as_ref().is_some_and(|e| self.expr(e, control)),
+            Expr::Break(exit) => {
+                let value = exit.expr.as_ref().is_some_and(|e| self.expr(e, control));
+                self.leaves_staged_loop(exit.label.as_ref()) || value
+            }
+            Expr::Continue(next) => self.leaves_staged_loop(next.label.as_ref()),
             Expr::Unary(unary) => self.expr(&unary.expr, control),
             Expr::Paren(inner) => self.expr(&inner.expr, control),
             Expr::Group(inner) => self.expr(&inner.expr, control),
@@ -188,10 +197,35 @@ impl Pass<'_, '_> {
             .fold(false, |runtime, e| self.expr(e, control) | runtime)
     }
 
-    fn staged_loop(&mut self, e: &Expr, body: &Block, control: bool, cond: bool) -> bool {
+    /// Whether a jump to the loop labeled `label` crosses into a staged
+    /// loop: a Rust loop cannot jump to a label that only the generated IR
+    /// has, so the loops it leaves are staged as well.
+    fn leaves_staged_loop(&self, label: Option<&syn::Lifetime>) -> bool {
+        let Some(label) = label else { return false };
+        let name = label.ident.to_string();
+        let target = self
+            .loops
+            .iter()
+            .rposition(|(loop_label, _)| loop_label.as_deref() == Some(&name));
+        target.is_some_and(|index| {
+            index + 1 < self.loops.len() && self.stages.loops.contains(&self.loops[index].1)
+        })
+    }
+
+    fn staged_loop(
+        &mut self,
+        e: &Expr,
+        label: Option<&syn::Label>,
+        body: &Block,
+        control: bool,
+        cond: bool,
+    ) -> bool {
         let id = self.body.expr(e);
         let runtime = self.stages.loops.contains(&id) || cond;
+        self.loops
+            .push((label.map(|label| label.name.ident.to_string()), id));
         let content = self.block(body, control || runtime);
+        self.loops.pop();
         if runtime || content {
             self.stages.loops.insert(id);
             true

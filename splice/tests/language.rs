@@ -1521,3 +1521,113 @@ fn primitive_types_may_be_spelled_by_their_core_path() {
     }
     splice_testkit::each_backend!(B => check::<B>());
 }
+
+/// MAC-12: labeled loops, `break 'label` and `continue 'label` lower to IR
+/// across runtime loops, unrolled loops and loops the jump stages.
+mod labels {
+    use splice::kernel;
+
+    #[kernel(print)]
+    pub(super) fn first_pair(xs: &[i32], target: i32) -> i32 {
+        let mut found = -1;
+        let mut i = 0;
+        'outer: while i < xs.len() {
+            let mut j = 0;
+            while j < xs.len() {
+                if j > i && xs[i] + xs[j] == target {
+                    found = (i * 10 + j) as i32;
+                    break 'outer;
+                }
+                j += 1;
+            }
+            i += 1;
+        }
+        found
+    }
+
+    #[kernel]
+    pub(super) fn rows_without_negatives(xs: &[i32], width: i32) -> i32 {
+        let mut rows = 0;
+        let mut row = 0;
+        'rows: while row * width < xs.len() as i32 {
+            row += 1;
+            for column in 0..width {
+                if xs[((row - 1) * width + column) as usize] < 0 {
+                    continue 'rows;
+                }
+            }
+            rows += 1;
+        }
+        rows
+    }
+
+    #[kernel]
+    pub(super) fn steps_found(#[comptime] plan: &[i32], xs: &[i32]) -> i32 {
+        let mut hits = 0;
+        'steps: for &step in plan {
+            for &x in xs {
+                if x == step {
+                    hits += 1;
+                    continue 'steps;
+                }
+            }
+            hits += 100;
+        }
+        hits
+    }
+
+    #[kernel]
+    pub(super) fn stop_early(xs: &[i32], #[comptime] tries: i32) -> i32 {
+        let mut i = 0;
+        let mut sum = 0;
+        'scan: while i < xs.len() {
+            for _try in 0..tries {
+                if xs[i] == 0 {
+                    break 'scan;
+                }
+                sum += xs[i];
+            }
+            i += 1;
+        }
+        sum
+    }
+}
+
+#[test]
+fn labeled_loops_lower_to_ir() {
+    use labels::{first_pair, rows_without_negatives, steps_found, stop_early};
+    fn check<B: Codegen<Output: Executable>>() {
+        let pair = first_pair::build::<B>(first_pair::BuildArgs {}).unwrap();
+        let rows =
+            rows_without_negatives::build::<B>(rows_without_negatives::BuildArgs {}).unwrap();
+        let plan = [3, 9, 4];
+        let steps = steps_found::build::<B>(steps_found::BuildArgs { plan: &plan }).unwrap();
+        let stop = stop_early::build::<B>(stop_early::BuildArgs { tries: 2 }).unwrap();
+        for xs in [&[][..], &[1, 2, 3, 4], &[4, -1, 3, 0, 2, 2], &[5, 3, 0, 9]] {
+            for target in [5, 7, 100] {
+                assert_eq!(
+                    pair.call(first_pair::CallArgs { xs, target }),
+                    Ok(first_pair(xs, target))
+                );
+            }
+            for width in [1, 2] {
+                assert_eq!(
+                    rows.call(rows_without_negatives::CallArgs { xs, width }),
+                    Ok(rows_without_negatives(xs, width))
+                );
+            }
+            assert_eq!(
+                steps.call(steps_found::CallArgs { xs }),
+                Ok(steps_found(&plan, xs))
+            );
+            assert_eq!(
+                stop.call(stop_early::CallArgs { xs }),
+                Ok(stop_early(xs, 2))
+            );
+        }
+    }
+    splice_testkit::each_backend!(B => check::<B>());
+    let printed = labels::first_pair::print().unwrap();
+    assert!(printed.contains("'outer: while"), "{printed}");
+    assert!(printed.contains("break 'outer"), "{printed}");
+}

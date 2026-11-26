@@ -316,7 +316,7 @@ pub(super) fn expand(root: Path, native: &mut ItemFn, print: bool) -> Result<Tok
         debug_names,
         body: &body,
         fish: emit!(#fish),
-        loop_kind: None,
+        loops: Vec::new(),
         region_depth: 0,
         source_fault: None,
         evaluator_return: None,

@@ -1,5 +1,5 @@
 //! Lower staged branches, matches, and loops into scalar control flow.
-use super::{Binding, LoopKind, Lower, Scalar, Stage, Value, err};
+use super::{Binding, LoopFrame, LoopKind, Lower, Scalar, Stage, Value, err};
 use proc_macro2::TokenStream;
 use quote::ToTokens;
 use syn::spanned::Spanned;
@@ -175,43 +175,50 @@ impl Lower<'_> {
             }),
         ))
     }
-    pub(super) fn loop_jump(&self, e: &Expr, again: bool) -> Result<Value> {
-        let Some(kind) = self.loop_kind else {
-            return err(e, "break/continue outside a kernel loop");
-        };
+    pub(super) fn loop_jump(
+        &self,
+        e: &Expr,
+        label: Option<&syn::Lifetime>,
+        again: bool,
+    ) -> Result<Value> {
+        let frame = &self.jump_target(e, label)?[0];
         let (target, flag) = if again {
-            (emit!(__splice_loop_next), emit!(__splice_reaches_next))
+            (&frame.next, &frame.reaches_next)
         } else {
-            (emit!(__splice_loop_end), emit!(__splice_reaches_end))
+            (&frame.end, &frame.reaches_end)
         };
-        let record = matches!(kind, LoopKind::Unrolled).then(|| emit!(#flag = true;));
+        let record = (frame.kind == LoopKind::Unrolled).then(|| emit!(#flag = true;));
         let region = self.region();
         Ok(Value::new(
             Stage::Never,
             emit!({#record __splice_builder.jump(#target)?; break #region;}),
         ))
     }
-    pub(super) fn loop_expr(&self, cond: Option<&Expr>, body: &Block) -> Result<Value> {
+    pub(super) fn loop_expr(
+        &self,
+        label: Option<&syn::Label>,
+        cond: Option<&Expr>,
+        body: &Block,
+    ) -> Result<Value> {
         let mut scope = self.nested_region();
-        scope.loop_kind = Some(LoopKind::Runtime);
+        let LoopFrame { next, end, .. } = scope.enter_loop(label, LoopKind::Runtime);
         let test = if let Some(e) = cond {
             let reg = scope.operand(e, Scalar::Bool)?;
             let point = scope.debug_point(e.span());
-            emit!({#point let __splice_cond = #reg; __splice_builder.branch_if_false(__splice_cond, __splice_loop_end)?;})
+            emit!({#point let __splice_cond = #reg; __splice_builder.branch_if_false(__splice_cond, #end)?;})
         } else {
             emit!()
         };
         let body_code = scope.block(body)?.code;
-        let contents =
-            scope.delimit(emit!(#test #body_code; __splice_builder.jump(__splice_loop_next)?;));
+        let contents = scope.delimit(emit!(#test #body_code; __splice_builder.jump(#next)?;));
         let code = emit!({
-            let (__splice_loop_next, __splice_loop_end) = (__splice_builder.label()?, __splice_builder.label()?);
-            __splice_builder.jump(__splice_loop_next)?;
-            __splice_builder.mark(__splice_loop_next)?;
+            let (#next, #end) = (__splice_builder.label()?, __splice_builder.label()?);
+            __splice_builder.jump(#next)?;
+            __splice_builder.mark(#next)?;
             #contents
-            __splice_builder.mark(__splice_loop_end)?;
+            __splice_builder.mark(#end)?;
         });
-        let stage = if cond.is_none() && !contains_break(body) {
+        let stage = if cond.is_none() && !contains_break(body, label) {
             Stage::Never
         } else {
             Stage::Unit
@@ -293,7 +300,7 @@ impl Lower<'_> {
         read: TokenStream,
     ) -> Result<Value> {
         let mut scope = self.nested_region();
-        scope.loop_kind = Some(LoopKind::Runtime);
+        let LoopFrame { next, end, .. } = scope.enter_loop(f.label.as_ref(), LoopKind::Runtime);
         let id = &pat.ident;
         scope
             .bindings
@@ -302,25 +309,25 @@ impl Lower<'_> {
         let point = scope.debug_point(f.for_token.span);
         let body = scope.block(&f.body)?.code;
         let root = self.root;
-        let contents = scope.delimit(emit!(#body; __splice_builder.jump(__splice_loop_next)?;));
+        let contents = scope.delimit(emit!(#body; __splice_builder.jump(#next)?;));
         Ok(Value::unit(emit!({
             #setup
             let #index = __splice_builder.copy(__splice_start)?;
-            let (__splice_for_head, __splice_for_body, __splice_loop_next, __splice_loop_end) =
+            let (__splice_for_head, __splice_for_body, #next, #end) =
                 (__splice_builder.label()?, __splice_builder.label()?, __splice_builder.label()?, __splice_builder.label()?);
             __splice_builder.jump(__splice_for_head)?;
             __splice_builder.mark(__splice_for_head)?;
             let __splice_cond = __splice_builder.binary(#root::hir::Binary::Lt, #index, __splice_limit)?;
-            __splice_builder.branch(__splice_cond, __splice_for_body, __splice_loop_end)?;
+            __splice_builder.branch(__splice_cond, __splice_for_body, #end)?;
             __splice_builder.mark(__splice_for_body)?;
             #read
             #point
             #contents
-            __splice_builder.mark(__splice_loop_next)?;
+            __splice_builder.mark(#next)?;
             let __splice_next = __splice_builder.binary(#root::hir::Binary::Add, #index, __splice_one)?;
             __splice_builder.assign(#index, __splice_next)?;
             __splice_builder.jump(__splice_for_head)?;
-            __splice_builder.mark(__splice_loop_end)?;
+            __splice_builder.mark(#end)?;
         })))
     }
     fn unroll(&self, f: &syn::ExprForLoop) -> Result<Value> {
@@ -341,27 +348,33 @@ impl Lower<'_> {
             ));
         }
         let mut scope = bindings.nested_region();
-        scope.loop_kind = Some(LoopKind::Unrolled);
+        let LoopFrame {
+            next,
+            end,
+            reaches_next,
+            reaches_end,
+            ..
+        } = scope.enter_loop(f.label.as_ref(), LoopKind::Unrolled);
         let body = scope.block(&f.body)?;
-        let fallthrough =
-            (body.stage != Stage::Never).then(|| emit!(__splice_reaches_next = true;));
+        let fallthrough = (body.stage != Stage::Never).then(|| emit!(#reaches_next = true;));
         let iteration = scope.delimit(emit!(#body; #fallthrough));
         let region = self.region();
+        // An iteration that leaves an outer loop reaches neither exit.
         Ok(Value::unit(emit!({
-            let __splice_loop_end = __splice_builder.label()?;
-            let mut __splice_reaches_end = false;
-            let mut __splice_reaches_next = true;
+            let #end = __splice_builder.label()?;
+            let mut #reaches_end = false;
+            let mut #reaches_next = true;
             for #pat in #iterable {
                 #step
-                let __splice_loop_next = __splice_builder.label()?;
-                __splice_reaches_next = false;
+                let #next = __splice_builder.label()?;
+                #reaches_next = false;
                 #captures
                 #iteration
-                __splice_builder.mark(__splice_loop_next)?;
-                if !__splice_reaches_next { break; }
+                __splice_builder.mark(#next)?;
+                if !#reaches_next { break; }
             }
-            __splice_builder.mark(__splice_loop_end)?;
-            if !__splice_reaches_next && !__splice_reaches_end { break #region; }
+            __splice_builder.mark(#end)?;
+            if !#reaches_next && !#reaches_end { break #region; }
         })))
     }
     pub(super) fn match_expr(&self, m: &syn::ExprMatch, hint: Option<Scalar>) -> Result<Value> {
@@ -540,17 +553,35 @@ fn contains_transfer(body: &Block) -> bool {
     visitor.0
 }
 
-fn contains_break(body: &Block) -> bool {
-    struct Find(bool);
-    impl<'ast> Visit<'ast> for Find {
-        fn visit_expr_break(&mut self, _: &'ast syn::ExprBreak) {
-            self.0 = true;
-        }
-        fn visit_expr_while(&mut self, _: &'ast syn::ExprWhile) {}
-        fn visit_expr_for_loop(&mut self, _: &'ast syn::ExprForLoop) {}
-        fn visit_expr_loop(&mut self, _: &'ast syn::ExprLoop) {}
+/// Whether a `break` in `body` leaves the loop labeled `label`: an
+/// unlabeled one outside nested loops, or one naming the label anywhere.
+fn contains_break(body: &Block, label: Option<&syn::Label>) -> bool {
+    struct Find<'a> {
+        label: Option<&'a syn::Lifetime>,
+        nested: usize,
+        found: bool,
     }
-    let mut find = Find(false);
+    impl<'ast> Visit<'ast> for Find<'_> {
+        fn visit_expr_break(&mut self, exit: &'ast syn::ExprBreak) {
+            self.found |= match &exit.label {
+                None => self.nested == 0,
+                Some(label) => self.label == Some(label),
+            };
+            syn::visit::visit_expr_break(self, exit);
+        }
+        fn visit_expr(&mut self, expr: &'ast Expr) {
+            let nested = matches!(expr, Expr::While(_) | Expr::ForLoop(_) | Expr::Loop(_));
+            self.nested += usize::from(nested);
+            syn::visit::visit_expr(self, expr);
+            self.nested -= usize::from(nested);
+        }
+        fn visit_item(&mut self, _: &'ast syn::Item) {}
+    }
+    let mut find = Find {
+        label: label.map(|label| &label.name),
+        nested: 0,
+        found: false,
+    };
     find.visit_block(body);
-    find.0
+    find.found
 }

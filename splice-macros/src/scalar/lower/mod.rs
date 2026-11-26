@@ -113,10 +113,23 @@ impl Value {
         Self::new(Stage::Unit, code)
     }
 }
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum LoopKind {
     Runtime,
     Unrolled,
+}
+
+/// An enclosing loop: its Rust label and the names of its generated IR
+/// labels and, when unrolled, of the flags that record which of its exits
+/// an iteration reached.
+#[derive(Clone)]
+pub(super) struct LoopFrame {
+    label: Option<String>,
+    kind: LoopKind,
+    next: Ident,
+    end: Ident,
+    reaches_next: Ident,
+    reaches_end: Ident,
 }
 
 #[derive(Clone)]
@@ -134,7 +147,8 @@ pub(super) struct Lower<'a> {
     pub(super) labels: &'a std::cell::Cell<u32>,
     pub(super) debug_names: std::collections::BTreeMap<String, Ident>,
     pub(super) fish: TokenStream,
-    pub(super) loop_kind: Option<LoopKind>,
+    /// Enclosing loops, innermost last.
+    pub(super) loops: Vec<LoopFrame>,
     pub(super) region_depth: usize,
     pub(super) source_fault: Option<syn::Lifetime>,
     pub(super) evaluator_return: Option<syn::Lifetime>,
@@ -187,6 +201,44 @@ impl Lower<'_> {
             proc_macro2::Span::mixed_site(),
         )
     }
+    /// Enter a loop with Rust `label`; the frame names its generated labels.
+    fn enter_loop(&mut self, label: Option<&syn::Label>, kind: LoopKind) -> LoopFrame {
+        let n = self.labels.get();
+        self.labels.set(n + 1);
+        let name = |part: &str| {
+            quote::format_ident!(
+                "__splice_{part}_{n}",
+                span = proc_macro2::Span::mixed_site()
+            )
+        };
+        let frame = LoopFrame {
+            label: label.map(|label| label.name.ident.to_string()),
+            kind,
+            next: name("loop_next"),
+            end: name("loop_end"),
+            reaches_next: name("reaches_next"),
+            reaches_end: name("reaches_end"),
+        };
+        self.loops.push(frame.clone());
+        frame
+    }
+
+    /// The loop a `break`/`continue` with `label` leaves, and the frames
+    /// it crosses, innermost last.
+    fn jump_target(&self, at: &Expr, label: Option<&syn::Lifetime>) -> Result<&[LoopFrame]> {
+        let index = match label {
+            None => self.loops.len().checked_sub(1),
+            Some(label) => self
+                .loops
+                .iter()
+                .rposition(|frame| frame.label.as_deref() == Some(&label.ident.to_string())),
+        };
+        match index {
+            Some(index) => Ok(&self.loops[index..]),
+            None => err(at, "break/continue outside a kernel loop"),
+        }
+    }
+
     // Each runtime arm builds independently. A host-selected return, break
     // or continue can skip the rest of that arm without skipping its siblings.
     fn region(&self) -> syn::Lifetime {
@@ -708,15 +760,15 @@ impl Lower<'_> {
             Expr::Block(x) if x.label.is_none() => self.block_with_hint(&x.block, hint),
             Expr::If(x) => self.if_expr(x, hint),
             Expr::Match(x) => self.match_expr(x, hint),
-            Expr::While(x) if x.label.is_none() => {
-                self.staged_loop(e, || self.loop_expr(Some(&x.cond), &x.body))
+            Expr::While(x) => self.staged_loop(e, || {
+                self.loop_expr(x.label.as_ref(), Some(&x.cond), &x.body)
+            }),
+            Expr::Loop(x) => {
+                self.staged_loop(e, || self.loop_expr(x.label.as_ref(), None, &x.body))
             }
-            Expr::Loop(x) if x.label.is_none() => {
-                self.staged_loop(e, || self.loop_expr(None, &x.body))
-            }
-            Expr::ForLoop(x) if x.label.is_none() => self.staged_loop(e, || self.for_expr(x)),
-            Expr::Continue(x) if x.label.is_none() => self.loop_jump(e, true),
-            Expr::Break(x) if x.label.is_none() && x.expr.is_none() => self.loop_jump(e, false),
+            Expr::ForLoop(x) => self.staged_loop(e, || self.for_expr(x)),
+            Expr::Continue(x) => self.loop_jump(e, x.label.as_ref(), true),
+            Expr::Break(x) if x.expr.is_none() => self.loop_jump(e, x.label.as_ref(), false),
             Expr::Return(x) => {
                 let value = match &x.expr {
                     Some(arg) => self.expr_with_hint(arg, Some(self.result_type))?,

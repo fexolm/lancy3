@@ -1,40 +1,47 @@
-error: unsupported scalar kernel expression; use comptime!(...) for host calculations
-  --> tests/ui/unsupported_kernels.rs:11:5
+error: initializer must produce a scalar value
+  --> tests/ui/unsupported_kernels.rs:12:9
    |
-11 | /     'outer: loop {
-12 | |         n += 1;
-13 | |         if n > 3 {
-14 | |             break 'outer;
-15 | |         }
-16 | |     }
-   | |_____^
+12 |     let last = loop {
+   |         ^^^^
 
 error: this function is not a Splice kernel; mark it #[kernel(rust)] to publish it as a Rust call
- --> tests/ui/unsupported_kernels.rs:9:4
-  |
-9 | fn labeled(#[comptime] plan: &Plan, x: i32) -> i32 {
-  |    ^^^^^^^
+  --> tests/ui/unsupported_kernels.rs:10:4
+   |
+10 | fn loop_value(#[comptime] plan: &Plan, x: i32) -> i32 {
+   |    ^^^^^^^^^^
 
 error: runtime parameters must be i32, bool, usize or a slice of u16, u32, i32, i64, f32, or f64
-  --> tests/ui/unsupported_kernels.rs:21:12
+  --> tests/ui/unsupported_kernels.rs:22:12
    |
-21 | fn wide(x: i64) -> i32 {
+22 | fn wide(x: i64) -> i32 {
    |            ^^^
 
 error: this function is not a Splice kernel; mark it #[kernel(rust)] to publish it as a Rust call
-  --> tests/ui/unsupported_kernels.rs:21:4
+  --> tests/ui/unsupported_kernels.rs:22:4
    |
-21 | fn wide(x: i64) -> i32 {
+22 | fn wide(x: i64) -> i32 {
    |    ^^^^
 
 error: a Splice kernel calls functions by path, not through a local function value
-  --> tests/ui/unsupported_kernels.rs:28:5
+  --> tests/ui/unsupported_kernels.rs:29:5
    |
-28 |     callback(x)
+29 |     callback(x)
    |     ^^^^^^^^
 
 error: this function is not a Splice kernel; mark it #[kernel(rust)] to publish it as a Rust call
-  --> tests/ui/unsupported_kernels.rs:27:4
+  --> tests/ui/unsupported_kernels.rs:28:4
    |
-27 | fn use_callback(#[comptime] callback: fn(i32) -> i32, x: i32) -> i32 {
+28 | fn use_callback(#[comptime] callback: fn(i32) -> i32, x: i32) -> i32 {
    |    ^^^^^^^^^^^^
+
+error: `print` cannot show a labeled break or continue across an unrolled loop
+  --> tests/ui/unsupported_kernels.rs:40:17
+   |
+40 |                 continue 'steps;
+   |                 ^^^^^^^^^^^^^^^
+
+error: this function is not a Splice kernel; mark it #[kernel(rust)] to publish it as a Rust call
+  --> tests/ui/unsupported_kernels.rs:34:4
+   |
+34 | fn printed_steps(#[comptime] plan: &[i32], xs: &[i32]) -> i32 {
+   |    ^^^^^^^^^^^^^

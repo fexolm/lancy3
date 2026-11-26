@@ -171,7 +171,7 @@ impl Lower<'_> {
                 if !matches!(&*f.expr, Expr::Range(_)) && self.iterated_buffer(&f.expr).is_none() {
                     let iter = self.plan_iterable(&f.expr)?;
                     let mut scope = self.with_pattern(pat);
-                    scope.loop_kind = Some(LoopKind::Unrolled);
+                    scope.enter_loop(f.label.as_ref(), LoopKind::Unrolled);
                     let body = scope.source_body(&f.body)?;
                     return Ok(emit!({ let mut text = ::std::string::String::new();
                         let enclosing = __splice_source.enter_unrolled();
@@ -191,7 +191,8 @@ impl Lower<'_> {
                     }));
                 }
                 let mut scope = self.nested_region();
-                scope.loop_kind = Some(LoopKind::Runtime);
+                scope.enter_loop(f.label.as_ref(), LoopKind::Runtime);
+                let label = label_text(f.label.as_ref());
                 crate::scalar::bind_pattern(
                     &mut scope.bindings,
                     pat,
@@ -200,21 +201,23 @@ impl Lower<'_> {
                 let range = self.source_syntax(&f.expr)?;
                 let body = isolate(braces(scope.source_body(&f.body)?));
                 return Ok(emit!(
-                    ::std::format!("for {} in {} {}", ::core::stringify!(#pat), #range, #body)
+                    ::std::format!("{}for {} in {} {}", #label, ::core::stringify!(#pat), #range, #body)
                 ));
             }
             Expr::While(w) => {
                 let mut scope = self.nested_region();
                 let cond = scope.isolated_expr(&w.cond, Some(Scalar::Bool))?;
-                scope.loop_kind = Some(LoopKind::Runtime);
+                scope.enter_loop(w.label.as_ref(), LoopKind::Runtime);
+                let label = label_text(w.label.as_ref());
                 let body = isolate(braces(scope.source_body(&w.body)?));
-                return Ok(emit!(::std::format!("while {} {}", #cond, #body)));
+                return Ok(emit!(::std::format!("{}while {} {}", #label, #cond, #body)));
             }
             Expr::Loop(l) => {
                 let mut scope = self.nested_region();
-                scope.loop_kind = Some(LoopKind::Runtime);
+                scope.enter_loop(l.label.as_ref(), LoopKind::Runtime);
+                let label = label_text(l.label.as_ref());
                 let body = isolate(braces(scope.source_body(&l.body)?));
-                return Ok(emit!(::std::format!("loop {}", #body)));
+                return Ok(emit!(::std::format!("{}loop {}", #label, #body)));
             }
             Expr::MethodCall(method) => {
                 if let Expr::Index(index) = &*method.receiver
@@ -280,15 +283,32 @@ impl Lower<'_> {
                 }
             }
             Expr::Return(_) | Expr::Break(_) | Expr::Continue(_) => {
-                let (transfer, label) = match e {
-                    Expr::Return(_) => (emit!(Return), None),
-                    Expr::Break(_) => (emit!(Break), Some(emit!(break_unrolled))),
-                    _ => (emit!(Continue), Some(emit!(continue_unrolled))),
+                let (transfer, unrolled, label) = match e {
+                    Expr::Return(_) => (emit!(Return), None, None),
+                    Expr::Break(b) => (emit!(Break), Some(emit!(break_unrolled)), b.label.as_ref()),
+                    Expr::Continue(c) => (
+                        emit!(Continue),
+                        Some(emit!(continue_unrolled)),
+                        c.label.as_ref(),
+                    ),
+                    _ => unreachable!(),
                 };
-                let text = if let Some(label) = label
-                    && matches!(self.loop_kind, Some(LoopKind::Unrolled))
+                let frames = match unrolled {
+                    Some(_) => self.jump_target(e, label)?,
+                    None => &[],
+                };
+                // The listing shows an unrolled loop as its iterations; only
+                // the innermost one is left by an unlabeled jump.
+                if label.is_some() && frames.iter().any(|frame| frame.kind == LoopKind::Unrolled) {
+                    return err(
+                        e,
+                        "`print` cannot show a labeled break or continue across an unrolled loop",
+                    );
+                }
+                let text = if let Some(unrolled) = unrolled
+                    && frames[0].kind == LoopKind::Unrolled
                 {
-                    emit!(__splice_source.#label())
+                    emit!(__splice_source.#unrolled())
                 } else {
                     self.source_syntax(e)?
                 };
@@ -428,4 +448,9 @@ fn isolate(body: TokenStream) -> TokenStream {
         __splice_source.transfer = transfer;
         text
     })
+}
+
+/// The `'label: ` prefix of a printed loop.
+fn label_text(label: Option<&syn::Label>) -> String {
+    label.map_or_else(String::new, |label| format!("{}: ", label.name))
 }
