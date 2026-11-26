@@ -1,10 +1,5 @@
 //! Staged scalar functions. Rust executes host code while symbolic runtime
 //! expressions append register operations and control-flow edges to the IR.
-// Generated locals and labels share a hygiene context across fragments. Tokens
-// interpolated from the kernel keep their original spans and lexical bindings.
-macro_rules! emit {
-    ($($tokens:tt)*) => { quote::quote_spanned!(proc_macro2::Span::mixed_site()=> $($tokens)*) };
-}
 
 pub(crate) mod abi;
 pub(crate) mod lower;

@@ -6,10 +6,6 @@ use std::collections::HashSet;
 use syn::visit_mut::VisitMut;
 use syn::{Error, Expr, FnArg, GenericParam, ItemFn, Meta, Path, Result, ReturnType, Stmt, Type};
 
-macro_rules! emit {
-    ($($tokens:tt)*) => { quote::quote_spanned!(proc_macro2::Span::mixed_site()=> $($tokens)*) };
-}
-
 mod captures;
 mod opaque;
 mod region;
@@ -175,10 +171,10 @@ fn expand(root: &Path, mut function: ItemFn, checks: Vec<Check>) -> Result<Token
     };
     elision.visit_result(&mut output);
     let opaque_result = opaque::contains(&output);
-    let host_generics = used_generics(&elision.generics, stage.iter().map(|(_, ty)| ty));
-    let (_, host_args, host_where) = host_generics.split_for_impl();
-    let call_generics = used_generics(&elision.generics, call.iter().map(|(_, ty)| ty));
-    let (_, call_args, call_where) = call_generics.split_for_impl();
+    let api = crate::api::PublicApi::new(&vis, &sig.generics, &elision.generics, &stage, &call);
+    let (_, host_args, _) = api.host.split_for_impl();
+    let call_generics = &api.call;
+    let (_, call_args, _) = call_generics.split_for_impl();
     let environment_generics =
         used_generics(&elision.generics, environment.iter().map(|(_, ty)| ty));
     let (_, environment_args, environment_where) = environment_generics.split_for_impl();
@@ -237,8 +233,8 @@ fn expand(root: &Path, mut function: ItemFn, checks: Vec<Check>) -> Result<Token
     };
 
     let host_fields: Vec<_> = stage.iter().map(|(n, t)| emit!(#n: #t)).collect();
+    let api_items = &api.items;
     let host_names: Vec<_> = stage.iter().map(|(n, _)| n).collect();
-    let call_fields = call.iter().map(|(n, t)| emit!(#n: #t));
     let call_names = call.iter().map(|(n, _)| n);
     let environment_fields = environment.iter().map(|(n, t)| emit!(#n: #t));
     let environment_names = environment.iter().map(|(n, _)| n);
@@ -268,10 +264,7 @@ fn expand(root: &Path, mut function: ItemFn, checks: Vec<Check>) -> Result<Token
         #(#patterns)*
         #expr #semi
     };
-    let mut ir_generics = sig.generics.clone();
-    ir_generics.params = elision.generics.params.iter().filter(|p| {
-        !matches!(p, GenericParam::Lifetime(l) if !host_generics.lifetimes().any(|h| h.lifetime == l.lifetime) && !sig.generics.lifetimes().any(|h| h.lifetime == l.lifetime))
-    }).cloned().collect();
+    let mut ir_generics = api.entry.clone();
     ir_generics
         .make_where_clause()
         .predicates
@@ -307,7 +300,7 @@ fn expand(root: &Path, mut function: ItemFn, checks: Vec<Check>) -> Result<Token
             environment: &environment_type,
             declared: &sig.generics,
             invocation: &invoke_generics,
-            arguments: &call_generics,
+            arguments: call_generics,
             output: &mut output,
             body: &call_body,
         }
@@ -351,8 +344,7 @@ fn expand(root: &Path, mut function: ItemFn, checks: Vec<Check>) -> Result<Token
                 ::core::result::Result::Err(#root::BuildError::staging("a Rust import cannot run during specialization"))
             }
 
-            #vis struct BuildArgs #host_generics #host_where { #(#vis #host_fields,)* }
-            #vis struct CallArgs #call_generics #call_where { #(#vis #call_fields,)* }
+            #api_items
             #[doc(hidden)]
             #vis struct Signature #signature_generics (
                 ::core::marker::PhantomData<fn(#(*const &#marker_lifetimes (),)* #(*const #type_params),*)>

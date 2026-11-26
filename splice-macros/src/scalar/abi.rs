@@ -136,18 +136,12 @@ pub(super) fn generate(
         ReturnType::Default => syn::parse_quote!(()),
     };
     elision.visit_result(&mut result_ty);
-    let generics = &elision.generics;
-    let host_generics = used_generics(generics, host.iter().map(|(_, ty)| ty));
-    let (_, host_args, host_where) = host_generics.split_for_impl();
+    let api = crate::api::PublicApi::new(vis, &sig.generics, &elision.generics, &host, &runtime);
+    let api_items = &api.items;
+    let (_, host_args, _) = api.host.split_for_impl();
     let build_type = emit!(BuildArgs #host_args);
-    let host_fields = host.iter().map(|(name, ty)| emit!(#vis #name: #ty));
-    let build_struct =
-        emit!(#vis struct BuildArgs #host_generics #host_where { #(#host_fields,)* });
-
-    let call_generics = used_generics(generics, runtime.iter().map(|(_, ty)| ty));
-    let (call_decls, call_args, call_where) = call_generics.split_for_impl();
-    let call_fields = runtime.iter().map(|(name, ty)| emit!(#vis #name: #ty));
-    let call_struct = emit!(#vis struct CallArgs #call_generics #call_where { #(#call_fields,)* });
+    let call_generics = api.call.clone();
+    let (call_decls, call_args, _) = call_generics.split_for_impl();
     let mut signature_generics = call_generics.clone();
     signature_generics.params = signature_generics
         .params
@@ -252,15 +246,11 @@ pub(super) fn generate(
             }
         }
     };
-    let mut build_generics = sig.generics.clone();
-    build_generics.params = generics.params.iter().filter(|p| {
-        !matches!(p, GenericParam::Lifetime(l) if !host_generics.lifetimes().any(|h| h.lifetime == l.lifetime) && !sig.generics.lifetimes().any(|h| h.lifetime == l.lifetime))
-    }).cloned().collect();
     Abi {
         build_type,
         signature,
-        build_generics,
-        items: emit!(#build_struct #call_struct #marker #implementation),
+        build_generics: api.entry,
+        items: emit!(#api_items #marker #implementation),
     }
 }
 

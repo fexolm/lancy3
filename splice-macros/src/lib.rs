@@ -5,6 +5,14 @@ use syn::{
     parse_macro_input, parse_quote, punctuated::Punctuated,
 };
 
+// Generated locals and labels share a hygiene context across fragments.
+// Tokens interpolated from the kernel keep their original spans and
+// lexical bindings.
+macro_rules! emit {
+    ($($tokens:tt)*) => { quote::quote_spanned!(proc_macro2::Span::mixed_site()=> $($tokens)*) };
+}
+
+mod api;
 mod comptime_key;
 mod declaration;
 mod import;
