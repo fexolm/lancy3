@@ -15,6 +15,10 @@
 //!   also needs `libpolly-19-dev`).
 //! - `doc`: rustdoc for the workspace with warnings denied.
 //! - `bench [ARGS]`: the backend comparison bench, with ARGS for Criterion.
+//! - `bench-tables [--run] [SIMD...]`: Markdown tables of the backend bench
+//!   with the commit, toolchain versions and the ISA of each profile. With
+//!   `--run`, first benchmark every given profile (default: all that this
+//!   host runs) into its own Criterion baseline.
 //!
 //! Cargo runs with the toolchain that started `cargo xtask`, so
 //! `cargo +1.94.1 xtask ci` checks with the CI toolchain.
@@ -75,6 +79,12 @@ fn run(args: &[String]) -> Result {
             options.finish()?;
             test(debug, &target)
         }
+        "bench-tables" => {
+            let run = options.flag("--run");
+            let profiles = std::mem::take(&mut options.positional);
+            options.finish()?;
+            bench_tables(run, &profiles)
+        }
         "profile" => {
             let simd = options
                 .positional
@@ -100,7 +110,8 @@ fn run(args: &[String]) -> Result {
 
 fn usage() -> String {
     "usage: cargo xtask ci [--quick] | lint | test [--debug] [--target T] | features | \
-     profile SIMD [--target T] [--expect-bytes N] | static-llvm | doc | bench [ARGS]"
+     profile SIMD [--target T] [--expect-bytes N] | static-llvm | doc | bench [ARGS] | \
+     bench-tables [--run] [SIMD...]"
         .into()
 }
 
@@ -244,7 +255,9 @@ fn features() -> Result {
     ]))
 }
 
-fn profile(simd: &str, target: &[String], bytes: Option<String>) -> Result {
+/// What `SPLICE_SIMD=simd` selects here: the profile and width, then the
+/// enabled extensions. `Err` carries why the host cannot run it.
+fn probe(simd: &str, target: &[String]) -> Result<std::result::Result<(String, String), String>> {
     let mut probe = cargo(&["run", "--quiet", "--release", "-p", "splice-target"]);
     probe
         .args(["--example", "simd_profile"])
@@ -253,20 +266,25 @@ fn profile(simd: &str, target: &[String], bytes: Option<String>) -> Result {
     let output = probe
         .output()
         .map_err(|error| format!("{probe:?}: {error}"))?;
-    let selected = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-    if !output.status.success() && bytes.is_none() {
-        eprintln!(
-            "xtask: skipping SPLICE_SIMD={simd}: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
-        return Ok(());
-    }
     if !output.status.success() {
-        return Err(format!(
-            "SPLICE_SIMD={simd} is unavailable: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        ));
+        return Ok(Err(String::from_utf8_lossy(&output.stderr).trim().into()));
     }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut lines = stdout.lines();
+    let selected = lines.next().unwrap_or_default().trim().to_owned();
+    let features = lines.next().unwrap_or_default().trim().to_owned();
+    Ok(Ok((selected, features)))
+}
+
+fn profile(simd: &str, target: &[String], bytes: Option<String>) -> Result {
+    let selected = match probe(simd, target)? {
+        Ok((selected, _)) => selected,
+        Err(error) if bytes.is_none() => {
+            eprintln!("xtask: skipping SPLICE_SIMD={simd}: {error}");
+            return Ok(());
+        }
+        Err(error) => return Err(format!("SPLICE_SIMD={simd} is unavailable: {error}")),
+    };
     eprintln!("xtask: SPLICE_SIMD={simd} selects {selected}");
     if let Some(bytes) = bytes
         && !selected.ends_with(&format!(", {bytes} bytes"))
@@ -279,6 +297,266 @@ fn profile(simd: &str, target: &[String], bytes: Option<String>) -> Result {
     }
     command.args(target).env("SPLICE_SIMD", simd);
     status(command)
+}
+
+const ALL_PROFILES: &[&str] = &["avx512", "avx2", "sse", "sve2", "sve", "neon"];
+/// One sample setting for every row, so all numbers are comparable.
+const BENCH_SETTINGS: &[&str] = &[
+    "--sample-size",
+    "20",
+    "--warm-up-time",
+    "1",
+    "--measurement-time",
+    "3",
+];
+const BACKENDS: &[(&str, &str)] = &[
+    ("lancy", "Lancy"),
+    ("cranelift", "Cranelift"),
+    ("llvm_manual_simd", "LLVM"),
+];
+
+/// SPL-05: tables of the backend bench, regenerated rather than edited.
+/// Each profile's results live in the Criterion baseline `splice-SIMD`,
+/// next to the ISA it ran with.
+fn bench_tables(run: bool, profiles: &[String]) -> Result {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+    let criterion = env::var_os("CARGO_TARGET_DIR")
+        .map_or_else(|| root.join("target"), PathBuf::from)
+        .join("criterion");
+    let profiles: Vec<String> = if profiles.is_empty() {
+        ALL_PROFILES.iter().map(|&p| p.into()).collect()
+    } else {
+        profiles.to_vec()
+    };
+    let mut sections = Vec::new();
+    for simd in &profiles {
+        let isa = criterion.join(format!("splice-{simd}.isa"));
+        if run {
+            let (selected, features) = match probe(simd, &[])? {
+                Ok(found) => found,
+                Err(error) => {
+                    eprintln!("xtask: skipping SPLICE_SIMD={simd}: {error}");
+                    continue;
+                }
+            };
+            let mut bench = cargo(&["bench", "-p", "splice-kernel", "--features", "llvm"]);
+            bench
+                .args(["--bench", "backends", "--", "--noplot", "--save-baseline"])
+                .arg(format!("splice-{simd}"))
+                .args(BENCH_SETTINGS)
+                .env("SPLICE_SIMD", simd);
+            status(bench)?;
+            std::fs::write(&isa, format!("{selected}\n{features}\n"))
+                .map_err(|e| format!("{}: {e}", isa.display()))?;
+        }
+        let Ok(description) = std::fs::read_to_string(&isa) else {
+            continue;
+        };
+        let rows = baseline(&criterion, &format!("splice-{simd}"))?;
+        if !rows.is_empty() {
+            sections.push((simd.clone(), description, rows));
+        }
+    }
+    if sections.is_empty() {
+        return Err(format!(
+            "no baselines in {}; run with --run",
+            criterion.display()
+        ));
+    }
+    print!("{}", render(root, &sections));
+    Ok(())
+}
+
+/// `(group, backend) -> median ns` of one Criterion baseline.
+type Rows = std::collections::BTreeMap<(String, String), f64>;
+
+fn baseline(criterion: &Path, name: &str) -> Result<Rows> {
+    let mut rows = Rows::new();
+    let mut pending = vec![criterion.to_path_buf()];
+    while let Some(dir) = pending.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.filter_map(|entry| entry.ok()) {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            if path.file_name().is_some_and(|file| file == name) {
+                let read = |file| {
+                    std::fs::read_to_string(path.join(file))
+                        .map_err(|e| format!("{}: {e}", path.display()))
+                };
+                let benchmark = read("benchmark.json")?;
+                let estimates = read("estimates.json")?;
+                let group = json_string(&benchmark, "group_id");
+                let function = json_string(&benchmark, "function_id");
+                let median = estimates
+                    .split_once("\"median\":")
+                    .and_then(|(_, rest)| json_number(rest, "point_estimate"));
+                if let (Some(group), Some(function), Some(median)) = (group, function, median) {
+                    rows.insert((group, function), median);
+                }
+            } else {
+                pending.push(path);
+            }
+        }
+    }
+    Ok(rows)
+}
+
+fn json_string(json: &str, key: &str) -> Option<String> {
+    let (_, rest) = json.split_once(&format!("\"{key}\":\""))?;
+    Some(rest.split_once('"')?.0.to_owned())
+}
+
+fn json_number(json: &str, key: &str) -> Option<f64> {
+    let (_, rest) = json.split_once(&format!("\"{key}\":"))?;
+    let end = rest.find([',', '}']).unwrap_or(rest.len());
+    rest[..end].trim().parse().ok()
+}
+
+fn render(root: &Path, sections: &[(String, String, Rows)]) -> String {
+    use std::fmt::Write;
+    let run = |program: &str, args: &[&str]| {
+        Command::new(program)
+            .args(args)
+            .current_dir(root)
+            .output()
+            .ok()
+            .filter(|output| output.status.success())
+            .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_owned())
+            .unwrap_or_else(|| "unknown".into())
+    };
+    let commit = run("git", &["rev-parse", "--short", "HEAD"]);
+    let dirty = run("git", &["status", "--porcelain", "--untracked-files=no"]);
+    let rustc = run(
+        &env::var("RUSTC").unwrap_or_else(|_| "rustc".into()),
+        &["--version"],
+    );
+    let llvm = env::var_os("LLVM_SYS_191_PREFIX")
+        .map(|prefix| PathBuf::from(prefix).join("bin/llvm-config"))
+        .unwrap_or_else(|| "llvm-config-19".into());
+    let llvm = run(&llvm.to_string_lossy(), &["--version"]);
+    let lock = std::fs::read_to_string(root.join("Cargo.lock")).unwrap_or_default();
+    let cranelift = lock
+        .split("[[package]]")
+        .find(|package| package.contains("name = \"cranelift-codegen\""))
+        .and_then(|package| json_like_value(package, "version"))
+        .unwrap_or_else(|| "unknown".into());
+    let cpu = std::fs::read_to_string("/proc/cpuinfo")
+        .ok()
+        .and_then(|info| {
+            info.lines()
+                .find_map(|line| line.strip_prefix("model name"))
+                .map(|name| name.trim_start_matches([' ', '\t', ':']).to_owned())
+        })
+        .unwrap_or_else(|| env::consts::ARCH.into());
+
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
+        "<!-- Generated by `cargo xtask bench-tables`; do not edit by hand. -->\n"
+    );
+    let _ = writeln!(
+        out,
+        "- Commit: `{commit}`{}",
+        if dirty.is_empty() || dirty == "unknown" {
+            ""
+        } else {
+            " (with uncommitted changes)"
+        }
+    );
+    let _ = writeln!(
+        out,
+        "- Toolchain: {rustc}; LLVM {llvm}; Cranelift {cranelift}"
+    );
+    let _ = writeln!(out, "- CPU: {cpu}");
+    let _ = writeln!(
+        out,
+        "- Criterion `{}`; median time. LLVM is `LlvmManualSimd` (loop and SLP \
+         vectorizers off).",
+        BENCH_SETTINGS.join(" ")
+    );
+    for (simd, description, rows) in sections {
+        let mut lines = description.lines();
+        let selected = lines.next().unwrap_or_default();
+        let features = lines.next().unwrap_or_default();
+        let _ = writeln!(out, "\n### `SPLICE_SIMD={simd}`: {selected}\n");
+        let _ = writeln!(
+            out,
+            "Every backend gets the same extensions: {}.\n",
+            if features.is_empty() {
+                "the baseline only"
+            } else {
+                features
+            }
+        );
+        for route in ["build", "from_ir"] {
+            let mut workloads: Vec<&str> = rows
+                .keys()
+                .filter_map(|(group, _)| {
+                    group
+                        .strip_suffix(&format!("/execute/{route}"))
+                        .or_else(|| group.strip_suffix(&format!("/compile/{route}")))
+                })
+                .collect();
+            workloads.sort_unstable();
+            workloads.dedup();
+            if workloads.is_empty() {
+                continue;
+            }
+            let _ = writeln!(
+                out,
+                "Route `{route}`: compile (with installation), then a warm call.\n"
+            );
+            let mut header = String::from("| Workload |");
+            let mut rule = String::from("| --- |");
+            for stage in ["compile", "call"] {
+                for (_, name) in BACKENDS {
+                    let _ = write!(header, " {name} {stage} |");
+                    rule.push_str(" ---: |");
+                }
+            }
+            let _ = writeln!(out, "{header}\n{rule}");
+            for workload in workloads {
+                let _ = write!(out, "| `{workload}` |");
+                for stage in ["compile", "execute"] {
+                    for (backend, _) in BACKENDS {
+                        let group = format!("{workload}/{stage}/{route}");
+                        let time = rows.get(&(group, (*backend).into()));
+                        let _ = write!(out, " {} |", time.map_or("–".into(), |&ns| duration(ns)));
+                    }
+                }
+                out.push('\n');
+            }
+            out.push('\n');
+        }
+    }
+    out
+}
+
+fn json_like_value(toml: &str, key: &str) -> Option<String> {
+    let (_, rest) = toml.split_once(&format!("{key} = \""))?;
+    Some(rest.split_once('"')?.0.to_owned())
+}
+
+fn duration(ns: f64) -> String {
+    let (value, unit) = if ns >= 1e6 {
+        (ns / 1e6, "ms")
+    } else if ns >= 1e3 {
+        (ns / 1e3, "µs")
+    } else {
+        (ns, "ns")
+    };
+    let digits = if value >= 100.0 {
+        0
+    } else if value >= 10.0 {
+        1
+    } else {
+        2
+    };
+    format!("{value:.digits$} {unit}")
 }
 
 /// BE-05: with LLVM linked statically, its GDB JIT interface and splice-jit's
