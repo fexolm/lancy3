@@ -49,17 +49,13 @@ impl Scalar {
         if let Some(t) = simd::vector_type(ty, types) {
             return Some(t);
         }
-        let name = match ty {
-            syn::Type::Path(p) if p.qself.is_none() => p.path.get_ident()?,
-            _ => return None,
-        };
-        [
-            ("i32", Self::Int),
-            ("bool", Self::Bool),
-            ("usize", Self::Index),
-        ]
-        .into_iter()
-        .find_map(|(ty, scalar)| (name == ty).then_some(scalar))
+        use crate::kast::types::Primitive;
+        match Primitive::of(ty)? {
+            Primitive::I32 => Some(Self::Int),
+            Primitive::Bool => Some(Self::Bool),
+            Primitive::Usize => Some(Self::Index),
+            _ => None,
+        }
     }
 }
 

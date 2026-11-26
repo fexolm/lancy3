@@ -6,7 +6,79 @@
 //! so a shadowed name is a different local.
 use super::{Body, DeclId, Origin, Param};
 use syn::visit::Visit;
-use syn::{BinOp, Expr, Lit, Pat};
+use syn::{BinOp, Expr, Lit, Pat, Type};
+
+/// A primitive Rust type, the one table every classification of the macro
+/// reads.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Primitive {
+    Bool,
+    Char,
+    I8,
+    I16,
+    I32,
+    I64,
+    I128,
+    Isize,
+    U8,
+    U16,
+    U32,
+    U64,
+    U128,
+    Usize,
+    F32,
+    F64,
+}
+
+impl Primitive {
+    const ALL: [(Self, &'static str); 16] = [
+        (Self::Bool, "bool"),
+        (Self::Char, "char"),
+        (Self::I8, "i8"),
+        (Self::I16, "i16"),
+        (Self::I32, "i32"),
+        (Self::I64, "i64"),
+        (Self::I128, "i128"),
+        (Self::Isize, "isize"),
+        (Self::U8, "u8"),
+        (Self::U16, "u16"),
+        (Self::U32, "u32"),
+        (Self::U64, "u64"),
+        (Self::U128, "u128"),
+        (Self::Usize, "usize"),
+        (Self::F32, "f32"),
+        (Self::F64, "f64"),
+    ];
+
+    /// The primitive `ty` names: `i32`, or the full path
+    /// `[::]core::primitive::i32` (also through `std`).
+    pub(crate) fn of(ty: &Type) -> Option<Self> {
+        let Type::Path(path) = ty else { return None };
+        if path.qself.is_some() {
+            return None;
+        }
+        let path = &path.path;
+        let name = match path.segments.len() {
+            1 if path.leading_colon.is_none() => &path.segments[0],
+            3 if matches!(path.segments[0].ident.to_string().as_str(), "core" | "std")
+                && path.segments[1].ident == "primitive" =>
+            {
+                &path.segments[2]
+            }
+            _ => return None,
+        };
+        if !name.arguments.is_none() {
+            return None;
+        }
+        Self::named(&name.ident.to_string())
+    }
+
+    pub(crate) fn named(name: &str) -> Option<Self> {
+        Self::ALL
+            .iter()
+            .find_map(|(primitive, spelling)| (*spelling == name).then_some(*primitive))
+    }
+}
 
 pub(super) fn usize_decls(body: &Body<'_>) -> Vec<bool> {
     let mut collect = Collect {
@@ -148,9 +220,7 @@ fn is_usize(body: &Body<'_>, found: &[bool], e: &Expr) -> bool {
     match e {
         Expr::Paren(p) => is_usize(body, found, &p.expr),
         Expr::Group(g) => is_usize(body, found, &g.expr),
-        Expr::Cast(c) => {
-            matches!(&*c.ty, syn::Type::Path(t) if t.qself.is_none() && t.path.is_ident("usize"))
-        }
+        Expr::Cast(c) => Primitive::of(&c.ty) == Some(Primitive::Usize),
         Expr::Lit(l) => matches!(&l.lit, Lit::Int(int) if int.suffix() == "usize"),
         Expr::MethodCall(m) => m.method == "len" && m.args.is_empty() && slice(body, &m.receiver),
         Expr::Binary(b) if arithmetic(&b.op) => {

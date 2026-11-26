@@ -31,23 +31,25 @@ impl Elem {
             Self::Param(_) | Self::Index(_) => unreachable!("named primitive element"),
         }
     }
-    fn named(name: &str) -> Option<Self> {
-        [
-            Self::U16,
-            Self::U32,
-            Self::I32,
-            Self::I64,
-            Self::F32,
-            Self::F64,
-        ]
-        .into_iter()
-        .find(|v| v.names().0 == name)
+    fn of(primitive: crate::kast::types::Primitive) -> Option<Self> {
+        use crate::kast::types::Primitive;
+        Some(match primitive {
+            Primitive::U16 => Self::U16,
+            Primitive::U32 => Self::U32,
+            Primitive::I32 => Self::I32,
+            Primitive::I64 => Self::I64,
+            Primitive::F32 => Self::F32,
+            Primitive::F64 => Self::F64,
+            _ => return None,
+        })
     }
     pub(crate) fn parse(t: &Type, types: &[&Ident]) -> Option<Self> {
+        if let Some(primitive) = crate::kast::types::Primitive::of(t) {
+            return Self::of(primitive);
+        }
         let Type::Path(p) = t else { return None };
         let name = p.path.get_ident()?;
-        Self::named(&name.to_string())
-            .or_else(|| types.iter().position(|ty| *ty == name).map(Self::Param))
+        types.iter().position(|ty| *ty == name).map(Self::Param)
     }
     pub(crate) fn tokens(self, root: &Path, types: &[&Ident]) -> TokenStream {
         match self {
@@ -105,8 +107,10 @@ fn splat_element(expr: &Expr) -> Option<Elem> {
         Expr::Unary(u) if matches!(u.op, syn::UnOp::Neg(_)) => splat_element(&u.expr),
         Expr::Cast(c) => Elem::parse(&c.ty, &[]),
         Expr::Lit(l) => match &l.lit {
-            syn::Lit::Int(v) => Elem::named(v.suffix()),
-            syn::Lit::Float(v) => Elem::named(v.suffix()),
+            syn::Lit::Int(v) => crate::kast::types::Primitive::named(v.suffix()).and_then(Elem::of),
+            syn::Lit::Float(v) => {
+                crate::kast::types::Primitive::named(v.suffix()).and_then(Elem::of)
+            }
             _ => None,
         },
         _ => None,

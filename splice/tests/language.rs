@@ -1490,3 +1490,34 @@ fn intrinsic_methods_stage_the_registered_operation_or_their_body() {
         assert_eq!(code.call(fallback::CallArgs { x, y }), Ok(x.max(y)));
     }
 }
+
+/// MAC-09: a primitive named by its full path is the same type.
+#[kernel]
+fn primitive_paths(
+    xs: &[::core::primitive::i32],
+    scale: core::primitive::i32,
+    flag: std::primitive::bool,
+) -> ::core::primitive::i32 {
+    let index: ::core::primitive::usize = 0;
+    let first = xs[index];
+    if flag { first * scale } else { first }
+}
+
+#[test]
+fn primitive_types_may_be_spelled_by_their_core_path() {
+    fn check<B: Codegen<Output: Executable>>() {
+        let code = primitive_paths::build::<B>(primitive_paths::BuildArgs {}).unwrap();
+        for flag in [false, true] {
+            let xs = [7, 1];
+            assert_eq!(
+                code.call(primitive_paths::CallArgs {
+                    xs: &xs,
+                    scale: 3,
+                    flag
+                }),
+                Ok(primitive_paths(&xs, 3, flag))
+            );
+        }
+    }
+    splice_testkit::each_backend!(B => check::<B>());
+}

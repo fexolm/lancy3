@@ -29,11 +29,7 @@ impl TraitMethodKind {
 }
 
 pub(in crate::scalar) fn primitive_type(ty: &Type) -> bool {
-    matches!(ty, Type::Path(path) if path.qself.is_none() && path.path.get_ident().is_some_and(|name| {
-        matches!(name.to_string().as_str(),
-            "bool" | "char" | "i8" | "i16" | "i32" | "i64" | "i128" | "isize"
-            | "u8" | "u16" | "u32" | "u64" | "u128" | "usize" | "f32" | "f64")
-    }))
+    crate::kast::types::Primitive::of(ty).is_some()
 }
 
 pub(crate) fn trait_defaults(

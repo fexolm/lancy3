@@ -57,28 +57,7 @@ pub(super) fn rewrite(expr: &mut Expr, signature: &Signature, fields: &[Ident]) 
 }
 
 fn scalar_copy(ty: &Type) -> bool {
-    let Type::Path(ty) = ty else { return false };
-    ty.path.get_ident().is_some_and(|name| {
-        matches!(
-            name.to_string().as_str(),
-            "bool"
-                | "char"
-                | "isize"
-                | "usize"
-                | "i8"
-                | "i16"
-                | "i32"
-                | "i64"
-                | "i128"
-                | "u8"
-                | "u16"
-                | "u32"
-                | "u64"
-                | "u128"
-                | "f32"
-                | "f64"
-        )
-    })
+    crate::kast::types::Primitive::of(ty).is_some()
 }
 
 pub(super) fn pattern_bindings(pat: &Pat) -> Vec<Ident> {

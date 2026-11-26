@@ -272,6 +272,20 @@ mod tests {
         assert!(total <= BUDGET, "{total} tokens, budget {BUDGET}");
     }
 
+    /// MAC-09: a marker is recognized by its whole path.
+    #[test]
+    fn foreign_attributes_are_not_splice_markers() {
+        let item = quote!(impl Plan { fn read(#[x::comptime] value: i32) -> i32 { value } });
+        let error = expand(syn::parse_quote!(::splice), Lowering::Ir, false, item).unwrap_err();
+        assert!(
+            error.to_string().contains("expected #[comptime]"),
+            "{error}"
+        );
+        let item =
+            quote!(impl Plan { #[splice::kernel(rust)] fn read(value: i32) -> i32 { value } });
+        assert!(expand(syn::parse_quote!(::splice), Lowering::Ir, false, item).is_ok());
+    }
+
     #[test]
     fn methods_must_be_published_by_their_block() {
         for item in [
@@ -456,11 +470,17 @@ fn hoist_lint_attributes(attrs: &mut Vec<Attribute>, sig: &mut Signature) {
     }
 }
 
+/// Whether `attr` is the Splice marker `name`. `comptime`, `columns` and
+/// `intrinsic` are inert names only a `#[kernel]` item reads; `kernel` is
+/// also the attribute macro, which a method can name by its path in Splice.
+/// `#[cuda::kernel]` or `#[x::comptime]` is someone else's attribute.
 fn marker(attr: &Attribute, name: &str) -> bool {
-    attr.path()
-        .segments
-        .last()
-        .is_some_and(|segment| segment.ident == name)
+    let path = attr.path();
+    path.is_ident(name)
+        || (name == "kernel"
+            && path.segments.len() == 2
+            && path.segments[0].ident == "splice"
+            && path.segments[1].ident == name)
 }
 
 /// The name of the method's `#[intrinsic("name")]`, validated by
