@@ -676,7 +676,8 @@ pub(super) fn expand(root: Path, native: &mut ItemFn, print: bool) -> Result<Tok
         impl #name::__SpliceDefinition {
             #evaluator
             #source_body_method
-            #[allow(unreachable_code, clippy::too_many_arguments)]
+            // A staging error replaces the operation that would read its operands.
+            #[allow(unreachable_code, unused_variables, clippy::too_many_arguments)]
             fn __splice_inline #outer_generic (#(#outer_call_decls,)* #context_decls __splice_builder:&mut #factory)
                 -> #root::Result<#hir::Reg> #outer_where {
                 let __splice_guard = #support::enter_expansion()?;

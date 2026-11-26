@@ -220,7 +220,8 @@ pub(crate) fn publish(
     });
     let stage = emit! {
         #[doc(hidden)]
-        #[allow(unreachable_code, clippy::too_many_arguments)]
+        // A staging error replaces the operation that would read its operands.
+            #[allow(unreachable_code, unused_variables, clippy::too_many_arguments)]
         #visibility fn #stage_name #generics (#(#declarations,)* #frame __splice_builder: &mut dyn #root::frontend::KernelBuilder)
             -> #root::Result<#hir::Reg> #where_
         {
