@@ -118,17 +118,13 @@ pub fn aggregate<T, const N: usize>(
     Ok(fields)
 }
 
-pub fn has_destructor<T>(_: fn() -> T) -> bool {
-    std::mem::needs_drop::<T>()
-}
-
-/// An aggregate of a kernel that cannot run as a Rust call: its destructor
-/// would be skipped, so the kernel does not compile.
+/// An aggregate local of a kernel: the IR cannot run its destructor, so a
+/// type with drop glue does not compile.
 pub fn dropless_aggregate<T>(_: fn() -> T) {
     const {
         assert!(
             !std::mem::needs_drop::<T>(),
-            "a Rust aggregate with drop glue requires a Rust call, and this kernel cannot run as one"
+            "a kernel cannot build an aggregate with drop glue; build it in a Rust function and call that"
         );
     }
 }

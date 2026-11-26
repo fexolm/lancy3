@@ -34,8 +34,7 @@ impl Drop for Guard {
     fn drop(&mut self) {}
 }
 
-// A `usize` result cannot travel through a Rust call, so the destructor
-// of `guard` could not run.
+// The IR cannot run the destructor of `guard`.
 #[kernel]
 fn guarded_index(x: i32) -> usize {
     let guard = Guard { value: x };

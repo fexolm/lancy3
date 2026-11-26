@@ -6,17 +6,11 @@ use syn::visit::Visit;
 use syn::visit_mut::VisitMut;
 use syn::{Attribute, Block, Error, FnArg, Item, Meta, Path, Result, Signature, Visibility};
 
-use crate::import::Lowering;
 mod selector;
 pub(crate) use selector::{trait_method_dispatch, trait_method_eval_dispatch};
 
 /// `print` (`#[kernel(print)]`) applies to a free function lowered to IR.
-pub(crate) fn expand(
-    root: Path,
-    lowering: Lowering,
-    print: bool,
-    tokens: TokenStream,
-) -> Result<TokenStream> {
+pub(crate) fn expand(root: Path, print: bool, tokens: TokenStream) -> Result<TokenStream> {
     let method_error = "put #[kernel] on the enclosing impl or trait to publish its methods";
     let item = match syn::parse2::<Item>(tokens.clone()) {
         Ok(Item::Verbatim(_)) | Err(_)
@@ -34,15 +28,11 @@ pub(crate) fn expand(
             hoist_lint_attributes(&mut function.attrs, &mut function.sig);
             signature(&function.sig)?;
             item_markers(&mut function.attrs, false)?;
-            crate::import::expand_function(root, function, lowering, print)
+            crate::scalar::expand(root, &mut function, print)
         }
         Item::Impl(_) | Item::Trait(_) if print => Err(Error::new_spanned(
             tokens,
             "#[kernel(print)] publishes `print` for a free function",
-        )),
-        Item::Impl(_) | Item::Trait(_) if lowering == Lowering::Rust => Err(Error::new_spanned(
-            tokens,
-            "put #[kernel(rust)] on individual methods of a #[kernel] impl or trait",
         )),
         Item::Impl(mut implementation) => {
             item_markers(&mut implementation.attrs, false)?;
@@ -51,33 +41,21 @@ pub(crate) fn expand(
             let trait_path = implementation.trait_.as_ref().map(|(_, path, _)| path);
             for member in &mut implementation.items {
                 if let syn::ImplItem::Fn(method) = member {
-                    let lowering = method_lowering(&mut method.attrs)?;
+                    method_markers(&method.attrs)?;
                     let gates = configuration(&method.attrs)?;
-                    let shape = crate::scalar::methods::stage_shape(
+                    let intrinsic = intrinsic_name(&method.attrs)?;
+                    let generated = crate::scalar::methods::publish(
                         &root,
                         &method.sig,
-                        Some(&method.block),
-                        trait_path.is_none().then_some(&method.vis),
-                    );
-                    for item in shape {
-                        specialized.push(syn::ImplItem::Verbatim(quote!(#(#[#gates])* #item)));
-                    }
-                    let intrinsic = intrinsic_name(&method.attrs)?;
-                    let generated = match lowering {
-                        Lowering::Ir => crate::scalar::methods::publish(
-                            &root,
-                            &method.sig,
-                            &method.block,
-                            &method.vis,
-                            trait_path.is_some(),
-                            intrinsic.as_ref(),
-                        )
-                        .unwrap_or_else(|error| {
-                            errors.push(error);
-                            Vec::new()
-                        }),
-                        Lowering::Rust => Vec::new(),
-                    };
+                        &method.block,
+                        &method.vis,
+                        trait_path.is_some(),
+                        intrinsic.as_ref(),
+                    )
+                    .unwrap_or_else(|error| {
+                        errors.push(error);
+                        Vec::new()
+                    });
                     if let Some(path) = trait_path
                         && !generated.is_empty()
                     {
@@ -131,25 +109,17 @@ pub(crate) fn expand(
             let mut errors = Errors::default();
             for member in &mut declaration.items {
                 if let syn::TraitItem::Fn(method) = member {
-                    let lowering = method_lowering(&mut method.attrs)?;
+                    method_markers(&method.attrs)?;
                     let gates = configuration(&method.attrs)?;
-                    let (kind, defaults) = match lowering {
-                        Lowering::Ir => {
-                            crate::scalar::methods::trait_defaults(&root, &method.sig, &trait_owner)
-                                .unwrap_or_else(|error| {
-                                    errors.push(error);
-                                    (crate::scalar::methods::TraitMethodKind::Rust, Vec::new())
-                                })
-                        }
-                        Lowering::Rust => {
-                            (crate::scalar::methods::TraitMethodKind::Rust, Vec::new())
-                        }
-                    };
+                    let (kind, defaults) =
+                        crate::scalar::methods::trait_defaults(&root, &method.sig, &trait_owner)
+                            .unwrap_or_else(|error| {
+                                errors.push(error);
+                                (crate::scalar::methods::TraitMethodKind::Rust, Vec::new())
+                            });
                     selectors.push((method.sig.ident.clone(), kind, gates.clone()));
-                    for hidden in
-                        crate::scalar::methods::stage_shape(&root, &method.sig, None, None)
-                            .into_iter()
-                            .chain(defaults)
+                    for hidden in std::iter::once(crate::scalar::methods::stage_shape(&method.sig))
+                        .chain(defaults)
                     {
                         specialized.push(syn::TraitItem::Verbatim(quote!(#(#[#gates])* #hidden)));
                     }
@@ -218,14 +188,9 @@ mod tests {
         ];
         for item in items {
             let expand = || {
-                expand(
-                    syn::parse_quote!(::splice),
-                    Lowering::Ir,
-                    false,
-                    item.clone(),
-                )
-                .unwrap()
-                .to_string()
+                expand(syn::parse_quote!(::splice), false, item.clone())
+                    .unwrap()
+                    .to_string()
             };
             assert_eq!(expand(), expand());
         }
@@ -263,9 +228,7 @@ mod tests {
         ];
         let total: usize = probe
             .into_iter()
-            .map(|item| {
-                tokens(expand(syn::parse_quote!(::splice), Lowering::Ir, false, item).unwrap())
-            })
+            .map(|item| tokens(expand(syn::parse_quote!(::splice), false, item).unwrap()))
             .sum();
         // 7 213 tokens at the commit that introduced the budget.
         const BUDGET: usize = 7_400;
@@ -276,14 +239,13 @@ mod tests {
     #[test]
     fn foreign_attributes_are_not_splice_markers() {
         let item = quote!(impl Plan { fn read(#[x::comptime] value: i32) -> i32 { value } });
-        let error = expand(syn::parse_quote!(::splice), Lowering::Ir, false, item).unwrap_err();
+        let error = expand(syn::parse_quote!(::splice), false, item).unwrap_err();
         assert!(
             error.to_string().contains("expected #[comptime]"),
             "{error}"
         );
-        let item =
-            quote!(impl Plan { #[splice::kernel(rust)] fn read(value: i32) -> i32 { value } });
-        assert!(expand(syn::parse_quote!(::splice), Lowering::Ir, false, item).is_ok());
+        let item = quote!(impl Plan { #[cuda::kernel] fn read(value: i32) -> i32 { value } });
+        assert!(expand(syn::parse_quote!(::splice), false, item).is_ok());
     }
 
     #[test]
@@ -305,7 +267,7 @@ mod tests {
             ),
             quote!(impl Plan { #[kernel] fn value() -> i32 { 1 } }),
         ] {
-            let error = expand(syn::parse_quote!(::splice), Lowering::Ir, false, item).unwrap_err();
+            let error = expand(syn::parse_quote!(::splice), false, item).unwrap_err();
             assert!(
                 error.to_string().contains("enclosing impl or trait"),
                 "{error}"
@@ -319,17 +281,6 @@ fn configuration(attrs: &[Attribute]) -> Result<Vec<TokenStream>> {
         .iter()
         .filter_map(|attr| crate::scalar::configuration(&attr.meta).transpose())
         .collect()
-}
-
-/// An ordinary trait occupies only the type namespace. A published trait
-/// additionally imports a selector in the macro namespace.
-pub(crate) fn trait_dispatch(
-    root: &Path,
-    path: &Path,
-    published: TokenStream,
-    ordinary: TokenStream,
-) -> TokenStream {
-    select_trait(root, path, quote!(#published, #ordinary))
 }
 
 fn select_trait(root: &Path, path: &Path, input: TokenStream) -> TokenStream {
@@ -397,21 +348,15 @@ impl Errors {
     }
 }
 
-/// A method of a `#[kernel]` block is lowered unless it carries
-/// `#[kernel(rust)]`; the marker is consumed here.
-fn method_lowering(attrs: &mut Vec<Attribute>) -> Result<Lowering> {
-    let Some(index) = attrs.iter().position(|attr| marker(attr, "kernel")) else {
-        return Ok(Lowering::Ir);
-    };
-    let attr = attrs.remove(index);
-    match &attr.meta {
-        Meta::List(list) if list.parse_args::<syn::Ident>().is_ok_and(|id| id == "rust") => {
-            Ok(Lowering::Rust)
-        }
-        _ => Err(Error::new_spanned(
+/// Every method of a `#[kernel]` block is lowered with the block. A plain
+/// Rust method that kernels call belongs in an ordinary `impl`.
+fn method_markers(attrs: &[Attribute]) -> Result<()> {
+    match attrs.iter().find(|attr| marker(attr, "kernel")) {
+        Some(attr) => Err(Error::new_spanned(
             attr,
-            "put #[kernel] only on the enclosing impl or trait; a method accepts #[kernel(rust)]",
+            "put #[kernel] only on the enclosing impl or trait; keep a Rust method in an ordinary impl",
         )),
+        None => Ok(()),
     }
 }
 

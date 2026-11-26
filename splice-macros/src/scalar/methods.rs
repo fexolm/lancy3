@@ -71,7 +71,7 @@ pub(crate) fn publish(
             _ => {
                 return Err(syn::Error::new_spanned(
                     ty,
-                    "a Splice method returns (), i32 or bool; mark it #[kernel(rust)] to keep it in Rust",
+                    "a Splice method returns (), i32 or bool; keep a Rust method in an ordinary impl",
                 ));
             }
         },

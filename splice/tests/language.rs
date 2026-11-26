@@ -2,7 +2,6 @@ use splice::simd::Lane;
 use splice::{BuildError, Codegen, Executable, kernel};
 use splice_lancy::Lancy;
 use std::cell::Cell;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 mod formulas {
@@ -503,90 +502,6 @@ fn runtime_argument_to_recursive_comptime_parameter_fails_only_if_reached() {
     splice_testkit::each_backend!(B => check::<B>());
 }
 
-#[kernel(rust)]
-fn first_byte(bytes: &[u8]) -> Option<&u8> {
-    bytes.first()
-}
-
-#[test]
-fn a_rust_result_can_borrow_the_callers_buffer_after_callargs_is_consumed() {
-    macro_rules! check {
-        ($backend:ty) => {{
-            let direct = first_byte::build::<$backend>(first_byte::BuildArgs {}).unwrap();
-            let ir = first_byte::ir().unwrap();
-            let portable = <$backend>::compile(&ir).unwrap();
-            drop(ir);
-            for code in [direct, portable] {
-                let bytes = [14, 27];
-                let first = code
-                    .call(first_byte::CallArgs { bytes: &bytes })
-                    .unwrap()
-                    .unwrap();
-                assert!(std::ptr::eq(first, &bytes[0]));
-                assert_eq!(
-                    code.call(first_byte::CallArgs { bytes: &[] }).unwrap(),
-                    None
-                );
-            }
-        }};
-    }
-    splice_testkit::each_backend!(B => check!(B));
-}
-
-struct Capture {
-    value: i32,
-    drops: Arc<AtomicUsize>,
-}
-
-impl Capture {
-    fn value(&self) -> i32 {
-        self.value
-    }
-}
-
-impl Drop for Capture {
-    fn drop(&mut self) {
-        self.drops.fetch_add(1, Ordering::Relaxed);
-    }
-}
-
-#[kernel(rust)]
-fn captured_value(#[comptime] plan: Capture) -> i32 {
-    plan.value()
-}
-
-#[test]
-fn an_owned_rust_capture_lives_until_the_last_code_or_ir_owner_is_dropped() {
-    macro_rules! check {
-        ($backend:ty) => {{
-            let drops = Arc::new(AtomicUsize::new(0));
-            let capture = |value| Capture {
-                value,
-                drops: Arc::clone(&drops),
-            };
-            let direct =
-                captured_value::build::<$backend>(captured_value::BuildArgs { plan: capture(11) })
-                    .unwrap();
-            let ir = captured_value::ir(capture(43)).unwrap();
-            let portable = <$backend>::compile(&ir).unwrap();
-            let other = <$backend>::compile(&ir).unwrap();
-            assert_eq!(drops.load(Ordering::Relaxed), 0);
-            drop(ir);
-
-            assert_eq!(direct.call(captured_value::CallArgs {}).unwrap(), 11);
-            drop(direct);
-            assert_eq!(drops.load(Ordering::Relaxed), 1);
-            assert_eq!(portable.call(captured_value::CallArgs {}).unwrap(), 43);
-            drop(portable);
-            assert_eq!(drops.load(Ordering::Relaxed), 1);
-            assert_eq!(other.call(captured_value::CallArgs {}).unwrap(), 43);
-            drop(other);
-            assert_eq!(drops.load(Ordering::Relaxed), 2);
-        }};
-    }
-    splice_testkit::each_backend!(B => check!(B));
-}
-
 #[derive(splice::KernelType)]
 struct Threshold {
     min: i32,
@@ -628,91 +543,6 @@ fn a_published_method_uses_its_body_when_the_intrinsic_is_unavailable() {
     }
 
     splice_testkit::each_backend!(B => check::<B>());
-}
-
-#[kernel(rust)]
-fn total(n: usize, value: i32) -> i32 {
-    use std::vec::Vec as Values;
-
-    let mut values: Values<i32> = Values::new();
-    values.resize(n, value);
-    values.iter().copied().fold(0, i32::wrapping_add)
-}
-
-#[test]
-fn a_runtime_collection_uses_rust_allocation_and_arithmetic() {
-    macro_rules! check {
-        ($backend:ty) => {{
-            let ir = total::ir().unwrap();
-            for code in [
-                total::build::<$backend>(total::BuildArgs {}).unwrap(),
-                <$backend>::compile(&ir).unwrap(),
-            ] {
-                for (n, value) in [(0, -3), (4, -7), (3, i32::MAX)] {
-                    assert_eq!(
-                        code.call(total::CallArgs { n, value }).unwrap(),
-                        (n as i32).wrapping_mul(value)
-                    );
-                }
-            }
-        }};
-    }
-    splice_testkit::each_backend!(B => check!(B));
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct Pair(u64, bool);
-
-#[kernel(rust)]
-fn constant<T: Copy + 'static>(#[comptime] value: T) -> T {
-    value
-}
-
-#[test]
-fn an_owned_copy_capture_can_be_returned_on_every_call() {
-    macro_rules! check {
-        ($backend:ty) => {{
-            let value = Pair(1 << 45, true);
-            let direct = constant::build::<$backend, Pair>(constant::BuildArgs { value }).unwrap();
-            let portable = {
-                let ir = constant::ir(value).unwrap();
-                <$backend>::compile(&ir).unwrap()
-            };
-            for code in [direct, portable] {
-                for _ in 0..2 {
-                    assert_eq!(code.call(constant::CallArgs {}).unwrap(), value);
-                }
-            }
-        }};
-    }
-    splice_testkit::each_backend!(B => check!(B));
-}
-
-#[kernel(rust)]
-fn borrowed_iter(xs: &[u8]) -> impl Iterator<Item = &u8> {
-    xs.iter()
-}
-
-#[test]
-fn a_borrowing_opaque_result_outlives_the_kernel() {
-    macro_rules! check {
-        ($backend:ty) => {{
-            let bytes = [3, 4, 9];
-            let direct = {
-                let code = borrowed_iter::build::<$backend>(borrowed_iter::BuildArgs {}).unwrap();
-                code.call(borrowed_iter::CallArgs { xs: &bytes }).unwrap()
-            };
-            assert!(direct.eq(&bytes));
-
-            let portable = {
-                let ir = borrowed_iter::ir().unwrap();
-                let code = <$backend>::compile(&ir).unwrap();
-                code.call(borrowed_iter::CallArgs { xs: &bytes }).unwrap()
-            };
-            assert!(portable.eq(&bytes));
-        }};
-    }
-    splice_testkit::each_backend!(B => check!(B));
 }
 
 #[kernel(print)]
@@ -772,47 +602,6 @@ fn iterating_a_runtime_slice_lowers_to_a_loop_and_handles_an_empty_input() {
     splice_testkit::each_backend!(B => check::<B>(&ir));
 }
 
-static ADD_CALLS: AtomicUsize = AtomicUsize::new(0);
-
-#[derive(Clone, Copy)]
-struct AddOperand(i32);
-
-impl std::ops::Add for AddOperand {
-    type Output = i32;
-
-    fn add(self, other: Self) -> i32 {
-        ADD_CALLS.fetch_add(1, Ordering::Relaxed);
-        self.0 + other.0
-    }
-}
-
-#[kernel(rust)]
-fn overloaded_add(#[comptime] arg: AddOperand) -> i32 {
-    arg + arg
-}
-
-#[test]
-fn overload_resolution_does_not_make_custom_add_pure() {
-    macro_rules! check {
-        ($backend:ty) => {{
-            let before = ADD_CALLS.load(Ordering::Relaxed);
-            let arg = AddOperand(9);
-            let direct =
-                overloaded_add::build::<$backend>(overloaded_add::BuildArgs { arg }).unwrap();
-            let portable = <$backend>::compile(&overloaded_add::ir(arg).unwrap()).unwrap();
-            assert_eq!(ADD_CALLS.load(Ordering::Relaxed), before);
-
-            for code in [direct, portable] {
-                let args = overloaded_add::CallArgs {};
-                assert_eq!(code.call(args).unwrap(), 18);
-            }
-            assert_eq!(ADD_CALLS.load(Ordering::Relaxed), before + 2);
-        }};
-    }
-
-    splice_testkit::each_backend!(B => check!(B));
-}
-
 struct Counter(Cell<i32>);
 
 impl Counter {
@@ -828,11 +617,6 @@ fn short_borrow_for_effect(#[comptime] counter: &Counter, x: i32) -> i32 {
     x.wrapping_add(counter.tick())
 }
 
-#[kernel(rust)]
-fn runtime_counter(counter: &Counter) -> i32 {
-    counter.tick()
-}
-
 #[test]
 fn a_method_with_an_interior_write_cannot_use_a_short_build_borrow() {
     macro_rules! check {
@@ -842,17 +626,7 @@ fn a_method_with_an_interior_write_cannot_use_a_short_build_borrow() {
             assert_build_error(short_borrow_for_effect::build::<$backend>(
                 short_borrow_for_effect::BuildArgs { counter: &counter },
             ));
-            let direct = runtime_counter::build::<$backend>(runtime_counter::BuildArgs {}).unwrap();
-            let portable = <$backend>::compile(&runtime_counter::ir().unwrap()).unwrap();
             assert_eq!(counter.0.get(), 0);
-            for (index, code) in [direct, portable].into_iter().enumerate() {
-                assert_eq!(
-                    code.call(runtime_counter::CallArgs { counter: &counter })
-                        .unwrap(),
-                    1 + index as i32
-                );
-            }
-            assert_eq!(counter.0.get(), 2);
         }};
     }
 
@@ -931,45 +705,6 @@ fn trait_dispatch_requires_publication_on_the_selected_implementation() {
     }
 
     splice_testkit::each_backend!(B => check::<B>());
-}
-
-fn add_three(value: i32) -> i32 {
-    value.wrapping_add(3)
-}
-
-fn multiply_by_five(value: i32) -> i32 {
-    value.wrapping_mul(5)
-}
-
-fn fail_callback(_: i32) -> i32 {
-    panic!("callback failed")
-}
-
-#[kernel(rust)]
-fn use_callback(#[comptime] callback: fn(i32) -> i32, x: i32) -> i32 {
-    callback(x)
-}
-
-#[test]
-fn captured_function_pointers_keep_their_identity_and_handle_unwinds() {
-    macro_rules! check {
-        ($backend:ty) => {{
-            for (callback, expected) in [
-                (add_three as fn(i32) -> i32, Some(10)),
-                (fail_callback, None),
-                (multiply_by_five, Some(35)),
-            ] {
-                let direct =
-                    use_callback::build::<$backend>(use_callback::BuildArgs { callback }).unwrap();
-                let ir = use_callback::ir(callback).unwrap();
-                for code in [direct, <$backend>::compile(&ir).unwrap()] {
-                    assert_eq!(code.call(use_callback::CallArgs { x: 7 }).ok(), expected);
-                }
-            }
-        }};
-    }
-
-    splice_testkit::each_backend!(B => check!(B));
 }
 
 #[derive(splice::KernelType)]

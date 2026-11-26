@@ -6,7 +6,7 @@ pub(crate) mod lower;
 pub(crate) mod methods;
 pub(crate) use lower::simd::constructor_arity;
 use lower::{Binding, BufferType, Lower, Scalar};
-pub(crate) use lower::{Elem, select_free, uses_stage_requirements};
+pub(crate) use lower::{Elem, uses_stage_requirements};
 use proc_macro2::{Ident, TokenStream};
 use std::collections::HashMap;
 use syn::visit::Visit;
@@ -324,7 +324,7 @@ pub(super) fn expand(root: Path, native: &mut ItemFn, print: bool) -> Result<Tok
     };
     let evaluator = lower.evaluator(&native.sig, &lowered_block, module_vis, None)?;
     let code = lower.kernel_body(&lowered_block)?;
-    let owned_scope = lower.owned_scope(native);
+    let dropless = lower.dropless_aggregates();
     let debug_arguments = host_names.iter().map(|id| lower.capture_constant(id));
     let source_support = emit!(#root::frontend::source);
     let overflow = lower::overflow_prologue(&root);
@@ -640,7 +640,6 @@ pub(super) fn expand(root: Path, native: &mut ItemFn, print: bool) -> Result<Tok
     };
     let reg_indices = 0..reg_names.len();
     let needs_stages = uses_stage_requirements(&lowered_block);
-    let region_policy = crate::import::publication(&root, vis, sig, needs_stages);
     let foldable = lower::can_fold(sig, &lowered_block);
     let fold_macro = if foldable {
         emit!(#root::__splice_choose_kernel)
@@ -660,7 +659,6 @@ pub(super) fn expand(root: Path, native: &mut ItemFn, print: bool) -> Result<Tok
             #vis const __SPLICE_RETURN: #hir::ValueType = #result_value_type;
             #[doc(hidden)]
             #vis use #root::__splice_choose_kernel as __splice_dispatch;
-            #region_policy
             #context_sign
             #context_exports
             #entry_points
@@ -681,7 +679,7 @@ pub(super) fn expand(root: Path, native: &mut ItemFn, print: bool) -> Result<Tok
                 let __splice_input_values: [::core::option::Option<#hir::Constant>; #arity] = [#(#support::RunArg::known(&#reg_names)),*];
                 #recursion
                 #unpack
-                #owned_scope;
+                #dropless
                 let __splice_inputs: &[(#hir::Reg, ::core::option::Option<#hir::Constant>)] = &[#((#reg_names, __splice_input_values[#reg_indices])),*];
                 #(#copy_mutable)*
                 #(#mutable_host)*
@@ -927,13 +925,8 @@ mod tests {
             ),
         ];
         for (item, diagnostic) in examples {
-            let error = crate::declaration::expand(
-                parse_quote!(::splice),
-                crate::import::Lowering::Ir,
-                false,
-                emit!(#item),
-            )
-            .unwrap_err();
+            let error = crate::declaration::expand(parse_quote!(::splice), false, emit!(#item))
+                .unwrap_err();
             assert!(error.to_string().contains(diagnostic), "{error}");
         }
     }

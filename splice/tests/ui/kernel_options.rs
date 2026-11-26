@@ -5,31 +5,18 @@ fn unknown(x: i32) -> i32 {
     x
 }
 
-#[kernel(rust, rust)]
+#[kernel(print, print)]
 fn repeated(x: i32) -> i32 {
     x
 }
 
+// Splice has no Rust kernels: an ordinary Rust function is called as one.
 #[kernel(rust)]
-impl Unit {
-    fn one() -> i32 {
-        1
-    }
+fn rust_kernel(x: i32) -> i32 {
+    x
 }
 
 pub struct Unit;
-
-// A Rust kernel keeps its specialization arguments, so they cannot borrow.
-#[kernel(rust)]
-fn borrowed(#[comptime] plan: &[i32], x: i32) -> i32 {
-    plan[0] + x
-}
-
-// `print` renders Splice source, which a Rust kernel does not have.
-#[kernel(rust, print)]
-fn printed_rust(x: i32) -> i32 {
-    x
-}
 
 #[kernel(print)]
 impl Unit {

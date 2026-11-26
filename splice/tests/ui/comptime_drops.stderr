@@ -51,7 +51,7 @@ note: the above error was encountered while instantiating `fn dropless::<Probe>`
    |
    = note: this note originates in the attribute macro `kernel` (in Nightly builds, run with -Z macro-backtrace for more info)
 
-error[E0080]: evaluation panicked: a Rust aggregate with drop glue requires a Rust call, and this kernel cannot run as one
+error[E0080]: evaluation panicked: a kernel cannot build an aggregate with drop glue; build it in a Rust function and call that
  --> $RUST/core/src/panic.rs
   |
   = note: evaluation of `splice::frontend::scalar::dropless_aggregate::<Guard>::{constant#0}` failed here
@@ -60,7 +60,7 @@ error[E0080]: evaluation panicked: a Rust aggregate with drop glue requires a Ru
   |
   | /         assert!(
   | |             !std::mem::needs_drop::<T>(),
-  | |             "a Rust aggregate with drop glue requires a Rust call, and this kernel cannot run as one"
+  | |             "a kernel cannot build an aggregate with drop glue; build it in a Rust function and call that"
   | |         );
   | |_________- in this macro invocation
 
@@ -70,15 +70,15 @@ note: erroneous constant encountered
   | /     const {
   | |         assert!(
   | |             !std::mem::needs_drop::<T>(),
-  | |             "a Rust aggregate with drop glue requires a Rust call, and this kernel cannot run as one"
+  | |             "a kernel cannot build an aggregate with drop glue; build it in a Rust function and call that"
   | |         );
   | |     }
   | |_____^
 
 note: the above error was encountered while instantiating `fn dropless_aggregate::<Guard>`
-  --> tests/ui/comptime_drops.rs:39:1
+  --> tests/ui/comptime_drops.rs:38:1
    |
-39 | #[kernel]
+38 | #[kernel]
    | ^^^^^^^^^
    |
    = note: this note originates in the attribute macro `kernel` (in Nightly builds, run with -Z macro-backtrace for more info)

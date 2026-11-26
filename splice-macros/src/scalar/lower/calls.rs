@@ -193,11 +193,8 @@ impl Lower<'_> {
                 })
                 .collect();
             let mut shape = crate::scalar::methods::rename_path(p, "stage_shape");
-            let mut policy = crate::scalar::methods::rename_path(p, "region_needs_stages");
-            for metadata in [&mut shape, &mut policy] {
-                metadata.path.segments.last_mut().unwrap().arguments = syn::PathArguments::None;
-            }
-            let opaque = self.import_result(p, &opaque_args, cast, Some((&shape, &policy)));
+            shape.path.segments.last_mut().unwrap().arguments = syn::PathArguments::None;
+            let opaque = self.import_result(p, &opaque_args, cast, Some(&shape));
             let ordinary = self.import_result(p, &bound, cast, None);
             let kernel = staged_call(&bound);
             let boolean = if cast.is_some() {
@@ -242,7 +239,7 @@ impl Lower<'_> {
         path: &syn::ExprPath,
         args: &[TokenStream],
         cast: Option<&syn::Type>,
-        stage_checks: Option<(&syn::ExprPath, &syn::ExprPath)>,
+        stage_shape: Option<&syn::ExprPath>,
     ) -> TokenStream {
         let root = self.root;
         let native = emit!(#root::frontend::native);
@@ -326,7 +323,7 @@ impl Lower<'_> {
                 &[],
             )?
         };
-        let operands = if let Some((shape, needs_stages)) = stage_checks {
+        let operands = if let Some(shape) = stage_shape {
             let indices: Vec<_> = (0..arity).map(syn::Index::from).collect();
             emit! {
                 let __splice_import_values = (#(Operand(#args),)*);
@@ -336,9 +333,6 @@ impl Lower<'_> {
                 {
                     return ::core::result::Result::Err(#root::BuildError::staging("runtime value passed to a comptime parameter"));
                 })*
-                if #needs_stages() {
-                    return ::core::result::Result::Err(#root::BuildError::staging("a published kernel call cannot be specialized inside this Rust region"));
-                }
                 let operands = [#((&__splice_import_values.#indices).materialize(__splice_builder)?),*];
             }
         } else {

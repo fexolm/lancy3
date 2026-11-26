@@ -142,7 +142,7 @@ fn parameter_attributes_pass_through() {
 }
 
 /// User types named like the generated `BuildArgs`, `CallArgs` and
-/// `Signature`, in scalar kernel and `#[kernel(rust)]` signatures.
+/// `Signature`, in kernel signatures and bodies.
 mod generated_names {
     use splice::kernel;
 
@@ -152,24 +152,26 @@ mod generated_names {
     }
     #[derive(splice::ComptimeKey, splice::KernelType)]
     pub struct BuildArgs(pub i32);
-    #[derive(Clone, Copy)]
-    pub struct CallArgs(pub i32);
+    #[derive(Clone, Copy, splice::KernelType)]
+    pub struct CallArgs {
+        pub value: i32,
+    }
 
     #[kernel(print)]
     pub fn scaled(#[comptime] s: &Signature, #[comptime] b: BuildArgs, x: i32) -> i32 {
         s.scale * x + b.0
     }
 
-    #[kernel(rust)]
-    pub fn opaque(#[comptime] b: BuildArgs, c: CallArgs) -> i32 {
-        let local: CallArgs = c;
-        local.0 + b.0
+    #[kernel]
+    pub fn wrapped(#[comptime] b: BuildArgs, c: i32) -> i32 {
+        let local = CallArgs { value: c };
+        local.value + b.0
     }
 }
 
 #[test]
 fn user_types_named_like_generated_items() {
-    use generated_names::{BuildArgs, CallArgs, Signature, opaque, scaled};
+    use generated_names::{BuildArgs, Signature, scaled, wrapped};
     let _lowered = scaled::print;
     let s = Signature { scale: 3 };
     let code = scaled::build::<Lancy>(scaled::BuildArgs {
@@ -178,6 +180,6 @@ fn user_types_named_like_generated_items() {
     })
     .unwrap();
     assert_eq!(code.call(scaled::CallArgs { x: 5 }), Ok(16));
-    let code = opaque::build::<Lancy>(opaque::BuildArgs { b: BuildArgs(2) }).unwrap();
-    assert_eq!(code.call(opaque::CallArgs { c: CallArgs(4) }), Ok(6));
+    let code = wrapped::build::<Lancy>(wrapped::BuildArgs { b: BuildArgs(2) }).unwrap();
+    assert_eq!(code.call(wrapped::CallArgs { c: 4 }), Ok(6));
 }

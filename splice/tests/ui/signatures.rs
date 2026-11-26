@@ -83,7 +83,7 @@ fn misplaced() -> i32 {
     0
 }
 
-#[kernel(rust)]
+#[kernel]
 fn twice_comptime(#[comptime] #[comptime] n: i32, x: i32) -> i32 {
     n + x
 }

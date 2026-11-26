@@ -2,7 +2,7 @@
 //! of the entire aggregate before exposing any projection to the lowerer.
 use super::{Binding, Lower, Scalar, Stage, err};
 use proc_macro2::TokenStream;
-use syn::{Expr, ExprField, ExprStruct, ItemFn, Member, Pat, Path, Result};
+use syn::{Expr, ExprField, ExprStruct, Member, Pat, Path, Result};
 
 pub(in crate::scalar) struct Layout {
     fields: Vec<(Member, Scalar)>,
@@ -27,26 +27,13 @@ fn constructor(root: &Path, pat: &Pat, literal: &ExprStruct) -> TokenStream {
 }
 
 impl Lower<'_> {
-    /// Rust owns the lexical scope when a local's destructor is observable.
-    /// A dropless aggregate continues through the ordinary field lowering.
-    pub(in crate::scalar) fn owned_scope(&self, function: &ItemFn) -> TokenStream {
+    /// A kernel's aggregate locals have no destructor: the IR cannot run
+    /// Rust drop glue (a `const` assertion, so `cargo build` reports it).
+    pub(in crate::scalar) fn dropless_aggregates(&self) -> TokenStream {
         let root = self.root;
         let layouts = self.aggregates.borrow();
-        if layouts.is_empty() {
-            return TokenStream::new();
-        }
         let owners = layouts.iter().map(|layout| &layout.constructor);
-        let rust_call =
-            crate::import::scope_checks(root, function).zip(self.owned_call(&function.sig));
-        let Some((checks, call)) = rust_call else {
-            return emit!(#(#root::frontend::scalar::dropless_aggregate(#owners);)*);
-        };
-        emit!({
-            if false #(|| #root::frontend::scalar::has_destructor(#owners))* {
-                #checks
-                return ::core::result::Result::Ok(#call);
-            }
-        })
+        emit!(#(#root::frontend::scalar::dropless_aggregate(#owners);)*)
     }
 
     pub(super) fn aggregate_local(

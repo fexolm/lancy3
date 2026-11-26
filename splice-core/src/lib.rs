@@ -10,18 +10,15 @@ pub use call::Executable;
 pub mod debug;
 pub mod frontend;
 pub mod hir;
-mod imports;
+#[doc(hidden)]
+#[allow(unsafe_code)]
+mod runtime_context;
 pub mod simd;
 pub mod validate;
 #[doc(hidden)]
-pub use imports::ImportInvocation;
-pub use imports::{ImportArgs, LinkedImport, RustImport};
-#[allow(unsafe_code)]
-mod runtime_context;
-#[doc(hidden)]
 pub use runtime_context::{
     ContextArguments, ContextFrame, ContextOperation, ContextPacketLayout, ContextSignature,
-    RuntimeContext, STATIC_HEADER, StaticRustCall, StaticRustSymbol,
+    RuntimeContext, STATIC_HEADER, StaticRustSymbol,
 };
 
 /// Description of an actual Rust struct field for this monomorphization.

@@ -1,123 +1,113 @@
-error: put #[kernel(rust)] on individual methods of a #[kernel] impl or trait
-  --> tests/ui/declarations.rs:7:1
-   |
- 7 | / impl Counter {
- 8 | |     fn get(&self) -> i32 {
- 9 | |         0
-10 | |     }
-11 | | }
-   | |_^
-
-error: put #[kernel] only on the enclosing impl or trait; a method accepts #[kernel(rust)]
-  --> tests/ui/declarations.rs:16:5
-   |
-16 |     #[kernel]
-   |     ^^^^^^^^^
+error: put #[kernel] only on the enclosing impl or trait; keep a Rust method in an ordinary impl
+ --> tests/ui/declarations.rs:7:5
+  |
+7 |     #[kernel]
+  |     ^^^^^^^^^
 
 error: runtime parameters must be i32, bool, usize or a slice of u16, u32, i32, i64, f32, or f64
-  --> tests/ui/declarations.rs:25:24
+  --> tests/ui/declarations.rs:16:24
    |
-25 |     fn method_param(x: i64) -> i32 {
+16 |     fn method_param(x: i64) -> i32 {
    |                        ^^^
 
 error: expected a named binding
-  --> tests/ui/declarations.rs:33:32
+  --> tests/ui/declarations.rs:24:32
    |
-33 |     fn tuple_param(#[comptime] (a, b): (i32, i32)) -> i32 {
+24 |     fn tuple_param(#[comptime] (a, b): (i32, i32)) -> i32 {
    |                                ^^^^^^
 
 error: a Splice method parameter is #[comptime], i32, bool, a slice, or the &mut self receiver
-  --> tests/ui/declarations.rs:42:22
+  --> tests/ui/declarations.rs:33:22
    |
-42 |     fn context_param(state: &mut State) -> i32 {
+33 |     fn context_param(state: &mut State) -> i32 {
    |                      ^^^^^
 
 error: expected a safe synchronous kernel with Rust ABI and fixed arity
-  --> tests/ui/declarations.rs:50:5
+  --> tests/ui/declarations.rs:41:5
    |
-50 |     async fn later() -> i32 {
+41 |     async fn later() -> i32 {
    |     ^^^^^^^^^^^^^^^^^^^^^^^
 
 error: put #[kernel] on the enclosing impl or trait to publish its methods
-  --> tests/ui/declarations.rs:58:5
+  --> tests/ui/declarations.rs:49:5
    |
-58 |     fn get(&self) -> i32 {
+49 |     fn get(&self) -> i32 {
    |     ^^^^^^^^^^^^^^^^^^^^
 
 error: put #[kernel] on the enclosing impl or trait to publish its methods
-  --> tests/ui/declarations.rs:65:5
+  --> tests/ui/declarations.rs:56:5
    |
-65 |     fn get(&self) -> i32;
+56 |     fn get(&self) -> i32;
    |     ^^^^^^^^^^^^^^^^^^^^^
 
 error: a Splice trait method parameter is #[comptime], i32, bool or a slice
-  --> tests/ui/declarations.rs:70:12
+  --> tests/ui/declarations.rs:61:12
    |
-70 |     fn sum(x: splice::simd::Lane<i32>) -> i32;
+61 |     fn sum(x: splice::simd::Lane<i32>) -> i32;
    |            ^
 
 error: expected #[comptime] on a method parameter
-  --> tests/ui/declarations.rs:76:15
+  --> tests/ui/declarations.rs:67:15
    |
-76 |     fn marked(#[inline] x: i32) -> i32 {
+67 |     fn marked(#[inline] x: i32) -> i32 {
    |               ^^^^^^^^^
 
 error: expected one #[comptime] marker without arguments
-  --> tests/ui/declarations.rs:84:27
+  --> tests/ui/declarations.rs:75:27
    |
-84 |     fn doubly(#[comptime] #[comptime] n: i32, x: i32) -> i32 {
+75 |     fn doubly(#[comptime] #[comptime] n: i32, x: i32) -> i32 {
    |                           ^^^^^^^^^^^
 
 error: expected one #[comptime] marker without arguments
-  --> tests/ui/declarations.rs:92:22
+  --> tests/ui/declarations.rs:83:22
    |
-92 |     fn with_argument(#[comptime(1)] n: i32, x: i32) -> i32 {
+83 |     fn with_argument(#[comptime(1)] n: i32, x: i32) -> i32 {
    |                      ^^^^^^^^^^^^^^
 
 error: expected a nonempty intrinsic name
-   --> tests/ui/declarations.rs:100:17
-    |
-100 |     #[intrinsic("")]
-    |                 ^^
+  --> tests/ui/declarations.rs:91:17
+   |
+91 |     #[intrinsic("")]
+   |                 ^^
 
 error: one #[intrinsic("name")] is allowed on a kernel method with a body
-   --> tests/ui/declarations.rs:110:5
+   --> tests/ui/declarations.rs:101:5
     |
-110 |     #[intrinsic("b")]
+101 |     #[intrinsic("b")]
     |     ^^^^^^^^^^^^^^^^^
 
 error: runtime parameters must be i32, bool, usize or a slice of u16, u32, i32, i64, f32, or f64
-   --> tests/ui/declarations.rs:118:16
+   --> tests/ui/declarations.rs:109:16
     |
-118 |     fn area(x: i64) -> i32;
+109 |     fn area(x: i64) -> i32;
     |                ^^^
 
 error: expected a free function, impl or trait
-   --> tests/ui/declarations.rs:122:1
+   --> tests/ui/declarations.rs:113:1
     |
-122 | struct NotAFunction;
+113 | struct NotAFunction;
     | ^^^^^^^^^^^^^^^^^^^^
 
 error: KernelType can only be derived for structs
-   --> tests/ui/declarations.rs:125:6
+   --> tests/ui/declarations.rs:116:6
     |
-125 | enum NotAStruct {
+116 | enum NotAStruct {
     |      ^^^^^^^^^^
 
 error: expected `crate = path`, at most once
-   --> tests/ui/declarations.rs:130:10
+   --> tests/ui/declarations.rs:121:10
     |
-130 | #[splice(root = splice)]
+121 | #[splice(root = splice)]
     |          ^^^^
 
 error: expected `crate = path`, at most once
-   --> tests/ui/declarations.rs:136:26
+   --> tests/ui/declarations.rs:127:26
     |
-136 | #[splice(crate = splice, crate = splice)]
+127 | #[splice(crate = splice, crate = splice)]
     |                          ^^^^^
 
 error: union fields do not have a known active variant
-   --> tests/ui/declarations.rs:142:7
+   --> tests/ui/declarations.rs:133:7
     |
-142 | union Bits {
+133 | union Bits {
     |       ^^^^

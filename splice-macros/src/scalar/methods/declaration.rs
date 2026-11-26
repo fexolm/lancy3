@@ -44,7 +44,7 @@ pub(crate) fn trait_defaults(
         };
         return Err(syn::Error::new_spanned(
             ty,
-            "a Splice trait method returns (), i32, bool or a primitive; mark it #[kernel(rust)] to keep it in Rust",
+            "a Splice trait method returns (), i32, bool or a primitive; keep a Rust method in an ordinary trait",
         ));
     }
     let mut signature = normalize(signature, None);
@@ -182,47 +182,20 @@ pub(crate) fn trait_defaults(
     Ok((kind, items))
 }
 
-pub(crate) fn stage_shape(
-    root: &syn::Path,
-    signature: &Signature,
-    body: Option<&syn::Block>,
-    inherent_visibility: Option<&syn::Visibility>,
-) -> [TokenStream; 2] {
-    let (shape_kind, policy_kind, bound) = if inherent_visibility.is_some() {
-        (
-            "inherent_region_stage_shape",
-            "inherent_region_needs_stages",
-            TokenStream::new(),
-        )
-    } else {
-        (
-            "stage_shape",
-            "region_needs_stages",
-            emit!(where Self: Sized),
-        )
-    };
-    let method = entry_name(shape_kind, &signature.ident);
-    let policy = entry_name(policy_kind, &signature.ident);
-    let needs_stages = body.map_or_else(
-        || emit!(false),
-        |body| crate::import::method_policy(root, signature, body),
-    );
+/// The stage of each parameter of a trait method, which a caller of an
+/// implementation outside a `#[kernel]` block checks before calling it as
+/// Rust.
+pub(crate) fn stage_shape(signature: &Signature) -> TokenStream {
+    let method = entry_name("stage_shape", &signature.ident);
     let stages = parameter_stages(signature);
     let masks = stage_masks(&stages);
-    [
-        emit! {
-            #[doc(hidden)]
-            #[allow(dead_code, clippy::type_complexity)]
-            #inherent_visibility fn #method() -> (#([(); #stages],)*) #bound {
-                (#(#masks,)*)
-            }
-        },
-        emit! {
-            #[doc(hidden)]
-            #[allow(dead_code)]
-            #inherent_visibility fn #policy() -> bool #bound { #needs_stages }
-        },
-    ]
+    emit! {
+        #[doc(hidden)]
+        #[allow(dead_code, clippy::type_complexity)]
+        fn #method() -> (#([(); #stages],)*) where Self: Sized {
+            (#(#masks,)*)
+        }
+    }
 }
 
 fn stage_masks(stages: &[usize]) -> impl Iterator<Item = TokenStream> + '_ {

@@ -1,4 +1,5 @@
-// MAC-08: every method of a #[kernel] block is lowered or marked rust.
+// MAC-08: every method of a #[kernel] block lowers; a Rust method belongs
+// in an ordinary impl.
 use splice::kernel;
 
 pub struct Foo {
@@ -13,11 +14,6 @@ impl Foo {
 
     fn wide(x: i64) -> i32 {
         x as i32
-    }
-
-    #[kernel(rust)]
-    fn label(&self) -> String {
-        format!("{}", self.n)
     }
 }
 

@@ -1,49 +1,33 @@
-error: expected `rust`, `print` or `crate = path`, each at most once
+error: expected `print` or `crate = path`, each at most once
  --> tests/ui/kernel_options.rs:3:10
   |
 3 | #[kernel(fast)]
   |          ^^^^
 
-error: expected `rust`, `print` or `crate = path`, each at most once
- --> tests/ui/kernel_options.rs:8:16
+error: expected `print` or `crate = path`, each at most once
+ --> tests/ui/kernel_options.rs:8:17
   |
-8 | #[kernel(rust, rust)]
-  |                ^^^^
+8 | #[kernel(print, print)]
+  |                 ^^^^^
 
-error: put #[kernel(rust)] on individual methods of a #[kernel] impl or trait
-  --> tests/ui/kernel_options.rs:14:1
+error: expected `print` or `crate = path`, each at most once
+  --> tests/ui/kernel_options.rs:14:10
    |
-14 | / impl Unit {
-15 | |     fn one() -> i32 {
-16 | |         1
-17 | |     }
-18 | | }
-   | |_^
-
-error: a #[kernel(rust)] function keeps its specialization arguments after build, so a borrowed one must be passed at call time or owned
-  --> tests/ui/kernel_options.rs:24:13
-   |
-24 | fn borrowed(#[comptime] plan: &[i32], x: i32) -> i32 {
-   |             ^^^^^^^^^^^^^^^^^^^^^^^^
-
-error: `print` renders the Splice source of a lowered kernel; a #[kernel(rust)] function has none
-  --> tests/ui/kernel_options.rs:29:16
-   |
-29 | #[kernel(rust, print)]
-   |                ^^^^^
+14 | #[kernel(rust)]
+   |          ^^^^
 
 error: #[kernel(print)] publishes `print` for a free function
-  --> tests/ui/kernel_options.rs:35:1
+  --> tests/ui/kernel_options.rs:22:1
    |
-35 | / impl Unit {
-36 | |     fn two() -> i32 {
-37 | |         2
-38 | |     }
-39 | | }
+22 | / impl Unit {
+23 | |     fn two() -> i32 {
+24 | |         2
+25 | |     }
+26 | | }
    | |_^
 
 error[E0425]: cannot find function `print` in module `unprinted`
-  --> tests/ui/kernel_options.rs:48:24
+  --> tests/ui/kernel_options.rs:35:24
    |
-48 |     let _ = unprinted::print();
+35 |     let _ = unprinted::print();
    |                        ^^^^^ not found in `unprinted`

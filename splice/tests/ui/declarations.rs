@@ -1,15 +1,6 @@
 // Diagnostics of #[kernel] on impls, traits, methods and derives.
 use splice::{ComptimeKey, KernelType, kernel};
 
-pub struct Counter;
-
-#[kernel(rust)]
-impl Counter {
-    fn get(&self) -> i32 {
-        0
-    }
-}
-
 pub struct Nested;
 #[kernel]
 impl Nested {

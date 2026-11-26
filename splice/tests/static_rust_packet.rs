@@ -3,22 +3,15 @@ use splice::hir::{Buffer, ContextSlice, Instr, RustTarget};
 use splice::hir::{Constant, ScalarType};
 use splice::{
     BufferArg, BufferKind, BuildOptions, Codegen, ContextArguments, Executable, Mode,
-    StaticRustCall, StaticRustSymbol,
+    StaticRustSymbol,
 };
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-struct Empty;
-
-impl StaticRustCall for Empty {
-    const WORDS: u32 = 0;
-    const SLICES: u32 = 0;
-
-    fn invoke(_: ContextArguments<'_>) -> i32 {
-        19
-    }
+fn empty(_: ContextArguments<'_>) -> i32 {
+    19
 }
 
-static EMPTY: StaticRustSymbol = StaticRustSymbol::of::<Empty>("empty");
+static EMPTY: StaticRustSymbol = StaticRustSymbol::new("empty", 0, 0, empty);
 
 #[test]
 fn static_packets_can_have_no_operands() {
@@ -51,27 +44,20 @@ fn static_packets_can_have_no_operands() {
     splice_testkit::each_backend!(B => check::<B>());
 }
 
-struct Modify;
-
 static SEEN_INPUT: AtomicUsize = AtomicUsize::new(0);
 
-impl StaticRustCall for Modify {
-    const WORDS: u32 = 1;
-    const SLICES: u32 = 2;
-
-    fn invoke(mut args: ContextArguments<'_>) -> i32 {
-        let word = args.word(0);
-        let input = args.read::<u16>();
-        SEEN_INPUT.store(input.as_ptr() as usize, Ordering::Relaxed);
-        let output = args.write::<i32>();
-        let value = word.wrapping_add(i32::from(input[0]));
-        output[0] = value;
-        output[1] = word;
-        value
-    }
+fn modify(mut args: ContextArguments<'_>) -> i32 {
+    let word = args.word(0);
+    let input = args.read::<u16>();
+    SEEN_INPUT.store(input.as_ptr() as usize, Ordering::Relaxed);
+    let output = args.write::<i32>();
+    let value = word.wrapping_add(i32::from(input[0]));
+    output[0] = value;
+    output[1] = word;
+    value
 }
 
-static MODIFY: StaticRustSymbol = StaticRustSymbol::of::<Modify>("modify");
+static MODIFY: StaticRustSymbol = StaticRustSymbol::new("modify", 1, 2, modify);
 const READ_U16: BufferKind = BufferKind::new(splice::simd::Element::U16, false);
 const PARENT_KINDS: [BufferKind; 2] = [BufferKind::Write, READ_U16];
 const CHILD_KINDS: [BufferKind; 2] = [READ_U16, BufferKind::Write];

@@ -9,35 +9,6 @@ use syn::{
     FnArg, GenericParam, Generics, Lifetime, LifetimeParam, Pat, Path, ReturnType, Signature, Type,
 };
 
-pub(crate) fn has_early_bound_lifetime(ty: &Type, generics: &Generics) -> bool {
-    struct Lifetimes(HashSet<Ident>);
-    impl<'ast> Visit<'ast> for Lifetimes {
-        fn visit_lifetime(&mut self, lifetime: &'ast syn::Lifetime) {
-            self.0.insert(lifetime.ident.clone());
-        }
-    }
-
-    let mut used = Lifetimes(Default::default());
-    used.visit_type(ty);
-    let mut bounds = Lifetimes(Default::default());
-    for parameter in &generics.params {
-        if let GenericParam::Lifetime(parameter) = parameter {
-            // A parameter with an explicit bound is early-bound too.
-            if !parameter.bounds.is_empty() {
-                bounds.visit_lifetime_param(parameter);
-            }
-        } else {
-            bounds.visit_generic_param(parameter);
-        }
-    }
-    if let Some(where_clause) = &generics.where_clause {
-        bounds.visit_where_clause(where_clause);
-    }
-    generics.lifetimes().any(|lifetime| {
-        used.0.contains(&lifetime.lifetime.ident) && bounds.0.contains(&lifetime.lifetime.ident)
-    })
-}
-
 pub(super) struct Parameter<'a> {
     pub(super) name: Ident,
     pub(super) ty: &'a Type,
@@ -304,47 +275,6 @@ pub(crate) fn used_generics<'a>(
     let mut used = GenericUses(HashSet::new());
     for ty in types {
         used.visit_type(ty);
-    }
-    select_generics(generics, used)
-}
-
-pub(crate) fn body_generics<'a>(
-    generics: &Generics,
-    types: impl Iterator<Item = &'a Type>,
-    body: &syn::Expr,
-) -> Generics {
-    let mut used = GenericUses(HashSet::new());
-    for ty in types {
-        used.visit_type(ty);
-    }
-    used.visit_expr(body);
-    loop {
-        let previous = used.0.len();
-        for param in &generics.params {
-            if used.0.contains(&param_name(param)) {
-                used.visit_generic_param(param);
-            }
-        }
-        if let Some(clause) = &generics.where_clause {
-            for predicate in &clause.predicates {
-                let mut subject = GenericUses(HashSet::new());
-                match predicate {
-                    syn::WherePredicate::Type(predicate) => {
-                        subject.visit_type(&predicate.bounded_ty)
-                    }
-                    syn::WherePredicate::Lifetime(predicate) => {
-                        subject.visit_lifetime(&predicate.lifetime);
-                    }
-                    _ => (),
-                }
-                if !subject.0.is_disjoint(&used.0) {
-                    used.visit_where_predicate(predicate);
-                }
-            }
-        }
-        if used.0.len() == previous {
-            break;
-        }
     }
     select_generics(generics, used)
 }

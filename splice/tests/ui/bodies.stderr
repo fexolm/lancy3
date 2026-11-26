@@ -4,23 +4,11 @@ error: runtime value used in a comptime expression
 7 |     let pair = (x, 1);
   |                 ^
 
-error: this function is not a Splice kernel; mark it #[kernel(rust)] to publish it as a Rust call
- --> tests/ui/bodies.rs:6:4
-  |
-6 | fn runtime_tuple(x: i32) -> i32 {
-  |    ^^^^^^^^^^^^^
-
 error: put nested Rust macros in a host helper outside the kernel
   --> tests/ui/bodies.rs:13:18
    |
 13 |     let v = vec![format!("a")];
    |                  ^^^^^^^^^^^^
-
-error: this function is not a Splice kernel; mark it #[kernel(rust)] to publish it as a Rust call
-  --> tests/ui/bodies.rs:12:4
-   |
-12 | fn nested_macro() -> i32 {
-   |    ^^^^^^^^^^^^
 
 error: specify Lane::<T> or annotate the vector binding
   --> tests/ui/bodies.rs:19:13
@@ -28,23 +16,11 @@ error: specify Lane::<T> or annotate the vector binding
 19 |     let v = Lane::splat(1.5);
    |             ^^^^^^^^^^^^^^^^
 
-error: this function is not a Splice kernel; mark it #[kernel(rust)] to publish it as a Rust call
-  --> tests/ui/bodies.rs:18:4
-   |
-18 | fn untyped_splat(out: &mut [i32]) -> i32 {
-   |    ^^^^^^^^^^^^^
-
 error: a kernel supports +, -, *, /, &, | and ^ on SIMD vectors
   --> tests/ui/bodies.rs:28:8
    |
 28 |     (v % v).store(out, 0);
    |        ^
-
-error: this function is not a Splice kernel; mark it #[kernel(rust)] to publish it as a Rust call
-  --> tests/ui/bodies.rs:26:4
-   |
-26 | fn vector_remainder(xs: &[i32], out: &mut [i32]) -> i32 {
-   |    ^^^^^^^^^^^^^^^^
 
 warning: unused import: `splice::simd::Lane`
  --> tests/ui/bodies.rs:3:5

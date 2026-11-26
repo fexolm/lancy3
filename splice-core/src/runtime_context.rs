@@ -270,14 +270,6 @@ pub struct ContextPacketLayout {
     pub bytes: u32,
 }
 
-/// A Rust operation whose only operands are the words and slices in its packet.
-pub trait StaticRustCall {
-    const WORDS: u32;
-    const SLICES: u32;
-
-    fn invoke(arguments: ContextArguments<'_>) -> i32;
-}
-
 /// A Rust operation selected when the kernel is staged, with its packet shape.
 #[derive(Debug)]
 pub struct StaticRustSymbol {
@@ -313,10 +305,6 @@ impl StaticRustSymbol {
             slices,
             invoke,
         }
-    }
-
-    pub const fn of<F: StaticRustCall>(name: &'static str) -> Self {
-        Self::new(name, F::WORDS, F::SLICES, F::invoke)
     }
 
     pub fn name(&self) -> &'static str {
