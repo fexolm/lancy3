@@ -1696,8 +1696,10 @@ fn prefix_masks_trap_exactly_when_an_active_lane_is_outside() {
                     let expected = if active > src_room {
                         Err(CallError::Trap(Trap::Bounds))
                     } else {
-                        for k in 0..active.min(out_room) {
-                            want[at + k] = src[at + k];
+                        let written = active.min(out_room);
+                        if written > 0 {
+                            let lanes = at..at + written;
+                            want[lanes.clone()].copy_from_slice(&src[lanes]);
                         }
                         if active > out_room {
                             Err(CallError::Trap(Trap::Bounds))
