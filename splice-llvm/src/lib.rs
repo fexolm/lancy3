@@ -100,7 +100,10 @@ pub fn to_llvm_ir(
         &target::machine(target, false)?,
         machine,
         |ctx, m| {
-            let options = BuildOptions::new(splice_core::Mode::Release, *target);
+            let options = function
+                .options()
+                .with_mode(splice_core::Mode::Release)
+                .with_target(*target);
             lower::populate_function(
                 ctx,
                 m,

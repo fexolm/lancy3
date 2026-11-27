@@ -943,7 +943,7 @@ mod tests {
                         fn read(&self);
                     }
                 ),
-                "method with a body",
+                "not supported on a trait method",
             ),
         ];
         for (item, diagnostic) in examples {

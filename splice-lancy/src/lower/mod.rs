@@ -125,7 +125,12 @@ pub fn lower(
     root: &splice_core::Function,
     target: &splice_core::Target,
 ) -> splice_core::Result<hir::Function> {
-    lower_with(root, target.vector_bytes(), IntrinsicPolicy::Fallback, None)
+    lower_with(
+        root,
+        target.vector_bytes(),
+        root.options().unsupported_intrinsic,
+        None,
+    )
 }
 
 pub(crate) fn lower_with(
