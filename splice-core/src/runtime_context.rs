@@ -429,12 +429,11 @@ unsafe extern "C" fn invoke_context(
     let Some((words, slices)) = context.signature.shape(operation) else {
         return Trap::Abi.status();
     };
-    // SAFETY: the native caller supplies initialized, disjoint views and the
-    // validated context signature gives the exact packet shape.
     rust_entry(|| {
-        let result = (context.invoke)(operation, unsafe {
-            arguments(packet, words as u32, slices)
-        });
+        // SAFETY: the native caller supplies initialized, disjoint views and
+        // the validated context signature gives the exact packet shape.
+        let arguments = unsafe { arguments(packet, words as u32, slices) };
+        let result = (context.invoke)(operation, arguments);
         // SAFETY: the packet is at least 8 aligned, writable bytes, and the
         // operands read from it are no longer borrowed.
         unsafe { packet.cast::<u64>().write(result) };
@@ -462,17 +461,18 @@ unsafe extern "C" fn invoke_static(
     // SAFETY: native lowering stores the static descriptor's address at the
     // start of the aligned packet.
     let symbol = unsafe { &*packet.cast::<*const StaticRustSymbol>().read() };
-    // SAFETY: the checked native caller supplies live, aligned, initialized
-    // operands of the symbol's shape and the verified slice views for the
-    // duration of this call.
     rust_entry(|| {
-        let result = (symbol.invoke)(unsafe {
+        // SAFETY: the checked native caller supplies live, aligned,
+        // initialized operands of the symbol's shape and the verified slice
+        // views for the duration of this call.
+        let arguments = unsafe {
             arguments(
                 packet.add(STATIC_HEADER as usize),
                 symbol.words,
                 symbol.slices,
             )
-        });
+        };
+        let result = (symbol.invoke)(arguments);
         // SAFETY: the result overwrites the header, which was read above;
         // the packet is at least 8 aligned, writable bytes.
         unsafe { packet.cast::<u64>().write(result) };

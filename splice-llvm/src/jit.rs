@@ -21,13 +21,17 @@ use std::ptr::null_mut;
 
 pub(crate) struct Jit(LLVMOrcLLJITRef);
 
-// Each compilation gets its own ORC session. After lookup, calls only touch
-// immutable executable code, and dropping its owner requires exclusive access.
+// SAFETY: Each compilation gets its own ORC session. After lookup, calls
+// only touch immutable executable code, and dropping its owner requires
+// exclusive access.
 unsafe impl Send for Jit {}
+// SAFETY: a shared `Jit` is only used to run its immutable code.
 unsafe impl Sync for Jit {}
 
 impl Drop for Jit {
     fn drop(&mut self) {
+        // SAFETY: `self.0` is the live LLJIT this value owns; no code of it
+        // runs once its owner is dropped.
         unsafe {
             let error = LLVMOrcDisposeLLJIT(self.0);
             if !error.is_null() {
@@ -91,6 +95,9 @@ impl Jit {
     /// LLVM's own definition when LLVM is linked statically, and registers
     /// symbols under a lock that LLVM does not take.
     fn link(object: MemoryBuffer<'static>) -> splice_core::Result<Self> {
+        // SAFETY: every ORC handle is created here and passed to LLVM by the
+        // ownership rules of its C API: the object buffer and the generator
+        // are consumed by the calls that take them.
         unsafe {
             let mut raw = null_mut();
             check(LLVMOrcCreateLLJIT(&mut raw, null_mut()))?;
@@ -179,6 +186,8 @@ unsafe fn check(error: LLVMErrorRef) -> splice_core::Result<()> {
     if error.is_null() {
         return Ok(());
     }
+    // SAFETY: `error` is a live error the caller owns; reading its message
+    // consumes it, and the message is disposed after it is copied.
     unsafe {
         let message = LLVMGetErrorMessage(error); // consumes error
         let reason = CStr::from_ptr(message).to_string_lossy().into_owned();

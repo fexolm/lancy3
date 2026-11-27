@@ -14,7 +14,7 @@
 - [x] Ф6 — lancy LIR и бэкенды
 - [x] Ф7 — splice-macros (перенесённые хвосты — в записи «Ф7 закрыта»)
 - [x] Ф8 — производительность (отложенное — в записи «Ф8 — закрытие»)
-- [ ] Ф9 — публичный API, unsafe, документация, crates.io
+- [x] Ф9 — публичный API, unsafe, документация, crates.io (отложенное — в «Итог рефакторинга»)
 
 ## Журнал
 
@@ -690,3 +690,45 @@
 - SPL-10: README, `docs/splice-language.md`, `docs/splice-api-cases.md` подключены к `splice` как доктесты (`#[cfg(doctest)]`), все примеры компилируются; `copy_if_room` с результатом `Result` (не поддерживается) вынесен в помеченный «Планируется» блок `ignore`, пример `total(n: usize, x: i32)` теперь проходит.
 - SPL-12: решение — оставить в `schema_plan` чтение `u16`-столбцов через `Lane::first_n(1)`/`load_select`: у `u16` нет скалярного регистра (Р6), это задокументировано в README; слова шире `i32`, вторая половина находки, сделаны выше.
 - Проверки: `cargo +1.94.1 xtask ci --quick` (fmt, clippy `-D warnings` во всех конфигурациях, все тесты release, доктесты) — зелёный.
+
+### Ф9.3 — unsafe и FFI (LNC-12, BE-19, BE-20, BE-22, A64-17)
+- `[workspace.lints.clippy] undocumented_unsafe_blocks = "warn"` (с `-D warnings` в CI — ошибка); все крейты наследуют `[lints] workspace = true`. Доведены `// SAFETY:` у оставшихся ≈20 мест (`unsafe impl` по одному на impl, ORC-вызовы `splice-llvm`, внутренние блоки `invoke_context`/`invoke_static`, тестовые вызовы — вынесены из `assert_eq!` в `let`).
+- LNC-12: память JIT lancy — `libc` (Linux) и `windows-sys` 0.61 (Windows) вместо ручных `extern` и констант; результаты `munmap`/`VirtualFree` проверяются `debug_assert`. Проверено `clippy --target x86_64-pc-windows-msvc` и `aarch64-unknown-linux-gnu`.
+- BE-20: `Mutex<CodeMemory>` в Cranelift заменён на `unsafe impl Sync for CodeMemory` с обоснованием (модуль трогают только компиляция и `Drop`).
+- BE-19: инвариант «срез ≤ `i32::MAX` элементов» записан в `SAFETY` векторного GEP LLVM и в документацию `validate_buffers`; тест `a_slice_longer_than_i32_max_is_rejected` (4 ГиБ нулевых страниц, не трогаются; Linux 64-bit).
+- A64-17: ABI корня AArch64 описан у констант `ROOT_BYTES`/`ROOT_SAVES` (`x0` — аргументы, `x1` — workspace, корневая область со статусом и результатами, frame record x29/x30, x19/x20/x22, сохранения в первом кадре).
+- BE-22: закрыт документацией по Р15 — адреса вшиты; именованные символы нужны только с кэшем кода на диске, которого нет.
+- Отложено: LNC-14 (unwind-регистрация `RtlAddFunctionTable`/`__register_frame`) и остаток CORE-24 (CFI для LLVM-кадров) — нужен генератор unwind-таблиц для каждого эмиттера (x64/AArch64 Lancy) и тест раскрутки через JIT-кадр на Windows-джобе; паники Rust внутри ядра не раскручиваются через JIT-кадр (`rust_entry` ловит их до возврата), так что текущий код корректен, а выигрыш — только для внешних отладчиков/профилировщиков, которым хватает frame record (A64-17) и GDB-объектов `splice-jit`.
+
+### Ф9.4 — готовность к crates.io (SPL-13, CLIP-02)
+- `[workspace.package]` (version, edition, rust-version, license, repository) и `[workspace.dependencies]` (внутренние крейты с `version`, `thiserror`, `libc`, `tracing`); у публикуемых крейтов `readme`, `keywords`, `categories`; `[package.metadata.docs.rs]` у `splice-llvm` (Linux x86-64: llvm-sys требует LLVM 19) и `splice-kernel` (features `lancy`, `cranelift`). Dev-зависимости только по `path` (testkit, фикстуры) Cargo вырезает при упаковке.
+- `cargo xtask package` (`cargo package --workspace`: упаковка и сборка каждого архива) — в `xtask ci` и в CI-джобе `lint`. `cargo publish --workspace --dry-run` проходит. **Для владельца:** индекс crates.io уже содержит `lancy@0.1.0`, `splice-*@0.1.0` и `splice-kernel@0.1.0` (предупреждение dry-run) — публикация под этими именами невозможна, если они не принадлежат владельцу; переименование — решение владельца, не делалось.
+- CLIP-02: pedantic в `[workspace.lints]` не включался — шумовые lint-ы разрешать не нужно. CLIP-01 (≈250 кастов pedantic) отложен: без включённого `cast_*` аудит не защищён от регрессий, а включение требует прохода по всем эмиттерам; касты на границах ABI теперь идут через `KernelScalar::{to_word, from_word}`. CLIP-03 закрыт по ходу Ф5–Ф7.
+- Отложено: X64-07 (xmm16–31) — EVEX-путь у всех эмиттеров, часть форм EVEX не имеет; измеренной цели нет (см. Ф8).
+
+## Итог рефакторинга
+
+По фазам:
+- **Ф0** — подтверждённые ошибки (Cranelift BE-01/02, scratch при инлайнинге HIR-01/13, MAC-02/03, CORE-04, единый GDB-дескриптор BE-05/CORE-15, мелкие) с регрессионными тестами; CI на LLVM 19 (Р3).
+- **Ф1** — страховочная сетка: явный путь понижения, переносимые тесты и инварианты lancy, filetests, splice-testkit с матрицей бэкендов и дифференциальными проверками, CI (x86-64, arm64, Windows, qemu SVE/SVE2).
+- **Ф2** — типизированные ошибки, один `Trap` и одна кодировка статуса во всех слоях.
+- **Ф3** — цель (`Target`) как значение: одна SIMD-ширина и один набор расширений для всех бэкендов, честный `LlvmManualSimd`.
+- **Ф4** — splice-core: типизированные скаляры, один верификатор и `replay`, контракт `Backend`/`Codegen`, общий путь вызова ядра на словах `u64`, один механизм Rust-вызова, легализация памяти в ядре; `splice-text` и Rust-ядра удалены (решения владельца).
+- **Ф5** — HIR lancy: таблица свойств операций, менеджер проходов, хранилище IR, ловушки в HIR, общие скалярные/векторные формы, текстовый HIR.
+- **Ф6** — LIR и бэкенды lancy: общий численный fallback, общий слой LIR, таблицы форм x64/AArch64, временные регистры, стадии бэкенда для filetests.
+- **Ф7** — splice-macros: модель тела `kast`, один вычислитель, типы через rustc (все runtime-скаляры), режим переполнения, интринсики на реестре, `print` по запросу, ошибки компиляции вместо autoref-откатов.
+- **Ф8** — производительность: нативные скаляры x64 и удаление `lanes*`, спиллы/workspace/пул констант, AArch64 min/max и frame record, оптимизации HIR, JIT-рантайм; таблицы бенчмарков генерирует `cargo xtask bench-tables` (`docs/benchmarks.md`).
+- **Ф9** — минимальный документированный API lancy, явный фасад `splice` с `__private`, слова Rust-вызова шире `i32` (методы, трейты, операции объекта), спецификации и README как доктесты, `SAFETY` у каждого `unsafe` под lint-ом, `libc`/`windows-sys`, метаданные и `cargo xtask package`, AGENTS.md вместо codex.md.
+
+Находки: из 181 ID сводной таблицы закрыто ≈159. Открытыми или частично закрытыми остаются, с причинами в записях фаз:
+- Ф8: X64-07 (EVEX/xmm16–31), X64-14, X64-17 (не принят по замеру), A64-02, A64-03 п.1, A64-06, A64-08, A64-09, A64-15 (aarch64 без замеров вне qemu), HIR-07, HIR-08 (остаток), BE-11, LNC-13, LNC-17, CORE-11 (остаток), CORE-21, SPL-18 (по Р15/замеру);
+- Ф9: LNC-14 и остаток CORE-24 (unwind-таблицы), CLIP-01 (аудит кастов без pedantic-lint-ов);
+- для владельца: имена `lancy`, `splice-*`, `splice-kernel` 0.1.0 уже есть в индексе crates.io.
+
+Числа до/после (подробности в записях):
+- вызов ядер Lancy: геосреднее ×0.97–0.98 по 22 нагрузкам за Ф5–Ф8, `sql_plan` 207–215 → 191–196 мс;
+- сборка Lancy: ×1.00–1.03 (шум), Cranelift ×0.92;
+- Rust-вызов из ядра (Ф9.2b): 3.79/4.25/3.61 → 3.41/3.65/3.15 нс (Lancy/Cranelift/LLVM);
+- открыт вопрос: сборка LLVM `simd_matmul` +4…8 % (Ф5).
+
+Проверки Ф9.3–9.4: полный `cargo +1.94.1 xtask ci` (lint, тесты release, features, doc, package, static-llvm) — зелёный; первый прогон упал на `cargo package --workspace`, который берёт и `publish = false` крейты (testkit без версии зависимости) — `xtask package` исключает `splice-testkit` и `xtask`.

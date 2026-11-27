@@ -15,7 +15,6 @@ use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{Module, default_libcall_names};
 use splice_core::call::{Entry, Interface, SliceDescriptor, enter_native};
 use splice_core::{Backend, BuildOptions, CallError, Executable, Function, Result};
-use std::sync::Mutex;
 
 /// Compile a specialized kernel or a portable Splice function with Cranelift.
 pub struct Cranelift;
@@ -124,6 +123,11 @@ fn isa_flags(target: &splice_core::Target) -> Vec<(&'static str, bool)> {
 
 struct CodeMemory(Option<JITModule>);
 
+// SAFETY: a shared `CodeMemory` is never used: the module is only touched
+// while compiling, before the kernel exists, and by `Drop`, which has
+// exclusive access. Calls run the finalized code without the module.
+unsafe impl Sync for CodeMemory {}
+
 impl Drop for CodeMemory {
     fn drop(&mut self) {
         if let Some(module) = self.0.take() {
@@ -136,9 +140,8 @@ impl Drop for CodeMemory {
 
 /// Owns the executable code of the entry point and all its callees.
 pub struct CraneliftKernel {
-    // The module is Send. Only its owner needs exclusive access on drop.
-    // Concurrent calls use the immutable machine code without taking a lock.
-    _memory: splice_jit::Published<Mutex<CodeMemory>>,
+    // Concurrent calls use the immutable machine code, never the module.
+    _memory: splice_jit::Published<CodeMemory>,
     entry: Entry,
     interface: Interface,
 }
@@ -184,7 +187,7 @@ impl Backend for Cranelift {
         // (`splice_core::call::Entry`). The kernel owns its module.
         let entry = unsafe { std::mem::transmute::<*const u8, Entry>(address) };
         Ok(CraneliftKernel {
-            _memory: publish.finish(debug_info::profile_here(), Mutex::new(memory))?,
+            _memory: publish.finish(debug_info::profile_here(), memory)?,
             entry,
             interface: Interface::new(function.signature()),
         })

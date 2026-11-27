@@ -2,30 +2,29 @@ use super::executable::{Executable, os_error};
 use crate::CompileError;
 use std::ffi::c_void;
 use std::ptr::{self, NonNull};
-
-#[link(name = "kernel32")]
-unsafe extern "system" {
-    fn VirtualAlloc(address: *mut c_void, size: usize, kind: u32, protection: u32) -> *mut c_void;
-    fn VirtualProtect(address: *mut c_void, size: usize, protection: u32, old: *mut u32) -> i32;
-    fn VirtualFree(address: *mut c_void, size: usize, kind: u32) -> i32;
-    fn GetCurrentProcess() -> *mut c_void;
-    fn FlushInstructionCache(process: *mut c_void, address: *const c_void, size: usize) -> i32;
-}
+use windows_sys::Win32::System::Diagnostics::Debug::FlushInstructionCache;
+use windows_sys::Win32::System::Memory::{
+    MEM_COMMIT, MEM_RELEASE, MEM_RESERVE, PAGE_EXECUTE_READ, PAGE_READWRITE, VirtualAlloc,
+    VirtualFree, VirtualProtect,
+};
+use windows_sys::Win32::System::Threading::GetCurrentProcess;
 
 pub(super) fn allocate(len: usize) -> Result<NonNull<c_void>, CompileError> {
-    const MEM_COMMIT_RESERVE: u32 = 0x1000 | 0x2000;
-    const PAGE_READWRITE: u32 = 0x04;
-    let p = unsafe { VirtualAlloc(ptr::null_mut(), len, MEM_COMMIT_RESERVE, PAGE_READWRITE) };
+    // SAFETY: a new region at an address the system chooses aliases no
+    // existing memory.
+    let p = unsafe { VirtualAlloc(ptr::null(), len, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE) };
     NonNull::new(p).ok_or_else(|| os_error("VirtualAlloc"))
 }
 
 pub(super) fn seal(mem: &Executable) -> Result<(), CompileError> {
-    const PAGE_EXECUTE_READ: u32 = 0x20;
     let address = mem.address.as_ptr();
     let mut old = 0;
+    // SAFETY: `mem` owns the region of `mem.len` bytes; nothing else
+    // references it before it is published.
     if unsafe { VirtualProtect(address, mem.len, PAGE_EXECUTE_READ, &mut old) } == 0 {
         return Err(os_error("VirtualProtect"));
     }
+    // SAFETY: flushing the instruction cache of this process's own region.
     if unsafe { FlushInstructionCache(GetCurrentProcess(), address, mem.len) } == 0 {
         return Err(os_error("FlushInstructionCache"));
     }
@@ -33,6 +32,8 @@ pub(super) fn seal(mem: &Executable) -> Result<(), CompileError> {
 }
 
 pub(super) fn release(mem: &Executable) {
-    const MEM_RELEASE: u32 = 0x8000;
-    unsafe { VirtualFree(mem.address.as_ptr(), 0, MEM_RELEASE) };
+    // SAFETY: `mem` owns the region, and its owner is dropped, so no
+    // invocation is running in it.
+    let freed = unsafe { VirtualFree(mem.address.as_ptr(), 0, MEM_RELEASE) };
+    debug_assert_ne!(freed, 0, "VirtualFree of an owned region");
 }

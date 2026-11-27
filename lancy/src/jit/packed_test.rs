@@ -13,5 +13,6 @@ pub(crate) unsafe fn with_kernel<const N: usize>(
     // until the callback returns, and the callback cannot retain the closure.
     let entry: unsafe extern "C" fn(*mut [[u8; 64]; N]) =
         unsafe { std::mem::transmute(memory.address.as_ptr()) };
+    // SAFETY: as above; `slots` is the exclusive slot array of one call.
     run(&|slots| unsafe { entry(slots) });
 }

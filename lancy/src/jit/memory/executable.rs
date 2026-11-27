@@ -16,6 +16,7 @@ pub(in crate::jit) struct Executable {
 // SAFETY: Once published the mapping is immutable. A caller borrows the owner
 // for the duration of execution, so drop cannot race an active invocation.
 unsafe impl Send for Executable {}
+// SAFETY: shared references only read or execute the immutable mapping.
 unsafe impl Sync for Executable {}
 
 /// Installing nothing is a caller defect: every kernel has a body.

@@ -529,7 +529,10 @@ impl<'ctx> Body<'_, 'ctx> {
                 };
                 // SAFETY: the positioned builder, scalar pointer, vector index
                 // and element type share a context. LLVM consumes this
-                // one-index array during the call.
+                // one-index array during the call. GEP sign-extends the
+                // 32-bit offsets; an active lane's index is below the slice
+                // length, which `validate_buffers` bounds by `i32::MAX`, so
+                // the extended offset is the index itself.
                 unsafe {
                     VectorValue::new(LLVMBuildGEP2(
                         ir.as_mut_ptr(),

@@ -106,10 +106,8 @@ fn load_covers_scaled_address_and_shift_covers_its_constant() {
     let args = [words[1..].as_ptr() as u64, u32::MAX as u64];
     let code = Kernel::compile(&f, &crate::test_target::options()).unwrap();
     // SAFETY: index -1 from the second element addresses the first live i32.
-    assert_eq!(
-        unsafe { code.call_word(&args) }.unwrap() as i32,
-        words[0] >> 16
-    );
+    let actual = unsafe { code.call_word(&args) }.unwrap() as i32;
+    assert_eq!(actual, words[0] >> 16);
 }
 
 #[test]

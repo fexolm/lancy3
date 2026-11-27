@@ -3,37 +3,26 @@ use crate::CompileError;
 use std::ffi::c_void;
 use std::ptr::{self, NonNull};
 
-unsafe extern "C" {
-    fn mmap(
-        address: *mut c_void,
-        size: usize,
-        prot: i32,
-        flags: i32,
-        fd: i32,
-        offset: i64,
-    ) -> *mut c_void;
-    fn mprotect(address: *mut c_void, size: usize, prot: i32) -> i32;
-    fn munmap(address: *mut c_void, size: usize) -> i32;
-}
-
 pub(super) fn allocate(len: usize) -> Result<NonNull<c_void>, CompileError> {
-    const MAP_PRIVATE_ANONYMOUS: i32 = 0x02 | 0x20;
-    const PROT_READ_WRITE: i32 = 1 | 2;
+    // SAFETY: an anonymous private mapping at an address the kernel chooses
+    // aliases no existing memory.
     let p = unsafe {
-        mmap(
+        libc::mmap(
             ptr::null_mut(),
             len,
-            PROT_READ_WRITE,
-            MAP_PRIVATE_ANONYMOUS,
+            libc::PROT_READ | libc::PROT_WRITE,
+            libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
             -1,
             0,
         )
     };
-    if p as isize == -1 {
+    if p == libc::MAP_FAILED {
         return Err(os_error("mmap"));
     }
     NonNull::new(p).ok_or_else(|| {
-        unsafe { munmap(p, len) };
+        // SAFETY: `p` is the mapping of `len` bytes just created, unused.
+        let unmapped = unsafe { libc::munmap(p, len) };
+        debug_assert_eq!(unmapped, 0, "munmap of a fresh mapping");
         CompileError::Os {
             operation: "mmap",
             source: std::io::Error::other("mapping has a null base address"),
@@ -42,11 +31,19 @@ pub(super) fn allocate(len: usize) -> Result<NonNull<c_void>, CompileError> {
 }
 
 pub(super) fn seal(mem: &Executable) -> Result<(), CompileError> {
-    const PROT_READ_EXEC: i32 = 1 | 4;
     #[cfg(target_arch = "aarch64")]
     synchronize(mem);
     // Publish the mapping only after mprotect succeeds.
-    if unsafe { mprotect(mem.address.as_ptr(), mem.len, PROT_READ_EXEC) } != 0 {
+    // SAFETY: `mem` owns the mapping of `mem.len` bytes; nothing else
+    // references it before it is published.
+    let sealed = unsafe {
+        libc::mprotect(
+            mem.address.as_ptr(),
+            mem.len,
+            libc::PROT_READ | libc::PROT_EXEC,
+        )
+    };
+    if sealed != 0 {
         return Err(os_error("mprotect"));
     }
     Ok(())
@@ -81,5 +78,8 @@ fn synchronize(mem: &Executable) {
 }
 
 pub(super) fn release(mem: &Executable) {
-    unsafe { munmap(mem.address.as_ptr(), mem.len) };
+    // SAFETY: `mem` owns the mapping, and its owner is dropped, so no
+    // invocation is running in it.
+    let unmapped = unsafe { libc::munmap(mem.address.as_ptr(), mem.len) };
+    debug_assert_eq!(unmapped, 0, "munmap of an owned mapping");
 }

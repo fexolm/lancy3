@@ -55,6 +55,7 @@ fn registrations_link_into_the_gdb_descriptor() {
     // SAFETY: only this test registers objects in this process, and the
     // descriptor is read between registrations.
     let first = || unsafe { (&raw const (*descriptor).first).read_volatile() };
+    // SAFETY: as above; nothing writes the descriptor during these reads.
     unsafe {
         assert_eq!((*descriptor).version, 1);
         assert_eq!((*descriptor).action, 0);

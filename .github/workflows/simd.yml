@@ -40,6 +40,7 @@ jobs:
       - run: cargo +"$TOOLCHAIN" metadata --locked --format-version 1 > /dev/null
       - run: cargo +"$TOOLCHAIN" xtask lint
       - run: cargo +"$TOOLCHAIN" xtask doc
+      - run: cargo +"$TOOLCHAIN" xtask package
 
   test:
     strategy:

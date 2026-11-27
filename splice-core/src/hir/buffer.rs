@@ -186,6 +186,10 @@ impl BufferArg<'_> {
 }
 
 /// Check arity, mutability and representable slice lengths before entering native code.
+///
+/// Every slice is at most `i32::MAX` elements long: backends rely on it, for
+/// example LLVM sign-extends 32-bit gather offsets, which is the index itself
+/// only below `2^31`.
 #[inline]
 pub fn validate_buffers(
     kinds: &[BufferKind],
@@ -281,6 +285,21 @@ mod tests {
         assert_eq!(shared.kind(), BufferKind::new(Element::F32, false));
         assert_eq!(shared.as_slice::<f32>(), &[1.5, 2.5, 3.5]);
         assert_eq!(address, data.as_mut_ptr().cast());
+    }
+
+    /// Backends address slices with signed 32-bit offsets (BE-19).
+    #[test]
+    #[cfg(all(target_os = "linux", target_pointer_width = "64"))]
+    fn a_slice_longer_than_i32_max_is_rejected() {
+        // Zeroed pages are mapped lazily: the 4 GiB are never touched.
+        let long = vec![0u16; i32::MAX as usize + 1];
+        let kinds = [BufferKind::new(Element::U16, false)];
+        assert!(matches!(
+            validate_buffers(&kinds, &[BufferArg::read(&long)]),
+            Err(crate::SignatureError::Length { buffer: 0 })
+        ));
+        let fits = &long[..i32::MAX as usize];
+        assert!(validate_buffers(&kinds, &[BufferArg::read(fits)]).is_ok());
     }
 
     #[test]

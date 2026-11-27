@@ -14,6 +14,8 @@
 //!   interface has one definition (Linux; on Ubuntu the static link line
 //!   also needs `libpolly-19-dev`).
 //! - `doc`: rustdoc for the workspace with warnings denied.
+//! - `package`: package every publishable crate and build each package
+//!   from its archive, as `cargo publish` would (nothing is uploaded).
 //! - `bench [ARGS]`: the backend comparison bench, with ARGS for Criterion.
 //! - `bench-tables [--run] [SIMD...]`: Markdown tables of the backend bench
 //!   with the commit, toolchain versions and the ISA of each profile. With
@@ -67,6 +69,7 @@ fn run(args: &[String]) -> Result {
             if !quick {
                 features()?;
                 doc()?;
+                package()?;
                 if cfg!(target_os = "linux") {
                     static_llvm()?;
                 }
@@ -95,12 +98,13 @@ fn run(args: &[String]) -> Result {
             options.finish()?;
             profile(&simd, &target, bytes)
         }
-        "lint" | "features" | "static-llvm" | "doc" => {
+        "lint" | "features" | "static-llvm" | "doc" | "package" => {
             options.finish()?;
             match command.as_str() {
                 "lint" => lint(),
                 "features" => features(),
                 "static-llvm" => static_llvm(),
+                "package" => package(),
                 _ => doc(),
             }
         }
@@ -110,7 +114,7 @@ fn run(args: &[String]) -> Result {
 
 fn usage() -> String {
     "usage: cargo xtask ci [--quick] | lint | test [--debug] [--target T] | features | \
-     profile SIMD [--target T] [--expect-bytes N] | static-llvm | doc | bench [ARGS] | \
+     profile SIMD [--target T] [--expect-bytes N] | static-llvm | doc | package | bench [ARGS] | \
      bench-tables [--run] [SIMD...]"
         .into()
 }
@@ -640,6 +644,18 @@ fn static_llvm() -> Result {
     }
     eprintln!("xtask: static LLVM links with one GDB JIT interface");
     Ok(())
+}
+
+fn package() -> Result {
+    // The test kit and xtask are `publish = false`.
+    status(cargo(&[
+        "package",
+        "--workspace",
+        "--exclude",
+        "splice-testkit",
+        "--exclude",
+        "xtask",
+    ]))
 }
 
 fn doc() -> Result {

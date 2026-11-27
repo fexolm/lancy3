@@ -1,9 +1,9 @@
 [package]
 name = "splice-testkit"
 version = "0.0.0"
-edition = "2024"
-rust-version = "1.94"
-license = "MIT OR Apache-2.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
 publish = false
 description = "Backend matrix and differential checks for Splice tests"
 
@@ -16,3 +16,6 @@ splice = { package = "splice-kernel", path = "../splice", default-features = fal
 
 [dev-dependencies]
 splice-target = { path = "../splice-target" }
+
+[lints]
+workspace = true

@@ -203,10 +203,8 @@ fn unaligned_vector_store_precedes_trap() {
             }
         }
         // SAFETY: p points one byte into this live, exclusively owned width+2 byte buffer.
-        assert_eq!(
-            unsafe { k.call_word(&[buf[1..].as_mut_ptr() as u64, i]) },
-            result
-        );
+        let actual = unsafe { k.call_word(&[buf[1..].as_mut_ptr() as u64, i]) };
+        assert_eq!(actual, result);
         assert_eq!(buf, expected);
     }
 }

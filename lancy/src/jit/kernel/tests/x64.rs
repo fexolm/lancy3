@@ -187,10 +187,9 @@ fn outlined_vector_pressure_preserves_windows_xmm_registers_on_normal_and_trappi
         let args = [input.as_ptr() as u64, output.as_mut_ptr() as u64, index];
         // SAFETY: both executable owners, the exact-size workspace, all vector
         // inputs, the writable output and the in/out canary array span this call.
-        assert_eq!(
-            unsafe { invoke(args.as_ptr(), workspace.as_mut_ptr(), actual.as_mut_ptr()) },
-            value
-        );
+        let returned =
+            unsafe { invoke(args.as_ptr(), workspace.as_mut_ptr(), actual.as_mut_ptr()) };
+        assert_eq!(returned, value);
         assert_eq!(actual_status, status);
         assert_eq!(output, expected);
         assert_eq!(actual, canaries);

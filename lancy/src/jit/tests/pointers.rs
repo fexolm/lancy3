@@ -77,10 +77,9 @@ fn pointer_offsets_sign_extend_indices_before_scaling() {
     // SAFETY: this kernel only computes an address and never dereferences it.
     for index in [-1i32, 0, 1, i32::MAX, i32::MIN] {
         let expected = base.wrapping_add_signed(i64::from(index) * 8);
-        assert_eq!(
-            unsafe { kernel.call_word(&[base, index as u32 as u64]) },
-            Ok(expected)
-        );
+        // SAFETY: the kernel only computes an address; it never accesses it.
+        let actual = unsafe { kernel.call_word(&[base, index as u32 as u64]) };
+        assert_eq!(actual, Ok(expected));
     }
 }
 
@@ -113,11 +112,8 @@ fn constant_offsets_outside_disp32_keep_the_full_pointer_width() {
             let base = std::ptr::from_ref(&word) as u64;
             let expected = base.wrapping_add_signed(i64::from(index) * stride);
             // SAFETY: the kernel only computes an address; it never accesses the result.
-            assert_eq!(
-                unsafe { kernel.call_word(&[base]) },
-                Ok(expected),
-                "{scale:?}, {index}"
-            );
+            let actual = unsafe { kernel.call_word(&[base]) };
+            assert_eq!(actual, Ok(expected), "{scale:?}, {index}");
         }
     }
 }

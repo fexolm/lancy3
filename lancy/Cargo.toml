@@ -1,24 +1,36 @@
 [package]
 name = "lancy"
-version = "0.1.0"
-edition = "2024"
-rust-version = "1.94"
-license = "MIT OR Apache-2.0"
-repository = "https://github.com/fexolm/lancy3"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
 description = "A CPU JIT with SSA HIR and x86-64 and AArch64 code generation"
+readme = "README.md"
+keywords = ["jit","compiler","codegen","simd","x86-64"]
+categories = ["compilers","development-tools"]
 
 [features]
 experimental-simd = []
 
 [dependencies]
 tracing.workspace = true
-splice-target = { path = "../splice-target", version = "0.1.0" }
+splice-target.workspace = true
 regalloc2 = "0.15.3"
-thiserror = "2"
+thiserror.workspace = true
 # Both backends build on every host; only executing code needs a match.
 iced-x86 = { version = "1.21", default-features = false, features = ["std", "code_asm", "op_code_info"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_System_Memory", "Win32_System_Diagnostics_Debug", "Win32_System_Threading"] }
 
 [dev-dependencies]
 filecheck = "0.5"
 regalloc2 = { version = "0.15.3", features = ["checker"] }
 iced-x86 = { version = "1.21", default-features = false, features = ["decoder", "intel", "instr_info"] }
+
+[lints]
+workspace = true

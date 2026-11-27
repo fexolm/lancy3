@@ -69,6 +69,18 @@ impl Config {
     }
 }
 
+// The root ABI (A64-17). The host calls the root with AAPCS64:
+// `x0` points to the argument words, `x1` to the workspace. The workspace
+// starts with the root area of ROOT_BYTES: the status pointer, then the
+// result words. The root
+// - reserves HOST_STACK_BYTES on the host stack and stores ROOT_SAVES there,
+//   then points x29 at the saved x29/x30 pair (an AAPCS64 frame record);
+// - keeps the root area in x20, the first frame (`x1 + ROOT_BYTES`) in x19
+//   and the arguments in x22 for the whole call;
+// - saves every other callee-saved register the call graph writes in the
+//   first frame and restores it, with ROOT_SAVES, on return and on trap.
+// Children run on the workspace (their saves at `x1`), not the host stack,
+// except in debug builds, which give each function a host frame.
 // Status pointer and eight result words, padded to a cache line so that
 // every frame starts aligned (A64-10).
 const ROOT_BYTES: usize = 128;

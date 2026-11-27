@@ -1,18 +1,21 @@
 [package]
 name = "splice-llvm"
-version = "0.1.0"
-edition = "2024"
-rust-version = "1.94"
-license = "MIT OR Apache-2.0"
-repository = "https://github.com/fexolm/lancy3"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
 description = "LLVM ORC JIT code generator for Splice kernels"
+readme = "../README.md"
+keywords = ["jit","kernel","llvm","codegen"]
+categories = ["compilers"]
 
 [dependencies]
 tracing.workspace = true
-splice-core = { path = "../splice-core", version = "0.1.0" }
-splice-target = { path = "../splice-target", version = "0.1.0" }
-splice-jit = { path = "../splice-jit", version = "0.1.0" }
-thiserror = "2"
+splice-core.workspace = true
+splice-target.workspace = true
+splice-jit.workspace = true
+thiserror.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 inkwell = { version = "0.11", default-features = false, features = ["target-x86", "llvm19-1-no-llvm-linking"] }
@@ -26,7 +29,14 @@ inkwell = { version = "0.11", default-features = false, features = ["target-x86"
 inkwell = { version = "0.11", default-features = false, features = ["target-aarch64", "llvm19-1-prefer-dynamic"] }
 
 [target.'cfg(all(target_os = "linux", target_arch = "aarch64"))'.dev-dependencies]
-libc = "0.2"
+libc.workspace = true
+
+# llvm-sys needs an LLVM 19 installation; docs.rs documents the Linux x86-64 build.
+[package.metadata.docs.rs]
+targets = ["x86_64-unknown-linux-gnu"]
 
 [build-dependencies]
 cc = "1"
+
+[lints]
+workspace = true
