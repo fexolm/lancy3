@@ -31,8 +31,7 @@ splice-llvm = { workspace = true, optional = true }
 tracing.workspace = true
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "registry", "std"] }
 criterion = { version = "0.8", features = ["html_reports"] }
-splice-test-traits = { path = "../tests/fixtures/trait-provider" }
-splice-test-overflow = { path = "../tests/fixtures/overflow-provider" }
+splice-test-fixtures = { path = "../tests/fixtures/provider" }
 splice-testkit = { path = "../splice-testkit", default-features = false }
 trybuild = "1"
 

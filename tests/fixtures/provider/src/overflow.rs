@@ -1,6 +1,6 @@
-//! Kernels of a crate whose overflow checks are the opposite of its profile's
-//! `debug_assertions` (see the workspace profiles): its kernels must follow
-//! the crate's real `-C overflow-checks`, at run time and while staging.
+//! Kernels whose overflow checks are the opposite of their profile's
+//! `debug_assertions` (see the workspace profiles): they must follow the
+//! crate's real `-C overflow-checks`, at run time and while staging.
 use splice::kernel;
 
 #[kernel]

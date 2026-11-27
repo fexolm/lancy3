@@ -1,8 +1,8 @@
 use splice::{Codegen, Executable, hir::Instr, kernel};
-use splice_test_traits::IndexedTransform as ImportedIndexed;
-use splice_test_traits::ReverseTransform as ImportedReverse;
-use splice_test_traits::Transform as Imported;
-use splice_test_traits::{
+use splice_test_fixtures::traits::IndexedTransform as ImportedIndexed;
+use splice_test_fixtures::traits::ReverseTransform as ImportedReverse;
+use splice_test_fixtures::traits::Transform as Imported;
+use splice_test_fixtures::traits::{
     OrdinaryTransform, OtherPlanTransform, OwnedPlanTransform, ParameterizedTransform,
     PlanTransform, WideTransform,
 };

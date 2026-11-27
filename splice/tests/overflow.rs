@@ -302,11 +302,11 @@ fn host_arithmetic_faults_are_deferred_for_every_integer_type() {
 // crate does not (see the workspace profiles).
 #[kernel]
 fn across_crates(a: i32, b: i32, c: i32) -> i32 {
-    splice_test_overflow::add(a, b) - c
+    splice_test_fixtures::overflow::add(a, b) - c
 }
 
 fn check_crate_overflow<B: Codegen<Output: Executable>>(mode: Mode) {
-    use splice_test_overflow::{add, add_known};
+    use splice_test_fixtures::overflow::{add, add_known};
     let here = cfg!(debug_assertions);
     let fixture = !here;
     let wraps = |checks: bool, value: i32| {

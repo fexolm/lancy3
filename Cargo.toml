@@ -1,6 +1,6 @@
 [workspace]
 members = ["lancy", "splice", "splice-core", "splice-macros", "splice-target", "splice-lancy", "splice-llvm", "splice-cranelift", "splice-jit", "splice-testkit", "xtask"]
-exclude = ["tests/fixtures/trait-provider", "tests/fixtures/overflow-provider"]
+exclude = ["tests/fixtures/provider"]
 resolver = "3"
 
 [workspace.package]
@@ -26,10 +26,10 @@ thiserror = "2"
 libc = "0.2"
 tracing = { version = "0.1", default-features = false, features = ["std"] }
 
-# The overflow fixture checks overflow opposite to its profile's
+# The fixture crate checks overflow opposite to its profile's
 # debug_assertions, so kernels cannot follow `cfg!(debug_assertions)`.
-[profile.dev.package.splice-test-overflow]
+[profile.dev.package.splice-test-fixtures]
 overflow-checks = false
 
-[profile.release.package.splice-test-overflow]
+[profile.release.package.splice-test-fixtures]
 overflow-checks = true
