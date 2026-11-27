@@ -167,13 +167,6 @@ pub enum Instr {
 }
 
 impl Instr {
-    pub fn terminates(&self) -> bool {
-        matches!(
-            self,
-            Self::Return(_) | Self::TrapBounds | Self::Jump(_) | Self::Branch { .. }
-        )
-    }
-
     fn may_trap(&self) -> bool {
         match self {
             Self::Bin(_, op, ..) => op.may_trap(),
