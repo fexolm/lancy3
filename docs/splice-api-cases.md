@@ -20,7 +20,7 @@
 
 ```rust
 use splice::kernel;
-use splice_lancy::Lancy;
+use splice::lancy::Lancy;
 
 struct Plan { min: i32 }
 

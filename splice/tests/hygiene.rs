@@ -5,7 +5,7 @@
 //!
 //! A user `mod foo` beside `#[kernel] fn foo` stays a name conflict by design:
 //! the kernel's API is the module `foo` (`foo::build`, `foo::BuildArgs`).
-use splice_lancy::Lancy;
+use splice::lancy::Lancy;
 
 /// Variants that shadow `Ok` and `Err` from the prelude.
 mod status {

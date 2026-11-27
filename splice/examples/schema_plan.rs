@@ -1,8 +1,8 @@
+use splice::lancy::Lancy;
 use splice::{
     BufferArg, BufferKind, Executable, kernel,
     simd::{Element, Lane, LaneElement},
 };
-use splice_lancy::Lancy;
 
 #[derive(Clone, Copy)]
 enum Compare {
@@ -366,9 +366,9 @@ fn run(
 fn mixed_schema_specializes_the_same_operators_for_different_elements()
 -> Result<(), Box<dyn std::error::Error>> {
     use splice::Codegen;
-    use splice_cranelift::Cranelift;
+    use splice::cranelift::Cranelift;
     #[cfg(feature = "llvm")]
-    use splice_llvm::Llvm;
+    use splice::llvm::Llvm;
 
     let schema = Schema::from_batch(&demo_columns());
     let mut plan = demo_plan();

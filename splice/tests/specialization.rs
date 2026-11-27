@@ -198,14 +198,14 @@ fn invalid_arguments_are_rejected_before_staging_or_reusing_a_callee()
                 .is_err()
             );
         }
-        let read = [BufferKind::Read];
+        let read = [BufferKind::READ_I32];
         for (kinds, buffers) in [
             (&read[..], &[][..]),
             (&read, &[Buffer(2)]),
-            (&[BufferKind::Write], &[Buffer(0)]),
+            (&[BufferKind::WRITE_I32], &[Buffer(0)]),
             (&[BufferKind::new(Element::I64, false)], &[Buffer(0)]),
             (
-                &[BufferKind::Read, BufferKind::Write],
+                &[BufferKind::READ_I32, BufferKind::WRITE_I32],
                 &[Buffer(1), Buffer(1)],
             ),
         ] {
@@ -223,7 +223,7 @@ fn invalid_arguments_are_rejected_before_staging_or_reusing_a_callee()
             Specialization::new::<Child>(Signature::new(
                 &[ScalarType::I32; 1],
                 ScalarType::I32,
-                &[BufferKind::Read, BufferKind::Read],
+                &[BufferKind::READ_I32, BufferKind::READ_I32],
             ))
         };
         let shared = [Buffer(1), Buffer(1)];
@@ -247,7 +247,7 @@ fn invalid_arguments_are_rejected_before_staging_or_reusing_a_callee()
         root.ret(result)?;
         Ok(())
     }
-    let kinds = [BufferKind::Read, BufferKind::Write];
+    let kinds = [BufferKind::READ_I32, BufferKind::WRITE_I32];
     let ir = splice::frontend::materialize(
         Signature::new(&[ScalarType::I32; 1], ScalarType::I32, &kinds),
         Box::new(stage),

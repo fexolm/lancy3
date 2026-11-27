@@ -416,14 +416,14 @@ pub(super) fn expand(root: Path, native: &mut ItemFn, print: bool) -> Result<Tok
     }
     let context_sign = context.as_ref().map(|context| {
         let signature = context.signature(&root);
-        emit!(#[doc(hidden)] #vis static __SPLICE_CONTEXT_SIGNATURE: #root::ContextSignature = #signature;)
+        emit!(#[doc(hidden)] #vis static __SPLICE_CONTEXT_SIGNATURE: #root::__private::ContextSignature = #signature;)
     });
     let root_context_args = context
         .as_ref()
-        .map(|_| emit!(#root::ContextFrame::root(&__SPLICE_CONTEXT_SIGNATURE),));
+        .map(|_| emit!(#root::__private::ContextFrame::root(&__SPLICE_CONTEXT_SIGNATURE),));
     let context_decls = context
         .as_ref()
-        .map(|_| emit!(__splice_context_frame: #root::ContextFrame,));
+        .map(|_| emit!(__splice_context_frame: #root::__private::ContextFrame,));
     let context_exports = context.as_ref().map(|context| {
         let dispatch = context.dispatcher(&root, emit!(&__SPLICE_CONTEXT_SIGNATURE), &types);
         let object = parameters.iter().find(|p| matches!(p.binding, Binding::Context)).expect("a context parameter").ty;
@@ -431,7 +431,7 @@ pub(super) fn expand(root: Path, native: &mut ItemFn, print: bool) -> Result<Tok
         emit! {
             #[doc(hidden)]
             #[allow(clippy::too_many_arguments)]
-            #vis fn __splice_stage_context #generic (#(#nested_decls,)* _: #witness, __splice_context_frame: #root::ContextFrame,
+            #vis fn __splice_stage_context #generic (#(#nested_decls,)* _: #witness, __splice_context_frame: #root::__private::ContextFrame,
                 __splice_builder: &mut #factory) -> #root::Result<#hir::Reg> #where_ {
                 #(#extract_known)*
                 __SpliceDefinition::__splice_inline #fish (#(#helper_args,)* __splice_context_frame, __splice_builder)
@@ -439,7 +439,7 @@ pub(super) fn expand(root: Path, native: &mut ItemFn, print: bool) -> Result<Tok
 
             #[doc(hidden)]
             #vis fn __splice_dispatch_context #generic (__splice_object: #object,
-                __splice_operation: u32, __splice_arguments: #root::ContextArguments<'_>, _: #witness) -> i32 #where_ {
+                __splice_operation: u32, __splice_arguments: #root::__private::ContextArguments<'_>, _: #witness) -> i32 #where_ {
                 #dispatch
             }
         }
@@ -607,7 +607,7 @@ pub(super) fn expand(root: Path, native: &mut ItemFn, print: bool) -> Result<Tok
             #vis fn build_with_options #compile_generics (
                 __splice_options: #root::BuildOptions, __splice_args: #build_type,
             ) -> ::core::result::Result<#root::TypedKernel<#signature, <#backend as #root::Backend>::Output>, #root::BuildError> #where_ {
-                #root::build_boundary(move || {
+                #root::__private::build_boundary(move || {
                     let BuildArgs { #(#host_names,)* } = __splice_args;
                     #setup
                     <#backend as #root::Codegen>::build_with_options(
@@ -626,7 +626,7 @@ pub(super) fn expand(root: Path, native: &mut ItemFn, print: bool) -> Result<Tok
             #vis fn ir_with_options #generic (__splice_options: #root::BuildOptions, #host_decls)
                 -> ::core::result::Result<#root::TypedIr<#signature>, #root::BuildError> #where_
             {
-                #root::build_boundary(move || {
+                #root::__private::build_boundary(move || {
                     #setup
                     #root::frontend::materialize(
                         #root::frontend::Signature::new(#params, #result, __splice_kinds), __splice_body, __splice_options,
@@ -640,9 +640,9 @@ pub(super) fn expand(root: Path, native: &mut ItemFn, print: bool) -> Result<Tok
     let needs_stages = uses_stage_requirements(&lowered_block);
     let foldable = evaluable && lower::foldable_signature(sig);
     let fold_macro = if foldable {
-        emit!(#root::__splice_choose_kernel)
+        emit!(#root::__private::__splice_choose_kernel)
     } else {
-        emit!(#root::__splice_choose_rust)
+        emit!(#root::__private::__splice_choose_rust)
     };
     let generated = emit! {
         #(#[#gates])*
@@ -656,7 +656,7 @@ pub(super) fn expand(root: Path, native: &mut ItemFn, print: bool) -> Result<Tok
             #[doc(hidden)] #vis use #fold_macro as __splice_fold;
             #vis const __SPLICE_RETURN: #hir::ValueType = #result_value_type;
             #[doc(hidden)]
-            #vis use #root::__splice_choose_kernel as __splice_dispatch;
+            #vis use #root::__private::__splice_choose_kernel as __splice_dispatch;
             #context_sign
             #context_exports
             #entry_points

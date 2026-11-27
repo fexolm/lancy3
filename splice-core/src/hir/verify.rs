@@ -121,7 +121,7 @@ mod tests {
     fn a_well_formed_function_verifies_and_records_traps() {
         let f = typed(
             vec![ScalarType::Index],
-            vec![BufferKind::Read],
+            vec![BufferKind::READ_I32],
             vec![I32],
             vec![
                 Instr::Load {
@@ -350,7 +350,7 @@ mod tests {
         assert_eq!(
             error(
                 1,
-                vec![BufferKind::Read],
+                vec![BufferKind::READ_I32],
                 vec![I32],
                 vec![load, Instr::Return(R1)]
             ),
@@ -359,7 +359,7 @@ mod tests {
         assert_eq!(
             typed_error(
                 index(),
-                vec![BufferKind::Read],
+                vec![BufferKind::READ_I32],
                 vec![],
                 vec![store.clone(), Instr::Return(R0)]
             ),
@@ -368,7 +368,7 @@ mod tests {
         assert_eq!(
             typed_error(
                 index(),
-                vec![BufferKind::Write],
+                vec![BufferKind::WRITE_I32],
                 vec![],
                 vec![store, Instr::Return(R0)]
             ),

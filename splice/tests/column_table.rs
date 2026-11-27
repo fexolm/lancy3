@@ -1,10 +1,10 @@
 use splice::Function;
 use splice::hir::{Constant, Instr, SimdOp};
+use splice::lancy::Lancy;
 use splice::{
     BufferArg, BufferKind, Codegen, Executable, TypedKernel, kernel,
     simd::{Element, Lane},
 };
-use splice_lancy::Lancy;
 
 /// Whether staging left a call to the kernel function `name`.
 fn calls(function: &Function, name: &str) -> bool {
@@ -102,7 +102,10 @@ fn float_column_matches_the_rust_filter_including_nan_and_tail()
         }
         Ok(())
     }
-    let schema = Schema(vec![BufferKind::Read, BufferKind::new(Element::F32, false)]);
+    let schema = Schema(vec![
+        BufferKind::READ_I32,
+        BufferKind::new(Element::F32, false),
+    ]);
     let plan = Plan::Filter {
         expr: Expr::GeFloat { col: 1, val: 2.5 },
     };
@@ -189,7 +192,7 @@ fn check<E: Executable>(
 #[test]
 fn sql_specialization_reads_the_selected_column_from_each_batch()
 -> Result<(), Box<dyn std::error::Error>> {
-    let int = BufferKind::Read;
+    let int = BufferKind::READ_I32;
     let float = BufferKind::new(Element::F64, false);
     for (slot, val, layout) in [(0, 7, vec![int, float]), (1, 9, vec![float, int])] {
         let schema = Schema(layout);

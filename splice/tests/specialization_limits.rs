@@ -1,5 +1,5 @@
+use splice::lancy::Lancy;
 use splice::{BuildOptions, Codegen, Executable, Mode, kernel};
-use splice_lancy::Lancy;
 use std::{
     cell::Cell,
     sync::atomic::{AtomicUsize, Ordering},

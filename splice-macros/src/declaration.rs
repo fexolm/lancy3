@@ -297,13 +297,13 @@ fn select_trait(root: &Path, path: &Path, input: TokenStream) -> TokenStream {
     let alias = selector_alias("trait", path.segments.last().unwrap().ident.span());
     quote::quote_spanned!(proc_macro2::Span::mixed_site()=> {
         mod __splice_default_trait {
-            pub use #root::__splice_choose_rust as #alias;
+            pub use #root::__private::__splice_choose_rust as #alias;
         }
         use __splice_default_trait::*;
         {
             #[allow(unused_imports)]
             use #path as #alias;
-            #[allow(unused_imports)] use #root::__splice_method_case;
+            #[allow(unused_imports)] use #root::__private::__splice_method_case;
             #alias!(#input)
         }
     })

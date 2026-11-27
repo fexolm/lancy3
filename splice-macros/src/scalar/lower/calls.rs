@@ -153,7 +153,7 @@ impl Lower<'_> {
                 let (#(#params,)*)=(#(#original_args,)*);
                 let mut runtime=||{::core::result::Result::Ok::<_,#root::BuildError>(#support::Word::Runtime(#target(#(#bound,)* __splice_builder)?))};
                 #item::__splice_fold!(
-                    match #root::build_boundary(|| #item::__SpliceDefinition::__splice_eval #generics ((#(::core::option::Option::Some(#params),)*))) {
+                    match #root::__private::build_boundary(|| #item::__SpliceDefinition::__splice_eval #generics ((#(::core::option::Option::Some(#params),)*))) {
                         ::core::result::Result::Ok(value)=>#support::Word::known(value),
                         ::core::result::Result::Err(_)=>runtime()?,
                     },
@@ -295,27 +295,27 @@ impl Lower<'_> {
         let adapter = emit! {
             trait __SplicePacketAdapter {
                 fn supported(self) -> bool;
-                fn invoke(self, args: #root::ContextArguments<'_>) -> i32;
+                fn invoke(self, args: #root::__private::ContextArguments<'_>) -> i32;
             }
             impl<#(#slots: #word,)* R, P: #native::ProjectResult<R>> __SplicePacketAdapter for &#native::Candidate<fn(#(#slots),*) -> R, P> {
                 fn supported(self) -> bool { true }
                 #[allow(unused_variables)]
-                fn invoke(self, args: #root::ContextArguments<'_>) -> i32 {
+                fn invoke(self, args: #root::__private::ContextArguments<'_>) -> i32 {
                     #native::ProjectResult::project(&self.1, (self.0)(#(<#slots as #word>::decode(args.word(#indices))),*))
                 }
             }
             impl<F, P> __SplicePacketAdapter for &&#native::Candidate<F, P> {
                 fn supported(self) -> bool { false }
-                fn invoke(self, _: #root::ContextArguments<'_>) -> i32 { ::core::unreachable!("verified scalar packet adapter") }
+                fn invoke(self, _: #root::__private::ContextArguments<'_>) -> i32 { ::core::unreachable!("verified scalar packet adapter") }
             }
-            fn adapter #generics (args: #root::ContextArguments<'_>) -> i32 #where_clause {
+            fn adapter #generics (args: #root::__private::ContextArguments<'_>) -> i32 #where_clause {
                 (&#candidate).invoke(args)
             }
         };
         let call = emit! {
             __splice_builder.rust_call(
                 #root::hir::RustTarget::Static(const {
-                    &#root::StaticRustSymbol::new(::core::stringify!(#path), #words, 0, adapter #fish)
+                    &#root::__private::StaticRustSymbol::new(::core::stringify!(#path), #words, 0, adapter #fish)
                 }),
                 &operands,
                 &[],
@@ -378,7 +378,7 @@ pub(crate) fn select_free(
     emit!({
         mod __splice_default {
             pub mod #alias {
-                pub use #root::__splice_choose_rust as #selector;
+                pub use #root::__private::__splice_choose_rust as #selector;
             }
         }
         #[allow(unused_imports)] use __splice_default::*;

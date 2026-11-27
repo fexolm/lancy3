@@ -12,21 +12,21 @@
 macro_rules! each_backend {
     ($b:ident => $body:expr) => {{
         {
-            type $b = ::splice::Lancy;
+            type $b = ::splice::lancy::Lancy;
             $body
         };
         {
-            type $b = ::splice::Cranelift;
-            $body
-        };
-        #[cfg(feature = "llvm")]
-        {
-            type $b = ::splice::Llvm;
+            type $b = ::splice::cranelift::Cranelift;
             $body
         };
         #[cfg(feature = "llvm")]
         {
-            type $b = ::splice::LlvmManualSimd;
+            type $b = ::splice::llvm::Llvm;
+            $body
+        };
+        #[cfg(feature = "llvm")]
+        {
+            type $b = ::splice::llvm::LlvmManualSimd;
             $body
         };
     }};

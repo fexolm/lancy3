@@ -1,12 +1,12 @@
 use crate::relational::*;
 use splice::Codegen;
 use splice::Executable;
+use splice::cranelift::Cranelift;
 use splice::hir::{BufferKind, Function, Instr, SimdOp};
-use splice::simd::Lane;
-use splice_cranelift::Cranelift;
-use splice_lancy::Lancy;
+use splice::lancy::Lancy;
 #[cfg(feature = "llvm")]
-use splice_llvm::Llvm;
+use splice::llvm::Llvm;
+use splice::simd::Lane;
 
 type Row = (i32, i32);
 
@@ -779,10 +779,10 @@ fn plan_shape_selects_the_reachable_operator_kernels_at_build_time() {
         assert_eq!(
             f.buffer_kinds(),
             [
-                BufferKind::Read,
-                BufferKind::Read,
-                BufferKind::Write,
-                BufferKind::Write
+                BufferKind::READ_I32,
+                BufferKind::READ_I32,
+                BufferKind::WRITE_I32,
+                BufferKind::WRITE_I32
             ]
         );
     }

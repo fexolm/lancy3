@@ -171,10 +171,10 @@ pub(super) fn generate(
         let invoke = context.dispatcher(root, emit!(&__SPLICE_CONTEXT_SIGNATURE), &types);
         emit! {
             let __splice_object = self.#parameter;
-            let mut __splice_dispatch = |__splice_operation: u32, __splice_arguments: #root::ContextArguments<'_>| -> i32 {
+            let mut __splice_dispatch = |__splice_operation: u32, __splice_arguments: #root::__private::ContextArguments<'_>| -> i32 {
                 #invoke
             };
-            let mut __splice_runtime_context = #root::RuntimeContext::new(&__SPLICE_CONTEXT_SIGNATURE, &mut __splice_dispatch);
+            let mut __splice_runtime_context = #root::__private::RuntimeContext::new(&__SPLICE_CONTEXT_SIGNATURE, &mut __splice_dispatch);
         }
     });
     let buffers = if let Some(columns) = columns {
@@ -205,7 +205,7 @@ pub(super) fn generate(
             fn invoke<__SpliceExecutable: #root::Executable>(self, executable: &__SpliceExecutable)
                 -> ::core::result::Result<Self::Output, #root::CallError>
             {
-                #root::call_boundary(move || {
+                #root::__private::call_boundary(move || {
                     let __splice_registers = [#(#registers),*];
                     #context_setup
                     #buffers

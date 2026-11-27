@@ -91,19 +91,19 @@ impl Context {
                 return super::calls::dispatch_free(
                     root, target,
                     emit!(&#item::__SPLICE_CONTEXT_SIGNATURE),
-                    emit!(&#root::ContextSignature::new(&[])),
+                    emit!(&#root::__private::ContextSignature::new(&[])),
                 );
             }
             let symbol = method_metadata(target, "context_signature");
             let name = &symbol.path.segments.last().unwrap().ident;
             emit!({
-                trait Missing { #[allow(non_upper_case_globals)] const #name: &'static #root::ContextSignature =
-                    &#root::ContextSignature::new(&[]); }
+                trait Missing { #[allow(non_upper_case_globals)] const #name: &'static #root::__private::ContextSignature =
+                    &#root::__private::ContextSignature::new(&[]); }
                 impl<T: ?Sized> Missing for T {}
                 #symbol
             })
         });
-        emit!(#root::ContextSignature::with_borrows(&[#(#arities),*], &[#(#borrows),*], &[#(#signatures),*]))
+        emit!(#root::__private::ContextSignature::with_borrows(&[#(#arities),*], &[#(#borrows),*], &[#(#signatures),*]))
     }
 
     pub(in crate::scalar) fn dispatcher(
@@ -133,7 +133,7 @@ impl Context {
             let dispatch = crate::scalar::methods::rename_path(target, "dispatch_context");
             let name = &dispatch.path.segments.last().unwrap().ident;
             emit!(#index => {
-                trait Missing { fn #name<Elements>(&mut self, _:u32, _:#root::ContextArguments<'_>, _: ::core::marker::PhantomData<Elements>) -> i32 {
+                trait Missing { fn #name<Elements>(&mut self, _:u32, _:#root::__private::ContextArguments<'_>, _: ::core::marker::PhantomData<Elements>) -> i32 {
                     ::core::unreachable!("unlinked method has no context operations")
                 } }
                 impl<T: ?Sized> Missing for T {}
@@ -141,9 +141,9 @@ impl Context {
             },)
         });
         emit!(match (#signature).operation_at(__splice_operation) {
-            ::core::option::Option::Some(#root::ContextOperation::Local(__splice_operation)) =>
+            ::core::option::Option::Some(#root::__private::ContextOperation::Local(__splice_operation)) =>
                 match __splice_operation { #local _ => ::core::unreachable!("verified local operation") },
-            ::core::option::Option::Some(#root::ContextOperation::Child{ index, operation }) =>
+            ::core::option::Option::Some(#root::__private::ContextOperation::Child{ index, operation }) =>
                 match index { #(#routes)* _ => ::core::unreachable!("verified child context") },
             ::core::option::Option::None => ::core::unreachable!("verified Rust operation"),
         })
@@ -388,7 +388,7 @@ impl Context {
             trait Missing {
                 fn #marker() -> bool {false}
                 fn #name<Elements, #(#params),*>(_: #root::hir::Buffer, #(_: #params,)*
-                    _: ::core::marker::PhantomData<Elements>, _: #root::ContextFrame, _: &mut dyn #root::frontend::KernelBuilder) -> #root::Result<#root::hir::Reg> {
+                    _: ::core::marker::PhantomData<Elements>, _: #root::__private::ContextFrame, _: &mut dyn #root::frontend::KernelBuilder) -> #root::Result<#root::hir::Reg> {
                     ::core::result::Result::Err(#root::BuildError::staging("Rust method cannot be linked into the scalar kernel"))
                 }
             }

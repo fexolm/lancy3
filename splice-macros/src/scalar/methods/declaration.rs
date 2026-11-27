@@ -142,7 +142,7 @@ pub(crate) fn trait_defaults(
         let adapter = emit! {
             #[doc(hidden)]
             #[allow(unused_variables)]
-            fn #adapter_name #generics (args: #root::ContextArguments<'_>) -> i32 #where_ {
+            fn #adapter_name #generics (args: #root::__private::ContextArguments<'_>) -> i32 #where_ {
                 #support::ImportWord::encode(<Self as #trait_owner>::#name #func (#(#words),*))
             }
         };
@@ -150,7 +150,7 @@ pub(crate) fn trait_defaults(
         let call = emit! {
             __splice_builder.rust_call(
                 #hir::RustTarget::Static(const {
-                    &#root::StaticRustSymbol::new(
+                    &#root::__private::StaticRustSymbol::new(
                         ::core::stringify!(#name), #arity, 0, <Self as #trait_owner>::#adapter_name #func,
                     )
                 }),

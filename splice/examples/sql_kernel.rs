@@ -1,5 +1,5 @@
 use splice::kernel;
-use splice_lancy::Lancy;
+use splice::lancy::Lancy;
 
 #[derive(splice::ComptimeKey)]
 enum SqlExpr {

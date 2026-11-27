@@ -2,10 +2,10 @@ mod relational;
 
 use relational::{Catalog, Plan, pricing_plan, query};
 use splice::Executable;
-use splice_cranelift::Cranelift;
-use splice_lancy::Lancy;
+use splice::cranelift::Cranelift;
+use splice::lancy::Lancy;
 #[cfg(feature = "llvm")]
-use splice_llvm::Llvm;
+use splice::llvm::Llvm;
 
 #[cfg(test)]
 #[path = "relational/tests.rs"]

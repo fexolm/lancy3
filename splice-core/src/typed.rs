@@ -1,5 +1,6 @@
 //! The declaration marker ties a kernel's Rust argument type to its specialized IR.
-use crate::{BuildError, BuildOptions, CallError, Codegen, Executable, Function, build_boundary};
+use crate::error::build_boundary;
+use crate::{BuildError, BuildOptions, CallError, Codegen, Executable, Function};
 use std::{fmt, marker::PhantomData, ops::Deref};
 
 /// Argument record emitted by an individual kernel declaration.

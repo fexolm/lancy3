@@ -39,8 +39,8 @@ fn host_associated_functions_can_belong_to_a_type_named_lane() {
     let expected = delivery(3, 8);
     let ir = delivery::ir(3).unwrap();
     for kernel in [
-        delivery::build::<splice_lancy::Lancy>(delivery::BuildArgs { zone: 3 }).unwrap(),
-        splice_lancy::Lancy::compile(&ir).unwrap(),
+        delivery::build::<splice::lancy::Lancy>(delivery::BuildArgs { zone: 3 }).unwrap(),
+        splice::lancy::Lancy::compile(&ir).unwrap(),
     ] {
         assert_eq!(
             kernel.call(delivery::CallArgs { price: 8 }).unwrap(),
@@ -288,7 +288,10 @@ fn slice_kernel_compiles_the_complete_loop() {
         .into_inner()
         .0;
     assert_eq!(batch.arity(), 0);
-    assert_eq!(batch.buffer_kinds(), [BufferKind::Read, BufferKind::Write]);
+    assert_eq!(
+        batch.buffer_kinds(),
+        [BufferKind::READ_I32, BufferKind::WRITE_I32]
+    );
     assert!(
         batch
             .instructions()

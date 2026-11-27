@@ -207,8 +207,8 @@ pub(crate) fn publish(
         name,
     );
     let witness = super::context_slice_types(root, &params, &types);
-    let frame =
-        runtime_receiver.then(|| emit!(_: #witness, __splice_context_frame: #root::ContextFrame,));
+    let frame = runtime_receiver
+        .then(|| emit!(_: #witness, __splice_context_frame: #root::__private::ContextFrame,));
     let generics = &signature.generics;
     let where_ = &generics.where_clause;
     let value_type = result_type.value_type(root, &types);
@@ -260,12 +260,12 @@ pub(crate) fn publish(
         let dispatch = context.dispatcher(root, emit!(Self::#signature_name), &types);
         items.push(emit!(
             #[doc(hidden)] #[allow(non_upper_case_globals)]
-            #visibility const #signature_name: &'static #root::ContextSignature = &#signature;
+            #visibility const #signature_name: &'static #root::__private::ContextSignature = &#signature;
         ));
         items.push(emit!(
             #[doc(hidden)]
             #visibility fn #dispatch_name #generics (&mut self, __splice_operation:u32,
-                __splice_arguments:#root::ContextArguments<'_>, _: #witness) -> i32 #where_ {
+                __splice_arguments:#root::__private::ContextArguments<'_>, _: #witness) -> i32 #where_ {
                 let __splice_object = self;
                 #dispatch
             }

@@ -6,15 +6,15 @@ macro_rules! builders {
     ($b:ident => $build:expr) => {
         $crate::Builders {
             lancy: &|| {
-                type $b = splice_lancy::Lancy;
+                type $b = splice::lancy::Lancy;
                 $build
             },
             cranelift: &|| {
-                type $b = splice_cranelift::Cranelift;
+                type $b = splice::cranelift::Cranelift;
                 $build
             },
             llvm: &|| {
-                type $b = splice_llvm::LlvmManualSimd;
+                type $b = splice::llvm::LlvmManualSimd;
                 $build
             },
         }
@@ -37,12 +37,12 @@ use criterion::{
     measurement::WallTime,
 };
 use relational::{Catalog, pricing_plan, query};
+use splice::cranelift::CraneliftKernel;
+use splice::lancy::LancyKernel;
+use splice::llvm::LlvmKernel;
 use splice::{
     BufferArg, BuildError, Codegen, Executable, KernelScalar, TypedIr, TypedKernel, kernel,
 };
-use splice_cranelift::CraneliftKernel;
-use splice_lancy::LancyKernel;
-use splice_llvm::LlvmKernel;
 use std::{cell::LazyCell, hint::black_box, ops::Not};
 
 #[kernel]

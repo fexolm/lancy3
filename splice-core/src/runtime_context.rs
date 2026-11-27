@@ -59,17 +59,17 @@ impl ContextSignature {
     /// levels and `u32::MAX` operations.
     ///
     /// ```compile_fail,E0080
-    /// # use splice_core::ContextSignature;
+    /// # use splice_core::__private::ContextSignature;
     /// // Four billion words do not fit an i32 packet.
     /// static HUGE: ContextSignature = ContextSignature::new(&[u32::MAX]);
     /// ```
     /// ```compile_fail,E0080
-    /// # use splice_core::ContextSignature;
+    /// # use splice_core::__private::ContextSignature;
     /// // Two operations, but slice counts for one.
     /// static MISMATCH: ContextSignature = ContextSignature::with_borrows(&[1, 1], &[0], &[]);
     /// ```
     /// ```compile_fail,E0080
-    /// # use splice_core::ContextSignature;
+    /// # use splice_core::__private::ContextSignature;
     /// macro_rules! double {
     ///     ($previous:ident;) => {};
     ///     ($previous:ident; $next:ident $(, $rest:ident)*) => {
@@ -83,9 +83,9 @@ impl ContextSignature {
     ///     N17, N18, N19, N20, N21, N22, N23, N24, N25, N26, N27, N28, N29, N30, N31, N32);
     /// ```
     /// ```
-    /// # use splice_core::ContextSignature;
+    /// # use splice_core::__private::ContextSignature;
     /// static VALID: ContextSignature = ContextSignature::with_borrows(&[1, 2], &[0, 1], &[]);
-    /// assert_eq!(VALID.arity(1), Some(2));
+    /// assert_eq!(VALID.shape(1), Some((2, 1)));
     /// ```
     pub const fn with_borrows(
         local: &'static [u32],
@@ -156,10 +156,6 @@ impl ContextSignature {
             operation -= size;
         }
         None
-    }
-
-    pub fn arity(&self, operation: u32) -> Option<usize> {
-        self.shape(operation).map(|(words, _)| words)
     }
 
     pub fn shape(&self, mut operation: u32) -> Option<(usize, u32)> {
@@ -545,7 +541,9 @@ mod tests {
             })
         );
         assert_eq!(
-            (0..8).map(|i| ROOT.arity(i)).collect::<Vec<_>>(),
+            (0..8)
+                .map(|i| ROOT.shape(i).map(|(words, _)| words))
+                .collect::<Vec<_>>(),
             [
                 Some(1),
                 Some(0),
@@ -574,7 +572,7 @@ mod tests {
             N1, N2, N3, N4, N5, N6, N7, N8, N9, N10, N11, N12, N13, N14, N15, N16,
             N17, N18, N19, N20, N21, N22, N23, N24, N25, N26, N27, N28, N29, N30, N31
         );
-        assert_eq!(N31.arity((1 << 31) - 1), Some(2));
-        assert_eq!(N31.arity(1 << 31), None);
+        assert_eq!(N31.shape((1 << 31) - 1), Some((2, 0)));
+        assert_eq!(N31.shape(1 << 31), None);
     }
 }

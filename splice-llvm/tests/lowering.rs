@@ -61,7 +61,7 @@ fn checked_calls_remap_buffers_and_stop_after_the_first_fault() {
         Signature::new(
             &[ScalarType::I32; 2],
             ScalarType::I32,
-            &[BufferKind::Write, BufferKind::Read],
+            &[BufferKind::WRITE_I32, BufferKind::READ_I32],
         ),
     );
     let zero = child.constant(Constant::from(0usize)).unwrap();
@@ -85,7 +85,7 @@ fn checked_calls_remap_buffers_and_stop_after_the_first_fault() {
         Signature::new(
             &[ScalarType::I32; 2],
             ScalarType::I32,
-            &[BufferKind::Read, BufferKind::Write],
+            &[BufferKind::READ_I32, BufferKind::WRITE_I32],
         ),
     );
     let child = Arc::new(child.finish().unwrap());

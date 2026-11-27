@@ -2,7 +2,7 @@
 //! which every backend materializes from [`RustTarget::plan`].
 use super::{Buffer, BufferKind, ContextSlice, ScalarType, ValueType};
 use crate::runtime_context::{CONTEXT_CALL, STATIC_CALL};
-use crate::{ContextArguments, StaticRustSymbol};
+use crate::runtime_context::{ContextArguments, StaticRustSymbol};
 use splice_target::abi::RustFunction;
 use std::collections::HashMap;
 
@@ -155,7 +155,7 @@ impl RustTarget {
             .expect("a checked Rust call has a valid packet");
         let (entry, context, operation, header) = match self {
             Self::Context { buffer, operation } => (&CONTEXT_CALL, Some(buffer), operation, 0),
-            Self::Static(_) => (&STATIC_CALL, None, 0, crate::STATIC_HEADER),
+            Self::Static(_) => (&STATIC_CALL, None, 0, crate::runtime_context::STATIC_HEADER),
         };
         let mut stores = Vec::new();
         if let Self::Static(symbol) = self {

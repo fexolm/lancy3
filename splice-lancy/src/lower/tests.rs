@@ -16,9 +16,8 @@ fn options() -> splice_core::BuildOptions {
 
 #[test]
 fn context_descriptors_reject_other_signatures_and_slice_operations() {
-    use splice_core::{
-        BufferArg, Codegen, ContextFrame, ContextSignature, Executable, RuntimeContext,
-    };
+    use splice_core::__private::{ContextFrame, ContextSignature, RuntimeContext};
+    use splice_core::{BufferArg, Codegen, Executable};
     static CHILD: ContextSignature = ContextSignature::new(&[1]);
     static FIRST: ContextSignature = ContextSignature::with_children(&[2], &[&CHILD]);
     static SECOND: ContextSignature = ContextSignature::with_children(&[2], &[&CHILD]);
@@ -39,8 +38,8 @@ fn context_descriptors_reject_other_signatures_and_slice_operations() {
     }
 
     use splice_core::hir::check_forwarding;
-    assert!(check_forwarding(&KINDS, &[BufferKind::Read], &[Buffer(0)]).is_err());
-    assert!(check_forwarding(&[BufferKind::Write], &KINDS, &[Buffer(0)]).is_err());
+    assert!(check_forwarding(&KINDS, &[BufferKind::READ_I32], &[Buffer(0)]).is_err());
+    assert!(check_forwarding(&[BufferKind::WRITE_I32], &KINDS, &[Buffer(0)]).is_err());
     assert!(check_forwarding(&KINDS, &[KINDS[0]; 2], &[Buffer(0); 2]).is_err());
     assert!(check_forwarding(&KINDS, &KINDS, &[Buffer(0)]).is_ok());
 
@@ -116,8 +115,9 @@ fn context_descriptors_reject_other_signatures_and_slice_operations() {
     .unwrap();
     let portable = crate::Lancy::compile(&ir).unwrap();
     for kernel in [direct, portable] {
-        let mut unreachable =
-            |_, _: splice_core::ContextArguments<'_>| panic!("wrong context callback was called");
+        let mut unreachable = |_, _: splice_core::__private::ContextArguments<'_>| {
+            panic!("wrong context callback was called")
+        };
         let mut wrong = RuntimeContext::new(&SECOND, &mut unreachable);
         assert!(
             kernel
@@ -132,7 +132,7 @@ fn context_descriptors_reject_other_signatures_and_slice_operations() {
         );
 
         let (mut value, mut calls) = (3, 0);
-        let mut invoke = |ordinal, args: splice_core::ContextArguments<'_>| {
+        let mut invoke = |ordinal, args: splice_core::__private::ContextArguments<'_>| {
             assert_eq!(ordinal, 1);
             calls += 1;
             value += args.word(0);
@@ -151,12 +151,12 @@ fn context_descriptors_reject_other_signatures_and_slice_operations() {
 
 #[test]
 fn context_slice_operands_require_valid_nonaliasing_descriptors() {
-    use splice_core::ContextSignature;
+    use splice_core::__private::ContextSignature;
     static SIGNATURE: ContextSignature = ContextSignature::with_borrows(&[0], &[2], &[]);
     let kinds = [
         BufferKind::context(&SIGNATURE),
-        BufferKind::Read,
-        BufferKind::Write,
+        BufferKind::READ_I32,
+        BufferKind::WRITE_I32,
     ];
     let view = |buffer, writable| ContextSlice {
         buffer: Buffer(buffer),
@@ -209,7 +209,7 @@ fn context_slice_operands_require_valid_nonaliasing_descriptors() {
 
 #[test]
 fn static_rust_packets_carry_words_in_order_in_both_staging_paths() {
-    use splice_core::StaticRustSymbol;
+    use splice_core::__private::StaticRustSymbol;
     static THREE: StaticRustSymbol = StaticRustSymbol::new("three", 0, 0, |_| 3);
     static DIGITS: StaticRustSymbol = StaticRustSymbol::new("digits", 3, 0, |args| {
         (0..3).fold(0, |n, i| n * 10 + args.word(i))
@@ -368,11 +368,15 @@ fn checked_nested_call_preserves_writes_before_failure() {
         Signature::new(
             &[ScalarType::I32; 1],
             ScalarType::I32,
-            &[BufferKind::Read, BufferKind::Write],
+            &[BufferKind::READ_I32, BufferKind::WRITE_I32],
         ),
         Box::new(|b| {
             let x = b.call_kernel(
-                Signature::new(&[ScalarType::I32; 1], ScalarType::I32, &[BufferKind::Write]),
+                Signature::new(
+                    &[ScalarType::I32; 1],
+                    ScalarType::I32,
+                    &[BufferKind::WRITE_I32],
+                ),
                 &[b.arg(0)?],
                 &[Buffer(1)],
                 Box::new(|c| {
@@ -394,7 +398,7 @@ fn checked_nested_call_preserves_writes_before_failure() {
         Signature::new(
             &[ScalarType::I32; 1],
             ScalarType::I32,
-            &[BufferKind::Read, BufferKind::Write],
+            &[BufferKind::READ_I32, BufferKind::WRITE_I32],
         ),
         splice_core::BuildOptions::host(splice_core::Mode::Release).unwrap(),
         |_, _| Ok((graph, None)),
@@ -541,13 +545,17 @@ fn rejects_undefined_labels_and_aliased_writable_arguments() {
         matches!(undefined.unwrap_err(), splice_core::BuildError::Verify { reason, .. } if reason.contains("undefined"))
     );
     let alias = build(
-        Signature::new(&[ScalarType::I32; 0], ScalarType::I32, &[BufferKind::Write]),
+        Signature::new(
+            &[ScalarType::I32; 0],
+            ScalarType::I32,
+            &[BufferKind::WRITE_I32],
+        ),
         Box::new(|b| {
             let value = b.call_kernel(
                 Signature::new(
                     &[ScalarType::I32; 0],
                     ScalarType::I32,
-                    &[BufferKind::Write, BufferKind::Read],
+                    &[BufferKind::WRITE_I32, BufferKind::READ_I32],
                 ),
                 &[],
                 &[Buffer(0), Buffer(0)],
@@ -618,7 +626,11 @@ fn index_comparisons_on_i32_forms_match_unsigned_64_bit_order() {
                     b.ret(result)
                 };
                 let kernel = crate::Lancy::build_with_options(
-                    Signature::new(&[ScalarType::I32; 2], ScalarType::I32, &[BufferKind::Read]),
+                    Signature::new(
+                        &[ScalarType::I32; 2],
+                        ScalarType::I32,
+                        &[BufferKind::READ_I32],
+                    ),
                     Box::new(body),
                     options(),
                 )
@@ -660,7 +672,7 @@ fn index_guard_on_a_slice_length_compares_the_i32_length() {
         b.ret(value)
     }
     let graph = build(
-        Signature::new(&[], ScalarType::I32, &[BufferKind::Read]),
+        Signature::new(&[], ScalarType::I32, &[BufferKind::READ_I32]),
         Box::new(body),
     )
     .unwrap();
@@ -699,7 +711,7 @@ fn index_parameters_carry_their_i32_form_across_blocks() {
         b.ret(value)
     }
     let graph = build(
-        Signature::new(&[ScalarType::I32], ScalarType::I32, &[BufferKind::Read]),
+        Signature::new(&[ScalarType::I32], ScalarType::I32, &[BufferKind::READ_I32]),
         Box::new(body),
     )
     .unwrap();

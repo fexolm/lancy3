@@ -1,8 +1,8 @@
 //! Rust attribute frontend for Splice kernels.
 use proc_macro::TokenStream;
 use syn::{
-    Data, DeriveInput, Error, Expr, Index, Member, Meta, MetaNameValue, Path, Token,
-    parse_macro_input, parse_quote, punctuated::Punctuated,
+    Data, DeriveInput, Error, Expr, Meta, MetaNameValue, Path, Token, parse_macro_input,
+    parse_quote, punctuated::Punctuated,
 };
 
 // Generated locals and labels share a hygiene context across fragments.
@@ -43,25 +43,17 @@ pub fn kernel_type(item: TokenStream) -> TokenStream {
     };
     let name = item.ident;
     let (params, args, where_) = item.generics.split_for_impl();
-    let fields = data.fields.iter().enumerate().map(|(index, field)| {
-        let member = field
-            .ident
-            .clone()
-            .map_or_else(|| Member::Unnamed(Index::from(index)), Member::Named);
-        let label = match &member {
-            Member::Named(name) => name.to_string().trim_start_matches("r#").to_owned(),
-            Member::Unnamed(index) => index.index.to_string(),
-        };
-        let ty = &field.ty;
-        quote::quote!(#root::KernelField {
-            name: #label,
-            offset: ::core::mem::offset_of!(Self, #member),
-            type_name: ::core::any::type_name::<#ty>,
-        })
-    });
+    let fields = data
+        .fields
+        .iter()
+        .enumerate()
+        .map(|(index, field)| match &field.ident {
+            Some(name) => name.to_string().trim_start_matches("r#").to_owned(),
+            None => index.to_string(),
+        });
     quote::quote! {
         impl #params #root::KernelType for #name #args #where_ {
-            const FIELDS: &'static [#root::KernelField] = &[#(#fields),*];
+            const FIELDS: &'static [&'static str] = &[#(#fields),*];
         }
     }
     .into()

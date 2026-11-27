@@ -1,10 +1,8 @@
+use splice::__private::{ContextArguments, StaticRustSymbol};
 use splice::frontend::{KernelBuilder, Signature, materialize};
 use splice::hir::{Buffer, ContextSlice, Instr, RustTarget};
 use splice::hir::{Constant, ScalarType};
-use splice::{
-    BufferArg, BufferKind, BuildOptions, Codegen, ContextArguments, Executable, Mode,
-    StaticRustSymbol,
-};
+use splice::{BufferArg, BufferKind, BuildOptions, Codegen, Executable, Mode};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 fn empty(_: ContextArguments<'_>) -> i32 {
@@ -59,8 +57,8 @@ fn modify(mut args: ContextArguments<'_>) -> i32 {
 
 static MODIFY: StaticRustSymbol = StaticRustSymbol::new("modify", 1, 2, modify);
 const READ_U16: BufferKind = BufferKind::new(splice::simd::Element::U16, false);
-const PARENT_KINDS: [BufferKind; 2] = [BufferKind::Write, READ_U16];
-const CHILD_KINDS: [BufferKind; 2] = [READ_U16, BufferKind::Write];
+const PARENT_KINDS: [BufferKind; 2] = [BufferKind::WRITE_I32, READ_U16];
+const CHILD_KINDS: [BufferKind; 2] = [READ_U16, BufferKind::WRITE_I32];
 const SHARED_INPUT: ContextSlice = view(0, false);
 const MUTABLE_OUTPUT: ContextSlice = view(1, true);
 
@@ -120,7 +118,7 @@ fn static_packets_keep_nested_slice_borrows_and_effect_order() {
     )));
     #[cfg(feature = "llvm")]
     {
-        let text = splice_llvm::to_llvm_ir(&ir, &ir.options().target).unwrap();
+        let text = splice::llvm::to_llvm_ir(&ir, &ir.options().target).unwrap();
         assert!(!text.contains("nocapture") && !text.contains("captures(none)"));
         assert!(text.contains("readonly") && text.contains("noalias"));
     }
@@ -171,7 +169,8 @@ fn static_packets_keep_nested_slice_borrows_and_effect_order() {
 #[test]
 fn invalid_static_packet_operands_are_rejected_before_native_codegen() {
     use splice::hir::Reg;
-    static EMPTY_CONTEXT: splice::ContextSignature = splice::ContextSignature::new(&[]);
+    static EMPTY_CONTEXT: splice::__private::ContextSignature =
+        splice::__private::ContextSignature::new(&[]);
     let kinds = [
         CHILD_KINDS[0],
         CHILD_KINDS[1],
@@ -238,7 +237,7 @@ fn invalid_static_packet_operands_are_rejected_before_native_codegen() {
 
 #[test]
 fn static_rust_adapters_cannot_reinterpret_a_slice_element_type() {
-    const KINDS: [BufferKind; 2] = [BufferKind::Read, BufferKind::Write];
+    const KINDS: [BufferKind; 2] = [BufferKind::READ_I32, BufferKind::WRITE_I32];
     let ir = materialize(
         Signature::new(&[ScalarType::I32; 1], ScalarType::I32, &KINDS),
         Box::new(modify_child),

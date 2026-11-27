@@ -422,7 +422,8 @@ fn opaque_context_operations_receive_all_scalar_words() {
     assert_eq!(shapes, [(4, 0), (3, 1)]);
     #[cfg(feature = "llvm")]
     {
-        let llvm = splice_llvm::to_llvm_ir(ir.as_inner(), &ir.as_inner().options().target).unwrap();
+        let llvm =
+            splice::llvm::to_llvm_ir(ir.as_inner(), &ir.as_inner().options().target).unwrap();
         // Each call has a fixed-size packet slot in the entry block.
         let packets = llvm
             .lines()

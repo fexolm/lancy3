@@ -559,13 +559,14 @@ fn every_scalar_cast_folds_a_constant_like_rust_as() {
 /// A Rust import that returns `value` for `fail == 0` and panics otherwise.
 /// A panic is the only trap Rust code reports: every call goes through the
 /// packet entry, which owns the status.
-fn import(args: splice::ContextArguments<'_>) -> i32 {
+fn import(args: splice::__private::ContextArguments<'_>) -> i32 {
     let (value, fail) = (args.word(0), args.word(1));
     assert!(fail == 0, "import failed on {value}");
     value
 }
 
-static IMPORT: splice::StaticRustSymbol = splice::StaticRustSymbol::new("import", 2, 0, import);
+static IMPORT: splice::__private::StaticRustSymbol =
+    splice::__private::StaticRustSymbol::new("import", 2, 0, import);
 
 #[test]
 fn every_backend_reports_the_same_typed_trap() {
@@ -1189,10 +1190,10 @@ fn compress_expand_and_compress_store_agree_at_buffer_edges() {
         });
         let x: Vec<i32> = (100..100 + n as i32 + 1).collect();
         let kinds = [
-            BufferKind::Read,
-            BufferKind::Read,
-            BufferKind::Write,
-            BufferKind::Write,
+            BufferKind::READ_I32,
+            BufferKind::READ_I32,
+            BufferKind::WRITE_I32,
+            BufferKind::WRITE_I32,
         ];
         agree(
             &format!("{op:?}"),
@@ -1413,7 +1414,7 @@ fn every_build_route_reports_the_same_verify_error() {
     use splice::hir::{Label, ValueType};
     use splice::{BuildError, BuildOptions, Codegen, Mode};
     type Body = fn(&mut dyn KernelBuilder) -> splice::Result<()>;
-    const KINDS: [BufferKind; 1] = [BufferKind::Read];
+    const KINDS: [BufferKind; 1] = [BufferKind::READ_I32];
     let bodies: [(&str, Body); 10] = [
         ("uninitialized", |b| {
             let value = b.local(ValueType::Scalar(ScalarType::I32))?;

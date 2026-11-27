@@ -15,7 +15,7 @@
 //! Only a kernel's own module can give a build its call interface: the
 //! output of `second` cannot be retyped as `first`'s.
 //! ```compile_fail,E0603
-//! use splice::{Lancy, TypedKernel, kernel};
+//! use splice::{TypedKernel, kernel, lancy::Lancy};
 //! #[kernel]
 //! fn first(x: i32) -> i32 { x }
 //! #[kernel]
@@ -57,11 +57,32 @@
 //! impl Plan for () {}
 //! ```
 
-pub use splice_core::*;
+pub use splice_core::{
+    Backend, BufferArg, BufferElement, BufferKind, BuildError, BuildOptions, CallArgs, CallError,
+    Codegen, CompileInput, ComptimeKey, Executable, Function, KernelScalar, KernelType, Mode,
+    Result, SignatureError, Target, TargetError, Trap, TypedIr, TypedKernel, debug, frontend, hir,
+    kernel, simd, target, validate_buffers,
+};
 
-#[cfg(feature = "cranelift")]
-pub use splice_cranelift::Cranelift;
+/// Items that generated code names. Not a stable API.
+#[doc(hidden)]
+pub use splice_core::__private;
+
+/// Lancy, Splice's own JIT (feature `lancy`, on by default).
 #[cfg(feature = "lancy")]
-pub use splice_lancy::Lancy;
+pub mod lancy {
+    pub use splice_lancy::{Lancy, LancyKernel};
+}
+
+/// Cranelift (feature `cranelift`).
+#[cfg(feature = "cranelift")]
+pub mod cranelift {
+    pub use splice_cranelift::{Cranelift, CraneliftKernel};
+}
+
+/// LLVM 19 (feature `llvm`). [`llvm::LlvmManualSimd`] keeps only the SIMD the
+/// kernel spells out: O3 without loop and SLP vectorization.
 #[cfg(feature = "llvm")]
-pub use splice_llvm::{Llvm, LlvmManualSimd};
+pub mod llvm {
+    pub use splice_llvm::{Llvm, LlvmKernel, LlvmManualSimd, to_llvm_ir};
+}

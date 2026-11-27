@@ -228,15 +228,15 @@ pub fn field<T: crate::KernelType + ?Sized>(owner: Operand<T>, name: &str) -> cr
 }
 
 pub trait Layout {
-    fn layout(self) -> Option<&'static [crate::KernelField]>;
+    fn layout(self) -> Option<&'static [&'static str]>;
 }
 impl<T: crate::KernelType + ?Sized> Layout for &Operand<T> {
-    fn layout(self) -> Option<&'static [crate::KernelField]> {
+    fn layout(self) -> Option<&'static [&'static str]> {
         Some(T::FIELDS)
     }
 }
 impl<T: ?Sized> Layout for &&Operand<T> {
-    fn layout(self) -> Option<&'static [crate::KernelField]> {
+    fn layout(self) -> Option<&'static [&'static str]> {
         None
     }
 }
@@ -244,9 +244,9 @@ impl<T: ?Sized> Layout for &&Operand<T> {
 impl<T: ?Sized> Operand<T> {
     /// A layout lists the fields Rust declares on `T`: a field missing from
     /// it would be reached through a user `Deref`.
-    pub fn declares(self, layout: Option<&[crate::KernelField]>, name: &str) -> crate::Result<()> {
+    pub fn declares(self, layout: Option<&[&str]>, name: &str) -> crate::Result<()> {
         match layout {
-            Some(fields) if fields.iter().any(|field| field.name == name) => Ok(()),
+            Some(fields) if fields.contains(&name) => Ok(()),
             Some(_) => Err(crate::BuildError::staging(format!(
                 "`{}` declares no field `{name}`; reading it would call a user Deref",
                 std::any::type_name::<T>()

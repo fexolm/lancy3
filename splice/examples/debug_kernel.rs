@@ -44,11 +44,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map_err(|error| error.to_string())?;
     match backend.as_deref() {
         #[cfg(feature = "llvm")]
-        Some("llvm") => run::<splice_llvm::Llvm>(repetitions),
+        Some("llvm") => run::<splice::llvm::Llvm>(repetitions),
         #[cfg(feature = "llvm")]
-        Some("llvm_manual_simd") => run::<splice_llvm::LlvmManualSimd>(repetitions),
-        Some("cranelift") => run::<splice_cranelift::Cranelift>(repetitions),
-        Some("lancy") | None => run::<splice_lancy::Lancy>(repetitions),
+        Some("llvm_manual_simd") => run::<splice::llvm::LlvmManualSimd>(repetitions),
+        Some("cranelift") => run::<splice::cranelift::Cranelift>(repetitions),
+        Some("lancy") | None => run::<splice::lancy::Lancy>(repetitions),
         Some(other) => Err(format!("unknown backend {other}").into()),
     }
 }

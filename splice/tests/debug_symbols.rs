@@ -270,10 +270,10 @@ fn gdb_shows_runtime_bools_as_rust_bools() {
             assert_eq!(code.call(flagged::CallArgs { x: 4 }), Ok(8));
             code
         }
-        let _lancy = run::<splice_lancy::Lancy>();
-        let _cranelift = run::<splice_cranelift::Cranelift>();
+        let _lancy = run::<splice::lancy::Lancy>();
+        let _cranelift = run::<splice::cranelift::Cranelift>();
         #[cfg(feature = "llvm")]
-        let _llvm = run::<splice_llvm::Llvm>();
+        let _llvm = run::<splice::llvm::Llvm>();
         return;
     }
     let backends = if cfg!(feature = "llvm") { 3 } else { 2 };
@@ -336,10 +336,10 @@ fn gdb_shows_runtime_masks_as_lane_vectors() {
             );
             code
         }
-        let _lancy = run::<splice_lancy::Lancy>(lanes);
-        let _cranelift = run::<splice_cranelift::Cranelift>(lanes);
+        let _lancy = run::<splice::lancy::Lancy>(lanes);
+        let _cranelift = run::<splice::cranelift::Cranelift>(lanes);
         #[cfg(feature = "llvm")]
-        let _llvm = run::<splice_llvm::Llvm>(lanes);
+        let _llvm = run::<splice::llvm::Llvm>(lanes);
         return;
     }
     let backends = if cfg!(feature = "llvm") { 3 } else { 2 };

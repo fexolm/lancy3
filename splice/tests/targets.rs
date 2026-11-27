@@ -101,7 +101,7 @@ fn backends_without_the_convention_reject_it() {
             .with_calling_convention(foreign)
             .unwrap();
         let options = BuildOptions::new(Mode::Release, target);
-        let error = widened_sum::build_with_options::<splice::Cranelift>(
+        let error = widened_sum::build_with_options::<splice::cranelift::Cranelift>(
             options,
             widened_sum::BuildArgs {},
         )

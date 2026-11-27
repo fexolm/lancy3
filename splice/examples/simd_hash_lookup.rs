@@ -3,10 +3,10 @@ mod probe;
 
 use probe::{fixture, lookup, reference};
 use splice::Executable;
-use splice_cranelift::Cranelift;
-use splice_lancy::Lancy;
+use splice::cranelift::Cranelift;
+use splice::lancy::Lancy;
 #[cfg(feature = "llvm")]
-use splice_llvm::Llvm;
+use splice::llvm::Llvm;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let kernel: Box<dyn Executable> = match std::env::args().nth(1).as_deref() {

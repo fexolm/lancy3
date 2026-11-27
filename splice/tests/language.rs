@@ -1,6 +1,6 @@
+use splice::lancy::Lancy;
 use splice::simd::Lane;
 use splice::{BuildError, Codegen, Executable, kernel};
-use splice_lancy::Lancy;
 use std::cell::Cell;
 use std::sync::atomic::{AtomicUsize, Ordering};
 

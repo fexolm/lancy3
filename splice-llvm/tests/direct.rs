@@ -53,7 +53,11 @@ fn failed_nested_specialization_can_be_replaced_before_installation() {
 #[test]
 fn nested_bodies_keep_their_llvm_insertion_points_and_propagate_faults() {
     let kernel = Llvm::build_with_options(
-        Signature::new(&[ScalarType::I32; 1], ScalarType::I32, &[BufferKind::Write]),
+        Signature::new(
+            &[ScalarType::I32; 1],
+            ScalarType::I32,
+            &[BufferKind::WRITE_I32],
+        ),
         Box::new(|f| {
             let index = f.arg(0)?;
             let input = f.constant(Constant::from(4))?;
@@ -82,7 +86,11 @@ fn nested_bodies_keep_their_llvm_insertion_points_and_propagate_faults() {
             let zero = f.constant(Constant::from(0usize))?;
             f.store(Buffer(0), zero, value)?;
             let loaded = f.call_kernel(
-                Signature::new(&[ScalarType::I32; 1], ScalarType::I32, &[BufferKind::Read]),
+                Signature::new(
+                    &[ScalarType::I32; 1],
+                    ScalarType::I32,
+                    &[BufferKind::READ_I32],
+                ),
                 &[index],
                 &[Buffer(0)],
                 Box::new(|child| {
@@ -183,7 +191,7 @@ fn direct_builder_checks_handles_control_flow_and_borrow_contracts() {
                 Signature::new(
                     &[ScalarType::I32; 0],
                     ScalarType::I32,
-                    &[BufferKind::Write, BufferKind::Read],
+                    &[BufferKind::WRITE_I32, BufferKind::READ_I32],
                 ),
                 &[],
                 &[Buffer(1), Buffer(1)],
@@ -202,7 +210,7 @@ fn direct_builder_checks_handles_control_flow_and_borrow_contracts() {
                 Signature::new(
                     &[ScalarType::I32; 0],
                     ScalarType::I32,
-                    &[BufferKind::Read, BufferKind::Write]
+                    &[BufferKind::READ_I32, BufferKind::WRITE_I32]
                 ),
                 body,
                 BuildOptions::host(Mode::Release).unwrap()

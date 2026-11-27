@@ -527,11 +527,11 @@ mod tests {
             simd::Element,
         };
         let kinds = [
-            BufferKind::Read,
-            BufferKind::Read,
-            BufferKind::Read,
-            BufferKind::Write,
-            BufferKind::Write,
+            BufferKind::READ_I32,
+            BufferKind::READ_I32,
+            BufferKind::READ_I32,
+            BufferKind::WRITE_I32,
+            BufferKind::WRITE_I32,
         ];
         fn stage(b: &mut dyn KernelBuilder) -> splice_core::Result<()> {
             let op = |op| Simd {

@@ -1,5 +1,5 @@
+use crate::runtime_context::{ContextSignature, RuntimeContext};
 use crate::simd::{Element, LaneElement};
-use crate::{ContextSignature, RuntimeContext};
 use std::collections::HashMap;
 use std::fmt;
 use std::marker::PhantomData;
@@ -23,10 +23,10 @@ pub struct BufferKind {
 }
 
 impl BufferKind {
-    #[allow(non_upper_case_globals)]
-    pub const Read: Self = Self::new(Element::I32, false);
-    #[allow(non_upper_case_globals)]
-    pub const Write: Self = Self::new(Element::I32, true);
+    /// A shared `i32` slice.
+    pub const READ_I32: Self = Self::new(Element::I32, false);
+    /// A writable `i32` slice.
+    pub const WRITE_I32: Self = Self::new(Element::I32, true);
     pub const fn new(element: Element, writable: bool) -> Self {
         Self {
             element,

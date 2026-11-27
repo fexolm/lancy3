@@ -18,7 +18,7 @@ splice-kernel = "0.1"
 Splice — язык для CPU-ядер, которые специализируются по данным приложения после его запуска. Функция с атрибутом `#[kernel]` сохраняет обычный вызов Rust. Макрос также создаёт фабрику JIT-кода. Параметр типа `B` у фабрики выбирает компилятор ядра.
 
 ```rust
-use splice::{kernel, Cranelift, Lancy, Llvm};
+use splice::{kernel, cranelift::Cranelift, lancy::Lancy, llvm::Llvm};
 
 enum Price { Retail, Wholesale(i32) }
 
@@ -131,7 +131,7 @@ cargo test -p splice-kernel --release --example sql_plan --test simd
 
 ```rust
 use splice::{kernel, Executable};
-use splice_lancy::Lancy;
+use splice::lancy::Lancy;
 
 #[kernel]
 fn add_block(a: &[u16], b: &[u16], dst: &mut [u16]) -> i32 {

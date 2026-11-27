@@ -51,7 +51,10 @@ fn slice_calls_remap_arguments_and_keep_row_updates() {
     let mut expected = [2; 5];
     let expected_count = score_column(&values, &mut expected, 2);
     let f = score_column::ir(2).unwrap();
-    assert_eq!(f.buffer_kinds(), &[BufferKind::Read, BufferKind::Write]);
+    assert_eq!(
+        f.buffer_kinds(),
+        &[BufferKind::READ_I32, BufferKind::WRITE_I32]
+    );
     assert!(f.instructions().iter().any(|i| matches!(i,
         Instr::Call { buffers, .. } if buffers == &[Buffer(1), Buffer(0)]
     )));
