@@ -99,9 +99,11 @@ pub const fn decode_status(status: i64) -> Result<u32, Trap> {
 
 /// The native entry of every Rust call a kernel makes:
 /// `entry(receiver, operation, packet, word)` with the host C convention. It
-/// returns a status (see [`Trap::status`]) whose low word is the call's `i32`
-/// result.
-pub type RustEntry = unsafe extern "C" fn(*mut u8, u32, *const u8, i32) -> i64;
+/// returns a status (see [`Trap::status`]). Splice entries write the call's
+/// result word to the start of the packet, which therefore has at least 8
+/// aligned, writable bytes; Lancy's own Rust calls return an `i32` result in
+/// the status's low word instead.
+pub type RustEntry = unsafe extern "C" fn(*mut u8, u32, *mut u8, i32) -> i64;
 
 /// A static descriptor of a [`RustEntry`]. The name is for listings.
 #[derive(Debug)]

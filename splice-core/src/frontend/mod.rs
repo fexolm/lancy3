@@ -115,13 +115,15 @@ pub trait KernelBuilder {
         ))
     }
     /// Run Rust code at this point of the kernel: a static function or an
-    /// operation of a Rust context argument, on `i32` words and slices.
+    /// operation of a Rust context argument, on scalar words and slices,
+    /// returning a `result`.
     #[doc(hidden)]
     fn rust_call(
         &mut self,
         target: crate::hir::RustTarget,
         _args: &[Reg],
         _slices: &[ContextSlice],
+        _result: crate::hir::ScalarType,
     ) -> crate::Result<Reg> {
         Err(crate::BuildError::staging(format!(
             "backend cannot link Rust code {target:?}"

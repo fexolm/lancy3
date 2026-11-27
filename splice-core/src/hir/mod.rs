@@ -150,12 +150,13 @@ pub enum Instr {
     },
     Return(Reg),
     TrapBounds,
-    /// Run Rust code on `args` words and `slices`; `dst` is its `i32` word.
+    /// Run Rust code on scalar `args` and `slices`; `dst` is its `result`.
     RustCall {
         dst: Reg,
         target: RustTarget,
         args: Vec<Reg>,
         slices: Vec<ContextSlice>,
+        result: ScalarType,
     },
     Call {
         dst: Reg,

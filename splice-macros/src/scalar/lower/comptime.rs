@@ -15,7 +15,7 @@ impl Lower<'_> {
         vis: &syn::Visibility,
         method: Option<&Ident>,
     ) -> Result<(TokenStream, bool)> {
-        use crate::scalar::methods::{TraitMethodKind, primitive_type};
+        use crate::scalar::methods::primitive_type;
         let name = match method {
             Some(name) => emit!(#name),
             None => emit!(__splice_eval),
@@ -42,10 +42,12 @@ impl Lower<'_> {
             syn::ReturnType::Type(_, ty) => emit!(#ty),
             _ => emit!(()),
         };
-        // A wide result stays in Rust during mandatory evaluation: only owned
-        // primitives and expressions without opaque operands or calls.
+        // A wide result (a primitive other than `i32` and `bool`) stays in
+        // Rust during mandatory evaluation: only owned primitives and
+        // expressions without opaque operands or calls.
         let wide = method.is_some()
-            && TraitMethodKind::for_result(&sig.output) == TraitMethodKind::EvalOnly;
+            && matches!(&sig.output, syn::ReturnType::Type(_, ty) if primitive_type(ty)
+                && !matches!(Scalar::from_type(ty, &[]), Some(Scalar::I32 | Scalar::Bool)));
         let parameters = if wide {
             sig.inputs.iter().all(|arg| matches!(arg, FnArg::Typed(arg)
                 if primitive_type(&arg.ty) && matches!(arg.pat.as_ref(), Pat::Ident(pat) if pat.by_ref.is_none() && pat.subpat.is_none())))

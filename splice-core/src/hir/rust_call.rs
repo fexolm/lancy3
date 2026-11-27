@@ -1,6 +1,6 @@
 //! Rust calls: one instruction, one native entry and one packet layout,
 //! which every backend materializes from [`RustTarget::plan`].
-use super::{Buffer, BufferKind, ContextSlice, ScalarType, ValueType};
+use super::{Buffer, BufferKind, ContextSlice, ValueType};
 use crate::runtime_context::{CONTEXT_CALL, STATIC_CALL};
 use crate::runtime_context::{ContextArguments, StaticRustSymbol};
 use splice_target::abi::RustFunction;
@@ -31,13 +31,11 @@ impl PartialEq for RustTarget {
     }
 }
 
-/// The operands of a Rust call are `i32` ABI words and it returns one.
-pub(crate) const WORD: ValueType = ValueType::Scalar(ScalarType::I32);
-
 /// A value a backend stores into the packet at [`PacketStore::at`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PacketValue {
-    /// Operand `n` of the call: an `i32`.
+    /// Operand `n` of the call, a scalar of any type, at the low end of its
+    /// 8-byte word.
     Word(usize),
     /// The data pointer of a slice: a pointer.
     Data(Buffer),
@@ -57,10 +55,11 @@ pub struct PacketStore {
 }
 
 /// How a backend emits a Rust call: store `stores` into an 8-byte aligned
-/// packet of `bytes`, call `entry(receiver, operation, packet, 0)` and
-/// forward a nonzero trap code of the returned status; the low word of the
-/// status is the result. The receiver is the data pointer of the context
-/// buffer, or the packet itself when there is none.
+/// packet of `bytes`, call `entry(receiver, operation, packet, 0)`, forward
+/// a nonzero trap code of the returned status and otherwise load the
+/// call's result, a scalar of its type, from the start of the packet. The
+/// receiver is the data pointer of the context buffer, or the packet itself
+/// when there is none.
 #[derive(Clone, Debug)]
 pub struct RustCallPlan {
     pub entry: &'static RustFunction,
@@ -94,7 +93,7 @@ impl RustTarget {
         }
     }
 
-    /// Check a call's operands: `i32` words, and slices that the call may
+    /// Check a call's operands: scalar words, and slices that the call may
     /// borrow without aliasing a writable one.
     pub fn check(
         self,
@@ -111,9 +110,12 @@ impl RustTarget {
                 slices.len()
             )));
         }
-        if args.into_iter().any(|ty| ty != Some(WORD)) {
+        if args
+            .into_iter()
+            .any(|ty| !matches!(ty, Some(ValueType::Scalar(_))))
+        {
             return Err(crate::BuildError::verify(format!(
-                "expected i32 operands for {}",
+                "expected scalar operands for {}",
                 self.name()
             )));
         }
@@ -165,7 +167,7 @@ impl RustTarget {
             });
         }
         stores.extend((0..words).map(|n| PacketStore {
-            at: header + n as u32 * 4,
+            at: header + n as u32 * ContextArguments::WORD_BYTES,
             value: PacketValue::Word(n),
         }));
         for (index, &ContextSlice { buffer, writable }) in slices.iter().enumerate() {

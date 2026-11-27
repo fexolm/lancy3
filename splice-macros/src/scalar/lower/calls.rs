@@ -4,12 +4,7 @@ use proc_macro2::TokenStream;
 use syn::{Expr, Result};
 
 impl Lower<'_> {
-    pub(super) fn call(
-        &self,
-        c: &syn::ExprCall,
-        hint: Option<Scalar>,
-        cast: Option<&syn::Type>,
-    ) -> Result<Value> {
+    pub(super) fn call(&self, c: &syn::ExprCall, hint: Option<Scalar>) -> Result<Value> {
         let Expr::Path(p) = &*c.func else {
             return err(&c.func, "expected a kernel function path");
         };
@@ -192,16 +187,11 @@ impl Lower<'_> {
                 .collect();
             let mut shape = crate::scalar::methods::rename_path(p, "stage_shape");
             shape.path.segments.last_mut().unwrap().arguments = syn::PathArguments::None;
-            let opaque = self.import_result(p, &opaque_args, cast, Some(&shape));
-            let ordinary = self.import_result(p, &bound, cast, None);
+            let opaque = self.import_result(p, &opaque_args, Some(&shape));
+            let ordinary = self.import_result(p, &bound, None);
             let kernel = staged_call(&bound);
-            let boolean = if cast.is_some() {
-                emit!(#support::RunArg::word(#kernel, __splice_builder)?)
-            } else {
-                kernel.clone()
-            };
             let dispatch = crate::declaration::trait_method_dispatch(
-                root, &owner, method, kernel, boolean, opaque, ordinary,
+                root, &owner, method, kernel, opaque, ordinary,
             );
             emit!({ let (#(#names,)*) = (#(#args,)*); #dispatch })
         } else if method {
@@ -229,14 +219,13 @@ impl Lower<'_> {
         dispatch_free(self.root, path, kernel, rust)
     }
     pub(super) fn import_call(&self, path: &syn::ExprPath, args: &[TokenStream]) -> TokenStream {
-        self.import_result(path, args, None, None)
+        self.import_result(path, args, None)
     }
 
     fn import_result(
         &self,
         path: &syn::ExprPath,
         args: &[TokenStream],
-        cast: Option<&syn::Type>,
         stage_shape: Option<&syn::ExprPath>,
     ) -> TokenStream {
         let root = self.root;
@@ -245,30 +234,27 @@ impl Lower<'_> {
         let slots: Vec<_> = (0..arity)
             .map(|index| quote::format_ident!("__SpliceOperand{index}"))
             .collect();
-        let (candidate, prepare) = if let Some(ty) = cast {
-            (
-                emit!(__splice_candidate(#path, |result| result as #ty)),
-                emit! {
-                    fn __splice_candidate<#(#slots,)* R, F: ::core::ops::Fn(R) -> i32>(
-                        entry: fn(#(#slots),*) -> R, project: F,
-                    ) -> #native::Candidate<fn(#(#slots),*) -> R, #native::MapResult<F>> {
-                        #native::Candidate(entry, #native::MapResult(project))
-                    }
-                },
-            )
-        } else {
-            (
-                emit!(__splice_candidate(#path)),
-                emit! {
-                    fn __splice_candidate<#(#slots,)* R>(entry: fn(#(#slots),*) -> R)
-                        -> #native::Candidate<fn(#(#slots),*) -> R, #native::EncodeResult>
-                    {
-                        #native::Candidate(entry, #native::EncodeResult)
-                    }
-                },
-            )
+        let candidate = emit!(__splice_candidate(#path));
+        let prepare = emit! {
+            fn __splice_candidate<#(#slots,)* R>(entry: fn(#(#slots),*) -> R)
+                -> #native::Candidate<fn(#(#slots),*) -> R>
+            {
+                #native::Candidate(entry)
+            }
         };
-        let (generics, _, where_clause) = self.generics.split_for_impl();
+        // The adapter is a nested item: it cannot name `Self`, so it drops
+        // the bounds of `Self` (such as the `Self: Sized` of a trait method).
+        let mut item_generics = self.generics.clone();
+        if let Some(clause) = &mut item_generics.where_clause {
+            clause.predicates = std::mem::take(&mut clause.predicates)
+                .into_iter()
+                .filter(|predicate| {
+                    !matches!(predicate, syn::WherePredicate::Type(bound)
+                        if matches!(&bound.bounded_ty, syn::Type::Path(ty) if ty.qself.is_none() && ty.path.is_ident("Self")))
+                })
+                .collect();
+        }
+        let (generics, _, where_clause) = item_generics.split_for_impl();
         let type_args = self
             .generics
             .params
@@ -285,7 +271,7 @@ impl Lower<'_> {
         use syn::visit::Visit;
         let mut uses_self = crate::declaration::UsesSelf::default();
         uses_self.visit_expr_path(path);
-        uses_self.visit_generics(self.generics);
+        uses_self.visit_generics(&item_generics);
         if uses_self.0 {
             return emit!(::core::result::Result::Err::<#root::hir::Reg,#root::BuildError>(#root::BuildError::staging("unpublished Self method requires its owning Rust context"))?);
         }
@@ -294,21 +280,21 @@ impl Lower<'_> {
         let words = arity as u32;
         let adapter = emit! {
             trait __SplicePacketAdapter {
-                fn supported(self) -> bool;
-                fn invoke(self, args: #root::__private::ContextArguments<'_>) -> i32;
+                fn result(self) -> ::core::option::Option<#root::hir::ScalarType>;
+                fn invoke(self, args: #root::__private::ContextArguments<'_>) -> u64;
             }
-            impl<#(#slots: #word,)* R, P: #native::ProjectResult<R>> __SplicePacketAdapter for &#native::Candidate<fn(#(#slots),*) -> R, P> {
-                fn supported(self) -> bool { true }
+            impl<#(#slots: #word,)* R: #word> __SplicePacketAdapter for &#native::Candidate<fn(#(#slots),*) -> R> {
+                fn result(self) -> ::core::option::Option<#root::hir::ScalarType> { ::core::option::Option::Some(<R as #word>::TYPE) }
                 #[allow(unused_variables)]
-                fn invoke(self, args: #root::__private::ContextArguments<'_>) -> i32 {
-                    #native::ProjectResult::project(&self.1, (self.0)(#(<#slots as #word>::decode(args.word(#indices))),*))
+                fn invoke(self, args: #root::__private::ContextArguments<'_>) -> u64 {
+                    #word::encode((self.0)(#(<#slots as #word>::decode(args.word(#indices))),*))
                 }
             }
-            impl<F, P> __SplicePacketAdapter for &&#native::Candidate<F, P> {
-                fn supported(self) -> bool { false }
-                fn invoke(self, _: #root::__private::ContextArguments<'_>) -> i32 { ::core::unreachable!("verified scalar packet adapter") }
+            impl<F> __SplicePacketAdapter for &&#native::Candidate<F> {
+                fn result(self) -> ::core::option::Option<#root::hir::ScalarType> { ::core::option::Option::None }
+                fn invoke(self, _: #root::__private::ContextArguments<'_>) -> u64 { ::core::unreachable!("verified scalar packet adapter") }
             }
-            fn adapter #generics (args: #root::__private::ContextArguments<'_>) -> i32 #where_clause {
+            fn adapter #generics (args: #root::__private::ContextArguments<'_>) -> u64 #where_clause {
                 (&#candidate).invoke(args)
             }
         };
@@ -319,6 +305,7 @@ impl Lower<'_> {
                 }),
                 &operands,
                 &[],
+                __splice_result,
             )?
         };
         let operands = if let Some(shape) = stage_shape {
@@ -340,9 +327,9 @@ impl Lower<'_> {
             #prepare
             #adapter
             use #root::frontend::native::{Materialize as _, Operand};
-            if !(&#candidate).supported() {
+            let ::core::option::Option::Some(__splice_result) = (&#candidate).result() else {
                 return ::core::result::Result::Err(#root::BuildError::staging("Rust import requires a non-scalar argument or result"));
-            }
+            };
             #operands
             #call
         })

@@ -1,16 +1,16 @@
-error: a Splice method returns (), i32 or bool; keep a Rust method in an ordinary impl
+error: a Splice method returns () or a kernel scalar; keep a Rust method in an ordinary impl
   --> tests/ui/unsupported_methods.rs:11:23
    |
 11 |     fn name(&self) -> String {
    |                       ^^^^^^
 
-error: a Splice method parameter is #[comptime], i32, bool, a slice, or the &mut self receiver
-  --> tests/ui/unsupported_methods.rs:15:13
+error: runtime parameters must be bool, i32, u32, i64, u64, usize, f32, f64 or a slice of u16, u32, i32, i64, f32, or f64
+  --> tests/ui/unsupported_methods.rs:15:16
    |
-15 |     fn wide(x: i64) -> i32 {
-   |             ^
+15 |     fn wide(x: char) -> i32 {
+   |                ^^^^
 
-error: a Splice trait method returns (), i32, bool or a primitive; keep a Rust method in an ordinary trait
+error: a Splice trait method returns () or a primitive; keep a Rust method in an ordinary trait
   --> tests/ui/unsupported_methods.rs:23:29
    |
 23 |     fn widen(value: i32) -> Self::Output;

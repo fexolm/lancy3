@@ -663,7 +663,7 @@ impl<'a, 'ctx> Body<'a, 'ctx> {
         let packet = self.packet(plan.bytes)?;
         for &PacketStore { at, value } in &plan.stores {
             let value: BasicValueEnum<'ctx> = match value {
-                PacketValue::Word(n) => self.load(args[n])?.into(),
+                PacketValue::Word(n) => self.word(args[n])?.into(),
                 PacketValue::Data(buffer) => self.slices[buffer.index()].data.into(),
                 PacketValue::Length(buffer) => self
                     .builder
@@ -700,13 +700,40 @@ impl<'a, 'ctx> Body<'a, 'ctx> {
             packet.into(),
             word.const_zero().into(),
         ];
-        let value = self
+        let status = self
             .builder
             .build_indirect_call(ty, entry, &operands, "")?
             .try_as_basic_value()
             .unwrap_basic()
             .into_int_value();
-        self.rust_result(dst, value)
+        self.rust_status(status)?;
+        let (result, _) = self.registers[dst.0 as usize];
+        let result = simd::llvm_type(self.ctx, self.machine.vector_bytes, result);
+        let value = self.builder.build_load(result, packet, "")?;
+        self.store(dst, value)
+    }
+
+    /// A scalar register as the 8-byte word of a Rust call operand: its
+    /// bits zero-extended.
+    fn word(&self, reg: Reg) -> Built<IntValue<'ctx>> {
+        let wide = self.ctx.i64_type();
+        let value = self.value(reg)?;
+        let bits = match self.scalar_type(reg) {
+            ScalarType::F32 => self
+                .builder
+                .build_bit_cast(value, self.ctx.i32_type(), "")?
+                .into_int_value(),
+            ScalarType::F64 => {
+                return Ok(self
+                    .builder
+                    .build_bit_cast(value, wide, "")?
+                    .into_int_value());
+            }
+            _ => value.into_int_value(),
+        };
+        Ok(self
+            .builder
+            .build_int_z_extend_or_bit_cast(bits, wide, "")?)
     }
 
     /// An 8-byte aligned packet of `bytes` for one Rust call, allocated in
@@ -725,9 +752,8 @@ impl<'a, 'ctx> Body<'a, 'ctx> {
         Ok(allocas.build_alloca(wide.array_type(bytes.div_ceil(8)), "rust_packet")?)
     }
 
-    /// Store a Rust call's result word, or report the trap code in the
-    /// upper word of its status.
-    fn rust_result(&mut self, dst: Reg, value: IntValue<'ctx>) -> Built<()> {
+    /// Report the trap code in the upper word of a Rust call's status.
+    fn rust_status(&mut self, value: IntValue<'ctx>) -> Built<()> {
         self.calls_rust = true;
         let wide = self.ctx.i64_type();
         let max = wide.const_int(u64::from(u32::MAX), false);
@@ -747,11 +773,7 @@ impl<'a, 'ctx> Body<'a, 'ctx> {
         self.builder.build_store(self.status, code)?;
         self.builder.build_return(Some(&self.failed_result()))?;
         self.builder.position_at_end(next);
-        self.store(
-            dst,
-            self.builder
-                .build_int_truncate(value, self.ctx.i32_type(), "")?,
-        )
+        Ok(())
     }
 }
 

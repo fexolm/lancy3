@@ -86,3 +86,15 @@ pub mod cranelift {
 pub mod llvm {
     pub use splice_llvm::{Llvm, LlvmKernel, LlvmManualSimd, to_llvm_ir};
 }
+
+#[cfg(doctest)]
+#[doc = include_str!("../../README.md")]
+mod readme {}
+
+#[cfg(doctest)]
+#[doc = include_str!("../../docs/splice-language.md")]
+mod language {}
+
+#[cfg(doctest)]
+#[doc = include_str!("../../docs/splice-api-cases.md")]
+mod api_cases {}

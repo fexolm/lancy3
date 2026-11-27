@@ -231,13 +231,13 @@ impl Hash for ContextSignature {
 /// code passes every operation's words and slices in a packet.
 pub struct RuntimeContext<'a> {
     signature: &'static ContextSignature,
-    invoke: &'a mut dyn FnMut(u32, ContextArguments<'_>) -> i32,
+    invoke: &'a mut dyn FnMut(u32, ContextArguments<'_>) -> u64,
 }
 
 impl<'a> RuntimeContext<'a> {
     pub fn new(
         signature: &'static ContextSignature,
-        invoke: &'a mut dyn FnMut(u32, ContextArguments<'_>) -> i32,
+        invoke: &'a mut dyn FnMut(u32, ContextArguments<'_>) -> u64,
     ) -> Self {
         Self { signature, invoke }
     }
@@ -254,13 +254,17 @@ struct SliceView {
     element: u32,
 }
 
-/// Scalars and slice reborrows valid during one opaque Rust operation.
+/// Scalars and slice reborrows valid during one opaque Rust operation. Each
+/// scalar is an 8-byte word holding the value at its low end; the
+/// operation's `u64` result goes back the same way (see
+/// [`crate::frontend::scalar::ImportWord`]).
 pub struct ContextArguments<'a> {
-    words: &'a [i32],
+    words: &'a [u64],
     slices: std::slice::Iter<'a, SliceView>,
 }
 
-/// Layout of a native callback packet. Words start at byte zero.
+/// Layout of a native callback packet. Words start at byte zero, and the
+/// result overwrites the first eight bytes.
 pub struct ContextPacketLayout {
     pub slices_at: u32,
     pub bytes: u32,
@@ -272,7 +276,7 @@ pub struct StaticRustSymbol {
     name: &'static str,
     words: u32,
     slices: u32,
-    invoke: fn(ContextArguments<'_>) -> i32,
+    invoke: fn(ContextArguments<'_>) -> u64,
 }
 
 impl StaticRustSymbol {
@@ -282,14 +286,14 @@ impl StaticRustSymbol {
     ///
     /// ```compile_fail,E0080
     /// # use splice_core::{ContextArguments, StaticRustSymbol};
-    /// fn never(_: ContextArguments<'_>) -> i32 { 0 }
+    /// fn never(_: ContextArguments<'_>) -> u64 { 0 }
     /// static OVERSIZE: StaticRustSymbol = StaticRustSymbol::new("oversize", u32::MAX, 0, never);
     /// ```
     pub const fn new(
         name: &'static str,
         words: u32,
         slices: u32,
-        invoke: fn(ContextArguments<'_>) -> i32,
+        invoke: fn(ContextArguments<'_>) -> u64,
     ) -> Self {
         assert!(
             ContextArguments::packet_layout(words, slices).is_some(),
@@ -313,6 +317,8 @@ impl StaticRustSymbol {
 }
 
 impl<'a> ContextArguments<'a> {
+    /// Bytes of one scalar word.
+    pub const WORD_BYTES: u32 = 8;
     pub const SLICE_BYTES: u32 = 16;
     pub const LENGTH_OFFSET: u32 = 8;
     pub const ELEMENT_OFFSET: u32 = 12;
@@ -323,7 +329,7 @@ impl<'a> ContextArguments<'a> {
     }
 
     pub const fn packet_layout(words: u32, slices: u32) -> Option<ContextPacketLayout> {
-        let slices_at = (words as u64 * 4).next_multiple_of(8);
+        let slices_at = words as u64 * Self::WORD_BYTES as u64;
         let bytes = slices_at + slices as u64 * Self::SLICE_BYTES as u64;
         if bytes > i32::MAX as u64 {
             return None;
@@ -334,7 +340,8 @@ impl<'a> ContextArguments<'a> {
         })
     }
 
-    pub fn word(&self, index: usize) -> i32 {
+    /// The bits of operand `index`; only those of its type are meaningful.
+    pub fn word(&self, index: usize) -> u64 {
         self.words[index]
     }
 
@@ -412,7 +419,7 @@ pub(crate) static STATIC_CALL: RustFunction = RustFunction {
 unsafe extern "C" fn invoke_context(
     raw: *mut u8,
     operation: u32,
-    packet: *const u8,
+    packet: *mut u8,
     _unused: i32,
 ) -> i64 {
     // SAFETY: The backend verifies the context descriptor and borrows it for
@@ -425,9 +432,13 @@ unsafe extern "C" fn invoke_context(
     // SAFETY: the native caller supplies initialized, disjoint views and the
     // validated context signature gives the exact packet shape.
     rust_entry(|| {
-        (context.invoke)(operation, unsafe {
+        let result = (context.invoke)(operation, unsafe {
             arguments(packet, words as u32, slices)
-        })
+        });
+        // SAFETY: the packet is at least 8 aligned, writable bytes, and the
+        // operands read from it are no longer borrowed.
+        unsafe { packet.cast::<u64>().write(result) };
+        0
     })
 }
 
@@ -445,7 +456,7 @@ pub const STATIC_HEADER: u32 = 8;
 unsafe extern "C" fn invoke_static(
     _receiver: *mut u8,
     _operation: u32,
-    packet: *const u8,
+    packet: *mut u8,
     _unused: i32,
 ) -> i64 {
     // SAFETY: native lowering stores the static descriptor's address at the
@@ -455,13 +466,17 @@ unsafe extern "C" fn invoke_static(
     // operands of the symbol's shape and the verified slice views for the
     // duration of this call.
     rust_entry(|| {
-        (symbol.invoke)(unsafe {
+        let result = (symbol.invoke)(unsafe {
             arguments(
                 packet.add(STATIC_HEADER as usize),
                 symbol.words,
                 symbol.slices,
             )
-        })
+        });
+        // SAFETY: the result overwrites the header, which was read above;
+        // the packet is at least 8 aligned, writable bytes.
+        unsafe { packet.cast::<u64>().write(result) };
+        0
     })
 }
 
@@ -474,12 +489,12 @@ unsafe extern "C" fn invoke_static(
 /// the aliasing contract of [`ContextArguments`]. Every caller's shape was
 /// checked to fit `i32` when its symbol or signature was built.
 #[inline(always)]
-unsafe fn arguments<'a>(packet: *const u8, words: u32, slices: u32) -> ContextArguments<'a> {
-    let slices_at = (words as usize * 4).next_multiple_of(8);
+unsafe fn arguments<'a>(packet: *mut u8, words: u32, slices: u32) -> ContextArguments<'a> {
+    let slices_at = words as usize * ContextArguments::WORD_BYTES as usize;
     // SAFETY: the caller's contract.
     unsafe {
         ContextArguments {
-            words: std::slice::from_raw_parts(packet.cast::<i32>(), words as usize),
+            words: std::slice::from_raw_parts(packet.cast::<u64>(), words as usize),
             slices: std::slice::from_raw_parts(packet.add(slices_at).cast(), slices as usize)
                 .iter(),
         }

@@ -31,6 +31,7 @@ Runtime-скаляры ядра — `bool`, `i32`, `u32`, `i64`, `u64`, `usize`,
 Методы ядра удобно собрать в одном `impl`. Для обычных методов того же типа достаточно второго `impl`.
 
 ```rust
+# use splice::kernel;
 struct Foo(i32);
 
 #[kernel]
@@ -78,6 +79,7 @@ fn example() -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(code.call(floor::CallArgs { x: 10 })?, 10);
     Ok(())
 }
+# fn main() { example().unwrap() }
 ```
 
 Здесь оба вызова сравнивают `x` с одной и той же границей — числом `7`. Ядро хранит эту константу и свой машинный код, пока приложение им пользуется.
@@ -85,6 +87,7 @@ fn example() -> Result<(), Box<dyn std::error::Error>> {
 Для каждой функции с внешней фабрикой макрос объявляет две Rust-структуры. У `f::BuildArgs` по одному полю на каждый параметр с `#[comptime]`, у `f::CallArgs` — на каждый оставшийся параметр. Поле получает имя и тип параметра. Обе структуры и их поля доступны вызывающей стороне там же, где доступна фабрика. `f::build::<B>` принимает один `f::BuildArgs` по значению и возвращает типизированное ядро или `BuildError`. Метод `code.call` принимает один `f::CallArgs` по значению и возвращает `Result<R, CallError>`, где `R` — результат исходной функции.
 
 ```rust
+# use splice::{kernel, lancy::Lancy};
 #[kernel]
 fn affine(x: i32, #[comptime] scale: i32, y: i32, #[comptime] bias: i32) -> i32 {
     x * scale + y + bias
@@ -95,6 +98,7 @@ fn example_affine() -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(code.call(affine::CallArgs { y: 4, x: 2 })?, 11);
     Ok(())
 }
+# fn main() { example_affine().unwrap() }
 ```
 
 В литерале структуры поля можно перечислить в любом порядке. Rust связывает их по именам и вычисляет выражения в том порядке, в котором их написал вызывающий код. На входе `build` и `call` Splice разбирает структуру на отдельные аргументы. Внутри другого ядра тот же вызов записывается как `affine(x, scale, y, bias)`. В сигнатурах и операциях IR фигурируют отдельные значения. Низкоуровневый вызов `affine::ir(scale, bias)` принимает comptime-аргументы позиционно в порядке исходного объявления.
@@ -206,10 +210,25 @@ fn example_affine() -> Result<(), Box<dyn std::error::Error>> {
 Ядро без параметров типа тоже может вызывать обобщённую функцию. Например, обе ветви возвращают `bool`, а `row` приходит в `call`.
 
 ```rust
+# use splice::{kernel, lancy::Lancy};
+# enum Kind { I32, F64 }
+# #[derive(splice::KernelType)]
+# struct Schema { kind: Kind }
+# #[kernel]
+# fn filter<T>(row: i32) -> bool { row > 0 }
+# #[kernel]
+# fn pick(#[comptime] schema: &Schema, row: i32) -> bool {
 match schema.kind {
     Kind::I32 => filter::<i32>(row),
     Kind::F64 => filter::<f64>(row),
 }
+# }
+# fn main() -> Result<(), Box<dyn std::error::Error>> {
+# let schema = Schema { kind: Kind::F64 };
+# let code = pick::build::<Lancy>(pick::BuildArgs { schema: &schema })?;
+# assert!(code.call(pick::CallArgs { row: 8 })?);
+# Ok(())
+# }
 ```
 
 В обычной Rust-функции этот `match` выбирает фильтр при вызове. Если `schema.kind` известен Splice из поля `schema` в `BuildArgs`, в готовом ядре остаётся только выбранный фильтр. Если вид данных приходит в `call`, выбор происходит при каждом вызове.
@@ -229,13 +248,14 @@ match schema.kind {
 Во время `call` ядро может вызывать функции и методы из `std` и любого крейта, доступного приложению на целевой платформе. Например, после `use regex::Regex` ядро может принять `re: &Regex` и вызвать `re.is_match(text)`. Для этого библиотеке не нужны атрибуты Splice. Если поиск выполняется внутри условной ветки, он произойдёт только при входе в неё.
 
 ```rust
+# use splice::kernel;
 #[kernel]
 fn total(n: usize, x: i32) -> i32 {
     use std::vec::Vec as Values;
 
-    let mut v: Values<i32> = Values::new();
+    let mut v = Values::<i32>::new();
     v.resize(n, x);
-    v.iter().copied().fold(0, i32::wrapping_add)
+    v.iter().sum::<i32>()
 }
 ```
 
@@ -248,6 +268,7 @@ fn total(n: usize, x: i32) -> i32 {
 Типизированная обёртка получает все аргументы вызова, включая вызовы с несколькими скалярами. Порядок вычислений, запись до ошибки и прекращение выполнения при панике совпадают с поведением исходного Rust-кода.
 
 ```rust
+# use splice::kernel;
 struct Foo { count: i32 }
 
 #[kernel]

@@ -607,14 +607,14 @@ static RUST_FUNCTIONS: [&hir::RustFunction; 3] = [
 ];
 
 /// The operation, or the trap whose code is the word.
-unsafe extern "C" fn identity_or_error(_: *mut u8, value: u32, _: *const u8, fail: i32) -> i64 {
+unsafe extern "C" fn identity_or_error(_: *mut u8, value: u32, _: *mut u8, fail: i32) -> i64 {
     match crate::Trap::from_code(fail as u32) {
         Some(trap) => trap.status(),
         None => i64::from(value),
     }
 }
 
-unsafe extern "C" fn double(_: *mut u8, value: u32, _: *const u8, _: i32) -> i64 {
+unsafe extern "C" fn double(_: *mut u8, value: u32, _: *mut u8, _: i32) -> i64 {
     i64::from(value.wrapping_mul(2))
 }
 
@@ -622,7 +622,7 @@ unsafe extern "C" fn double(_: *mut u8, value: u32, _: *const u8, _: i32) -> i64
 ///
 /// # Safety
 /// The packet holds four `i32` words.
-unsafe extern "C" fn sum4(_: *mut u8, _: u32, packet: *const u8, _: i32) -> i64 {
+unsafe extern "C" fn sum4(_: *mut u8, _: u32, packet: *mut u8, _: i32) -> i64 {
     let word = |i: usize| {
         // SAFETY: the caller's packet holds four words.
         unsafe { packet.cast::<i32>().add(i).read_unaligned() }

@@ -225,9 +225,10 @@ impl<'f, 'b> Replay<'f, 'b> {
                     target,
                     args,
                     slices,
+                    result,
                 } => {
                     let args = self.regs(args)?;
-                    self.define(*dst, |b| b.rust_call(*target, &args, slices))?;
+                    self.define(*dst, |b| b.rust_call(*target, &args, slices, *result))?;
                 }
                 Instr::Call {
                     dst,

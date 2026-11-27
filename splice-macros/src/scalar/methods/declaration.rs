@@ -5,8 +5,8 @@ use syn::{FnArg, GenericParam, ReturnType, Signature, Type};
 
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub(crate) enum TraitMethodKind {
+    /// A result that crosses the scalar call ABI: a kernel scalar or `()`.
     Word,
-    Bool,
     EvalOnly,
     Rust,
 }
@@ -16,8 +16,7 @@ impl TraitMethodKind {
         match output {
             ReturnType::Default => Self::Word,
             ReturnType::Type(_, ty) => match Scalar::from_type(ty, &[]) {
-                Some(Scalar::I32) => Self::Word,
-                Some(Scalar::Bool) => Self::Bool,
+                Some(scalar) if scalar.is_scalar() => Self::Word,
                 _ if matches!(ty.as_ref(), Type::Tuple(tuple) if tuple.elems.is_empty()) => {
                     Self::Word
                 }
@@ -44,7 +43,7 @@ pub(crate) fn trait_defaults(
         };
         return Err(syn::Error::new_spanned(
             ty,
-            "a Splice trait method returns (), i32, bool or a primitive; keep a Rust method in an ordinary trait",
+            "a Splice trait method returns () or a primitive; keep a Rust method in an ordinary trait",
         ));
     }
     let mut signature = normalize(signature, None);
@@ -92,15 +91,7 @@ pub(crate) fn trait_defaults(
         let id = &param.name;
         let ty = param.ty;
         declarations.push(match param.binding {
-            Binding::Host(_)
-                if matches!(
-                    Scalar::from_type(ty, &types),
-                    Some(Scalar::I32 | Scalar::Bool | Scalar::Index)
-                ) =>
-            {
-                if matches!(Scalar::from_type(ty, &types), Some(Scalar::Index)) {
-                    materializable = false;
-                }
+            Binding::Host(_) if Scalar::from_type(ty, &types).is_some_and(Scalar::is_scalar) => {
                 stage_checks
                     .push(emit!(let #id = #support::Host(#support::KnownArg::require(#id)?);));
                 emit!(#id: impl #support::KnownArg<#ty>)
@@ -109,7 +100,7 @@ pub(crate) fn trait_defaults(
                 materializable = false;
                 emit!(#id: #support::Host<#ty>)
             }
-            Binding::Reg(Scalar::I32 | Scalar::Bool, _) => emit!(#id: impl #support::RunArg),
+            Binding::Reg(scalar, _) if scalar.is_scalar() => emit!(#id: impl #support::RunArg),
             Binding::Buffer(_) => {
                 materializable = false;
                 emit!(#id: #hir::Buffer)
@@ -117,7 +108,7 @@ pub(crate) fn trait_defaults(
             _ => {
                 return Err(syn::Error::new_spanned(
                     param.pattern,
-                    "a Splice trait method parameter is #[comptime], i32, bool or a slice",
+                    "a Splice trait method parameter is #[comptime], a kernel scalar or a slice",
                 ));
             }
         });
@@ -142,7 +133,7 @@ pub(crate) fn trait_defaults(
         let adapter = emit! {
             #[doc(hidden)]
             #[allow(unused_variables)]
-            fn #adapter_name #generics (args: #root::__private::ContextArguments<'_>) -> i32 #where_ {
+            fn #adapter_name #generics (args: #root::__private::ContextArguments<'_>) -> u64 #where_ {
                 #support::ImportWord::encode(<Self as #trait_owner>::#name #func (#(#words),*))
             }
         };
@@ -156,11 +147,12 @@ pub(crate) fn trait_defaults(
                 }),
                 &args,
                 &[],
+                <#result_type as #support::ImportWord>::TYPE,
             )
         };
         items.push(adapter);
         emit! {
-            let args = [#(#support::RunArg::word(#args, __splice_builder)?),*];
+            let args = [#(#support::RunArg::reg(#args, __splice_builder)?),*];
             #call
         }
     } else {

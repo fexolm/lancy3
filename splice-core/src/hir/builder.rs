@@ -198,12 +198,14 @@ impl KernelBuilder for FunctionBuilder {
         target: super::RustTarget,
         args: &[Reg],
         slices: &[ContextSlice],
+        result: ScalarType,
     ) -> crate::Result<Reg> {
-        self.scalar(ScalarType::I32, |dst| Instr::RustCall {
+        self.scalar(result, |dst| Instr::RustCall {
             dst,
             target,
             args: args.to_vec(),
             slices: slices.to_vec(),
+            result,
         })
     }
     fn call_kernel(

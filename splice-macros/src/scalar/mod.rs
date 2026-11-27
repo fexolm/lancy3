@@ -153,10 +153,7 @@ pub(super) fn expand(root: Path, native: &mut ItemFn, print: bool) -> Result<Tok
         }
         let source = emit!(#root::frontend::source);
         if matches!(formal, Binding::Host(_)) {
-            if matches!(
-                Scalar::from_type(ty, &types),
-                Some(Scalar::I32 | Scalar::Bool | Scalar::Index)
-            ) {
+            if Scalar::from_type(ty, &types).is_some_and(Scalar::is_scalar) {
                 source_decls.push(emit!(#id:impl #support::KnownArg<#ty>));
                 extract_known.push(emit!(let #id=#support::KnownArg::require(#id)?;));
             } else {
@@ -240,7 +237,7 @@ pub(super) fn expand(root: Path, native: &mut ItemFn, print: bool) -> Result<Tok
                     ));
                 }
                 let index = buffer_names.len() as u32;
-                context = Some(lower::Context::for_function(id.clone()));
+                context = Some(lower::Context::for_function(id.clone(), ty));
                 inline_args.push(emit!(#hir::Buffer(#index)));
                 buffer_names.push(id);
                 buffer_kinds.push(emit!(#hir::BufferKind::context(&__SPLICE_CONTEXT_SIGNATURE)));
@@ -439,7 +436,7 @@ pub(super) fn expand(root: Path, native: &mut ItemFn, print: bool) -> Result<Tok
 
             #[doc(hidden)]
             #vis fn __splice_dispatch_context #generic (__splice_object: #object,
-                __splice_operation: u32, __splice_arguments: #root::__private::ContextArguments<'_>, _: #witness) -> i32 #where_ {
+                __splice_operation: u32, __splice_arguments: #root::__private::ContextArguments<'_>, _: #witness) -> u64 #where_ {
                 #dispatch
             }
         }

@@ -265,9 +265,6 @@ struct State {
     exit: Option<Exit>,
 }
 
-/// A Rust call returns an `i32` word.
-const WORD: ValueType = ValueType::Scalar(ScalarType::I32);
-
 struct Builder<'a> {
     graph: Function,
     source: Option<&'static KernelSource>,
@@ -473,6 +470,20 @@ impl Builder<'_> {
         self.graph
             .append(self.current.expect("open block"), op)
             .expect("a well-typed lowering of verified IR defines a value")
+    }
+    /// A scalar register as the 8-byte word of a Rust call operand: its
+    /// bits zero-extended.
+    fn word(&mut self, r: Reg) -> Value {
+        let v = self.read(r);
+        let narrow = match self.scalar(r) {
+            ScalarType::Bool | ScalarType::I32 | ScalarType::F32 => {
+                self.value(Op::Bitcast(hir::Type::U32, v))
+            }
+            ScalarType::U32 => v,
+            ScalarType::I64 | ScalarType::F64 => return self.value(Op::Bitcast(hir::Type::U64, v)),
+            ScalarType::U64 | ScalarType::Index => return v,
+        };
+        self.value(Op::Cast(hir::Type::U64, narrow))
     }
     fn scalar(&self, r: Reg) -> ScalarType {
         match self.types[r.0 as usize] {
@@ -878,8 +889,9 @@ impl KernelBuilder for Builder<'_> {
         target: RustTarget,
         args: &[Reg],
         slices: &[ContextSlice],
+        result: ScalarType,
     ) -> splice_core::Result<Reg> {
-        let dst = self.local(WORD)?;
+        let dst = self.local(ValueType::Scalar(result))?;
         if !self.reachable() {
             return Ok(dst);
         }
@@ -896,7 +908,7 @@ impl KernelBuilder for Builder<'_> {
         for PacketStore { at, value } in plan.stores {
             match value {
                 PacketValue::Word(n) => {
-                    let word = self.read(args[n]);
+                    let word = self.word(args[n]);
                     store(self, at, word);
                 }
                 PacketValue::Data(buffer) => {
@@ -923,10 +935,13 @@ impl KernelBuilder for Builder<'_> {
         };
         let operation = self.value(Op::Const(plan.operation as i32));
         let zero = self.value(Op::Const(0));
-        self.define(
-            dst,
-            Op::RustCall(plan.entry, [receiver, operation, packet, zero]),
-        );
+        // The entry forwards a trap through its status and writes the result
+        // to the start of the packet.
+        self.effect(Op::RustCall(
+            plan.entry,
+            [receiver, operation, packet, zero],
+        ));
+        self.define(dst, Op::Load(scalar_type(result), packet));
         Ok(dst)
     }
     fn call_kernel(

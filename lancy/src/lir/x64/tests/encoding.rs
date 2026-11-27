@@ -4,7 +4,7 @@ use crate::hir::{Function, Op, Terminator, Type, Value};
 use iced_x86::{Decoder, DecoderOptions, EncodingKind};
 use splice_target::{Profile, Target};
 
-unsafe extern "C" fn double(_: *mut u8, value: u32, _: *const u8, _: i32) -> i64 {
+unsafe extern "C" fn double(_: *mut u8, value: u32, _: *mut u8, _: i32) -> i64 {
     i64::from(value.wrapping_mul(2))
 }
 

@@ -13,7 +13,7 @@ impl Nested {
 pub struct Wide;
 #[kernel]
 impl Wide {
-    fn method_param(x: i64) -> i32 {
+    fn method_param(x: char) -> i32 {
         x as i32
     }
 }
@@ -106,7 +106,7 @@ impl Twice {
 
 #[kernel]
 pub trait Shape {
-    fn area(x: i64) -> i32;
+    fn area(x: char) -> i32;
 }
 
 #[kernel]

@@ -27,7 +27,9 @@ impl<T: ScalarConstant + Copy> ScalarConstant for &T {
     }
 }
 #[doc(hidden)]
-#[diagnostic::on_unimplemented(message = "a scalar kernel parameter requires an i32 value")]
+#[diagnostic::on_unimplemented(
+    message = "a scalar kernel parameter requires a kernel scalar value"
+)]
 pub trait RunArg {
     fn known(&self) -> Option<Constant> {
         None
@@ -45,33 +47,7 @@ pub trait RunArg {
     {
         match self.known_as(ty) {
             Some(value) if self.known().is_some_and(|known| known.ty() != ty) => b.constant(value),
-            _ => self.typed(ty, b),
-        }
-    }
-    /// The value as a register of type `ty`. A Rust call returns an `i32`
-    /// word: a `bool` result is a nonzero word.
-    fn typed(self, ty: ScalarType, b: &mut dyn KernelBuilder) -> crate::Result<Reg>
-    where
-        Self: Sized,
-    {
-        let r = self.reg(b)?;
-        match b.reg_type(r) {
-            Some(ValueType::Scalar(ScalarType::I32)) if ty == ScalarType::Bool => {
-                let zero = b.constant(Constant::from(0))?;
-                b.binary(Binary::Ne, r, zero)
-            }
-            _ => Ok(r),
-        }
-    }
-    /// The value as the `i32` word that passes it to a Rust call.
-    fn word(self, b: &mut dyn KernelBuilder) -> crate::Result<Reg>
-    where
-        Self: Sized,
-    {
-        let r = self.reg(b)?;
-        match b.reg_type(r) {
-            Some(ValueType::Scalar(ScalarType::Bool)) => b.cast(r, ScalarType::I32),
-            _ => Ok(r),
+            _ => self.reg(b),
         }
     }
 }
@@ -124,15 +100,52 @@ impl Word {
             _ => known,
         };
         let (lhs, rhs) = (retyped(self, rhs, b), retyped(rhs, self, b));
-        let (mut a, mut z) = (lhs.reg(b)?, rhs.reg(b)?);
-        // A Rust call returns an i32 word: it meets a bool operand as a bool.
-        let bool = Some(ValueType::Scalar(ScalarType::Bool));
-        if b.reg_type(a) == bool {
-            z = z.typed(ScalarType::Bool, b)?;
-        } else if b.reg_type(z) == bool {
-            a = a.typed(ScalarType::Bool, b)?;
-        }
+        let (a, z) = (lhs.reg(b)?, rhs.reg(b)?);
         Ok(Self::Runtime(b.binary(op, a, z)?))
+    }
+}
+
+/// A scalar operand of a Rust object operation, which reads it as `ty`.
+pub fn context_operand(r: Reg, ty: ScalarType, b: &dyn KernelBuilder) -> crate::Result<Reg> {
+    match b.reg_type(r) {
+        Some(ValueType::Scalar(actual)) if actual == ty => Ok(r),
+        _ => Err(crate::BuildError::staging(format!(
+            "a Rust object operation reads this operand as {ty}"
+        ))),
+    }
+}
+
+/// The kernel type of the result of `operation`, which is never called:
+/// the Rust type of a Rust object operation.
+pub fn result_type<R: ImportWord>(_operation: impl FnOnce() -> R) -> ScalarType {
+    R::TYPE
+}
+
+/// Assign an arm's value to the result of a branch whose type only the
+/// builder knows: the first arm creates the result with its type.
+pub fn assign_inferred(
+    slot: &mut Option<Reg>,
+    value: Reg,
+    b: &mut dyn KernelBuilder,
+) -> crate::Result<()> {
+    let result = match *slot {
+        Some(result) => result,
+        None => {
+            let ty = b
+                .reg_type(value)
+                .ok_or_else(|| crate::BuildError::staging("a branch value has no type"))?;
+            *slot.insert(b.local(ty)?)
+        }
+    };
+    b.assign(result, value)
+}
+
+/// The result of a branch of [`assign_inferred`] arms; without a reachable
+/// arm, an unused `i32`.
+pub fn inferred_result(slot: Option<Reg>, b: &mut dyn KernelBuilder) -> crate::Result<Reg> {
+    match slot {
+        Some(result) => Ok(result),
+        None => b.local(ValueType::Scalar(ScalarType::I32)),
     }
 }
 
@@ -691,58 +704,45 @@ macro_rules! __splice_choose_rust {
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __splice_method_case {
-    (word (call $s:expr, $b:expr, $o:expr, $r:expr)) => { $s };
-    (boolean (call $s:expr, $b:expr, $o:expr, $r:expr)) => { $b };
-    (ordinary (call $s:expr, $b:expr, $o:expr, $r:expr)) => { $r };
-    ($kind:ident (call $s:expr, $b:expr, $o:expr, $r:expr)) => { $o };
+    (word (call $s:expr, $o:expr, $r:expr)) => { $s };
+    (ordinary (call $s:expr, $o:expr, $r:expr)) => { $r };
+    ($kind:ident (call $s:expr, $o:expr, $r:expr)) => { $o };
     (ordinary (evaluate $e:expr, $o:expr)) => { $o };
     (opaque (evaluate $e:expr, $o:expr)) => { $o };
     ($kind:ident (evaluate $e:expr, $o:expr)) => { $e };
     (word (items stage $($items:item)*)) => { $($items)* };
-    (boolean (items stage $($items:item)*)) => { $($items)* };
     (eval (items eval $($items:item)*)) => { $($items)* };
     ($kind:ident (items $provided:ident $($items:item)*)) => {};
 }
 
-/// A value that a Rust call passes or returns as one `i32` word.
+/// A value that a Rust call passes or returns as one word of its kernel
+/// type (see [`crate::KernelScalar`]); `()` is an `i32` zero.
 pub trait ImportWord: Sized {
-    fn decode(bits: i32) -> Self;
-    fn encode(self) -> i32;
+    const TYPE: ScalarType;
+    fn decode(word: u64) -> Self;
+    fn encode(self) -> u64;
     /// The value in a kernel register.
-    fn constant(self) -> Constant;
+    fn constant(self) -> Constant {
+        Constant::new(Self::TYPE, self.encode())
+    }
     fn from_constant(value: Constant) -> Self {
-        Self::decode(value.bits() as u32 as i32)
+        Self::decode(value.bits())
     }
 }
-impl ImportWord for i32 {
-    fn decode(bits: i32) -> Self {
-        bits
+impl<T: crate::KernelScalar> ImportWord for T {
+    const TYPE: ScalarType = T::TYPE;
+    fn decode(word: u64) -> Self {
+        T::from_word(word)
     }
-    fn encode(self) -> i32 {
-        self
-    }
-    fn constant(self) -> Constant {
-        self.into()
-    }
-}
-impl ImportWord for bool {
-    fn decode(bits: i32) -> Self {
-        bits != 0
-    }
-    fn encode(self) -> i32 {
-        i32::from(self)
-    }
-    fn constant(self) -> Constant {
-        self.into()
+    fn encode(self) -> u64 {
+        self.to_word()
     }
 }
 impl ImportWord for () {
-    fn decode(_: i32) -> Self {}
-    fn encode(self) -> i32 {
+    const TYPE: ScalarType = ScalarType::I32;
+    fn decode(_: u64) -> Self {}
+    fn encode(self) -> u64 {
         0
-    }
-    fn constant(self) -> Constant {
-        0i32.into()
     }
 }
 

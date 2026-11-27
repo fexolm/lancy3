@@ -559,9 +559,9 @@ fn every_scalar_cast_folds_a_constant_like_rust_as() {
 /// A Rust import that returns `value` for `fail == 0` and panics otherwise.
 /// A panic is the only trap Rust code reports: every call goes through the
 /// packet entry, which owns the status.
-fn import(args: splice::__private::ContextArguments<'_>) -> i32 {
+fn import(args: splice::__private::ContextArguments<'_>) -> u64 {
     let (value, fail) = (args.word(0), args.word(1));
-    assert!(fail == 0, "import failed on {value}");
+    assert!(fail == 0, "import failed on {}", value as i32);
     value
 }
 
@@ -587,7 +587,7 @@ fn every_backend_reports_the_same_typed_trap() {
         }
         let import = splice::hir::RustTarget::Static(&IMPORT);
         let zero = b.constant(Constant::from(0))?;
-        let passed = b.rust_call(import, &[value, zero], &[])?;
+        let passed = b.rust_call(import, &[value, zero], &[], ScalarType::I32)?;
         b.ret(passed)?;
         let operations = [
             (Binary::Div, 1, 0),
@@ -610,7 +610,7 @@ fn every_backend_reports_the_same_typed_trap() {
         b.mark(exits[4])?;
         let hundred = b.constant(Constant::from(100))?;
         let fail = b.binary(Binary::Sub, value, hundred)?;
-        let r = b.rust_call(import, &[value, fail], &[])?;
+        let r = b.rust_call(import, &[value, fail], &[], ScalarType::I32)?;
         b.ret(r)?;
         Ok(())
     });

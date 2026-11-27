@@ -11,9 +11,6 @@ use std::cell::RefCell;
 use std::collections::{HashSet, VecDeque};
 use std::sync::Arc;
 
-/// A Rust call returns an `i32` ABI word.
-const WORD: ValueType = ValueType::Scalar(ScalarType::I32);
-
 /// Check `body` as it stages and when it completes.
 /// `overflow_checks` is the build's overflow mode, passed on to nested
 /// bodies (see [`KernelBuilder::overflow_checks`]).
@@ -494,11 +491,12 @@ impl KernelBuilder for Validating<'_> {
         target: RustTarget,
         args: &[Reg],
         slices: &[ContextSlice],
+        result: ScalarType,
     ) -> Result<Reg> {
         let types = self.rust_operands(args);
         self.at(target.check(self.kinds, types.into_iter(), slices))?;
-        let r = self.inner.rust_call(target, args, slices)?;
-        Ok(self.value(args, r, WORD))
+        let r = self.inner.rust_call(target, args, slices, result)?;
+        Ok(self.value(args, r, ValueType::Scalar(result)))
     }
     fn call_kernel(
         &mut self,
@@ -656,7 +654,13 @@ impl KernelBuilder for Sink {
     fn trap_bounds(&mut self) -> Result<()> {
         Ok(())
     }
-    fn rust_call(&mut self, _: RustTarget, _: &[Reg], _: &[ContextSlice]) -> Result<Reg> {
+    fn rust_call(
+        &mut self,
+        _: RustTarget,
+        _: &[Reg],
+        _: &[ContextSlice],
+        _: ScalarType,
+    ) -> Result<Reg> {
         self.next()
     }
     fn call_kernel(

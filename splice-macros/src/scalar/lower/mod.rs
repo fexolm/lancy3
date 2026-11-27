@@ -363,35 +363,17 @@ impl Lower<'_> {
         let root = self.root;
         let want = want.base();
         let bits = match (v.stage, want) {
-            (Stage::Word(t), _) => {
-                // A Rust call returns an i32 word whatever its Rust type.
-                let ty = if want == Scalar::Inferred { t } else { want };
-                return Ok(match self.scalar_type(ty) {
-                    Some(ty) => {
-                        emit!(#root::frontend::scalar::RunArg::typed(#v, #ty, __splice_builder)?)
-                    }
-                    None => emit!(#root::frontend::scalar::RunArg::reg(#v, __splice_builder)?),
-                });
+            (Stage::Word(_), _) => {
+                return Ok(emit!(#root::frontend::scalar::RunArg::reg(#v, __splice_builder)?));
             }
             (Stage::Reg(t), _)
                 if t.base() == want
-                    || (!matches!(
-                        t.base(),
-                        Scalar::Index | Scalar::Vector(_) | Scalar::Mask(_)
-                    ) && !matches!(
-                        want,
-                        Scalar::Index | Scalar::Vector(_) | Scalar::Mask(_)
-                    ) && (t == Scalar::Inferred || want == Scalar::Inferred)) =>
+                    || (!matches!(t, Scalar::Vector(_) | Scalar::Mask(_))
+                        && !matches!(want, Scalar::Vector(_) | Scalar::Mask(_))
+                        && (t == Scalar::Inferred || want == Scalar::Inferred)) =>
             {
-                // An inferred register may be a Rust call's word.
-                return Ok(
-                    match self.scalar_type(want).filter(|_| t == Scalar::Inferred) {
-                        Some(ty) => {
-                            emit!(#root::frontend::scalar::RunArg::typed(#v, #ty, __splice_builder)?)
-                        }
-                        None => v.code,
-                    },
-                );
+                // An inferred register has the type the builder knows.
+                return Ok(v.code);
             }
             (Stage::Literal(t), want)
                 if t.base() == want
@@ -913,7 +895,7 @@ impl Lower<'_> {
                 };
                 Ok(Value::new(Stage::Reg(t.base()), code))
             }
-            Expr::Call(x) => self.call(x, hint, None),
+            Expr::Call(x) => self.call(x, hint),
             Expr::Index(x) => self.index(x),
             Expr::Cast(x) => self.cast(x),
             Expr::MethodCall(_) => self.method(e, hint),

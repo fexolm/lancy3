@@ -4,11 +4,11 @@ error: put #[kernel] only on the enclosing impl or trait; keep a Rust method in 
 7 |     #[kernel]
   |     ^^^^^^^^^
 
-error: a Splice method parameter is #[comptime], i32, bool, a slice, or the &mut self receiver
-  --> tests/ui/declarations.rs:16:21
+error: runtime parameters must be bool, i32, u32, i64, u64, usize, f32, f64 or a slice of u16, u32, i32, i64, f32, or f64
+  --> tests/ui/declarations.rs:16:24
    |
-16 |     fn method_param(x: i64) -> i32 {
-   |                     ^
+16 |     fn method_param(x: char) -> i32 {
+   |                        ^^^^
 
 error: expected a named binding
   --> tests/ui/declarations.rs:24:32
@@ -16,7 +16,7 @@ error: expected a named binding
 24 |     fn tuple_param(#[comptime] (a, b): (i32, i32)) -> i32 {
    |                                ^^^^^^
 
-error: a Splice method parameter is #[comptime], i32, bool, a slice, or the &mut self receiver
+error: a Splice method parameter is #[comptime], a kernel scalar, a slice, or the &mut self receiver
   --> tests/ui/declarations.rs:33:22
    |
 33 |     fn context_param(state: &mut State) -> i32 {
@@ -40,7 +40,7 @@ error: put #[kernel] on the enclosing impl or trait to publish its methods
 56 |     fn get(&self) -> i32;
    |     ^^^^^^^^^^^^^^^^^^^^^
 
-error: a Splice trait method parameter is #[comptime], i32, bool or a slice
+error: a Splice trait method parameter is #[comptime], a kernel scalar or a slice
   --> tests/ui/declarations.rs:61:12
    |
 61 |     fn sum(x: splice::simd::Lane<i32>) -> i32;
@@ -76,11 +76,11 @@ error: one #[intrinsic("name")] is allowed on a kernel method with a body
 101 |     #[intrinsic("b")]
     |     ^^^^^^^^^^^^^^^^^
 
-error: a Splice trait method parameter is #[comptime], i32, bool or a slice
-   --> tests/ui/declarations.rs:109:13
+error: runtime parameters must be bool, i32, u32, i64, u64, usize, f32, f64 or a slice of u16, u32, i32, i64, f32, or f64
+   --> tests/ui/declarations.rs:109:16
     |
-109 |     fn area(x: i64) -> i32;
-    |             ^
+109 |     fn area(x: char) -> i32;
+    |                ^^^^
 
 error: expected a free function, impl or trait
    --> tests/ui/declarations.rs:113:1

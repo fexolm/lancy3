@@ -66,12 +66,12 @@ pub(crate) fn publish(
     };
     let result_type = match &signature.output {
         ReturnType::Type(_, ty) if !unit_result => match Scalar::from_type(ty, &types) {
-            Some(result @ (Scalar::I32 | Scalar::Bool)) => result,
+            Some(result) if result.is_scalar() => result.base(),
             _ if eval_only => Scalar::I32,
             _ => {
                 return Err(syn::Error::new_spanned(
                     ty,
-                    "a Splice method returns (), i32 or bool; keep a Rust method in an ordinary impl",
+                    "a Splice method returns () or a kernel scalar; keep a Rust method in an ordinary impl",
                 ));
             }
         },
@@ -106,17 +106,12 @@ pub(crate) fn publish(
             debug_host_args.push(id);
         }
         let declaration = match param.binding {
-            Binding::Host(_)
-                if matches!(
-                    Scalar::from_type(ty, &types),
-                    Some(Scalar::I32 | Scalar::Bool | Scalar::Index)
-                ) =>
-            {
+            Binding::Host(_) if Scalar::from_type(ty, &types).is_some_and(Scalar::is_scalar) => {
                 host_args.push(id);
                 emit!(#id: impl #support::KnownArg<#ty>)
             }
             Binding::Host(_) => emit!(#support::Host(#id): #support::Host<#ty>),
-            Binding::Reg(Scalar::I32 | Scalar::Bool, write) => {
+            Binding::Reg(scalar, write) if scalar.is_scalar() => {
                 scalar_args.push(id);
                 if write {
                     mutable_args.push(id);
@@ -125,13 +120,13 @@ pub(crate) fn publish(
             }
             Binding::Buffer(_) => emit!(#id: #hir::Buffer),
             Binding::Context if runtime_receiver && context.is_none() => {
-                context = Some(super::lower::Context::new(id.clone()));
+                context = Some(super::lower::Context::new(id.clone(), ty));
                 emit!(#id: #hir::Buffer)
             }
             _ => {
                 return Err(syn::Error::new_spanned(
                     param.pattern,
-                    "a Splice method parameter is #[comptime], i32, bool, a slice, or the &mut self receiver",
+                    "a Splice method parameter is #[comptime], a kernel scalar, a slice, or the &mut self receiver",
                 ));
             }
         };
@@ -265,7 +260,7 @@ pub(crate) fn publish(
         items.push(emit!(
             #[doc(hidden)]
             #visibility fn #dispatch_name #generics (&mut self, __splice_operation:u32,
-                __splice_arguments:#root::__private::ContextArguments<'_>, _: #witness) -> i32 #where_ {
+                __splice_arguments:#root::__private::ContextArguments<'_>, _: #witness) -> u64 #where_ {
                 let __splice_object = self;
                 #dispatch
             }

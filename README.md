@@ -9,20 +9,20 @@
 splice-kernel = "0.1"
 ```
 
-В коде используйте `splice::{kernel, Lancy}`. Для других бэкендов включите features `cranelift` или `llvm`, например `splice-kernel = { version = "0.1", features = ["cranelift"] }`. Чтобы отключить Lancy, укажите `default-features = false`. LLVM требует установленную версию, указанную ниже. Для самостоятельного использования Lancy добавьте `lancy = "0.1"`.
+В коде используйте `splice::kernel` и `splice::lancy::Lancy`. Каждый бэкенд — модуль фасада: `splice::lancy`, `splice::cranelift` (feature `cranelift`) и `splice::llvm` (feature `llvm`, там же `LlvmManualSimd` и `to_llvm_ir`). Для других бэкендов включите features `cranelift` или `llvm`, например `splice-kernel = { version = "0.1", features = ["cranelift"] }`. Чтобы отключить Lancy, укажите `default-features = false`. LLVM требует установленную версию, указанную ниже. Для самостоятельного использования Lancy добавьте `lancy = "0.1"`.
 
-Для первого выпуска публикуйте пакеты по порядку, дожидаясь появления каждого в индексе crates.io: `splice-target`, `splice-macros`, `lancy`, `splice-core`, `splice-jit`, `splice-lancy`, `splice-cranelift`, `splice-llvm`, затем `splice-kernel`. Перед публикацией каждого пакета выполните `cargo publish -p ИМЯ --dry-run`, затем `cargo publish -p ИМЯ`.
+Пакеты публикуются вместе: `cargo publish --workspace` сам упорядочивает их по зависимостям (`splice-target`, `splice-macros`, `lancy`, `splice-core`, `splice-jit`, бэкенды, затем `splice-kernel`); `cargo xtask package` проверяет это без публикации.
 
 Проект распространяется по выбору пользователя на условиях MIT или Apache-2.0.
 
 Splice — язык для CPU-ядер, которые специализируются по данным приложения после его запуска. Функция с атрибутом `#[kernel]` сохраняет обычный вызов Rust. Макрос также создаёт фабрику JIT-кода. Параметр типа `B` у фабрики выбирает компилятор ядра.
 
 ```rust
-use splice::{kernel, cranelift::Cranelift, lancy::Lancy, llvm::Llvm};
+use splice::{kernel, lancy::Lancy};
 
 enum Price { Retail, Wholesale(i32) }
 
-#[kernel]
+#[kernel(print)]
 fn total(#[comptime] plan: &Price, price: i32, qty: i32) -> i32 {
     match plan {
         Price::Retail => price.wrapping_mul(qty),
@@ -33,23 +33,19 @@ fn total(#[comptime] plan: &Price, price: i32, qty: i32) -> i32 {
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let plan = Price::Wholesale(3);
     let fast_build = total::build::<Lancy>(total::BuildArgs { plan: &plan })?;
-    let cranelift = total::build::<Cranelift>(total::BuildArgs { plan: &plan })?;
-    let llvm = total::build::<Llvm>(total::BuildArgs { plan: &plan })?;
     print!("{}", total::print(&plan)?);
     assert_eq!(fast_build.call(total::CallArgs { price: 10, qty: 4 })?, 28);
-    assert_eq!(cranelift.call(total::CallArgs { price: 10, qty: 4 })?, 28);
-    assert_eq!(llvm.call(total::CallArgs { price: 10, qty: 4 })?, 28);
     Ok(())
 }
 ```
 
-Вызов `build::<Lancy>` строит SSA HIR Lancy прямо при обходе кернела. Вызов `build::<Llvm>` таким же образом строит LLVM IR. Вызов `build::<Cranelift>` строит и проверяет переносимый IR, затем компилирует его в машинный код через Cranelift. Хостовый Rust выбирает вариант `match` по плану, вычисляет известные выражения и разворачивает `for` по `#[comptime]`-срезу. Параметры специализации могут содержать заимствования и пользовательские enum. Коллекцию специализации можно подготовить в приложении и передать в `BuildArgs` по ссылке. Вызов `comptime!(e)` требует вычислить выражение при сборке. Для изменяемой памяти конкретного запуска передайте `&mut [T]` в `CallArgs`.
+Вызов `build::<Lancy>` строит SSA HIR Lancy прямо при обходе кернела. С `splice::llvm::Llvm` тот же вызов таким же образом строит LLVM IR, а `build::<splice::cranelift::Cranelift>` строит и проверяет переносимый IR, затем компилирует его в машинный код через Cranelift. Хостовый Rust выбирает вариант `match` по плану, вычисляет известные выражения и разворачивает `for` по `#[comptime]`-срезу. Параметры специализации могут содержать заимствования и пользовательские enum. Коллекцию специализации можно подготовить в приложении и передать в `BuildArgs` по ссылке. Вызов `comptime!(e)` требует вычислить выражение при сборке. Для изменяемой памяти конкретного запуска передайте `&mut [T]` в `CallArgs`.
 
 В пределах одной сборки вложенные вызовы делят тело по объявлению функции, её параметрам типа и значениям `const`- и `#[comptime]`-аргументов. Обычная функция без параметров специализации строится один раз. Для чисел, строк и срезов ключ учитывает содержимое. Для своих структур и перечислений можно добавить `#[derive(splice::ComptimeKey)]`, а для параметра типа — ограничение `T: splice::ComptimeKey`. Аргументы с состоянием, для которых ключ не задан, сохраняют отдельный обход тела при каждом вызове.
 
 `total::ir(&plan)?` возвращает переносимый IR после специализации: `splice::Function` с инструкциями `splice::hir::Instr`. В примере сигнатура содержит только `price` и `qty`, а скидка 3 появляется в теле константой перед умножением. Повторные вызовы одной специализации ссылаются на одно тело (`Instr::Call` с общим `Arc<Function>`). IR отражает семантику Splice до оптимизаций машинного бэкенда.
 
-`kernel_name::print(...)` выполняет специализацию по тем же аргументам и возвращает Rust-код до построения IR. Входы `#[comptime]` исчезают из сигнатуры, а runtime-условия и циклы сохраняют форму Rust. Напечатанный код использует обычные операции Rust, включая `Lane` для SIMD. Побочные эффекты обычной Rust-функции происходят в `call`, когда выполнение доходит до вызова. Для вывода во время подготовки плана приложение может вызвать `println!` перед передачей `BuildArgs`.
+`kernel_name::print(...)` (есть у ядра с `#[kernel(print)]`) выполняет специализацию по тем же аргументам и возвращает Rust-код до построения IR. Входы `#[comptime]` исчезают из сигнатуры, а runtime-условия и циклы сохраняют форму Rust. Напечатанный код использует обычные операции Rust, включая `Lane` для SIMD. Побочные эффекты обычной Rust-функции происходят в `call`, когда выполнение доходит до вызова. Для вывода во время подготовки плана приложение может вызвать `println!` перед передачей `BuildArgs`.
 
 Свободная функция `total` объявляет структуры `total::BuildArgs` и `total::CallArgs`. Фабрика принимает аргументы специализации по именам. У исполняемого ядра метод `call` принимает именованные аргументы запуска. Ошибки сборки и вызова имеют типы `splice::BuildError` и `splice::CallError`. Вариант `let ir = total::ir(&plan)?;` принимает аргументы специализации позиционно. Вызов `Lancy::compile(&ir)?`, `Cranelift::compile(&ir)?` или `Llvm::compile(&ir)?` сохраняет тип аргументов запуска. [Спецификация языка](docs/splice-language.md)
 
@@ -74,21 +70,44 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 Вход `#[columns(layout)] columns: &[BufferArg<'_>]` описывает набор колонок, который меняется между вызовами. Выражение `layout` вычисляется при `build` или `ir` и задаёт порядок и типы колонок через `BufferKind`. `columns[slot].as_slice::<T>()` получает `&[T]` для известного при сборке номера колонки. Поддерживаются `u16`, `u32`, `i32`, `i64`, `f32` и `f64`. Splice проверяет номер и тип в раскладке при сборке, а `Executable::call` проверяет переданные буферы перед входом в JIT.
 
 ```rust
+# use splice::{BufferArg, BufferKind, kernel, lancy::Lancy, simd::Element};
+# #[derive(splice::KernelType)]
+# struct Schema { layout: [BufferKind; 1], elements: [Element; 1] }
+# enum Expr { Ge { col: usize, val: i32 } }
+# enum Plan { Filter { expr: Expr }, Empty }
+# #[kernel]
+# fn filter_ge(col: &[i32], #[comptime] val: i32, out: &mut [i32]) -> i32 {
+#     let mut n = 0;
+#     for row in 0..col.len() {
+#         if col[row] >= val { out[n as usize] = col[row]; n += 1; }
+#     }
+#     n
+# }
 #[kernel]
 fn query(
     #[comptime] schema: &Schema,
     #[comptime] plan: &Plan,
     out: &mut [i32],
-    #[columns(schema.buffer_kinds())] columns: &[BufferArg<'_>],
+    #[columns(&schema.layout)] columns: &[BufferArg<'_>],
 ) -> i32 {
     match plan {
-        Plan::Filter { expr: Expr::Ge { col, val } } => match schema.column(*col) {
-            Some(Element::I32) => filter_ge(columns[*col].as_slice::<i32>(), *val, out),
+        Plan::Filter { expr: Expr::Ge { col, val } } => match schema.elements[*col] {
+            Element::I32 => filter_ge(columns[*col].as_slice::<i32>(), *val, out),
             _ => -1,
         },
         Plan::Empty => 0,
     }
 }
+# fn main() -> Result<(), Box<dyn std::error::Error>> {
+# let schema = Schema { layout: [BufferKind::READ_I32], elements: [Element::I32] };
+# let plan = Plan::Filter { expr: Expr::Ge { col: 0, val: 2 } };
+# let code = query::build::<Lancy>(query::BuildArgs { schema: &schema, plan: &plan })?;
+# let (column, mut out) = ([1, 2, 3], [0; 3]);
+# let columns = [BufferArg::read(&column)];
+# assert_eq!(code.call(query::CallArgs { out: &mut out, columns: &columns })?, 2);
+# assert_eq!(out[..2], [2, 3]);
+# Ok(())
+# }
 ```
 
 Здесь `filter_ge` — обычное ядро с `&[i32]` и порогом `#[comptime] val: i32`. При вызове `call` поля структуры обозначают выходной буфер и набор колонок в порядке раскладки. Одно ядро принимает разные батчи с этой раскладкой. Для другой раскладки нужно собрать специализацию по новой схеме. Ядро принимает одну таблицу после обычных параметров-срезов. Таблица доступна в точке входа, а выбранный из неё срез можно передавать во вложенные ядра. [Исполняемый пример и тесты](splice/tests/column_table.rs)
@@ -148,6 +167,7 @@ let jit = add_block::build::<Lancy>(add_block::BuildArgs {})?;
 let count = jit.call(add_block::CallArgs { a: &a, b: &b, dst: &mut dst })?;
 assert_eq!(count as usize, n);
 assert_eq!(dst, vec![0u16; n]);
+# Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
 - Элементы векторов и срезов поддерживают `u16`, `u32`, `i32`, `i64`, `f32` и `f64`. `+`, `-` и `*` для целых выполняются по модулю разрядности. Целые поддерживают побитовые операции, вещественные — деление, `sqrt` и `mul_add` с одним округлением. `splat` заполняет полосы одним значением, включая runtime-параметр `i32`. `iota()` нумерует их с нуля.
@@ -246,7 +266,7 @@ Splice публикует вложенные спаны `tracing` уровня `
 `splice::compile` (бэкенды — `splice_core::compile`, сам Lancy — `lancy::compile`). Для замеров добавьте в приложение `tracing-subscriber = "0.3"`
 и установите подписчик до вызова `build::<B>` или `B::compile`.
 
-```rust
+```rust,no_run
 use tracing_subscriber::fmt::format::FmtSpan;
 
 tracing_subscriber::fmt()

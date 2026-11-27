@@ -70,9 +70,19 @@ impl Lower<'_> {
         } else {
             plain
         };
+        let operand = |value: &Value| match value.stage {
+            Stage::Word(t) | Stage::Reg(t) | Stage::Literal(t) if t != Scalar::Inferred => Some(t),
+            _ => None,
+        };
+        let kind = if predicate {
+            Scalar::Bool
+        } else {
+            operand(&left)
+                .or(operand(&right))
+                .unwrap_or(Scalar::Inferred)
+        };
         let left = self.word(left, &expr.left)?;
         let right = self.word(right, &expr.right)?;
-        let kind = if predicate { Scalar::Bool } else { Scalar::I32 };
         Ok(Value::new(
             Stage::Word(kind),
             emit!({

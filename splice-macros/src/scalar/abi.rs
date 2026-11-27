@@ -171,7 +171,7 @@ pub(super) fn generate(
         let invoke = context.dispatcher(root, emit!(&__SPLICE_CONTEXT_SIGNATURE), &types);
         emit! {
             let __splice_object = self.#parameter;
-            let mut __splice_dispatch = |__splice_operation: u32, __splice_arguments: #root::__private::ContextArguments<'_>| -> i32 {
+            let mut __splice_dispatch = |__splice_operation: u32, __splice_arguments: #root::__private::ContextArguments<'_>| -> u64 {
                 #invoke
             };
             let mut __splice_runtime_context = #root::__private::RuntimeContext::new(&__SPLICE_CONTEXT_SIGNATURE, &mut __splice_dispatch);

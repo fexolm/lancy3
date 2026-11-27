@@ -294,7 +294,7 @@ pub(super) unsafe fn run(
                     (function.entry)(
                         f.read(receiver) as *mut u8,
                         f.read(operation) as u32,
-                        f.read(packet) as *const u8,
+                        f.read(packet) as *mut u8,
                         f.read(extra) as i32,
                     )
                 };

@@ -32,6 +32,7 @@ fn context_descriptors_reject_other_signatures_and_slice_operations() {
             },
             &[b.arg(0)?],
             &[],
+            ScalarType::I32,
         )?;
         b.ret(result)?;
         Ok(())
@@ -53,6 +54,7 @@ fn context_descriptors_reject_other_signatures_and_slice_operations() {
                 },
                 &[b.arg(0)?],
                 &[],
+                ScalarType::I32,
             )
         },
         |b| {
@@ -63,6 +65,7 @@ fn context_descriptors_reject_other_signatures_and_slice_operations() {
                 },
                 &[],
                 &[],
+                ScalarType::I32,
             )
         },
         |b| {
@@ -73,6 +76,7 @@ fn context_descriptors_reject_other_signatures_and_slice_operations() {
                 },
                 &[b.arg(0)?],
                 &[],
+                ScalarType::I32,
             )
         },
         |b| b.load(Buffer(0), b.arg(0)?),
@@ -181,6 +185,7 @@ fn context_slice_operands_require_valid_nonaliasing_descriptors() {
                 },
                 &[],
                 slices,
+                ScalarType::I32,
             )?;
             builder.ret(result)?;
             Ok(())
@@ -215,12 +220,17 @@ fn static_rust_packets_carry_words_in_order_in_both_staging_paths() {
         (0..3).fold(0, |n, i| n * 10 + args.word(i))
     });
     fn body(b: &mut dyn KernelBuilder) -> splice_core::Result<()> {
-        let three = b.rust_call(RustTarget::Static(&THREE), &[], &[])?;
+        let three = b.rust_call(RustTarget::Static(&THREE), &[], &[], ScalarType::I32)?;
         let (one, two) = (
             b.constant(Constant::from(1))?,
             b.constant(Constant::from(2))?,
         );
-        let digits = b.rust_call(RustTarget::Static(&DIGITS), &[one, two, b.arg(0)?], &[])?;
+        let digits = b.rust_call(
+            RustTarget::Static(&DIGITS),
+            &[one, two, b.arg(0)?],
+            &[],
+            ScalarType::I32,
+        )?;
         let total = b.binary(Binary::Add, three, digits)?;
         b.ret(total)?;
         Ok(())

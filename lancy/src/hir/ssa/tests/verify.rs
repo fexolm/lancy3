@@ -96,7 +96,7 @@ fn pointers_keep_their_type_across_edits_edges_and_returns() {
 }
 #[test]
 fn rust_calls_verify_operand_types() {
-    unsafe extern "C" fn add(_: *mut u8, operation: u32, _: *const u8, word: i32) -> i64 {
+    unsafe extern "C" fn add(_: *mut u8, operation: u32, _: *mut u8, word: i32) -> i64 {
         i64::from((operation as i32).wrapping_add(word) as u32)
     }
     static ADD: crate::hir::RustFunction = crate::hir::RustFunction {

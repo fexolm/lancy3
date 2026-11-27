@@ -9,7 +9,6 @@ impl TraitMethodKind {
     fn tag(self) -> TokenStream {
         match self {
             Self::Word => quote!(word),
-            Self::Bool => quote!(boolean),
             Self::EvalOnly => quote!(eval),
             Self::Rust => quote!(opaque),
         }
@@ -99,14 +98,13 @@ pub(crate) fn trait_method_dispatch(
     owner: &Path,
     method: &Ident,
     scalar: TokenStream,
-    boolean: TokenStream,
     opaque: TokenStream,
     ordinary: TokenStream,
 ) -> TokenStream {
     super::select_trait(
         root,
         owner,
-        quote!(@expr #method, __splice_method_case, (call #scalar, #boolean, #opaque, #ordinary)),
+        quote!(@expr #method, __splice_method_case, (call #scalar, #opaque, #ordinary)),
     )
 }
 

@@ -22,7 +22,6 @@ use splice_core::{
 };
 
 /// A Rust call returns an `i32` word.
-const WORD: ScalarType = ScalarType::I32;
 use std::{
     cell::{Cell, RefCell},
     collections::HashMap,
@@ -377,9 +376,10 @@ impl KernelBuilder for Direct<'_, '_> {
         target: RustTarget,
         args: &[Reg],
         slices: &[ContextSlice],
+        result: ScalarType,
     ) -> splice_core::Result<Reg> {
         let plan = target.plan(self.kinds, args.len(), slices);
-        self.result(WORD, |ir, dst| ir.rust_call(dst, plan, args))
+        self.result(result, |ir, dst| ir.rust_call(dst, plan, args))
     }
     fn call_kernel(
         &mut self,

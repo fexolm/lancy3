@@ -44,6 +44,18 @@ fn scalar(f: &Function, reg: Reg) -> ScalarType {
     }
 }
 
+/// A scalar as the 8-byte word of a Rust call operand: its bits
+/// zero-extended.
+fn word(builder: &mut FunctionBuilder, value: Value, ty: ScalarType) -> Value {
+    let bits = match ty {
+        ScalarType::F32 => builder.ins().bitcast(I32, MemFlags::new(), value),
+        ScalarType::F64 => return builder.ins().bitcast(I64, MemFlags::new(), value),
+        ScalarType::I64 | ScalarType::U64 | ScalarType::Index => return value,
+        _ => value,
+    };
+    builder.ins().uextend(I64, bits)
+}
+
 /// Return a failed status from this function unchanged.
 fn forward_status(builder: &mut FunctionBuilder, status: Value) {
     let failed = builder
@@ -277,13 +289,17 @@ pub(super) fn emit(
                 target,
                 ref args,
                 ref slices,
+                result,
             } => {
                 use cranelift_codegen::ir::{AbiParam, Signature};
                 let plan = target.plan(f.buffer_kinds(), args.len(), slices);
                 let packet = packet.expect("a Rust call has a packet slot");
                 for PacketStore { at, value } in plan.stores {
                     let value = match value {
-                        PacketValue::Word(n) => b.use_var(var(args[n])),
+                        PacketValue::Word(n) => {
+                            let value = b.use_var(var(args[n]));
+                            word(&mut b, value, scalar(f, args[n]))
+                        }
                         PacketValue::Data(buffer) => buffers[buffer.index()][0],
                         PacketValue::Length(buffer) => buffers[buffer.index()][1],
                         PacketValue::Tag(tag) => b.ins().iconst(I32, i64::from(tag)),
@@ -309,7 +325,7 @@ pub(super) fn emit(
                     .call_indirect(sig, entry, &[receiver, operation, address, zero]);
                 let packed = b.inst_results(call)[0];
                 forward_status(&mut b, packed);
-                let value = b.ins().ireduce(I32, packed);
+                let value = b.ins().stack_load(scalar_type(result), packet, 0);
                 b.def_var(var(dst), value);
             }
             Instr::Call {

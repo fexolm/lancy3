@@ -1,32 +1,10 @@
 //! Type-directed linking of scalar Rust functions. Rust resolves the function
 //! and its argument types before the specialization factory runs.
-use super::{
-    KernelBuilder,
-    scalar::{ImportWord, RunArg},
-};
+use super::{KernelBuilder, scalar::RunArg};
 use crate::hir::Reg;
 
-pub struct Candidate<F, P>(pub F, pub P);
-
-pub trait ProjectResult<R> {
-    fn project(&self, result: R) -> i32;
-}
-
-pub struct EncodeResult;
-
-impl<R: ImportWord> ProjectResult<R> for EncodeResult {
-    fn project(&self, result: R) -> i32 {
-        result.encode()
-    }
-}
-
-pub struct MapResult<F>(pub F);
-
-impl<R, F: Fn(R) -> i32> ProjectResult<R> for MapResult<F> {
-    fn project(&self, result: R) -> i32 {
-        (self.0)(result)
-    }
-}
+/// A Rust function a kernel calls, typed by its signature.
+pub struct Candidate<F>(pub F);
 
 pub struct Operand<T>(pub T);
 pub trait Materialize {
@@ -39,7 +17,7 @@ impl<T: RunArg + Copy> Materialize for &Operand<T> {
     }
 
     fn materialize(self, builder: &mut dyn KernelBuilder) -> crate::Result<Reg> {
-        self.0.word(builder)
+        self.0.reg(builder)
     }
 }
 impl<T> Materialize for &&Operand<T> {

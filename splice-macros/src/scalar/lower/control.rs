@@ -111,9 +111,15 @@ impl Lower<'_> {
         }
         if let Stage::Reg(t) = stage {
             let value = self.reg(v, t, at)?;
+            let root = self.root;
+            let assign = if t == Scalar::Inferred {
+                emit!(#root::frontend::scalar::assign_inferred(&mut __splice_branch_result, __splice_value, __splice_builder)?;)
+            } else {
+                emit!(__splice_builder.assign(__splice_branch_result, __splice_value)?;)
+            };
             Ok(emit!({
                 let __splice_value = #value;
-                __splice_builder.assign(__splice_branch_result, __splice_value)?;
+                #assign
                 __splice_builder.jump(__splice_join)?;
             }))
         } else {
@@ -172,7 +178,7 @@ impl Lower<'_> {
                 let (__splice_yes, __splice_no, __splice_join) =
                     (__splice_builder.label()?, __splice_builder.label()?, __splice_builder.label()?);
                 if __splice_known_condition.is_none() {
-                    let __splice_cond = #root::frontend::scalar::RunArg::typed(__splice_word, #root::hir::ScalarType::Bool, __splice_builder)?;
+                    let __splice_cond = #root::frontend::scalar::RunArg::reg(__splice_word, __splice_builder)?;
                     __splice_builder.branch(__splice_cond, __splice_yes, __splice_no)?;
                 }
                 if __splice_known_condition != ::core::option::Option::Some(false) { __splice_builder.mark(__splice_yes)?; #yes_code; }
@@ -658,7 +664,14 @@ impl Lower<'_> {
 }
 
 fn result_slot(stage: Stage, lower: &Lower<'_>) -> (TokenStream, TokenStream) {
-    if let Stage::Reg(t) = stage {
+    if let Stage::Reg(Scalar::Inferred) = stage {
+        // Only the builder knows the type: the first arm creates the local.
+        let root = lower.root;
+        (
+            emit!(let mut __splice_branch_result = ::core::option::Option::None;),
+            emit!(#root::frontend::scalar::inferred_result(__splice_branch_result, __splice_builder)?),
+        )
+    } else if let Stage::Reg(t) = stage {
         let ty = t.value_type(lower.root, lower.types);
         (
             emit!(let __splice_branch_result = __splice_builder.local(#ty)?;),
