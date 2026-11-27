@@ -1183,6 +1183,42 @@ fn literal_locals_and_arms_take_the_usize_type_rust_infers() {
     splice_testkit::each_backend!(B => check::<B>());
 }
 
+/// A negated or inverted literal arm takes the type the binding gives the
+/// other arm, as rustc infers it.
+#[kernel]
+fn signed_arms(a: i32) -> i64 {
+    let x: i64 = if a > 0 { 1 } else { -1 };
+    x * 3_000_000_000
+}
+
+#[kernel]
+fn inverted_arms(a: i32) -> u64 {
+    let x: u64 = if a > 0 { !0 } else { 1 };
+    x >> 3
+}
+
+#[test]
+fn negated_and_inverted_literal_arms_take_the_annotated_type() {
+    fn check<B: Codegen<Output: Executable>>() {
+        let signed = signed_arms::build::<B>(signed_arms::BuildArgs {}).unwrap();
+        let inverted = inverted_arms::build::<B>(inverted_arms::BuildArgs {}).unwrap();
+        let signed_ir = B::compile(&signed_arms::ir().unwrap()).unwrap();
+        let inverted_ir = B::compile(&inverted_arms::ir().unwrap()).unwrap();
+        for a in [-1, 0, 1] {
+            for code in [&signed, &signed_ir] {
+                assert_eq!(code.call(signed_arms::CallArgs { a }), Ok(signed_arms(a)));
+            }
+            for code in [&inverted, &inverted_ir] {
+                assert_eq!(
+                    code.call(inverted_arms::CallArgs { a }),
+                    Ok(inverted_arms(a))
+                );
+            }
+        }
+    }
+    splice_testkit::each_backend!(B => check::<B>());
+}
+
 #[test]
 fn usize_parameters_and_results_keep_all_64_bits() {
     use index_arithmetic::shift_index;
