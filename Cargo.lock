@@ -929,6 +929,7 @@ version = "0.1.0"
 dependencies = [
  "splice-macros",
  "splice-target",
+ "syn 2.0.119",
  "thiserror 2.0.21",
  "tracing",
 ]

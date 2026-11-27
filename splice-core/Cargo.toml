@@ -16,5 +16,8 @@ thiserror.workspace = true
 splice-target.workspace = true
 splice-macros.workspace = true
 
+[dev-dependencies]
+syn = { version = "2", features = ["full"] }
+
 [lints]
 workspace = true

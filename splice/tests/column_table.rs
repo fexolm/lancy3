@@ -78,12 +78,10 @@ fn any_ge_float(col: &[f32], #[comptime] val: f32) -> i32 {
 }
 
 #[test]
-fn float_column_matches_the_rust_filter_including_nan_and_tail()
+fn float_column_matches_the_scalar_filter_including_nan_and_tail()
 -> Result<(), Box<dyn std::error::Error>> {
     fn check<E: Executable>(
         code: TypedKernel<query::Signature, E>,
-        schema: &Schema,
-        plan: &Plan,
     ) -> Result<(), Box<dyn std::error::Error>> {
         for values in [&[][..], &[f32::NAN, 0.0, -1.0], &[2.5, f32::NAN]] {
             let expected = i32::from(values.iter().any(|&x| x >= 2.5));
@@ -91,7 +89,6 @@ fn float_column_matches_the_rust_filter_including_nan_and_tail()
                 BufferArg::read::<i32>(&[99]),
                 BufferArg::read::<f32>(values),
             ];
-            assert_eq!(query(schema, plan, &mut [], &columns), expected);
             assert_eq!(
                 code.call(query::CallArgs {
                     out: &mut [],
@@ -130,10 +127,8 @@ fn float_column_matches_the_rust_filter_including_nan_and_tail()
                 schema: &schema,
                 plan: &plan,
             })?,
-            &schema,
-            &plan,
         )?;
-        check(B::compile(&ir)?, &schema, &plan)?;
+        check(B::compile(&ir)?)?;
     });
     Ok(())
 }

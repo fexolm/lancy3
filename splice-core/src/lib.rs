@@ -50,6 +50,8 @@ pub use frontend::ComptimeKey;
 pub use hir::{BufferArg, BufferElement, BufferKind, Function, validate_buffers};
 use hir::{Constant, ScalarType};
 pub use math::Math;
+#[doc(hidden)]
+pub use splice_macros::simd_api as __simd_api;
 pub use splice_macros::{ComptimeKey, KernelType, intrinsic, kernel};
 
 /// Result of staging or compiling a kernel.
