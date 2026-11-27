@@ -296,6 +296,7 @@ pub(super) fn propagate(
     if changed_aliases {
         f.substitute_values(&aliases);
     }
+    changed_cfg |= local_cfg::thread_constant_branches(f, cfg);
     changed_cfg |= local_cfg::convert_branches(f, cfg);
     Ok(if changed_cfg {
         f.prune_unreachable()?;

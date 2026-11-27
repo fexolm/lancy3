@@ -1,7 +1,7 @@
 use crate::hir::transforms::ControlFlowGraph;
 use crate::hir::{Binary, Block, Edge, Function, Op, Simd, Terminator, Ternary, Type, Value};
 use crate::support::slotmap::DenseMap;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 #[derive(Clone, Copy)]
 enum Path {
@@ -176,4 +176,153 @@ pub(super) fn convert_branches(f: &mut Function, cfg: &ControlFlowGraph) -> bool
         changed = true;
     }
     changed
+}
+
+/// Send each edge that passes a constant condition into an empty block,
+/// which only branches on that parameter, straight to the chosen successor.
+/// A short-circuit condition such as `a || b` joins its operands through
+/// such a block. Threading the constant operand exposes the comparison of
+/// the other one as the branch that guards the code, for the passes that
+/// use dominating comparisons (bounds checks). Loop headers keep their
+/// incoming edges, so loops stay reducible.
+pub(super) fn thread_constant_branches(f: &mut Function, cfg: &ControlFlowGraph) -> bool {
+    let rpo = cfg.reverse_postorder();
+    let mut order = DenseMap::filled(f.block_capacity(), usize::MAX);
+    for (i, &b) in rpo.iter().enumerate() {
+        order[b] = i;
+    }
+    let mut candidates = Vec::new();
+    for &b in rpo {
+        if f.instructions(b).next().is_none()
+            && let Terminator::Branch { cond, yes, no } = *f.terminator(b)
+            && let Some(index) = f.param_index(b, cond)
+            && cfg.predecessors(b).iter().all(|&p| order[p] < order[b])
+        {
+            candidates.push((b, index, yes, no));
+        }
+    }
+    if candidates.is_empty() {
+        return false;
+    }
+    // `b` stops dominating the chosen successor, so a parameter used past
+    // its own branch must equal one value on every incoming edge, which
+    // then replaces it.
+    let mut owner = HashMap::new();
+    for &(b, ..) in &candidates {
+        owner.extend(f.params(b).iter().map(|&v| (v, b)));
+    }
+    let mut escaping = HashSet::new();
+    let mut constants = HashMap::new();
+    for &b in rpo {
+        let mut note = |v: Value| {
+            if owner.get(&v).is_some_and(|&o| o != b) {
+                escaping.insert(v);
+            }
+        };
+        for inst in f.instructions(b) {
+            f.visit_operands(inst, &mut note);
+            if let Op::Const(n) = *f.op(inst) {
+                constants.insert(f.result(inst).unwrap(), n);
+            }
+        }
+        let term = *f.terminator(b);
+        term.operand().into_iter().for_each(&mut note);
+        for edge in term.edges() {
+            f.edge(edge).1.iter().copied().for_each(&mut note);
+        }
+    }
+    let mut params = HashMap::new();
+    if !escaping.is_empty() {
+        for &b in rpo {
+            params.extend(f.params(b).iter().enumerate().map(|(i, &v)| (v, (b, i))));
+        }
+    }
+    let mut aliases = Vec::new();
+    candidates.retain(|&(b, index, ..)| {
+        let mut replaced = Vec::new();
+        for (i, &param) in f.params(b).iter().enumerate() {
+            if !escaping.contains(&param) {
+                continue;
+            }
+            let Some(value) = (i != index)
+                .then(|| uniform_argument(f, cfg, &params, b, i))
+                .flatten()
+            else {
+                return false;
+            };
+            replaced.push((param, value));
+        }
+        aliases.extend(replaced);
+        true
+    });
+    if !aliases.is_empty() {
+        let mut map = DenseMap::from_fn(f.value_count(), |v| v);
+        for (param, value) in aliases {
+            map[param] = value;
+        }
+        f.substitute_values(&map);
+    }
+    let mut changed = false;
+    for (b, index, yes, no) in candidates {
+        for (pred, edge) in cfg.incoming_edges(b) {
+            let (_, args) = f.edge(edge);
+            let Some(&n) = constants.get(&args[index]) else {
+                continue;
+            };
+            let incoming = args.to_vec();
+            let (target, chosen) = f.edge(if n != 0 { yes } else { no });
+            // Values other than parameters of `b` are defined in a strict
+            // dominator of `b`, which also dominates its predecessor.
+            let forwarded: Vec<_> = chosen
+                .iter()
+                .map(|&v| f.param_index(b, v).map_or(v, |i| incoming[i]))
+                .collect();
+            let threaded = f.add_edge(target, &forwarded);
+            let retarget = |e: Edge| if e == edge { threaded } else { e };
+            let term = match *f.terminator(pred) {
+                Terminator::Jump(e) => Terminator::Jump(retarget(e)),
+                Terminator::Branch { cond, yes, no } => Terminator::Branch {
+                    cond,
+                    yes: retarget(yes),
+                    no: retarget(no),
+                },
+                Terminator::Return(_) => unreachable!("a predecessor has an edge"),
+            };
+            f.set_terminator(pred, term);
+            changed = true;
+        }
+    }
+    changed
+}
+
+/// The value that every edge into `block` passes for parameter `index`,
+/// looking through parameters of blocks with a single incoming edge. It is
+/// available at each predecessor, so it dominates `block`.
+fn uniform_argument(
+    f: &Function,
+    cfg: &ControlFlowGraph,
+    params: &HashMap<Value, (Block, usize)>,
+    block: Block,
+    index: usize,
+) -> Option<Value> {
+    let resolve = |mut v: Value| {
+        // A chain of single-edge blocks is acyclic in reachable code; the
+        // limit only bounds the walk.
+        for _ in 0..8 {
+            let Some(&(b, i)) = params.get(&v) else {
+                break;
+            };
+            let mut incoming = cfg.incoming_edges(b);
+            let (Some((_, edge)), None) = (incoming.next(), incoming.next()) else {
+                break;
+            };
+            v = f.edge(edge).1[i];
+        }
+        v
+    };
+    let mut values = cfg
+        .incoming_edges(block)
+        .map(|(_, edge)| resolve(f.edge(edge).1[index]));
+    let first = values.next()?;
+    values.all(|v| v == first).then_some(first)
 }
