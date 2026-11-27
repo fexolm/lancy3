@@ -7,7 +7,8 @@ use splice::hir::{Instr, ScalarType};
 use splice::intrinsic::Intrinsic;
 use splice::{BuildOptions, Codegen, Executable, IntrinsicPolicy, Mode, kernel};
 use std::fmt::Debug;
-use std::sync::{Arc, Mutex};
+use std::cell::RefCell;
+use std::sync::{Arc, Once};
 use tracing::field::{Field, Visit};
 use tracing_subscriber::layer::{Context, Layer, SubscriberExt};
 
@@ -41,11 +42,17 @@ mod ops {
         }
     }
 
-    /// Implemented by LLVM where the target fuses it.
+    /// Rust's fused multiply-add, called from the body of [`fma`].
+    pub fn fused_rust(a: f64, b: f64, c: f64) -> f64 {
+        a.mul_add(b, c)
+    }
+
+    /// Implemented by LLVM where the target fuses it. The body rounds once,
+    /// as the native fused instruction does.
     #[kernel]
     #[intrinsic("mul_add")]
     pub fn fma(a: f64, b: f64, c: f64) -> f64 {
-        a * b + c
+        fused_rust(a, b, c)
     }
 
     pub struct Bits;
@@ -97,9 +104,11 @@ fn low_bits(x: u32, y: u32) -> u32 {
     ops::Bits::low_bit(x) + ops::Bits::low_bit(y)
 }
 
-/// The events logged with target `splice::intrinsic`.
-#[derive(Clone, Default)]
-struct Log(Arc<Mutex<Vec<String>>>);
+thread_local! {
+    /// The events logged with target `splice::intrinsic` on this thread
+    /// while [`logged`] runs.
+    static LOG: RefCell<Option<Vec<String>>> = const { RefCell::new(None) };
+}
 
 struct Message(String);
 
@@ -110,22 +119,34 @@ impl Visit for Message {
     }
 }
 
+/// Keeps the intrinsic events of each thread in [`LOG`].
+struct Log;
+
 impl<S: tracing::Subscriber> Layer<S> for Log {
     fn on_event(&self, event: &tracing::Event<'_>, _: Context<'_, S>) {
         if event.metadata().target() == "splice::intrinsic" {
             let mut message = Message(String::new());
             event.record(&mut message);
-            self.0.lock().unwrap().push(message.0);
+            LOG.with_borrow_mut(|log| log.as_mut().map(|log| log.push(message.0)));
         }
     }
 }
 
-/// `build` with a subscriber that keeps the intrinsic log.
+/// `build` with the intrinsic log of this thread recorded.
+///
+/// The subscriber is global and installed once: a scoped
+/// `with_default` subscriber races with tests on other threads that build
+/// without one, and tracing can then cache the warning's callsite as never
+/// enabled, which dropped the log under parallel tests.
 fn logged<T>(build: impl FnOnce() -> T) -> (T, Vec<String>) {
-    let log = Log::default();
-    let subscriber = tracing_subscriber::registry().with(log.clone());
-    let result = tracing::subscriber::with_default(subscriber, build);
-    let events = log.0.lock().unwrap().clone();
+    static INSTALL: Once = Once::new();
+    INSTALL.call_once(|| {
+        tracing::subscriber::set_global_default(tracing_subscriber::registry().with(Log))
+            .expect("no other global subscriber in this test binary");
+    });
+    LOG.set(Some(Vec::new()));
+    let result = build();
+    let events = LOG.take().unwrap_or_default();
     (result, events)
 }
 
@@ -320,7 +341,7 @@ fn mul_add_is_native_on_llvm_with_fused_multiply_add() {
                 Path::Portable => B::compile(&fused::ir_with_options(options)?),
             },
             |code| {
-                // Exact products: the fused and the unfused result agree.
+                // Native and fallback both round once, as Rust's `mul_add`.
                 for (a, b, c) in [
                     (0.0, 0.0, 0.0),
                     (-0.0, 1.0, 0.0),
@@ -329,6 +350,9 @@ fn mul_add_is_native_on_llvm_with_fused_multiply_add() {
                     (f64::INFINITY, 0.0, 1.0),
                     (f64::MAX, 1.0, f64::MAX),
                     (f64::MIN_POSITIVE, 0.5, 0.0),
+                    // The product rounds to 1, so an unfused body gives 0;
+                    // the fused result is -2^-54.
+                    (1.0 + 2f64.powi(-27), 1.0 - 2f64.powi(-27), -1.0),
                 ] {
                     let expected = ops::fma(a, b, c);
                     assert!(expected.to_bits() == a.mul_add(b, c).to_bits() || expected.is_nan());
