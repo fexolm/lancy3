@@ -105,6 +105,32 @@ fn threshold(src: &[i32], out: &mut [i32]) -> i32 {
     n + 1
 }
 
+/// Byte lanes: saturating add and a lower clamp, a vector of 16 to 64
+/// bytes at a time, with a scalar tail.
+#[kernel]
+fn brighten(src: &[u8], out: &mut [u8]) -> i32 {
+    let n = src.len();
+    if out.len() < n {
+        return -1;
+    }
+    let width = Lane::<u8>::lanes();
+    let add = Lane::<u8>::splat(40);
+    let floor = Lane::<u8>::splat(16);
+    let mut i = 0;
+    while i + width <= n {
+        Lane::<u8>::load(src, i)
+            .saturating_add(add)
+            .simd_max(floor)
+            .store(out, i);
+        i += width;
+    }
+    while i < n {
+        out[i] = src[i].saturating_add(40).max(16);
+        i += 1;
+    }
+    n as i32
+}
+
 /// i32 → f32, fused scale and offset, f32 → i32.
 #[kernel]
 fn requantize(src: &[i32], out: &mut [i32]) -> i32 {
@@ -367,6 +393,27 @@ pub(super) fn compare(c: &mut Criterion) {
         c,
         threshold::ir,
         builders!(B => threshold::build::<B>(threshold::BuildArgs {})),
+    );
+
+    let pixels: Vec<u8> = ints.iter().map(|&x| x as u8).collect();
+    let bright: Vec<u8> = pixels
+        .iter()
+        .map(|&x| x.saturating_add(40).max(16))
+        .collect();
+    Workload {
+        name: "micro_simd_u8_brighten",
+        elements: N,
+        workspace_words: N,
+        expected: &|| &bright,
+        equal: <[u8]>::eq,
+        run: |kernel: &dyn Executable, out: &mut [u8]| {
+            length(kernel.call(&[], &mut [BufferArg::read(&pixels), BufferArg::write(out)])?)
+        },
+    }
+    .compare(
+        c,
+        brighten::ir,
+        builders!(B => brighten::build::<B>(brighten::BuildArgs {})),
     );
 
     let quantized: Vec<_> = ints
