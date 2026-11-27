@@ -334,3 +334,94 @@ fn inherent(root: &Path, mut implementation: ItemImpl) -> Result<TokenStream> {
     }
     Ok(quote!(#implementation))
 }
+
+/// `#[intrinsic(simd)]`: the declarations of Splice's SIMD types
+/// (`splice::simd::Lane`, `Mask`). A unit struct becomes a zero-sized type
+/// that Rust cannot build; an impl (inherent, or of an operator trait)
+/// declares body-less methods, which get a body that panics. A kernel
+/// stages each one as Splice's portable SIMD operations: the kernel macro
+/// types the call from these declarations (`scalar::lower::simd::Declared`)
+/// and `splice::frontend::methods::simd` lowers it by method. Unlike
+/// [`expand`], the methods may be generic, take slices and be associated
+/// functions: the operations carry buffers and immediates that an
+/// `IntrinsicId` does not describe.
+pub(crate) fn simd(item: TokenStream) -> Result<TokenStream> {
+    match syn::parse2::<Item>(item)? {
+        Item::Struct(mut declaration) => {
+            if !matches!(declaration.fields, Fields::Unit) {
+                return Err(Error::new_spanned(
+                    &declaration.fields,
+                    "a SIMD intrinsic struct is declared without fields",
+                ));
+            }
+            let params: Vec<_> = declaration
+                .generics
+                .type_params()
+                .map(|t| t.ident.clone())
+                .collect();
+            declaration.fields = Fields::Unnamed(
+                syn::parse_quote!((::core::marker::PhantomData<fn() -> (#(#params,)*)>)),
+            );
+            declaration.semi_token = Some(Default::default());
+            Ok(quote!(#declaration))
+        }
+        Item::Impl(mut implementation) => {
+            let described = {
+                let self_ty = &implementation.self_ty;
+                quote!(#self_ty).to_string().replace(' ', "")
+            };
+            for item in &mut implementation.items {
+                match item {
+                    ImplItem::Verbatim(tokens) => {
+                        let (vis, method) = syn::parse::Parser::parse2(
+                            |input: syn::parse::ParseStream| {
+                                let attrs = input.call(syn::Attribute::parse_outer)?;
+                                let vis: syn::Visibility = input.parse()?;
+                                let mut method: TraitItemFn = input.parse()?;
+                                method.attrs.splice(0..0, attrs);
+                                Ok((vis, method))
+                            },
+                            tokens.clone(),
+                        )?;
+                        if method.default.is_some() {
+                            return Err(Error::new_spanned(
+                                &method.default,
+                                "an intrinsic has no body: the backend implements it",
+                            ));
+                        }
+                        let (attrs, sig) = (&method.attrs, &method.sig);
+                        let message = format!(
+                            "`{described}::{}` is a kernel SIMD operation: only a #[kernel] calls it",
+                            sig.ident
+                        );
+                        *item = syn::parse_quote! {
+                            #(#attrs)*
+                            #[allow(unused_variables)]
+                            #vis #sig {
+                                ::core::unreachable!(#message)
+                            }
+                        };
+                    }
+                    ImplItem::Fn(method) => {
+                        return Err(Error::new_spanned(
+                            &method.block,
+                            "an intrinsic has no body: the backend implements it",
+                        ));
+                    }
+                    ImplItem::Type(_) => {}
+                    item => {
+                        return Err(Error::new_spanned(
+                            item,
+                            "a SIMD intrinsic implementation declares only methods",
+                        ));
+                    }
+                }
+            }
+            Ok(quote!(#implementation))
+        }
+        item => Err(Error::new_spanned(
+            item,
+            "#[intrinsic(simd)] declares a SIMD struct or its intrinsics",
+        )),
+    }
+}

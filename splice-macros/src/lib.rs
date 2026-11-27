@@ -99,25 +99,36 @@ pub fn kernel(options: TokenStream, item: TokenStream) -> TokenStream {
 /// `impl Trait for Type` of such a trait, the body-less methods are that
 /// type's intrinsics, which a kernel calls like any method. Outside a
 /// kernel they panic. `#[intrinsic(crate = path)]` names the Splice crate
-/// when it is not `::splice`.
+/// when it is not `::splice`. `#[intrinsic(simd)]` is the form of
+/// `splice::simd::Lane` and `Mask`, whose intrinsics Splice stages as its
+/// portable SIMD operations (see `intrinsic::simd`).
 #[proc_macro_attribute]
 pub fn intrinsic(options: TokenStream, item: TokenStream) -> TokenStream {
-    let root = syn::parse::Parser::parse(
+    let options = syn::parse::Parser::parse(
         |input: syn::parse::ParseStream| {
-            if input.is_empty() {
-                return Ok(parse_quote!(::splice));
+            let mut root = parse_quote!(::splice);
+            let mut simd = false;
+            while !input.is_empty() {
+                let key: syn::Ident = input.parse()?;
+                if key == "crate" {
+                    input.parse::<Token![=]>()?;
+                    root = input.parse::<Path>()?;
+                } else if key == "simd" {
+                    simd = true;
+                } else {
+                    return Err(Error::new_spanned(key, "expected `crate = path`"));
+                }
+                if !input.is_empty() {
+                    input.parse::<Token![,]>()?;
+                }
             }
-            let key: syn::Ident = input.parse()?;
-            if key != "crate" {
-                return Err(Error::new_spanned(key, "expected `crate = path`"));
-            }
-            input.parse::<Token![=]>()?;
-            input.parse::<Path>()
+            Ok((root, simd))
         },
         options,
     );
-    match root {
-        Ok(root) => intrinsic::expand(root, item.into()),
+    match options {
+        Ok((_, true)) => intrinsic::simd(item.into()),
+        Ok((root, false)) => intrinsic::expand(root, item.into()),
         Err(error) => Err(error),
     }
     .unwrap_or_else(Error::into_compile_error)
@@ -156,4 +167,17 @@ impl KernelOptions {
             print,
         })
     }
+}
+
+/// The items of `splice::simd::Lane` and `Mask` (`simd_api.rs`), for
+/// `splice_core::simd`, which expands this once.
+#[doc(hidden)]
+#[proc_macro]
+pub fn simd_api(input: TokenStream) -> TokenStream {
+    if !input.is_empty() {
+        return Error::new(proc_macro2::Span::call_site(), "simd_api takes no input")
+            .into_compile_error()
+            .into();
+    }
+    scalar::simd_api_tokens().into()
 }

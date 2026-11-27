@@ -44,7 +44,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use splice::{Codegen, KernelScalar, simd::Lane};
+    use splice::{Codegen, KernelScalar};
 
     fn kernels() -> Vec<(&'static str, Box<dyn Executable>)> {
         let ir = matmul::ir().unwrap();
@@ -94,7 +94,7 @@ mod tests {
     fn tiles_tails_and_invalid_shapes_match_scalar_dot_products() {
         const SENTINEL: i32 = 0x0bad_cafe;
         let kernels = kernels();
-        let width = Lane::<i32>::lanes();
+        let width = splice::simd::lanes::<i32>();
         let cases = [
             (2, 3, 4),
             (16, 32, 4 * width),
@@ -120,11 +120,6 @@ mod tests {
             expected.extend([SENTINEL; 3]);
             let dims = [rows as i32, inner as i32, cols as i32];
             let mut dst = vec![SENTINEL; count + 3];
-            assert_eq!(
-                matmul(dims[0], dims[1], dims[2], &a, &b, &mut dst),
-                count as i32
-            );
-            assert_eq!(dst, expected, "Rust {dims:?}");
             for (name, kernel) in &kernels {
                 dst.fill(SENTINEL);
                 let actual = kernel
@@ -150,7 +145,6 @@ mod tests {
         ] {
             // One input element and three output elements make these shapes invalid.
             let mut out = [SENTINEL; 3];
-            assert_eq!(matmul(dims[0], dims[1], dims[2], &[3], &[4], &mut out), -1);
             for (name, kernel) in &kernels {
                 let result = kernel
                     .call(

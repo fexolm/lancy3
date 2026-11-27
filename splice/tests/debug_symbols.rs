@@ -59,7 +59,7 @@ fn exercise<B: Codegen<Output: Executable>>() {
                 bias: 12,
                 dst: &mut buf
             }),
-            Ok(test_kernel(&mut [0, 0], 12))
+            Ok(12)
         );
         assert_eq!(buf, [13, 14]);
         let mut short = [0];

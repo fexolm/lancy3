@@ -41,10 +41,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use splice::Codegen;
     use splice::KernelScalar;
     use splice::hir::{Simd, SimdOp};
     use splice::simd::Element;
-    use splice::{Codegen, simd::Lane};
 
     fn check(
         kernels: &[Box<dyn Executable>],
@@ -57,12 +57,6 @@ mod tests {
         let count = if valid { queries.len() as i32 } else { -1 };
         let output_len = expected.len();
         let mut guarded = vec![GUARD; output_len + 2];
-        assert_eq!(
-            lookup(table, queries, &mut guarded[1..1 + output_len]),
-            count
-        );
-        assert_eq!(&guarded[1..1 + output_len], expected);
-        assert_eq!((guarded[0], guarded[output_len + 1]), (GUARD, GUARD));
         for kernel in kernels {
             guarded.fill(GUARD);
             let result = kernel
@@ -106,7 +100,7 @@ mod tests {
             #[cfg(feature = "llvm")]
             Box::new(Llvm::compile(&ir).unwrap().into_inner()),
         ];
-        let w = Lane::<i32>::lanes();
+        let w = splice::simd::lanes::<i32>();
         // The multiplier is 1 modulo 8. Keys 7, 15, -1 and 31 all start at 7.
         let cluster = [15, -1, 0, 0, 0, 0, 0, 7];
         let chunk = [7, -1, 15, 31, 7, 0];

@@ -70,16 +70,7 @@ impl Lower<'_> {
                 emit!(#root::frontend::scalar::column(#table, #slot, #element)?),
             ));
         }
-        let data_type = if matches!(
-            m.method.to_string().as_str(),
-            "store" | "store_select" | "scatter" | "scatter_select"
-        ) && let Some(dst) = m.args.first()
-            && let Stage::Buffer(buffer) = self.expr(dst)?.stage
-        {
-            Some(Scalar::Vector(buffer.elem))
-        } else {
-            None
-        };
+        let data_type = self.simd_store_receiver(m)?;
         let receiver = self.expr_with_hint(&m.receiver, data_type)?;
 
         if let Stage::Reg(t @ (Scalar::Vector(_) | Scalar::Mask(_))) = receiver.stage {

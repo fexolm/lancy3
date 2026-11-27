@@ -6,7 +6,6 @@ use splice::hir::{BufferKind, Function, Instr, SimdOp};
 use splice::lancy::Lancy;
 #[cfg(feature = "llvm")]
 use splice::llvm::Llvm;
-use splice::simd::Lane;
 
 type Row = (i32, i32);
 
@@ -108,18 +107,6 @@ fn compare(plan: &Plan, tables: &[&[Row]], kernels: &[&dyn Executable]) {
             &expected,
         );
     }
-    scratch.fill(-8);
-    assert_eq!(
-        query(
-            &plan.prepare(),
-            cat.offsets(),
-            cat.data(),
-            &mut scratch,
-            &mut state
-        ) as usize,
-        expected.len()
-    );
-    assert_rows(plan, &scratch[..2 * expected.len()], &expected);
 }
 
 fn check_workspace_boundary(plan: &Plan, tables: &[&[Row]], kernels: &[&dyn Executable]) {
@@ -129,20 +116,20 @@ fn check_workspace_boundary(plan: &Plan, tables: &[&[Row]], kernels: &[&dyn Exec
     let mut enough = 8 * (tables.iter().map(|t| t.len()).sum::<usize>() + 2 * want.len()) + 256;
     let mut storage = vec![sentinel; enough + 2];
     let mut state = vec![-1; plan.state_words()];
-    let mut run = |words: &mut [i32]| {
-        query(
-            &plan.prepare(),
-            catalog.offsets(),
-            catalog.data(),
-            words,
-            &mut state,
-        )
+    // The first kernel finds the boundary; every kernel must agree on it.
+    let mut fits = |words: &mut [i32]| match catalog.run(kernels[0], words, &mut state) {
+        Ok(rows) => {
+            assert_rows(plan, rows, &want);
+            true
+        }
+        Err(RunError::WorkspaceTooSmall) => false,
+        Err(error) => panic!("{error:?}"),
     };
-    assert_eq!(run(&mut storage[1..=enough]) as usize, want.len());
+    assert!(fits(&mut storage[1..=enough]));
     let mut short = 0;
     while enough - short > 1 {
         let middle = short + (enough - short) / 2;
-        if run(&mut storage[1..=middle]) < 0 {
+        if !fits(&mut storage[1..=middle]) {
             short = middle;
         } else {
             enough = middle;
@@ -150,7 +137,7 @@ fn check_workspace_boundary(plan: &Plan, tables: &[&[Row]], kernels: &[&dyn Exec
     }
     // Reuse the same address so partial writes have the same alignment.
     storage.fill(sentinel);
-    assert_eq!(run(&mut storage[1..=short]), -1);
+    assert!(!fits(&mut storage[1..=short]));
     let failed = storage.clone();
     assert_eq!(failed[0], sentinel);
     assert!(failed[short + 1..].iter().all(|&v| v == sentinel));
@@ -231,7 +218,7 @@ fn branching_join_tree_runs_against_changing_tables() {
 
 #[test]
 fn filter_compacts_batches_and_project_reads_both_original_columns() {
-    let width = Lane::<i32>::lanes();
+    let width = splice::simd::lanes::<i32>();
     let plan = Plan::Project(
         Box::new(Plan::Filter(
             Box::new(Plan::Scan(0)),
@@ -266,7 +253,7 @@ fn filter_compacts_batches_and_project_reads_both_original_columns() {
 
 #[test]
 fn short_scan_filter_project_batches_fit_shifted_workspaces() {
-    let width = Lane::<i32>::lanes();
+    let width = splice::simd::lanes::<i32>();
     let plan = Plan::Project(
         Box::new(Plan::Filter(
             Box::new(Plan::Scan(1)),
@@ -315,7 +302,7 @@ fn short_scan_filter_project_batches_fit_shifted_workspaces() {
 
 #[test]
 fn fused_scan_filter_project_needs_only_two_words_for_one_survivor() {
-    let width = Lane::<i32>::lanes();
+    let width = splice::simd::lanes::<i32>();
     let plan = Plan::Project(
         Box::new(Plan::Filter(
             Box::new(Plan::Scan(0)),
@@ -333,17 +320,6 @@ fn fused_scan_filter_project_needs_only_two_words_for_one_survivor() {
             let catalog = Catalog::new(&[&rows]).unwrap();
             let expected = [7, survivor as i32 + 7];
             let mut guarded = [-9; 4];
-            assert_eq!(
-                query(
-                    &plan.prepare(),
-                    catalog.offsets(),
-                    catalog.data(),
-                    &mut guarded[1..3],
-                    &mut state
-                ),
-                1
-            );
-            assert_eq!(guarded, [-9, expected[0], expected[1], -9]);
             for &kernel in kernels {
                 guarded.fill(-9);
                 assert_eq!(
@@ -395,13 +371,11 @@ fn fused_join_streams_all_hits_and_stays_successful_as_workspace_grows() {
         let mut state = vec![-1; plan.state_words()];
         for capacity in 0..=96 {
             storage.fill(-971);
-            let n = query(
-                &plan.prepare(),
-                catalog.offsets(),
-                catalog.data(),
-                &mut storage[1..1 + capacity],
-                &mut state,
-            );
+            let n = match catalog.run(kernels[0], &mut storage[1..1 + capacity], &mut state) {
+                Ok(rows) => (rows.len() / 2) as i32,
+                Err(RunError::WorkspaceTooSmall) => -1,
+                Err(error) => panic!("{error:?}"),
+            };
             if n < 0 {
                 assert_eq!(n, -1);
                 assert!(!fits, "adding workspace caused failure at {capacity} words");
@@ -427,7 +401,7 @@ fn fused_join_streams_all_hits_and_stays_successful_as_workspace_grows() {
 
 #[test]
 fn batched_probe_returns_every_build_side_match() {
-    let width = Lane::<i32>::lanes();
+    let width = splice::simd::lanes::<i32>();
     let plan = Plan::Join(
         Box::new(Plan::Scan(0)),
         Box::new(Plan::Scan(1)),
@@ -466,7 +440,7 @@ fn probe_verifies_keys_in_singleton_and_colliding_buckets() {
     let b = colliding_key(2);
     let c = colliding_key(3);
     let keys = [0, a, b, c, colliding_key(4), 65536, i32::MIN, 3, 7];
-    let left: Vec<_> = (0..2 * Lane::<i32>::lanes() + 3)
+    let left: Vec<_> = (0..2 * splice::simd::lanes::<i32>() + 3)
         .map(|i| (keys[i % keys.len()], 17 + i as i32))
         .collect();
     // 65536 hashes to slot one. The other salts start from occupied slot zero.
@@ -487,7 +461,7 @@ fn probe_verifies_keys_in_singleton_and_colliding_buckets() {
 
 #[test]
 fn colliding_keys_with_duplicate_values_and_a_late_neighbor_both_match() {
-    let width = Lane::<i32>::lanes();
+    let width = splice::simd::lanes::<i32>();
     let plan = Plan::Join(
         Box::new(Plan::Scan(0)),
         Box::new(Plan::Scan(1)),
@@ -515,7 +489,7 @@ fn colliding_keys_with_duplicate_values_and_a_late_neighbor_both_match() {
 
 #[test]
 fn refilled_probe_lanes_preserve_late_hits_and_drain_the_tail() {
-    let width = Lane::<i32>::lanes();
+    let width = splice::simd::lanes::<i32>();
     let chain = 4 * width + 5;
     let mut right: Vec<_> = (0..chain)
         .map(|i| (colliding_key(i as i32), 100 + i as i32))
@@ -565,7 +539,7 @@ fn refilled_probe_lanes_preserve_late_hits_and_drain_the_tail() {
 
 #[test]
 fn duplicate_values_span_several_batches_of_many_to_many_matches() {
-    let width = Lane::<i32>::lanes();
+    let width = splice::simd::lanes::<i32>();
     let count = 6 * width + 3;
     let other = colliding_key(1);
     // Interleave two colliding keys with unrelated rows and give each

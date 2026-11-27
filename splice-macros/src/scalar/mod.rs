@@ -4,7 +4,7 @@
 pub(crate) mod abi;
 pub(crate) mod lower;
 pub(crate) mod methods;
-pub(crate) use lower::simd::constructor_arity;
+pub(crate) use lower::simd::{constructor_arity, simd_api_tokens};
 use lower::{Binding, BufferType, Lower, Scalar};
 pub(crate) use lower::{Elem, uses_stage_requirements};
 use proc_macro2::{Ident, TokenStream};

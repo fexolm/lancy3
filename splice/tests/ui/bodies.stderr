@@ -16,7 +16,7 @@ error: specify Lane::<T> or annotate the vector binding
 19 |     let v = Lane::splat(1.5);
    |             ^^^^^^^^^^^^^^^^
 
-error: a kernel supports +, -, *, /, &, | and ^ on SIMD vectors
+error: a kernel supports +, -, *, /, &, |, ^ and >> on SIMD vectors
   --> tests/ui/bodies.rs:28:8
    |
 28 |     (v % v).store(out, 0);

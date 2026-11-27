@@ -64,7 +64,7 @@ impl<'a> Program<'a> {
         let mut program = Self {
             tasks: Vec::new(),
             indices: 0,
-            lanes: splice::simd::Lane::<i32>::lanes(),
+            lanes: splice::simd::lanes::<i32>(),
             state_words: 0,
         };
         program.pipe(plan, None, false);
