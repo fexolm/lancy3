@@ -411,8 +411,9 @@ impl Lower<'_> {
             }
             DeclaredType::Element => {
                 let v = self.expr(arg)?;
-                if own == Elem::I32 && matches!(v.stage, Stage::Reg(_)) {
-                    let reg = self.reg(v, Scalar::I32, arg)?;
+                if matches!(v.stage, Stage::Reg(_)) {
+                    let lane = own.scalar().unwrap_or(Scalar::Inferred);
+                    let reg = self.reg(v, lane, arg)?;
                     emit!(#operand::Reg(#reg))
                 } else {
                     // A known element is staged as its bit pattern.
@@ -445,7 +446,7 @@ impl Lower<'_> {
         if !matches!(lane.arguments, PathArguments::None) && explicit.is_none() {
             return err(
                 lane,
-                "expected Lane<T> with one of u16, u32, i32, i64, f32, f64",
+                "expected Lane<T> with one of i8, u8, i16, u16, i32, u32, i64, f32, f64",
             );
         }
         let name = p.path.segments.last().unwrap().ident.to_string();
@@ -466,11 +467,12 @@ impl Lower<'_> {
                 }
                 DeclaredType::Element => {
                     let v = self.expr(arg)?;
-                    splat = splat_element(arg).or(matches!(
-                        v.stage,
-                        Stage::Reg(Scalar::I32 | Scalar::Inferred)
-                    )
-                    .then_some(Elem::I32));
+                    // A runtime scalar splats to lanes of its type.
+                    splat = splat_element(arg).or(match v.stage {
+                        Stage::Reg(Scalar::Inferred) => Some(Elem::I32),
+                        Stage::Reg(Scalar::Number(p)) => Elem::of(p),
+                        _ => None,
+                    });
                 }
                 _ => {}
             }

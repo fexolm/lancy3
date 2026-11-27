@@ -28,7 +28,8 @@ impl Lowering {
     }
 }
 
-/// A core method of the integer types and its lowering.
+/// A core method of the scalar types and its lowering. A method applies to
+/// the types its operation does: `min` and `max` also to `char`.
 const INTEGER_METHODS: [(&str, Lowering); 9] = [
     ("wrapping_add", Lowering::Binary(Binary::Add)),
     ("wrapping_sub", Lowering::Binary(Binary::Sub)),
@@ -43,13 +44,12 @@ const INTEGER_METHODS: [(&str, Lowering); 9] = [
 
 /// The lowering of `method` on a receiver of type `ty`, if it is a core method.
 fn lookup(ty: ScalarType, method: &str) -> Option<Lowering> {
-    if !ty.is_integer() {
-        return None;
-    }
-    INTEGER_METHODS
-        .iter()
-        .find(|(name, _)| *name == method)
-        .map(|&(_, lowering)| lowering)
+    let (_, lowering) = INTEGER_METHODS.iter().find(|(name, _)| *name == method)?;
+    let applies = match *lowering {
+        Lowering::Binary(op) => op.output(ty) == Some(ty),
+        Lowering::WrappingNeg => ty.is_integer(),
+    };
+    applies.then_some(*lowering)
 }
 
 /// Whether some scalar type has the core method `method`.
@@ -238,7 +238,7 @@ const LANE: [(&str, SimdLowering); 53] = [
     ("reduce_sum", |c| c.with_args(SimdOp::ReduceSum, 0)),
     ("replace_wrapping", |c| {
         let index = c.scalar(0, ScalarType::I32)?;
-        let value = c.scalar(1, c.element)?;
+        let value = c.element_operand(1)?;
         c.op(SimdOp::ReplaceWrapping, &[c.this()?, index, value])
     }),
     ("rotate_left", |c| {
@@ -264,8 +264,8 @@ const LANE: [(&str, SimdLowering); 53] = [
     ("splat", |c| match c.arg(0)? {
         // `Lane::splat` of a known value carries its bit pattern.
         Operand::Known(value) => c.op(SimdOp::Splat(value.bits()), &[]),
-        Operand::Reg(value) if c.element == ScalarType::I32 => c.op(SimdOp::SplatScalar, &[value]),
-        _ => Err(c.error("splats a known value or a runtime i32")),
+        Operand::Reg(value) => c.op(SimdOp::SplatScalar, &[value]),
+        Operand::Buffer(_) => Err(c.error("splats a scalar of the lane type")),
     }),
     ("sqrt", |c| c.with_args(SimdOp::Sqrt, 0)),
     ("store", |c| c.store(SimdOp::Store, false)),
@@ -396,6 +396,17 @@ impl SimdCall<'_> {
                 self.builder.constant(value)
             }
             Operand::Buffer(_) => Err(self.error("expected a scalar operand")),
+        }
+    }
+
+    /// Argument `index`, a value of the element: a register, or a known
+    /// value as the bit pattern `LaneElement::bits` gives.
+    fn element_operand(&mut self, index: usize) -> crate::Result<Reg> {
+        match self.arg(index)? {
+            Operand::Known(value) => self
+                .builder
+                .constant(Constant::new(self.element, value.bits())),
+            _ => self.scalar(index, self.element),
         }
     }
 

@@ -65,10 +65,10 @@ error: expected one #[comptime] marker without arguments
    |                      ^^^^^^^^^^^^^^
 
 error: runtime parameters must be a kernel scalar (bool, char, i8, i16, i32, i64, u8, u16, u32, u64, usize, f32, f64) or a slice of one other than bool
-   --> tests/ui/declarations.rs:90:16
-    |
+  --> tests/ui/declarations.rs:90:16
+   |
 90 |     fn area(x: u128) -> i32;
-    |                ^^^^
+   |                ^^^^
 
 error: expected a free function, impl or trait
   --> tests/ui/declarations.rs:94:1

@@ -15,3 +15,9 @@ error: `print` cannot show a labeled break or continue across an unrolled loop
    |
 23 |                 continue 'steps;
    |                 ^^^^^^^^^^^^^^^
+
+error: `char::from_u32` is not supported in a kernel: an associated function of a primitive type is not a kernel operation
+  --> tests/ui/unsupported_kernels.rs:33:5
+   |
+33 |     char::from_u32(code).unwrap_or('?')
+   |     ^^^^^^^^^^^^^^

@@ -57,7 +57,7 @@ impl<T: LaneElement> Lane<T> {
     pub fn lanes() -> usize;
     /// Activate the first min(count, lanes()) lanes. Useful for the last partial block.
     pub fn first_n(count: usize) -> Mask<T>;
-    /// `v` in every lane: a known value, or a runtime `i32`.
+    /// `v` in every lane: a known value or a runtime scalar of the lane type.
     pub fn splat(v: T) -> Self;
     /// Lane `i` holds `i`.
     pub fn iota() -> Self;

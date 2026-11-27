@@ -1,0 +1,8 @@
+error[E0599]: no method named `__splice_stage_to_ascii_uppercase` found for type `char` in the current scope
+ --> tests/ui/unsupported_char_methods.rs:6:7
+  |
+6 |     c.to_ascii_uppercase()
+  |       ^^^^^^^^^^^^^^^^^^
+  |
+help: there is a method `is_ascii_uppercase` with a similar name, but with different arguments
+ --> $RUST/core/src/char/methods.rs
