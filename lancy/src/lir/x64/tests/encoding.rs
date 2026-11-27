@@ -185,3 +185,38 @@ fn the_constant_pool_shares_equal_entries_widest_first() {
     assert_eq!(bytes[1..65], [2; 64]);
     assert_eq!(bytes[65..113], [1; 48]);
 }
+
+/// A 64-byte paired shuffle loads its index table into a destination apart
+/// from both inputs and permutes there with `vpermi2d`: no copy. A
+/// destination that is an input keeps the table in the scratch register.
+#[test]
+fn wide_paired_shuffles_permute_in_the_destination_without_a_copy() {
+    use crate::lir::x64::inst::simd::packed::rearrange::PairedShuffle;
+    use iced_x86::code_asm::CodeAssembler;
+    let listing = |regs: [usize; 3]| {
+        let mut a = CodeAssembler::new(64).unwrap();
+        let mut pool = crate::lir::x64::emit::Constants::default();
+        PairedShuffle::Interleave(false)
+            .emit(&mut a, &mut pool, 64, regs)
+            .unwrap();
+        let data = pool.emit(&mut a).unwrap();
+        let bytes = a.assemble(0).unwrap();
+        let text = &bytes[..bytes.len() - data];
+        Decoder::new(64, text, DecoderOptions::NONE)
+            .into_iter()
+            .map(|i| format!("{i}"))
+            .collect::<Vec<_>>()
+    };
+    let apart = listing([1, 2, 3]);
+    assert_eq!(apart.len(), 2, "{apart:?}");
+    assert!(apart[0].starts_with("vmovdqu64 zmm1,"), "{apart:?}");
+    assert_eq!(apart[1], "vpermi2d zmm1,zmm2,zmm3");
+    let first = listing([2, 2, 3]);
+    assert_eq!(first.len(), 2, "{first:?}");
+    assert_eq!(first[1], "vpermt2d zmm2,zmm5,zmm3");
+    let second = listing([3, 2, 3]);
+    assert_eq!(
+        second[1..],
+        ["vpermi2d zmm5,zmm2,zmm3", "vmovaps zmm3,zmm5"]
+    );
+}
