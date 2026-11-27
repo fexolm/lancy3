@@ -71,6 +71,9 @@ impl Registers {
                 ValueType::Scalar(ty) => (super::scalar_type(ty), 1),
                 ValueType::Vector(e) => (chunk_type(e), m.chunks()),
                 ValueType::Mask(e) => (chunk_type(e.index()), m.chunks()),
+                ValueType::Opaque(_) => {
+                    unreachable!("intrinsic::check rejects opaque values before lowering")
+                }
             };
             vars.extend((0..count).map(|_| b.declare_var(ty)));
         }

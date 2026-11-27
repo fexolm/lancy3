@@ -54,6 +54,9 @@ pub(super) fn llvm_type(ctx: &Context, bytes: usize, ty: ValueType) -> BasicType
         ValueType::Scalar(ty) => scalar_type(ctx, ty),
         ValueType::Vector(e) => vector_type(ctx, bytes, e).into(),
         ValueType::Mask(e) => ctx.bool_type().vec_type(e.lanes(bytes) as u32).into(),
+        // `intrinsic::check` rejects a portable function with an opaque
+        // value, and direct staging rejects the intrinsic that would make one.
+        ValueType::Opaque(_) => unreachable!("no backend represents an opaque value"),
     }
 }
 

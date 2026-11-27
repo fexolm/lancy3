@@ -6,6 +6,9 @@ pub enum ValueType {
     Scalar(ScalarType),
     Vector(Element),
     Mask(Element),
+    /// A value of an `#[intrinsic] struct`: an opaque type that only the
+    /// backends that implement its intrinsics represent.
+    Opaque(crate::intrinsic::OpaqueType),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

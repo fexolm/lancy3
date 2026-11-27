@@ -23,6 +23,7 @@ impl PublicApi {
     /// a named lifetime for each elided one (`abi::Elision`); the types of
     /// `host` and `call` use the elided generics.
     pub(crate) fn new(
+        root: &syn::Path,
         vis: &Visibility,
         declared: &Generics,
         elided: &Generics,
@@ -35,9 +36,13 @@ impl PublicApi {
         let (_, _, call_where) = call_generics.split_for_impl();
         let host_fields = host.iter().map(|(name, ty)| emit!(#vis #name: #ty));
         let call_fields = call.iter().map(|(name, ty)| emit!(#vis #name: #ty));
+        // A runtime parameter is a kernel scalar or slice (checked where it is
+        // bound), so only the `#[comptime]` ones can be intrinsic structs.
+        let boundary = boundary(root, elided, host.iter().map(|(_, ty)| ty));
         let items = emit! {
             #vis struct BuildArgs #host_generics #host_where { #(#host_fields,)* }
             #vis struct CallArgs #call_generics #call_where { #(#call_fields,)* }
+            #boundary
         };
         let mut entry = declared.clone();
         entry.params = elided
@@ -57,6 +62,41 @@ impl PublicApi {
             call: call_generics,
             entry,
             items,
+        }
+    }
+}
+
+/// A function that rustc type-checks and that fails when a field type,
+/// references peeled, is an `#[intrinsic] struct`
+/// (`splice::intrinsic::boundary`).
+fn boundary<'a>(
+    root: &syn::Path,
+    generics: &Generics,
+    types: impl Iterator<Item = &'a Type>,
+) -> TokenStream {
+    let checks: Vec<_> = types
+        .map(|ty| {
+            let mut ty = ty;
+            while let Type::Reference(reference) = ty {
+                ty = &reference.elem;
+            }
+            let boundary = emit!(#root::intrinsic::boundary);
+            quote::quote_spanned! {syn::spanned::Spanned::span(ty)=>
+                #boundary::crossing((&#boundary::Probe::<#ty>::new()).__splice_boundary());
+            }
+        })
+        .collect();
+    if checks.is_empty() {
+        return TokenStream::new();
+    }
+    let (declarations, _, where_clause) = generics.split_for_impl();
+    emit! {
+        #[doc(hidden)]
+        #[allow(dead_code, non_snake_case)]
+        fn __splice_boundary #declarations () #where_clause {
+            #[allow(unused_imports)]
+            use #root::intrinsic::boundary::{Opaque as _, Plain as _};
+            #(#checks)*
         }
     }
 }

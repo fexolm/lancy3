@@ -134,7 +134,9 @@ pub trait Backend: Sized {
     /// both build paths. A build that calls an intrinsic its backend does
     /// not implement fails with [`intrinsic::unsupported`].
     fn supports_intrinsic(id: &intrinsic::IntrinsicId, target: &Target) -> bool;
-    /// Compile a verified portable function. Source points are available
+    /// Compile a verified portable function that passed the intrinsic
+    /// check: the backend implements its intrinsics, and it holds no
+    /// opaque value ([`hir::ValueType::Opaque`]). Source points are available
     /// when the function was staged in debug mode.
     fn compile_function(function: &Function, options: BuildOptions) -> Result<Self::Output>;
     /// Stage `body` with `options`. The body checks its own operations
@@ -146,7 +148,9 @@ pub trait Backend: Sized {
         body: frontend::Body<'_>,
         options: BuildOptions,
     ) -> Result<Self::Output> {
-        Self::compile_function(&frontend::record(signature, body, options)?, options)
+        let function = frontend::record(signature, body, options)?;
+        intrinsic::check::<Self>(&function, &options.target)?;
+        Self::compile_function(&function, options)
     }
 }
 

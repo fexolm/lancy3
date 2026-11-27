@@ -126,6 +126,39 @@ mod acme {
     impl LowBit for u32 {
         fn low_bit(self) -> u32;
     }
+
+    /// An opaque type only backends could represent, and its intrinsics.
+    #[splice::intrinsic]
+    pub struct Atomic<T>;
+
+    #[splice::intrinsic]
+    impl<T> Atomic<T> {
+        pub fn compare_and_swap(&self, val: T, val2: T) -> bool;
+    }
+}
+
+/// An intrinsic struct's methods are intrinsics named by the struct, its
+/// generic arguments and the signature; no backend implements them.
+#[test]
+fn intrinsic_struct_methods_have_structural_ids() {
+    let [id] = acme::Atomic::<i64>::__SPLICE_INTRINSICS else {
+        panic!("one intrinsic")
+    };
+    let atomic = format!("{}::acme::Atomic<i64>", module_path!());
+    assert_eq!(
+        id.to_string(),
+        format!("`{atomic}::compare_and_swap({atomic}, i64, i64) -> bool`")
+    );
+    assert_ne!(*id, acme::Atomic::<i32>::__SPLICE_INTRINSICS[0]);
+    let target = splice::Target::host().unwrap();
+    fn check<B: Codegen>(id: &IntrinsicId, target: &splice::Target) {
+        assert!(
+            !B::supports_intrinsic(id, target),
+            "{}",
+            backend_name::<B>()
+        );
+    }
+    splice_testkit::each_backend!(B => check::<B>(id, &target));
 }
 
 #[kernel]
