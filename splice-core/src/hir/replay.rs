@@ -2,6 +2,7 @@
 //! path is this replay over the builder that stages kernels directly.
 use super::{Function, Instr, Label, Reg};
 use crate::frontend::KernelBuilder;
+use crate::intrinsic::{Fallback, Intrinsic};
 
 /// Issue the operations of `function` to `builder`, in order.
 ///
@@ -238,6 +239,18 @@ impl<'f, 'b> Replay<'f, 'b> {
                 } => {
                     let args = self.regs(args)?;
                     self.define(*dst, |b| b.call_function(function, &args, buffers))?;
+                }
+                Instr::Intrinsic {
+                    dst,
+                    name,
+                    args,
+                    fallback,
+                } => {
+                    let args = self.regs(args)?;
+                    let intrinsic = Intrinsic::new(name, fallback.signature());
+                    self.define(*dst, |b| {
+                        b.intrinsic(&intrinsic, &args, Fallback::Function(fallback))
+                    })?;
                 }
             }
         }

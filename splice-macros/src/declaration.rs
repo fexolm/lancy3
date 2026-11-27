@@ -28,13 +28,14 @@ pub(crate) fn expand(root: Path, print: bool, tokens: TokenStream) -> Result<Tok
     }
     match item {
         Item::Fn(mut function) => {
-            if method_context(&function.attrs, &function.sig) {
+            if method_context(&function.sig) {
                 return Err(Error::new_spanned(&function.sig, method_error));
             }
             hoist_lint_attributes(&mut function.attrs, &mut function.sig);
             signature(&function.sig)?;
-            item_markers(&mut function.attrs, false)?;
-            crate::scalar::expand(root, &mut function, print)
+            let intrinsic = intrinsic_name(&function.attrs)?;
+            item_markers(&mut function.attrs, true)?;
+            crate::scalar::expand(root, &mut function, print, intrinsic.as_ref())
         }
         Item::Impl(_) | Item::Trait(_) if print => Err(Error::new_spanned(
             tokens,
@@ -48,6 +49,9 @@ pub(crate) fn expand(root: Path, print: bool, tokens: TokenStream) -> Result<Tok
             for member in &mut implementation.items {
                 if let syn::ImplItem::Fn(method) = member {
                     method_markers(&method.attrs)?;
+                    if trait_path.is_some() {
+                        no_trait_intrinsic(&method.attrs)?;
+                    }
                     let gates = configuration(&method.attrs)?;
                     let intrinsic = intrinsic_name(&method.attrs)?;
                     let generated = crate::scalar::methods::publish(
@@ -57,6 +61,7 @@ pub(crate) fn expand(root: Path, print: bool, tokens: TokenStream) -> Result<Tok
                         &method.vis,
                         trait_path.is_some(),
                         intrinsic.as_ref(),
+                        implementation.generics.params.is_empty(),
                     )
                     .unwrap_or_else(|error| {
                         errors.push(error);
@@ -116,6 +121,7 @@ pub(crate) fn expand(root: Path, print: bool, tokens: TokenStream) -> Result<Tok
             for member in &mut declaration.items {
                 if let syn::TraitItem::Fn(method) = member {
                     method_markers(&method.attrs)?;
+                    no_trait_intrinsic(&method.attrs)?;
                     let gates = configuration(&method.attrs)?;
                     let (kind, defaults) =
                         crate::scalar::methods::trait_defaults(&root, &method.sig, &trait_owner)
@@ -331,10 +337,10 @@ impl<'ast> Visit<'ast> for UsesSelf {
     }
 }
 
-fn method_context(attrs: &[Attribute], sig: &Signature) -> bool {
+fn method_context(sig: &Signature) -> bool {
     let mut uses = UsesSelf(false);
     uses.visit_signature(sig);
-    sig.receiver().is_some() || uses.0 || attrs.iter().any(|attr| marker(attr, "intrinsic"))
+    sig.receiver().is_some() || uses.0
 }
 
 /// Report every unpublishable method of a block, not only the first.
@@ -356,6 +362,18 @@ impl Errors {
 
 /// Every method of a `#[kernel]` block is lowered with the block. A plain
 /// Rust method that kernels call belongs in an ordinary `impl`.
+/// Trait methods dispatch by `Self`; an intrinsic is a free function or a
+/// method of an inherent `#[kernel] impl`.
+fn no_trait_intrinsic(attrs: &[Attribute]) -> Result<()> {
+    match attrs.iter().find(|attr| marker(attr, "intrinsic")) {
+        Some(attr) => Err(Error::new_spanned(
+            attr,
+            "#[intrinsic] is not supported on a trait method; put it on a free #[kernel] function or a method of an inherent #[kernel] impl",
+        )),
+        None => Ok(()),
+    }
+}
+
 fn method_markers(attrs: &[Attribute]) -> Result<()> {
     match attrs.iter().find(|attr| marker(attr, "kernel")) {
         Some(attr) => Err(Error::new_spanned(
@@ -604,7 +622,7 @@ fn marker(attr: &Attribute, name: &str) -> bool {
             && path.segments[1].ident == name)
 }
 
-/// The name of the method's `#[intrinsic("name")]`, validated by
+/// The name of the function's or method's `#[intrinsic("name")]`, validated by
 /// [`item_markers`].
 fn intrinsic_name(attrs: &[Attribute]) -> Result<Option<syn::LitStr>> {
     attrs
@@ -628,7 +646,7 @@ fn item_markers(attrs: &mut Vec<Attribute>, intrinsic_body: bool) -> Result<()> 
             if !intrinsic_body || intrinsic {
                 return Err(Error::new_spanned(
                     attr,
-                    "one #[intrinsic(\"name\")] is allowed on a kernel method with a body",
+                    "one #[intrinsic(\"name\")] is allowed on a kernel function or method with a body",
                 ));
             }
             let name: syn::LitStr = attr.parse_args()?;

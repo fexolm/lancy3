@@ -115,9 +115,9 @@ impl Lower<'_> {
         Ok(Value::new(
             Stage::Reg(kind),
             emit!({
-                const { ::core::assert!(#root::frontend::intrinsics::is_method(#name), #message) };
+                const { ::core::assert!(#root::frontend::methods::is_method(#name), #message) };
                 let operands = [#receiver, #(#args),*];
-                #root::frontend::intrinsics::method(__splice_builder, #name, &operands)?
+                #root::frontend::methods::method(__splice_builder, #name, &operands)?
             }),
         ))
     }

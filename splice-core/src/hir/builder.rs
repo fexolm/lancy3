@@ -3,6 +3,7 @@ use super::{
     ValueType,
 };
 use crate::frontend::{Body, KernelBuilder, KernelSource, Signature, Specialization};
+use crate::intrinsic::{Fallback, Intrinsic};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -73,8 +74,19 @@ impl FunctionBuilder {
         key: Option<Specialization>,
         body: Body<'_>,
     ) -> crate::Result<Reg> {
+        let callee = self.callee(signature, key, body)?;
+        self.call_function(&callee, args, buffers)
+    }
+
+    /// The function `body` stages, shared by the calls with the same `key`.
+    fn callee(
+        &mut self,
+        signature: Signature<'_>,
+        key: Option<Specialization>,
+        body: Body<'_>,
+    ) -> crate::Result<Arc<Function>> {
         if let Some(callee) = key.as_ref().and_then(|k| self.callees.get(k)).cloned() {
-            return self.call_function(&callee, args, buffers);
+            return Ok(callee);
         }
         let mut child = Self::new(self.function.options, signature);
         std::mem::swap(&mut self.callees, &mut child.callees);
@@ -86,7 +98,7 @@ impl FunctionBuilder {
         if let Some(key) = key {
             self.callees.insert(key, callee.clone());
         }
-        self.call_function(&callee, args, buffers)
+        Ok(callee)
     }
 
     /// Verify the recorded function.
@@ -237,6 +249,28 @@ impl KernelBuilder for FunctionBuilder {
             function: Arc::clone(function),
             args: args.to_vec(),
             buffers: buffers.to_vec(),
+        })
+    }
+    /// The backend is chosen when the function is compiled: record the
+    /// intrinsic with its body.
+    fn supports_intrinsic(&self, _: &Intrinsic<'_>) -> bool {
+        true
+    }
+    fn intrinsic(
+        &mut self,
+        intrinsic: &Intrinsic<'_>,
+        args: &[Reg],
+        fallback: Fallback<'_>,
+    ) -> crate::Result<Reg> {
+        let fallback = match fallback {
+            Fallback::Staged { key, body } => self.callee(intrinsic.signature, key, body)?,
+            Fallback::Function(function) => Arc::clone(function),
+        };
+        self.scalar(intrinsic.signature.result, |dst| Instr::Intrinsic {
+            dst,
+            name: intrinsic.name.into(),
+            args: args.to_vec(),
+            fallback,
         })
     }
 }

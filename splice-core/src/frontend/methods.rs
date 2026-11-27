@@ -1,19 +1,16 @@
-//! The registry of kernel intrinsics: named operations with the behavior of a
-//! Rust method, staged as portable IR. `x.saturating_add(y)` on a runtime
-//! integer and a `#[intrinsic("splice.i32.saturating_add")]` method both
-//! resolve here, so every backend receives the same operation.
-//!
-//! An intrinsic is named `splice.<type>.<method>`, where `<type>` is the
-//! Rust name of the receiver's scalar type. Every operand has that type.
+//! The Rust methods of runtime kernel values that are core operations:
+//! `x.saturating_add(y)` on a runtime integer stages one portable
+//! [`Binary`] operation, which every backend implements. These are not
+//! intrinsics (see [`crate::intrinsic`]): no backend chooses them.
 //!
 //! The methods of [`Lane`](crate::simd::Lane) and [`Mask`](crate::simd::Mask)
-//! are the SIMD part of the registry ([`simd_method`]): each one stages
-//! [`SimdOp`]s on the operands the kernel passes, typed by the builder.
+//! are the SIMD part ([`simd_method`]): each one stages [`SimdOp`]s on the
+//! operands the kernel passes, typed by the builder.
 use super::KernelBuilder;
 use crate::hir::{Binary, Buffer, Constant, Reg, ScalarType, Simd, SimdOp, ValueType};
 use crate::simd::{Element, Shuffle};
 
-/// How an intrinsic stages its operands.
+/// How a core method stages its operands.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Lowering {
     /// One binary operation of the receiver and the argument.
@@ -31,7 +28,7 @@ impl Lowering {
     }
 }
 
-/// The method of an intrinsic and its lowering for the integer types.
+/// A core method of the integer types and its lowering.
 const INTEGER_METHODS: [(&str, Lowering); 9] = [
     ("wrapping_add", Lowering::Binary(Binary::Add)),
     ("wrapping_sub", Lowering::Binary(Binary::Sub)),
@@ -44,7 +41,7 @@ const INTEGER_METHODS: [(&str, Lowering); 9] = [
     ("max", Lowering::Binary(Binary::Max)),
 ];
 
-/// The lowering of `method` on a receiver of type `ty`, if registered.
+/// The lowering of `method` on a receiver of type `ty`, if it is a core method.
 fn lookup(ty: ScalarType, method: &str) -> Option<Lowering> {
     if !ty.is_integer() {
         return None;
@@ -55,7 +52,7 @@ fn lookup(ty: ScalarType, method: &str) -> Option<Lowering> {
         .map(|&(_, lowering)| lowering)
 }
 
-/// Whether some scalar type has the intrinsic method `method`.
+/// Whether some scalar type has the core method `method`.
 #[doc(hidden)]
 pub const fn is_method(method: &str) -> bool {
     let mut i = 0;
@@ -83,33 +80,8 @@ const fn same(a: &str, b: &str) -> bool {
     true
 }
 
-/// Stage the intrinsic `name` on `args` if it is registered and the
-/// operands have its types; `Ok(None)` otherwise, and the caller stages
-/// the method's own body.
-pub fn call(
-    builder: &mut dyn KernelBuilder,
-    name: &str,
-    args: &[Reg],
-) -> crate::Result<Option<Reg>> {
-    let Some((ty, method)) = name
-        .strip_prefix("splice.")
-        .and_then(|rest| rest.split_once('.'))
-    else {
-        return Ok(None);
-    };
-    let Some(ty) = ScalarType::ALL.into_iter().find(|t| t.name() == ty) else {
-        return Ok(None);
-    };
-    match lookup(ty, method) {
-        Some(lowering) if operands_have_type(builder, args, ty, lowering) => {
-            stage(builder, lowering, ty, args).map(Some)
-        }
-        _ => Ok(None),
-    }
-}
-
 /// Stage the Rust method `method` on runtime scalars: `args[0]` is the
-/// receiver. A method without an intrinsic for the receiver's type, or
+/// receiver. A method that is not a core operation of the receiver's type, or
 /// with operands of other types, is a staging error.
 #[doc(hidden)]
 pub fn method(builder: &mut dyn KernelBuilder, method: &str, args: &[Reg]) -> crate::Result<Reg> {

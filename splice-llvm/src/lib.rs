@@ -99,7 +99,20 @@ pub fn to_llvm_ir(
         &context,
         &target::machine(target, false)?,
         machine,
-        |ctx, m| lower::populate_function(ctx, m, machine, function, false).map(drop),
+        |ctx, m| {
+            let options = function
+                .options()
+                .with_mode(splice_core::Mode::Release)
+                .with_target(*target);
+            lower::populate_function(
+                ctx,
+                m,
+                machine,
+                function,
+                lower::Lowering::new(&options, true),
+            )
+            .map(drop)
+        },
     )?
     .print_to_string()
     .to_string())
@@ -114,6 +127,13 @@ pub struct LlvmKernel {
 
 impl Backend for Llvm {
     type Output = LlvmKernel;
+
+    fn supports_intrinsic(
+        intrinsic: &splice_core::intrinsic::Intrinsic<'_>,
+        target: &splice_core::Target,
+    ) -> bool {
+        lower::native_intrinsic(intrinsic, &target::Machine::new(target))
+    }
 
     fn compile_function(
         function: &Function,
@@ -133,6 +153,13 @@ impl Backend for Llvm {
 
 impl Backend for LlvmManualSimd {
     type Output = LlvmKernel;
+
+    fn supports_intrinsic(
+        intrinsic: &splice_core::intrinsic::Intrinsic<'_>,
+        target: &splice_core::Target,
+    ) -> bool {
+        lower::native_intrinsic(intrinsic, &target::Machine::new(target))
+    }
 
     fn compile_function(
         function: &Function,
@@ -161,7 +188,15 @@ impl LlvmKernel {
             function.signature(),
             auto_vectorize,
             options,
-            |ctx, m, machine| lower::populate_function(ctx, m, machine, function, options.debug()),
+            |ctx, m, machine| {
+                lower::populate_function(
+                    ctx,
+                    m,
+                    machine,
+                    function,
+                    lower::Lowering::new(&options, auto_vectorize),
+                )
+            },
         )
     }
 
@@ -173,7 +208,14 @@ impl LlvmKernel {
     ) -> splice_core::Result<Self> {
         let _span = tracing::debug_span!(target: "splice_core::compile", "compile", backend = "llvm", input = "staged").entered();
         Self::compile(signature, auto_vectorize, options, |ctx, m, machine| {
-            lower::populate(ctx, m, machine, signature, body, options.debug())
+            lower::populate(
+                ctx,
+                m,
+                machine,
+                signature,
+                body,
+                lower::Lowering::new(&options, auto_vectorize),
+            )
         })
     }
 
@@ -272,11 +314,18 @@ mod tests {
                         machine,
                         Signature::new(&[ScalarType::I32; 1], ScalarType::I32, &[]),
                         staged,
-                        false,
+                        lower::Lowering::new(&options(), true),
                     )
                     .map(drop)
                 } else {
-                    lower::populate_function(ctx, m, machine, &ir, false).map(drop)
+                    lower::populate_function(
+                        ctx,
+                        m,
+                        machine,
+                        &ir,
+                        lower::Lowering::new(&options(), true),
+                    )
+                    .map(drop)
                 }
             })
             .unwrap();
@@ -467,11 +516,18 @@ mod tests {
                         machine,
                         Signature::new(&[ScalarType::I32; 1], ScalarType::I32, &kinds),
                         stage,
-                        false,
+                        lower::Lowering::new(&options(), true),
                     )
                     .map(drop)
                 } else {
-                    lower::populate_function(ctx, m, machine, &ir, false).map(drop)
+                    lower::populate_function(
+                        ctx,
+                        m,
+                        machine,
+                        &ir,
+                        lower::Lowering::new(&options(), true),
+                    )
+                    .map(drop)
                 }
             })
             .unwrap();
@@ -611,11 +667,18 @@ mod tests {
                         machine,
                         Signature::new(&[ScalarType::I32; 1], ScalarType::I32, &kinds),
                         stage,
-                        false,
+                        lower::Lowering::new(&options(), true),
                     )
                     .map(drop)
                 } else {
-                    lower::populate_function(ctx, m, machine, &ir, false).map(drop)
+                    lower::populate_function(
+                        ctx,
+                        m,
+                        machine,
+                        &ir,
+                        lower::Lowering::new(&options(), true),
+                    )
+                    .map(drop)
                 }
             })
             .unwrap();

@@ -8,6 +8,7 @@
 compile_error!("splice-cranelift supports x86-64 Windows and Linux, and AArch64 Linux");
 
 mod debug_info;
+mod intrinsic;
 mod lower;
 mod module;
 
@@ -149,6 +150,13 @@ pub struct CraneliftKernel {
 impl Backend for Cranelift {
     type Output = CraneliftKernel;
 
+    fn supports_intrinsic(
+        intrinsic: &splice_core::intrinsic::Intrinsic<'_>,
+        _target: &splice_core::Target,
+    ) -> bool {
+        intrinsic::native(intrinsic).is_some()
+    }
+
     fn compile_function(function: &Function, options: BuildOptions) -> Result<CraneliftKernel> {
         let _span = tracing::debug_span!(target: "splice_core::compile", "compile", backend = "cranelift", input = "portable").entered();
         let debug = options.debug();
@@ -156,7 +164,13 @@ impl Backend for Cranelift {
         splice_jit::prepare_perf_map();
         let mut memory = CodeMemory(Some(JITModule::new(builder(&target, debug)?)));
         let module = memory.0.as_mut().unwrap();
-        let mut kernel = module::KernelModule::lower(module, function, &target, debug)?;
+        let mut kernel = module::KernelModule::lower(
+            module,
+            function,
+            &target,
+            debug,
+            options.unsupported_intrinsic,
+        )?;
         let id = kernel.entry;
         let sources = std::mem::take(&mut kernel.functions);
         let mut symbols = Vec::new();

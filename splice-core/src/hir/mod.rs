@@ -164,6 +164,16 @@ pub enum Instr {
         args: Vec<Reg>,
         buffers: Vec<Buffer>,
     },
+    /// Call the intrinsic `name` on scalar `args`. The signature of
+    /// `fallback`, the intrinsic's body, is the intrinsic's signature: a
+    /// backend that implements the intrinsic emits its own code, any other
+    /// compiles the call as a [`Call`](Self::Call) of `fallback`.
+    Intrinsic {
+        dst: Reg,
+        name: Arc<str>,
+        args: Vec<Reg>,
+        fallback: Arc<Function>,
+    },
 }
 
 impl Instr {
@@ -173,7 +183,10 @@ impl Instr {
             Self::Load { .. } | Self::Store { .. } | Self::RustCall { .. } | Self::TrapBounds => {
                 true
             }
-            Self::Call { function, .. } => function.needs_status(),
+            Self::Call { function, .. }
+            | Self::Intrinsic {
+                fallback: function, ..
+            } => function.needs_status(),
             Self::Simd { inst, .. } => inst.op.may_trap(),
             _ => false,
         }
@@ -189,6 +202,7 @@ impl Instr {
             | Self::BufferLen { dst, .. }
             | Self::Load { dst, .. }
             | Self::Call { dst, .. }
+            | Self::Intrinsic { dst, .. }
             | Self::RustCall { dst, .. } => Some(*dst),
             _ => None,
         }
@@ -288,7 +302,8 @@ impl Function {
         self.needs_status
     }
 
-    /// This function and the bodies it calls, directly or not, in first-use
+    /// This function and the bodies it calls, directly or not, including
+    /// the bodies of its intrinsics, in first-use
     /// breadth-first order. A body shared by several calls appears once.
     pub fn reachable_functions(&self) -> Vec<&Self> {
         let mut functions = vec![self];
@@ -296,7 +311,10 @@ impl Function {
         let mut i = 0;
         while i < functions.len() {
             for inst in functions[i].instructions() {
-                if let Instr::Call { function, .. } = inst
+                if let Instr::Call { function, .. }
+                | Instr::Intrinsic {
+                    fallback: function, ..
+                } = inst
                     && seen.insert(Arc::as_ptr(function))
                 {
                     functions.push(function);

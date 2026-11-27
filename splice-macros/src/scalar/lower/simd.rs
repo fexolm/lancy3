@@ -453,7 +453,7 @@ impl Lower<'_> {
         self.simd_operator(t, "Not", vec![v.code], at)
     }
     /// A method of the vector or mask `receiver`: the registry
-    /// (`frontend::intrinsics::simd_method`) stages it on the operands,
+    /// (`frontend::methods::simd_method`) stages it on the operands,
     /// typed by the builder. The macro gives the result its stage.
     pub(super) fn simd_method(
         &self,
@@ -484,7 +484,7 @@ impl Lower<'_> {
                 return err(m, "mask.select requires two vectors");
             };
             let no = self.reg(no, ty, &m.args[1])?;
-            let operand = emit!(#root::frontend::intrinsics::Operand::Reg);
+            let operand = emit!(#root::frontend::methods::Operand::Reg);
             stages.push(yes.stage);
             operands.extend([emit!(#operand(#yes)), emit!(#operand(#no))]);
         } else {
@@ -524,7 +524,7 @@ impl Lower<'_> {
         let call = emit!({
             let receiver = #receiver;
             let operands = [#(#operands),*];
-            #root::frontend::intrinsics::simd_method(__splice_builder, #method, receiver, &operands, #output)?
+            #root::frontend::methods::simd_method(__splice_builder, #method, receiver, &operands, #output)?
         });
         Ok(match result {
             Some(ty) => Value::new(
@@ -538,7 +538,7 @@ impl Lower<'_> {
     /// An argument of a SIMD method: its stage and its registry operand.
     fn simd_argument(&self, arg: &Expr, hint: Scalar) -> Result<(Stage, TokenStream)> {
         let root = self.root;
-        let operand = emit!(#root::frontend::intrinsics::Operand);
+        let operand = emit!(#root::frontend::methods::Operand);
         if self.body.known(arg) {
             let value = self.known_operand(arg, None)?;
             return Ok((
