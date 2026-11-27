@@ -1,5 +1,5 @@
 use super::{
-    Binary, Buffer, Constant, ContextSlice, Function, Instr, Label, Reg, ScalarType, Simd,
+    Binary, Constant, ContextSlice, Function, Instr, Label, Reg, ScalarType, Simd, Slice,
     ValueType,
 };
 use crate::frontend::{Body, KernelBuilder, KernelSource, Signature, Specialization};
@@ -70,12 +70,12 @@ impl FunctionBuilder {
         &mut self,
         signature: Signature<'_>,
         args: &[Reg],
-        buffers: &[Buffer],
+        slices: &[Slice],
         key: Option<Specialization>,
         body: Body<'_>,
     ) -> crate::Result<Reg> {
         if let Some(callee) = key.as_ref().and_then(|k| self.callees.get(k)).cloned() {
-            return self.call_function(&callee, args, buffers);
+            return self.call_function(&callee, args, slices);
         }
         let mut child = Self::new(self.function.options, signature);
         std::mem::swap(&mut self.callees, &mut child.callees);
@@ -87,7 +87,7 @@ impl FunctionBuilder {
         if let Some(key) = key {
             self.callees.insert(key, callee.clone());
         }
-        self.call_function(&callee, args, buffers)
+        self.call_function(&callee, args, slices)
     }
 
     /// Verify the recorded function.
@@ -145,20 +145,26 @@ impl KernelBuilder for FunctionBuilder {
     fn cast(&mut self, src: Reg, to: ScalarType) -> crate::Result<Reg> {
         self.scalar(to, |dst| Instr::Cast { dst, src })
     }
-    fn buffer_len(&mut self, buffer: Buffer) -> crate::Result<Reg> {
-        self.scalar(ScalarType::Index, |dst| Instr::BufferLen { dst, buffer })
+    fn slice_arg(&self, index: usize) -> crate::Result<Slice> {
+        Ok(self.function.signature().slice(index))
     }
-    fn load(&mut self, buffer: Buffer, index: Reg) -> crate::Result<Reg> {
+    fn offset(&mut self, ptr: Reg, offset: Reg) -> crate::Result<Reg> {
         let ty = self
             .function
-            .buffer_kinds
-            .get(buffer.index())
-            .map_or(ScalarType::I32, |kind| kind.element());
-        self.scalar(ty, |dst| Instr::Load { dst, buffer, index })
+            .checked_reg_type(ptr)
+            .unwrap_or(ValueType::Scalar(ScalarType::I32));
+        self.emit_value(ty, |dst| Instr::Offset { dst, ptr, offset })
     }
-    fn store(&mut self, buffer: Buffer, index: Reg, value: Reg) -> crate::Result<()> {
+    fn load(&mut self, slice: Slice, index: Reg) -> crate::Result<Reg> {
+        let ty = match self.function.checked_reg_type(slice.ptr) {
+            Some(ValueType::Ptr(kind)) => kind.element(),
+            _ => ScalarType::I32,
+        };
+        self.scalar(ty, |dst| Instr::Load { dst, slice, index })
+    }
+    fn store(&mut self, slice: Slice, index: Reg, value: Reg) -> crate::Result<()> {
         self.push(Instr::Store {
-            buffer,
+            slice,
             index,
             value,
         })
@@ -212,31 +218,31 @@ impl KernelBuilder for FunctionBuilder {
         &mut self,
         signature: Signature<'_>,
         args: &[Reg],
-        buffers: &[Buffer],
+        slices: &[Slice],
         body: Body<'_>,
     ) -> crate::Result<Reg> {
-        self.staged_call(signature, args, buffers, None, body)
+        self.staged_call(signature, args, slices, None, body)
     }
     fn call_specialized(
         &mut self,
         key: Specialization,
         args: &[Reg],
-        buffers: &[Buffer],
+        slices: &[Slice],
         body: Body<'_>,
     ) -> crate::Result<Reg> {
-        self.staged_call(key.signature(), args, buffers, Some(key), body)
+        self.staged_call(key.signature(), args, slices, Some(key), body)
     }
     fn call_function(
         &mut self,
         function: &Arc<Function>,
         args: &[Reg],
-        buffers: &[Buffer],
+        slices: &[Slice],
     ) -> crate::Result<Reg> {
         self.scalar(function.result(), |dst| Instr::Call {
             dst,
             function: Arc::clone(function),
             args: args.to_vec(),
-            buffers: buffers.to_vec(),
+            slices: slices.to_vec(),
         })
     }
     /// The backend is chosen when the function is compiled.

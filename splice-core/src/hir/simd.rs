@@ -1,4 +1,4 @@
-use super::{Buffer, BufferKind, ScalarType};
+use super::{BufferKind, ScalarType};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ValueType {
@@ -10,6 +10,9 @@ pub enum ValueType {
     /// A value of an `#[intrinsic] struct`: an opaque type that only the
     /// backends that implement its intrinsics represent.
     Opaque(crate::intrinsic::OpaqueType),
+    /// The data pointer of a slice of the kind, or of a Rust context: the
+    /// first register of a [`Slice`](super::Slice).
+    Ptr(BufferKind),
 }
 
 impl ValueType {
@@ -17,7 +20,7 @@ impl ValueType {
     /// lane element.
     pub const fn is_supported(self) -> bool {
         match self {
-            Self::Scalar(_) | Self::Opaque(_) => true,
+            Self::Scalar(_) | Self::Opaque(_) | Self::Ptr(_) => true,
             Self::Vector(e) | Self::Mask(e) => e.is_lane(),
         }
     }
@@ -32,25 +35,25 @@ pub enum SimdOp {
     Iota,
     Shuffle(crate::simd::Shuffle),
     PrefixSum,
-    AlignmentPrefix(Buffer),
+    AlignmentPrefix,
     Compress,
     Expand,
     Swizzle,
     Count,
     Shr(u32),
     RotateLeft(u32),
-    CompressStore(Buffer),
+    CompressStore,
     Last,
     ExtractWrapping,
     ReplaceWrapping,
-    Load(Buffer),
-    Store(Buffer),
-    LoadSelect(Buffer),
-    StoreSelect(Buffer),
-    Gather(Buffer),
-    Scatter(Buffer),
-    GatherSelect(Buffer),
-    ScatterSelect(Buffer),
+    Load,
+    Store,
+    LoadSelect,
+    StoreSelect,
+    Gather,
+    Scatter,
+    GatherSelect,
+    ScatterSelect,
     Add,
     Sub,
     SaturatingAdd,
@@ -109,6 +112,11 @@ pub enum Slot {
     Element,
     /// A vector of the given element.
     Converted(ScalarType),
+    /// The data pointer of a slice of `e`: a [`ValueType::Ptr`], writable
+    /// for an operation that writes.
+    Pointer,
+    /// The length of that slice: scalar `Index`.
+    Length,
 }
 
 impl Slot {
@@ -122,6 +130,8 @@ impl Slot {
             Self::Bool => ValueType::Scalar(ScalarType::Bool),
             Self::Element => ValueType::Scalar(element),
             Self::Converted(to) => ValueType::Vector(to),
+            Self::Pointer => ValueType::Ptr(BufferKind::new(element, false)),
+            Self::Length => ValueType::Scalar(ScalarType::Index),
         }
     }
 }
@@ -192,12 +202,13 @@ pub enum Access {
     Write,
 }
 
-/// The buffer an operation accesses. The first operand addresses it: an
+/// How an operation accesses the slice of its first operands, a
+/// [`Slot::Pointer`] and, unless it only takes the address, a
+/// [`Slot::Length`]. The next operand addresses the elements: an
 /// [`Slot::Offset`], or [`Slot::Indices`] when `indexed`. A `masked`
 /// operation touches only the lanes of its [`Slot::Mask`] operand.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Memory {
-    pub buffer: Buffer,
     pub access: Access,
     pub indexed: bool,
     pub masked: bool,
@@ -230,14 +241,19 @@ impl SimdOp {
             Iota => ("iota", &[], Some(Vector), E::Any),
             Shuffle(_) => ("shuffle", &[Vector, Vector], Some(Vector), E::I32),
             PrefixSum => ("prefix_sum", &[Vector], Some(Vector), E::I32),
-            AlignmentPrefix(_) => ("alignment_prefix", &[Offset], Some(Offset), E::I32),
+            AlignmentPrefix => ("alignment_prefix", &[Pointer], Some(Offset), E::I32),
             Compress => ("compress", &[Vector, Mask], Some(Vector), E::I32),
             Expand => ("expand", &[Vector, Mask, Vector], Some(Vector), E::I32),
             Swizzle => ("swizzle", &[Vector, Vector], Some(Vector), E::I32),
             Count => ("count", &[Mask], Some(Lane), E::Any),
             Shr(_) => ("shr", &[Vector], Some(Vector), E::I32OrU32),
             RotateLeft(_) => ("rotate_left", &[Vector], Some(Vector), E::I32OrU32),
-            CompressStore(_) => ("compress_store", &[Offset, Mask, Vector], None, E::I32),
+            CompressStore => (
+                "compress_store",
+                &[Pointer, Length, Offset, Mask, Vector],
+                None,
+                E::I32,
+            ),
             Last => ("last", &[Vector], Some(Element), E::Any),
             ExtractWrapping => ("extract_wrapping", &[Vector, Lane], Some(Element), E::Any),
             ReplaceWrapping => (
@@ -246,19 +262,39 @@ impl SimdOp {
                 Some(Vector),
                 E::Any,
             ),
-            Load(_) => ("load", &[Offset], Some(Vector), E::Any),
-            Store(_) => ("store", &[Offset, Vector], None, E::Any),
-            LoadSelect(_) => ("load_select", &[Offset, Mask, Vector], Some(Vector), E::Any),
-            StoreSelect(_) => ("store_select", &[Offset, Mask, Vector], None, E::Any),
-            Gather(_) => ("gather", &[Indices], Some(Vector), E::Any),
-            Scatter(_) => ("scatter", &[Indices, Vector], None, E::Any),
-            GatherSelect(_) => (
-                "gather_select",
-                &[Indices, Mask, Vector],
+            Load => ("load", &[Pointer, Length, Offset], Some(Vector), E::Any),
+            Store => ("store", &[Pointer, Length, Offset, Vector], None, E::Any),
+            LoadSelect => (
+                "load_select",
+                &[Pointer, Length, Offset, Mask, Vector],
                 Some(Vector),
                 E::Any,
             ),
-            ScatterSelect(_) => ("scatter_select", &[Indices, Mask, Vector], None, E::Any),
+            StoreSelect => (
+                "store_select",
+                &[Pointer, Length, Offset, Mask, Vector],
+                None,
+                E::Any,
+            ),
+            Gather => ("gather", &[Pointer, Length, Indices], Some(Vector), E::Any),
+            Scatter => (
+                "scatter",
+                &[Pointer, Length, Indices, Vector],
+                None,
+                E::Any,
+            ),
+            GatherSelect => (
+                "gather_select",
+                &[Pointer, Length, Indices, Mask, Vector],
+                Some(Vector),
+                E::Any,
+            ),
+            ScatterSelect => (
+                "scatter_select",
+                &[Pointer, Length, Indices, Mask, Vector],
+                None,
+                E::Any,
+            ),
             Add => ("add", &[Vector, Vector], Some(Vector), E::Any),
             Sub => ("sub", &[Vector, Vector], Some(Vector), E::Any),
             SaturatingAdd => (
@@ -306,29 +342,23 @@ impl SimdOp {
             All => ("all", &[Mask], Some(Bool), E::Any),
             Select => ("select", &[Mask, Vector, Vector], Some(Vector), E::Any),
         };
-        const fn memory(
-            buffer: Buffer,
-            access: Access,
-            indexed: bool,
-            masked: bool,
-        ) -> Option<Memory> {
+        const fn memory(access: Access, indexed: bool, masked: bool) -> Option<Memory> {
             Some(Memory {
-                buffer,
                 access,
                 indexed,
                 masked,
             })
         }
         let memory = match self {
-            AlignmentPrefix(b) => memory(b, Access::Address, false, false),
-            Load(b) => memory(b, Access::Read, false, false),
-            LoadSelect(b) => memory(b, Access::Read, false, true),
-            Gather(b) => memory(b, Access::Read, true, false),
-            GatherSelect(b) => memory(b, Access::Read, true, true),
-            Store(b) => memory(b, Access::Write, false, false),
-            StoreSelect(b) | CompressStore(b) => memory(b, Access::Write, false, true),
-            Scatter(b) => memory(b, Access::Write, true, false),
-            ScatterSelect(b) => memory(b, Access::Write, true, true),
+            AlignmentPrefix => memory(Access::Address, false, false),
+            Load => memory(Access::Read, false, false),
+            LoadSelect => memory(Access::Read, false, true),
+            Gather => memory(Access::Read, true, false),
+            GatherSelect => memory(Access::Read, true, true),
+            Store => memory(Access::Write, false, false),
+            StoreSelect | CompressStore => memory(Access::Write, false, true),
+            Scatter => memory(Access::Write, true, false),
+            ScatterSelect => memory(Access::Write, true, true),
             _ => None,
         };
         OpInfo {
@@ -357,7 +387,7 @@ impl Simd {
             .map(|slot| slot.value_type(self.element))
     }
 
-    pub fn validate(self, args: &[ValueType], buffers: &[BufferKind]) -> crate::Result<()> {
+    pub fn validate(self, args: &[ValueType]) -> crate::Result<()> {
         let info = self.op.info();
         let converted = match info.output {
             Some(Slot::Converted(to)) => Some(to),
@@ -383,6 +413,9 @@ impl Simd {
         // Masks of elements with the same index type are interchangeable.
         let compatible = |(actual, slot): (&ValueType, &Slot)| match (actual, slot) {
             (ValueType::Mask(a), Slot::Mask) => a.index() == self.element.index(),
+            (ValueType::Ptr(kind), Slot::Pointer) => {
+                kind.context_signature().is_none() && kind.element() == self.element
+            }
             _ => *actual == slot.value_type(self.element),
         };
         if args.len() != info.operands.len() || !args.iter().zip(info.operands).all(compatible) {
@@ -399,15 +432,9 @@ impl Simd {
         let Some(memory) = info.memory else {
             return Ok(());
         };
-        let kind = buffers
-            .get(memory.buffer.index())
-            .ok_or_else(|| crate::BuildError::verify("invalid SIMD buffer"))?;
-        if kind.context_signature().is_some() || kind.element() != self.element {
-            return Err(crate::BuildError::verify(
-                "SIMD buffer element type mismatch",
-            ));
-        }
-        if memory.access == Access::Write && !kind.writable() {
+        if memory.access == Access::Write
+            && !matches!(args[0], ValueType::Ptr(kind) if kind.writable())
+        {
             return Err(crate::BuildError::verify("SIMD store to read-only buffer"));
         }
         Ok(())

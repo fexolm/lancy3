@@ -1,6 +1,6 @@
 //! Rust calls: one instruction, one native entry and one packet layout,
 //! which every backend materializes from [`RustTarget::plan`].
-use super::{Buffer, BufferKind, ContextSlice, ValueType};
+use super::{BufferKind, ContextSlice, Reg, ValueType};
 use crate::runtime_context::{CONTEXT_CALL, STATIC_CALL};
 use crate::runtime_context::{ContextArguments, StaticRustSymbol};
 use splice_target::abi::RustFunction;
@@ -11,8 +11,8 @@ use std::collections::HashMap;
 pub enum RustTarget {
     /// A Rust function selected when the kernel is staged.
     Static(&'static StaticRustSymbol),
-    /// An operation of the Rust context passed as `buffer`.
-    Context { buffer: Buffer, operation: u32 },
+    /// An operation of the Rust context whose pointer is `context`.
+    Context { context: Reg, operation: u32 },
 }
 
 impl PartialEq for RustTarget {
@@ -20,12 +20,12 @@ impl PartialEq for RustTarget {
         match (*self, *other) {
             (Self::Static(a), Self::Static(b)) => std::ptr::eq(a, b),
             (
-                Self::Context { buffer, operation },
+                Self::Context { context, operation },
                 Self::Context {
-                    buffer: b,
+                    context: c,
                     operation: o,
                 },
-            ) => buffer == b && operation == o,
+            ) => context == c && operation == o,
             _ => false,
         }
     }
@@ -37,10 +37,10 @@ pub enum PacketValue {
     /// Operand `n` of the call, a scalar of any type, at the low end of its
     /// 8-byte word.
     Word(usize),
-    /// The data pointer of a slice: a pointer.
-    Data(Buffer),
-    /// The length of a slice: an `i32`.
-    Length(Buffer),
+    /// The data pointer of a slice, a pointer register.
+    Data(Reg),
+    /// The length of a slice, a `usize` register, stored as an `i32`.
+    Length(Reg),
     /// A constant `u32`.
     Tag(u32),
     /// The address of a static symbol: a 64-bit integer.
@@ -58,12 +58,11 @@ pub struct PacketStore {
 /// packet of `bytes`, call `entry(receiver, operation, packet, 0)`, forward
 /// a nonzero trap code of the returned status and otherwise load the
 /// call's result, a scalar of its type, from the start of the packet. The
-/// receiver is the data pointer of the context buffer, or the packet itself
-/// when there is none.
+/// receiver is the context pointer, or the packet itself when there is none.
 #[derive(Clone, Debug)]
 pub struct RustCallPlan {
     pub entry: &'static RustFunction,
-    pub context: Option<Buffer>,
+    pub context: Option<Reg>,
     pub operation: u32,
     pub bytes: u32,
     pub stores: Vec<PacketStore>,
@@ -71,10 +70,9 @@ pub struct RustCallPlan {
 
 impl RustTarget {
     /// The words and slices the target takes.
-    fn shape(self, kinds: &[BufferKind]) -> crate::Result<(usize, u32)> {
+    fn shape(self, reg_type: &impl Fn(Reg) -> Option<ValueType>) -> crate::Result<(usize, u32)> {
         match self {
-            Self::Context { buffer, operation } => kinds
-                .get(buffer.index())
+            Self::Context { context, operation } => pointee(reg_type(context))
                 .and_then(|kind| kind.context_signature())
                 .ok_or_else(|| crate::BuildError::verify("expected a Rust context descriptor"))?
                 .shape(operation)
@@ -97,11 +95,11 @@ impl RustTarget {
     /// borrow without aliasing a writable one.
     pub fn check(
         self,
-        kinds: &[BufferKind],
-        args: impl ExactSizeIterator<Item = Option<ValueType>>,
+        args: &[Reg],
         slices: &[ContextSlice],
+        reg_type: impl Fn(Reg) -> Option<ValueType>,
     ) -> crate::Result<()> {
-        let (words, borrows) = self.shape(kinds)?;
+        let (words, borrows) = self.shape(&reg_type)?;
         if args.len() != words || slices.len() != borrows as usize {
             return Err(crate::BuildError::verify(format!(
                 "{} takes {words} words and {borrows} slices, got {} and {}",
@@ -111,8 +109,8 @@ impl RustTarget {
             )));
         }
         if args
-            .into_iter()
-            .any(|ty| !matches!(ty, Some(ValueType::Scalar(_))))
+            .iter()
+            .any(|&r| !matches!(reg_type(r), Some(ValueType::Scalar(_))))
         {
             return Err(crate::BuildError::verify(format!(
                 "expected scalar operands for {}",
@@ -120,10 +118,10 @@ impl RustTarget {
             )));
         }
         let mut seen = HashMap::new();
-        for &ContextSlice { buffer, writable } in slices {
-            let kind = kinds
-                .get(buffer.index())
+        for &ContextSlice { slice, writable } in slices {
+            let kind = pointee(reg_type(slice.ptr))
                 .filter(|kind| kind.context_signature().is_none())
+                .filter(|_| reg_type(slice.len) == Some(ValueType::Scalar(super::ScalarType::Index)))
                 .ok_or_else(|| {
                     crate::BuildError::verify(format!(
                         "expected slice operands for {}",
@@ -136,8 +134,10 @@ impl RustTarget {
                     self.name()
                 )));
             }
+            // Distinct pointer registers come from distinct borrows, which
+            // Rust already checked; the same register twice is checked here.
             if seen
-                .insert(buffer, writable)
+                .insert(slice.ptr, writable)
                 .is_some_and(|prior| prior || writable)
             {
                 return Err(crate::BuildError::verify(
@@ -152,11 +152,16 @@ impl RustTarget {
     /// `slices`. The operands follow the layout of [`ContextArguments`]; a
     /// static call's packet starts with the symbol's address (see
     /// `invoke_static`), so no backend embeds a pointer constant.
-    pub fn plan(self, kinds: &[BufferKind], words: usize, slices: &[ContextSlice]) -> RustCallPlan {
+    pub fn plan(
+        self,
+        reg_type: impl Fn(Reg) -> ValueType,
+        words: usize,
+        slices: &[ContextSlice],
+    ) -> RustCallPlan {
         let layout = ContextArguments::packet_layout(words as u32, slices.len() as u32)
             .expect("a checked Rust call has a valid packet");
         let (entry, context, operation, header) = match self {
-            Self::Context { buffer, operation } => (&CONTEXT_CALL, Some(buffer), operation, 0),
+            Self::Context { context, operation } => (&CONTEXT_CALL, Some(context), operation, 0),
             Self::Static(_) => (&STATIC_CALL, None, 0, crate::runtime_context::STATIC_HEADER),
         };
         let mut stores = Vec::new();
@@ -170,17 +175,20 @@ impl RustTarget {
             at: header + n as u32 * ContextArguments::WORD_BYTES,
             value: PacketValue::Word(n),
         }));
-        for (index, &ContextSlice { buffer, writable }) in slices.iter().enumerate() {
+        for (index, &ContextSlice { slice, writable }) in slices.iter().enumerate() {
             let at = header + layout.slices_at + index as u32 * ContextArguments::SLICE_BYTES;
-            let tag = ContextArguments::view_tag(kinds[buffer.index()].element(), writable);
+            let element = pointee(Some(reg_type(slice.ptr)))
+                .expect("a checked slice operand")
+                .element();
+            let tag = ContextArguments::view_tag(element, writable);
             stores.extend([
                 PacketStore {
                     at,
-                    value: PacketValue::Data(buffer),
+                    value: PacketValue::Data(slice.ptr),
                 },
                 PacketStore {
                     at: at + ContextArguments::LENGTH_OFFSET,
-                    value: PacketValue::Length(buffer),
+                    value: PacketValue::Length(slice.len),
                 },
                 PacketStore {
                     at: at + ContextArguments::ELEMENT_OFFSET,
@@ -196,5 +204,13 @@ impl RustTarget {
             bytes: (header + layout.bytes).max(8),
             stores,
         }
+    }
+}
+
+/// What a pointer register points to.
+pub(crate) fn pointee(ty: Option<ValueType>) -> Option<BufferKind> {
+    match ty? {
+        ValueType::Ptr(kind) => Some(kind),
+        _ => None,
     }
 }

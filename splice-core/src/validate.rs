@@ -3,8 +3,8 @@
 //! portable function is verified (which replays it through this check).
 use crate::frontend::{Body, KernelBuilder, KernelSource, Signature, Specialization};
 use crate::hir::{
-    Binary, Buffer, BufferKind, Constant, ContextSlice, Function, Label, Reg, RustTarget,
-    ScalarType, Simd, ValueType,
+    Binary, Constant, ContextSlice, Function, Label, Reg, RustTarget, ScalarType, Simd, Slice,
+    ValueType,
 };
 use crate::intrinsic::IntrinsicId;
 use crate::{BuildError, Result};
@@ -38,7 +38,7 @@ pub struct Validating<'a> {
     inner: &'a mut dyn KernelBuilder,
     arity: usize,
     result: ScalarType,
-    kinds: &'a [BufferKind],
+    signature: Signature<'a>,
     types: Vec<ValueType>,
     /// The block each label starts, once marked.
     labels: Vec<Option<usize>>,
@@ -87,11 +87,9 @@ impl<'a> Validating<'a> {
             inner,
             arity: signature.params.len(),
             result: signature.result,
-            kinds: signature.buffers,
-            types: signature
-                .params
-                .iter()
-                .map(|&ty| ValueType::Scalar(ty))
+            signature,
+            types: (0..signature.registers())
+                .map(|r| signature.param_type(r).expect("a parameter register"))
                 .collect(),
             labels: Vec::new(),
             blocks: vec![Block::new()],
@@ -189,49 +187,31 @@ impl<'a> Validating<'a> {
         self.current = None;
     }
 
-    fn buffer(&self, buffer: Buffer) -> Result<BufferKind> {
-        let kind = *self
-            .kinds
-            .get(buffer.index())
-            .ok_or_else(|| self.error("invalid buffer"))?;
+    /// The type of the elements of `slice`, accessed one at a time.
+    fn element(&self, slice: Slice, write: bool) -> Result<ScalarType> {
+        let ValueType::Ptr(kind) = self.ty(slice.ptr)? else {
+            return Err(self.error("expected a slice pointer register"));
+        };
         if kind.context_signature().is_some() {
             return Err(self.error("slice memory operation cannot use Rust context"));
         }
-        Ok(kind)
-    }
-
-    /// The type of the elements of `buffer`, accessed one at a time.
-    fn element(&self, buffer: Buffer, write: bool) -> Result<ScalarType> {
-        let kind = self.buffer(buffer)?;
-        let ty = kind.element();
+        self.expect(slice.len, ScalarType::Index)?;
         if write && !kind.writable() {
             return Err(self.error("store to read-only buffer"));
         }
-        Ok(ty)
+        Ok(kind.element())
     }
 
-    fn call_arguments(
-        &self,
-        callee: Signature<'_>,
-        args: &[Reg],
-        buffers: &[Buffer],
-    ) -> Result<()> {
-        let types: Vec<_> = args
-            .iter()
-            .map(|&r| self.types.get(r.0 as usize).copied())
-            .collect();
-        self.at(crate::hir::check_call(
-            callee,
-            types.into_iter(),
-            self.kinds,
-            buffers,
-        ))
+    fn call_arguments(&self, callee: Signature<'_>, args: &[Reg], slices: &[Slice]) -> Result<()> {
+        self.at(crate::hir::check_call(callee, args, slices, |r| {
+            self.reg_type(r)
+        }))
     }
 
-    fn rust_operands(&self, args: &[Reg]) -> Vec<Option<ValueType>> {
-        args.iter()
-            .map(|&r| self.types.get(r.0 as usize).copied())
-            .collect()
+    /// The scalar arguments and slice registers a call reads.
+    fn call_reads(args: &[Reg], slices: &[Slice]) -> Vec<Reg> {
+        let slices = slices.iter().flat_map(|s| [s.ptr, s.len]);
+        args.iter().copied().chain(slices).collect()
     }
 
     /// Check labels and the definite initialization of every register on
@@ -255,7 +235,7 @@ impl<'a> Validating<'a> {
         let words = self.types.len().div_ceil(64);
         let bit = |bits: &[u64], r: Reg| bits[r.0 as usize / 64] & (1 << (r.0 % 64)) != 0;
         let mut entry = vec![0u64; words];
-        for r in 0..self.arity {
+        for r in 0..self.signature.registers() {
             entry[r / 64] |= 1 << (r % 64);
         }
         let mut states: Vec<Option<Vec<u64>>> = vec![None; self.blocks.len()];
@@ -340,13 +320,9 @@ impl KernelBuilder for Validating<'_> {
                 crate::debug::Value::Register(r) => {
                     self.ty(r)?;
                 }
-                crate::debug::Value::Slice(buffer)
-                    if self
-                        .kinds
-                        .get(buffer.index())
-                        .is_none_or(|kind| kind.context_signature().is_some()) =>
-                {
-                    return Err(self.error("invalid debug buffer"));
+                crate::debug::Value::Slice(slice) => {
+                    self.element(slice, false)
+                        .map_err(|_| self.error("invalid debug slice"))?;
                 }
                 _ => {}
             }
@@ -380,7 +356,7 @@ impl KernelBuilder for Validating<'_> {
     }
     fn simd(&mut self, inst: Simd, args: &[Reg]) -> Result<Option<Reg>> {
         let types = self.types(args)?;
-        self.at(inst.validate(&types, self.kinds))?;
+        self.at(inst.validate(&types))?;
         let dst = self.inner.simd(inst, args)?;
         match (dst, inst.output()) {
             (Some(dst), Some(ty)) => {
@@ -403,23 +379,36 @@ impl KernelBuilder for Validating<'_> {
         let r = self.inner.cast(value, to)?;
         Ok(self.value(&[value], r, ValueType::Scalar(to)))
     }
-    fn buffer_len(&mut self, buffer: Buffer) -> Result<Reg> {
-        self.buffer(buffer)?;
-        let r = self.inner.buffer_len(buffer)?;
-        Ok(self.value(&[], r, ValueType::Scalar(ScalarType::Index)))
+    fn slice_arg(&self, index: usize) -> Result<Slice> {
+        if index < self.signature.buffers.len() {
+            self.inner.slice_arg(index)
+        } else {
+            Err(BuildError::verify("invalid buffer parameter index"))
+        }
     }
-    fn load(&mut self, buffer: Buffer, index: Reg) -> Result<Reg> {
-        self.expect(index, ScalarType::Index)?;
-        let ty = self.element(buffer, false)?;
-        let r = self.inner.load(buffer, index)?;
-        Ok(self.value(&[index], r, ValueType::Scalar(ty)))
+    fn offset(&mut self, ptr: Reg, offset: Reg) -> Result<Reg> {
+        let ty @ ValueType::Ptr(kind) = self.ty(ptr)? else {
+            return Err(self.error("expected a slice pointer register"));
+        };
+        if kind.context_signature().is_some() {
+            return Err(self.error("a Rust context has no elements"));
+        }
+        self.expect(offset, ScalarType::Index)?;
+        let r = self.inner.offset(ptr, offset)?;
+        Ok(self.value(&[ptr, offset], r, ty))
     }
-    fn store(&mut self, buffer: Buffer, index: Reg, value: Reg) -> Result<()> {
+    fn load(&mut self, slice: Slice, index: Reg) -> Result<Reg> {
         self.expect(index, ScalarType::Index)?;
-        let ty = self.element(buffer, true)?;
+        let ty = self.element(slice, false)?;
+        let r = self.inner.load(slice, index)?;
+        Ok(self.value(&[slice.ptr, slice.len, index], r, ValueType::Scalar(ty)))
+    }
+    fn store(&mut self, slice: Slice, index: Reg, value: Reg) -> Result<()> {
+        self.expect(index, ScalarType::Index)?;
+        let ty = self.element(slice, true)?;
         self.expect(value, ty)?;
-        self.inner.store(buffer, index, value)?;
-        self.record(&[index, value], None);
+        self.inner.store(slice, index, value)?;
+        self.record(&[slice.ptr, slice.len, index, value], None);
         Ok(())
     }
     fn binary(&mut self, op: Binary, a: Reg, b: Reg) -> Result<Reg> {
@@ -497,10 +486,14 @@ impl KernelBuilder for Validating<'_> {
         slices: &[ContextSlice],
         result: ScalarType,
     ) -> Result<Reg> {
-        let types = self.rust_operands(args);
-        self.at(target.check(self.kinds, types.into_iter(), slices))?;
+        self.at(target.check(args, slices, |r| self.reg_type(r)))?;
         let r = self.inner.rust_call(target, args, slices, result)?;
-        Ok(self.value(args, r, ValueType::Scalar(result)))
+        let mut reads = Self::call_reads(args, &[]);
+        reads.extend(slices.iter().flat_map(|s| [s.slice.ptr, s.slice.len]));
+        if let RustTarget::Context { context, .. } = target {
+            reads.push(context);
+        }
+        Ok(self.value(&reads, r, ValueType::Scalar(result)))
     }
     fn intrinsic(&mut self, id: &IntrinsicId, args: &[Reg]) -> Result<Reg> {
         let types = self.types(args)?;
@@ -516,45 +509,48 @@ impl KernelBuilder for Validating<'_> {
         &mut self,
         signature: Signature<'_>,
         args: &[Reg],
-        buffers: &[Buffer],
+        slices: &[Slice],
         body: Body<'_>,
     ) -> Result<Reg> {
-        self.call_arguments(signature, args, buffers)?;
+        self.call_arguments(signature, args, slices)?;
         let r = self.inner.call_kernel(
             signature,
             args,
-            buffers,
+            slices,
             validated(signature, body, self.overflow_checks),
         )?;
-        Ok(self.value(args, r, ValueType::Scalar(signature.result)))
+        let reads = Self::call_reads(args, slices);
+        Ok(self.value(&reads, r, ValueType::Scalar(signature.result)))
     }
     fn call_specialized(
         &mut self,
         key: Specialization,
         args: &[Reg],
-        buffers: &[Buffer],
+        slices: &[Slice],
         body: Body<'_>,
     ) -> Result<Reg> {
         let signature = key.signature();
-        self.call_arguments(signature, args, buffers)?;
+        self.call_arguments(signature, args, slices)?;
         let _staging = Staging::enter(&key)?;
         let r = self.inner.call_specialized(
             key,
             args,
-            buffers,
+            slices,
             validated(signature, body, self.overflow_checks),
         )?;
-        Ok(self.value(args, r, ValueType::Scalar(signature.result)))
+        let reads = Self::call_reads(args, slices);
+        Ok(self.value(&reads, r, ValueType::Scalar(signature.result)))
     }
     fn call_function(
         &mut self,
         function: &Arc<Function>,
         args: &[Reg],
-        buffers: &[Buffer],
+        slices: &[Slice],
     ) -> Result<Reg> {
-        self.call_arguments(function.signature(), args, buffers)?;
-        let r = self.inner.call_function(function, args, buffers)?;
-        Ok(self.value(args, r, ValueType::Scalar(function.result())))
+        self.call_arguments(function.signature(), args, slices)?;
+        let r = self.inner.call_function(function, args, slices)?;
+        let reads = Self::call_reads(args, slices);
+        Ok(self.value(&reads, r, ValueType::Scalar(function.result())))
     }
 }
 
@@ -592,6 +588,8 @@ impl Drop for Staging {
 /// A builder that only numbers registers and labels, to verify a function.
 pub(crate) struct Sink {
     registers: u32,
+    /// The scalar parameters.
+    signature: usize,
     labels: u32,
     debug: bool,
 }
@@ -599,7 +597,8 @@ pub(crate) struct Sink {
 impl Sink {
     pub(crate) fn new(signature: Signature<'_>, debug: bool) -> Self {
         Self {
-            registers: signature.params.len() as u32,
+            registers: signature.registers() as u32,
+            signature: signature.params.len(),
             labels: 0,
             debug,
         }
@@ -633,13 +632,20 @@ impl KernelBuilder for Sink {
     fn cast(&mut self, _: Reg, _: ScalarType) -> Result<Reg> {
         self.next()
     }
-    fn buffer_len(&mut self, _: Buffer) -> Result<Reg> {
+    fn slice_arg(&self, index: usize) -> Result<Slice> {
+        let ptr = (self.signature + 2 * index) as u32;
+        Ok(Slice {
+            ptr: Reg(ptr),
+            len: Reg(ptr + 1),
+        })
+    }
+    fn offset(&mut self, _: Reg, _: Reg) -> Result<Reg> {
         self.next()
     }
-    fn load(&mut self, _: Buffer, _: Reg) -> Result<Reg> {
+    fn load(&mut self, _: Slice, _: Reg) -> Result<Reg> {
         self.next()
     }
-    fn store(&mut self, _: Buffer, _: Reg, _: Reg) -> Result<()> {
+    fn store(&mut self, _: Slice, _: Reg, _: Reg) -> Result<()> {
         Ok(())
     }
     fn binary(&mut self, _: Binary, _: Reg, _: Reg) -> Result<Reg> {
@@ -681,13 +687,13 @@ impl KernelBuilder for Sink {
         &mut self,
         signature: Signature<'_>,
         _: &[Reg],
-        _: &[Buffer],
+        _: &[Slice],
         body: Body<'_>,
     ) -> Result<Reg> {
         body(&mut Self::new(signature, self.debug))?;
         self.next()
     }
-    fn call_function(&mut self, _: &Arc<Function>, _: &[Reg], _: &[Buffer]) -> Result<Reg> {
+    fn call_function(&mut self, _: &Arc<Function>, _: &[Reg], _: &[Slice]) -> Result<Reg> {
         self.next()
     }
     fn intrinsic(&mut self, _: &IntrinsicId, _: &[Reg]) -> Result<Reg> {

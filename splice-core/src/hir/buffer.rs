@@ -1,20 +1,10 @@
 use crate::KernelScalar;
-use crate::hir::ScalarType;
+use crate::hir::{Reg, ScalarType, Slice, ValueType};
 use crate::runtime_context::{ContextSignature, RuntimeContext};
 use std::collections::HashMap;
 use std::fmt;
 use std::marker::PhantomData;
 use std::ptr::NonNull;
-
-/// A buffer parameter in a function's separate buffer argument list.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct Buffer(pub u32);
-
-impl Buffer {
-    pub fn index(self) -> usize {
-        self.0 as usize
-    }
-}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct BufferKind {
@@ -240,12 +230,14 @@ pub fn validate_buffers(
     Ok(())
 }
 
-/// Check the borrow contract at a static call site. Multiple immutable
-/// views may name the same buffer. A mutable view needs exclusive access.
+/// Check the slices passed for the buffer parameters `callee` of a call.
+/// Multiple immutable views may share a pointer register; a mutable view
+/// needs exclusive access. Distinct registers come from borrows that Rust
+/// checked in the kernel's source, such as the halves of `split_at_mut`.
 pub fn check_forwarding(
-    caller: &[BufferKind],
     callee: &[BufferKind],
-    actual: &[Buffer],
+    actual: &[Slice],
+    reg_type: impl Fn(Reg) -> Option<ValueType>,
 ) -> crate::Result<()> {
     if callee.len() != actual.len() {
         return Err(crate::BuildError::verify(format!(
@@ -254,34 +246,34 @@ pub fn check_forwarding(
             actual.len()
         )));
     }
-    if actual.is_empty() {
-        return Ok(());
-    }
-    let mut seen: HashMap<_, BufferKind> = HashMap::new();
-    for (&required, &buffer) in callee.iter().zip(actual) {
-        let kind = caller
-            .get(buffer.index())
-            .ok_or_else(|| crate::BuildError::verify(format!("unknown buffer {}", buffer.0)))?;
-        if !required.same_type(*kind) {
+    let mut seen: HashMap<Reg, BufferKind> = HashMap::new();
+    for (i, (&required, &slice)) in callee.iter().zip(actual).enumerate() {
+        let Some(ValueType::Ptr(kind)) = reg_type(slice.ptr) else {
             return Err(crate::BuildError::verify(format!(
-                "buffer {} has wrong element type",
-                buffer.0
+                "buffer argument {i} is not a slice pointer"
+            )));
+        };
+        if reg_type(slice.len) != Some(ValueType::Scalar(ScalarType::Index)) {
+            return Err(crate::BuildError::verify(format!(
+                "buffer argument {i} has no usize length"
             )));
         }
-        if !required.accepts(*kind) {
+        if !required.same_type(kind) {
             return Err(crate::BuildError::verify(format!(
-                "buffer {} is read-only",
-                buffer.0
+                "buffer argument {i} has wrong element type"
             )));
         }
-        if actual.len() > 1
-            && seen
-                .insert(buffer, required)
-                .is_some_and(|prior| !prior.may_alias(required))
+        if !required.accepts(kind) {
+            return Err(crate::BuildError::verify(format!(
+                "buffer argument {i} is read-only"
+            )));
+        }
+        if seen
+            .insert(slice.ptr, required)
+            .is_some_and(|prior| !prior.may_alias(required))
         {
             return Err(crate::BuildError::verify(format!(
-                "writable buffer {} aliases another call argument",
-                buffer.0
+                "writable buffer argument {i} aliases another call argument"
             )));
         }
     }

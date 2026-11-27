@@ -13,9 +13,7 @@ mod verify;
 pub use simd::{Access, Elements, Memory, OpInfo, Simd, SimdOp, Slot, ValueType};
 pub use types::{Constant, ScalarInfo, ScalarKind, ScalarType};
 
-pub use buffer::{
-    Buffer, BufferArg, BufferElement, BufferKind, check_forwarding, validate_buffers,
-};
+pub use buffer::{BufferArg, BufferElement, BufferKind, check_forwarding, validate_buffers};
 pub use builder::FunctionBuilder;
 pub use replay::replay;
 pub use rust_call::{PacketStore, PacketValue, RustCallPlan, RustTarget};
@@ -30,9 +28,23 @@ pub struct Reg(pub u32);
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Label(pub u32);
 
+/// A slice value: the register of its data pointer, of type
+/// [`ValueType::Ptr`], and the register of its length, a `usize`.
+///
+/// Buffer parameters are where slices enter a function: parameter `i`
+/// is the pair of registers after the scalar parameters
+/// ([`Signature::slice`](crate::frontend::Signature::slice)). Any pair of
+/// such registers is a slice, so a subslice is a new pair (see
+/// [`Instr::Offset`]) and a nested kernel takes slices as register pairs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct Slice {
+    pub ptr: Reg,
+    pub len: Reg,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ContextSlice {
-    pub buffer: Buffer,
+    pub slice: Slice,
     pub writable: bool,
 }
 
@@ -128,17 +140,22 @@ pub enum Instr {
     },
     Copy(Reg, Reg),
     Bin(Reg, Binary, Reg, Reg),
-    BufferLen {
+    /// `dst = ptr + offset` elements of the pointee of `ptr`, unchecked:
+    /// the data pointer of a subslice that the frontend checked.
+    Offset {
         dst: Reg,
-        buffer: Buffer,
+        ptr: Reg,
+        offset: Reg,
     },
+    /// Read element `index` of `slice`, which traps unless it is below the
+    /// length.
     Load {
         dst: Reg,
-        buffer: Buffer,
+        slice: Slice,
         index: Reg,
     },
     Store {
-        buffer: Buffer,
+        slice: Slice,
         index: Reg,
         value: Reg,
     },
@@ -163,7 +180,7 @@ pub enum Instr {
         dst: Reg,
         function: Arc<Function>,
         args: Vec<Reg>,
-        buffers: Vec<Buffer>,
+        slices: Vec<Slice>,
     },
     /// Call the intrinsic `id` on `args`; `dst` has its result type. The
     /// backend that compiles the function implements it or fails the build.
@@ -194,7 +211,7 @@ impl Instr {
             | Self::Cast { dst, .. }
             | Self::Copy(dst, _)
             | Self::Bin(dst, ..)
-            | Self::BufferLen { dst, .. }
+            | Self::Offset { dst, .. }
             | Self::Load { dst, .. }
             | Self::Call { dst, .. }
             | Self::Intrinsic { dst, .. }
@@ -217,13 +234,15 @@ pub struct Function {
     labels: usize,
 }
 
-/// Validate a nested kernel's scalar and buffer arguments in its caller.
+/// Validate a nested kernel's scalar and slice arguments in its caller,
+/// given the type of each register.
 pub fn check_call(
     callee: crate::frontend::Signature<'_>,
-    args: impl ExactSizeIterator<Item = Option<ValueType>>,
-    caller_kinds: &[BufferKind],
-    buffers: &[Buffer],
+    args: &[Reg],
+    slices: &[Slice],
+    reg_type: impl Fn(Reg) -> Option<ValueType>,
 ) -> crate::Result<()> {
+    let args = args.iter().map(|&r| reg_type(r));
     if args.len() != callee.params.len() {
         return Err(crate::BuildError::verify(format!(
             "expected {} scalar arguments, got {}",
@@ -246,7 +265,7 @@ pub fn check_call(
             }
         }
     }
-    check_forwarding(caller_kinds, callee.buffers, buffers)
+    check_forwarding(callee.buffers, slices, reg_type)
 }
 
 impl Function {
@@ -259,7 +278,7 @@ impl Function {
     }
 
     pub fn register_count(&self) -> usize {
-        self.params.len() + self.locals.len()
+        self.signature().registers() + self.locals.len()
     }
 
     pub fn reg_type(&self, r: Reg) -> ValueType {
@@ -268,9 +287,10 @@ impl Function {
 
     fn checked_reg_type(&self, r: Reg) -> Option<ValueType> {
         let index = r.0 as usize;
-        match self.params.get(index) {
-            Some(&ty) => Some(ValueType::Scalar(ty)),
-            None => self.locals.get(index - self.params.len()).copied(),
+        let signature = self.signature();
+        match signature.param_type(index) {
+            Some(ty) => Some(ty),
+            None => self.locals.get(index - signature.registers()).copied(),
         }
     }
 

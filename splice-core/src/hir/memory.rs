@@ -13,12 +13,12 @@
 //! - a compress store writes the compressed lanes that fit, then traps if
 //!   any did not.
 use super::ScalarType;
-use super::{Access, Buffer, Reg, Simd, SimdOp};
+use super::{Access, Reg, Simd, SimdOp, Slice};
 
 /// The slice an operation accesses and the element of its vector.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Slice {
-    pub buffer: Buffer,
+pub struct Region {
+    pub slice: Slice,
     pub element: ScalarType,
 }
 
@@ -53,13 +53,13 @@ pub trait Primitives {
     /// inside, and the backend may trap without running it.
     fn require_full(
         &mut self,
-        slice: Slice,
+        slice: Region,
         offset: Self::Scalar,
         before_trap: BeforeTrap<'_, Self>,
     ) -> Result<(), Self::Error>;
     /// How many lanes of the vector at `offset` lie in the slice: a lane
     /// count, which may exceed the number of lanes when all of them do.
-    fn room(&mut self, slice: Slice, offset: Self::Scalar) -> Result<Self::Scalar, Self::Error>;
+    fn room(&mut self, slice: Region, offset: Self::Scalar) -> Result<Self::Scalar, Self::Error>;
     /// The mask of the first `count` lanes, for a [`room`](Self::room).
     fn first_lanes(
         &mut self,
@@ -69,10 +69,10 @@ pub trait Primitives {
     /// The lanes whose index is not below the slice length, compared at
     /// the width of the index lanes. This is exact for a length that fits
     /// that width.
-    fn outside(&mut self, slice: Slice, indices: Self::Vector)
+    fn outside(&mut self, slice: Region, indices: Self::Vector)
     -> Result<Self::Vector, Self::Error>;
-    /// Whether `buffer` holds at most `n` elements: a `bool`.
-    fn length_at_most(&mut self, buffer: Buffer, n: u64) -> Result<Self::Scalar, Self::Error>;
+    /// Whether `slice` holds at most `n` elements: a `bool`.
+    fn length_at_most(&mut self, slice: Region, n: u64) -> Result<Self::Scalar, Self::Error>;
     fn and(&mut self, a: Self::Scalar, b: Self::Scalar) -> Result<Self::Scalar, Self::Error>;
     fn mask_and(&mut self, a: Self::Vector, b: Self::Vector) -> Result<Self::Vector, Self::Error>;
     fn mask_xor(&mut self, a: Self::Vector, b: Self::Vector) -> Result<Self::Vector, Self::Error>;
@@ -102,7 +102,7 @@ pub trait Primitives {
     /// only the lanes of `mask` and takes the others from `passthrough`.
     fn load(
         &mut self,
-        slice: Slice,
+        slice: Region,
         at: Address<Self::Scalar, Self::Vector>,
         masked: Option<Masked<Self::Vector>>,
     ) -> Result<Self::Vector, Self::Error>;
@@ -110,7 +110,7 @@ pub trait Primitives {
     /// order: all of them, or only those of `mask`.
     fn store(
         &mut self,
-        slice: Slice,
+        slice: Region,
         at: Address<Self::Scalar, Self::Vector>,
         mask: Option<Self::Vector>,
         value: Self::Vector,
@@ -120,7 +120,7 @@ pub trait Primitives {
     /// [`room`](Self::room) at `offset`.
     fn compress_store(
         &mut self,
-        slice: Slice,
+        slice: Region,
         offset: Self::Scalar,
         mask: Self::Vector,
         value: Self::Vector,
@@ -151,12 +151,16 @@ pub fn lower<P: Primitives>(
         .filter(|memory| memory.access != Access::Address)
         .expect("a slice memory operation");
     let e = inst.element;
-    let slice = Slice {
-        buffer: memory.buffer,
+    let slice = Region {
+        slice: Slice {
+            ptr: args[0],
+            len: args[1],
+        },
         element: e,
     };
+    let args = &args[2..];
     let write = memory.access == Access::Write;
-    if let SimdOp::CompressStore(_) = inst.op {
+    if let SimdOp::CompressStore = inst.op {
         let offset = p.read_offset(args[0])?;
         let (mask, value) = (p.read_vector(args[1])?, p.read_vector(args[2])?);
         let room = p.room(slice, offset)?;
@@ -228,7 +232,7 @@ pub fn lower<P: Primitives>(
             let index = e.index();
             if !index.is_signed() && index.bits() < 32 {
                 let largest = u64::MAX >> (64 - index.bits());
-                let short = p.length_at_most(slice.buffer, largest)?;
+                let short = p.length_at_most(slice, largest)?;
                 fail = p.and(fail, short)?;
             }
             if !write {

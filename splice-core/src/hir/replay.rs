@@ -1,6 +1,6 @@
 //! Replay a portable function into any kernel builder. A backend's portable
 //! path is this replay over the builder that stages kernels directly.
-use super::{Function, Instr, Label, Reg};
+use super::{ContextSlice, Function, Instr, Label, Reg, RustTarget, Slice};
 use crate::frontend::KernelBuilder;
 
 /// Issue the operations of `function` to `builder`, in order.
@@ -30,6 +30,7 @@ struct Replay<'f, 'b> {
 impl<'f, 'b> Replay<'f, 'b> {
     fn new(f: &'f Function, b: &'b mut dyn KernelBuilder) -> crate::Result<Self> {
         let count = f.register_count();
+        let params = f.signature().registers();
         let mut writes = vec![0u32; count];
         let mut copied = vec![false; count];
         for instruction in f.instructions() {
@@ -41,11 +42,16 @@ impl<'f, 'b> Replay<'f, 'b> {
             }
         }
         let results = (0..count)
-            .map(|r| r >= f.arity() && writes[r] == 1 && !copied[r])
+            .map(|r| r >= params && writes[r] == 1 && !copied[r])
             .collect();
         let mut regs = vec![None; count];
         for (r, slot) in regs.iter_mut().enumerate().take(f.arity()) {
             *slot = Some(b.arg(r)?);
+        }
+        for i in 0..f.buffer_kinds().len() {
+            let (ours, theirs) = (f.signature().slice(i), b.slice_arg(i)?);
+            regs[ours.ptr.0 as usize] = Some(theirs.ptr);
+            regs[ours.len.0 as usize] = Some(theirs.len);
         }
         if let Some(source) = f.source() {
             b.set_source(source);
@@ -58,7 +64,7 @@ impl<'f, 'b> Replay<'f, 'b> {
             b,
             regs,
             results,
-            next: f.arity(),
+            next: params,
             labels,
             pc: 0,
         })
@@ -89,6 +95,13 @@ impl<'f, 'b> Replay<'f, 'b> {
 
     fn regs(&mut self, rs: &[Reg]) -> crate::Result<Vec<Reg>> {
         rs.iter().map(|&r| self.reg(r)).collect()
+    }
+
+    fn slice(&mut self, s: Slice) -> crate::Result<Slice> {
+        Ok(Slice {
+            ptr: self.reg(s.ptr)?,
+            len: self.reg(s.len)?,
+        })
     }
 
     fn label(&self, l: Label) -> Label {
@@ -146,6 +159,10 @@ impl<'f, 'b> Replay<'f, 'b> {
                                     value: Value::Register(self.reg(r)?),
                                     ..var
                                 },
+                                Value::Slice(s) => Variable {
+                                    value: Value::Slice(self.slice(s)?),
+                                    ..var
+                                },
                                 _ => var,
                             })
                         })
@@ -194,20 +211,22 @@ impl<'f, 'b> Replay<'f, 'b> {
                     let (a, z) = (self.reg(a)?, self.reg(z)?);
                     self.define(dst, |b| b.binary(op, a, z))?;
                 }
-                &Instr::BufferLen { dst, buffer } => {
-                    self.define(dst, |b| b.buffer_len(buffer))?;
+                &Instr::Offset { dst, ptr, offset } => {
+                    let (ptr, offset) = (self.reg(ptr)?, self.reg(offset)?);
+                    self.define(dst, |b| b.offset(ptr, offset))?;
                 }
-                &Instr::Load { dst, buffer, index } => {
-                    let index = self.reg(index)?;
-                    self.define(dst, |b| b.load(buffer, index))?;
+                &Instr::Load { dst, slice, index } => {
+                    let (slice, index) = (self.slice(slice)?, self.reg(index)?);
+                    self.define(dst, |b| b.load(slice, index))?;
                 }
                 &Instr::Store {
-                    buffer,
+                    slice,
                     index,
                     value,
                 } => {
+                    let slice = self.slice(slice)?;
                     let (index, value) = (self.reg(index)?, self.reg(value)?);
-                    self.b.store(buffer, index, value)?;
+                    self.b.store(slice, index, value)?;
                 }
                 &Instr::Label(l) => self.b.mark(self.label(l))?,
                 &Instr::Jump(l) => self.b.jump(self.label(l))?,
@@ -228,16 +247,36 @@ impl<'f, 'b> Replay<'f, 'b> {
                     result,
                 } => {
                     let args = self.regs(args)?;
-                    self.define(*dst, |b| b.rust_call(*target, &args, slices, *result))?;
+                    let target = match *target {
+                        RustTarget::Context { context, operation } => RustTarget::Context {
+                            context: self.reg(context)?,
+                            operation,
+                        },
+                        target => target,
+                    };
+                    let slices = slices
+                        .iter()
+                        .map(|&s| {
+                            Ok(ContextSlice {
+                                slice: self.slice(s.slice)?,
+                                ..s
+                            })
+                        })
+                        .collect::<crate::Result<Vec<_>>>()?;
+                    self.define(*dst, |b| b.rust_call(target, &args, &slices, *result))?;
                 }
                 Instr::Call {
                     dst,
                     function,
                     args,
-                    buffers,
+                    slices,
                 } => {
                     let args = self.regs(args)?;
-                    self.define(*dst, |b| b.call_function(function, &args, buffers))?;
+                    let slices = slices
+                        .iter()
+                        .map(|&s| self.slice(s))
+                        .collect::<crate::Result<Vec<_>>>()?;
+                    self.define(*dst, |b| b.call_function(function, &args, &slices))?;
                 }
                 Instr::Intrinsic { dst, id, args } => {
                     let args = self.regs(args)?;

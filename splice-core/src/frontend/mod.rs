@@ -15,7 +15,7 @@ mod specialization;
 pub use specialization::{ComptimeKey, KeyArgument, MaybeKey, Specialization};
 
 use crate::hir::{
-    Binary, Buffer, BufferKind, Constant, ContextSlice, Function, Label, Reg, ScalarType, Simd,
+    Binary, BufferKind, Constant, ContextSlice, Function, Label, Reg, ScalarType, Simd, Slice,
     ValueType,
 };
 use crate::intrinsic::IntrinsicId;
@@ -53,6 +53,35 @@ impl<'a> Signature<'a> {
             result,
             buffers,
         }
+    }
+
+    /// The parameter registers: the scalars, then a [`Slice`] for each
+    /// buffer.
+    pub const fn registers(&self) -> usize {
+        self.params.len() + 2 * self.buffers.len()
+    }
+
+    /// The registers of buffer parameter `index`.
+    pub const fn slice(&self, index: usize) -> Slice {
+        let ptr = (self.params.len() + 2 * index) as u32;
+        Slice {
+            ptr: Reg(ptr),
+            len: Reg(ptr + 1),
+        }
+    }
+
+    /// The type of parameter register `index`, if it is one.
+    pub fn param_type(&self, index: usize) -> Option<ValueType> {
+        if let Some(&ty) = self.params.get(index) {
+            return Some(ValueType::Scalar(ty));
+        }
+        let buffer = (index - self.params.len()) / 2;
+        let &kind = self.buffers.get(buffer)?;
+        Some(if (index - self.params.len()) % 2 == 0 {
+            ValueType::Ptr(kind)
+        } else {
+            ValueType::Scalar(ScalarType::Index)
+        })
     }
 }
 
@@ -101,9 +130,14 @@ pub trait KernelBuilder {
     fn constant(&mut self, value: Constant) -> crate::Result<Reg>;
     /// Rust's `value as to`.
     fn cast(&mut self, value: Reg, to: ScalarType) -> crate::Result<Reg>;
-    fn buffer_len(&mut self, buffer: Buffer) -> crate::Result<Reg>;
-    fn load(&mut self, buffer: Buffer, index: Reg) -> crate::Result<Reg>;
-    fn store(&mut self, buffer: Buffer, index: Reg, value: Reg) -> crate::Result<()>;
+    /// The registers of buffer parameter `index`.
+    fn slice_arg(&self, index: usize) -> crate::Result<Slice>;
+    /// `ptr` advanced by `offset` elements, unchecked (see [`Instr::Offset`]).
+    ///
+    /// [`Instr::Offset`]: crate::hir::Instr::Offset
+    fn offset(&mut self, ptr: Reg, offset: Reg) -> crate::Result<Reg>;
+    fn load(&mut self, slice: Slice, index: Reg) -> crate::Result<Reg>;
+    fn store(&mut self, slice: Slice, index: Reg, value: Reg) -> crate::Result<()>;
     fn binary(&mut self, op: Binary, a: Reg, b: Reg) -> crate::Result<Reg>;
     fn assign(&mut self, dst: Reg, src: Reg) -> crate::Result<()>;
     fn label(&mut self) -> crate::Result<Label>;
@@ -136,7 +170,7 @@ pub trait KernelBuilder {
         &mut self,
         signature: Signature<'_>,
         args: &[Reg],
-        buffers: &[Buffer],
+        slices: &[Slice],
         body: Body<'_>,
     ) -> crate::Result<Reg>;
 
@@ -147,10 +181,10 @@ pub trait KernelBuilder {
         &mut self,
         key: Specialization,
         args: &[Reg],
-        buffers: &[Buffer],
+        slices: &[Slice],
         body: Body<'_>,
     ) -> crate::Result<Reg> {
-        self.call_kernel(key.signature(), args, buffers, body)
+        self.call_kernel(key.signature(), args, slices, body)
     }
 
     /// Call a portable function. Builders that keep callee definitions
@@ -159,13 +193,13 @@ pub trait KernelBuilder {
         &mut self,
         function: &Arc<Function>,
         args: &[Reg],
-        buffers: &[Buffer],
+        slices: &[Slice],
     ) -> crate::Result<Reg> {
         let callee = Arc::clone(function);
         self.call_kernel(
             function.signature(),
             args,
-            buffers,
+            slices,
             Box::new(move |b| crate::hir::replay(&callee, b)),
         )
     }
@@ -191,6 +225,22 @@ impl dyn KernelBuilder + '_ {
         let dst = self.local(ty)?;
         self.assign(dst, value)?;
         Ok(dst)
+    }
+
+    /// `&slice[start..end]`: traps with [`crate::Trap::Bounds`], as Rust
+    /// panics, unless `start <= end <= slice.len`.
+    pub fn subslice(&mut self, slice: Slice, start: Reg, end: Reg) -> crate::Result<Slice> {
+        let ordered = self.binary(Binary::Le, start, end)?;
+        let inside = self.binary(Binary::Le, end, slice.len)?;
+        let valid = self.binary(Binary::And, ordered, inside)?;
+        let (fail, next) = (self.label()?, self.label()?);
+        self.branch(valid, next, fail)?;
+        self.mark(fail)?;
+        self.trap_bounds()?;
+        self.mark(next)?;
+        let ptr = self.offset(slice.ptr, start)?;
+        let len = self.binary(Binary::Sub, end, start)?;
+        Ok(Slice { ptr, len })
     }
 
     /// Continue in a fresh block when the condition holds.
