@@ -136,8 +136,8 @@ fn branches_use_comparison_bits_and_preserve_comparison_masks() {
 #[test]
 fn branches_use_vector_reduction_bits_and_preserve_scalar_masks() {
     use splice_core::{
+        hir::ScalarType,
         hir::{Simd, SimdOp},
-        simd::Element,
     };
 
     let mut f = FunctionBuilder::new(
@@ -145,7 +145,7 @@ fn branches_use_vector_reduction_bits_and_preserve_scalar_masks() {
         Signature::new(&[ScalarType::I32; 1], ScalarType::I32, &[]),
     );
     let op = |op| Simd {
-        element: Element::I32,
+        element: ScalarType::I32,
         op,
     };
     let count = f.cast(f.arg(0).unwrap(), ScalarType::Index).unwrap();
@@ -226,11 +226,11 @@ fn packed_chunks_cover_the_vector_and_a_short_store_keeps_its_prefix() {
     use cranelift_codegen::ir::types::I16X8;
     use splice_core::{
         BufferKind,
+        hir::ScalarType,
         hir::{Buffer, Simd, SimdOp},
-        simd::Element,
     };
 
-    let e = Element::U16;
+    let e = ScalarType::U16;
     let mut f = FunctionBuilder::new(
         options(),
         Signature::new(
@@ -307,13 +307,13 @@ fn masked_contiguous_access_selects_packed_and_ordered_paths() {
     use cranelift_codegen::ir::types::I16X8;
     use splice_core::{
         BufferKind,
+        hir::ScalarType,
         hir::{Buffer, Simd, SimdOp},
-        simd::Element,
     };
 
     // The only vector memory operations here have runtime masks, so a plain
     // vector load/store in CLIF must come from the masked access fast path.
-    let e = Element::U16;
+    let e = ScalarType::U16;
     let mut f = FunctionBuilder::new(
         options(),
         Signature::new(
@@ -409,8 +409,8 @@ fn a_full_gather_has_one_bounds_branch_for_all_lanes() {
 #[test]
 fn stack_shuffles_share_one_slot_per_function() {
     use splice_core::{
+        hir::ScalarType,
         hir::{Simd, SimdOp},
-        simd::Element,
     };
 
     let mut f = FunctionBuilder::new(
@@ -418,7 +418,7 @@ fn stack_shuffles_share_one_slot_per_function() {
         Signature::new(&[ScalarType::I32; 1], ScalarType::I32, &[]),
     );
     let op = |op| Simd {
-        element: Element::I32,
+        element: ScalarType::I32,
         op,
     };
     let lane = f.arg(0).unwrap();

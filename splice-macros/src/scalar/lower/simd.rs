@@ -1,16 +1,16 @@
 use super::{Lower, Scalar, Stage, Value, err};
+use crate::kast::types::Primitive;
 use proc_macro2::{Ident, Span, TokenStream};
 use quote::{ToTokens, format_ident};
 use syn::{Expr, GenericArgument, Path, PathArguments, Result, Type, visit::Visit};
 
+/// The element of a slice, vector or mask: a named primitive, a generic
+/// parameter of the kernel, or the lane index type of a generic parameter.
+/// rustc checked that a named element is a `BufferElement` (or a
+/// `LaneElement` for a vector); the IR type is `<T as KernelScalar>::TYPE`.
 #[derive(Copy, Clone, PartialEq, Eq)]
 pub(crate) enum Elem {
-    U16,
-    U32,
-    I32,
-    I64,
-    F32,
-    F64,
+    Named(Primitive),
     Param(usize),
     Index(usize),
 }
@@ -20,52 +20,33 @@ pub(crate) struct BufferType {
     pub write: bool,
 }
 impl Elem {
-    fn names(self) -> (&'static str, &'static str) {
-        match self {
-            Self::U16 => ("u16", "U16"),
-            Self::U32 => ("u32", "U32"),
-            Self::I32 => ("i32", "I32"),
-            Self::I64 => ("i64", "I64"),
-            Self::F32 => ("f32", "F32"),
-            Self::F64 => ("f64", "F64"),
-            Self::Param(_) | Self::Index(_) => unreachable!("named primitive element"),
-        }
-    }
-    fn of(primitive: crate::kast::types::Primitive) -> Option<Self> {
-        use crate::kast::types::Primitive;
-        Some(match primitive {
-            Primitive::U16 => Self::U16,
-            Primitive::U32 => Self::U32,
-            Primitive::I32 => Self::I32,
-            Primitive::I64 => Self::I64,
-            Primitive::F32 => Self::F32,
-            Primitive::F64 => Self::F64,
-            _ => return None,
-        })
+    pub(crate) const I32: Self = Self::Named(Primitive::I32);
+    pub(crate) const U32: Self = Self::Named(Primitive::U32);
+    fn of(primitive: Primitive) -> Option<Self> {
+        (primitive.is_kernel_scalar() && primitive != Primitive::Bool)
+            .then_some(Self::Named(primitive))
     }
     /// The primitive type of a named element.
-    pub(in crate::scalar) fn primitive(self) -> Option<crate::kast::types::Primitive> {
+    pub(in crate::scalar) fn primitive(self) -> Option<Primitive> {
         match self {
+            Self::Named(p) => Some(p),
             Self::Param(_) | Self::Index(_) => None,
-            _ => crate::kast::types::Primitive::named(self.names().0),
         }
+    }
+    pub(in crate::scalar) fn is_float(self) -> bool {
+        self.primitive().is_some_and(Primitive::is_float)
     }
     /// The register an element of a slice loads into: a generic element's
     /// type is the builder's.
     pub(super) fn scalar(self) -> Option<Scalar> {
-        use super::Number;
-        Some(match self {
-            Self::U32 => Scalar::Number(Number::U32),
-            Self::I32 => Scalar::I32,
-            Self::I64 => Scalar::Number(Number::I64),
-            Self::F32 => Scalar::Number(Number::F32),
-            Self::F64 => Scalar::Number(Number::F64),
-            Self::Param(_) => Scalar::Inferred,
-            Self::U16 | Self::Index(_) => return None,
-        })
+        match self {
+            Self::Named(p) => Scalar::of(p),
+            Self::Param(_) => Some(Scalar::Inferred),
+            Self::Index(_) => None,
+        }
     }
     pub(crate) fn parse(t: &Type, types: &[&Ident]) -> Option<Self> {
-        if let Some(primitive) = crate::kast::types::Primitive::of(t) {
+        if let Some(primitive) = Primitive::of(t) {
             return Self::of(primitive);
         }
         let Type::Path(p) = t else { return None };
@@ -73,16 +54,8 @@ impl Elem {
         types.iter().position(|ty| *ty == name).map(Self::Param)
     }
     pub(crate) fn tokens(self, root: &Path, types: &[&Ident]) -> TokenStream {
-        match self {
-            Self::Param(_) | Self::Index(_) => {
-                let ty = self.ty(root, types);
-                emit!(<#ty as #root::simd::LaneElement>::ELEMENT)
-            }
-            _ => {
-                let id = format_ident!("{}", self.names().1);
-                emit!(#root::simd::Element::#id)
-            }
-        }
+        let ty = self.ty(root, types);
+        emit!(<#ty as #root::KernelScalar>::TYPE)
     }
     pub(in crate::scalar) fn ty(self, root: &Path, types: &[&Ident]) -> TokenStream {
         match self {
@@ -91,13 +64,13 @@ impl Elem {
                 let ty = types[i];
                 emit!(<#ty as #root::simd::LaneElement>::Index)
             }
-            _ => Ident::new(self.names().0, Span::call_site()).to_token_stream(),
+            Self::Named(p) => Ident::new(p.name(), Span::call_site()).to_token_stream(),
         }
     }
     fn index(self) -> Self {
         match self {
-            Self::F32 => Self::I32,
-            Self::F64 => Self::I64,
+            Self::Named(Primitive::F32) => Self::I32,
+            Self::Named(Primitive::F64) => Self::Named(Primitive::I64),
             Self::Param(i) => Self::Index(i),
             x => x,
         }
@@ -128,10 +101,8 @@ fn splat_element(expr: &Expr) -> Option<Elem> {
         Expr::Unary(u) if matches!(u.op, syn::UnOp::Neg(_)) => splat_element(&u.expr),
         Expr::Cast(c) => Elem::parse(&c.ty, &[]),
         Expr::Lit(l) => match &l.lit {
-            syn::Lit::Int(v) => crate::kast::types::Primitive::named(v.suffix()).and_then(Elem::of),
-            syn::Lit::Float(v) => {
-                crate::kast::types::Primitive::named(v.suffix()).and_then(Elem::of)
-            }
+            syn::Lit::Int(v) => Primitive::named(v.suffix()).and_then(Elem::of),
+            syn::Lit::Float(v) => Primitive::named(v.suffix()).and_then(Elem::of),
             _ => None,
         },
         _ => None,
@@ -383,8 +354,8 @@ impl Lower<'_> {
             },
             Scalar::Vector(e) => match op {
                 "Add" | "Sub" | "Mul" => (e, op, t),
-                "Div" if matches!(e, Elem::F32 | Elem::F64) => (e, op, t),
-                "And" | "Or" | "Xor" | "Not" if !matches!(e, Elem::F32 | Elem::F64) => (e, op, t),
+                "Div" if e.is_float() => (e, op, t),
+                "And" | "Or" | "Xor" | "Not" if !e.is_float() => (e, op, t),
                 "Eq" | "Ne" | "Lt" | "Le" | "Gt" | "Ge" => (e, op, Scalar::Mask(e)),
                 _ => return err(at, "unsupported SIMD vector operator"),
             },
@@ -500,7 +471,9 @@ impl Lower<'_> {
                 Some(Scalar::Mask(e))
             }
             "any" | "all" => Some(Scalar::Bool),
-            "count" | "reduce_sum" | "extract_wrapping" | "last" => Some(Scalar::I32),
+            "count" => Some(Scalar::I32),
+            // A scalar of the lane type.
+            "reduce_sum" | "extract_wrapping" | "last" => e.scalar(),
             "cast" | "widen_low" | "widen_high" | "narrow" => match data {
                 Some(to) => Some(to),
                 None => return err(m, "specify the output lane type"),

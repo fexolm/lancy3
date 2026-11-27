@@ -4,23 +4,16 @@ use lancy::Trap;
 use lancy::hir::{
     Binary, Block, Lane, Op, Scale, Simd as V, Ternary, Type, Unary, Value, VectorAddress,
 };
-use splice_core::{
-    hir::{
-        Buffer, Reg, Simd, SimdOp, ValueType,
-        memory::{self, Address, BeforeTrap, Masked, Slice},
-    },
-    simd::Element,
+use splice_core::hir::{
+    Buffer, Reg, ScalarType, Simd, SimdOp, ValueType,
+    memory::{self, Address, BeforeTrap, Masked, Slice},
 };
 
-fn lane(e: Element) -> Lane {
-    match e {
-        Element::U16 => Lane::U16,
-        Element::U32 => Lane::U32,
-        Element::I32 => Lane::I32,
-        Element::I64 => Lane::I64,
-        Element::F32 => Lane::F32,
-        Element::F64 => Lane::F64,
-    }
+/// The Lancy lane of a vector element: its scalar type.
+fn lane(e: ScalarType) -> Lane {
+    super::scalar_type(e)
+        .lane()
+        .expect("a lane element is a Lancy lane")
 }
 
 pub(super) fn native_type(ty: ValueType) -> Type {
@@ -31,11 +24,14 @@ pub(super) fn native_type(ty: ValueType) -> Type {
     }
 }
 
-pub(super) fn stride(e: Element) -> Scale {
-    match e {
-        Element::U16 => Scale::Two,
-        Element::I32 | Element::U32 | Element::F32 => Scale::Four,
-        Element::I64 | Element::F64 => Scale::Eight,
+/// The distance between elements of `e` in memory.
+pub(super) fn stride(e: ScalarType) -> Scale {
+    match e.bytes() {
+        1 => Scale::One,
+        2 => Scale::Two,
+        4 => Scale::Four,
+        8 => Scale::Eight,
+        bytes => unreachable!("no {bytes}-byte slice element"),
     }
 }
 
@@ -203,6 +199,8 @@ impl Builder<'_> {
                 match op {
                     Add => Binary::Add,
                     Sub => Binary::Sub,
+                    SaturatingAdd => Binary::SaturatingAdd,
+                    SaturatingSub => Binary::SaturatingSub,
                     Mul => Binary::Mul,
                     Min => Binary::Min,
                     Max => Binary::Max,
@@ -263,7 +261,7 @@ impl Builder<'_> {
         let x = self.value(Op::literal(ty, bits.into()));
         self.value(Op::Simd(V::Splat(x)))
     }
-    fn splat_index(&mut self, e: Element, x: Value) -> Value {
+    fn splat_index(&mut self, e: ScalarType, x: Value) -> Value {
         let ty = lane(e.index()).scalar();
         let x = if ty == Type::I32 {
             x
@@ -276,7 +274,7 @@ impl Builder<'_> {
         self.value(Op::Simd(V::MaskCount(mask)))
     }
     /// The predicate of the first `count` lanes, an `i32`.
-    fn first_lanes(&mut self, e: Element, count: Value) -> Value {
+    fn first_lanes(&mut self, e: ScalarType, count: Value) -> Value {
         self.value(Op::Simd(V::FirstLanes(lane(e.index()), count)))
     }
 }
@@ -325,28 +323,34 @@ impl memory::Primitives for Builder<'_> {
         let width = self.value(Op::Simd(V::LaneCount(lane(s.element))));
         Ok(self.value(Op::Bin(Binary::Min, left, width)))
     }
-    fn first_lanes(&mut self, e: Element, count: Value) -> splice_core::Result<Value> {
+    fn first_lanes(&mut self, e: ScalarType, count: Value) -> splice_core::Result<Value> {
         Ok(self.first_lanes(e, count))
     }
     fn outside(&mut self, s: Slice, indices: Value) -> splice_core::Result<Value> {
         let e = s.element;
         let (_, len) = self.slice(s.buffer);
-        let idx = lane(e.index());
-        let limit = self.splat_index(e, len);
-        if idx == Lane::U16 {
-            return Ok(self.value(Op::Bin(Binary::Ge, indices, limit)));
-        }
-        // Buffer validation caps every length at i32::MAX. Reinterpreting
-        // negative indices as unsigned puts them above every valid length.
-        let unsigned = Type::Vector(if idx.bytes() == 4 {
-            Lane::U32
+        let index = e.index();
+        // Reinterpreting negative indices as unsigned puts them above every
+        // valid length: buffer validation caps lengths at i32::MAX, and a
+        // narrow limit at the first negative index. A narrow unsigned limit
+        // saturates at the largest index, where `memory` ignores the result:
+        // no such index leaves a longer slice.
+        let unsigned = ScalarType::integer(index.bits(), false);
+        let len = if index.bits() < 32 {
+            let cap = if index.is_signed() {
+                1 << (index.bits() - 1)
+            } else {
+                (1 << index.bits()) - 1
+            };
+            let cap = self.value(Op::Const(cap));
+            self.value(Op::Bin(Binary::Min, len, cap))
         } else {
-            Lane::U64
-        });
-        let offsets = self.value(Op::Bitcast(unsigned, indices));
-        let limit = self.value(Op::Bitcast(unsigned, limit));
+            len
+        };
+        let limit = self.splat_index(unsigned, len);
+        let offsets = self.value(Op::Bitcast(Type::Vector(lane(unsigned)), indices));
         let outside = self.value(Op::Bin(Binary::Ge, offsets, limit));
-        Ok(self.value(Op::Bitcast(Type::Vector(idx), outside)))
+        Ok(self.value(Op::Bitcast(Type::Vector(lane(index)), outside)))
     }
     fn length_at_most(&mut self, buffer: Buffer, n: u64) -> splice_core::Result<Value> {
         let (_, len) = self.slice(buffer);
@@ -365,7 +369,7 @@ impl memory::Primitives for Builder<'_> {
     fn any(&mut self, mask: Value) -> splice_core::Result<Value> {
         Ok(self.value(Op::Simd(V::AnyTrue(mask))))
     }
-    fn before_first(&mut self, e: Element, mask: Value) -> splice_core::Result<Value> {
+    fn before_first(&mut self, e: ScalarType, mask: Value) -> splice_core::Result<Value> {
         // The first lane of the mask, or the lane count if it has none.
         let idx = lane(e.index());
         let iota = self.value(Op::Simd(V::Iota(idx)));
@@ -475,26 +479,35 @@ impl Builder<'_> {
                 base: self.value(Op::PtrOffset(base, offset, stride(e))),
                 indices: None,
             },
-            // Lancy's gather takes signed indices: rebase unsigned u16
-            // offsets around 32768.
-            Address::Indices(indices) if e.index() == Element::U16 => {
-                let half = self.value(Op::Const(1 << 15));
-                let base = self.value(Op::PtrOffset(base, half, Scale::Two));
-                let sign = self.splat_bits(Lane::U16, 1 << 15);
-                let biased = self.value(Op::Bin(Binary::Xor, indices, sign));
-                VectorAddress {
-                    base,
-                    indices: Some(self.value(Op::Bitcast(Type::Vector(Lane::I16), biased))),
+            // Lancy's gather takes signed indices: rebase narrow unsigned
+            // offsets around half their range. `u32` offsets above
+            // `i32::MAX` are outside every slice and trap before the access.
+            Address::Indices(indices) => {
+                let index = e.index();
+                let signed = lane(ScalarType::integer(index.bits(), true));
+                if index.is_signed() {
+                    return VectorAddress {
+                        base,
+                        indices: Some(indices),
+                    };
                 }
-            }
-            Address::Indices(indices) => VectorAddress {
-                base,
-                indices: Some(if e.index() == Element::U32 {
-                    self.value(Op::Bitcast(Type::Vector(Lane::I32), indices))
+                let base = if index.bits() < 32 {
+                    let half = self.value(Op::Const(1 << (index.bits() - 1)));
+                    self.value(Op::PtrOffset(base, half, stride(e)))
+                } else {
+                    base
+                };
+                let indices = if index.bits() < 32 {
+                    let sign = self.splat_bits(lane(index), 1 << (index.bits() - 1));
+                    self.value(Op::Bin(Binary::Xor, indices, sign))
                 } else {
                     indices
-                }),
-            },
+                };
+                VectorAddress {
+                    base,
+                    indices: Some(self.value(Op::Bitcast(Type::Vector(signed), indices))),
+                }
+            }
         }
     }
 }

@@ -1,5 +1,4 @@
 //! Errors of the two phases: building a kernel and calling it.
-use crate::simd::Element;
 pub use splice_target::{TargetError, abi::Trap};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use thiserror::Error;
@@ -51,7 +50,10 @@ pub enum SignatureError {
     #[error("expected {expected} buffers, got {actual}")]
     Buffers { expected: usize, actual: usize },
     #[error("buffer {buffer} expects {} elements", expected.name())]
-    Element { buffer: usize, expected: Element },
+    Element {
+        buffer: usize,
+        expected: crate::hir::ScalarType,
+    },
     #[error("buffer {buffer} has the wrong Rust context signature")]
     Context { buffer: usize },
     #[error("buffer {buffer} requires a writable slice")]

@@ -8,7 +8,7 @@
 //! operands the kernel passes, typed by the builder.
 use super::KernelBuilder;
 use crate::hir::{Binary, Buffer, Constant, Reg, ScalarType, Simd, SimdOp, ValueType};
-use crate::simd::{Element, Shuffle};
+use crate::simd::Shuffle;
 
 /// How a core method stages its operands.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -149,18 +149,18 @@ struct SimdCall<'a> {
     builder: &'a mut dyn KernelBuilder,
     method: &'a str,
     receiver: Reg,
-    element: Element,
+    element: ScalarType,
     mask: bool,
     args: &'a [Operand],
     /// The output element of a conversion (`cast::<U>()`, `widen_low`).
-    output: Option<Element>,
+    output: Option<ScalarType>,
 }
 
 type SimdLowering = fn(&mut SimdCall<'_>) -> crate::Result<Option<Reg>>;
 
 /// The SIMD methods: the Rust method of `Lane` or `Mask` and the operations
 /// it stages.
-const SIMD_METHODS: [(&str, SimdLowering); 33] = [
+const SIMD_METHODS: [(&str, SimdLowering); 35] = [
     ("interleave_low", |c| c.shuffle(Shuffle::InterleaveLow)),
     ("interleave_high", |c| c.shuffle(Shuffle::InterleaveHigh)),
     ("deinterleave_even", |c| {
@@ -174,6 +174,8 @@ const SIMD_METHODS: [(&str, SimdLowering); 33] = [
         let count = c.count(0)?;
         c.with_args(SimdOp::RotateLeft(count), 0)
     }),
+    ("saturating_add", |c| c.with_args(SimdOp::SaturatingAdd, 1)),
+    ("saturating_sub", |c| c.with_args(SimdOp::SaturatingSub, 1)),
     ("simd_min", |c| c.with_args(SimdOp::Min, 1)),
     ("simd_max", |c| c.with_args(SimdOp::Max, 1)),
     ("sqrt", |c| c.with_args(SimdOp::Sqrt, 0)),
@@ -202,7 +204,7 @@ const SIMD_METHODS: [(&str, SimdLowering); 33] = [
         c.vector_op(SimdOp::ExtractWrapping, &[c.receiver, index])
     }),
     ("replace_wrapping", |c| {
-        let (index, value) = (c.lane(0)?, c.lane(1)?);
+        let (index, value) = (c.lane(0)?, c.scalar(1, c.element)?);
         c.vector_op(SimdOp::ReplaceWrapping, &[c.receiver, index, value])
     }),
     ("simd_eq", |c| c.with_args(SimdOp::Eq, 1)),
@@ -265,7 +267,7 @@ pub fn simd_method(
     method: &str,
     receiver: Reg,
     args: &[Operand],
-    output: Option<Element>,
+    output: Option<ScalarType>,
 ) -> crate::Result<Option<Reg>> {
     let (element, mask) = match builder.reg_type(receiver) {
         Some(ValueType::Vector(element)) => (element, false),
@@ -317,7 +319,7 @@ impl SimdCall<'_> {
             Operand::Known(value) => {
                 let value = value
                     .cast(ty)
-                    .ok_or_else(|| self.error("expected an integer operand"))?;
+                    .ok_or_else(|| self.error(&format!("expected a `{ty}` operand")))?;
                 self.builder.constant(value)
             }
             Operand::Buffer(_) => Err(self.error("expected a scalar operand")),
@@ -348,7 +350,7 @@ impl SimdCall<'_> {
         }
     }
 
-    fn output(&self) -> crate::Result<Element> {
+    fn output(&self) -> crate::Result<ScalarType> {
         self.output
             .ok_or_else(|| self.error("specify the output lane type"))
     }
@@ -436,6 +438,6 @@ mod tests {
             assert!(simd_lowering(name).is_some(), "{name}");
             assert!(!names[..i].contains(name), "{name} is registered twice");
         }
-        assert!(simd_lowering("saturating_add").is_none());
+        assert!(simd_lowering("saturating_mul").is_none());
     }
 }

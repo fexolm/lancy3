@@ -10,21 +10,12 @@
 //!     Lane::<u16>::lanes() as i32
 //! }
 //! ```
+use crate::{BufferElement, KernelScalar};
 use splice_target::MAX_VECTOR_BYTES;
 use std::{
     marker::PhantomData,
     ops::{Add, BitAnd, BitOr, BitXor, Mul, Not, Sub},
 };
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
-pub enum Element {
-    U16,
-    U32,
-    I32,
-    I64,
-    F32,
-    F64,
-}
 
 /// Width of the reference `Lane<T>` that runs a kernel as ordinary Rust: the
 /// default target of this machine (`SPLICE_SIMD`). Compiled kernels use the
@@ -39,52 +30,16 @@ pub fn vector_bytes() -> usize {
     }
 }
 
-impl Element {
-    pub const fn bytes(self) -> usize {
-        match self {
-            Self::U16 => 2,
-            Self::I32 | Self::U32 | Self::F32 => 4,
-            Self::I64 | Self::F64 => 8,
-        }
-    }
-    /// Lanes in a vector of `vector_bytes`.
-    pub const fn lanes(self, vector_bytes: usize) -> usize {
-        vector_bytes / self.bytes()
-    }
-    pub const fn index(self) -> Self {
-        match self {
-            Self::F32 => Self::I32,
-            Self::F64 => Self::I64,
-            other => other,
-        }
-    }
-    pub const fn is_float(self) -> bool {
-        matches!(self, Self::F32 | Self::F64)
-    }
-    pub const fn is_unsigned(self) -> bool {
-        matches!(self, Self::U16 | Self::U32)
-    }
-    pub const fn name(self) -> &'static str {
-        match self {
-            Self::U16 => "u16",
-            Self::U32 => "u32",
-            Self::I32 => "i32",
-            Self::I64 => "i64",
-            Self::F32 => "f32",
-            Self::F64 => "f64",
-        }
-    }
-}
-
-mod sealed {
-    pub trait Sealed {}
-}
-pub trait LaneElement:
-    sealed::Sealed + Copy + Default + PartialOrd + std::fmt::Debug + 'static
-{
+/// The element of a [`Lane`]: a number type whose
+/// [`ScalarType::is_lane`] holds.
+#[diagnostic::on_unimplemented(
+    message = "`{Self}` is not a SIMD lane element",
+    label = "not a lane element",
+    note = "lane elements are `i8`, `u8`, `i16`, `u16`, `i32`, `u32`, `i64`, `f32` and `f64`"
+)]
+pub trait LaneElement: BufferElement + Default + PartialOrd + std::fmt::Debug + 'static {
     type Storage: Copy + AsRef<[Self]> + AsMut<[Self]>;
     type Index: LaneIndex;
-    const ELEMENT: Element;
     const ZERO: Self;
     fn fill(v: Self) -> Self::Storage;
     fn number(n: usize) -> Self;
@@ -97,12 +52,11 @@ pub trait LaneIndex: LaneElement {
     fn offset(self) -> usize;
 }
 macro_rules! element {
-    ($ty:ty, $kind:ident, $idx:ty, $bits:expr, $add:expr, $sub:expr, $mul:expr) => {
-        impl sealed::Sealed for $ty {}
+    ($ty:ty, $idx:ty, $bits:expr, $add:expr, $sub:expr, $mul:expr) => {
+        const _: () = assert!(<$ty as KernelScalar>::TYPE.is_lane());
         impl LaneElement for $ty {
             type Storage = [$ty; MAX_VECTOR_BYTES / size_of::<$ty>()];
             type Index = $idx;
-            const ELEMENT: Element = Element::$kind;
             const ZERO: Self = 0 as $ty;
             fn fill(v: Self) -> Self::Storage {
                 [v; MAX_VECTOR_BYTES / size_of::<$ty>()]
@@ -126,10 +80,9 @@ macro_rules! element {
     };
 }
 macro_rules! integer {
-    ($ty:ty,$kind:ident) => {
+    ($($ty:ty),*) => {$(
         element!(
             $ty,
-            $kind,
             $ty,
             |v| v as u64,
             <$ty>::wrapping_add,
@@ -141,36 +94,32 @@ macro_rules! integer {
                 self as usize
             }
         }
-    };
+    )*};
 }
-integer!(u16, U16);
-integer!(u32, U32);
-integer!(i32, I32);
-integer!(i64, I64);
+integer!(i8, u8, i16, u16, i32, u32, i64);
 element!(
     f32,
-    F32,
     i32,
     |v: f32| u64::from(v.to_bits()),
     Add::add,
     Sub::sub,
     Mul::mul
 );
-element!(f64, F64, i64, f64::to_bits, Add::add, Sub::sub, Mul::mul);
+element!(f64, i64, f64::to_bits, Add::add, Sub::sub, Mul::mul);
 
 /// One native-width block of elements. Use lanes() to advance a slice cursor.
 #[derive(Clone, Copy)]
 pub struct Lane<T: LaneElement>(T::Storage);
 /// One predicate per lane of the corresponding data vector.
 #[derive(Clone, Copy)]
-pub struct Mask<T: LaneElement>(u32, PhantomData<T>);
-// The narrowest element (`u16`) has the most lanes; each needs a mask bit.
-const _: () = assert!(MAX_VECTOR_BYTES / Element::U16.bytes() <= u32::BITS as usize);
+pub struct Mask<T: LaneElement>(u64, PhantomData<T>);
+// The narrowest element (`u8`) has the most lanes; each needs a mask bit.
+const _: () = assert!(MAX_VECTOR_BYTES <= u64::BITS as usize);
 impl<T: LaneElement> Mask<T> {
     fn from_fn(f: impl Fn(usize) -> bool) -> Self {
         let mut bits = 0;
         for i in 0..Lane::<T>::lanes() {
-            bits |= u32::from(f(i)) << i;
+            bits |= u64::from(f(i)) << i;
         }
         Self(bits, PhantomData)
     }
@@ -181,7 +130,11 @@ impl<T: LaneElement> Mask<T> {
         self.0 != 0
     }
     pub fn all(self) -> bool {
-        self.0 == u32::MAX >> (32 - Lane::<T>::lanes())
+        self.0 == u64::MAX >> (64 - Lane::<T>::lanes())
+    }
+    /// Number of active lanes.
+    pub fn count(self) -> i32 {
+        self.0.count_ones() as i32
     }
     pub fn select<U: LaneElement<Index = T::Index>>(self, yes: Lane<U>, no: Lane<U>) -> Lane<U> {
         Lane::from_fn(|i| if self.active(i) { yes.at(i) } else { no.at(i) })
@@ -209,7 +162,7 @@ mask_binary!(BitXor, bitxor);
 
 impl<T: LaneElement> Lane<T> {
     pub fn lanes() -> usize {
-        T::ELEMENT.lanes(vector_bytes())
+        T::TYPE.lanes(vector_bytes())
     }
     /// Activate the first min(count, lanes()) lanes. Useful for the last partial block.
     pub fn first_n(count: usize) -> Mask<T> {
@@ -230,6 +183,18 @@ impl<T: LaneElement> Lane<T> {
     }
     pub fn iota() -> Self {
         Self::from_fn(T::number)
+    }
+    /// Read a lane, wrapping the index modulo the active lane count.
+    pub fn extract_wrapping(self, index: i32) -> T {
+        self.at(index as usize & (Self::lanes() - 1))
+    }
+    /// Replace a lane, wrapping the index modulo the active lane count.
+    pub fn replace_wrapping(self, index: i32, value: T) -> Self {
+        let index = index as usize & (Self::lanes() - 1);
+        Self::from_fn(|i| if i == index { value } else { self.at(i) })
+    }
+    pub fn last(self) -> T {
+        self.at(Self::lanes() - 1)
     }
     pub fn load(src: &[T], offset: usize) -> Self {
         Self::from_fn(|i| src[offset.checked_add(i).expect("SIMD index overflow")])
@@ -326,12 +291,33 @@ impl Shuffle {
         }
     }
 }
-impl Mask<i32> {
-    /// Number of active lanes.
-    pub fn count(self) -> i32 {
-        self.0.count_ones() as i32
-    }
+macro_rules! integer_lanes {
+    ($($ty:ty),*) => {$(
+        impl Lane<$ty> {
+            /// Sum all lanes with wrapping addition.
+            pub fn reduce_sum(self) -> $ty {
+                (0..Self::lanes()).fold(0, |sum: $ty, i| sum.wrapping_add(self.at(i)))
+            }
+            /// The smaller of each pair of lanes.
+            pub fn simd_min(self, rhs: Self) -> Self {
+                Self::from_fn(|i| self.at(i).min(rhs.at(i)))
+            }
+            /// The larger of each pair of lanes.
+            pub fn simd_max(self, rhs: Self) -> Self {
+                Self::from_fn(|i| self.at(i).max(rhs.at(i)))
+            }
+            /// Add each pair of lanes, clamping to the lane type's range.
+            pub fn saturating_add(self, rhs: Self) -> Self {
+                Self::from_fn(|i| self.at(i).saturating_add(rhs.at(i)))
+            }
+            /// Subtract each pair of lanes, clamping to the lane type's range.
+            pub fn saturating_sub(self, rhs: Self) -> Self {
+                Self::from_fn(|i| self.at(i).saturating_sub(rhs.at(i)))
+            }
+        }
+    )*};
 }
+integer_lanes!(i8, u8, i16, u16, i32, u32, i64);
 
 impl std::ops::Shr<u32> for Lane<i32> {
     type Output = Self;
@@ -351,32 +337,12 @@ impl Lane<u32> {
     pub fn rotate_left(self, count: u32) -> Self {
         Self::from_fn(|i| self.at(i).rotate_left(count))
     }
-    pub fn simd_min(self, rhs: Self) -> Self {
-        Self::from_fn(|i| self.at(i).min(rhs.at(i)))
-    }
-    pub fn simd_max(self, rhs: Self) -> Self {
-        Self::from_fn(|i| self.at(i).max(rhs.at(i)))
-    }
 }
 
 impl Lane<i32> {
-    /// Sum all lanes with wrapping addition.
-    pub fn reduce_sum(self) -> i32 {
-        (0..Self::lanes()).fold(0i32, |sum, i| sum.wrapping_add(self.at(i)))
-    }
     /// Rotate the bits of each lane left by the same count, modulo 32.
     pub fn rotate_left(self, count: u32) -> Self {
         Self::from_fn(|i| self.at(i).rotate_left(count))
-    }
-
-    /// Signed minimum of each pair of lanes.
-    pub fn simd_min(self, rhs: Self) -> Self {
-        Self::from_fn(|i| self.at(i).min(rhs.at(i)))
-    }
-
-    /// Signed maximum of each pair of lanes.
-    pub fn simd_max(self, rhs: Self) -> Self {
-        Self::from_fn(|i| self.at(i).max(rhs.at(i)))
     }
 
     /// Number of words before the next vector-aligned address. Does not access memory.
@@ -452,18 +418,6 @@ impl Lane<i32> {
             sum = sum.wrapping_add(self.at(i));
             sum
         })
-    }
-    /// Read a lane, wrapping the index modulo the active lane count.
-    pub fn extract_wrapping(self, index: i32) -> i32 {
-        self.at(index as usize & (Self::lanes() - 1))
-    }
-    /// Replace a lane, wrapping the index modulo the active lane count.
-    pub fn replace_wrapping(self, index: i32, value: i32) -> Self {
-        let index = index as usize & (Self::lanes() - 1);
-        Self::from_fn(|i| if i == index { value } else { self.at(i) })
-    }
-    pub fn last(self) -> i32 {
-        self.at(Self::lanes() - 1)
     }
 }
 

@@ -148,15 +148,16 @@ fn from_word<'ctx>(
     word: IntValue<'ctx>,
     ty: ScalarType,
 ) -> Result<BasicValueEnum<'ctx>, BuilderError> {
-    Ok(match ty {
-        ScalarType::Bool => b.build_int_truncate(word, ctx.bool_type(), "")?.into(),
-        ScalarType::I32 | ScalarType::U32 => b.build_int_truncate(word, ctx.i32_type(), "")?.into(),
-        ScalarType::I64 | ScalarType::U64 | ScalarType::Index => word.into(),
-        ScalarType::F32 => {
-            let bits = b.build_int_truncate(word, ctx.i32_type(), "")?;
-            b.build_bit_cast(bits, ctx.f32_type(), "")?
-        }
-        ScalarType::F64 => b.build_bit_cast(word, ctx.f64_type(), "")?,
+    let int = body::int_type(ctx, ty.bits());
+    let bits = if ty.bits() == 64 {
+        word
+    } else {
+        b.build_int_truncate(word, int, "")?
+    };
+    Ok(if ty.is_float() {
+        b.build_bit_cast(bits, body::scalar_type(ctx, ty), "")?
+    } else {
+        bits.into()
     })
 }
 
@@ -168,12 +169,11 @@ fn to_word<'ctx>(
     ty: ScalarType,
 ) -> Result<IntValue<'ctx>, BuilderError> {
     let i64_ty = ctx.i64_type();
-    let bits = match ty {
-        ScalarType::F32 => b
-            .build_bit_cast(value, ctx.i32_type(), "")?
-            .into_int_value(),
-        ScalarType::F64 => b.build_bit_cast(value, i64_ty, "")?.into_int_value(),
-        _ => value.into_int_value(),
+    let bits = if ty.is_float() {
+        let int = body::int_type(ctx, ty.bits());
+        b.build_bit_cast(value, int, "")?.into_int_value()
+    } else {
+        value.into_int_value()
     };
     if bits.get_type() == i64_ty {
         Ok(bits)

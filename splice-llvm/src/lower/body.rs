@@ -3,7 +3,7 @@ mod intrinsic;
 mod simd;
 
 pub(crate) use intrinsic::native;
-pub(super) use simd::scalar_type;
+pub(super) use simd::{int_type, scalar_type};
 
 use super::call;
 use inkwell::basic_block::BasicBlock;
@@ -37,7 +37,7 @@ pub(super) enum Error {
 struct Slice<'ctx> {
     data: PointerValue<'ctx>,
     len: IntValue<'ctx>,
-    element: splice_core::simd::Element,
+    element: ScalarType,
 }
 
 /// A side exit: forward the status a failed callee already stored, or
@@ -296,7 +296,7 @@ impl<'a, 'ctx> Body<'a, 'ctx> {
 
     fn element(&mut self, buffer: Buffer, index: Reg) -> Built<PointerValue<'ctx>> {
         let slice = self.slices[buffer.0 as usize];
-        let ty = ScalarType::of_element(slice.element).expect("validated scalar element");
+        let ty = slice.element;
         let ty = simd::scalar_type(self.ctx, ty);
         self.checked_element(slice, ty, self.load(index)?)
     }

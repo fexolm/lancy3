@@ -42,8 +42,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 mod tests {
     use super::*;
     use splice::KernelScalar;
+    use splice::hir::ScalarType;
     use splice::hir::{Simd, SimdOp};
-    use splice::simd::Element;
     use splice::{Codegen, simd::Lane};
 
     fn check(
@@ -143,7 +143,7 @@ mod tests {
         let ops = splice_testkit::simd_ops(&lookup::ir().unwrap());
         let has = |op: fn(&SimdOp) -> bool| {
             ops.iter()
-                .any(|&Simd { element, op: o }| element == Element::I32 && op(&o))
+                .any(|&Simd { element, op: o }| element == ScalarType::I32 && op(&o))
         };
         assert!(has(|op| matches!(op, SimdOp::LoadSelect(_))), "{ops:?}");
         assert!(has(|op| *op == SimdOp::Mul), "{ops:?}");

@@ -175,15 +175,15 @@ fn a_failed_body_can_be_retried_and_its_completed_children_reused() {
 fn invalid_arguments_are_rejected_before_staging_or_reusing_a_callee()
 -> Result<(), Box<dyn std::error::Error>> {
     use splice::frontend::{KernelBuilder, Specialization};
+    use splice::hir::ScalarType;
     use splice::hir::{Buffer, Reg, ValueType};
-    use splice::simd::Element;
     use splice::{BufferArg, BufferKind};
 
     fn stage(root: &mut dyn KernelBuilder) -> splice::Result<()> {
         struct Child;
         let arg = root.arg(0)?;
-        let vector = root.local(ValueType::Vector(Element::I32))?;
-        let mask = root.local(ValueType::Mask(Element::I32))?;
+        let vector = root.local(ValueType::Vector(ScalarType::I32))?;
+        let mask = root.local(ValueType::Mask(ScalarType::I32))?;
         fn unexpected(_: &mut dyn KernelBuilder) -> splice::Result<()> {
             panic!("staged an invalid call")
         }
@@ -203,7 +203,7 @@ fn invalid_arguments_are_rejected_before_staging_or_reusing_a_callee()
             (&read[..], &[][..]),
             (&read, &[Buffer(2)]),
             (&[BufferKind::WRITE_I32], &[Buffer(0)]),
-            (&[BufferKind::new(Element::I64, false)], &[Buffer(0)]),
+            (&[BufferKind::new(ScalarType::I64, false)], &[Buffer(0)]),
             (
                 &[BufferKind::READ_I32, BufferKind::WRITE_I32],
                 &[Buffer(1), Buffer(1)],

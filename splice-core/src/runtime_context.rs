@@ -324,7 +324,7 @@ impl<'a> ContextArguments<'a> {
     pub const ELEMENT_OFFSET: u32 = 12;
     const WRITABLE: u32 = 1 << 31;
 
-    pub const fn view_tag(element: crate::simd::Element, writable: bool) -> u32 {
+    pub const fn view_tag(element: crate::hir::ScalarType, writable: bool) -> u32 {
         element as u32 | if writable { Self::WRITABLE } else { 0 }
     }
 
@@ -345,17 +345,17 @@ impl<'a> ContextArguments<'a> {
         self.words[index]
     }
 
-    fn next<T: crate::simd::LaneElement>(&mut self) -> &'a SliceView {
+    fn next<T: crate::BufferElement>(&mut self) -> &'a SliceView {
         let view = self.slices.next().expect("missing Rust slice operand");
         assert_eq!(
             view.element & !Self::WRITABLE,
-            T::ELEMENT as u32,
+            T::TYPE as u32,
             "wrong Rust slice element type"
         );
         view
     }
 
-    pub fn read<T: crate::simd::LaneElement>(&mut self) -> &'a [T] {
+    pub fn read<T: crate::BufferElement>(&mut self) -> &'a [T] {
         let view = self.next::<T>();
         // SAFETY: the caller constructed each view from a verified slice
         // descriptor. Native execution is paused during this callback. The
@@ -364,7 +364,7 @@ impl<'a> ContextArguments<'a> {
         unsafe { std::slice::from_raw_parts(view.data.cast(), view.len as usize) }
     }
 
-    pub fn write<T: crate::simd::LaneElement>(&mut self) -> &'a mut [T] {
+    pub fn write<T: crate::BufferElement>(&mut self) -> &'a mut [T] {
         let view = self.next::<T>();
         assert_ne!(
             view.element & Self::WRITABLE,

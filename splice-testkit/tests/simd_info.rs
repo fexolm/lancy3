@@ -4,18 +4,14 @@
 //! compiles and runs each accepted operation with the same effect.
 use splice::frontend::{self, KernelBuilder, Signature};
 use splice::hir::{Access, Buffer, Constant, ScalarType, Simd, SimdOp, Slot, ValueType};
-use splice::simd::{Element, Shuffle as Pairing};
+use splice::simd::Shuffle as Pairing;
 use splice::{BufferArg, BufferElement, BufferKind, BuildError, BuildOptions, Codegen, Mode};
 use std::fmt::Debug;
 
-const ELEMENTS: [Element; 6] = [
-    Element::U16,
-    Element::U32,
-    Element::I32,
-    Element::I64,
-    Element::F32,
-    Element::F64,
-];
+/// Every lane element: the scalar types whose `is_lane` holds.
+fn elements() -> impl Iterator<Item = ScalarType> {
+    ScalarType::ALL.into_iter().filter(|e| e.is_lane())
+}
 
 /// Every operation, with each value of its parameters that changes its
 /// operands, result or elements.
@@ -84,7 +80,7 @@ fn operations() -> Vec<SimdOp> {
         ]
         .map(SimdOp::Shuffle),
     );
-    for to in ELEMENTS {
+    for to in elements() {
         ops.extend([Cast(to), Narrow(to)]);
         ops.extend([false, true].map(|high| Widen { to, high }));
     }
@@ -92,7 +88,7 @@ fn operations() -> Vec<SimdOp> {
 }
 
 /// Buffer 0 holds `e` (the operation's buffer), buffer 1 its lane indices.
-fn kinds(e: Element) -> [BufferKind; 2] {
+fn kinds(e: ScalarType) -> [BufferKind; 2] {
     [BufferKind::new(e, true), BufferKind::new(e.index(), false)]
 }
 
@@ -116,6 +112,7 @@ fn stage(inst: Simd, b: &mut dyn KernelBuilder) -> splice::Result<Option<ValueTy
                 b.simd(Simd { element: e, op }, &[all])?.unwrap()
             }
             Slot::Lane => b.constant(Constant::from(0))?,
+            Slot::Element => b.constant(Constant::new(e, 0))?,
             Slot::Offset => zero,
             Slot::Bool | Slot::Converted(_) => unreachable!("not an operand"),
         });
@@ -126,7 +123,7 @@ fn stage(inst: Simd, b: &mut dyn KernelBuilder) -> splice::Result<Option<ValueTy
     Ok(output)
 }
 
-fn layout(e: Element) -> (Signature<'static>, BuildOptions) {
+fn layout(e: ScalarType) -> (Signature<'static>, BuildOptions) {
     let kinds: &'static [BufferKind; 2] = Box::leak(Box::new(kinds(e)));
     let options = BuildOptions::host(Mode::Release).unwrap();
     (Signature::new(&[], ScalarType::I32, kinds), options)
@@ -134,32 +131,37 @@ fn layout(e: Element) -> (Signature<'static>, BuildOptions) {
 
 /// Run `kernel` on buffers of `T` (`1, 2, …`) and zero indices of `I`;
 /// report the result and buffer 0 after the call.
-fn observe<T: BufferElement + From<u8> + Debug, I: BufferElement + Default>(
+fn observe<T: BufferElement + TryFrom<u8, Error: Debug> + Debug, I: BufferElement + Default>(
     call: &dyn Fn(&mut [BufferArg<'_>]) -> Result<u64, splice::CallError>,
 ) -> String {
-    let mut data: Vec<T> = (1..=64).map(T::from).collect();
+    let mut data: Vec<T> = (1..=64).map(|v| T::try_from(v).unwrap()).collect();
     let indices = vec![I::default(); 64];
     let result = call(&mut [data.as_mut_slice().into(), indices.as_slice().into()]);
     format!("{result:?} {data:?}")
 }
 
 fn run(
-    e: Element,
+    e: ScalarType,
     call: &dyn Fn(&mut [BufferArg<'_>]) -> Result<u64, splice::CallError>,
 ) -> String {
     match e {
-        Element::U16 => observe::<u16, u16>(call),
-        Element::U32 => observe::<u32, u32>(call),
-        Element::I32 => observe::<i32, i32>(call),
-        Element::I64 => observe::<i64, i64>(call),
-        Element::F32 => observe::<f32, i32>(call),
-        Element::F64 => observe::<f64, i64>(call),
+        ScalarType::I8 => observe::<i8, i8>(call),
+        ScalarType::U8 => observe::<u8, u8>(call),
+        ScalarType::I16 => observe::<i16, i16>(call),
+        ScalarType::U16 => observe::<u16, u16>(call),
+        ScalarType::U32 => observe::<u32, u32>(call),
+        ScalarType::I32 => observe::<i32, i32>(call),
+        ScalarType::I64 => observe::<i64, i64>(call),
+        ScalarType::F32 => observe::<f32, i32>(call),
+        ScalarType::F64 => observe::<f64, i64>(call),
+        e => unreachable!("{e:?} is not a lane element"),
     }
 }
 
 #[test]
 fn every_simd_operation_is_checked_and_lowered_as_its_info_says() {
     let mut accepted = 0;
+    let mut failures = Vec::new();
     for op in operations() {
         let info = op.info();
         assert_eq!(
@@ -167,7 +169,7 @@ fn every_simd_operation_is_checked_and_lowered_as_its_info_says() {
             info.memory.is_some_and(|m| m.access != Access::Address),
             "{op:?}"
         );
-        for e in ELEMENTS {
+        for e in elements() {
             let inst = Simd { element: e, op };
             let (signature, options) = layout(e);
             let mut output = None;
@@ -185,7 +187,7 @@ fn every_simd_operation_is_checked_and_lowered_as_its_info_says() {
                     "{inst:?} is outside {:?} but staged as {staged:?}",
                     info.elements
                 );
-                fn rejects<B: Codegen>(inst: Simd, e: Element) -> bool {
+                fn rejects<B: Codegen>(inst: Simd, e: ScalarType) -> bool {
                     let (signature, options) = layout(e);
                     let body = Box::new(move |b: &mut dyn KernelBuilder| stage(inst, b).map(drop));
                     matches!(
@@ -206,20 +208,27 @@ fn every_simd_operation_is_checked_and_lowered_as_its_info_says() {
             );
             let mut seen = Vec::new();
             splice_testkit::each_backend!(B => {
-                let kernel = B::compile(&function).unwrap_or_else(|error| {
-                    panic!("{} rejects {inst:?}: {error}", std::any::type_name::<B>())
-                });
-                let call = |buffers: &mut [BufferArg<'_>]| splice::Executable::call(&kernel, &[], buffers);
-                seen.push((std::any::type_name::<B>(), run(e, &call)));
+                let backend = std::any::type_name::<B>();
+                match B::compile(&function) {
+                    Ok(kernel) => {
+                        let call = |buffers: &mut [BufferArg<'_>]| {
+                            splice::Executable::call(&kernel, &[], buffers)
+                        };
+                        seen.push((backend, run(e, &call)));
+                    }
+                    Err(error) => failures.push(format!("{backend} rejects {inst:?}: {error}")),
+                }
             });
-            for (backend, result) in &seen[1..] {
-                assert_eq!(
-                    result, &seen[0].1,
-                    "{inst:?}: {backend} differs from {}",
-                    seen[0].0
-                );
+            for (backend, result) in seen.iter().skip(1) {
+                if result != &seen[0].1 {
+                    failures.push(format!(
+                        "{inst:?}: {backend} gives {result}, {} gives {}",
+                        seen[0].0, seen[0].1
+                    ));
+                }
             }
         }
     }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
     assert!(accepted > 150, "{accepted}");
 }

@@ -25,11 +25,16 @@ use std::{
 };
 
 /// The Lancy type of a scalar register. A `bool` is an `i32` mask, the
-/// form of Lancy comparisons: zero or all bits set.
+/// form of Lancy comparisons: zero or all bits set. A `char` is its code
+/// point.
 fn scalar_type(ty: ScalarType) -> hir::Type {
     match ty {
         ScalarType::Bool | ScalarType::I32 => hir::Type::I32,
-        ScalarType::U32 => hir::Type::U32,
+        ScalarType::Char | ScalarType::U32 => hir::Type::U32,
+        ScalarType::I8 => hir::Type::I8,
+        ScalarType::U8 => hir::Type::U8,
+        ScalarType::I16 => hir::Type::I16,
+        ScalarType::U16 => hir::Type::U16,
         ScalarType::I64 => hir::Type::I64,
         ScalarType::U64 => hir::Type::U64,
         ScalarType::Index => hir::Type::Usize,
@@ -38,13 +43,14 @@ fn scalar_type(ty: ScalarType) -> hir::Type {
     }
 }
 
-/// The type twice as wide as an integer type, for overflow checks.
+/// The integer type twice as wide as the integer `ty`, of the same
+/// signedness, for overflow checks.
 fn wide(ty: ScalarType) -> hir::Type {
-    match ty {
-        ScalarType::I32 => hir::Type::I64,
-        ScalarType::U32 => hir::Type::U64,
-        ScalarType::I64 => hir::Type::I128,
-        _ => hir::Type::U128,
+    debug_assert!(ty.is_integer());
+    match (ty.bits(), ty.is_signed()) {
+        (64, true) => hir::Type::I128,
+        (64, false) => hir::Type::U128,
+        (bits, signed) => scalar_type(ScalarType::integer(bits * 2, signed)),
     }
 }
 
@@ -506,14 +512,18 @@ impl Builder<'_> {
     /// A scalar register as the 8-byte word of a Rust call operand: its
     /// bits zero-extended.
     fn word(&mut self, r: Reg) -> Value {
+        let ty = self.scalar(r);
         let v = self.read(r);
-        let narrow = match self.scalar(r) {
-            ScalarType::Bool | ScalarType::I32 | ScalarType::F32 => {
-                self.value(Op::Bitcast(hir::Type::U32, v))
-            }
-            ScalarType::U32 => v,
-            ScalarType::I64 | ScalarType::F64 => return self.value(Op::Bitcast(hir::Type::U64, v)),
-            ScalarType::U64 | ScalarType::Index => return v,
+        if ty.bits() == 64 {
+            return self.value(Op::Bitcast(hir::Type::U64, v));
+        }
+        // The unsigned integer of the register's width, then zero-extended.
+        let bits = scalar_type(ty).lane().expect("scalar lane").bytes() * 8;
+        let unsigned = scalar_type(ScalarType::integer(bits as u32, false));
+        let narrow = if scalar_type(ty) == unsigned {
+            v
+        } else {
+            self.value(Op::Bitcast(unsigned, v))
         };
         self.value(Op::Cast(hir::Type::U64, narrow))
     }
@@ -527,7 +537,6 @@ impl Builder<'_> {
     fn literal(&mut self, ty: ScalarType, bits: u64) -> Value {
         match ty {
             ScalarType::Bool => self.value(Op::Const(-((bits & 1) as i32))),
-            ScalarType::I32 => self.value(Op::Const(bits as u32 as i32)),
             _ => {
                 let lane = scalar_type(ty).lane().expect("scalar lane");
                 self.value(Op::literal(lane, bits.into()))
@@ -836,8 +845,7 @@ impl KernelBuilder for Builder<'_> {
         Ok(dst)
     }
     fn load(&mut self, buffer: Buffer, index: Reg) -> splice_core::Result<Reg> {
-        let ty = ScalarType::of_element(self.kinds[buffer.index()].element())
-            .expect("validated scalar element");
+        let ty = self.kinds[buffer.index()].element();
         let dst = self.local(ValueType::Scalar(ty))?;
         if self.reachable() {
             let index = self.read(index);

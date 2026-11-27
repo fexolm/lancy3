@@ -12,7 +12,7 @@ impl Foo {
         format!("{}", self.n)
     }
 
-    fn wide(x: char) -> i32 {
+    fn wide(x: isize) -> i32 {
         x as i32
     }
 }

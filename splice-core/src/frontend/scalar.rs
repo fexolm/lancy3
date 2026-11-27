@@ -655,7 +655,7 @@ impl Drop for ExpansionGuard {
 pub fn column(
     (kinds, base): (&[crate::BufferKind], crate::hir::Buffer),
     slot: usize,
-    element: crate::simd::Element,
+    element: crate::hir::ScalarType,
 ) -> crate::Result<crate::hir::Buffer> {
     match kinds.get(slot) {
         Some(kind) if kind.context_signature().is_none() && kind.element() == element => {

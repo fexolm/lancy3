@@ -4,10 +4,10 @@ error: put #[kernel] only on the enclosing impl or trait; keep a Rust method in 
 7 |     #[kernel]
   |     ^^^^^^^^^
 
-error: runtime parameters must be bool, i32, u32, i64, u64, usize, f32, f64 or a slice of u16, u32, i32, i64, f32, or f64
+error: runtime parameters must be a kernel scalar (bool, char, i8, i16, i32, i64, u8, u16, u32, u64, usize, f32, f64) or a slice of one other than bool
   --> tests/ui/declarations.rs:16:24
    |
-16 |     fn method_param(x: char) -> i32 {
+16 |     fn method_param(x: i128) -> i32 {
    |                        ^^^^
 
 error: expected a named binding
@@ -118,10 +118,10 @@ error: #[intrinsic] is not supported on a trait method; put it on a free #[kerne
 145 |     #[intrinsic("acme.measure")]
     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-error: runtime parameters must be bool, i32, u32, i64, u64, usize, f32, f64 or a slice of u16, u32, i32, i64, f32, or f64
+error: runtime parameters must be a kernel scalar (bool, char, i8, i16, i32, i64, u8, u16, u32, u64, usize, f32, f64) or a slice of one other than bool
    --> tests/ui/declarations.rs:153:16
     |
-153 |     fn area(x: char) -> i32;
+153 |     fn area(x: u128) -> i32;
     |                ^^^^
 
 error: expected a free function, impl or trait

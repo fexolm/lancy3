@@ -1,10 +1,7 @@
 use splice::Function;
-use splice::hir::{Constant, Instr, SimdOp};
+use splice::hir::{Constant, Instr, ScalarType, SimdOp};
 use splice::lancy::Lancy;
-use splice::{
-    BufferArg, BufferKind, Codegen, Executable, TypedKernel, kernel,
-    simd::{Element, Lane},
-};
+use splice::{BufferArg, BufferKind, Codegen, Executable, TypedKernel, kernel, simd::Lane};
 
 /// Whether staging left a call to the kernel function `name`.
 fn calls(function: &Function, name: &str) -> bool {
@@ -104,7 +101,7 @@ fn float_column_matches_the_rust_filter_including_nan_and_tail()
     }
     let schema = Schema(vec![
         BufferKind::READ_I32,
-        BufferKind::new(Element::F32, false),
+        BufferKind::new(ScalarType::F32, false),
     ]);
     let plan = Plan::Filter {
         expr: Expr::GeFloat { col: 1, val: 2.5 },
@@ -113,7 +110,7 @@ fn float_column_matches_the_rust_filter_including_nan_and_tail()
     assert!(
         splice_testkit::simd_ops(&ir)
             .iter()
-            .any(|simd| simd.op == SimdOp::Ge && simd.element == Element::F32)
+            .any(|simd| simd.op == SimdOp::Ge && simd.element == ScalarType::F32)
     );
     assert!(!calls(&ir, "filter_ge"));
     let rust = query::print(&schema, &plan)?;
@@ -193,7 +190,7 @@ fn check<E: Executable>(
 fn sql_specialization_reads_the_selected_column_from_each_batch()
 -> Result<(), Box<dyn std::error::Error>> {
     let int = BufferKind::READ_I32;
-    let float = BufferKind::new(Element::F64, false);
+    let float = BufferKind::new(ScalarType::F64, false);
     for (slot, val, layout) in [(0, 7, vec![int, float]), (1, 9, vec![float, int])] {
         let schema = Schema(layout);
         let plan = Plan::Filter {
@@ -227,7 +224,7 @@ fn sql_specialization_reads_the_selected_column_from_each_batch()
 #[kernel(print)]
 fn unchecked_query(
     #[comptime] col: usize,
-    #[columns([BufferKind::new(Element::F64, false)])] columns: &[BufferArg<'_>],
+    #[columns([BufferKind::new(ScalarType::F64, false)])] columns: &[BufferArg<'_>],
 ) -> i32 {
     columns[col].as_slice::<i32>()[0]
 }

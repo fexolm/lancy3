@@ -4,17 +4,17 @@ error: expected a safe synchronous kernel with Rust ABI and fixed arity
 7 | async fn asynchronous() {}
   | ^^^^^^^^^^^^^^^^^^^^^^^
 
-error: expected (), bool, i32, u32, i64, u64, usize, f32, f64, Lane<T> or Mask<T>
+error: expected (), a kernel scalar (bool, char, i8, i16, i32, i64, u8, u16, u32, u64, usize, f32, f64), Lane<T> or Mask<T>
   --> tests/ui/signatures.rs:10:21
    |
 10 | fn wide_result() -> i128 {
    |                     ^^^^
 
 error: a kernel cannot return vectors or masks with generic elements
-  --> tests/ui/signatures.rs:15:36
+  --> tests/ui/signatures.rs:15:40
    |
-15 | fn generic_vector<T: Element>() -> Lane<T> {
-   |                                    ^^^^^^^
+15 | fn generic_vector<T: LaneElement>() -> Lane<T> {
+   |                                        ^^^^^^^
 
 error: use &mut [i32] to write to a slice
   --> tests/ui/signatures.rs:20:18
@@ -100,11 +100,23 @@ error: missing aggregate field
 99 |     comptime!(pair.second)
    |               ^^^^^^^^^^^
 
-warning: unused imports: `Element` and `Lane`
+error: runtime parameters must be a kernel scalar (bool, char, i8, i16, i32, i64, u8, u16, u32, u64, usize, f32, f64) or a slice of one other than bool
+   --> tests/ui/signatures.rs:105:22
+    |
+105 | fn bool_slice(flags: &[bool]) -> i32 {
+    |                      ^^^^^^^
+
+error: expected (), a kernel scalar (bool, char, i8, i16, i32, i64, u8, u16, u32, u64, usize, f32, f64), Lane<T> or Mask<T>
+   --> tests/ui/signatures.rs:110:31
+    |
+110 | fn pointer_sized(x: isize) -> isize {
+    |                               ^^^^^
+
+warning: unused imports: `LaneElement` and `Lane`
  --> tests/ui/signatures.rs:3:20
   |
-3 | use splice::simd::{Element, Lane};
-  |                    ^^^^^^^  ^^^^
+3 | use splice::simd::{Lane, LaneElement};
+  |                    ^^^^  ^^^^^^^^^^^
   |
   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
 

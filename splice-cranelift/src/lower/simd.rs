@@ -6,17 +6,16 @@ use crate::lower::trap;
 use cranelift_codegen::ir::{
     InstBuilder, MemFlags, StackSlot, StackSlotData, StackSlotKind, Type, Value,
     condcodes::{FloatCC, IntCC},
-    types::{F32X4, F64X2, I8X16, I16X8, I32, I32X4, I64, I64X2},
+    types::{I8X16, I32, I32X4, I64},
 };
 use cranelift_frontend::{FunctionBuilder, Variable};
 use splice_core::Trap;
 use splice_core::{
     Function,
     hir::{
-        Buffer, Reg, Simd, SimdOp, ValueType,
+        Buffer, Reg, ScalarType, Simd, SimdOp, ValueType,
         memory::{self, Address, BeforeTrap, Masked, Slice},
     },
-    simd::Element,
 };
 use std::cell::Cell;
 
@@ -42,14 +41,21 @@ impl Machine {
     }
 }
 
-fn chunk_type(element: Element) -> Type {
-    match element {
-        Element::U16 => I16X8,
-        Element::I32 | Element::U32 => I32X4,
-        Element::I64 => I64X2,
-        Element::F32 => F32X4,
-        Element::F64 => F64X2,
-    }
+/// The 16-byte CLIF vector of lanes of `element`.
+fn chunk_type(element: ScalarType) -> Type {
+    super::scalar_type(element)
+        .by((CHUNK_BYTES / element.bytes()) as u32)
+        .expect("a lane element fills a 16-byte vector")
+}
+
+/// An unsigned integer element (`is_signed` is also false for floats).
+fn unsigned(e: ScalarType) -> bool {
+    e.is_integer() && !e.is_signed()
+}
+
+/// The lanes of `element` in one chunk.
+fn chunk_lanes(element: ScalarType) -> usize {
+    CHUNK_BYTES / element.bytes()
 }
 
 pub(super) struct Registers {
@@ -115,7 +121,7 @@ fn constant(b: &mut FunctionBuilder, ty: Type, bytes: &[u8; CHUNK_BYTES]) -> Val
 
 fn lane_constant(
     b: &mut FunctionBuilder,
-    element: Element,
+    element: ScalarType,
     part: usize,
     bits_at: impl Fn(usize) -> u64,
 ) -> Value {
@@ -189,10 +195,10 @@ pub(super) fn emit(
             vec![total]
         }
         ReduceSum => {
-            let mut total = b.ins().iconst(I32, 0);
+            let mut total = b.ins().iconst(super::scalar_type(element), 0);
             for &chunk in &inputs[0] {
-                for i in 0..4 {
-                    let lane = b.ins().extractlane(chunk, i);
+                for i in 0..chunk_lanes(element) {
+                    let lane = b.ins().extractlane(chunk, i as u8);
                     total = b.ins().iadd(total, lane);
                 }
             }
@@ -267,21 +273,30 @@ pub(super) fn emit(
                 b.ins()
                     .stack_store(chunk, slot, (part * CHUNK_BYTES) as i32);
             }
-            let index = b.ins().band_imm(inputs[1][0], (bytes / 4 - 1) as i64);
+            let index = b
+                .ins()
+                .band_imm(inputs[1][0], element.lanes(bytes) as i64 - 1);
             let index = b.ins().uextend(I64, index);
-            let offset = b.ins().ishl_imm(index, 2);
+            let offset = b
+                .ins()
+                .ishl_imm(index, i64::from(element.bytes().trailing_zeros()));
             let base = b.ins().stack_addr(I64, slot, 0);
             let addr = b.ins().iadd(base, offset);
             if inst.op == ExtractWrapping {
-                vec![b.ins().load(I32, byte_order, addr, 0)]
+                let ty = super::scalar_type(element);
+                vec![b.ins().load(ty, byte_order, addr, 0)]
             } else {
                 b.ins().store(byte_order, inputs[2][0], addr, 0);
+                let ty = chunk_type(element);
                 (0..inputs[0].len())
-                    .map(|part| b.ins().stack_load(I32X4, slot, (part * CHUNK_BYTES) as i32))
+                    .map(|part| b.ins().stack_load(ty, slot, (part * CHUNK_BYTES) as i32))
                     .collect()
             }
         }
-        Last => vec![b.ins().extractlane(*inputs[0].last().unwrap(), 3)],
+        Last => {
+            let last = (chunk_lanes(element) - 1) as u8;
+            vec![b.ins().extractlane(*inputs[0].last().unwrap(), last)]
+        }
         PrefixSum => {
             // A CLIF chunk has four i32 lanes. Propagate the previous chunk's
             // final sum after the two intra-chunk shifts.
@@ -359,7 +374,7 @@ fn swizzle_words(
         .immediates
         .push(Vec::from([0u8, 0, 0, 0, 4, 4, 4, 4, 8, 8, 8, 8, 12, 12, 12, 12]).into());
     let offsets = constant(b, I8X16, &[0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3]);
-    let three = lane_constant(b, Element::I32, 0, |_| 3);
+    let three = lane_constant(b, ScalarType::I32, 0, |_| 3);
     indices
         .iter()
         .map(|&index| {
@@ -373,7 +388,7 @@ fn swizzle_words(
             let owner = b.ins().ushr_imm(index, 2);
             let mut result = constant(b, I32X4, &[0; 16]);
             for (part, &source) in parts.iter().enumerate() {
-                let id = lane_constant(b, Element::I32, 0, |_| part as u64);
+                let id = lane_constant(b, ScalarType::I32, 0, |_| part as u64);
                 let valid = b.ins().icmp(IntCC::Equal, owner, id);
                 let source = b.ins().bitcast(I8X16, order, source);
                 let shuffled = shuffle_bytes(b, m, source, selector);
@@ -491,6 +506,73 @@ fn compress_words(
         .collect()
 }
 
+/// The wrapping product of byte lanes: CLIF multiplies 16-bit and wider
+/// lanes, so multiply the zero-extended halves and keep the low bytes.
+fn byte_product(b: &mut FunctionBuilder, x: Value, y: Value) -> Value {
+    let order = MemFlags::new().with_endianness(cranelift_codegen::ir::Endianness::Little);
+    let halves = [true, false].map(|low| {
+        let (x, y) = if low {
+            (b.ins().uwiden_low(x), b.ins().uwiden_low(y))
+        } else {
+            (b.ins().uwiden_high(x), b.ins().uwiden_high(y))
+        };
+        let product = b.ins().imul(x, y);
+        b.ins().bitcast(I8X16, order, product)
+    });
+    let even: Vec<u8> = (0..16).map(|i| 2 * i).collect();
+    let even = b.func.dfg.immediates.push(even.into());
+    b.ins().shuffle(halves[0], halves[1], even)
+}
+
+/// Saturating sums and differences. CLIF has them for 8- and 16-bit
+/// lanes; wider lanes detect the overflow of the wrapping result.
+fn saturating(b: &mut FunctionBuilder, inst: Simd, x: Value, y: Value) -> Value {
+    let add = inst.op == SimdOp::SaturatingAdd;
+    let e = inst.element;
+    if e.bytes() <= 2 {
+        return match (add, e.is_signed()) {
+            (true, true) => b.ins().sadd_sat(x, y),
+            (true, false) => b.ins().uadd_sat(x, y),
+            (false, true) => b.ins().ssub_sat(x, y),
+            (false, false) => b.ins().usub_sat(x, y),
+        };
+    }
+    if !e.is_signed() {
+        // An unsigned sum overflows below an operand; a difference is
+        // zero unless `x` is larger.
+        return if add {
+            let sum = b.ins().iadd(x, y);
+            let wrapped = b.ins().icmp(IntCC::UnsignedLessThan, sum, x);
+            b.ins().bor(sum, wrapped)
+        } else {
+            let larger = b.ins().umax(x, y);
+            b.ins().isub(larger, y)
+        };
+    }
+    // A signed result overflows when its sign differs from both operands
+    // of a sum (from `x` and from `-y` for a difference); it saturates
+    // toward the sign of `x`.
+    let wrapped = if add {
+        b.ins().iadd(x, y)
+    } else {
+        b.ins().isub(x, y)
+    };
+    let from_x = b.ins().bxor(wrapped, x);
+    let other = if add {
+        b.ins().bxor(wrapped, y)
+    } else {
+        b.ins().bxor(x, y)
+    };
+    let overflow = b.ins().band(from_x, other);
+    let bits = i64::from(e.bits()) - 1;
+    let overflow = b.ins().sshr_imm(overflow, bits);
+    let sign = b.ins().sshr_imm(x, bits);
+    let ones = b.ins().icmp(IntCC::Equal, x, x);
+    let max = b.ins().ushr_imm(ones, 1);
+    let limit = b.ins().bxor(sign, max);
+    b.ins().bitselect(overflow, limit, wrapped)
+}
+
 fn packed(b: &mut FunctionBuilder, inst: Simd, inputs: &[Vec<Value>], part: usize) -> Value {
     use SimdOp::*;
     let op = inst.op;
@@ -500,11 +582,11 @@ fn packed(b: &mut FunctionBuilder, inst: Simd, inputs: &[Vec<Value>], part: usiz
     match op {
         Splat(bits) => lane_constant(b, inst.element, part, |_| bits),
         Iota => lane_constant(b, inst.element, part, |i| match inst.element {
-            Element::F32 => u64::from((i as f32).to_bits()),
-            Element::F64 => (i as f64).to_bits(),
+            ScalarType::F32 => u64::from((i as f32).to_bits()),
+            ScalarType::F64 => (i as f64).to_bits(),
             _ => i as u64,
         }),
-        Shr(n) if inst.element.is_unsigned() => b.ins().ushr_imm(arg(0), i64::from(n & 31)),
+        Shr(n) if unsigned(inst.element) => b.ins().ushr_imm(arg(0), i64::from(n & 31)),
         Shr(n) => b.ins().sshr_imm(arg(0), i64::from(n & 31)),
         RotateLeft(n) => {
             let count = n & 31;
@@ -525,9 +607,11 @@ fn packed(b: &mut FunctionBuilder, inst: Simd, inputs: &[Vec<Value>], part: usiz
         Cast(to) => convert(b, inst.element, to, chunk_type(to), arg(0)),
         Add => b.ins().iadd(arg(0), arg(1)),
         Sub => b.ins().isub(arg(0), arg(1)),
+        Mul if inst.element.bytes() == 1 => byte_product(b, arg(0), arg(1)),
         Mul => b.ins().imul(arg(0), arg(1)),
-        Min if inst.element.is_unsigned() => b.ins().umin(arg(0), arg(1)),
-        Max if inst.element.is_unsigned() => b.ins().umax(arg(0), arg(1)),
+        SaturatingAdd | SaturatingSub => saturating(b, inst, arg(0), arg(1)),
+        Min if unsigned(inst.element) => b.ins().umin(arg(0), arg(1)),
+        Max if unsigned(inst.element) => b.ins().umax(arg(0), arg(1)),
         Min => b.ins().smin(arg(0), arg(1)),
         Max => b.ins().smax(arg(0), arg(1)),
         And | MaskAnd => b.ins().band(arg(0), arg(1)),
@@ -547,7 +631,7 @@ fn packed(b: &mut FunctionBuilder, inst: Simd, inputs: &[Vec<Value>], part: usiz
             b.ins().fcmp(cc, arg(0), arg(1))
         }
         Eq | Ne | Lt | Le | Gt | Ge => {
-            let unsigned = inst.element.is_unsigned();
+            let unsigned = unsigned(inst.element);
             let cc = match op {
                 Eq => IntCC::Equal,
                 Ne => IntCC::NotEqual,
@@ -575,14 +659,14 @@ fn packed(b: &mut FunctionBuilder, inst: Simd, inputs: &[Vec<Value>], part: usiz
     }
 }
 
-fn convert(b: &mut FunctionBuilder, from: Element, to: Element, ty: Type, x: Value) -> Value {
+fn convert(b: &mut FunctionBuilder, from: ScalarType, to: ScalarType, ty: Type, x: Value) -> Value {
     if b.func.dfg.value_type(x) == ty {
         return x;
     }
     match (from.is_float(), to.is_float()) {
         (true, true) if from.bytes() < to.bytes() => b.ins().fpromote(ty, x),
         (true, true) => b.ins().fdemote(ty, x),
-        (false, true) if from.is_unsigned() => b.ins().fcvt_from_uint(ty, x),
+        (false, true) if unsigned(from) => b.ins().fcvt_from_uint(ty, x),
         (false, true) => b.ins().fcvt_from_sint(ty, x),
         // The x64 backend lowers saturating float-to-int conversions only
         // into 32-bit lanes (BE-02); convert 64-bit lanes one at a time.
@@ -595,10 +679,10 @@ fn convert(b: &mut FunctionBuilder, from: Element, to: Element, ty: Type, x: Val
                 .collect();
             gather_lanes(b, ty, &lanes)
         }
-        (true, false) if to.is_unsigned() => b.ins().fcvt_to_uint_sat(ty, x),
+        (true, false) if unsigned(to) => b.ins().fcvt_to_uint_sat(ty, x),
         (true, false) => b.ins().fcvt_to_sint_sat(ty, x),
         (false, false) if from.bytes() > to.bytes() => b.ins().ireduce(ty, x),
-        (false, false) if from.is_unsigned() => b.ins().uextend(ty, x),
+        (false, false) if unsigned(from) => b.ins().uextend(ty, x),
         (false, false) => b.ins().sextend(ty, x),
     }
 }
@@ -606,8 +690,8 @@ fn convert(b: &mut FunctionBuilder, from: Element, to: Element, ty: Type, x: Val
 fn convert_width(
     b: &mut FunctionBuilder,
     machine: Machine,
-    from: Element,
-    to: Element,
+    from: ScalarType,
+    to: ScalarType,
     sources: &[Value],
     start: usize,
 ) -> Vec<Value> {
@@ -752,7 +836,7 @@ impl memory::Primitives for Slices<'_, '_> {
         let end = self.b.ins().umax(offset, len);
         Ok(self.b.ins().isub(end, offset))
     }
-    fn first_lanes(&mut self, e: Element, count: Value) -> Lowered<Chunks> {
+    fn first_lanes(&mut self, e: ScalarType, count: Value) -> Lowered<Chunks> {
         // A room can exceed the lanes, and the narrowest lane type.
         let lanes = self
             .b
@@ -808,7 +892,7 @@ impl memory::Primitives for Slices<'_, '_> {
             .unwrap();
         Ok(b.ins().vany_true(all))
     }
-    fn before_first(&mut self, e: Element, mask: Chunks) -> Lowered<Chunks> {
+    fn before_first(&mut self, e: ScalarType, mask: Chunks) -> Lowered<Chunks> {
         // lowbit(bits) - 1 has every bit below the first lane, and all bits
         // when the mask is empty. Lane `i` of each part tests bit `i`.
         let bits = self.mask_bits(mask);
@@ -943,7 +1027,7 @@ enum Lanes<'a> {
 struct Memory<'a> {
     m: Machine,
     data: Value,
-    element: Element,
+    element: ScalarType,
     address: Lanes<'a>,
     mask: Option<&'a [Value]>,
     values: Option<&'a [Value]>,

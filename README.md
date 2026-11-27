@@ -70,9 +70,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 Вход `#[columns(layout)] columns: &[BufferArg<'_>]` описывает набор колонок, который меняется между вызовами. Выражение `layout` вычисляется при `build` или `ir` и задаёт порядок и типы колонок через `BufferKind`. `columns[slot].as_slice::<T>()` получает `&[T]` для известного при сборке номера колонки. Поддерживаются `u16`, `u32`, `i32`, `i64`, `f32` и `f64`. Splice проверяет номер и тип в раскладке при сборке, а `Executable::call` проверяет переданные буферы перед входом в JIT.
 
 ```rust
-# use splice::{BufferArg, BufferKind, kernel, lancy::Lancy, simd::Element};
+# use splice::{BufferArg, BufferKind, kernel, lancy::Lancy, hir::ScalarType};
 # #[derive(splice::KernelType)]
-# struct Schema { layout: [BufferKind; 1], elements: [Element; 1] }
+# struct Schema { layout: [BufferKind; 1], elements: [ScalarType; 1] }
 # enum Expr { Ge { col: usize, val: i32 } }
 # enum Plan { Filter { expr: Expr }, Empty }
 # #[kernel]
@@ -92,14 +92,14 @@ fn query(
 ) -> i32 {
     match plan {
         Plan::Filter { expr: Expr::Ge { col, val } } => match schema.elements[*col] {
-            Element::I32 => filter_ge(columns[*col].as_slice::<i32>(), *val, out),
+            ScalarType::I32 => filter_ge(columns[*col].as_slice::<i32>(), *val, out),
             _ => -1,
         },
         Plan::Empty => 0,
     }
 }
 # fn main() -> Result<(), Box<dyn std::error::Error>> {
-# let schema = Schema { layout: [BufferKind::READ_I32], elements: [Element::I32] };
+# let schema = Schema { layout: [BufferKind::READ_I32], elements: [ScalarType::I32] };
 # let plan = Plan::Filter { expr: Expr::Ge { col: 0, val: 2 } };
 # let code = query::build::<Lancy>(query::BuildArgs { schema: &schema, plan: &plan })?;
 # let (column, mut out) = ([1, 2, 3], [0; 3]);

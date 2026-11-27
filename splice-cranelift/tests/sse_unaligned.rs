@@ -4,7 +4,6 @@
 use splice_core::frontend::{self, KernelBuilder, Signature};
 use splice_core::hir::{Buffer, Simd, SimdOp};
 use splice_core::hir::{Constant, ScalarType};
-use splice_core::simd::Element;
 use splice_core::target::Profile;
 use splice_core::{BufferArg, BufferKind, BuildOptions, Codegen, Executable, Mode, Target};
 use splice_cranelift::Cranelift;
@@ -12,7 +11,7 @@ use splice_cranelift::Cranelift;
 /// `count(buf[0..] == buf[1..])`: the second load starts one element past the
 /// slice's base, so it is misaligned for any 16-byte-aligned allocation.
 fn shifted_compare(
-    element: Element,
+    element: ScalarType,
     bytes: usize,
 ) -> impl Fn(&mut dyn KernelBuilder) -> splice_core::Result<()> {
     move |b| {
@@ -31,9 +30,9 @@ fn shifted_compare(
             )?
             .unwrap();
         // Count takes 32-bit lanes; wider masks report whether any lane matched.
-        let result = if element.lanes(bytes) == Element::I32.lanes(bytes) {
+        let result = if element.lanes(bytes) == ScalarType::I32.lanes(bytes) {
             let count = Simd {
-                element: Element::I32,
+                element: ScalarType::I32,
                 op: SimdOp::Count,
             };
             b.simd(count, &[mask])?
@@ -54,11 +53,11 @@ fn shifted_compare(
 
 fn check_shifted_compares(options: BuildOptions) {
     let bytes = options.target.vector_bytes();
-    for element in [Element::F32, Element::F64] {
+    for element in [ScalarType::F32, ScalarType::F64] {
         let kinds = [BufferKind::new(element, false)];
         let lanes = element.lanes(bytes);
         // Pairs of equal values: lane i equals lane i + 1 exactly when i is even.
-        let expected = if element == Element::F32 {
+        let expected = if element == ScalarType::F32 {
             lanes.div_ceil(2) as u64
         } else {
             1 // `Any` is true.
@@ -80,7 +79,7 @@ fn check_shifted_compares(options: BuildOptions) {
             Cranelift::compile(&ir).unwrap(),
         ] {
             let result = match element {
-                Element::F32 => {
+                ScalarType::F32 => {
                     let data: Vec<f32> = (0..=lanes).map(|i| (i / 2) as f32).collect();
                     code.call(&[], &mut [BufferArg::from(&data[..])])
                 }

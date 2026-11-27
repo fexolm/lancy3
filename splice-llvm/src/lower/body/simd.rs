@@ -8,29 +8,25 @@ use inkwell::{
     types::{BasicTypeEnum, VectorType},
     values::{BasicMetadataValueEnum, BasicValueEnum, IntValue, VectorValue},
 };
-use splice_core::{
-    hir::{
-        Buffer, Reg, ScalarType, Simd, SimdOp, ValueType,
-        memory::{self, Address, BeforeTrap, Masked, Slice},
-    },
-    simd::Element,
+use splice_core::hir::{
+    Buffer, Reg, ScalarKind, ScalarType, Simd, SimdOp, ValueType,
+    memory::{self, Address, BeforeTrap, Masked, Slice},
 };
 
-fn element_type(ctx: &Context, e: Element) -> BasicTypeEnum<'_> {
-    match e {
-        Element::U16 => ctx.i16_type().into(),
-        Element::I32 | Element::U32 => ctx.i32_type().into(),
-        Element::I64 => ctx.i64_type().into(),
-        Element::F32 => ctx.f32_type().into(),
-        Element::F64 => ctx.f64_type().into(),
-    }
+fn element_type(ctx: &Context, e: ScalarType) -> BasicTypeEnum<'_> {
+    scalar_type(ctx, e)
 }
 
-fn vector_type(ctx: &Context, bytes: usize, e: Element) -> VectorType<'_> {
+/// An unsigned integer element (`is_signed` is also false for floats).
+fn unsigned(e: ScalarType) -> bool {
+    e.is_integer() && !e.is_signed()
+}
+
+fn vector_type(ctx: &Context, bytes: usize, e: ScalarType) -> VectorType<'_> {
     vector_type_with_lanes(ctx, e, e.lanes(bytes) as u32)
 }
 
-fn vector_type_with_lanes(ctx: &Context, e: Element, lanes: u32) -> VectorType<'_> {
+fn vector_type_with_lanes(ctx: &Context, e: ScalarType, lanes: u32) -> VectorType<'_> {
     match element_type(ctx, e) {
         BasicTypeEnum::IntType(t) => t.vec_type(lanes),
         BasicTypeEnum::FloatType(t) => t.vec_type(lanes),
@@ -38,14 +34,25 @@ fn vector_type_with_lanes(ctx: &Context, e: Element, lanes: u32) -> VectorType<'
     }
 }
 
-/// The LLVM type of a scalar register: a `bool` is an `i1`.
+/// The LLVM type of a scalar register: an integer of its width (a `bool`
+/// is an `i1`, a `char` an `i32`) or a float.
 pub(in crate::lower) fn scalar_type(ctx: &Context, ty: ScalarType) -> BasicTypeEnum<'_> {
-    match ty {
-        ScalarType::Bool => ctx.bool_type().into(),
-        ScalarType::I32 | ScalarType::U32 => ctx.i32_type().into(),
-        ScalarType::I64 | ScalarType::U64 | ScalarType::Index => ctx.i64_type().into(),
-        ScalarType::F32 => ctx.f32_type().into(),
-        ScalarType::F64 => ctx.f64_type().into(),
+    match (ty.kind(), ty.bits()) {
+        (ScalarKind::Float, 32) => ctx.f32_type().into(),
+        (ScalarKind::Float, _) => ctx.f64_type().into(),
+        (_, bits) => int_type(ctx, bits).into(),
+    }
+}
+
+/// The LLVM integer of `bits` bits, a scalar width.
+pub(in crate::lower) fn int_type(ctx: &Context, bits: u32) -> IntType<'_> {
+    match bits {
+        1 => ctx.bool_type(),
+        8 => ctx.i8_type(),
+        16 => ctx.i16_type(),
+        32 => ctx.i32_type(),
+        64 => ctx.i64_type(),
+        _ => unreachable!("no {bits}-bit scalar"),
     }
 }
 
@@ -61,8 +68,8 @@ impl<'ctx> Body<'_, 'ctx> {
     fn convert_lanes(
         &self,
         x: VectorValue<'ctx>,
-        from: Element,
-        to: Element,
+        from: ScalarType,
+        to: ScalarType,
     ) -> Built<VectorValue<'ctx>> {
         let ir = self.builder;
         let ty = vector_type_with_lanes(self.ctx, to, x.get_type().get_size());
@@ -71,15 +78,15 @@ impl<'ctx> Body<'_, 'ctx> {
             (true, true) => ir.build_float_cast(x, ty, "")?,
             (false, false) if from.bytes() == to.bytes() => x,
             (false, false) if from.bytes() > to.bytes() => ir.build_int_truncate(x, ty, "")?,
-            (false, false) if from.is_unsigned() => ir.build_int_z_extend(x, ty, "")?,
+            (false, false) if unsigned(from) => ir.build_int_z_extend(x, ty, "")?,
             (false, false) => ir.build_int_s_extend(x, ty, "")?,
-            (false, true) if from.is_unsigned() => ir.build_unsigned_int_to_float(x, ty, "")?,
+            (false, true) if unsigned(from) => ir.build_unsigned_int_to_float(x, ty, "")?,
             (false, true) => ir.build_signed_int_to_float(x, ty, "")?,
-            (true, false) if matches!(from, Element::F32 | Element::F64) => {
+            (true, false) if matches!(from, ScalarType::F32 | ScalarType::F64) => {
                 self.saturating_float_to_int(x, to, ty)?
             }
             (true, false) => {
-                let name = if to.is_unsigned() {
+                let name = if unsigned(to) {
                     "llvm.fptoui.sat"
                 } else {
                     "llvm.fptosi.sat"
@@ -101,7 +108,7 @@ impl<'ctx> Body<'_, 'ctx> {
     fn saturating_float_to_int(
         &self,
         x: VectorValue<'ctx>,
-        to: Element,
+        to: ScalarType,
         ty: VectorType<'ctx>,
     ) -> Built<VectorValue<'ctx>> {
         let ir = self.builder;
@@ -110,7 +117,7 @@ impl<'ctx> Body<'_, 'ctx> {
         let int = ty.get_element_type().into_int_type();
         let floats = |v: f64| VectorType::const_vector(&vec![float.const_float(v); lanes]);
         let bits = to.bytes() as i32 * 8;
-        let signed = !to.is_unsigned();
+        let signed = !unsigned(to);
         // Integers in `lowest..2^k` are the range; both bounds are powers of
         // two, so exact in either float type.
         let k = if signed { bits - 1 } else { bits };
@@ -165,19 +172,26 @@ impl<'ctx> Body<'_, 'ctx> {
                 .into(),
             SplatScalar | FirstN => {
                 let lanes = e.lanes(self.machine.vector_bytes) as u32;
-                let ty = self.ctx.i32_type().vec_type(lanes);
-                let scalar = if inst.op == FirstN {
+                let indices = self.ctx.i32_type().vec_type(lanes);
+                let ty = if inst.op == FirstN {
+                    indices
+                } else {
+                    vector_type(self.ctx, self.machine.vector_bytes, e)
+                };
+                let scalar: BasicValueEnum<'ctx> = if inst.op == FirstN {
                     // Clamp the usize count to the lane count before narrowing it.
                     let count = self.offset(args[0])?;
                     let lanes = self.ctx.i64_type().const_int(u64::from(lanes), false);
                     let fits = ir.build_int_compare(IntPredicate::ULT, count, lanes, "")?;
                     let count = ir.build_select(fits, count, lanes, "")?.into_int_value();
                     ir.build_int_truncate(count, self.ctx.i32_type(), "")?
+                        .into()
                 } else {
-                    self.load(args[0])?
+                    self.value(args[0])?
                 };
                 let first = ir.build_insert_element(ty.get_undef(), scalar, self.int(0), "")?;
-                let splat = ir.build_shuffle_vector(first, ty.get_undef(), ty.const_zero(), "")?;
+                let splat =
+                    ir.build_shuffle_vector(first, ty.get_undef(), indices.const_zero(), "")?;
                 if inst.op == FirstN {
                     // Compare at the full index width even when the data lanes are narrower.
                     let positions: Vec<_> =
@@ -312,7 +326,7 @@ impl<'ctx> Body<'_, 'ctx> {
                         self.int((n & 31) as i32),
                         e.lanes(self.machine.vector_bytes) as u32,
                     )?,
-                    !e.is_unsigned(),
+                    !unsigned(e),
                     "",
                 )?
                 .into(),
@@ -378,13 +392,17 @@ impl<'ctx> Body<'_, 'ctx> {
                 }?
                 .into()
             }
-            Min | Max => {
+            Min | Max | SaturatingAdd | SaturatingSub => {
                 let (a, b) = (arg(0)?, arg(1)?);
-                let name = match (inst.op, e.is_unsigned()) {
+                let name = match (inst.op, unsigned(e)) {
                     (Min, true) => "llvm.umin",
                     (Max, true) => "llvm.umax",
                     (Min, false) => "llvm.smin",
-                    _ => "llvm.smax",
+                    (Max, false) => "llvm.smax",
+                    (SaturatingAdd, true) => "llvm.uadd.sat",
+                    (SaturatingAdd, false) => "llvm.sadd.sat",
+                    (SaturatingSub, true) => "llvm.usub.sat",
+                    _ => "llvm.ssub.sat",
                 };
                 let intrinsic = self.intrinsic(name, &[a.get_type().into()])?;
                 ir.build_call(intrinsic, &[a.into(), b.into()], "")?
@@ -405,7 +423,7 @@ impl<'ctx> Body<'_, 'ctx> {
                     };
                     ir.build_float_compare(pred, a, b, "")?.into()
                 } else {
-                    let unsigned = e.is_unsigned();
+                    let unsigned = unsigned(e);
                     let pred = match inst.op {
                         Eq => IntPredicate::EQ,
                         Ne => IntPredicate::NE,
@@ -448,7 +466,7 @@ impl<'ctx> Body<'_, 'ctx> {
                 if inst.op == ExtractWrapping {
                     ir.build_extract_element(arg(0)?, index, "")?
                 } else {
-                    ir.build_insert_element(arg(0)?, self.load(args[2])?, index, "")?
+                    ir.build_insert_element(arg(0)?, self.value(args[2])?, index, "")?
                         .into()
                 }
             }
@@ -519,9 +537,11 @@ impl<'ctx> Body<'_, 'ctx> {
             .try_as_basic_value()
             .unwrap_basic()
             .into_int_value();
+        // Up to 64 lanes (`u8` on AVX-512): the count fits an `i32` from
+        // a mask of any width.
         Ok(self
             .builder
-            .build_int_z_extend(count, self.ctx.i32_type(), "")?)
+            .build_int_cast_sign_flag(count, self.ctx.i32_type(), false, "")?)
     }
 
     fn splat(
@@ -543,7 +563,7 @@ impl<'ctx> Body<'_, 'ctx> {
 }
 
 impl<'ctx> Body<'_, 'ctx> {
-    fn lanes(&self, e: Element) -> u32 {
+    fn lanes(&self, e: ScalarType) -> u32 {
         e.lanes(self.machine.vector_bytes) as u32
     }
 
@@ -597,8 +617,8 @@ impl<'ctx> Body<'_, 'ctx> {
     }
 
     /// The integer type of the offsets of an indexed access.
-    fn index_type(&self, e: Element) -> IntType<'ctx> {
-        if e.index() == Element::I64 {
+    fn index_type(&self, e: ScalarType) -> IntType<'ctx> {
+        if e.index() == ScalarType::I64 {
             self.ctx.i64_type()
         } else {
             self.ctx.i32_type()
@@ -617,7 +637,7 @@ impl<'ctx> Body<'_, 'ctx> {
             .into_int_value())
     }
 
-    fn all_lanes(&self, e: Element) -> VectorValue<'ctx> {
+    fn all_lanes(&self, e: ScalarType) -> VectorValue<'ctx> {
         VectorType::const_vector(&vec![
             self.ctx.bool_type().const_all_ones();
             self.lanes(e) as usize
@@ -682,7 +702,7 @@ impl<'ctx> memory::Primitives for Body<'_, 'ctx> {
             .into_int_value();
         Ok(ir.build_int_truncate(room, self.ctx.i32_type(), "")?)
     }
-    fn first_lanes(&mut self, e: Element, count: Self::Scalar) -> Built<Self::Vector> {
+    fn first_lanes(&mut self, e: ScalarType, count: Self::Scalar) -> Built<Self::Vector> {
         let lanes = self.lanes(e);
         let seq: Vec<_> = (0..lanes).map(|i| self.int(i as i32)).collect();
         Ok(self.builder.build_int_compare(
@@ -733,7 +753,7 @@ impl<'ctx> memory::Primitives for Body<'_, 'ctx> {
             "",
         )?)
     }
-    fn before_first(&mut self, _: Element, mask: Self::Vector) -> Built<Self::Vector> {
+    fn before_first(&mut self, _: ScalarType, mask: Self::Vector) -> Built<Self::Vector> {
         // lowbit(mask) - 1 has every bit below the first lane, and all bits
         // when the mask is empty.
         let ir = self.builder;
