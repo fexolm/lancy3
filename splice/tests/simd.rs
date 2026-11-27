@@ -1726,3 +1726,82 @@ fn prefix_masks_trap_exactly_when_an_active_lane_is_outside() {
         }
     }
 }
+
+#[kernel]
+fn saturating_float_casts(
+    singles: &[f32],
+    doubles: &[f64],
+    signed: &mut [i32],
+    unsigned: &mut [u32],
+    wide: &mut [i64],
+) -> i32 {
+    let w = Lane::<f32>::lanes();
+    let mut i = 0;
+    while i + w <= singles.len() {
+        let x = Lane::<f32>::load(singles, i);
+        x.cast::<i32>().store(signed, i);
+        x.cast::<u32>().store(unsigned, i);
+        i += w;
+    }
+    let w = Lane::<f64>::lanes();
+    let mut i = 0;
+    while i + w <= doubles.len() {
+        Lane::<f64>::load(doubles, i).cast::<i64>().store(wide, i);
+        i += w;
+    }
+    0
+}
+
+#[test]
+fn float_to_integer_lanes_saturate_and_send_nan_to_zero() {
+    // Rust's `as` is the reference: it truncates, saturates and maps NaN
+    // to zero. The values sit at and next to each bound.
+    let edges = [
+        f64::NAN,
+        f64::INFINITY,
+        f64::NEG_INFINITY,
+        0.0,
+        -0.0,
+        0.5,
+        -0.5,
+        -1.0,
+        123.9,
+        -123.9,
+        2f64.powi(31),
+        2f64.powi(31) - 128.0,
+        -(2f64.powi(31)),
+        -(2f64.powi(31)) - 256.0,
+        2f64.powi(32),
+        2f64.powi(32) - 256.0,
+        2f64.powi(63),
+        2f64.powi(63) - 1024.0,
+        -(2f64.powi(63)),
+        -(2f64.powi(63)) - 4096.0,
+        1e20,
+        -1e20,
+    ];
+    let lanes = Lane::<f32>::lanes();
+    let n = edges.len().div_ceil(lanes) * lanes;
+    let singles: Vec<f32> = (0..n).map(|i| edges[i % edges.len()] as f32).collect();
+    let doubles: Vec<f64> = (0..n).map(|i| edges[i % edges.len()]).collect();
+    for kernel in compile_all!(saturating_float_casts) {
+        let (mut signed, mut unsigned, mut wide) = (vec![7; n], vec![7; n], vec![7; n]);
+        let result = splice_testkit::call_i32(
+            &kernel,
+            &[],
+            &mut [
+                BufferArg::from(singles.as_slice()),
+                BufferArg::from(doubles.as_slice()),
+                BufferArg::from(signed.as_mut_slice()),
+                BufferArg::from(unsigned.as_mut_slice()),
+                BufferArg::from(wide.as_mut_slice()),
+            ],
+        );
+        assert_eq!(result, Ok(0));
+        for i in 0..n {
+            assert_eq!(signed[i], singles[i] as i32, "{}", singles[i]);
+            assert_eq!(unsigned[i], singles[i] as u32, "{}", singles[i]);
+            assert_eq!(wide[i], doubles[i] as i64, "{}", doubles[i]);
+        }
+    }
+}
