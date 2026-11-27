@@ -1,0 +1,50 @@
+error: an intrinsic has no body: the backend implements it
+ --> tests/ui/intrinsics.rs:3:26
+  |
+3 |       fn ones(self) -> u32 {
+  |  __________________________^
+4 | |         0
+5 | |     }
+  | |_____^
+
+error: an intrinsic is a plain method without generic parameters
+  --> tests/ui/intrinsics.rs:10:5
+   |
+10 |     fn generic<T>(self) -> u32;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: an intrinsic has no body: the backend implements it
+  --> tests/ui/intrinsics.rs:23:27
+   |
+23 |       fn plain(self) -> u32 {
+   |  ___________________________^
+24 | |         self
+25 | |     }
+   | |_____^
+
+error: an intrinsic implementation is for one concrete kernel type
+  --> tests/ui/intrinsics.rs:29:5
+   |
+29 | impl<T> Plain for Vec<T> {
+   |     ^^^
+
+error: an intrinsic struct is opaque: declare it without fields (`struct Atomic<T>;`)
+  --> tests/ui/intrinsics.rs:34:19
+   |
+34 |   pub struct Fields {
+   |  ___________________^
+35 | |     value: i32,
+36 | | }
+   | |_^
+
+error: an intrinsic struct takes only plain type parameters
+  --> tests/ui/intrinsics.rs:39:19
+   |
+39 | pub struct Bounded<T: Copy>;
+   |                   ^^^^^^^^^
+
+error: #[intrinsic] declares an intrinsic trait or struct, or implements its intrinsics
+  --> tests/ui/intrinsics.rs:42:1
+   |
+42 | pub fn free(x: i32) -> i32;
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^

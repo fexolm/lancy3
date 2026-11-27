@@ -24,6 +24,21 @@ pub(super) fn primitive_method(name: &str) -> bool {
     )
 }
 
+/// The core methods of runtime integers (`frontend::methods`): each stages
+/// a portable operation. Any other method of a runtime scalar is an
+/// intrinsic.
+const CORE_METHODS: [&str; 9] = [
+    "wrapping_add",
+    "wrapping_sub",
+    "wrapping_mul",
+    "wrapping_neg",
+    "saturating_add",
+    "saturating_sub",
+    "saturating_mul",
+    "min",
+    "max",
+];
+
 impl Lower<'_> {
     /// The method call `e`.
     pub(super) fn method(&self, e: &Expr, hint: Option<Scalar>) -> Result<Value> {
@@ -101,23 +116,71 @@ impl Lower<'_> {
                 );
             }
         };
-        // The registry stages the method on the receiver's type; the name
-        // must be registered for some type.
         let root = self.root;
         let name = m.method.to_string();
+        if !CORE_METHODS.contains(&name.as_str())
+            && let Some(ty) = kind.rust_type()
+        {
+            return self.intrinsic_method(ty, receiver, kind, m, hint);
+        }
+        // The registry stages the method on the receiver's type; the name
+        // must be registered for some type.
         let receiver = self.reg(receiver, kind, &m.receiver)?;
         let args = m
             .args
             .iter()
             .map(|arg| self.operand(arg, kind))
             .collect::<Result<Vec<_>>>()?;
-        let message = format!("`{name}` is not a kernel operation on runtime integers");
+        let message = format!(
+            "`{name}` is not a kernel operation on runtime integers; an intrinsic method needs a receiver of a known type"
+        );
         Ok(Value::new(
             Stage::Reg(kind),
             emit!({
                 const { ::core::assert!(#root::frontend::methods::is_method(#name), #message) };
                 let operands = [#receiver, #(#args),*];
                 #root::frontend::methods::method(__splice_builder, #name, &operands)?
+            }),
+        ))
+    }
+
+    /// `receiver.method(args)` on a runtime scalar, where `method` is not a
+    /// core method: an intrinsic of an `#[intrinsic]` trait in scope.
+    /// Rust's method resolution selects the trait's stage entry for the
+    /// receiver's type; the type the use expects, when it is known, types the result.
+    fn intrinsic_method(
+        &self,
+        ty: proc_macro2::Ident,
+        receiver: Value,
+        kind: Scalar,
+        m: &syn::ExprMethodCall,
+        hint: Option<Scalar>,
+    ) -> Result<Value> {
+        let root = self.root;
+        let operand = emit!(#root::frontend::methods::Operand);
+        let receiver = self.reg(receiver, kind, &m.receiver)?;
+        let args = m
+            .args
+            .iter()
+            .map(|arg| Ok(self.simd_argument(arg, Scalar::Inferred)?.1))
+            .collect::<Result<Vec<_>>>()?;
+        let stage = quote::format_ident!(
+            "__splice_stage_{}",
+            m.method.to_string().trim_start_matches("r#"),
+            span = m.method.span()
+        );
+        // rustc checks the result against the type the use expects, so a
+        // concrete expected type is the intrinsic's result type.
+        let result = hint
+            .filter(|t| t.is_scalar() && t.rust_type().is_some())
+            .unwrap_or(Scalar::Inferred);
+        Ok(Value::new(
+            Stage::Reg(result),
+            emit!({
+                let __splice_receiver = #receiver;
+                let __splice_operands = [#operand::Reg(__splice_receiver), #(#args),*];
+                let __splice_probe: #ty = ::core::default::Default::default();
+                __splice_probe.#stage(__splice_builder, &__splice_operands)?
             }),
         ))
     }

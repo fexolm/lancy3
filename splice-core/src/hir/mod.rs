@@ -20,6 +20,7 @@ pub use builder::FunctionBuilder;
 pub use replay::replay;
 pub use rust_call::{PacketStore, PacketValue, RustCallPlan, RustTarget};
 
+use crate::intrinsic::IntrinsicId;
 use std::collections::HashSet;
 use std::sync::Arc;
 
@@ -164,15 +165,12 @@ pub enum Instr {
         args: Vec<Reg>,
         buffers: Vec<Buffer>,
     },
-    /// Call the intrinsic `name` on scalar `args`. The signature of
-    /// `fallback`, the intrinsic's body, is the intrinsic's signature: a
-    /// backend that implements the intrinsic emits its own code, any other
-    /// compiles the call as a [`Call`](Self::Call) of `fallback`.
+    /// Call the intrinsic `id` on `args`; `dst` has its result type. The
+    /// backend that compiles the function implements it or fails the build.
     Intrinsic {
         dst: Reg,
-        name: Arc<str>,
+        id: IntrinsicId,
         args: Vec<Reg>,
-        fallback: Arc<Function>,
     },
 }
 
@@ -183,10 +181,7 @@ impl Instr {
             Self::Load { .. } | Self::Store { .. } | Self::RustCall { .. } | Self::TrapBounds => {
                 true
             }
-            Self::Call { function, .. }
-            | Self::Intrinsic {
-                fallback: function, ..
-            } => function.needs_status(),
+            Self::Call { function, .. } => function.needs_status(),
             Self::Simd { inst, .. } => inst.op.may_trap(),
             _ => false,
         }
@@ -302,8 +297,7 @@ impl Function {
         self.needs_status
     }
 
-    /// This function and the bodies it calls, directly or not, including
-    /// the bodies of its intrinsics, in first-use
+    /// This function and the bodies it calls, directly or not, in first-use
     /// breadth-first order. A body shared by several calls appears once.
     pub fn reachable_functions(&self) -> Vec<&Self> {
         let mut functions = vec![self];
@@ -311,10 +305,7 @@ impl Function {
         let mut i = 0;
         while i < functions.len() {
             for inst in functions[i].instructions() {
-                if let Instr::Call { function, .. }
-                | Instr::Intrinsic {
-                    fallback: function, ..
-                } = inst
+                if let Instr::Call { function, .. } = inst
                     && seen.insert(Arc::as_ptr(function))
                 {
                     functions.push(function);

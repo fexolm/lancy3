@@ -6,7 +6,7 @@ use crate::hir::{
     Binary, Buffer, BufferKind, Constant, ContextSlice, Function, Label, Reg, RustTarget,
     ScalarType, Simd, ValueType,
 };
-use crate::intrinsic::{Fallback, Intrinsic};
+use crate::intrinsic::IntrinsicId;
 use crate::{BuildError, Result};
 use std::cell::RefCell;
 use std::collections::{HashSet, VecDeque};
@@ -499,6 +499,16 @@ impl KernelBuilder for Validating<'_> {
         let r = self.inner.rust_call(target, args, slices, result)?;
         Ok(self.value(args, r, ValueType::Scalar(result)))
     }
+    fn intrinsic(&mut self, id: &IntrinsicId, args: &[Reg]) -> Result<Reg> {
+        let types = self.types(args)?;
+        if types != id.params {
+            return Err(self.error(format!(
+                "intrinsic {id} takes operands of its parameter types, got {types:?}"
+            )));
+        }
+        let r = self.inner.intrinsic(id, args)?;
+        Ok(self.value(args, r, id.result))
+    }
     fn call_kernel(
         &mut self,
         signature: Signature<'_>,
@@ -542,41 +552,6 @@ impl KernelBuilder for Validating<'_> {
         self.call_arguments(function.signature(), args, buffers)?;
         let r = self.inner.call_function(function, args, buffers)?;
         Ok(self.value(args, r, ValueType::Scalar(function.result())))
-    }
-    fn supports_intrinsic(&self, intrinsic: &Intrinsic<'_>) -> bool {
-        self.inner.supports_intrinsic(intrinsic)
-    }
-    fn intrinsic(
-        &mut self,
-        intrinsic: &Intrinsic<'_>,
-        args: &[Reg],
-        fallback: Fallback<'_>,
-    ) -> Result<Reg> {
-        let signature = intrinsic.signature;
-        if !signature.buffers.is_empty() {
-            return self.at(Err(BuildError::verify(format!(
-                "intrinsic {intrinsic} takes buffers"
-            ))));
-        }
-        self.call_arguments(signature, args, &[])?;
-        let r = match fallback {
-            Fallback::Staged { key, body } => {
-                let _staging = key.as_ref().map(Staging::enter).transpose()?;
-                let body = validated(signature, body, self.overflow_checks);
-                self.inner
-                    .intrinsic(intrinsic, args, Fallback::Staged { key, body })?
-            }
-            Fallback::Function(function) => {
-                if function.signature() != signature {
-                    return self.at(Err(BuildError::verify(format!(
-                        "the body of intrinsic {intrinsic} has another signature"
-                    ))));
-                }
-                self.inner
-                    .intrinsic(intrinsic, args, Fallback::Function(function))?
-            }
-        };
-        Ok(self.value(args, r, ValueType::Scalar(signature.result)))
     }
 }
 
@@ -712,17 +687,7 @@ impl KernelBuilder for Sink {
     fn call_function(&mut self, _: &Arc<Function>, _: &[Reg], _: &[Buffer]) -> Result<Reg> {
         self.next()
     }
-    /// The checked body of an intrinsic is staged, a recorded one was
-    /// checked when it was recorded.
-    fn intrinsic(
-        &mut self,
-        intrinsic: &Intrinsic<'_>,
-        _: &[Reg],
-        fallback: Fallback<'_>,
-    ) -> Result<Reg> {
-        if let Fallback::Staged { body, .. } = fallback {
-            body(&mut Self::new(intrinsic.signature, self.debug))?;
-        }
+    fn intrinsic(&mut self, _: &IntrinsicId, _: &[Reg]) -> Result<Reg> {
         self.next()
     }
 }

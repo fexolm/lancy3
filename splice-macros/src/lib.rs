@@ -15,6 +15,7 @@ macro_rules! emit {
 mod api;
 mod comptime_key;
 mod declaration;
+mod intrinsic;
 mod kast;
 mod scalar;
 
@@ -91,6 +92,36 @@ pub fn kernel(options: TokenStream, item: TokenStream) -> TokenStream {
     declaration::expand(options.root, options.print, item.into())
         .unwrap_or_else(Error::into_compile_error)
         .into()
+}
+
+/// Declare kernel intrinsics: methods without a body that every backend
+/// implements. On a trait, every method is an intrinsic; on an
+/// `impl Trait for Type` of such a trait, the body-less methods are that
+/// type's intrinsics, which a kernel calls like any method. Outside a
+/// kernel they panic. `#[intrinsic(crate = path)]` names the Splice crate
+/// when it is not `::splice`.
+#[proc_macro_attribute]
+pub fn intrinsic(options: TokenStream, item: TokenStream) -> TokenStream {
+    let root = syn::parse::Parser::parse(
+        |input: syn::parse::ParseStream| {
+            if input.is_empty() {
+                return Ok(parse_quote!(::splice));
+            }
+            let key: syn::Ident = input.parse()?;
+            if key != "crate" {
+                return Err(Error::new_spanned(key, "expected `crate = path`"));
+            }
+            input.parse::<Token![=]>()?;
+            input.parse::<Path>()
+        },
+        options,
+    );
+    match root {
+        Ok(root) => intrinsic::expand(root, item.into()),
+        Err(error) => Err(error),
+    }
+    .unwrap_or_else(Error::into_compile_error)
+    .into()
 }
 
 struct KernelOptions {

@@ -11,7 +11,6 @@ use cranelift_codegen::{
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
 use cranelift_jit::JITModule;
 use cranelift_module::{FuncId, Linkage, Module};
-use splice_core::intrinsic::Intrinsic;
 use splice_core::{Function, hir::Instr};
 use std::{
     borrow::Cow,
@@ -81,7 +80,6 @@ impl<'a> KernelModule<'a> {
         root: &'a Function,
         target: &splice_core::Target,
         debug: bool,
-        unsupported_intrinsic: splice_core::IntrinsicPolicy,
     ) -> splice_core::Result<Self> {
         let _span =
             tracing::debug_span!(target: "splice_core::compile", "lower_cranelift_ir").entered();
@@ -108,24 +106,12 @@ impl<'a> KernelModule<'a> {
                 .clone();
             let mut imports = HashMap::new();
             for inst in f.instructions() {
-                let callee = match inst {
-                    Instr::Call { function, .. } => Some(function),
-                    Instr::Intrinsic { name, fallback, .. } => {
-                        let intrinsic = Intrinsic::new(name, fallback.signature());
-                        if crate::intrinsic::native(&intrinsic).is_some() {
-                            None
-                        } else {
-                            splice_core::intrinsic::unsupported(
-                                unsupported_intrinsic,
-                                "cranelift",
-                                &intrinsic,
-                            )?;
-                            Some(fallback)
-                        }
-                    }
-                    _ => None,
-                };
-                if let Some(function) = callee {
+                if let Instr::Intrinsic { id, .. } = inst
+                    && crate::intrinsic::native(id).is_none()
+                {
+                    return Err(splice_core::intrinsic::unsupported("Cranelift", id));
+                }
+                if let Instr::Call { function, .. } = inst {
                     let key = Arc::as_ptr(function);
                     let profile_id = profile.then_some(ids.len());
                     let callee = match ids.entry(key) {

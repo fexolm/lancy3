@@ -38,15 +38,7 @@ pub(crate) fn configuration(meta: &Meta) -> Result<Option<TokenStream>> {
 
 /// `print` (`#[kernel(print)]`) also publishes `print`, which renders the
 /// specialized kernel as Rust; without it the kernel prints as a call.
-/// `intrinsic` is the name of a `#[intrinsic("name")]` function: a kernel
-/// that calls it calls the intrinsic, whose fallback is this function's
-/// body. The function itself still builds as its body.
-pub(super) fn expand(
-    root: Path,
-    native: &mut ItemFn,
-    print: bool,
-    intrinsic: Option<&syn::LitStr>,
-) -> Result<TokenStream> {
+pub(super) fn expand(root: Path, native: &mut ItemFn, print: bool) -> Result<TokenStream> {
     let mut generated_sig = native.sig.clone();
     crate::declaration::rebase_signature(&mut generated_sig);
     let sig = &generated_sig;
@@ -501,36 +493,7 @@ pub(super) fn expand(
             buffers: &[#(::core::stringify!(#buffer_names)),*],
         });
     };
-    if intrinsic.is_some() {
-        let concrete = |t: Scalar| t.is_scalar() && lower::scalar_type(&root, t).is_some();
-        if unit_result
-            || !concrete(result_type)
-            || !generic.params.is_empty()
-            || context.is_some()
-            || columns.is_some()
-            || !formals
-                .iter()
-                .all(|f| matches!(*f, Binding::Reg(t, _) if concrete(t)))
-        {
-            return Err(Error::new_spanned(
-                sig,
-                "an #[intrinsic] takes and returns concrete kernel scalars",
-            ));
-        }
-    }
-    let nested_body = if let Some(name) = intrinsic {
-        let intrinsic = emit!(#root::intrinsic);
-        emit! {
-            #unpack
-            #specialize
-            let __splice_body: #frontend::Body<'_> = #callback;
-            __splice_builder.intrinsic(
-                &#intrinsic::Intrinsic::new(#name, #frontend::Signature::new(#params, #result, #kinds)),
-                &[#(#reg_names),*],
-                #intrinsic::Fallback::Staged { key: __splice_key, body: __splice_body },
-            )
-        }
-    } else if context.is_some() {
+    let nested_body = if context.is_some() {
         emit!(::core::result::Result::Err(#root::BuildError::staging(
             "a runtime object requires a compatible enclosing Rust context"
         )))
@@ -905,7 +868,7 @@ mod tests {
 
     #[test]
     fn declaration_markers_reject_invalid_positions_and_duplicates() {
-        let examples: [(syn::Item, &str); 5] = [
+        let examples: [(syn::Item, &str); 4] = [
             (
                 parse_quote!(
                     #[comptime]
@@ -936,15 +899,6 @@ mod tests {
                 ),
                 "duplicate #[kernel]",
             ),
-            (
-                parse_quote!(
-                    trait Plan {
-                        #[intrinsic("x")]
-                        fn read(&self);
-                    }
-                ),
-                "not supported on a trait method",
-            ),
         ];
         for (item, diagnostic) in examples {
             let error = crate::declaration::expand(parse_quote!(::splice), false, emit!(#item))
@@ -958,7 +912,7 @@ mod tests {
         let mut f = parse_quote! {
             fn edit(column: &[i32]) -> i32 { column[0] = 1; 0 }
         };
-        let error = expand(parse_quote!(::splice), &mut f, false, None).unwrap_err();
+        let error = expand(parse_quote!(::splice), &mut f, false).unwrap_err();
         assert!(
             error
                 .to_string()
@@ -973,10 +927,9 @@ mod tests {
             #[cfg_attr(all(), inline, cfg(target_arch = "x86_64"))]
             fn sum(x: i32, y: i32) -> i32 { x + y }
         };
-        let items =
-            syn::parse2::<syn::File>(expand(parse_quote!(::splice), &mut f, true, None).unwrap())
-                .unwrap()
-                .items;
+        let items = syn::parse2::<syn::File>(expand(parse_quote!(::splice), &mut f, true).unwrap())
+            .unwrap()
+            .items;
         assert_eq!(items.len(), 3);
         for item in items {
             let attrs = match item {

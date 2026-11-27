@@ -28,6 +28,9 @@ pub(super) fn native_type(ty: ValueType) -> Type {
         ValueType::Scalar(ty) => super::scalar_type(ty),
         ValueType::Vector(e) => Type::Vector(lane(e)),
         ValueType::Mask(e) => Type::Vector(lane(e.index())),
+        ValueType::Opaque(_) => {
+            unreachable!("intrinsic::check rejects opaque values before lowering")
+        }
     }
 }
 

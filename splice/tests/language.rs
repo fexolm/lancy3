@@ -611,7 +611,6 @@ struct Threshold {
 
 #[kernel]
 impl Threshold {
-    #[intrinsic("splice.tests.unknown")]
     fn max(a: i32, b: i32) -> i32 {
         if a > b { a } else { b }
     }
@@ -624,7 +623,7 @@ fn apply_threshold(#[comptime] threshold: &Threshold, value: i32) -> i32 {
 }
 
 #[test]
-fn a_published_method_uses_its_body_when_the_intrinsic_is_unavailable() {
+fn a_published_method_runs_at_build_time_and_at_run_time() {
     fn check<B: Codegen<Output: Executable>>() {
         for min in [-3, 7] {
             let threshold = Threshold { min };
@@ -1308,64 +1307,6 @@ fn integer_methods_are_core_operations_on_every_integer_type() {
                         assert_eq!(actual, Ok(expected), "{xs:?} {a} {b} {n}");
                     }
                 }
-            }
-        }
-    }
-    splice_testkit::each_backend!(B => check::<B>());
-}
-
-mod intrinsic_methods {
-    use splice::kernel;
-
-    pub struct Math;
-
-    #[kernel]
-    impl Math {
-        #[intrinsic("acme.max")]
-        pub fn max(a: i32, b: i32) -> i32 {
-            if a > b { a } else { b }
-        }
-    }
-
-    #[kernel]
-    pub fn maximum(x: i32, y: i32) -> i32 {
-        Math::max(x, y)
-    }
-}
-
-/// MAC-13: a `#[intrinsic("name")]` method reaches the portable IR as an
-/// intrinsic call whose fallback is the method's body; a backend without
-/// the intrinsic compiles that body.
-#[test]
-fn intrinsic_methods_record_the_intrinsic_with_their_body() {
-    use intrinsic_methods::maximum;
-    use splice::hir::Instr;
-    let ir = maximum::ir().unwrap();
-    let fallback = ir
-        .instructions()
-        .iter()
-        .find_map(|op| match op {
-            Instr::Intrinsic { name, fallback, .. } if &**name == "acme.max" => Some(fallback),
-            _ => None,
-        })
-        .expect("an intrinsic call");
-    assert!(
-        !ir.instructions()
-            .iter()
-            .any(|op| matches!(op, Instr::Branch { .. }))
-    );
-    assert!(
-        fallback
-            .instructions()
-            .iter()
-            .any(|op| matches!(op, Instr::Branch { .. }))
-    );
-    fn check<B: Codegen<Output: Executable>>() {
-        let direct = maximum::build::<B>(maximum::BuildArgs {}).unwrap();
-        let portable = B::compile(&maximum::ir().unwrap()).unwrap();
-        for (x, y) in [(-5, 2), (7, 3), (i32::MIN, i32::MAX)] {
-            for code in [&direct, &portable] {
-                assert_eq!(code.call(maximum::CallArgs { x, y }), Ok(x.max(y)));
             }
         }
     }

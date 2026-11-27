@@ -85,69 +85,6 @@ impl Argument {
     }
 }
 
-pub struct Unnamed;
-#[kernel]
-impl Unnamed {
-    #[intrinsic("")]
-    fn empty_name(x: i32) -> i32 {
-        x
-    }
-}
-
-pub struct Twice;
-#[kernel]
-impl Twice {
-    #[intrinsic("a")]
-    #[intrinsic("b")]
-    fn two_names(x: i32) -> i32 {
-        x
-    }
-}
-
-pub struct Shapes;
-#[kernel]
-impl Shapes {
-    // An intrinsic takes and returns concrete kernel scalars.
-    #[intrinsic("acme.sum")]
-    fn slice_operand(xs: &[i32]) -> i32 {
-        xs[0]
-    }
-    #[intrinsic("acme.nothing")]
-    fn no_result(x: i32) {
-        let _ = x;
-    }
-    #[intrinsic("acme.generic")]
-    fn generic<const N: i32>(x: i32) -> i32 {
-        x + N
-    }
-}
-
-#[kernel]
-#[intrinsic("acme.host")]
-fn host_operand(#[comptime] n: i32, x: i32) -> i32 {
-    n + x
-}
-
-#[kernel]
-#[intrinsic("acme.block")]
-impl Shapes {}
-
-#[kernel]
-pub trait Measure {
-    #[intrinsic("acme.measure")]
-    fn measure(x: i32) -> i32 {
-        x
-    }
-}
-
-#[kernel]
-impl Measure for Shapes {
-    #[intrinsic("acme.measure")]
-    fn measure(x: i32) -> i32 {
-        x
-    }
-}
-
 #[kernel]
 pub trait Shape {
     fn area(x: char) -> i32;

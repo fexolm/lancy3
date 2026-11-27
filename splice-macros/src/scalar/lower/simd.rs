@@ -536,7 +536,7 @@ impl Lower<'_> {
     }
 
     /// An argument of a SIMD method: its stage and its registry operand.
-    fn simd_argument(&self, arg: &Expr, hint: Scalar) -> Result<(Stage, TokenStream)> {
+    pub(super) fn simd_argument(&self, arg: &Expr, hint: Scalar) -> Result<(Stage, TokenStream)> {
         let root = self.root;
         let operand = emit!(#root::frontend::methods::Operand);
         if self.body.known(arg) {

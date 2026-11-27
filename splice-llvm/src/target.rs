@@ -9,25 +9,25 @@ use std::sync::Once;
 /// What lowering needs from the build target.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Machine {
+    /// The backend named in diagnostics.
+    pub(crate) backend: &'static str,
     pub(crate) vector_bytes: usize,
     /// AVX-512 compress and expand instructions at this vector width.
     pub(crate) x86_compress: bool,
     /// See [`scalable`].
     pub(crate) scalable: bool,
-    /// A fused multiply-add instruction: AArch64, or x86 with FMA.
-    pub(crate) fma: bool,
 }
 
 impl Machine {
     pub(crate) fn new(target: &Target) -> Self {
         let bytes = target.vector_bytes();
         Self {
+            backend: "Llvm",
             vector_bytes: bytes,
             x86_compress: target
                 .x86()
                 .is_some_and(|isa| isa.avx10 > 0 || isa.avx512f && (bytes == 64 || isa.vl)),
             scalable: scalable(target),
-            fma: target.x86().is_none_or(|isa| isa.fma),
         }
     }
 }

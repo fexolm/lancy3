@@ -99,7 +99,9 @@ impl<B: Codegen> CompileInput<B> for Function {
     type Output = B::Output;
     type Error = BuildError;
     fn compile_with(&self, options: Option<BuildOptions>) -> crate::Result<B::Output> {
-        B::compile_function(self, options.unwrap_or(self.options()))
+        let options = options.unwrap_or(self.options());
+        crate::intrinsic::check::<B>(self, &options.target)?;
+        B::compile_function(self, options)
     }
 }
 impl<S, B: Codegen> CompileInput<B> for TypedIr<S> {
