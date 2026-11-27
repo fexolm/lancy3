@@ -2,129 +2,141 @@
 mod debug_info;
 mod lower;
 
-use lancy::{CompileError, ScalarKernel};
+use lancy::Kernel;
 pub use lower::lower;
-use splice::{BufferArg, BuildOptions, Codegen, Executable, Function};
+use splice_core::call::{Interface, SliceDescriptor};
+use splice_core::frontend::{Body, Signature};
+use splice_core::{Backend, BuildOptions, CallError, Executable, Function, Trap};
 
 /// Compile Splice kernels through Lancy's SSA HIR and host backend.
 pub struct Lancy;
 
-impl Codegen for Lancy {
+impl Backend for Lancy {
     type Output = LancyKernel;
 
-    fn build(
-        arity: usize,
-        kinds: &[splice::BufferKind],
-        body: splice::frontend::Body<'_>,
-    ) -> splice::Result<Self::Output> {
-        Self::build_with_options(arity, kinds, body, BuildOptions::default())
-    }
-
-    fn build_with_options(
-        arity: usize,
-        kinds: &[splice::BufferKind],
-        body: splice::frontend::Body<'_>,
+    fn stage(
+        signature: Signature<'_>,
+        body: Body<'_>,
         options: BuildOptions,
-    ) -> splice::Result<Self::Output> {
-        if options == BuildOptions::Debug {
-            return Self::compile(&splice::frontend::materialize_with_options(
-                arity, kinds, body, options,
-            )?);
-        }
-        let _span = tracing::debug_span!(target: "splice::compile", "compile", backend = "lancy", input = "staged").entered();
-        let (hir, source) = tracing::debug_span!(target: "splice::compile", "stage_lancy_hir")
-            .in_scope(|| lower::build_with_source(arity, kinds, body))?;
-        LancyKernel::new(hir, arity, kinds, source).map_err(|e| e.to_string())
+    ) -> splice_core::Result<Self::Output> {
+        let _span = tracing::debug_span!(target: "splice_core::compile", "compile", backend = "lancy", input = "staged").entered();
+        LancyKernel::compile(signature, options, |vector_bytes, debug| {
+            tracing::debug_span!(target: "splice_core::compile", "stage_lancy_hir")
+                .in_scope(|| lower::stage(signature, body, vector_bytes, debug))
+        })
     }
 
-    fn compile_raw(function: &Function) -> splice::Result<Self::Output> {
-        Self::compile_with_options(function, function.options())
-    }
-
-    fn compile_raw_with_options(
+    fn compile_function(
         function: &Function,
         options: BuildOptions,
-    ) -> splice::Result<Self::Output> {
-        let _span = tracing::debug_span!(target: "splice::compile", "compile", backend = "lancy", input = "portable").entered();
-        if options == BuildOptions::Debug {
-            let mut sources = Vec::new();
-            let hir = lower::lower_debug(function, &mut sources)?;
-            let code = ScalarKernel::compile_debug(&hir).map_err(|e| e.to_string())?;
-            let registration = debug_info::publish(&code, &sources)?;
-            return Ok(LancyKernel {
-                _debug: Some(registration),
-                code,
-                arity: function.arity(),
-                slices: function.buffer_kinds().into(),
-            });
-        }
-        let hir = tracing::debug_span!(target: "splice::compile", "lower_lancy_hir")
-            .in_scope(|| lower(function))?;
-        LancyKernel::new(
-            hir,
-            function.arity(),
-            function.buffer_kinds(),
-            function.source(),
-        )
-        .map_err(|e| e.to_string())
-    }
-}
-
-pub struct LancyKernel {
-    _debug: Option<splice_jit::Registration>,
-    code: ScalarKernel,
-    arity: usize,
-    slices: Box<[splice::BufferKind]>,
-}
-
-impl LancyKernel {
-    fn new(
-        function: lancy::hir::Function,
-        arity: usize,
-        kinds: &[splice::BufferKind],
-        source: Option<&splice::frontend::KernelSource>,
-    ) -> Result<Self, CompileError> {
-        let code = ScalarKernel::compile(&function)?;
-        if splice_jit::perf_enabled() {
-            splice_jit::profile(&[splice_jit::Function {
-                name: debug_info::name(source),
-                address: code.code_address() as u64,
-                size: code.code_size() as u64,
-                statements: Vec::new(),
-            }]);
-        }
-        Ok(Self {
-            _debug: None,
-            code,
-            arity,
-            slices: kinds.into(),
+    ) -> splice_core::Result<Self::Output> {
+        let _span = tracing::debug_span!(target: "splice_core::compile", "compile", backend = "lancy", input = "portable").entered();
+        LancyKernel::compile(function.signature(), options, |vector_bytes, debug| {
+            let graph = tracing::debug_span!(target: "splice_core::compile", "lower_lancy_hir")
+                .in_scope(|| lower::lower_with(function, vector_bytes, debug))?;
+            Ok((graph, function.source()))
         })
     }
 }
 
-impl Executable for LancyKernel {
-    fn call(&self, args: &[i32], buffers: &mut [BufferArg<'_>]) -> Result<i32, String> {
-        if args.len() != self.arity {
-            return Err(format!(
-                "expected {} scalar arguments, got {}",
-                self.arity,
-                args.len()
-            ));
+pub struct LancyKernel {
+    code: splice_jit::Published<Kernel>,
+    interface: Interface,
+}
+
+impl LancyKernel {
+    /// Lower with `lower`, which records the source points of a debug build.
+    fn compile(
+        signature: Signature<'_>,
+        options: BuildOptions,
+        lower: impl FnOnce(
+            usize,
+            Option<&mut Vec<lower::DebugSource>>,
+        ) -> splice_core::Result<(
+            lancy::hir::Function,
+            Option<&'static splice_core::frontend::KernelSource>,
+        )>,
+    ) -> splice_core::Result<Self> {
+        let target = options.target;
+        let mut sources = Vec::new();
+        let debug = options.debug();
+        let (hir, source) = lower(target.vector_bytes(), debug.then_some(&mut sources))?;
+        let mut compile_options = lancy::CompileOptions::new(target);
+        if debug {
+            compile_options = compile_options.with_debug();
         }
-        splice::hir::validate_buffers(&self.slices, buffers)?;
-        if self.slices.is_empty() && !self.code.requires_raw_call() {
-            return self.code.call(args).map_err(|e| e.to_string());
+        let code = Kernel::compile(&hir, &compile_options)
+            .map_err(|e| splice_core::BuildError::backend("lancy", e))?;
+        let mut publish = splice_jit::Publish::new(debug);
+        if debug {
+            debug_info::describe(&mut publish, &code, &sources);
+        } else {
+            publish.function(
+                source.map_or("kernel", |source| source.name),
+                code.code_address() as u64,
+                code.code_size() as u64,
+            );
         }
-        let mut words = Vec::with_capacity(self.arity + 2 * buffers.len());
-        words.extend(args.iter().map(|&v| v as u32 as u64));
-        for slice in buffers {
-            words.extend([slice.data() as u64, slice.len() as u64]);
+        Ok(Self {
+            code: publish.finish(true, code)?,
+            interface: Interface::new(signature),
+        })
+    }
+}
+
+/// Words of a call whose arguments Lancy receives on the stack.
+const INLINE_WORDS: usize = 32;
+
+// SAFETY: `enter` runs the code compiled for `interface`, and Lancy checks
+// the calling thread's target itself.
+unsafe impl Executable for LancyKernel {
+    fn interface(&self) -> &Interface {
+        &self.interface
+    }
+
+    unsafe fn enter(&self, words: &[u64], slices: &[SliceDescriptor]) -> Result<u64, CallError> {
+        let mut result = [0];
+        if slices.is_empty() {
+            // SAFETY: as below, without slices.
+            unsafe { self.code.memory().call_packed_unchecked(words, &mut result) }
+                .map_err(call_error)?;
+            return Ok(result[0]);
         }
-        // SAFETY: The validated descriptors supply live slices and exclusive
-        // Rust contexts. Both Splice lowering paths check permissions and use
-        // native call scratch only for initialized, shape-checked packets.
-        unsafe { self.code.call_raw(&words) }
-            .map(|v| v as i32)
-            .map_err(|e| e.to_string())
+        // Lancy takes the scalars followed by each slice's address and length.
+        let count = words.len() + 2 * slices.len();
+        let mut inline = [0; INLINE_WORDS];
+        let mut heap = Vec::new();
+        let packed = if count <= INLINE_WORDS {
+            &mut inline[..count]
+        } else {
+            heap.resize(count, 0);
+            &mut heap[..]
+        };
+        let (scalars, pairs) = packed.split_at_mut(words.len());
+        scalars.copy_from_slice(words);
+        for (pair, slice) in pairs.as_chunks_mut::<2>().0.iter_mut().zip(slices) {
+            *pair = [slice.data as u64, slice.len];
+        }
+        // SAFETY: the caller's contract: the descriptors supply live slices
+        // and exclusive Rust contexts. Both Splice lowering paths check
+        // permissions and use native call scratch only for initialized,
+        // shape-checked packets.
+        unsafe {
+            self.code
+                .memory()
+                .call_packed_unchecked(packed, &mut result)
+        }
+        .map_err(call_error)?;
+        Ok(result[0])
+    }
+}
+
+fn call_error(error: lancy::CallError) -> CallError {
+    match error {
+        lancy::CallError::Trap(trap) => trap.into(),
+        lancy::CallError::Target(error) => error.into(),
+        // The arguments were checked against the Splice signature above, so
+        // a Lancy signature mismatch is a defect at the native boundary.
+        _ => Trap::Abi.into(),
     }
 }

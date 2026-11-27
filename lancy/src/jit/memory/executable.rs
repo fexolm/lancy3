@@ -16,12 +16,18 @@ pub(in crate::jit) struct Executable {
 // SAFETY: Once published the mapping is immutable. A caller borrows the owner
 // for the duration of execution, so drop cannot race an active invocation.
 unsafe impl Send for Executable {}
+// SAFETY: shared references only read or execute the immutable mapping.
 unsafe impl Sync for Executable {}
+
+/// Installing nothing is a caller defect: every kernel has a body.
+#[derive(Debug, thiserror::Error)]
+#[error("cannot install empty machine code")]
+struct EmptyCode;
 
 impl Executable {
     pub(in crate::jit) fn new(code: &[u8]) -> Result<Self, CompileError> {
         if code.is_empty() {
-            return Err(CompileError::EmptyCode);
+            return Err(CompileError::internal(EmptyCode));
         }
         let len = code.len();
         let memory = Self {
@@ -42,7 +48,7 @@ impl Drop for Executable {
 }
 
 pub(super) fn os_error(operation: &'static str) -> CompileError {
-    CompileError::ExecutableMemory {
+    CompileError::Os {
         operation,
         source: std::io::Error::last_os_error(),
     }

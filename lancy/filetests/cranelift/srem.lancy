@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
 # %srem_i32
-fn main v0:i32 v1:i32 -> i32
+fn main(v0:i32 v1:i32) -> i32
   v2 = rem v0 v1
   ret v2
 @run 0 1 -> 0
@@ -22,7 +22,7 @@ fn main v0:i32 v1:i32 -> i32
 ---
 
 # %srem_imm_i32
-fn main v0:i32 -> i32
+fn main(v0:i32) -> i32
   t0 = const 3
   v1 = rem v0 t0
   ret v1

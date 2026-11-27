@@ -1,0 +1,165 @@
+error[E0277]: `Opaque` has no Splice layout description
+  --> tests/ui/specialization_types.rs:7:1
+   |
+ 7 | #[kernel]
+   | ^^^^^^^^^
+   | |
+   | a field of this type is read during specialization
+   | required by a bound introduced by this call
+   |
+help: the trait `KernelType` is not implemented for `Opaque`
+  --> tests/ui/specialization_types.rs:5:1
+   |
+ 5 | struct Opaque(i32);
+   | ^^^^^^^^^^^^^
+   = note: derive `splice::KernelType` for `Opaque`
+help: the trait `KernelType` is implemented for `Steps`
+  --> tests/ui/specialization_types.rs:12:10
+   |
+12 | #[derive(splice::KernelType)]
+   |          ^^^^^^^^^^^^^^^^^^
+note: required by a bound in `field`
+  --> $WORKSPACE/splice-core/src/frontend/evaluation.rs
+   |
+   | pub fn field<T: crate::KernelType + ?Sized>(owner: Operand<T>, name: &str) -> crate::Result<()> {
+   |                 ^^^^^^^^^^^^^^^^^ required by this bound in `field`
+   = note: this error originates in the attribute macro `kernel` which comes from the expansion of the derive macro `splice::KernelType` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0277]: specialization cannot dereference `Indirect`
+  --> tests/ui/specialization_types.rs:26:1
+   |
+26 | #[kernel]
+   | ^^^^^^^^^
+   | |
+   | only `&T` and `&mut T` are dereferenced without running user code
+   | required by a bound introduced by this call
+   |
+help: the trait `BuiltinReference` is not implemented for `Indirect`
+  --> tests/ui/specialization_types.rs:17:1
+   |
+17 | struct Indirect(Steps);
+   | ^^^^^^^^^^^^^^^
+help: the following other types implement trait `BuiltinReference`
+  --> $WORKSPACE/splice-core/src/frontend/evaluation.rs
+   |
+   | impl<T: ?Sized> BuiltinReference for &T {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `&T`
+...
+   | impl<T: ?Sized> BuiltinReference for &mut T {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `&mut T`
+note: required by a bound in `splice::frontend::evaluation::deref`
+  --> $WORKSPACE/splice-core/src/frontend/evaluation.rs
+   |
+   | pub fn deref<R: BuiltinReference>(reference: &R) -> &R::Target {
+   |                 ^^^^^^^^^^^^^^^^ required by this bound in `deref`
+   = note: this error originates in the attribute macro `kernel` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0277]: specialization cannot dereference `Indirect`
+  --> tests/ui/specialization_types.rs:26:1
+   |
+26 | #[kernel]
+   | ^^^^^^^^^ only `&T` and `&mut T` are dereferenced without running user code
+   |
+help: the trait `BuiltinReference` is not implemented for `Indirect`
+  --> tests/ui/specialization_types.rs:17:1
+   |
+17 | struct Indirect(Steps);
+   | ^^^^^^^^^^^^^^^
+help: the following other types implement trait `BuiltinReference`
+  --> $WORKSPACE/splice-core/src/frontend/evaluation.rs
+   |
+   | impl<T: ?Sized> BuiltinReference for &T {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `&T`
+...
+   | impl<T: ?Sized> BuiltinReference for &mut T {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `&mut T`
+   = note: this error originates in the attribute macro `kernel` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0277]: `Meters` is not a Rust primitive
+  --> tests/ui/specialization_types.rs:42:1
+   |
+42 | #[kernel]
+   | ^^^^^^^^^
+   | |
+   | specialization runs no user-defined operation
+   | required by a bound introduced by this call
+   |
+help: the trait `Primitive` is not implemented for `Meters`
+  --> tests/ui/specialization_types.rs:33:1
+   |
+33 | struct Meters(i32);
+   | ^^^^^^^^^^^^^
+   = help: the following other types implement trait `Primitive`:
+             &T
+             bool
+             char
+             f32
+             f64
+             i128
+             i16
+             i32
+           and $N others
+note: required by a bound in `primitive`
+  --> $WORKSPACE/splice-core/src/frontend/evaluation.rs
+   |
+   | pub fn primitive<T: Primitive + ?Sized>(_: &T) {}
+   |                     ^^^^^^^^^ required by this bound in `primitive`
+   = note: this error originates in the attribute macro `kernel` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0277]: `Meters` is not a Rust primitive
+  --> tests/ui/specialization_types.rs:47:1
+   |
+47 | #[kernel]
+   | ^^^^^^^^^
+   | |
+   | specialization runs no user-defined operation
+   | required by a bound introduced by this call
+   |
+help: the trait `Primitive` is not implemented for `Meters`
+  --> tests/ui/specialization_types.rs:33:1
+   |
+33 | struct Meters(i32);
+   | ^^^^^^^^^^^^^
+   = help: the following other types implement trait `Primitive`:
+             &T
+             bool
+             char
+             f32
+             f64
+             i128
+             i16
+             i32
+           and $N others
+note: required by a bound in `primitive`
+  --> $WORKSPACE/splice-core/src/frontend/evaluation.rs
+   |
+   | pub fn primitive<T: Primitive + ?Sized>(_: &T) {}
+   |                     ^^^^^^^^^ required by this bound in `primitive`
+   = note: this error originates in the attribute macro `kernel` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0277]: `Meters` has no Splice layout description
+  --> tests/ui/specialization_types.rs:47:1
+   |
+47 | #[kernel]
+   | ^^^^^^^^^
+   | |
+   | a field of this type is read during specialization
+   | required by a bound introduced by this call
+   |
+help: the trait `KernelType` is not implemented for `Meters`
+  --> tests/ui/specialization_types.rs:33:1
+   |
+33 | struct Meters(i32);
+   | ^^^^^^^^^^^^^
+   = note: derive `splice::KernelType` for `Meters`
+help: the trait `KernelType` is implemented for `Steps`
+  --> tests/ui/specialization_types.rs:12:10
+   |
+12 | #[derive(splice::KernelType)]
+   |          ^^^^^^^^^^^^^^^^^^
+note: required by a bound in `field`
+  --> $WORKSPACE/splice-core/src/frontend/evaluation.rs
+   |
+   | pub fn field<T: crate::KernelType + ?Sized>(owner: Operand<T>, name: &str) -> crate::Result<()> {
+   |                 ^^^^^^^^^^^^^^^^^ required by this bound in `field`
+   = note: this error originates in the attribute macro `kernel` which comes from the expansion of the derive macro `splice::KernelType` (in Nightly builds, run with -Z macro-backtrace for more info)

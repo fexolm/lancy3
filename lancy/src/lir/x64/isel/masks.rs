@@ -1,26 +1,19 @@
 //! Canonical predicates can share a register class through SSA copies and edges.
 use super::super::inst::{class, simd};
 use crate::hir::transforms::ControlFlowGraph;
-use crate::hir::{
-    Binary, Block, Function, Lane, Op, Simd, Terminator, Ternary, Type, Unary, Value,
-};
+use crate::hir::{Binary, Function, Lane, Op, Simd, Terminator, Ternary, Type, Unary, Value};
+use crate::lir::x64::Cpu;
 use regalloc2::{RegClass, VReg};
-use splice_target::Features;
 
 pub(super) struct Masks(Vec<bool>);
 
 impl Masks {
-    pub fn analyze(f: &Function, cfg: &ControlFlowGraph, cpu: Features) -> Self {
+    pub(super) fn analyze(f: &Function, cfg: &ControlFlowGraph, cpu: Cpu) -> Self {
         if !simd::evex(cpu) {
             return Self(Vec::new());
         }
         let mut groups = Groups::new(f.value_count());
         let mut literals = vec![None; f.value_count()];
-        let uses = if is_x86_feature_detected!("popcnt") {
-            count_only_uses(f, cfg)
-        } else {
-            Vec::new()
-        };
         for &v in f.params(f.entry()) {
             groups.reject(v);
         }
@@ -32,6 +25,25 @@ impl Masks {
                     Type::Vector(lane) => !lane.float() && simd::mask_lanes(cpu, lane),
                     _ => false,
                 });
+                let form = result
+                    .filter(|_| result_is_mask)
+                    .and_then(|v| mask_form(f.op(i), lane(v), lane, |v| literals[v.index()]));
+                if let Some(form) = form {
+                    let v = result.unwrap();
+                    match form {
+                        MaskForm::Copy(a) | MaskForm::Not(a) => groups.join(v, a),
+                        MaskForm::Logic(_, a, b) => {
+                            groups.join(v, a);
+                            groups.join(v, b);
+                        }
+                        MaskForm::Compare(_, _, a, b) => {
+                            groups.reject(a);
+                            groups.reject(b);
+                        }
+                        MaskForm::Constant(_) => {}
+                    }
+                    continue;
+                }
                 match *f.op(i) {
                     Op::Const(n) => {
                         literals[result.unwrap().index()] = Some(u128::from(n as u32));
@@ -41,44 +53,22 @@ impl Masks {
                         literals[result.unwrap().index()] = Some(bits);
                         groups.reject(result.unwrap());
                     }
-                    Op::Simd(Simd::Splat(v))
-                        if result_is_mask
-                            && literals[v.index()]
-                                .and_then(|bits| constant_predicate(lane(v), bits))
-                                .is_some() => {}
-                    Op::Copy(v) | Op::Simd(Simd::Bitcast(_, v))
-                        if result_is_mask
-                            && !lane(v).float()
-                            && lane(v).bytes() == lane(result.unwrap()).bytes() =>
-                    {
-                        groups.join(result.unwrap(), v);
-                    }
-                    Op::Simd(Simd::Bin(Binary::And | Binary::Or | Binary::Xor, a, b))
-                        if result_is_mask =>
-                    {
-                        groups.join(result.unwrap(), a);
-                        groups.join(result.unwrap(), b);
-                    }
-                    Op::Simd(Simd::Unary(Unary::Not, v)) if result_is_mask => {
-                        groups.join(result.unwrap(), v);
-                    }
-                    Op::Simd(Simd::Unary(Unary::Neg, _))
-                        if uses.get(result.unwrap().index()) == Some(&Use::Count(b)) =>
-                    {
-                        // Code selection consumes the predicate instead of the
-                        // negated vector when the predicate stays in K registers.
-                        groups.reject(result.unwrap());
-                    }
-                    Op::Simd(Simd::Bin(op, a, b))
-                        if result_is_mask
-                            && !matches!(lane(a), Lane::F16 | Lane::BF16)
-                            && simd::comparison_predicate(lane(a), op).is_some() =>
-                    {
-                        groups.reject(a);
-                        groups.reject(b);
-                    }
                     Op::Simd(Simd::AnyTrue(_) | Simd::AllTrue(_)) => {}
-                    Op::Simd(Simd::Ternary(Ternary::Select, _, yes, no))
+                    // A predicate producer, like a comparison; its count is a scalar.
+                    Op::Simd(Simd::FirstLanes(..)) if result_is_mask => {}
+                    Op::Simd(Simd::MaskCount(m)) if native_count(cpu, lane(m)) => {}
+                    Op::Simd(Simd::CompressStore { mask, value, .. }) => {
+                        groups.reject(value);
+                        // The mask stays a predicate for the native store and
+                        // for the fallback's compress and count.
+                        let lane = lane(value);
+                        let kept = native_compress_store(cpu, lane)
+                            || simd::compact_lanes(cpu, lane) && native_count(cpu, lane);
+                        if !kept {
+                            groups.reject(mask);
+                        }
+                    }
+                    Op::Ternary(Ternary::Select, _, yes, no)
                         if simd::mask_lanes(cpu, lane(yes)) =>
                     {
                         groups.reject(yes);
@@ -134,11 +124,11 @@ impl Masks {
         Self(groups.finish())
     }
 
-    pub fn contains(&self, v: Value) -> bool {
+    pub(super) fn contains(&self, v: Value) -> bool {
         self.0.get(v.index()).copied().unwrap_or(false)
     }
 
-    pub fn reg(&self, f: &Function, v: Value) -> VReg {
+    pub(super) fn reg(&self, f: &Function, v: Value) -> VReg {
         let ty = f.value_type(v);
         let class = if matches!(ty, Type::Vector(_)) && self.contains(v) {
             RegClass::Float
@@ -147,6 +137,42 @@ impl Masks {
         };
         VReg::new(v.index(), class)
     }
+}
+
+/// How a predicate result is computed in a k-register. The analysis keeps a
+/// value in k-registers exactly when the selection rules have a form for it.
+#[derive(Clone, Copy)]
+pub(super) enum MaskForm {
+    /// Same predicate in another value of equal lane size.
+    Copy(Value),
+    Not(Value),
+    Logic(Binary, Value, Value),
+    /// A comparison with its `vpcmp` predicate.
+    Compare(Lane, i32, Value, Value),
+    /// A splat of all-zero or all-one lanes.
+    Constant(bool),
+}
+
+/// The k-register form of `op` producing a predicate with `result` lanes,
+/// given each value's lane and the bits of its constant definition.
+pub(super) fn mask_form(
+    op: &Op,
+    result: Lane,
+    lane: impl Fn(Value) -> Lane,
+    constant: impl Fn(Value) -> Option<u128>,
+) -> Option<MaskForm> {
+    Some(match *op {
+        Op::Copy(v) if !lane(v).float() && lane(v).bytes() == result.bytes() => MaskForm::Copy(v),
+        Op::Unary(Unary::Not, v) => MaskForm::Not(v),
+        Op::Bin(kind @ (Binary::And | Binary::Or | Binary::Xor), a, b) => {
+            MaskForm::Logic(kind, a, b)
+        }
+        Op::Bin(kind, a, b) if !matches!(lane(a), Lane::F16 | Lane::BF16) => {
+            MaskForm::Compare(lane(a), simd::comparison_predicate(lane(a), kind)?, a, b)
+        }
+        Op::Simd(Simd::Splat(v)) => MaskForm::Constant(constant_predicate(lane(v), constant(v)?)?),
+        _ => return None,
+    })
 }
 
 pub(super) fn constant_predicate(lane: Lane, bits: u128) -> Option<bool> {
@@ -161,37 +187,14 @@ pub(super) fn constant_predicate(lane: Lane, bits: u128) -> Option<bool> {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Use {
-    None,
-    Count(Block),
-    Other,
+/// `kmovw` and `popcnt` count a predicate of at most 16 lanes.
+pub(super) fn native_count(cpu: Cpu, lane: Lane) -> bool {
+    cpu.isa.popcnt && cpu.bytes / lane.bytes() <= 16
 }
 
-fn count_only_uses(f: &Function, cfg: &ControlFlowGraph) -> Vec<Use> {
-    let mut uses = vec![Use::None; f.value_count()];
-    for &b in cfg.reverse_postorder() {
-        for i in f.instructions(b) {
-            if let Op::Simd(Simd::Reduce(Binary::Add, v)) = *f.op(i)
-                && f.value_type(v) == Type::Vector(Lane::I32)
-                && uses[v.index()] == Use::None
-            {
-                uses[v.index()] = Use::Count(b);
-            } else {
-                f.visit_operands(i, |v| uses[v.index()] = Use::Other);
-            }
-        }
-        let term = *f.terminator(b);
-        if let Terminator::Return(v) = term {
-            uses[v.index()] = Use::Other;
-        }
-        for edge in term.edges() {
-            for &v in f.edge(edge).1 {
-                uses[v.index()] = Use::Other;
-            }
-        }
-    }
-    uses
+/// `pdep` places the written prefix on the mask and `vpcompressd` stores it.
+pub(super) fn native_compress_store(cpu: Cpu, lane: Lane) -> bool {
+    simd::evex(cpu) && cpu.isa.bmi2 && lane.bytes() == 4
 }
 
 // Each component must have one representation. Rejecting any noncanonical

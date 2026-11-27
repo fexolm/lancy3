@@ -1,8 +1,8 @@
+use splice::lancy::Lancy;
 use splice::{
     BufferArg, BufferKind, Executable, kernel,
     simd::{Element, Lane, LaneElement},
 };
-use splice_lancy::Lancy;
 
 #[derive(Clone, Copy)]
 enum Compare {
@@ -55,7 +55,7 @@ struct Plan {
 }
 
 // One active lane keeps the operators short and works for every lane width.
-#[kernel]
+#[kernel(print)]
 fn filter<T: LaneElement>(
     col: &[T],
     #[comptime] op: Compare,
@@ -76,7 +76,7 @@ fn filter<T: LaneElement>(
     0
 }
 
-#[kernel]
+#[kernel(print)]
 fn join<T: LaneElement>(
     left_key: &[T],
     right_key: &[T],
@@ -101,7 +101,7 @@ fn join<T: LaneElement>(
     count
 }
 
-#[kernel]
+#[kernel(print)]
 fn project<T: LaneElement>(
     col: &[T],
     right_rows: &[i32],
@@ -128,7 +128,7 @@ fn project<T: LaneElement>(
     0
 }
 
-#[kernel]
+#[kernel(print)]
 fn query(
     #[comptime] schema: &Schema,
     #[comptime] plan: &Plan,
@@ -265,7 +265,7 @@ fn query(
     count
 }
 
-fn main() -> splice::Result<()> {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     let columns = demo_columns();
     let schema = Schema::from_batch(&columns);
     let plan = demo_plan();
@@ -281,7 +281,7 @@ fn main() -> splice::Result<()> {
                 columns
             )?
         ),
-        Some(mode) => return Err(format!("unknown mode {mode}; use run or rust")),
+        Some(mode) => return Err(format!("unknown mode {mode}; use run or rust").into()),
     }
     Ok(())
 }
@@ -334,19 +334,19 @@ fn demo_plan() -> Plan {
 
 fn demo_columns() -> [BufferArg<'static>; 6] {
     [
-        BufferArg::ReadI64(&[10, 10, 20, 30, 20]),
-        BufferArg::Read(&[3, 1, 4, 2, 5]),
-        BufferArg::ReadF32(&[0.1, 0.0, 0.3, 0.0, 0.2]),
-        BufferArg::ReadI64(&[10, 10, 20]),
-        BufferArg::ReadU16(&[100, 120, 250]),
-        BufferArg::ReadF64(&[4.9, 4.0, 4.7]),
+        BufferArg::read::<i64>(&[10, 10, 20, 30, 20]),
+        BufferArg::read::<i32>(&[3, 1, 4, 2, 5]),
+        BufferArg::read::<f32>(&[0.1, 0.0, 0.3, 0.0, 0.2]),
+        BufferArg::read::<i64>(&[10, 10, 20]),
+        BufferArg::read::<u16>(&[100, 120, 250]),
+        BufferArg::read::<f64>(&[4.9, 4.0, 4.7]),
     ]
 }
 
 fn run(
     code: splice::TypedKernel<query::Signature, impl Executable>,
     columns: [BufferArg<'_>; 6],
-) -> splice::Result<Vec<i32>> {
+) -> Result<Vec<i32>, Box<dyn std::error::Error>> {
     let capacity = columns[0].len() * columns[3].len();
     let mut keep = vec![0; columns[0].len()];
     let mut right = vec![0; capacity];
@@ -363,10 +363,12 @@ fn run(
 }
 
 #[test]
-fn mixed_schema_specializes_the_same_operators_for_different_elements() -> splice::Result<()> {
+fn mixed_schema_specializes_the_same_operators_for_different_elements()
+-> Result<(), Box<dyn std::error::Error>> {
     use splice::Codegen;
-    use splice_cranelift::Cranelift;
-    use splice_llvm::Llvm;
+    use splice::cranelift::Cranelift;
+    #[cfg(feature = "llvm")]
+    use splice::llvm::Llvm;
 
     let schema = Schema::from_batch(&demo_columns());
     let mut plan = demo_plan();
@@ -400,6 +402,7 @@ fn mixed_schema_specializes_the_same_operators_for_different_elements() -> splic
         expected
     );
     assert_eq!(run(Lancy::compile(&ir)?, demo_columns())?, expected);
+    #[cfg(feature = "llvm")]
     assert_eq!(
         run(
             query::build::<Llvm>(query::BuildArgs {
@@ -410,6 +413,7 @@ fn mixed_schema_specializes_the_same_operators_for_different_elements() -> splic
         )?,
         expected
     );
+    #[cfg(feature = "llvm")]
     assert_eq!(run(Llvm::compile(&ir)?, demo_columns())?, expected);
     assert_eq!(
         run(
@@ -423,8 +427,8 @@ fn mixed_schema_specializes_the_same_operators_for_different_elements() -> splic
     );
 
     let mut columns = demo_columns();
-    columns[0] = BufferArg::ReadF64(&[10.0, 10.0, 20.0, f64::NAN, 20.0]);
-    columns[3] = BufferArg::ReadF64(&[10.0, 10.0, 20.0]);
+    columns[0] = BufferArg::read(&[10.0, 10.0, 20.0, f64::NAN, 20.0]);
+    columns[3] = BufferArg::read(&[10.0, 10.0, 20.0]);
     plan.predicates[2].val = Literal::F64(10.0);
     let schema = Schema::from_batch(&columns);
     let rust = query::print(&schema, &plan)?;

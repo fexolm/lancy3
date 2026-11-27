@@ -1,6 +1,6 @@
 # The fifth guard is the first proof that element four is in range.
-fn main p:ptr len:i32 n:i32 -> i32
-  slices 0 read4
+fn main(p:ptr len:i32 n:i32) -> i32
+  slice p len read4
   zero = const 0
   one = const 1
   two = const 2
@@ -8,40 +8,44 @@ fn main p:ptr len:i32 n:i32 -> i32
   four = const 4
   five = const 5
   a = ge len one
-  br a g2 | reject
-block g2
+  br a g2() | reject()
+block g2()
   b = ge len two
-  br b g3 | reject
-block g3
+  br b g3() | reject()
+block g3()
   c = ge len three
-  br c g4 | reject
-block g4
+  br c g4() | reject()
+block g4()
   d = ge len four
-  br d g5 | reject
-block g5
+  br d g5() | reject()
+block g5()
   e = ge len five
-  br e init | reject
-block init
-  jump head zero zero
-block head i:i32 acc:i32
+  br e init() | reject()
+block init()
+  jump head(zero zero)
+block head(i:i32 acc:i32)
   more = lt i n
-  br more body | done
-block body
+  br more body() | done()
+block body()
   bounds four len
   ptr = offset p four 4
   x = load i32 ptr
   sum = add acc x
   next = add i one
-  jump head next sum
-block done
+  jump head(next sum)
+block done()
   ret acc
-block reject
+block reject()
   ret zero
+# The hoisted load replaces the loop's load without a copy, so the sum of
+# an invariant collapses (HIR-08).
 @opt not: bounds
 @opt check: load
-@opt nextln: jump
+@opt nextln: max
+@opt nextln: mul
 @opt not: load
 @opt not: bounds
+@opt not: lt
 @opt check: ret
 @run 5 3 -> 21 | 01 00 00 00 02 00 00 00 03 00 00 00 04 00 00 00 07 00 00 00 | 01 00 00 00 02 00 00 00 03 00 00 00 04 00 00 00 07 00 00 00
 @run 4 3 -> 0 | 01 00 00 00 02 00 00 00 03 00 00 00 04 00 00 00 | 01 00 00 00 02 00 00 00 03 00 00 00 04 00 00 00
@@ -49,35 +53,35 @@ block reject
 ---
 
 # The proof on the qualified path does not reach the unguarded entry.
-fn main p:ptr len:i32 n:i32 route:i32 -> i32
-  slices 0 read4
+fn main(p:ptr len:i32 n:i32 route:i32) -> i32
+  slice p len read4
   zero = const 0
   one = const 1
   four = const 4
   five = const 5
-  br route qualify | unguarded
-block qualify
+  br route qualify() | unguarded()
+block qualify()
   enough = ge len five
-  br enough pass | reject
-block pass
-  jump init
-block unguarded
-  jump init
-block init
-  jump head zero zero
-block head i:i32 acc:i32
+  br enough pass() | reject()
+block pass()
+  jump init()
+block unguarded()
+  jump init()
+block init()
+  jump head(zero zero)
+block head(i:i32 acc:i32)
   more = lt i n
-  br more body | done
-block body
+  br more body() | done()
+block body()
   bounds four len
   ptr = offset p four 4
   x = load i32 ptr
   sum = add acc x
   next = add i one
-  jump head next sum
-block done
+  jump head(next sum)
+block done()
   ret acc
-block reject
+block reject()
   ret zero
 @opt check: bounds
 @opt check: load
@@ -88,45 +92,45 @@ block reject
 ---
 
 # Leaving the stronger scope restores the outer proof.
-fn main p:ptr len:i32 n:i32 -> i32
-  slices 0 write4
+fn main(p:ptr len:i32 n:i32) -> i32
+  slice p len write4
   zero = const 0
   one = const 1
   two = const 2
   three = const 3
   outer = ge len two
-  br outer choose | reject
-block choose
+  br outer choose() | reject()
+block choose()
   inner = ge len three
-  br inner init1 | init2
-block init1
-  jump head1 zero
-block head1 i:i32
+  br inner init1() | init2()
+block init1()
+  jump head1(zero)
+block head1(i:i32)
   more1 = lt i n
-  br more1 body1 | done1
-block body1
+  br more1 body1() | done1()
+block body1()
   bounds two len
   at2 = offset p two 4
   next1 = add i one
   store at2 next1
-  jump head1 next1
-block done1
+  jump head1(next1)
+block done1()
   ret n
-block init2
-  jump head2 zero
-block head2 j:i32
+block init2()
+  jump head2(zero)
+block head2(j:i32)
   more2 = lt j n
-  br more2 body2 | done2
-block body2
+  br more2 body2() | done2()
+block body2()
   bounds one len
   at1 = offset p one 4
   next2 = add j one
   store at1 next2
   bounds two len
-  jump head2 next2
-block done2
+  jump head2(next2)
+block done2()
   ret n
-block reject
+block reject()
   ret zero
 @opt not: bounds
 @opt check: store

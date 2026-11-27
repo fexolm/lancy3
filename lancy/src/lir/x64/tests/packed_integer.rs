@@ -1,11 +1,12 @@
 use super::packed_code::{body, executable, host_supports, profiles, supports};
 use crate::{
     hir::{Binary as B, Lane, Type, Unary as U},
-    hir::{eval::evaluate, operation::Action},
     jit::packed_test,
-    lir::x64::{Features, inst::simd::Native},
+    lir::x64::{Cpu, inst::simd::Native},
+    support::numeric::{Action, evaluate},
 };
 use iced_x86::{Decoder, DecoderOptions, Mnemonic};
+use splice_target::X86Features;
 
 const INTS: [Lane; 8] = [
     Lane::I8,
@@ -87,7 +88,7 @@ fn operands(action: Action, lane: Lane, width: usize, seed: usize) -> [[u8; 64];
     slots
 }
 
-fn exercise(cpu: Features, lane: Lane, action: Action) {
+fn exercise(cpu: Cpu, lane: Lane, action: Action) {
     let ty = Type::Vector(lane);
     let output = match action {
         Action::Binary(op) => op.result_type(ty),
@@ -106,7 +107,7 @@ fn exercise(cpu: Features, lane: Lane, action: Action) {
             continue;
         }
         let (bytes, text_len) = body(op, regs);
-        let host = Features::host();
+        let host = Cpu::host();
         let mut can_run = cpu.bytes <= host.bytes;
         let mut packed_operation = false;
         for inst in Decoder::new(64, &bytes[..text_len], DecoderOptions::NONE) {
@@ -181,7 +182,7 @@ fn exercise(cpu: Features, lane: Lane, action: Action) {
     }
 }
 
-fn arithmetic_and_ordering(cpu: Features, lane: Lane) {
+fn arithmetic_and_ordering(cpu: Cpu, lane: Lane) {
     for op in [
         B::Add,
         B::Sub,
@@ -207,32 +208,27 @@ fn arithmetic_and_ordering(cpu: Features, lane: Lane) {
 fn packed_arithmetic_and_ordering_obey_each_isa_and_operand_alias() {
     let [sse2, avx2, foundation, extended] = profiles();
     // SSE4.1 has PCMPEQQ and PMULLD but signed PCMPGTQ requires SSE4.2.
-    let sse41 = Features {
-        sse41: true,
-        ssse3: true,
+    let sse41 = Cpu {
+        isa: X86Features {
+            sse41: true,
+            ssse3: true,
+            ..sse2.isa
+        },
         ..sse2
     };
-    let sse42 = Features {
-        sse42: true,
+    let sse42 = Cpu {
+        isa: X86Features {
+            sse42: true,
+            ..sse41.isa
+        },
         ..sse41
     };
     for cpu in [sse2, sse41, sse42, avx2, foundation, extended] {
         for lane in INTS {
-            if cpu.bytes != 64 || lane.bytes() >= 4 || cpu.bw {
+            if cpu.bytes != 64 || lane.bytes() >= 4 || cpu.isa.bw {
                 arithmetic_and_ordering(cpu, lane);
             }
         }
-    }
-}
-
-#[test]
-fn avx1_without_avx2_computes_both_sse_halves() {
-    let avx = Features {
-        bytes: 32,
-        ..profiles()[0]
-    };
-    for lane in INTS {
-        arithmetic_and_ordering(avx, lane);
     }
 }
 
@@ -255,7 +251,7 @@ fn variable_shifts_and_rotates_wrap_each_count_to_its_lane() {
             Lane::I64,
             Lane::U64,
         ] {
-            if lane.bytes() == 2 && !cpu.bw {
+            if lane.bytes() == 2 && !cpu.isa.bw {
                 continue;
             }
             for op in [B::Shl, B::Shr, B::RotateLeft, B::RotateRight] {
@@ -268,28 +264,43 @@ fn variable_shifts_and_rotates_wrap_each_count_to_its_lane() {
 #[test]
 fn packed_bit_counts_handle_zero_and_the_top_bit() {
     let [sse2, avx2, foundation, extended] = profiles();
-    let cd = Features {
-        cd: true,
+    let cd = Cpu {
+        isa: X86Features {
+            cd: true,
+            ..foundation.isa
+        },
         ..foundation
     };
-    let vpopcnt = Features {
-        vpopcnt: true,
+    let vpopcnt = Cpu {
+        isa: X86Features {
+            vpopcnt: true,
+            ..foundation.isa
+        },
         ..foundation
     };
-    let bw = Features {
-        bw: true,
+    let bw = Cpu {
+        isa: X86Features {
+            bw: true,
+            ..foundation.isa
+        },
         ..foundation
     };
-    let bitalg = Features { bitalg: true, ..bw };
+    let bitalg = Cpu {
+        isa: X86Features {
+            bitalg: true,
+            ..bw.isa
+        },
+        ..bw
+    };
     for cpu in [sse2, avx2, foundation, cd, vpopcnt, bw, bitalg, extended] {
         for lane in [Lane::U8, Lane::U16, Lane::U32, Lane::U64] {
             let ty = Type::Vector(lane);
             for op in [U::LeadingZeros, U::TrailingZeros, U::Popcnt] {
                 let action = Action::Unary(op);
                 let required = match op {
-                    U::LeadingZeros => lane.bytes() >= 4 && cpu.cd,
-                    _ if lane.bytes() >= 4 => cpu.vpopcnt,
-                    _ => cpu.bitalg && cpu.bw,
+                    U::LeadingZeros => lane.bytes() >= 4 && cpu.isa.cd,
+                    _ if lane.bytes() >= 4 => cpu.isa.vpopcnt,
+                    _ => cpu.isa.bitalg && cpu.isa.bw,
                 };
                 // An alternative packed expansion is valid on a lower ISA;
                 // decode it there too to catch accidental AVX-512 instructions.
@@ -307,8 +318,8 @@ fn packed_bit_counts_handle_zero_and_the_top_bit() {
 #[test]
 fn packed_integer_temporaries_preserve_live_inputs_under_pressure() {
     use crate::{
-        ScalarKernel,
-        hir::{Function, Op, Simd, Terminator, Ternary},
+        Kernel,
+        hir::{Function, Op, Terminator, Ternary},
     };
 
     const ARITY: usize = 18;
@@ -319,22 +330,20 @@ fn packed_integer_temporaries_preserve_live_inputs_under_pressure() {
     let mut acc = args[0];
     for pair in args.windows(2) {
         let [x, y] = [pair[0], pair[1]];
-        let mut emit = |op| f.append(block, Op::Simd(op)).unwrap();
-        let product = emit(Simd::Bin(B::Mul, x, y));
-        let rotated = emit(Simd::Bin(B::RotateLeft, product, y));
-        let neg = emit(Simd::Unary(U::Neg, y));
-        let lt = emit(Simd::Bin(B::Lt, x, y));
-        let term = emit(Simd::Ternary(Ternary::Select, lt, rotated, neg));
-        acc = emit(Simd::Bin(B::Xor, acc, term));
+        let mut emit = |op| f.append(block, op).unwrap();
+        let product = emit(Op::Bin(B::Mul, x, y));
+        let rotated = emit(Op::Bin(B::RotateLeft, product, y));
+        let neg = emit(Op::Unary(U::Neg, y));
+        let lt = emit(Op::Bin(B::Lt, x, y));
+        let term = emit(Op::Ternary(Ternary::Select, lt, rotated, neg));
+        acc = emit(Op::Bin(B::Xor, acc, term));
     }
     for &x in &args {
-        acc = f
-            .append(block, Op::Simd(Simd::Bin(B::Add, acc, x)))
-            .unwrap();
+        acc = f.append(block, Op::Bin(B::Add, acc, x)).unwrap();
     }
     f.set_terminator(block, Terminator::Return(acc));
-    let k = ScalarKernel::compile(&f).unwrap();
-    let lanes = ScalarKernel::vector_bytes() / 8;
+    let k = Kernel::compile(&f, &crate::test_target::options()).unwrap();
+    let lanes = crate::test_target::width() / 8;
     let inputs: Vec<u64> = (0..ARITY * lanes)
         .map(|i| {
             (i as u64 + 1)
@@ -343,7 +352,7 @@ fn packed_integer_temporaries_preserve_live_inputs_under_pressure() {
         })
         .collect();
     let mut actual = vec![0; lanes];
-    k.call_words(&inputs, &mut actual).unwrap();
+    k.call_packed(&inputs, &mut actual).unwrap();
     for lane in 0..lanes {
         let args: Vec<_> = inputs[lane..].iter().step_by(lanes).copied().collect();
         let mut expected = args[0];

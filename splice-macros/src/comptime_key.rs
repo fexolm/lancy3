@@ -1,13 +1,10 @@
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
-use syn::{Data, DeriveInput, Error, Fields, Path, Result, parse_quote};
+use syn::{Data, DeriveInput, Error, Fields, Result, parse_quote};
 
 pub fn expand(input: DeriveInput) -> Result<TokenStream> {
     let name = &input.ident;
-    let mut root: Path = parse_quote!(::splice);
-    for attr in input.attrs.iter().filter(|a| a.path().is_ident("splice")) {
-        root = attr.parse_args()?;
-    }
+    let root = crate::derive_root(&input.attrs)?;
     let key = quote!(#root::ComptimeKey);
     let mut generics = input.generics.clone();
     for param in generics.type_params_mut() {

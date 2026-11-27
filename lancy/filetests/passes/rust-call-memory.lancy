@@ -1,0 +1,74 @@
+# Without a call between them, a load reads the stored value.
+fn main(value:i32) -> i32
+  p = call_scratch 0 8
+  store p value
+  loaded = load i32 p
+  ret loaded
+@opt check: store
+@opt not: load
+@opt check: ret
+@run 7 -> 7
+
+---
+
+# A Rust call may write any memory it can reach, so the load stays after it.
+fn main(value:i32 fail:i32) -> i32
+  p = call_scratch 0 8
+  store p value
+  ignored = rust_call identity_or_error p value p fail
+  loaded = load i32 p
+  ret loaded
+@opt check: store
+@opt nextln: rust_call identity_or_error
+@opt nextln: load i32
+@isel check: store.i32
+@isel check: rust_call identity_or_error
+@run 7 0 -> 7
+@run 7 5 -> !rust_panic
+# Native code reports the function's own trap code, not a generic failure.
+@run 7 6 -> !abi
+@run 7 1 -> !bounds
+
+---
+
+# Calls of the same function with the same arguments still have independent
+# effects. A different function of the same signature calls its own entry.
+fn main(value:i32) -> i32
+  zero = const 0
+  p = call_scratch 0 8
+  first = rust_call identity_or_error p value p zero
+  unused = rust_call identity_or_error p value p zero
+  second = rust_call double p value p zero
+  result = add first second
+  ret result
+@opt check: rust_call identity_or_error
+@opt check: rust_call identity_or_error
+@opt check: rust_call double
+@run 7 -> 21
+@run -3 -> -9
+
+---
+
+# A Rust call reads its packet, so the stores that write it stay.
+fn main(a:i32 b:i32 c:i32 d:i32) -> i32
+  packet = call_scratch 0 16
+  four = const 4
+  eight = const 8
+  twelve = const 12
+  pb = offset packet four 1
+  pc = offset packet eight 1
+  pd = offset packet twelve 1
+  store packet a
+  store pb b
+  store pc c
+  store pd d
+  zero = const 0
+  sum = rust_call sum4 packet zero packet zero
+  ret sum
+@opt check: store
+@opt check: store
+@opt check: store
+@opt check: store
+@opt check: rust_call sum4
+@run 1 2 3 4 -> 10
+@run -1 2 -3 4 -> 2

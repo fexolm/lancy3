@@ -109,3 +109,59 @@ impl<K: Eq + Hash, V: Copy> ScopedFacts<K, V> {
         scope.interval.contains(&position).then_some(scope.value)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::Witnesses;
+    use std::ops::Range;
+
+    fn next(state: &mut u64) -> usize {
+        *state ^= *state << 13;
+        *state ^= *state >> 7;
+        *state ^= *state << 17;
+        *state as usize
+    }
+
+    /// Random nested-or-disjoint intervals, as dominance scopes are, including
+    /// repeated intervals and children that share their parent's start or end.
+    fn laminar(state: &mut u64, range: Range<usize>, depth: u32, out: &mut Vec<Range<usize>>) {
+        let mut start = range.start;
+        while start < range.end && depth < 5 {
+            let end = start + 1 + next(state) % (range.end - start);
+            for _ in 0..next(state) % 3 {
+                out.push(start..end);
+            }
+            if next(state).is_multiple_of(2) {
+                laminar(state, start..end, depth + 1, out);
+            }
+            start = end + next(state) % 2;
+        }
+    }
+
+    #[test]
+    fn indexed_facts_combine_every_enclosing_scope() {
+        let mut state = 0x9e37_79b9_7f4a_7c15;
+        for _ in 0..500 {
+            let mut intervals = Vec::new();
+            laminar(&mut state, 0..40, 0, &mut intervals);
+            let mut witnesses = Witnesses::default();
+            for (i, interval) in intervals.iter().enumerate() {
+                witnesses.record(0, interval.clone(), 1u64 << (i % 64));
+            }
+            let facts = witnesses.index(|a, b| a | b);
+            for position in 0..42 {
+                let expected = intervals
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, interval)| interval.contains(&position))
+                    .map(|(i, _)| 1u64 << (i % 64))
+                    .reduce(|a, b| a | b);
+                assert_eq!(
+                    facts.at(&0, position),
+                    expected,
+                    "{intervals:?} at {position}"
+                );
+            }
+        }
+    }
+}

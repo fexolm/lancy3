@@ -1,0 +1,45 @@
+error: runtime value used in a comptime expression
+ --> tests/ui/bodies.rs:7:17
+  |
+7 |     let pair = (x, 1);
+  |                 ^
+
+error: put nested Rust macros in a host helper outside the kernel
+  --> tests/ui/bodies.rs:13:18
+   |
+13 |     let v = vec![format!("a")];
+   |                  ^^^^^^^^^^^^
+
+error: specify Lane::<T> or annotate the vector binding
+  --> tests/ui/bodies.rs:19:13
+   |
+19 |     let v = Lane::splat(1.5);
+   |             ^^^^^^^^^^^^^^^^
+
+error: a kernel supports +, -, *, /, &, | and ^ on SIMD vectors
+  --> tests/ui/bodies.rs:28:8
+   |
+28 |     (v % v).store(out, 0);
+   |        ^
+
+error: only a runtime slice can be reborrowed here
+  --> tests/ui/bodies.rs:39:17
+   |
+39 |     let delta = &tick();
+   |                 ^^^^^^^
+
+error[E0532]: expected a pattern, found a function call
+  --> tests/ui/bodies.rs:50:13
+   |
+50 |     let p = pair(x);
+   |             ^^^^ not a tuple struct or tuple variant
+   |
+   = note: function calls are not allowed in patterns: <https://doc.rust-lang.org/book/ch19-00-patterns.html>
+
+warning: unused import: `splice::simd::Lane`
+ --> tests/ui/bodies.rs:3:5
+  |
+3 | use splice::simd::Lane;
+  |     ^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default

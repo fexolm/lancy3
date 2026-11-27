@@ -59,9 +59,9 @@ impl Emitter<'_> {
             // The low word of the original index suffices for wrapped addresses.
             // Each 128-bit lane addresses the two consecutive doublewords 2*i and 2*i+1.
             let i = z(indices, A::D);
-            let parity = z(17, A::D);
+            let parity = z(self.temp(0), A::D);
             self.a.put(C::Trn1_z_zz, &[d16, i, i])?;
-            self.a.put(C::Index_0_1_z, &[parity])?;
+            self.a.put(C::Index_z_ii, &[parity, O::imm(0), O::imm(1)])?;
             self.a.put(C::And_z_zi, &[parity, O::imm(1)])?;
             self.a.put(C::Add_z_zz_, &[d16, d16, d16])?;
             self.a.put(C::Add_z_zz_, &[d16, d16, parity])?;
@@ -84,14 +84,16 @@ impl Emitter<'_> {
         self.predicate(R::P4, A::S, lanes)?;
         // RCJHWV orders same-address stores within a single SVE instruction.
         // Emitting groups in lane order extends this guarantee across the logical vector.
+        let group = self.temp(0);
         for offset in (0..self.config.bytes).step_by(lanes * size) {
-            self.sve_widen_group(mask, 17, size, offset, true)?;
+            self.sve_widen_group(mask, group, size, offset, true)?;
             self.a.put(
-                C::Cmplt_p_p_zi0,
+                C::Cmplt_p_p_zi,
                 &[
                     O::vec(R::P1, A::S),
                     O::pred(R::P4, PredQual::Zero),
-                    z(17, A::S),
+                    z(group, A::S),
+                    O::imm(0),
                 ],
             )?;
             self.sve_widen_group(indices, 16, size, offset, true)?;
@@ -110,11 +112,11 @@ impl Emitter<'_> {
                     self.sve_splice(arr, dst, R::P5, 16)?;
                 }
             } else {
-                self.sve_widen_group(value, 17, size, offset, false)?;
+                self.sve_widen_group(value, group, size, offset, false)?;
                 self.a.put(
                     code,
                     &[
-                        z(17, A::S),
+                        z(group, A::S),
                         O::pred(R::P1, PredQual::None),
                         O::mem(base),
                         ix,

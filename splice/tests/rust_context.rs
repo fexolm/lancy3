@@ -1,8 +1,5 @@
-use splice::hir::{Instr, RustContextTarget};
-use splice::{Codegen, Executable, TypedIr, kernel};
-use splice_cranelift::Cranelift;
-use splice_lancy::Lancy;
-use splice_llvm::Llvm;
+use splice::hir::{Buffer, Instr, RustTarget};
+use splice::{CallError, Codegen, Executable, Trap, TypedIr, kernel};
 use std::collections::HashSet;
 use std::ops::AddAssign;
 
@@ -274,7 +271,7 @@ fn nested_opaque_operations_use_the_callers_reordered_shared_slices() {
     assert!(
         instructions
             .iter()
-            .any(|op| matches!(op, Instr::RustContextCall { .. }))
+            .any(|op| matches!(op, Instr::RustCall { .. }))
     );
     assert!(
         instructions
@@ -315,9 +312,7 @@ fn nested_opaque_operations_use_the_callers_reordered_shared_slices() {
         }
     }
 
-    check::<Lancy>(&ir);
-    check::<Llvm>(&ir);
-    check::<Cranelift>(&ir);
+    splice_testkit::each_backend!(B => check::<B>(&ir));
 }
 
 #[test]
@@ -328,7 +323,7 @@ fn native_and_rust_operations_reborrow_the_same_writable_slice_in_order() {
     let borrows = instructions
         .iter()
         .filter_map(|instruction| match instruction {
-            Instr::RustContextCall { slices, .. } => Some(slices.as_slice()),
+            Instr::RustCall { slices, .. } => Some(slices.as_slice()),
             _ => None,
         })
         .collect::<Vec<_>>();
@@ -338,11 +333,7 @@ fn native_and_rust_operations_reborrow_the_same_writable_slice_in_order() {
     assert!(first.writable && !tag.writable && !left.writable && !right.writable);
     assert_eq!(first.buffer, left.buffer);
     assert_eq!(left, right);
-
-    use splice_text::Text;
-    let formatted = Text::compile(&ir).unwrap();
-    assert!(formatted.contains("borrows mut buffer 3, buffer 2"));
-    assert!(formatted.contains("borrows buffer 3, buffer 3"));
+    assert_eq!((first.buffer, tag.buffer), (Buffer(3), Buffer(2)));
 
     fn check<B: Codegen<Output: Executable>>(ir: &TypedIr<writable_opaque_slice::Signature>) {
         for code in [
@@ -381,9 +372,7 @@ fn native_and_rust_operations_reborrow_the_same_writable_slice_in_order() {
         }
     }
 
-    check::<Lancy>(&ir);
-    check::<Llvm>(&ir);
-    check::<Cranelift>(&ir);
+    splice_testkit::each_backend!(B => check::<B>(&ir));
 }
 
 #[test]
@@ -392,7 +381,7 @@ fn nested_slice_descriptors_preserve_inferred_element_types() {
     assert_eq!(
         ir.instructions()
             .iter()
-            .filter(|op| matches!(op, Instr::RustContextCall { slices, .. } if slices.len() == 1))
+            .filter(|op| matches!(op, Instr::RustCall { slices, .. } if slices.len() == 1))
             .count(),
         2
     );
@@ -416,9 +405,7 @@ fn nested_slice_descriptors_preserve_inferred_element_types() {
             assert_eq!(totals.count.operands, [2, 3]);
         }
     }
-    check::<Lancy>(&ir);
-    check::<Llvm>(&ir);
-    check::<Cranelift>(&ir);
+    splice_testkit::each_backend!(B => check::<B>(&ir));
 }
 
 #[test]
@@ -428,13 +415,23 @@ fn opaque_context_operations_receive_all_scalar_words() {
         .instructions()
         .iter()
         .filter_map(|instruction| match instruction {
-            Instr::RustContextCall { args, slices, .. } => Some((args.len(), slices.len())),
+            Instr::RustCall { args, slices, .. } => Some((args.len(), slices.len())),
             _ => None,
         })
         .collect::<Vec<_>>();
     assert_eq!(shapes, [(4, 0), (3, 1)]);
-    let llvm = splice_llvm::to_llvm_ir(ir.as_inner()).unwrap();
-    assert_eq!(llvm.matches("rust_context_packet = alloca").count(), 1);
+    #[cfg(feature = "llvm")]
+    {
+        let llvm =
+            splice::llvm::to_llvm_ir(ir.as_inner(), &ir.as_inner().options().target).unwrap();
+        // Each call has a fixed-size packet slot in the entry block.
+        let packets = llvm
+            .lines()
+            .filter(|line| line.contains("%rust_packet") && line.contains(" = alloca ["))
+            .count();
+        assert_eq!(packets, 2);
+        assert!(!llvm.contains("alloca i64, i64"));
+    }
 
     fn check<B: Codegen<Output: Executable>>(ir: &TypedIr<wide_context_pipeline::Signature>) {
         for code in [
@@ -473,9 +470,7 @@ fn opaque_context_operations_receive_all_scalar_words() {
             }
         }
     }
-    check::<Lancy>(&ir);
-    check::<Llvm>(&ir);
-    check::<Cranelift>(&ir);
+    splice_testkit::each_backend!(B => check::<B>(&ir));
 }
 
 #[kernel]
@@ -497,7 +492,7 @@ fn rust_context_operations_surround_a_native_fault_and_keep_their_effects() {
     let calls: Vec<_> = code
         .iter()
         .enumerate()
-        .filter_map(|(index, op)| matches!(op, Instr::RustContextCall { .. }).then_some(index))
+        .filter_map(|(index, op)| matches!(op, Instr::RustCall { .. }).then_some(index))
         .collect();
     let [add_count, complete] = calls.as_slice() else {
         panic!("expected two Rust context calls, got {calls:?}");
@@ -518,13 +513,13 @@ fn rust_context_operations_surround_a_native_fault_and_keep_their_effects() {
             totals.count.total = 7;
             let xs = [2, 3];
 
-            assert!(
+            assert_eq!(
                 code.call(update::CallArgs {
                     totals: &mut totals,
                     xs: &xs,
                     index: 2
-                })
-                .is_err()
+                }),
+                Err(CallError::Trap(Trap::Bounds))
             );
             assert_eq!(totals.count.total, 12);
             assert_eq!(totals.count.operands, [5]);
@@ -547,13 +542,14 @@ fn rust_context_operations_surround_a_native_fault_and_keep_their_effects() {
                 fail_completion: true,
                 ..Totals::default()
             };
-            assert!(
+            // The context operation's own panic message reaches the caller.
+            assert_eq!(
                 code.call(update::CallArgs {
                     totals: &mut other,
                     xs: &xs,
                     index: 0
-                })
-                .is_err()
+                }),
+                Err(CallError::RustPanic("completion failed".into()))
             );
             assert_eq!(other.count.operands, [5]);
             assert_eq!(other.completed, 1);
@@ -575,9 +571,7 @@ fn rust_context_operations_surround_a_native_fault_and_keep_their_effects() {
         }
     }
 
-    check::<Lancy>(&ir);
-    check::<Llvm>(&ir);
-    check::<Cranelift>(&ir);
+    splice_testkit::each_backend!(B => check::<B>(&ir));
 }
 
 #[test]
@@ -593,8 +587,8 @@ fn published_methods_share_the_receivers_context_without_confusing_their_operati
     let operations: HashSet<_> = instructions
         .iter()
         .filter_map(|op| match op {
-            Instr::RustContextCall {
-                target: RustContextTarget::Borrowed { operation, .. },
+            Instr::RustCall {
+                target: RustTarget::Context { operation, .. },
                 ..
             } => Some(*operation),
             _ => None,
@@ -632,9 +626,7 @@ fn published_methods_share_the_receivers_context_without_confusing_their_operati
         }
     }
 
-    check::<Lancy>(&ir);
-    check::<Llvm>(&ir);
-    check::<Cranelift>(&ir);
+    splice_testkit::each_backend!(B => check::<B>(&ir));
 }
 
 #[test]
@@ -646,8 +638,8 @@ fn published_free_functions_share_the_enclosing_context() {
         .iter()
         .enumerate()
         .filter_map(|(index, op)| match op {
-            Instr::RustContextCall {
-                target: RustContextTarget::Borrowed { operation, .. },
+            Instr::RustCall {
+                target: RustTarget::Context { operation, .. },
                 ..
             } => {
                 assert!(seen.insert(*operation), "calls need distinct operation IDs");
@@ -751,9 +743,7 @@ fn published_free_functions_share_the_enclosing_context() {
         }
     }
 
-    check::<Lancy>(&ir, &forwarded);
-    check::<Llvm>(&ir, &forwarded);
-    check::<Cranelift>(&ir, &forwarded);
+    splice_testkit::each_backend!(B => check::<B>(&ir, &forwarded));
 }
 
 #[test]
@@ -768,7 +758,7 @@ fn published_and_ordinary_methods_preserve_shared_slice_arguments() {
     assert!(
         instructions
             .iter()
-            .any(|op| matches!(op, Instr::RustContextCall { .. }))
+            .any(|op| matches!(op, Instr::RustCall { .. }))
     );
 
     fn check<B: Codegen<Output: Executable>>(ir: &TypedIr<single_published::Signature>) {
@@ -810,7 +800,49 @@ fn published_and_ordinary_methods_preserve_shared_slice_arguments() {
         }
     }
 
-    check::<Lancy>(&ir);
-    check::<Llvm>(&ir);
-    check::<Cranelift>(&ir);
+    splice_testkit::each_backend!(B => check::<B>(&ir));
+}
+
+#[kernel]
+fn comptime_word(totals: &mut Totals, #[comptime] scale: i32, enabled: bool) -> i32 {
+    totals.record_words(scale, enabled, 2, 3)
+}
+
+// The kernel's parameter and the local that shadows it are the same token,
+// so they share a span; the local is a `bool`, not the `i32` parameter.
+macro_rules! shadowed_comptime_word {
+    ($scale:ident) => {
+        #[kernel]
+        fn shadowed_comptime_word(totals: &mut Totals, #[comptime] $scale: i32) -> i32 {
+            let $scale = $scale > 0;
+            totals.record_words(1, $scale, 2, 3)
+        }
+    };
+}
+shadowed_comptime_word!(scale);
+
+/// MAC-18: a comptime parameter reaches a Rust operation as a word; a local
+/// that shadows it is resolved to its own declaration, not to the parameter
+/// with the same name and span.
+#[test]
+fn opaque_operations_resolve_comptime_parameters_by_declaration() {
+    fn check<B: Codegen<Output: Executable>>() {
+        let code = comptime_word::build::<B>(comptime_word::BuildArgs { scale: 4 }).unwrap();
+        let mut totals = Totals::default();
+        let result = code.call(comptime_word::CallArgs {
+            totals: &mut totals,
+            enabled: true,
+        });
+        assert_eq!(result, Ok(Totals::default().record_words(4, true, 2, 3)));
+        assert_eq!(totals.count.operands, [423]);
+        let error =
+            shadowed_comptime_word::build::<B>(shadowed_comptime_word::BuildArgs { scale: 4 })
+                .err()
+                .expect("a shadowing local is not the parameter's word");
+        assert!(
+            error.to_string().contains("materializable operands"),
+            "{error}"
+        );
+    }
+    splice_testkit::each_backend!(B => check::<B>());
 }

@@ -1,7 +1,10 @@
-use super::{Block, Call, Edge, Inst, Type, Value};
+use super::{Block, Call, Edge, Inst, Lane, Type, Value, ssa::SliceParam};
 use thiserror::Error;
 
 /// A structural, typing or dominance error in an SSA function or an attempted edit.
+///
+/// Each variant's message describes it; the fields name the entities involved.
+#[expect(missing_docs, reason = "each variant's #[error] message documents it")]
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum IrError {
     #[error("unknown SSA instruction {inst:?}")]
@@ -65,12 +68,28 @@ pub enum IrError {
         expected: Type,
         actual: Type,
     },
+    /// An `i32` literal is `Op::Const`; other literals hold only the bits of
+    /// their lane. See `Op::literal`.
+    #[error("non-canonical literal in {inst:?}: {bits:#x} as {lane:?}")]
+    NonCanonicalLiteral { inst: Inst, lane: Lane, bits: u128 },
+    /// See `Function::set_slice_params`.
+    #[error("invalid slice parameter {slice:?}")]
+    InvalidSliceParam { slice: SliceParam },
+    #[error("{inst:?} stops with {trap:?}, which only a Rust entry reports")]
+    InvalidTrap { inst: Inst, trap: crate::Trap },
+    #[error("{inst:?} defines no value")]
+    NoResult { inst: Inst },
     #[error("invalid numeric operation in {inst:?} for {ty:?}")]
     InvalidNumeric { inst: Inst, ty: Type },
+    /// Pointers convert only by a bitcast to `U64`, which exposes the
+    /// address bits for alignment arithmetic. Every other conversion would
+    /// let integer arithmetic forge an address.
+    #[error("{inst:?} converts {from:?} to {to:?}; a pointer only bitcasts to U64")]
+    PointerCast { inst: Inst, from: Type, to: Type },
     #[error("unknown SSA call {call:?} in {inst:?}")]
     UnknownCall { inst: Inst, call: Call },
-    #[error("invalid Rust import packet in {inst:?}")]
-    InvalidRustPacket { inst: Inst },
+    #[error("scratch memory in {inst:?} is unaligned or exceeds 4 GiB")]
+    InvalidScratch { inst: Inst },
     #[error("wrong scalar arity at SSA call {call:?}: expected {expected}, got {actual}")]
     CallArity {
         call: Call,

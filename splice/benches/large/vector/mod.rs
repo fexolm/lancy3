@@ -3,14 +3,9 @@ mod integral;
 mod remap;
 mod yuv;
 
-use crate::{Builders, Workload};
+use crate::Workload;
 use criterion::Criterion;
-use splice::{BufferArg, Executable};
-use splice_cranelift::Cranelift;
-use splice_lancy::Lancy;
-use splice_llvm::LlvmManualSimd;
-
-use super::samples;
+use splice::{BufferArg, Executable, KernelScalar};
 
 pub(super) fn compare(c: &mut Criterion) {
     yuv_to_rgba(c);
@@ -22,7 +17,10 @@ pub(super) fn compare(c: &mut Criterion) {
 fn yuv_to_rgba(c: &mut Criterion) {
     use yuv::yuv_to_rgba;
     const PIXELS: usize = 512 * 512 + 3;
-    let pixels: Vec<_> = samples(41019).take(PIXELS).map(|x| x as i32).collect();
+    let pixels: Vec<_> = crate::common::xorshift(41019)
+        .take(PIXELS)
+        .map(|x| x as i32)
+        .collect();
     let expected: Vec<_> = pixels
         .iter()
         .map(|&pixel| {
@@ -45,18 +43,14 @@ fn yuv_to_rgba(c: &mut Criterion) {
         expected: &|| &expected,
         equal: <[i32]>::eq,
         run: |kernel: &dyn Executable, out: &mut [i32]| {
-            let count = kernel.call(&[], &mut [BufferArg::Read(&pixels), BufferArg::Write(out)])?;
-            usize::try_from(count).map_err(|_| "invalid RGBA output buffer".into())
+            let count = kernel.call(&[], &mut [BufferArg::read(&pixels), BufferArg::write(out)])?;
+            usize::try_from(i32::from_word(count)).map_err(|_| "invalid RGBA output buffer".into())
         },
     }
     .compare(
         c,
         yuv_to_rgba::ir,
-        Builders {
-            lancy: &|| yuv_to_rgba::build::<Lancy>(yuv_to_rgba::BuildArgs {}),
-            cranelift: &|| yuv_to_rgba::build::<Cranelift>(yuv_to_rgba::BuildArgs {}),
-            llvm: &|| yuv_to_rgba::build::<LlvmManualSimd>(yuv_to_rgba::BuildArgs {}),
-        },
+        builders!(B => yuv_to_rgba::build::<B>(yuv_to_rgba::BuildArgs {})),
     );
 }
 
@@ -65,7 +59,7 @@ fn integral_moments(c: &mut Criterion) {
     const WIDTH: usize = 515;
     const HEIGHT: usize = 257;
     const PIXELS: usize = WIDTH * HEIGHT;
-    let pixels: Vec<_> = samples(40829)
+    let pixels: Vec<_> = crate::common::xorshift(40829)
         .take(PIXELS)
         .map(|x| (x & 255) as i32)
         .collect();
@@ -92,20 +86,17 @@ fn integral_moments(c: &mut Criterion) {
         equal: <[i32]>::eq,
         run: |kernel: &dyn Executable, out: &mut [i32]| {
             let count = kernel.call(
-                &[WIDTH as i32, HEIGHT as i32],
-                &mut [BufferArg::Read(&pixels), BufferArg::Write(out)],
+                &[WIDTH as u64, HEIGHT as u64],
+                &mut [BufferArg::read(&pixels), BufferArg::write(out)],
             )?;
-            usize::try_from(count).map_err(|_| "invalid integral image dimensions".into())
+            usize::try_from(i32::from_word(count))
+                .map_err(|_| "invalid integral image dimensions".into())
         },
     }
     .compare(
         c,
         integral_moments::ir,
-        Builders {
-            lancy: &|| integral_moments::build::<Lancy>(integral_moments::BuildArgs {}),
-            cranelift: &|| integral_moments::build::<Cranelift>(integral_moments::BuildArgs {}),
-            llvm: &|| integral_moments::build::<LlvmManualSimd>(integral_moments::BuildArgs {}),
-        },
+        builders!(B => integral_moments::build::<B>(integral_moments::BuildArgs {})),
     );
 }
 
@@ -113,7 +104,7 @@ fn hash_keys(c: &mut Criterion) {
     use hash::{COLUMNS, hash_keys};
     const ROWS: usize = 65_539;
     const SEED: i32 = 19;
-    let keys: Vec<_> = samples(20893)
+    let keys: Vec<_> = crate::common::xorshift(20893)
         .take(COLUMNS * ROWS)
         .map(|x| x as i32)
         .collect();
@@ -142,20 +133,16 @@ fn hash_keys(c: &mut Criterion) {
         equal: <[i32]>::eq,
         run: |kernel: &dyn Executable, out: &mut [i32]| {
             let count = kernel.call(
-                &[SEED],
-                &mut [BufferArg::Read(&keys), BufferArg::Write(out)],
+                &[SEED.to_word()],
+                &mut [BufferArg::read(&keys), BufferArg::write(out)],
             )?;
-            usize::try_from(count).map_err(|_| "invalid hash buffers".into())
+            usize::try_from(i32::from_word(count)).map_err(|_| "invalid hash buffers".into())
         },
     }
     .compare(
         c,
         hash_keys::ir,
-        Builders {
-            lancy: &|| hash_keys::build::<Lancy>(hash_keys::BuildArgs {}),
-            cranelift: &|| hash_keys::build::<Cranelift>(hash_keys::BuildArgs {}),
-            llvm: &|| hash_keys::build::<LlvmManualSimd>(hash_keys::BuildArgs {}),
-        },
+        builders!(B => hash_keys::build::<B>(hash_keys::BuildArgs {})),
     );
 }
 
@@ -163,7 +150,10 @@ fn remap_rgb16(c: &mut Criterion) {
     use remap::remap_rgb16;
     const EDGE: usize = 145;
     const PLANE: usize = EDGE * EDGE;
-    let source: Vec<_> = samples(57793).take(3 * PLANE).map(|x| x as u16).collect();
+    let source: Vec<_> = crate::common::xorshift(57793)
+        .take(3 * PLANE)
+        .map(|x| x as u16)
+        .collect();
     let mut map = Vec::with_capacity(source.len());
     let mut expected = Vec::with_capacity(source.len());
     let center = (EDGE - 1) as f64 / 2.0;
@@ -192,21 +182,17 @@ fn remap_rgb16(c: &mut Criterion) {
             let count = kernel.call(
                 &[],
                 &mut [
-                    BufferArg::ReadU16(&source),
-                    BufferArg::ReadU16(&map),
-                    BufferArg::WriteU16(out),
+                    BufferArg::read::<u16>(&source),
+                    BufferArg::read::<u16>(&map),
+                    BufferArg::write::<u16>(out),
                 ],
             )?;
-            usize::try_from(count).map_err(|_| "invalid RGB16 remap buffers".into())
+            usize::try_from(i32::from_word(count)).map_err(|_| "invalid RGB16 remap buffers".into())
         },
     }
     .compare(
         c,
         remap_rgb16::ir,
-        Builders {
-            lancy: &|| remap_rgb16::build::<Lancy>(remap_rgb16::BuildArgs {}),
-            cranelift: &|| remap_rgb16::build::<Cranelift>(remap_rgb16::BuildArgs {}),
-            llvm: &|| remap_rgb16::build::<LlvmManualSimd>(remap_rgb16::BuildArgs {}),
-        },
+        builders!(B => remap_rgb16::build::<B>(remap_rgb16::BuildArgs {})),
     );
 }

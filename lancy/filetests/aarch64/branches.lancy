@@ -1,0 +1,14 @@
+# A branch on a boolean value is CBZ or CBNZ, and the last block falls
+# through into the epilogue (A64-07). The root sets X29 to its frame record
+# (A64-17).
+fn main(x:i32 y:i32) -> i32
+  cond = lt x y
+  br cond yes() | no()
+block yes()
+  ret cond
+block no()
+  ret x
+@aarch64 all has cbnz.w
+@aarch64 all has add.x29.sp.24
+@run 1 2 -> -1
+@run 3 2 -> 3

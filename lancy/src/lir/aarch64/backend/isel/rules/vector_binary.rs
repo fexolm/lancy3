@@ -15,9 +15,6 @@ impl Rules<'_> {
         let lane = ty.lane().unwrap();
         let profile = self.config.profile;
         let dst = self.dst();
-        if let Some(rem) = self.float_remainder(op, a, b) {
-            return Some(rem);
-        }
         if let Some(special) = self.float_binary_special(op, a, b) {
             return Some(special);
         }
@@ -91,7 +88,7 @@ impl Rules<'_> {
     fn xor3_args(&self, a: Value, b: Value) -> Option<[Value; 3]> {
         [(a, b), (b, a)].into_iter().find_map(|(inner, other)| {
             match self.ctx.single_use(inner)? {
-                Op::Simd(Simd::Bin(Binary::Xor, x, y)) => Some([x, y, other]),
+                Op::Bin(Binary::Xor, x, y) => Some([x, y, other]),
                 _ => None,
             }
         })

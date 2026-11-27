@@ -1,26 +1,6 @@
-//! Operation kinds and types shared by lowering and the HIR evaluator.
-use super::{Binary, Ternary, Type, Unary};
-
-#[derive(Clone, Copy, Debug)]
-pub(crate) enum Action {
-    Unary(Unary),
-    Binary(Binary),
-    Ternary(Ternary),
-    Cast,
-    Bitcast,
-    Splat,
-    Extract,
-    Insert,
-    Compress,
-    Expand,
-    Iota,
-    Shuffle,
-    Reduce(Binary),
-    AnyTrue,
-    AllTrue,
-    Widen(bool),
-    Narrow,
-}
+//! The numeric action of an HIR operation, shared by lowering and the evaluator.
+use super::Type;
+use crate::support::numeric::Action;
 
 pub(crate) fn operation(
     op: crate::hir::Op,
@@ -43,6 +23,15 @@ pub(crate) fn operation(
             [Some(x), None, None],
         ),
         Op::Simd(Simd::AnyTrue(x)) => (Action::AnyTrue, ty(x), Type::I32, [Some(x), None, None]),
+        Op::Simd(Simd::MaskCount(x)) => {
+            (Action::MaskCount, ty(x), Type::I32, [Some(x), None, None])
+        }
+        Op::Simd(Simd::FirstLanes(l, n)) => (
+            Action::FirstLanes,
+            ty(n),
+            Type::Vector(l),
+            [Some(n), None, None],
+        ),
         Op::Simd(Simd::AllTrue(x)) => (Action::AllTrue, ty(x), Type::I32, [Some(x), None, None]),
         Op::Simd(Simd::Widen { to, high, value }) => (
             Action::Widen(high),
@@ -56,30 +45,23 @@ pub(crate) fn operation(
             Type::Vector(to),
             [Some(x), Some(y), None],
         ),
-        Op::Unary(op, x) | Op::Simd(Simd::Unary(op, x)) => (
+        Op::Unary(op, x) => (
             Action::Unary(op),
             ty(x),
             op.result_type(ty(x)),
             [Some(x), None, None],
         ),
-        Op::Bin(op, x, y) | Op::Simd(Simd::Bin(op, x, y)) => (
+        Op::Bin(op, x, y) => (
             Action::Binary(op),
             ty(x),
             op.result_type(ty(x)),
             [Some(x), Some(y), None],
         ),
-        Op::Ternary(op, x, y, z) | Op::Simd(Simd::Ternary(op, x, y, z)) => (
+        Op::Ternary(op, x, y, z) => (
             Action::Ternary(op),
             ty(y),
             ty(y),
             [Some(x), Some(y), Some(z)],
-        ),
-        Op::Simd(Simd::Cast(l, x)) => (Action::Cast, ty(x), Type::Vector(l), [Some(x), None, None]),
-        Op::Simd(Simd::Bitcast(l, x)) => (
-            Action::Bitcast,
-            ty(x),
-            Type::Vector(l),
-            [Some(x), None, None],
         ),
         Op::Cast(to, x) => (Action::Cast, ty(x), to, [Some(x), None, None]),
         Op::Bitcast(to, x) => (Action::Bitcast, ty(x), to, [Some(x), None, None]),

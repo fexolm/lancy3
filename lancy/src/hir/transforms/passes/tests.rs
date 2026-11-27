@@ -1,6 +1,6 @@
 use super::{inline_all, simplify};
 use crate::hir::{Binary, Function, Op, Terminator};
-use crate::{CallError, Inlining, ScalarKernel};
+use crate::{CallError, Inlining, Kernel, Trap};
 use std::sync::Arc;
 
 #[test]
@@ -42,11 +42,12 @@ fn repeated_calls_clone_loops_and_each_early_return_into_its_own_continuation() 
     let answer = root.append(b, Op::Bin(Binary::Sub, a, c)).unwrap();
     root.set_terminator(b, Terminator::Return(answer));
 
-    let (source, ids) = root.verified_module().unwrap();
-    let expanded = inline_all(&source, &ids).unwrap();
-    assert_eq!(expanded.verified_module().unwrap().0.functions.len(), 1);
+    let source = root.verified_module().unwrap();
+    let expanded = inline_all(&source, crate::lir::MAX_VALUES).unwrap();
+    assert_eq!(expanded.verified_module().unwrap().functions.len(), 1);
     for policy in [Inlining::Always, Inlining::Never] {
-        let code = ScalarKernel::compile_with_inlining(&root, policy).unwrap();
+        let code =
+            Kernel::compile(&root, &crate::test_target::options().with_inlining(policy)).unwrap();
         for (x, y) in [(7, -5), (-5, 7), (0, 1), (-3, -9)] {
             let expected = (if x < 0 { x } else { 1 }) - (if y < 0 { y } else { 1 });
             assert_eq!(code.call(&[x, y]), Ok(expected));
@@ -72,8 +73,8 @@ fn non_returning_callee_removes_only_the_unreachable_continuation() {
     let yes = root.add_edge(yes, &[]);
     let no = root.add_edge(no, &[]);
     root.set_terminator(b, Terminator::Branch { cond: x, yes, no });
-    let (source, ids) = root.verified_module().unwrap();
-    let expanded = inline_all(&source, &ids).unwrap();
+    let source = root.verified_module().unwrap();
+    let expanded = inline_all(&source, crate::lir::MAX_VALUES).unwrap();
     expanded.verify().unwrap();
     assert_eq!(
         expanded
@@ -82,7 +83,12 @@ fn non_returning_callee_removes_only_the_unreachable_continuation() {
             .count(),
         1
     );
-    assert_eq!(ScalarKernel::compile(&root).unwrap().call(&[0]), Ok(0));
+    assert_eq!(
+        Kernel::compile(&root, &crate::test_target::options())
+            .unwrap()
+            .call(&[0]),
+        Ok(0)
+    );
 }
 
 #[test]
@@ -103,10 +109,10 @@ fn expansion_counts_only_the_live_parts_of_reused_templates() {
         caller.set_terminator(entry, Terminator::Return(value));
         callee = Arc::new(caller);
     }
-    let (source, ids) = callee.verified_module().unwrap();
-    let expanded = inline_all(&source, &ids).unwrap();
+    let source = callee.verified_module().unwrap();
+    let expanded = inline_all(&source, crate::lir::MAX_VALUES).unwrap();
     assert_eq!(expanded.blocks().count(), 2);
-    assert_eq!(expanded.verified_module().unwrap().0.functions.len(), 1);
+    assert_eq!(expanded.verified_module().unwrap().functions.len(), 1);
 }
 
 #[test]
@@ -120,13 +126,13 @@ fn remove_dominated_checks_but_keep_sibling_checks_and_unused_trapping_math() {
     let yes = f.add_edge(a, &[]);
     let no = f.add_edge(b, &[]);
     f.set_terminator(entry, Terminator::Branch { cond, yes, no });
-    f.append(a, Op::BoundsCheck(i, n));
-    f.append(a, Op::BoundsCheck(i, n));
+    f.append_inst(a, Op::BoundsCheck(i, n)).unwrap();
+    f.append_inst(a, Op::BoundsCheck(i, n)).unwrap();
     f.jump(a, end, &[]);
     f.jump(b, end, &[]);
-    f.append(end, Op::BoundsCheck(i, n));
+    f.append_inst(end, Op::BoundsCheck(i, n)).unwrap();
     let zero = f.append(end, Op::Const(0)).unwrap();
-    f.append(end, Op::Bin(Binary::Div, n, zero));
+    f.append_inst(end, Op::Bin(Binary::Div, n, zero)).unwrap();
     f.set_terminator(end, Terminator::Return(zero));
     simplify(&mut f).unwrap();
     f.verify().unwrap();
@@ -137,9 +143,102 @@ fn remove_dominated_checks_but_keep_sibling_checks_and_unused_trapping_math() {
             .count(),
         1
     );
-    let kernel = ScalarKernel::compile(&f).unwrap();
+    let kernel = Kernel::compile(&f, &crate::test_target::options()).unwrap();
     for cond in [0, 1] {
-        assert_eq!(kernel.call(&[cond, 1, 1]), Err(CallError::OutOfBounds));
-        assert_eq!(kernel.call(&[cond, 0, 1]), Err(CallError::DivisionByZero));
+        assert_eq!(
+            kernel.call(&[cond, 1, 1]),
+            Err(CallError::Trap(Trap::Bounds))
+        );
+        assert_eq!(
+            kernel.call(&[cond, 0, 1]),
+            Err(CallError::Trap(Trap::DivisionByZero))
+        );
+    }
+}
+
+/// The closed form of `sum(start..bound)` halves the trip count as unsigned:
+/// a signed `<` loop runs up to `u32::MAX` times when `start` is negative.
+#[test]
+fn recurrence_closed_form_holds_for_trip_counts_past_i32_max() {
+    let text = "fn main(start:i32 bound:i32) -> i32
+  one = const 1
+  zero = const 0
+  jump head(start zero)
+block head(i:i32 acc:i32)
+  more = lt i bound
+  br more body() | done(acc)
+block body()
+  next_i = add i one
+  next_acc = add acc i
+  jump head(next_i next_acc)
+block done(out:i32)
+  ret out";
+    let f = crate::hir::text::parse(text, &[]).unwrap();
+    let mut optimized = f.clone();
+    simplify(&mut optimized).unwrap();
+    assert!(
+        optimized
+            .blocks()
+            .all(|b| !matches!(optimized.terminator(b), Terminator::Branch { .. })),
+        "the loop must be replaced by its closed form"
+    );
+    let kernel = Kernel::compile(&f, &crate::test_target::options()).unwrap();
+    for (start, bound) in [
+        (i32::MIN, i32::MAX),
+        (i32::MIN, 0),
+        (-1, i32::MAX),
+        (i32::MIN + 1, i32::MAX),
+        (-3, 4),
+        (5, 5),
+        (7, -7),
+    ] {
+        let trip = (i128::from(bound) - i128::from(start)).max(0);
+        let sum = trip * i128::from(start) + trip * (trip - 1) / 2;
+        assert_eq!(
+            kernel.call(&[start, bound]),
+            Ok(sum as i32),
+            "sum({start}..{bound})"
+        );
+    }
+}
+
+/// Unswitching clones a loop and abandons the edges of the original; after
+/// the pipeline the operand arena holds only the arguments that live edges
+/// and calls use.
+#[test]
+fn optimized_functions_keep_no_retired_operands() {
+    let text = "fn main(n:i32 mode:i32) -> i32
+  z = const 0
+  one = const 1
+  jump head(z z)
+block head(i:i32 acc:i32)
+  more = lt i n
+  br more choose() | done()
+block choose()
+  br mode yes() | no()
+block yes()
+  total = add acc one
+  jump latch(total)
+block no()
+  other = sub acc one
+  jump latch(other)
+block latch(sum:i32)
+  next = add i one
+  jump head(next sum)
+block done()
+  ret acc";
+    let f = crate::hir::text::parse(text, &[]).unwrap();
+    let mut optimized = f.clone();
+    simplify(&mut optimized).unwrap();
+    let (arena, live) = optimized.operand_arena();
+    assert_eq!(arena, live);
+    assert!(
+        optimized.blocks().count() > f.blocks().count(),
+        "unswitched"
+    );
+    let kernel = Kernel::compile(&f, &crate::test_target::options()).unwrap();
+    for (n, mode) in [(0, 0), (3, 1), (3, 0), (-2, 1)] {
+        let expected = if mode != 0 { n.max(0) } else { -n.max(0) };
+        assert_eq!(kernel.call(&[n, mode]), Ok(expected));
     }
 }

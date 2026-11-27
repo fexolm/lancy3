@@ -1,0 +1,84 @@
+error[E0080]: evaluation panicked: a comptime value with drop glue would run a destructor during specialization
+ --> $RUST/core/src/panic.rs
+  |
+  = note: evaluation of `splice::frontend::evaluation::dropless::<std::string::String>::{constant#0}` failed here
+  |
+ ::: $WORKSPACE/splice-core/src/frontend/evaluation.rs
+  |
+  | /         assert!(
+  | |             !std::mem::needs_drop::<T>(),
+  | |             "a comptime value with drop glue would run a destructor during specialization"
+  | |         );
+  | |_________- in this macro invocation
+
+note: erroneous constant encountered
+ --> $WORKSPACE/splice-core/src/frontend/evaluation.rs
+  |
+  | /     const {
+  | |         assert!(
+  | |             !std::mem::needs_drop::<T>(),
+  | |             "a comptime value with drop glue would run a destructor during specialization"
+  | |         );
+  | |     }
+  | |_____^
+
+note: the above error was encountered while instantiating `fn dropless::<String>`
+ --> tests/ui/comptime_drops.rs:8:1
+  |
+8 | #[kernel]
+  | ^^^^^^^^^
+  |
+  = note: this note originates in the attribute macro `kernel` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0080]: evaluation panicked: a comptime value with drop glue would run a destructor during specialization
+ --> $RUST/core/src/panic.rs
+  |
+  = note: evaluation of `splice::frontend::evaluation::dropless::<Probe>::{constant#0}` failed here
+  |
+ ::: $WORKSPACE/splice-core/src/frontend/evaluation.rs
+  |
+  | /         assert!(
+  | |             !std::mem::needs_drop::<T>(),
+  | |             "a comptime value with drop glue would run a destructor during specialization"
+  | |         );
+  | |_________- in this macro invocation
+
+note: the above error was encountered while instantiating `fn dropless::<Probe>`
+  --> tests/ui/comptime_drops.rs:21:1
+   |
+21 | #[kernel]
+   | ^^^^^^^^^
+   |
+   = note: this note originates in the attribute macro `kernel` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0080]: evaluation panicked: a kernel cannot build an aggregate with drop glue; build it in a Rust function and call that
+ --> $RUST/core/src/panic.rs
+  |
+  = note: evaluation of `splice::frontend::scalar::dropless_aggregate::<Guard>::{constant#0}` failed here
+  |
+ ::: $WORKSPACE/splice-core/src/frontend/scalar.rs
+  |
+  | /         assert!(
+  | |             !std::mem::needs_drop::<T>(),
+  | |             "a kernel cannot build an aggregate with drop glue; build it in a Rust function and call that"
+  | |         );
+  | |_________- in this macro invocation
+
+note: erroneous constant encountered
+ --> $WORKSPACE/splice-core/src/frontend/scalar.rs
+  |
+  | /     const {
+  | |         assert!(
+  | |             !std::mem::needs_drop::<T>(),
+  | |             "a kernel cannot build an aggregate with drop glue; build it in a Rust function and call that"
+  | |         );
+  | |     }
+  | |_____^
+
+note: the above error was encountered while instantiating `fn dropless_aggregate::<Guard>`
+  --> tests/ui/comptime_drops.rs:38:1
+   |
+38 | #[kernel]
+   | ^^^^^^^^^
+   |
+   = note: this note originates in the attribute macro `kernel` (in Nightly builds, run with -Z macro-backtrace for more info)

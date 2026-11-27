@@ -1,5 +1,6 @@
 use super::bounds::{Bounds, Count, at_least};
 use super::facts::Facts;
+use super::pipeline::{Analyses, Preserved};
 use crate::hir::transforms::{ControlFlowGraph, DomTree, NaturalLoops};
 use crate::hir::{
     Binary, Block, Function, IrError, MAX_VECTOR_BYTES, Op, Simd, Terminator, Type, Unary, Value,
@@ -17,38 +18,31 @@ enum Rewrite {
     Unswitched,
 }
 
-#[derive(Default)]
-pub(super) struct LoopResult {
-    pub(super) rebuilt: Option<(ControlFlowGraph, DomTree)>,
-    pub(super) analysis: Option<(Facts, Bounds)>,
-}
-
-pub(super) fn run(
-    f: &mut Function,
-    initial_cfg: &ControlFlowGraph,
-    initial_dom: &DomTree,
-) -> Result<LoopResult, IrError> {
-    let mut result = LoopResult::default();
+/// Loop transformations to a fixed point. Each round that changes a loop
+/// refreshes the graph; the facts and bounds of the last round are kept for
+/// the passes after this one.
+pub(super) fn run(f: &mut Function, analyses: &mut Analyses<'_>) -> Result<Preserved, IrError> {
     let mut allow_unswitch = true;
     loop {
-        let (cfg, dom) = result
-            .rebuilt
-            .as_ref()
-            .map_or((initial_cfg, initial_dom), |(cfg, dom)| (cfg, dom));
+        let (cfg, dom) = analyses.graph(f)?;
         if !cfg.has_cycle() {
-            return Ok(result);
+            return Ok(Preserved::All);
         }
-        match simplify_loops(f, cfg, dom, allow_unswitch, &mut result.analysis) {
-            Rewrite::None => return Ok(result),
+        let mut analysis = None;
+        match simplify_loops(f, cfg, dom, allow_unswitch, &mut analysis) {
+            Rewrite::None => {
+                if let Some((facts, bounds)) = analysis {
+                    analyses.keep(facts, bounds);
+                }
+                return Ok(Preserved::All);
+            }
             Rewrite::Reduced => {}
             // One round of specialization avoids cloning the same loop for
             // every combination of invariant predicates.
             Rewrite::Unswitched => allow_unswitch = false,
         }
         f.prune_unreachable()?;
-        let cfg = ControlFlowGraph::compute(f)?;
-        let dom = DomTree::compute(&cfg);
-        result.rebuilt = Some((cfg, dom));
+        analyses.invalidate(Preserved::Nothing);
     }
 }
 
@@ -109,10 +103,9 @@ fn hoist(f: &mut Function, dom: &DomTree, loops: &NaturalLoops, facts: &mut Fact
     }
 
     // Hoisting many vector-valued expressions across a backedge can trade
-    // cheap recomputation for spills. Restrict new kinds of hoists to linear,
-    // low-pressure bodies. Count definitions as an upper bound on loop-local
-    // vector register demand and leave room for incoming live values.
-    const VECTOR_BUDGET: usize = 12;
+    // cheap recomputation for spills (see `HOIST_VECTOR_VALUES`). Count
+    // definitions as an upper bound on loop-local vector register demand.
+    const VECTOR_BUDGET: usize = super::limits::HOIST_VECTOR_VALUES;
     let mut vector_values = DenseMap::filled(f.block_capacity(), 0);
     for &block in dom.preorder() {
         let Some(pressure) = vector_values.get_mut(loops.owner[block]) else {
@@ -139,7 +132,8 @@ fn hoist(f: &mut Function, dom: &DomTree, loops: &NaturalLoops, facts: &mut Fact
             .count();
     }
 
-    let mut total_divisions = Vec::new();
+    // Results that can be evaluated early without observing a trap.
+    let mut total = Vec::new();
     for &block in dom.preorder() {
         let header = loops.owner[block];
         if header == Block::INVALID {
@@ -151,19 +145,16 @@ fn hoist(f: &mut Function, dom: &DomTree, loops: &NaturalLoops, facts: &mut Fact
             continue;
         }
         let extended = nearest != Block::INVALID && vector_values[header] <= VECTOR_BUDGET;
-        total_divisions.clear();
+        // Without `extended`, only `i32` arithmetic other than division moves,
+        // which has no effects.
+        total.clear();
         if extended {
-            for inst in f.instructions(block) {
-                if matches!(
-                    f.op(inst),
-                    Op::Bin(Binary::Div | Binary::Rem, ..)
-                        | Op::Simd(Simd::Bin(Binary::Div | Binary::Rem, ..))
-                ) && facts.is_total(f, inst)
-                {
-                    total_divisions.push(f.result(inst).unwrap());
-                }
-            }
-            total_divisions.sort_unstable();
+            total.extend(
+                f.instructions(block)
+                    .filter(|&inst| facts.is_total(f, inst))
+                    .filter_map(|inst| f.result(inst)),
+            );
+            total.sort_unstable();
         }
         f.hoist_instructions(block, |op, result, types| {
             let scalar_i32 = matches!(op, Op::Bin(kind, a, _) if types[a] == Type::I32
@@ -172,10 +163,8 @@ fn hoist(f: &mut Function, dom: &DomTree, loops: &NaturalLoops, facts: &mut Fact
                 return None;
             }
             let cheap = match op {
-                Op::Bin(kind, ..) | Op::Simd(Simd::Bin(kind, ..)) => {
-                    !matches!(kind, Binary::Pow | Binary::Atan2 | Binary::Hypot)
-                }
-                Op::Unary(kind, ..) | Op::Simd(Simd::Unary(kind, ..)) => matches!(
+                Op::Bin(kind, ..) => !matches!(kind, Binary::Pow | Binary::Atan2 | Binary::Hypot),
+                Op::Unary(kind, ..) => matches!(
                     kind,
                     Unary::Neg
                         | Unary::Abs
@@ -187,20 +176,10 @@ fn hoist(f: &mut Function, dom: &DomTree, loops: &NaturalLoops, facts: &mut Fact
                 Op::Cast(..)
                 | Op::Bitcast(..)
                 | Op::Ternary(..)
-                | Op::Simd(
-                    Simd::Cast(..)
-                    | Simd::Bitcast(..)
-                    | Simd::Ternary(..)
-                    | Simd::LaneCount(_)
-                    | Simd::Iota(_)
-                    | Simd::Splat(_),
-                ) => true,
+                | Op::Simd(Simd::LaneCount(_) | Simd::Iota(_) | Simd::Splat(_)) => true,
                 _ => false,
             };
-            if !cheap
-                || (!op.pure(Some(types[result]))
-                    && total_divisions.binary_search(&result).is_err())
-            {
+            if !cheap || (extended && total.binary_search(&result).is_err()) {
                 return None;
             }
             let available = |target| {
@@ -300,7 +279,7 @@ fn counted_loop(
         Binary::Le => Some((b, a, false)),
         _ => None,
     }
-    .filter(|&(i, _, _)| f.params(header).binary_search(&facts.root(i)).is_ok());
+    .filter(|&(i, _, _)| f.param_index(header, facts.root(i)).is_some());
     let (iv, bound, body_on_true, packet) = if let Some((iv, bound, yes)) = strict {
         (iv, bound, yes, None)
     } else {
@@ -322,7 +301,7 @@ fn counted_loop(
     };
     let iv = facts.root(iv);
     let bound = facts.available(bound, preheader, dom)?;
-    let index = f.params(header).binary_search(&iv).ok()?;
+    let index = f.param_index(header, iv)?;
     if f.value_type(iv) != Type::I32
         || !loops.contains(header, f.edge(body).0)
         || loops.contains(header, f.edge(exit).0)

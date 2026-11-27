@@ -1,79 +1,132 @@
 mod debug;
 mod simd;
+pub(super) use simd::scalar_type;
 
 use super::call;
 use inkwell::basic_block::BasicBlock;
 use inkwell::builder::{Builder, BuilderError};
 use inkwell::context::Context;
 use inkwell::types::BasicTypeEnum;
-use inkwell::values::{BasicMetadataValueEnum, BasicValue, FunctionValue, IntValue, PointerValue};
-use inkwell::{IntPredicate, module::Module};
-use splice::hir::{
-    Binary, Buffer, BufferKind, ContextSlice, Instr, Label, Reg, RustContextTarget, ValueType,
+use inkwell::values::{
+    BasicMetadataValueEnum, BasicValue, BasicValueEnum, FloatValue, FunctionValue, IntValue,
+    PointerValue,
 };
-use splice::{ContextArguments, Function};
-use std::collections::HashMap;
-use std::sync::Arc;
+use inkwell::{FloatPredicate, IntPredicate, module::Module};
+use splice_core::Trap;
+use splice_core::hir::{
+    Binary, Buffer, BufferKind, Constant, Label, PacketStore, PacketValue, Reg, RustCallPlan,
+    ScalarType, ValueType,
+};
 
-type Built<T> = Result<T, BuilderError>;
+type Built<T> = Result<T, Error>;
 
-pub(super) struct Callees<'a, 'ctx> {
-    pub ids: &'a HashMap<*const Function, usize>,
-    pub declarations: &'a [FunctionValue<'ctx>],
+/// Failure to emit LLVM IR for a function body.
+#[derive(Debug, thiserror::Error)]
+pub(super) enum Error {
+    #[error(transparent)]
+    Builder(#[from] BuilderError),
+    /// The loaded LLVM does not provide this intrinsic for these types.
+    #[error("LLVM does not provide {0}")]
+    MissingIntrinsic(&'static str),
 }
 
 #[derive(Clone, Copy)]
 struct Slice<'ctx> {
     data: PointerValue<'ctx>,
     len: IntValue<'ctx>,
-    element: splice::simd::Element,
+    element: splice_core::simd::Element,
 }
 
+/// A side exit: forward the status a failed callee already stored, or
+/// store a new trap code.
 #[derive(Clone, Copy, PartialEq)]
 enum Failure {
-    Propagate = 0,
-    Bounds = 1,
-    DivideByZero = 2,
-    Overflow = 3,
-    IntegerOverflow = 4,
-    RustPanic = 5,
+    Propagate,
+    Trap(Trap),
+}
+
+impl Failure {
+    const COUNT: usize = Trap::ALL.len() + 1;
+
+    fn index(self) -> usize {
+        match self {
+            Self::Propagate => 0,
+            Self::Trap(trap) => trap.code() as usize,
+        }
+    }
+}
+
+/// The module that bodies are emitted into, for one build target.
+#[derive(Clone, Copy)]
+pub(super) struct Unit<'a, 'ctx> {
+    pub ctx: &'ctx Context,
+    pub module: &'a Module<'ctx>,
+    pub machine: crate::target::Machine,
 }
 
 pub(super) struct Body<'a, 'ctx> {
     ctx: &'ctx Context,
+    machine: crate::target::Machine,
     builder: &'a Builder<'ctx>,
     module: &'a Module<'ctx>,
     function: FunctionValue<'ctx>,
     status: PointerValue<'ctx>,
     registers: Vec<(ValueType, PointerValue<'ctx>)>,
     slices: Vec<Slice<'ctx>>,
-    context_scratch: Option<(u32, PointerValue<'ctx>)>,
     static_rust_slice_operands: bool,
     labels: Vec<Option<BasicBlock<'ctx>>>,
-    exits: [Option<BasicBlock<'ctx>>; 6],
+    exits: [Option<BasicBlock<'ctx>>; Failure::COUNT],
+    /// A Rust call can report its own trap code.
+    calls_rust: bool,
+}
+
+/// Declare intrinsic `name` overloaded on `types`, if the loaded LLVM has it.
+fn intrinsic<'ctx>(
+    module: &Module<'ctx>,
+    name: &'static str,
+    types: &[BasicTypeEnum<'ctx>],
+) -> Built<FunctionValue<'ctx>> {
+    inkwell::intrinsics::Intrinsic::find(name)
+        .and_then(|intrinsic| intrinsic.get_declaration(module, types))
+        .ok_or(Error::MissingIntrinsic(name))
 }
 
 impl<'a, 'ctx> Body<'a, 'ctx> {
+    fn intrinsic(
+        &self,
+        name: &'static str,
+        types: &[BasicTypeEnum<'ctx>],
+    ) -> Built<FunctionValue<'ctx>> {
+        intrinsic(self.module, name, types)
+    }
+
     pub(super) fn start(
-        ctx: &'ctx Context,
+        unit: Unit<'a, 'ctx>,
         builder: &'a Builder<'ctx>,
-        module: &'a Module<'ctx>,
         function: FunctionValue<'ctx>,
         arity: usize,
         types: impl IntoIterator<Item = ValueType>,
         kinds: &[BufferKind],
     ) -> Built<Self> {
+        let Unit {
+            ctx,
+            module,
+            machine,
+        } = unit;
         builder.position_at_end(ctx.append_basic_block(function, "entry"));
         // Only the entry allocates register slots. LLVM promotes these to SSA,
         // including phi nodes for mutable locals across joins and backedges.
         let registers = types
             .into_iter()
-            .map(|ty| Ok((ty, builder.build_alloca(simd::llvm_type(ctx, ty), "")?)))
+            .map(|ty| {
+                let llvm = simd::llvm_type(ctx, machine.vector_bytes, ty);
+                Ok((ty, builder.build_alloca(llvm, "")?))
+            })
             .collect::<Built<Vec<_>>>()?;
         let mut params = function.get_param_iter();
         let status = params.next().unwrap().into_pointer_value();
         for &(_, ptr) in &registers[..arity] {
-            builder.build_store(ptr, params.next().unwrap().into_int_value())?;
+            builder.build_store(ptr, params.next().unwrap())?;
         }
         let slices = kinds
             .iter()
@@ -85,86 +138,42 @@ impl<'a, 'ctx> Body<'a, 'ctx> {
             .collect();
         Ok(Self {
             ctx,
+            machine,
             builder,
             module,
             function,
             status,
             registers,
             slices,
-            context_scratch: None,
             static_rust_slice_operands: false,
             labels: Vec::new(),
-            exits: [None; 6],
+            exits: [None; Failure::COUNT],
+            calls_rust: false,
         })
-    }
-
-    pub(super) fn emit(
-        ctx: &'ctx Context,
-        builder: &'a Builder<'ctx>,
-        module: &'a Module<'ctx>,
-        f: &Function,
-        function: FunctionValue<'ctx>,
-        callees: &Callees<'_, 'ctx>,
-        debug_id: Option<usize>,
-    ) -> Built<bool> {
-        let mut body = Self::start(
-            ctx,
-            builder,
-            module,
-            function,
-            f.arity(),
-            (0..f.register_count()).map(|i| f.reg_type(Reg(i as u32))),
-            f.buffer_kinds(),
-        )?;
-        // A builder may allocate label IDs without marking or using them.
-        body.labels.resize(f.label_count(), None);
-        for op in f.instructions() {
-            if let Instr::Label(l) = op {
-                body.labels[l.0 as usize] = Some(ctx.append_basic_block(function, ""));
-            }
-        }
-        let mut open = true;
-        let snapshot = debug_id.map(|_| body.debug_frame(f)).transpose()?;
-        for (index, inst) in f.instructions().iter().enumerate() {
-            if let Instr::Label(l) = inst {
-                let block = body.block(*l);
-                if open {
-                    builder.build_unconditional_branch(block)?;
-                }
-                builder.position_at_end(block);
-                open = true;
-            } else if open && let Instr::Debug(point) = inst {
-                if let (Some(id), Some(snapshot)) = (debug_id, snapshot) {
-                    body.debug_point(f, point, snapshot, id, index)?;
-                }
-            } else if open {
-                body.instruction(inst, callees)?;
-                open = !inst.terminates();
-            }
-        }
-        // A dead block at the end of verified HIR may lack a terminator.
-        if open {
-            builder.build_unreachable()?;
-        }
-        Ok(body.static_rust_slice_operands())
     }
 
     fn block(&self, label: Label) -> BasicBlock<'ctx> {
         self.labels[label.0 as usize].expect("verified jump target")
     }
 
-    pub(super) fn new_local(&mut self, allocas: &Builder<'ctx>, ty: ValueType) -> Built<Reg> {
-        // A second builder can insert slots in the entry even while emitting
-        // code for a loop or a guarded continuation in a different block.
+    /// A second builder can insert slots in the entry even while emitting
+    /// code for a loop or a guarded continuation in a different block.
+    fn position_in_entry(&self, allocas: &Builder<'ctx>) {
         let entry = self.function.get_first_basic_block().unwrap();
         if let Some(first) = entry.get_first_instruction() {
             allocas.position_before(&first);
         } else {
             allocas.position_at_end(entry);
         }
+    }
+
+    pub(super) fn new_local(&mut self, allocas: &Builder<'ctx>, ty: ValueType) -> Built<Reg> {
+        self.position_in_entry(allocas);
         let id = Reg(self.registers.len() as u32);
-        self.registers
-            .push((ty, allocas.build_alloca(simd::llvm_type(self.ctx, ty), "")?));
+        self.registers.push((
+            ty,
+            allocas.build_alloca(simd::llvm_type(self.ctx, self.machine.vector_bytes, ty), "")?,
+        ));
         Ok(id)
     }
 
@@ -191,10 +200,11 @@ impl<'a, 'ctx> Body<'a, 'ctx> {
         self.builder.position_at_end(self.block(label));
     }
     pub(super) fn unreachable(&self) -> Built<()> {
-        self.builder.build_unreachable().map(|_| ())
+        self.builder.build_unreachable()?;
+        Ok(())
     }
     pub(super) fn needs_status(&self) -> bool {
-        self.exits.iter().any(Option::is_some)
+        self.calls_rust || self.exits.iter().any(Option::is_some)
     }
 
     pub(super) fn static_rust_slice_operands(&self) -> bool {
@@ -205,52 +215,93 @@ impl<'a, 'ctx> Body<'a, 'ctx> {
         self.ctx.i32_type().const_int(n as u32 as u64, false)
     }
 
-    fn load(&self, reg: Reg) -> Built<IntValue<'ctx>> {
-        Ok(self
-            .builder
-            .build_load(self.ctx.i32_type(), self.registers[reg.0 as usize].1, "")?
-            .into_int_value())
+    fn scalar_type(&self, reg: Reg) -> ScalarType {
+        match self.registers[reg.0 as usize].0 {
+            ValueType::Scalar(ty) => ty,
+            _ => unreachable!("validated scalar register"),
+        }
     }
 
-    fn store(&self, reg: Reg, value: IntValue<'ctx>) -> Built<()> {
+    fn value(&self, reg: Reg) -> Built<BasicValueEnum<'ctx>> {
+        let (ty, ptr) = self.registers[reg.0 as usize];
+        let ty = simd::llvm_type(self.ctx, self.machine.vector_bytes, ty);
+        Ok(self.builder.build_load(ty, ptr, "")?)
+    }
+
+    /// An integer or `bool` register.
+    fn load(&self, reg: Reg) -> Built<IntValue<'ctx>> {
+        Ok(self.value(reg)?.into_int_value())
+    }
+
+    fn store(&self, reg: Reg, value: impl BasicValue<'ctx>) -> Built<()> {
         self.builder
             .build_store(self.registers[reg.0 as usize].1, value)?;
         Ok(())
     }
 
+    /// A `usize` memory offset as `i64`, clamped to `i32::MAX`: every slice
+    /// length fits `i32`, so a larger offset is out of bounds either way.
+    fn offset(&self, reg: Reg) -> Built<IntValue<'ctx>> {
+        let wide = self.ctx.i64_type();
+        let umin = self.intrinsic("llvm.umin", &[wide.into()])?;
+        let max = wide.const_int(i32::MAX as u64, false);
+        Ok(self
+            .builder
+            .build_call(umin, &[self.load(reg)?.into(), max.into()], "")?
+            .try_as_basic_value()
+            .unwrap_basic()
+            .into_int_value())
+    }
+
+    /// The result of a function that stops with a status.
+    fn failed_result(&self) -> BasicValueEnum<'ctx> {
+        self.function
+            .get_type()
+            .get_return_type()
+            .expect("kernels return a value")
+            .const_zero()
+    }
+
     // Guards of the same type share one side exit. Failed calls preserve
     // their callee's status and return immediately to the enclosing caller.
     fn exit_if(&mut self, condition: IntValue<'ctx>, fault: Failure) -> Built<()> {
-        let existing = self.exits[fault as usize];
-        let exit = existing.unwrap_or_else(|| self.ctx.append_basic_block(self.function, "error"));
+        let exit = self.exit(fault)?;
         let next = self.ctx.append_basic_block(self.function, "");
         self.builder
             .build_conditional_branch(condition, exit, next)?;
-        if existing.is_none() {
-            self.exits[fault as usize] = Some(exit);
-            self.builder.position_at_end(exit);
-            if fault != Failure::Propagate {
-                self.builder
-                    .build_store(self.status, self.int(fault as i32))?;
-            }
-            self.builder.build_return(Some(&self.int(0)))?;
-        }
         self.builder.position_at_end(next);
         Ok(())
     }
 
+    /// The side exit for `fault`, created on first use.
+    fn exit(&mut self, fault: Failure) -> Built<BasicBlock<'ctx>> {
+        if let Some(exit) = self.exits[fault.index()] {
+            return Ok(exit);
+        }
+        let here = self.builder.get_insert_block().expect("positioned builder");
+        let exit = self.ctx.append_basic_block(self.function, "error");
+        self.exits[fault.index()] = Some(exit);
+        self.builder.position_at_end(exit);
+        if let Failure::Trap(trap) = fault {
+            self.builder
+                .build_store(self.status, self.int(trap.code() as i32))?;
+        }
+        self.builder.build_return(Some(&self.failed_result()))?;
+        self.builder.position_at_end(here);
+        Ok(exit)
+    }
+
     fn element(&mut self, buffer: Buffer, index: Reg) -> Built<PointerValue<'ctx>> {
         let slice = self.slices[buffer.0 as usize];
-        let index = self
-            .builder
-            .build_int_z_extend(self.load(index)?, self.ctx.i64_type(), "")?;
-        self.checked_element(slice, self.ctx.i32_type().into(), index)
+        let ty = ScalarType::of_element(slice.element).expect("validated scalar element");
+        let ty = simd::scalar_type(self.ctx, ty);
+        self.checked_element(slice, ty, self.load(index)?)
     }
 
     pub(super) fn trap_bounds(&self) -> Built<()> {
         self.builder
-            .build_store(self.status, self.int(Failure::Bounds as i32))?;
-        self.builder.build_return(Some(&self.int(0)))?;
+            .build_store(self.status, self.int(Trap::Bounds.code() as i32))?;
+        self.builder.build_return(Some(&self.failed_result()))?;
         Ok(())
     }
 
@@ -260,136 +311,298 @@ impl<'a, 'ctx> Body<'a, 'ctx> {
         element: BasicTypeEnum<'ctx>,
         index: IntValue<'ctx>,
     ) -> Built<PointerValue<'ctx>> {
-        // The unsigned comparison also rejects negative signed indices, as every slice fits i32.
         let invalid = self
             .builder
             .build_int_compare(IntPredicate::UGE, index, slice.len, "")?;
-        self.exit_if(invalid, Failure::Bounds)?;
+        self.exit_if(invalid, Failure::Trap(Trap::Bounds))?;
         // SAFETY: Only the edge with index < slice.len reaches this instruction.
-        unsafe {
+        Ok(unsafe {
             self.builder
-                .build_in_bounds_gep(element, slice.data, &[index], "")
-        }
+                .build_in_bounds_gep(element, slice.data, &[index], "")?
+        })
     }
 
     fn binary(
         &mut self,
         op: Binary,
-        a: IntValue<'ctx>,
-        b: IntValue<'ctx>,
-    ) -> Built<IntValue<'ctx>> {
+        ty: ScalarType,
+        a: BasicValueEnum<'ctx>,
+        b: BasicValueEnum<'ctx>,
+    ) -> Built<BasicValueEnum<'ctx>> {
+        if ty.is_float() {
+            return self.float_binary(op, a.into_float_value(), b.into_float_value());
+        }
+        let (a, b) = (a.into_int_value(), b.into_int_value());
         let ir = self.builder;
+        let int = a.get_type();
+        let signed = ty.is_signed();
+        let constant = |n: i64| int.const_int(n as u64, signed);
         use Binary::*;
-        match op {
-            Add => ir.build_int_add(a, b, ""),
-            Sub => ir.build_int_sub(a, b, ""),
-            Mul => ir.build_int_mul(a, b, ""),
+        Ok(match op {
+            Add => ir.build_int_add(a, b, "")?.into(),
+            Sub => ir.build_int_sub(a, b, "")?.into(),
+            Mul => ir.build_int_mul(a, b, "")?.into(),
             CheckedAdd | CheckedSub | CheckedMul => {
-                let wide_type = self.ctx.i64_type();
-                let a = ir.build_int_s_extend(a, wide_type, "")?;
-                let b = ir.build_int_s_extend(b, wide_type, "")?;
-                let wide = match op {
-                    CheckedAdd => ir.build_int_add(a, b, "")?,
-                    CheckedSub => ir.build_int_sub(a, b, "")?,
-                    CheckedMul => ir.build_int_mul(a, b, "")?,
-                    _ => unreachable!(),
+                let name = match (op, signed) {
+                    (CheckedAdd, true) => "llvm.sadd.with.overflow",
+                    (CheckedAdd, false) => "llvm.uadd.with.overflow",
+                    (CheckedSub, true) => "llvm.ssub.with.overflow",
+                    (CheckedSub, false) => "llvm.usub.with.overflow",
+                    (_, true) => "llvm.smul.with.overflow",
+                    (_, false) => "llvm.umul.with.overflow",
                 };
-                let result = ir.build_int_truncate(wide, self.ctx.i32_type(), "")?;
-                let extended = ir.build_int_s_extend(result, wide_type, "")?;
-                let invalid = ir.build_int_compare(IntPredicate::NE, wide, extended, "")?;
-                self.exit_if(invalid, Failure::IntegerOverflow)?;
-                Ok(result)
+                let function = self.intrinsic(name, &[int.into()])?;
+                let pair = ir
+                    .build_call(function, &[a.into(), b.into()], "")?
+                    .try_as_basic_value()
+                    .unwrap_basic()
+                    .into_struct_value();
+                let result = ir.build_extract_value(pair, 0, "")?;
+                let overflow = ir.build_extract_value(pair, 1, "")?.into_int_value();
+                self.exit_if(overflow, Failure::Trap(Trap::Overflow))?;
+                result
             }
-            And => ir.build_and(a, b, ""),
-            Or => ir.build_or(a, b, ""),
-            Xor => ir.build_xor(a, b, ""),
-            Div | Rem => {
-                let zero = ir.build_int_compare(IntPredicate::EQ, b, self.int(0), "")?;
-                self.exit_if(zero, Failure::DivideByZero)?;
-                let min = ir.build_int_compare(IntPredicate::EQ, a, self.int(i32::MIN), "")?;
-                let minus_one = ir.build_int_compare(IntPredicate::EQ, b, self.int(-1), "")?;
-                self.exit_if(ir.build_and(min, minus_one, "")?, Failure::Overflow)?;
-                if op == Div {
-                    ir.build_int_signed_div(a, b, "")
+            SaturatingAdd | SaturatingSub => {
+                let name = match (op, signed) {
+                    (SaturatingAdd, true) => "llvm.sadd.sat",
+                    (SaturatingAdd, false) => "llvm.uadd.sat",
+                    (_, true) => "llvm.ssub.sat",
+                    (_, false) => "llvm.usub.sat",
+                };
+                let function = self.intrinsic(name, &[int.into()])?;
+                ir.build_call(function, &[a.into(), b.into()], "")?
+                    .try_as_basic_value()
+                    .unwrap_basic()
+            }
+            SaturatingMul => {
+                let name = if signed {
+                    "llvm.smul.with.overflow"
                 } else {
-                    ir.build_int_signed_rem(a, b, "")
+                    "llvm.umul.with.overflow"
+                };
+                let function = self.intrinsic(name, &[int.into()])?;
+                let pair = ir
+                    .build_call(function, &[a.into(), b.into()], "")?
+                    .try_as_basic_value()
+                    .unwrap_basic()
+                    .into_struct_value();
+                let product = ir.build_extract_value(pair, 0, "")?.into_int_value();
+                let overflow = ir.build_extract_value(pair, 1, "")?.into_int_value();
+                let saturated = if signed {
+                    // A product leaves the range on the side of its sign.
+                    let sign = ir.build_xor(a, b, "")?;
+                    let negative =
+                        ir.build_int_compare(IntPredicate::SLT, sign, int.const_zero(), "")?;
+                    let min = constant(i64::MIN >> (64 - ty.bits()));
+                    let max = constant(i64::MAX >> (64 - ty.bits()));
+                    ir.build_select(negative, min, max, "")?.into_int_value()
+                } else {
+                    int.const_all_ones()
+                };
+                ir.build_select(overflow, saturated, product, "")?
+            }
+            And => ir.build_and(a, b, "")?.into(),
+            Or => ir.build_or(a, b, "")?.into(),
+            Xor => ir.build_xor(a, b, "")?.into(),
+            Div | Rem => {
+                let zero = ir.build_int_compare(IntPredicate::EQ, b, int.const_zero(), "")?;
+                self.exit_if(zero, Failure::Trap(Trap::DivisionByZero))?;
+                if signed {
+                    let min = constant(i64::MIN >> (64 - ty.bits()));
+                    let min = ir.build_int_compare(IntPredicate::EQ, a, min, "")?;
+                    let minus_one =
+                        ir.build_int_compare(IntPredicate::EQ, b, int.const_all_ones(), "")?;
+                    self.exit_if(
+                        ir.build_and(min, minus_one, "")?,
+                        Failure::Trap(Trap::DivisionOverflow),
+                    )?;
                 }
+                match (op, signed) {
+                    (Div, true) => ir.build_int_signed_div(a, b, "")?,
+                    (Div, false) => ir.build_int_unsigned_div(a, b, "")?,
+                    (_, true) => ir.build_int_signed_rem(a, b, "")?,
+                    (_, false) => ir.build_int_unsigned_rem(a, b, "")?,
+                }
+                .into()
             }
             Shl | Shr | CheckedShl | CheckedShr => {
+                let width = constant(i64::from(ty.bits()));
                 let count = if matches!(op, CheckedShl | CheckedShr) {
-                    let invalid = ir.build_int_compare(IntPredicate::UGE, b, self.int(32), "")?;
-                    self.exit_if(invalid, Failure::IntegerOverflow)?;
+                    let invalid = ir.build_int_compare(IntPredicate::UGE, b, width, "")?;
+                    self.exit_if(invalid, Failure::Trap(Trap::Overflow))?;
                     b
                 } else {
-                    ir.build_and(b, self.int(31), "")?
+                    ir.build_and(b, constant(i64::from(ty.bits() - 1)), "")?
                 };
                 if matches!(op, Shl | CheckedShl) {
-                    ir.build_left_shift(a, count, "")
+                    ir.build_left_shift(a, count, "")?.into()
                 } else {
-                    ir.build_right_shift(a, count, true, "")
+                    ir.build_right_shift(a, count, signed, "")?.into()
                 }
             }
             Min | Max => {
-                let pred = if op == Min {
-                    IntPredicate::SLT
-                } else {
-                    IntPredicate::SGT
+                let pred = match (op, signed) {
+                    (Min, true) => IntPredicate::SLT,
+                    (Min, false) => IntPredicate::ULT,
+                    (_, true) => IntPredicate::SGT,
+                    (_, false) => IntPredicate::UGT,
                 };
                 let take_a = ir.build_int_compare(pred, a, b, "")?;
-                Ok(ir.build_select(take_a, a, b, "")?.into_int_value())
+                ir.build_select(take_a, a, b, "")?
+            }
+            Eq | Ne | Lt | Le | Gt | Ge => {
+                let pred = match (op, signed) {
+                    (Eq, _) => IntPredicate::EQ,
+                    (Ne, _) => IntPredicate::NE,
+                    (Lt, true) => IntPredicate::SLT,
+                    (Lt, false) => IntPredicate::ULT,
+                    (Le, true) => IntPredicate::SLE,
+                    (Le, false) => IntPredicate::ULE,
+                    (Gt, true) => IntPredicate::SGT,
+                    (Gt, false) => IntPredicate::UGT,
+                    (_, true) => IntPredicate::SGE,
+                    (_, false) => IntPredicate::UGE,
+                };
+                ir.build_int_compare(pred, a, b, "")?.into()
+            }
+        })
+    }
+
+    fn float_binary(
+        &self,
+        op: Binary,
+        a: FloatValue<'ctx>,
+        b: FloatValue<'ctx>,
+    ) -> Built<BasicValueEnum<'ctx>> {
+        let ir = self.builder;
+        use Binary::*;
+        Ok(match op {
+            Add => ir.build_float_add(a, b, "")?.into(),
+            Sub => ir.build_float_sub(a, b, "")?.into(),
+            Mul => ir.build_float_mul(a, b, "")?.into(),
+            Div => ir.build_float_div(a, b, "")?.into(),
+            Min | Max => {
+                // minimumNumber: llvm.minimum orders the zeros; a NaN
+                // operand yields the other operand.
+                let name = if op == Min {
+                    "llvm.minimum"
+                } else {
+                    "llvm.maximum"
+                };
+                let function = self.intrinsic(name, &[a.get_type().into()])?;
+                let both = ir
+                    .build_call(function, &[a.into(), b.into()], "")?
+                    .try_as_basic_value()
+                    .unwrap_basic();
+                let a_nan = ir.build_float_compare(FloatPredicate::UNO, a, a, "")?;
+                let b_nan = ir.build_float_compare(FloatPredicate::UNO, b, b, "")?;
+                let other = ir.build_select(a_nan, b, both.into_float_value(), "")?;
+                ir.build_select(b_nan, a.into(), other, "")?
             }
             Eq | Ne | Lt | Le | Gt | Ge => {
                 let pred = match op {
-                    Eq => IntPredicate::EQ,
-                    Ne => IntPredicate::NE,
-                    Lt => IntPredicate::SLT,
-                    Le => IntPredicate::SLE,
-                    Gt => IntPredicate::SGT,
-                    Ge => IntPredicate::SGE,
-                    _ => unreachable!(),
+                    Eq => FloatPredicate::OEQ,
+                    Ne => FloatPredicate::UNE,
+                    Lt => FloatPredicate::OLT,
+                    Le => FloatPredicate::OLE,
+                    Gt => FloatPredicate::OGT,
+                    _ => FloatPredicate::OGE,
                 };
-                let flag = ir.build_int_compare(pred, a, b, "")?;
-                ir.build_int_s_extend(flag, self.ctx.i32_type(), "")
+                ir.build_float_compare(pred, a, b, "")?.into()
             }
-        }
+            _ => unreachable!("validated float operation"),
+        })
     }
 
-    pub(super) fn constant(&self, dst: Reg, n: i32) -> Built<()> {
-        self.store(dst, self.int(n))
+    /// Rust's `value as to`.
+    fn convert(
+        &self,
+        value: BasicValueEnum<'ctx>,
+        from: ScalarType,
+        to: ScalarType,
+    ) -> Built<BasicValueEnum<'ctx>> {
+        let ir = self.builder;
+        let target = simd::scalar_type(self.ctx, to);
+        Ok(match (from.is_float(), to.is_float()) {
+            _ if from == to => value,
+            (false, false) => {
+                let value = value.into_int_value();
+                let target = target.into_int_type();
+                let (bits, wide) = (from.bits(), to.bits());
+                if bits > wide {
+                    ir.build_int_truncate(value, target, "")?.into()
+                } else if bits == wide {
+                    value.into()
+                } else if from.is_signed() {
+                    ir.build_int_s_extend(value, target, "")?.into()
+                } else {
+                    ir.build_int_z_extend(value, target, "")?.into()
+                }
+            }
+            (false, true) if from.is_signed() => ir
+                .build_signed_int_to_float(value.into_int_value(), target.into_float_type(), "")?
+                .into(),
+            (false, true) => ir
+                .build_unsigned_int_to_float(value.into_int_value(), target.into_float_type(), "")?
+                .into(),
+            (true, true) => ir
+                .build_float_cast(value.into_float_value(), target.into_float_type(), "")?
+                .into(),
+            (true, false) => {
+                let name = if to.is_signed() {
+                    "llvm.fptosi.sat"
+                } else {
+                    "llvm.fptoui.sat"
+                };
+                let function = self.intrinsic(name, &[target, value.get_type()])?;
+                ir.build_call(function, &[value.into()], "")?
+                    .try_as_basic_value()
+                    .unwrap_basic()
+            }
+        })
+    }
+
+    pub(super) fn constant(&self, dst: Reg, c: Constant) -> Built<()> {
+        let width = std::num::NonZero::new(c.ty().bits()).expect("a nonzero width");
+        let bits = self.ctx.custom_width_int_type(width).unwrap();
+        let bits = bits.const_int(c.bits(), false);
+        let ty = simd::scalar_type(self.ctx, c.ty());
+        // The builder folds a cast of a constant to a constant.
+        let value = self.builder.build_bit_cast(bits, ty, "")?;
+        self.store(dst, value)
+    }
+    pub(super) fn cast(&self, dst: Reg, src: Reg, to: ScalarType) -> Built<()> {
+        let value = self.convert(self.value(src)?, self.scalar_type(src), to)?;
+        self.store(dst, value)
     }
     pub(super) fn assign(&self, dst: Reg, src: Reg) -> Built<()> {
         let (ty, ptr) = self.registers[src.0 as usize];
-        let value = self
-            .builder
-            .build_load(simd::llvm_type(self.ctx, ty), ptr, "")?;
+        let value = self.builder.build_load(
+            simd::llvm_type(self.ctx, self.machine.vector_bytes, ty),
+            ptr,
+            "",
+        )?;
         self.builder
             .build_store(self.registers[dst.0 as usize].1, value)?;
         Ok(())
     }
     pub(super) fn arithmetic(&mut self, dst: Reg, op: Binary, a: Reg, b: Reg) -> Built<()> {
-        let result = self.binary(op, self.load(a)?, self.load(b)?)?;
+        let ty = self.scalar_type(a);
+        let result = self.binary(op, ty, self.value(a)?, self.value(b)?)?;
         self.store(dst, result)
     }
     pub(super) fn length(&self, dst: Reg, buffer: Buffer) -> Built<()> {
-        let len = self.slices[buffer.index()].len;
-        self.store(
-            dst,
-            self.builder
-                .build_int_truncate(len, self.ctx.i32_type(), "")?,
-        )
+        self.store(dst, self.slices[buffer.index()].len)
     }
     pub(super) fn read_element(&mut self, dst: Reg, buffer: Buffer, index: Reg) -> Built<()> {
         let ptr = self.element(buffer, index)?;
-        self.store(
-            dst,
-            self.builder
-                .build_load(self.ctx.i32_type(), ptr, "")?
-                .into_int_value(),
-        )
+        let ty = simd::scalar_type(self.ctx, self.scalar_type(dst));
+        let value = self.builder.build_load(ty, ptr, "")?;
+        self.store(dst, value)
     }
     pub(super) fn write_element(&mut self, buffer: Buffer, index: Reg, value: Reg) -> Built<()> {
         let ptr = self.element(buffer, index)?;
-        self.builder.build_store(ptr, self.load(value)?)?;
+        self.builder.build_store(ptr, self.value(value)?)?;
         Ok(())
     }
     pub(super) fn jump(&self, label: Label) -> Built<()> {
@@ -397,15 +610,12 @@ impl<'a, 'ctx> Body<'a, 'ctx> {
         Ok(())
     }
     pub(super) fn branch(&self, cond: Reg, yes: Label, no: Label) -> Built<()> {
-        let take =
-            self.builder
-                .build_int_compare(IntPredicate::NE, self.load(cond)?, self.int(0), "")?;
         self.builder
-            .build_conditional_branch(take, self.block(yes), self.block(no))?;
+            .build_conditional_branch(self.load(cond)?, self.block(yes), self.block(no))?;
         Ok(())
     }
     pub(super) fn ret(&self, value: Reg) -> Built<()> {
-        self.builder.build_return(Some(&self.load(value)?))?;
+        self.builder.build_return(Some(&self.value(value)?))?;
         Ok(())
     }
     pub(super) fn call_function(
@@ -421,7 +631,7 @@ impl<'a, 'ctx> Body<'a, 'ctx> {
             Vec::<BasicMetadataValueEnum>::with_capacity(callee.count_params() as usize);
         actuals.push(self.status.into());
         for &r in args {
-            actuals.push(self.load(r)?.into());
+            actuals.push(self.value(r)?.into());
         }
         for buffer in buffers {
             let slice = self.slices[buffer.index()];
@@ -439,265 +649,153 @@ impl<'a, 'ctx> Body<'a, 'ctx> {
         self.store(dst, result)
     }
 
-    pub(super) fn rust_call(
-        &mut self,
-        dst: Reg,
-        import: splice::hir::RustCall,
-        args: &[Reg],
-    ) -> Built<()> {
-        // The typed extern "C" entry remains resident in this process. Its
-        // wrapper catches unwinding Rust panics before returning to the JIT.
-        let wide = self.ctx.i64_type();
-        let word = self.ctx.i32_type();
-        let ty = wide.fn_type(&[word.into(), word.into()], false);
-        let addr = wide
-            .const_int((import.symbol.resolve)() as usize as u64, false)
-            .const_to_pointer(self.ctx.ptr_type(inkwell::AddressSpace::default()));
-        let mut words = [self.int(0); 2];
-        for (out, &arg) in words.iter_mut().zip(args) {
-            *out = self.load(arg)?;
-        }
-        let value = self
-            .builder
-            .build_indirect_call(ty, addr, &words.map(Into::into), "")?
-            .try_as_basic_value()
-            .unwrap_basic()
-            .into_int_value();
-        self.rust_result(dst, value)
-    }
-
-    pub(super) fn rust_context_call(
-        &mut self,
-        dst: Reg,
-        target: RustContextTarget,
-        args: &[Reg],
-        slices: &[ContextSlice],
-    ) -> Built<()> {
+    /// A Rust call as [`splice_core::hir::RustTarget::plan`] lays it out.
+    pub(super) fn rust_call(&mut self, dst: Reg, plan: RustCallPlan, args: &[Reg]) -> Built<()> {
         let wide = self.ctx.i64_type();
         let word = self.ctx.i32_type();
         let pointer = self.ctx.ptr_type(inkwell::AddressSpace::default());
-        self.static_rust_slice_operands |=
-            matches!(target, RustContextTarget::Static(_)) && !slices.is_empty();
-        let (data, ordinal, entry, type_, first, second) =
-            if let RustContextTarget::Borrowed { context, operation } = target
-                && slices.is_empty()
-                && args.len() <= 2
-            {
-                let mut words = [self.int(0); 2];
-                for (word, &arg) in words.iter_mut().zip(args) {
-                    *word = self.load(arg)?;
-                }
-                (
-                    self.slices[context.index()].data,
-                    operation,
-                    splice::invoke_runtime_context as *const (),
-                    word.into(),
-                    words[0].into(),
-                    words[1].into(),
-                )
-            } else {
-                let packet = self.context_packet(args, slices)?;
-                let (data, ordinal, entry) = match target {
-                    RustContextTarget::Borrowed { context, operation } => (
-                        self.slices[context.index()].data,
-                        operation,
-                        splice::invoke_packet_runtime_context as *const (),
-                    ),
-                    RustContextTarget::Static(symbol) => (packet, 0, symbol.entry() as *const ()),
-                };
-                (
-                    data,
-                    ordinal,
-                    entry,
-                    pointer.into(),
-                    packet.into(),
-                    word.const_zero().into(),
-                )
+        // A static Rust function may keep a slice address for its lifetime.
+        self.static_rust_slice_operands |= plan.context.is_none()
+            && plan
+                .stores
+                .iter()
+                .any(|store| matches!(store.value, PacketValue::Data(_)));
+        let packet = self.packet(plan.bytes)?;
+        for &PacketStore { at, value } in &plan.stores {
+            let value: BasicValueEnum<'ctx> = match value {
+                PacketValue::Word(n) => self.word(args[n])?.into(),
+                PacketValue::Data(buffer) => self.slices[buffer.index()].data.into(),
+                PacketValue::Length(buffer) => self
+                    .builder
+                    .build_int_truncate(self.slices[buffer.index()].len, word, "")?
+                    .into(),
+                PacketValue::Tag(tag) => word.const_int(u64::from(tag), false).into(),
+                PacketValue::Symbol(address) => wide.const_int(address as u64, false).into(),
             };
-        let ty = wide.fn_type(&[pointer.into(), word.into(), type_, word.into()], false);
-        let address = wide
-            .const_int(entry as usize as u64, false)
-            .const_to_pointer(pointer);
-        let operands = [
-            data.into(),
-            word.const_int(u64::from(ordinal), false).into(),
-            first,
-            second,
-        ];
-        let value = self
-            .builder
-            .build_indirect_call(ty, address, &operands, "")?
-            .try_as_basic_value()
-            .unwrap_basic()
-            .into_int_value();
-        self.rust_result(dst, value)
-    }
-
-    pub(super) fn rust_packet_call(
-        &mut self,
-        dst: Reg,
-        import: &'static splice::hir::RustPacketSymbol,
-        args: &[Reg],
-    ) -> Built<()> {
-        let packet = self.context_packet(args, &[])?;
-        let pointer = self.ctx.ptr_type(inkwell::AddressSpace::default());
-        let wide = self.ctx.i64_type();
-        let word = self.ctx.i32_type();
-        let address = |value: usize| {
-            wide.const_int(value as u64, false)
-                .const_to_pointer(pointer)
-        };
-        let ty = wide.fn_type(&[pointer.into(), pointer.into(), word.into()], false);
-        let entry = address(splice_target::abi::invoke_packet_import as *const () as usize);
-        let symbol = address(std::ptr::from_ref(import) as usize);
-        let count = word.const_int(u64::from(import.arity), false);
-        let value = self
-            .builder
-            .build_indirect_call(ty, entry, &[symbol.into(), packet.into(), count.into()], "")?
-            .try_as_basic_value()
-            .unwrap_basic()
-            .into_int_value();
-        self.rust_result(dst, value)
-    }
-
-    fn context_packet(
-        &mut self,
-        args: &[Reg],
-        slices: &[ContextSlice],
-    ) -> Built<PointerValue<'ctx>> {
-        let word = self.ctx.i32_type();
-        let layout = ContextArguments::packet_layout(args.len() as u32, slices.len() as u32)
-            .expect("validated Rust context packet");
-        let packet = self.context_scratch(layout.bytes.max(8))?;
-        let slot = |offset: u32| {
-            // SAFETY: the shared alloca is aligned and large enough for the
-            // verified packet. Only the initialized fields become Rust views.
-            unsafe {
+            // SAFETY: the packet alloca holds `plan.bytes`, which covers
+            // every store of the plan.
+            let slot = unsafe {
                 self.builder.build_in_bounds_gep(
                     self.ctx.i8_type(),
                     packet,
-                    &[word.const_int(u64::from(offset), false)],
+                    &[word.const_int(u64::from(at), false)],
                     "",
-                )
-            }
-        };
-        for (index, &arg) in args.iter().enumerate() {
-            self.builder
-                .build_store(slot(index as u32 * 4)?, self.load(arg)?)?;
+                )?
+            };
+            self.builder.build_store(slot, value)?;
         }
-        for (index, &ContextSlice { buffer, writable }) in slices.iter().enumerate() {
-            let slice = self.slices[buffer.index()];
-            let len = self.builder.build_int_truncate(slice.len, word, "")?;
-            let tag = word.const_int(
-                u64::from(ContextArguments::view_tag(slice.element, writable)),
-                false,
-            );
-            let offset = layout.slices_at + index as u32 * ContextArguments::SLICE_BYTES;
-            self.builder.build_store(slot(offset)?, slice.data)?;
-            self.builder
-                .build_store(slot(offset + ContextArguments::LENGTH_OFFSET)?, len)?;
-            self.builder
-                .build_store(slot(offset + ContextArguments::ELEMENT_OFFSET)?, tag)?;
-        }
-        Ok(packet)
+        let receiver = plan
+            .context
+            .map_or(packet, |context| self.slices[context.index()].data);
+        let ty = wide.fn_type(
+            &[pointer.into(), word.into(), pointer.into(), word.into()],
+            false,
+        );
+        let entry = wide
+            .const_int(plan.entry.entry as usize as u64, false)
+            .const_to_pointer(pointer);
+        let operands = [
+            receiver.into(),
+            word.const_int(u64::from(plan.operation), false).into(),
+            packet.into(),
+            word.const_zero().into(),
+        ];
+        let status = self
+            .builder
+            .build_indirect_call(ty, entry, &operands, "")?
+            .try_as_basic_value()
+            .unwrap_basic()
+            .into_int_value();
+        self.rust_status(status)?;
+        let (result, _) = self.registers[dst.0 as usize];
+        let result = simd::llvm_type(self.ctx, self.machine.vector_bytes, result);
+        let value = self.builder.build_load(result, packet, "")?;
+        self.store(dst, value)
     }
 
-    fn context_scratch(&mut self, bytes: u32) -> Built<PointerValue<'ctx>> {
+    /// A scalar register as the 8-byte word of a Rust call operand: its
+    /// bits zero-extended.
+    fn word(&self, reg: Reg) -> Built<IntValue<'ctx>> {
         let wide = self.ctx.i64_type();
-        let words = wide.const_int(u64::from(bytes.div_ceil(8)), false);
-        if let Some((capacity, packet)) = &mut self.context_scratch {
-            if bytes > *capacity {
-                // There is one entry alloca. Each synchronous call uses the
-                // storage until it returns, then the next call can reuse it.
-                assert!(
-                    packet
-                        .as_instruction_value()
-                        .expect("packet alloca")
-                        .set_operand(0, words)
-                );
-                *capacity = bytes;
+        let value = self.value(reg)?;
+        let bits = match self.scalar_type(reg) {
+            ScalarType::F32 => self
+                .builder
+                .build_bit_cast(value, self.ctx.i32_type(), "")?
+                .into_int_value(),
+            ScalarType::F64 => {
+                return Ok(self
+                    .builder
+                    .build_bit_cast(value, wide, "")?
+                    .into_int_value());
             }
-            return Ok(*packet);
-        }
+            _ => value.into_int_value(),
+        };
+        Ok(self
+            .builder
+            .build_int_z_extend_or_bit_cast(bits, wide, "")?)
+    }
+
+    /// An 8-byte aligned packet of `bytes` for one Rust call, allocated in
+    /// the entry block so that LLVM sees a fixed frame slot.
+    fn packet(&self, bytes: u32) -> Built<PointerValue<'ctx>> {
+        let wide = self.ctx.i64_type();
         let allocas = self.ctx.create_builder();
         let entry = self
             .function
             .get_first_basic_block()
             .expect("kernel entry block");
-        if let Some(first) = entry.get_first_instruction() {
-            allocas.position_before(&first);
-        } else {
-            allocas.position_at_end(entry);
+        match entry.get_first_instruction() {
+            Some(first) => allocas.position_before(&first),
+            None => allocas.position_at_end(entry),
         }
-        let packet = allocas.build_array_alloca(wide, words, "rust_context_packet")?;
-        self.context_scratch = Some((bytes, packet));
-        Ok(packet)
+        Ok(allocas.build_alloca(wide.array_type(bytes.div_ceil(8)), "rust_packet")?)
     }
 
-    fn rust_result(&mut self, dst: Reg, value: IntValue<'ctx>) -> Built<()> {
-        let max = self.ctx.i64_type().const_int(u64::from(u32::MAX), false);
+    /// Report the trap code in the upper word of a Rust call's status.
+    fn rust_status(&mut self, value: IntValue<'ctx>) -> Built<()> {
+        self.calls_rust = true;
+        let wide = self.ctx.i64_type();
+        let max = wide.const_int(u64::from(u32::MAX), false);
         let failed = self
             .builder
             .build_int_compare(IntPredicate::UGT, value, max, "")?;
-        self.exit_if(failed, Failure::RustPanic)?;
-        self.store(
-            dst,
-            self.builder
-                .build_int_truncate(value, self.ctx.i32_type(), "")?,
-        )
+        let exit = self.ctx.append_basic_block(self.function, "rust_error");
+        let next = self.ctx.append_basic_block(self.function, "");
+        self.builder.build_conditional_branch(failed, exit, next)?;
+        self.builder.position_at_end(exit);
+        let code = self
+            .builder
+            .build_right_shift(value, wide.const_int(32, false), false, "")?;
+        let code = self
+            .builder
+            .build_int_truncate(code, self.ctx.i32_type(), "")?;
+        self.builder.build_store(self.status, code)?;
+        self.builder.build_return(Some(&self.failed_result()))?;
+        self.builder.position_at_end(next);
+        Ok(())
     }
+}
 
-    fn instruction(&mut self, inst: &Instr, callees: &Callees<'_, 'ctx>) -> Built<()> {
-        match *inst {
-            Instr::Debug(_) => unreachable!("debug metadata is lowered at source points"),
-            Instr::Simd {
-                dst,
-                inst,
-                ref args,
-            } => self.simd(dst, inst, args),
-            Instr::Const(d, n) => self.constant(d, n),
-            Instr::Copy(d, v) => self.assign(d, v),
-            Instr::Bin(d, op, a, b) => self.arithmetic(d, op, a, b),
-            Instr::BufferLen { dst, buffer } => self.length(dst, buffer),
-            Instr::Load { dst, buffer, index } => self.read_element(dst, buffer, index),
-            Instr::Store {
-                buffer,
-                index,
-                value,
-            } => self.write_element(buffer, index, value),
-            Instr::Jump(l) => self.jump(l),
-            Instr::Branch { cond, yes, no } => self.branch(cond, yes, no),
-            Instr::Return(v) => self.ret(v),
-            Instr::TrapBounds => self.trap_bounds(),
-            Instr::RustCall {
-                dst,
-                import,
-                ref args,
-            } => self.rust_call(dst, import, args),
-            Instr::RustPacketCall {
-                dst,
-                import,
-                ref args,
-            } => self.rust_packet_call(dst, import, args),
-            Instr::RustContextCall {
-                dst,
-                target,
-                ref args,
-                ref slices,
-            } => self.rust_context_call(dst, target, args, slices),
-            Instr::Call {
-                dst,
-                ref function,
-                ref args,
-                ref buffers,
-            } => self.call_function(
-                dst,
-                callees.declarations[callees.ids[&Arc::as_ptr(function)]],
-                function.needs_status(),
-                args,
-                buffers,
-            ),
-            Instr::Label(_) => unreachable!("handled at block boundary"),
-        }
+#[cfg(test)]
+mod tests {
+    use super::{Error, intrinsic};
+    use inkwell::context::Context;
+
+    #[test]
+    fn missing_intrinsics_are_build_errors() {
+        let ctx = Context::create();
+        let module = ctx.create_module("intrinsics");
+        let vector = ctx.i32_type().vec_type(4).into();
+        assert!(intrinsic(&module, "llvm.umax", &[vector]).is_ok());
+        let missing = intrinsic(&module, "llvm.splice.missing", &[vector]);
+        assert!(matches!(
+            missing,
+            Err(Error::MissingIntrinsic("llvm.splice.missing"))
+        ));
+        assert_eq!(
+            missing.unwrap_err().to_string(),
+            "LLVM does not provide llvm.splice.missing"
+        );
     }
 }

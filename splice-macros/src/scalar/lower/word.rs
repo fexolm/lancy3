@@ -12,7 +12,7 @@ impl Lower<'_> {
             Stage::Word(_) => v.code,
             Stage::Reg(_) => emit!(#word::Runtime(#v)),
             Stage::Host | Stage::Literal(_) => {
-                emit!(#word::Known(#root::frontend::scalar::ScalarConstant::bits(#v)))
+                emit!(#word::Known(#root::frontend::scalar::ScalarConstant::constant(#v)))
             }
             _ => return err(at, "expected a scalar word"),
         })
@@ -65,19 +65,29 @@ impl Lower<'_> {
         let plain = emit!(#root::hir::Binary::#variant);
         let op = if let Some(checked) = checked_operator(op) {
             let checked = Ident::new(checked, Span::call_site());
-            let enabled = crate::overflow::enabled();
+            let enabled = super::host::kernel_overflow_checks();
             emit!(if #enabled { #root::hir::Binary::#checked }else{#plain})
         } else {
             plain
         };
+        let operand = |value: &Value| match value.stage {
+            Stage::Word(t) | Stage::Reg(t) | Stage::Literal(t) if t != Scalar::Inferred => Some(t),
+            _ => None,
+        };
+        let kind = if predicate {
+            Scalar::Bool
+        } else {
+            operand(&left)
+                .or(operand(&right))
+                .unwrap_or(Scalar::Inferred)
+        };
         let left = self.word(left, &expr.left)?;
         let right = self.word(right, &expr.right)?;
-        let kind = if predicate { Scalar::Bool } else { Scalar::Int };
         Ok(Value::new(
             Stage::Word(kind),
             emit!({
                 let (left,right)=(#left,#right);
-                left.binary(#op,right,__splice_builder)
+                left.binary(#op,right,__splice_builder)?
             }),
         ))
     }

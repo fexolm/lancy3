@@ -1,8 +1,8 @@
-use splice::hir::{Buffer, Instr};
-use splice::{BufferArg, BufferKind, Executable, kernel};
+use splice_core::hir::{Buffer, Instr};
+use splice_core::{BufferArg, BufferKind, Executable, kernel};
 use splice_lancy::Lancy;
 
-#[kernel]
+#[kernel(crate = splice_core)]
 fn append_score(out: &mut [i32], #[comptime] factor: i32, values: &[i32], row: i32) -> i32 {
     let score = values[row as usize]
         .wrapping_mul(factor)
@@ -13,7 +13,7 @@ fn append_score(out: &mut [i32], #[comptime] factor: i32, values: &[i32], row: i
     1
 }
 
-#[kernel]
+#[kernel(crate = splice_core)]
 fn lookup(input: &[i32], row: i32) -> i32 {
     let index = row as usize;
     if !input.is_empty() && index < input.len() {
@@ -36,7 +36,7 @@ fn negative_indices_compare_as_usize_before_loading() {
     }
 }
 
-#[kernel]
+#[kernel(crate = splice_core)]
 fn score_column(values: &[i32], out: &mut [i32], #[comptime] factor: i32) -> i32 {
     let mut count = 0;
     for row in 0..values.len() {
@@ -51,7 +51,10 @@ fn slice_calls_remap_arguments_and_keep_row_updates() {
     let mut expected = [2; 5];
     let expected_count = score_column(&values, &mut expected, 2);
     let f = score_column::ir(2).unwrap();
-    assert_eq!(f.buffer_kinds(), &[BufferKind::Read, BufferKind::Write]);
+    assert_eq!(
+        f.buffer_kinds(),
+        &[BufferKind::READ_I32, BufferKind::WRITE_I32]
+    );
     assert!(f.instructions().iter().any(|i| matches!(i,
         Instr::Call { buffers, .. } if buffers == &[Buffer(1), Buffer(0)]
     )));
@@ -77,14 +80,17 @@ fn entry_points_check_buffer_signatures_before_executing() {
     let mut out = [8];
     assert!(
         kernel
-            .call(&[], &mut [BufferArg::Read(&[5]), BufferArg::Read(&out)])
+            .call(
+                &[],
+                &mut [BufferArg::read::<i32>(&[5]), BufferArg::read(&out)]
+            )
             .is_err()
     );
     assert_eq!(
         kernel
             .call(
                 &[],
-                &mut [BufferArg::Read(&[5]), BufferArg::Write(&mut out)]
+                &mut [BufferArg::read::<i32>(&[5]), BufferArg::write(&mut out)]
             )
             .unwrap(),
         1
@@ -92,7 +98,7 @@ fn entry_points_check_buffer_signatures_before_executing() {
     assert_eq!(out, [24]);
 }
 
-#[kernel]
+#[kernel(crate = splice_core)]
 fn assign_in_order(buffer: &mut [i32], value: i32) -> i32 {
     buffer[{
         buffer[1] = buffer[0];
@@ -126,7 +132,7 @@ fn indexed_assignments_evaluate_rhs_before_place() {
     assert_eq!(out, expected);
 }
 
-#[kernel]
+#[kernel(crate = splice_core)]
 fn read_at(#[comptime] index: usize, input: &[i32]) -> i32 {
     input[index]
 }
@@ -140,7 +146,7 @@ fn host_indices_outside_register_width_stay_out_of_bounds() {
     assert!(f.call(read_at::CallArgs { input: &[12] }).is_err());
 }
 
-#[kernel]
+#[kernel(crate = splice_core)]
 fn divide(mode: i32, mut value: i32, divisor: i32) -> i32 {
     match mode {
         0 => value / divisor,
@@ -195,12 +201,12 @@ fn division_errors_follow_runtime_control_flow() {
     );
 }
 
-#[kernel]
+#[kernel(crate = splice_core)]
 fn scale(#[comptime] multiplier: i32, row: i32) -> i32 {
     multiplier.wrapping_mul(row)
 }
 
-#[kernel]
+#[kernel(crate = splice_core)]
 fn staged_divide(#[comptime] a: i32, #[comptime] n: i32, row: i32) -> i32 {
     if row == 0 {
         0
@@ -212,7 +218,7 @@ fn staged_divide(#[comptime] a: i32, #[comptime] n: i32, row: i32) -> i32 {
     }
 }
 
-#[kernel]
+#[kernel(crate = splice_core)]
 fn staged_usize(#[comptime] offset: usize, input: &[i32], row: i32) -> i32 {
     if row == 0 { 0 } else { input[offset / 2] }
 }

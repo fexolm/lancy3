@@ -13,20 +13,20 @@ mod values;
 mod vector_binary;
 mod wide;
 
+use crate::lir::aarch64::backend::Config;
 use crate::{
     hir::operation::operation,
-    hir::{Binary, Function, Lane, Op, Simd, Ternary, Type, Unary, Value},
+    hir::{Binary, Call, Function, Lane, Op, Simd, Ternary, Type, Unary, Value},
     lir::{
         aarch64::backend::{
             inst::{Inst, class},
-            remainder, rotate, special, sve,
+            rotate, special, sve,
         },
         isel::{Context, Root},
     },
     module::FunctionId,
 };
 use regalloc2::{PRegSet, VReg};
-use splice_target::Simd as Config;
 
 pub(super) fn reg(f: &Function, v: Value) -> VReg {
     VReg::new(v.index(), class(f.value_type(v)))
@@ -39,7 +39,7 @@ pub(super) fn select(
     out: &mut Vec<Inst>,
     config: Config,
     entry: bool,
-    callee: impl Fn(&Function) -> (FunctionId, PRegSet),
+    callee: impl Fn(Call) -> (FunctionId, PRegSet),
 ) {
     let mut rules = Rules {
         ctx,
@@ -83,26 +83,6 @@ impl Rules<'_> {
         // Only the selected form should mark its register operands live.
         self.ctx.require(v);
         reg(self.f, v)
-    }
-
-    fn float_remainder(&mut self, op: crate::hir::Binary, a: Value, b: Value) -> Option<Inst> {
-        let ty = self.ty(a);
-        let lane = ty.lane().filter(|lane| lane.float())?;
-        if op != crate::hir::Binary::Rem {
-            return None;
-        }
-        let packed = matches!(ty, Type::Vector(_));
-        let form = remainder::Form {
-            lane,
-            packed,
-            scalable: packed && sve(self.config.profile),
-        };
-        Some(Inst::FloatRemainder(
-            form,
-            self.dst(),
-            self.input(a),
-            self.input(b),
-        ))
     }
 
     fn float_special(
@@ -150,8 +130,6 @@ impl Rules<'_> {
             | Unary::IsSubnormal
             | Unary::SignBit => special::Action::Classify(op),
             Unary::Signum => special::Action::Signum,
-            Unary::NextUp => special::Action::Next(true),
-            Unary::NextDown => special::Action::Next(false),
             _ => return None,
         };
         self.float_special(action, v, None)
@@ -173,10 +151,17 @@ impl Rules<'_> {
         Some(Inst::Rotate(form, self.dst(), self.input(a), self.input(b)))
     }
 
-    fn instruction(&mut self, op: Op, callee: impl Fn(&Function) -> (FunctionId, PRegSet)) -> Inst {
+    fn instruction(&mut self, op: Op, callee: impl Fn(Call) -> (FunctionId, PRegSet)) -> Inst {
+        // Numeric operations take the scalar or the vector rules by the
+        // type they produce.
+        let vector = self
+            .result
+            .is_some_and(|r| matches!(self.ty(r), Type::Vector(_)));
         let native = match op {
             Op::Const(n) => return Inst::Literal(Type::I32, n as u32 as u128, self.dst()),
-            Op::CallScratch(bytes) => return Inst::CallScratch(bytes, self.dst()),
+            Op::CallScratch { offset, bytes } => {
+                return Inst::CallScratch(offset, bytes, self.dst());
+            }
             Op::Literal(lane, bits) => return Inst::Literal(lane.scalar(), bits, self.dst()),
             Op::Simd(Simd::LaneCount(lane)) => {
                 return Inst::Literal(
@@ -185,22 +170,20 @@ impl Rules<'_> {
                     self.dst(),
                 );
             }
-            Op::Copy(v) | Op::Simd(Simd::Bitcast(_, v)) => {
+            Op::Copy(v) | Op::Bitcast(Type::Vector(_), v) => {
                 return Inst::Copy(self.dst(), self.input(v));
             }
             Op::Bitcast(to, v) => return self.bitcast(to, v),
             Op::BoundsCheck(index, length) => {
                 return Inst::Check(self.input(index), self.input(length));
             }
-            Op::CheckOverflow(cond) => return Inst::CheckOverflow(self.input(cond)),
+            Op::TrapIf(cond, trap) => return Inst::TrapIf(self.input(cond), trap),
+            Op::Trap(trap) => return Inst::Trap(trap),
             Op::PtrOffset(base, index, scale) => {
                 return Inst::Offset(scale, self.dst(), self.input(base), self.input(index));
             }
             Op::Load(ty, ptr) => return Inst::Load(ty, self.dst(), self.input(ptr)),
-            Op::Simd(Simd::Load(lane, ptr)) => {
-                return Inst::Load(Type::Vector(lane), self.dst(), self.input(ptr));
-            }
-            Op::Store(ptr, v) | Op::Simd(Simd::Store(ptr, v)) => {
+            Op::Store(ptr, v) => {
                 return Inst::Store(self.ty(v), self.input(ptr), self.input(v));
             }
             Op::DebugStore(offset, value) => {
@@ -222,33 +205,22 @@ impl Rules<'_> {
                 return self.masked_memory(address, mask, value);
             }
             Op::Call(site) => return self.call(site, callee),
-            Op::RustCall(import, a, b) => {
-                return Inst::RustCall(import, self.input(a), self.input(b), self.dst());
+            Op::RustCall(function, args) => {
+                return Inst::RustCall(function, args.map(|arg| self.input(arg)), self.dst());
             }
-            Op::RustPacketCall(site) => {
-                let (import, args) = self.f.packet_call(site);
-                for (index, &word) in args.iter().enumerate() {
-                    let word = self.input(word);
-                    self.out.push(Inst::StorePacketWord(index as u32 * 4, word));
-                }
-                return Inst::RustPacketCall(import, self.dst());
-            }
-            Op::RustContextCall(import, args) => {
-                return Inst::RustContextCall(import, args.map(|arg| self.input(arg)), self.dst());
-            }
+            Op::Bin(kind, a, b) if vector => self.vector_binary(kind, a, b),
             Op::Bin(kind, a, b) => self.scalar_binary(kind, a, b),
-            Op::Simd(Simd::Bin(kind, a, b)) => self.vector_binary(kind, a, b),
-            Op::Unary(kind, v) | Op::Simd(Simd::Unary(kind, v)) => self.unary(kind, v),
-            Op::Ternary(Ternary::MulAdd, a, b, c) => self.scalar_fma(a, b, c),
-            Op::Ternary(Ternary::Select, mask, a, b) => return self.scalar_select(mask, a, b),
-            Op::Simd(Simd::Ternary(Ternary::MulAdd, a, b, c)) => self.vector_fma(a, b, c),
-            Op::Simd(Simd::Ternary(kind @ (Ternary::Select | Ternary::BitSelect), mask, a, b)) => {
+            Op::Unary(kind, v) => self.unary(kind, v),
+            Op::Ternary(Ternary::MulAdd, a, b, c) if vector => self.vector_fma(a, b, c),
+            Op::Ternary(kind @ (Ternary::Select | Ternary::BitSelect), mask, a, b) if vector => {
                 return self.vector_select(kind, mask, a, b);
             }
+            Op::Ternary(Ternary::MulAdd, a, b, c) => self.scalar_fma(a, b, c),
+            Op::Ternary(Ternary::Select, mask, a, b) => return self.scalar_select(mask, a, b),
+            Op::Cast(Type::Vector(to), v) => self.vector_cast(to, v),
             Op::Cast(to, v) => self.scalar_cast(to, v),
-            Op::Simd(Simd::Cast(to, v)) => self.vector_cast(to, v),
-            Op::Simd(Simd::Widen { to, high, value }) => return self.widen(to, high, value),
-            Op::Simd(Simd::Narrow(to, a, b)) => return self.narrow(to, a, b),
+            Op::Simd(Simd::Widen { to, high, value }) => self.widen(to, high, value),
+            Op::Simd(Simd::Narrow(to, a, b)) => self.narrow(to, a, b),
             Op::Simd(Simd::Iota(lane)) => return self.iota(lane),
             Op::Simd(Simd::Splat(v)) => return self.splat(v),
             Op::Simd(Simd::ExtractLane(src, index)) => return self.lane_access(src, index, None),
@@ -261,6 +233,9 @@ impl Rules<'_> {
             Op::Simd(Simd::Reduce(kind, v)) => return self.reduce(kind, v),
             Op::Simd(Simd::AnyTrue(v)) => return self.mask_test(v, false),
             Op::Simd(Simd::AllTrue(v)) => return self.mask_test(v, true),
+            Op::Simd(Simd::FirstLanes(..) | Simd::MaskCount(_) | Simd::CompressStore { .. }) => {
+                unreachable!("canonical::expand defines {op:?} before selection")
+            }
             Op::Ternary(Ternary::BitSelect, mask, a, b) => {
                 return self.scalar_bit_select(mask, a, b);
             }
@@ -277,8 +252,8 @@ impl Rules<'_> {
                 self.out.push(inst);
             }
         }
-        let sizes = args.map(|arg| arg.map_or(0, |v| self.ty(v).bytes(self.config.bytes)));
-        self.out.push(Inst::Libcall(action, input, output, sizes));
+        let args = args.map(|arg| arg.map(|v| self.ty(v)));
+        self.out.push(Inst::Libcall(action, input, output, args));
         Inst::LibResult(self.ty(self.result()), self.dst())
     }
 }

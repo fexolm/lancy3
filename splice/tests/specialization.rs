@@ -1,8 +1,19 @@
-use splice::{Codegen, ComptimeKey, Executable, kernel};
-use splice_cranelift::Cranelift;
-use splice_lancy::Lancy;
-use splice_llvm::Llvm;
-use splice_text::Text;
+use splice::frontend::Signature;
+use splice::hir::{Constant, Instr, ScalarType};
+use splice::{Codegen, ComptimeKey, Executable, Function, kernel};
+
+/// Distinct bodies of the kernel function `name` in the call graph of
+/// `root`, and calls to them.
+fn bodies_and_calls(root: &Function, name: &str) -> (usize, usize) {
+    let named = |f: &Function| f.source().is_some_and(|source| source.name == name);
+    let bodies = root.reachable_functions();
+    let calls = splice_testkit::instructions(root)
+        .filter(
+            |instruction| matches!(instruction, Instr::Call { function, .. } if named(function)),
+        )
+        .count();
+    (bodies.into_iter().filter(|f| named(f)).count(), calls)
+}
 
 #[derive(ComptimeKey)]
 enum Mode<'a> {
@@ -52,26 +63,15 @@ fn repeated_values_skip_staging_across_parents_and_keep_all_calls() {
     // emits the same bias but is a different set of specialization arguments.
     let modes = [Mode::Add(&a), Mode::Add(&b), Mode::Sub(&a), Mode::Add(&[5])];
     let expected = chain(&modes, 12);
-    check_direct::<Lancy>(&modes, expected);
-    check_direct::<Llvm>(&modes, expected);
-    check_direct::<Cranelift>(&modes, expected);
+    splice_testkit::each_backend!(B => check_direct::<B>(&modes, expected));
 
     let ir = chain::ir(&modes).unwrap();
-    let listing = Text::compile(&ir).unwrap();
-    assert_eq!(listing.matches("fn apply.").count(), 4);
-    assert_eq!(listing.matches(" = apply.").count(), 5);
-    assert_eq!(listing.matches("fn increment.").count(), 1);
-    assert_eq!(listing.matches(" = increment.").count(), 5);
-    assert_eq!(
-        chain::build::<Text>(chain::BuildArgs { modes: &modes })
-            .unwrap()
-            .as_inner(),
-        listing.as_inner()
-    );
+    assert_eq!(bodies_and_calls(&ir, "apply"), (4, 5));
+    assert_eq!(bodies_and_calls(&ir, "increment"), (1, 5));
     let args = || chain::CallArgs { x: 12 };
-    assert_eq!(Lancy::compile(&ir).unwrap().call(args()), Ok(expected));
-    assert_eq!(Llvm::compile(&ir).unwrap().call(args()), Ok(expected));
-    assert_eq!(Cranelift::compile(&ir).unwrap().call(args()), Ok(expected));
+    splice_testkit::each_backend!(B => {
+        assert_eq!(B::compile(&ir).unwrap().call(args()), Ok(expected));
+    });
 }
 
 trait Flavor: ComptimeKey {
@@ -101,22 +101,15 @@ fn instances(x: i32) -> i32 {
 }
 #[test]
 fn type_and_const_arguments_distinguish_monomorphizations() {
-    let listing = instances::build::<Text>(instances::BuildArgs {}).unwrap();
-    assert_eq!(listing.matches("fn affine.").count(), 3);
-    assert_eq!(listing.matches(" = affine.").count(), 4);
+    let ir = instances::ir().unwrap();
+    assert_eq!(bodies_and_calls(&ir, "affine"), (3, 4));
     let expected = instances(3);
-    assert_eq!(
-        instances::build::<Lancy>(instances::BuildArgs {})
-            .unwrap()
-            .call(instances::CallArgs { x: 3 }),
-        Ok(expected)
-    );
-    assert_eq!(
-        instances::build::<Llvm>(instances::BuildArgs {})
-            .unwrap()
-            .call(instances::CallArgs { x: 3 }),
-        Ok(expected)
-    );
+    splice_testkit::each_backend!(B => {
+        let direct = instances::build::<B>(instances::BuildArgs {}).unwrap();
+        for code in [direct, B::compile(&ir).unwrap()] {
+            assert_eq!(code.call(instances::CallArgs { x: 3 }), Ok(expected));
+        }
+    });
 }
 
 fn retry(root: &mut dyn splice::frontend::KernelBuilder) -> splice::Result<()> {
@@ -124,54 +117,63 @@ fn retry(root: &mut dyn splice::frontend::KernelBuilder) -> splice::Result<()> {
     struct Parent;
     struct Child;
     let failed = root.call_specialized(
-        Specialization::new::<Parent>(0, &[]),
+        Specialization::new::<Parent>(Signature::new(&[ScalarType::I32; 0], ScalarType::I32, &[])),
         &[],
         &[],
         Box::new(|b| {
             b.call_specialized(
-                Specialization::new::<Child>(0, &[]),
+                Specialization::new::<Child>(Signature::new(
+                    &[ScalarType::I32; 0],
+                    ScalarType::I32,
+                    &[],
+                )),
                 &[],
                 &[],
                 Box::new(|c| {
-                    let value = c.constant(17);
-                    c.ret(value);
+                    let value = c.constant(Constant::from(17))?;
+                    c.ret(value)?;
                     Ok(())
                 }),
             )?;
-            Err("rejected".into())
+            Err(splice::BuildError::unsupported("rejected"))
         }),
     );
-    assert_eq!(failed, Err("rejected".into()));
+    assert!(
+        matches!(failed, Err(splice::BuildError::Unsupported(feature)) if feature == "rejected")
+    );
     let result = root.call_specialized(
-        Specialization::new::<Parent>(0, &[]),
+        Specialization::new::<Parent>(Signature::new(&[ScalarType::I32; 0], ScalarType::I32, &[])),
         &[],
         &[],
         Box::new(|b| {
             let reused = b.call_specialized(
-                Specialization::new::<Child>(0, &[]),
+                Specialization::new::<Child>(Signature::new(
+                    &[ScalarType::I32; 0],
+                    ScalarType::I32,
+                    &[],
+                )),
                 &[],
                 &[],
                 Box::new(|_| panic!("restaged a completed callee")),
             )?;
-            b.ret(reused);
+            b.ret(reused)?;
             Ok(())
         }),
     )?;
-    root.ret(result);
+    root.ret(result)?;
     Ok(())
 }
 #[test]
 fn a_failed_body_can_be_retried_and_its_completed_children_reused() {
-    let lancy = Lancy::build(0, &[], Box::new(retry)).unwrap();
-    let llvm = Llvm::build(0, &[], Box::new(retry)).unwrap();
-    let cranelift = Cranelift::build(0, &[], Box::new(retry)).unwrap();
-    for code in [&lancy as &dyn Executable, &llvm, &cranelift] {
-        assert_eq!(code.call(&[], &mut []), Ok(17));
-    }
+    splice_testkit::each_backend!(B => {
+        let code = B::build_with_options(Signature::new(&[ScalarType::I32; 0], ScalarType::I32, &[]), Box::new(retry), splice::BuildOptions::host(splice::Mode::Release).unwrap()).unwrap();
+        assert_eq!(splice_testkit::call_i32(&code,&[], &mut []), Ok(17));
+    });
 }
 
 #[test]
-fn invalid_arguments_are_rejected_before_staging_or_reusing_a_callee() -> splice::Result<()> {
+fn invalid_arguments_are_rejected_before_staging_or_reusing_a_callee()
+-> Result<(), Box<dyn std::error::Error>> {
     use splice::frontend::{KernelBuilder, Specialization};
     use splice::hir::{Buffer, Reg, ValueType};
     use splice::simd::Element;
@@ -179,35 +181,51 @@ fn invalid_arguments_are_rejected_before_staging_or_reusing_a_callee() -> splice
 
     fn stage(root: &mut dyn KernelBuilder) -> splice::Result<()> {
         struct Child;
-        let arg = root.arg(0);
-        let vector = root.typed_local(ValueType::Vector(Element::I32));
-        let mask = root.typed_local(ValueType::Mask(Element::I32));
+        let arg = root.arg(0)?;
+        let vector = root.local(ValueType::Vector(Element::I32))?;
+        let mask = root.local(ValueType::Mask(Element::I32))?;
         fn unexpected(_: &mut dyn KernelBuilder) -> splice::Result<()> {
             panic!("staged an invalid call")
         }
         for args in [&[][..], &[Reg(u32::MAX)], &[vector], &[mask]] {
             assert!(
-                root.call_kernel(1, &[], args, &[], Box::new(unexpected))
-                    .is_err()
+                root.call_kernel(
+                    Signature::new(&[ScalarType::I32; 1], ScalarType::I32, &[]),
+                    args,
+                    &[],
+                    Box::new(unexpected)
+                )
+                .is_err()
             );
         }
-        let read = [BufferKind::Read];
+        let read = [BufferKind::READ_I32];
         for (kinds, buffers) in [
             (&read[..], &[][..]),
             (&read, &[Buffer(2)]),
-            (&[BufferKind::Write], &[Buffer(0)]),
+            (&[BufferKind::WRITE_I32], &[Buffer(0)]),
             (&[BufferKind::new(Element::I64, false)], &[Buffer(0)]),
             (
-                &[BufferKind::Read, BufferKind::Write],
+                &[BufferKind::READ_I32, BufferKind::WRITE_I32],
                 &[Buffer(1), Buffer(1)],
             ),
         ] {
             assert!(
-                root.call_kernel(1, kinds, &[arg], buffers, Box::new(unexpected))
-                    .is_err()
+                root.call_kernel(
+                    Signature::new(&[ScalarType::I32; 1], ScalarType::I32, kinds),
+                    &[arg],
+                    buffers,
+                    Box::new(unexpected)
+                )
+                .is_err()
             );
         }
-        let key = || Specialization::new::<Child>(1, &[BufferKind::Read, BufferKind::Read]);
+        let key = || {
+            Specialization::new::<Child>(Signature::new(
+                &[ScalarType::I32; 1],
+                ScalarType::I32,
+                &[BufferKind::READ_I32, BufferKind::READ_I32],
+            ))
+        };
         let shared = [Buffer(1), Buffer(1)];
         assert!(
             root.call_specialized(key(), &[vector], &shared, Box::new(unexpected))
@@ -218,7 +236,7 @@ fn invalid_arguments_are_rejected_before_staging_or_reusing_a_callee() -> splice
             &[arg],
             &shared,
             Box::new(|child| {
-                child.ret(child.arg(0));
+                child.ret(child.arg(0)?)?;
                 Ok(())
             }),
         )?;
@@ -226,25 +244,29 @@ fn invalid_arguments_are_rejected_before_staging_or_reusing_a_callee() -> splice
             root.call_specialized(key(), &[mask], &shared, Box::new(unexpected))
                 .is_err()
         );
-        root.ret(result);
+        root.ret(result)?;
         Ok(())
     }
-    let kinds = [BufferKind::Read, BufferKind::Write];
-    let ir = splice::frontend::materialize(1, &kinds, Box::new(stage))?;
-    for code in [
-        Box::new(Lancy::build(1, &kinds, Box::new(stage))?) as Box<dyn Executable>,
-        Box::new(Llvm::build(1, &kinds, Box::new(stage))?),
-        Box::new(Lancy::compile(&ir)?),
-        Box::new(Llvm::compile(&ir)?),
-    ] {
-        assert_eq!(
-            code.call(
-                &[37],
-                &mut [BufferArg::Read(&[]), BufferArg::Write(&mut [])]
-            )?,
-            37
-        );
-    }
+    let kinds = [BufferKind::READ_I32, BufferKind::WRITE_I32];
+    let ir = splice::frontend::materialize(
+        Signature::new(&[ScalarType::I32; 1], ScalarType::I32, &kinds),
+        Box::new(stage),
+        splice::BuildOptions::host(splice::Mode::Release)?,
+    )?;
+    splice_testkit::each_backend!(B => {
+        for code in [
+            Box::new(B::build_with_options(Signature::new(&[ScalarType::I32; 1], ScalarType::I32, &kinds), Box::new(stage), splice::BuildOptions::host(splice::Mode::Release).unwrap())?) as Box<dyn Executable>,
+            Box::new(B::compile(&ir)?),
+        ] {
+            assert_eq!(
+                splice_testkit::call_i32(&code,
+                    &[37],
+                    &mut [BufferArg::read::<i32>(&[]), BufferArg::write::<i32>(&mut [])]
+                )?,
+                37
+            );
+        }
+    });
     Ok(())
 }
 
@@ -261,12 +283,13 @@ fn two_buffers(left: &mut [i32], right: &mut [i32], d: i32) -> i32 {
     store_ratio(right, first, d)
 }
 #[test]
-fn shared_fallible_body_observes_each_calls_buffers_and_arguments() -> splice::Result<()> {
+fn shared_fallible_body_observes_each_calls_buffers_and_arguments()
+-> Result<(), Box<dyn std::error::Error>> {
     let ir = two_buffers::ir()?;
-    assert_eq!(Text::compile(&ir)?.matches("fn store_ratio.").count(), 1);
+    assert_eq!(bodies_and_calls(&ir, "store_ratio"), (1, 2));
     fn check<B: Codegen<Output: Executable>>(
         ir: &splice::TypedIr<two_buffers::Signature>,
-    ) -> splice::Result<()> {
+    ) -> Result<(), Box<dyn std::error::Error>> {
         for code in [
             two_buffers::build::<B>(two_buffers::BuildArgs {})?,
             B::compile(ir)?,
@@ -294,7 +317,6 @@ fn shared_fallible_body_observes_each_calls_buffers_and_arguments() -> splice::R
         Ok(())
     }
 
-    check::<Lancy>(&ir)?;
-    check::<Llvm>(&ir)?;
-    check::<Cranelift>(&ir)
+    splice_testkit::each_backend!(B => check::<B>(&ir)?);
+    Ok(())
 }

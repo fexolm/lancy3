@@ -1,338 +1,221 @@
 use super::{
-    Binary, Buffer, BufferKind, ContextSlice, Function, Instr, Label, Reg, RustContextTarget, Simd,
+    Binary, Buffer, Constant, ContextSlice, Function, Instr, Label, Reg, ScalarType, Simd,
     ValueType,
 };
-use crate::frontend::{Body, KernelBuilder, KernelSource, Specialization};
+use crate::frontend::{Body, KernelBuilder, KernelSource, Signature, Specialization};
 use std::collections::HashMap;
 use std::sync::Arc;
 
-/// Append typed scalar operations and control-flow edges, then verify the
-/// function for all code generators at `finish`.
+/// Record a kernel body as a portable function. [`finish`](Self::finish)
+/// verifies what was recorded; staging through
+/// [`materialize`](crate::frontend::materialize) checks each operation as
+/// it arrives instead.
 pub struct FunctionBuilder {
     function: Function,
     callees: HashMap<Specialization, Arc<Function>>,
 }
 
 impl FunctionBuilder {
-    pub fn new(arity: usize) -> Self {
-        Self::with_buffers(arity, Vec::new())
-    }
-    pub fn with_buffers(arity: usize, kinds: Vec<BufferKind>) -> Self {
-        Self::with_options(arity, kinds, crate::BuildOptions::default())
-    }
-    pub fn with_options(
-        arity: usize,
-        kinds: Vec<BufferKind>,
-        options: crate::BuildOptions,
-    ) -> Self {
+    pub fn new(options: crate::BuildOptions, signature: Signature<'_>) -> Self {
         Self {
             callees: HashMap::new(),
             function: Function {
                 source: None,
                 options,
                 needs_status: false,
-                arity,
-                buffer_kinds: kinds,
+                params: signature.params.to_vec(),
+                result: signature.result,
+                buffer_kinds: signature.buffers.to_vec(),
                 locals: Vec::new(),
                 labels: 0,
                 code: Vec::new(),
             },
         }
     }
-    pub fn arg(&self, index: usize) -> Reg {
-        Reg(if index < self.function.arity {
-            u32::try_from(index).unwrap_or(u32::MAX)
-        } else {
-            u32::MAX
-        })
+
+    fn push(&mut self, instruction: Instr) -> crate::Result<()> {
+        self.function.code.push(instruction);
+        Ok(())
     }
-    pub fn local(&mut self) -> Reg {
-        self.typed_local(ValueType::Scalar)
-    }
-    pub fn typed_local(&mut self, ty: ValueType) -> Reg {
-        let index = self.function.register_count();
-        if index >= u32::MAX as usize {
-            return Reg(u32::MAX);
-        }
-        self.function.locals.push(ty);
-        Reg(index as u32)
-    }
-    pub fn simd(&mut self, inst: Simd, args: &[Reg]) -> crate::Result<Option<Reg>> {
-        let types = args
-            .iter()
-            .map(|&r| {
-                self.function
-                    .checked_reg_type(r)
-                    .ok_or("invalid SIMD register")
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        inst.validate(&types, &self.function.buffer_kinds)?;
-        let dst = inst.output().map(|ty| self.typed_local(ty));
-        self.function.code.push(Instr::Simd {
-            inst,
-            dst,
-            args: args.to_vec(),
-        });
+
+    fn emit_value(
+        &mut self,
+        ty: ValueType,
+        instruction: impl FnOnce(Reg) -> Instr,
+    ) -> crate::Result<Reg> {
+        let dst = self.local(ty)?;
+        self.push(instruction(dst))?;
         Ok(dst)
     }
-    fn emit_value(&mut self, instruction: impl FnOnce(Reg) -> Instr) -> Reg {
-        let dst = self.local();
-        self.function.code.push(instruction(dst));
-        dst
-    }
 
-    fn emit_context_call(
+    fn scalar(
         &mut self,
-        target: RustContextTarget,
-        args: &[Reg],
-        slices: &[ContextSlice],
+        ty: ScalarType,
+        instruction: impl FnOnce(Reg) -> Instr,
     ) -> crate::Result<Reg> {
-        super::check_rust_context_call(
-            &self.function.buffer_kinds,
-            target,
-            args.iter().map(|&r| self.reg_type(r)),
-            slices,
-        )?;
-        Ok(self.emit_value(|dst| Instr::RustContextCall {
-            dst,
-            target,
-            args: args.to_vec(),
-            slices: slices.to_vec(),
-        }))
-    }
-    pub fn constant(&mut self, value: i32) -> Reg {
-        self.emit_value(|dst| Instr::Const(dst, value))
+        self.emit_value(ValueType::Scalar(ty), instruction)
     }
 
-    pub fn buffer_len(&mut self, buffer: Buffer) -> Reg {
-        self.emit_value(|dst| Instr::BufferLen { dst, buffer })
-    }
-
-    pub fn load(&mut self, buffer: Buffer, index: Reg) -> Reg {
-        self.emit_value(|dst| Instr::Load { dst, buffer, index })
-    }
-
-    pub fn store(&mut self, buffer: Buffer, index: Reg, value: Reg) {
-        self.function.code.push(Instr::Store {
-            buffer,
-            index,
-            value,
-        });
-    }
-
-    /// A mixed-stage condition may just have materialized its known arm.
-    /// Looking at the preceding instruction is valid even for mutable registers:
-    /// no label can transfer control between that definition and this use.
-    #[doc(hidden)]
-    pub fn immediate_condition(&self, reg: Reg) -> Option<bool> {
-        match self
-            .function
-            .code
-            .iter()
-            .rev()
-            .find(|op| !matches!(op, Instr::Debug(_)))?
-        {
-            Instr::Const(dst, value) if *dst == reg => Some(*value != 0),
-            _ => None,
+    /// The scalar type of `r`. An operation on an invalid operand records
+    /// `I32`; verification rejects it.
+    fn scalar_type(&self, r: Reg) -> ScalarType {
+        match self.function.checked_reg_type(r) {
+            Some(ValueType::Scalar(ty)) => ty,
+            _ => ScalarType::I32,
         }
     }
-    pub fn binary(&mut self, op: Binary, a: Reg, b: Reg) -> Reg {
-        self.emit_value(|dst| Instr::Bin(dst, op, a, b))
-    }
-    pub fn assign(&mut self, dst: Reg, src: Reg) {
-        self.function.code.push(Instr::Copy(dst, src));
-    }
-    pub fn label(&mut self) -> Label {
-        let label = Label(u32::try_from(self.function.labels).expect("exhausted labels"));
-        self.function.labels += 1;
-        label
-    }
-    pub fn mark(&mut self, label: Label) {
-        self.function.code.push(Instr::Label(label));
-    }
-    pub fn jump(&mut self, label: Label) {
-        self.function.code.push(Instr::Jump(label));
-    }
-    pub fn branch(&mut self, cond: Reg, yes: Label, no: Label) {
-        self.function.code.push(Instr::Branch { cond, yes, no });
-    }
-    pub fn ret(&mut self, value: Reg) {
-        self.function.code.push(Instr::Return(value));
-    }
-    pub fn rust_call(&mut self, import: super::RustCall, args: &[Reg]) -> crate::Result<Reg> {
-        import.validate(args.iter().map(|&r| self.function.checked_reg_type(r)))?;
-        Ok(self.emit_value(|dst| Instr::RustCall {
-            dst,
-            import,
-            args: args.to_vec(),
-        }))
-    }
-    pub fn call(&mut self, callee: Function, args: &[Reg]) -> Reg {
-        self.call_shared(Arc::new(callee), args)
-    }
-    pub fn call_shared(&mut self, function: Arc<Function>, args: &[Reg]) -> Reg {
-        self.emit_call(function, args, &[])
-    }
-    pub fn call_with_buffers(
-        &mut self,
-        function: Function,
-        args: &[Reg],
-        buffers: &[Buffer],
-    ) -> Result<Reg, String> {
-        super::check_call(
-            function.arity(),
-            function.buffer_kinds(),
-            args.iter().map(|&r| self.reg_type(r)),
-            &self.function.buffer_kinds,
-            buffers,
-        )?;
-        Ok(self.emit_call(Arc::new(function), args, buffers))
-    }
-    fn emit_call(&mut self, function: Arc<Function>, args: &[Reg], buffers: &[Buffer]) -> Reg {
-        self.emit_value(|dst| Instr::Call {
-            dst,
-            function,
-            args: args.to_vec(),
-            buffers: buffers.to_vec(),
-        })
-    }
+
     fn staged_call(
         &mut self,
-        arity: usize,
-        kinds: &[BufferKind],
+        signature: Signature<'_>,
         args: &[Reg],
         buffers: &[Buffer],
         key: Option<Specialization>,
         body: Body<'_>,
     ) -> crate::Result<Reg> {
-        super::check_call(
-            arity,
-            kinds,
-            args.iter().map(|&r| self.reg_type(r)),
-            &self.function.buffer_kinds,
-            buffers,
-        )?;
         if let Some(callee) = key.as_ref().and_then(|k| self.callees.get(k)).cloned() {
-            return Ok(self.emit_call(callee, args, buffers));
+            return self.call_function(&callee, args, buffers);
         }
-        let mut child = Self::with_options(arity, kinds.to_vec(), self.function.options);
+        let mut child = Self::new(self.function.options, signature);
         std::mem::swap(&mut self.callees, &mut child.callees);
         let staged = body(&mut child);
         std::mem::swap(&mut self.callees, &mut child.callees);
         staged?;
-        let callee = Arc::new(child.finish()?);
+        // The body checked its own operations.
+        let callee = Arc::new(child.finish_validated());
         if let Some(key) = key {
             self.callees.insert(key, callee.clone());
         }
-        Ok(self.emit_call(callee, args, buffers))
+        self.call_function(&callee, args, buffers)
     }
-    pub fn finish(self) -> Result<Function, String> {
+
+    /// Verify the recorded function.
+    pub fn finish(self) -> crate::Result<Function> {
         self.function.verify()
     }
-}
 
-// Keep the inherent API usable without importing the streaming builder trait.
-macro_rules! forward_mut {
-    ($($method:ident($($arg:ident: $ty:ty),*) $(-> $out:ty)?;)*) => {$(
-        fn $method(&mut self, $($arg: $ty),*) $(-> $out)? {
-            FunctionBuilder::$method(self, $($arg),*)
-        }
-    )*};
+    /// The recorded operations passed [`crate::validate::Validating`].
+    pub(crate) fn finish_validated(mut self) -> Function {
+        self.function.needs_status = self.function.code.iter().any(Instr::may_trap);
+        self.function
+    }
 }
 
 impl KernelBuilder for FunctionBuilder {
-    fn rust_packet_call(
-        &mut self,
-        import: &'static super::RustPacketSymbol,
-        args: &[Reg],
-    ) -> crate::Result<Reg> {
-        super::check_rust_packet_call(import, args.iter().map(|&arg| self.reg_type(arg)))?;
-        Ok(self.emit_value(|dst| Instr::RustPacketCall {
-            dst,
-            import,
-            args: args.to_vec(),
-        }))
-    }
-    fn rust_call(&mut self, import: super::RustCall, args: &[Reg]) -> crate::Result<Reg> {
-        FunctionBuilder::rust_call(self, import, args)
+    fn set_source(&mut self, source: &'static KernelSource) {
+        self.function.source = Some(source);
     }
     fn debug_enabled(&self) -> bool {
-        self.function.options == crate::BuildOptions::Debug
+        self.function.options.debug()
     }
     fn debug_point(
         &mut self,
         location: crate::debug::Location,
         variables: &[crate::debug::Variable],
-    ) {
-        if self.debug_enabled() {
-            self.function.code.push(Instr::Debug(crate::debug::Point {
-                location,
-                variables: variables.into(),
-            }));
-        }
+    ) -> crate::Result<()> {
+        self.push(Instr::Debug(crate::debug::Point {
+            location,
+            variables: variables.into(),
+        }))
     }
     fn reg_type(&self, r: Reg) -> Option<ValueType> {
         self.function.checked_reg_type(r)
     }
-    fn set_source(&mut self, source: &'static KernelSource) {
-        self.function.source = Some(source);
+    fn local(&mut self, ty: ValueType) -> crate::Result<Reg> {
+        let index = u32::try_from(self.function.register_count())
+            .ok()
+            .filter(|&index| index != u32::MAX)
+            .ok_or_else(|| crate::BuildError::unsupported("too many registers"))?;
+        self.function.locals.push(ty);
+        Ok(Reg(index))
     }
-    fn arg(&self, index: usize) -> Reg {
-        self.arg(index)
+    fn simd(&mut self, inst: Simd, args: &[Reg]) -> crate::Result<Option<Reg>> {
+        let dst = inst.output().map(|ty| self.local(ty)).transpose()?;
+        self.push(Instr::Simd {
+            inst,
+            dst,
+            args: args.to_vec(),
+        })?;
+        Ok(dst)
     }
-    forward_mut! {
-        local() -> Reg;
-        typed_local(ty:ValueType) -> Reg;
-        simd(inst:Simd,args:&[Reg])->crate::Result<Option<Reg>>;
-        constant(value: i32) -> Reg;
-        buffer_len(buffer: Buffer) -> Reg;
-        load(buffer: Buffer, index: Reg) -> Reg;
-        store(buffer: Buffer, index: Reg, value: Reg);
-        binary(op: Binary, a: Reg, b: Reg) -> Reg;
-        assign(dst: Reg, src: Reg);
-        label() -> Label;
-        mark(label: Label);
-        jump(label: Label);
-        branch(cond: Reg, yes: Label, no: Label);
-        ret(value: Reg);
+    fn constant(&mut self, value: Constant) -> crate::Result<Reg> {
+        self.scalar(value.ty(), |dst| Instr::Const(dst, value))
     }
-    fn immediate_condition(&self, reg: Reg) -> Option<bool> {
-        self.immediate_condition(reg)
+    fn cast(&mut self, src: Reg, to: ScalarType) -> crate::Result<Reg> {
+        self.scalar(to, |dst| Instr::Cast { dst, src })
+    }
+    fn buffer_len(&mut self, buffer: Buffer) -> crate::Result<Reg> {
+        self.scalar(ScalarType::Index, |dst| Instr::BufferLen { dst, buffer })
+    }
+    fn load(&mut self, buffer: Buffer, index: Reg) -> crate::Result<Reg> {
+        let ty = self
+            .function
+            .buffer_kinds
+            .get(buffer.index())
+            .and_then(|kind| ScalarType::of_element(kind.element()))
+            .unwrap_or(ScalarType::I32);
+        self.scalar(ty, |dst| Instr::Load { dst, buffer, index })
+    }
+    fn store(&mut self, buffer: Buffer, index: Reg, value: Reg) -> crate::Result<()> {
+        self.push(Instr::Store {
+            buffer,
+            index,
+            value,
+        })
+    }
+    fn binary(&mut self, op: Binary, a: Reg, b: Reg) -> crate::Result<Reg> {
+        let ty = self.scalar_type(a);
+        let ty = op.output(ty).unwrap_or(ty);
+        self.scalar(ty, |dst| Instr::Bin(dst, op, a, b))
+    }
+    fn assign(&mut self, dst: Reg, src: Reg) -> crate::Result<()> {
+        self.push(Instr::Copy(dst, src))
+    }
+    fn label(&mut self) -> crate::Result<Label> {
+        let label = u32::try_from(self.function.labels)
+            .map(Label)
+            .map_err(|_| crate::BuildError::unsupported("too many labels"))?;
+        self.function.labels += 1;
+        Ok(label)
+    }
+    fn mark(&mut self, label: Label) -> crate::Result<()> {
+        self.push(Instr::Label(label))
+    }
+    fn jump(&mut self, label: Label) -> crate::Result<()> {
+        self.push(Instr::Jump(label))
+    }
+    fn branch(&mut self, cond: Reg, yes: Label, no: Label) -> crate::Result<()> {
+        self.push(Instr::Branch { cond, yes, no })
+    }
+    fn ret(&mut self, value: Reg) -> crate::Result<()> {
+        self.push(Instr::Return(value))
     }
     fn trap_bounds(&mut self) -> crate::Result<()> {
-        self.function.code.push(Instr::TrapBounds);
-        Ok(())
+        self.push(Instr::TrapBounds)
     }
-    fn rust_context_call_with_slices(
+    fn rust_call(
         &mut self,
-        context: Buffer,
-        operation: u32,
+        target: super::RustTarget,
         args: &[Reg],
         slices: &[ContextSlice],
+        result: ScalarType,
     ) -> crate::Result<Reg> {
-        self.emit_context_call(
-            RustContextTarget::Borrowed { context, operation },
-            args,
-            slices,
-        )
-    }
-    fn rust_static_call(
-        &mut self,
-        symbol: &'static crate::StaticRustSymbol,
-        args: &[Reg],
-        slices: &[ContextSlice],
-    ) -> crate::Result<Reg> {
-        self.emit_context_call(RustContextTarget::Static(symbol), args, slices)
+        self.scalar(result, |dst| Instr::RustCall {
+            dst,
+            target,
+            args: args.to_vec(),
+            slices: slices.to_vec(),
+            result,
+        })
     }
     fn call_kernel(
         &mut self,
-        arity: usize,
-        kinds: &[BufferKind],
+        signature: Signature<'_>,
         args: &[Reg],
         buffers: &[Buffer],
         body: Body<'_>,
-    ) -> Result<Reg, String> {
-        self.staged_call(arity, kinds, args, buffers, None, body)
+    ) -> crate::Result<Reg> {
+        self.staged_call(signature, args, buffers, None, body)
     }
     fn call_specialized(
         &mut self,
@@ -341,7 +224,25 @@ impl KernelBuilder for FunctionBuilder {
         buffers: &[Buffer],
         body: Body<'_>,
     ) -> crate::Result<Reg> {
-        let (arity, kinds) = key.signature();
-        self.staged_call(arity, kinds, args, buffers, Some(key), body)
+        self.staged_call(key.signature(), args, buffers, Some(key), body)
+    }
+    fn call_function(
+        &mut self,
+        function: &Arc<Function>,
+        args: &[Reg],
+        buffers: &[Buffer],
+    ) -> crate::Result<Reg> {
+        self.scalar(function.result(), |dst| Instr::Call {
+            dst,
+            function: Arc::clone(function),
+            args: args.to_vec(),
+            buffers: buffers.to_vec(),
+        })
+    }
+}
+
+impl Function {
+    pub fn signature(&self) -> Signature<'_> {
+        Signature::new(&self.params, self.result, &self.buffer_kinds)
     }
 }

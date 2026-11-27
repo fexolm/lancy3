@@ -1,16 +1,21 @@
 use crate::hir::transforms::ControlFlowGraph;
 use crate::hir::{
     Binary, Block, Function, Lane, Op, Simd, Terminator, Ternary, Type, Unary, Value,
-    operation::Action,
     ssa::{Edge, Inst},
 };
+use crate::support::numeric::Action;
 use crate::support::slotmap::DenseMap;
 
-use crate::hir::integer::{self, binary as integer_binary, mask as lane_mask};
+use crate::support::numeric::integer::{self, binary as integer_binary, mask as lane_mask};
 
+/// What SCCP knows about a value.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Fact {
     Unknown,
+    /// The low lane bits of a scalar, or of every lane of a vector: a vector
+    /// fact is always uniform (a `Splat`), never a per-lane constant. A
+    /// per-lane vector constant would need its own fact, because `simplify`
+    /// rebuilds a vector constant as a `Splat` of one literal.
     Constant(u128),
     Varying,
 }
@@ -36,14 +41,6 @@ impl Fact {
             Self::Constant(bits) => Self::Constant(f(bits)),
             other => other,
         }
-    }
-}
-
-pub(super) fn literal(lane: Lane, bits: u128) -> Op {
-    if lane == Lane::I32 {
-        Op::Const(bits as i32)
-    } else {
-        Op::Literal(lane, bits)
     }
 }
 
@@ -134,20 +131,15 @@ impl Transfer {
             Op::Const(n) => Self::Constant(u128::from(n as u32)),
             Op::Literal(lane, bits) => Self::Constant(bits & lane_mask(lane)),
             Op::Copy(v) | Op::Simd(Simd::Splat(v)) => Self::Forward(v),
-            Op::Unary(kind, v) | Op::Simd(Simd::Unary(kind, v)) => {
+            Op::Unary(kind, v) => {
                 integer(v).map_or(Self::Varying, |lane| Self::Unary(kind, lane, v))
             }
-            Op::Bin(kind, a, b) | Op::Simd(Simd::Bin(kind, a, b)) if integer(a).is_some() => {
+            Op::Bin(kind, a, b) if integer(a).is_some() => {
                 Self::Binary(kind, f.value_type(a), a, b)
             }
             Op::Cast(to, v) => cast(to, v),
-            Op::Simd(Simd::Cast(to, v)) => cast(Type::Vector(to), v),
             Op::Bitcast(to, v) => bitcast(to.lane(), v),
-            Op::Simd(Simd::Bitcast(to, v)) => bitcast(Some(to), v),
-            Op::Ternary(Ternary::Select, c, yes, no)
-            | Op::Simd(Simd::Ternary(Ternary::Select, c, yes, no)) => {
-                Self::Select(f.value_type(c), c, yes, no)
-            }
+            Op::Ternary(Ternary::Select, c, yes, no) => Self::Select(f.value_type(c), c, yes, no),
             _ => Self::Varying,
         }
     }

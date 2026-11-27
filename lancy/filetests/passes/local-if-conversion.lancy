@@ -1,15 +1,15 @@
 # Empty arms feeding one scalar merge become one select.
-fn main cond:i32 x:i32 y:i32 -> i32
-  br cond yes | no
-block yes
-  jump join x
-block no
-  jump join y
-block join value:i32
+fn main(cond:i32 x:i32 y:i32) -> i32
+  br cond yes() | no()
+block yes()
+  jump join(x)
+block no()
+  jump join(y)
+block join(value:i32)
   ret value
 @opt not: br
-@opt check: Select
-@isel check: select.i32
+@opt check: = select
+@isel check: select.32
 @asm check: cmovne
 @run 0 17 31 -> 31
 @run 2 17 31 -> 17
@@ -18,18 +18,18 @@ block join value:i32
 ---
 
 # Same output with an observable divide on just one path.
-fn main cond:i32 x:i32 y:i32 -> i32
-  br cond yes | no
-block yes
+fn main(cond:i32 x:i32 y:i32) -> i32
+  br cond yes() | no()
+block yes()
   q = div x y
-  jump join q
-block no
-  jump join x
-block join value:i32
+  jump join(q)
+block no()
+  jump join(x)
+block join(value:i32)
   ret value
 @opt check: br
-@opt check: Div
-@opt not: Select
+@opt check: = div
+@opt not: = select
 @run 0 7 0 -> 7
 @run 1 7 0 -> !zero
 @run 1 -2147483648 -1 -> !overflow
@@ -37,45 +37,45 @@ block join value:i32
 ---
 
 # Identical varying incoming operands need neither a copy nor a select.
-fn main cond:i32 x:i32 -> i32
-  br cond yes | no
-block yes
+fn main(cond:i32 x:i32) -> i32
+  br cond yes() | no()
+block yes()
   copied = copy x
-  jump join copied
-block no
-  jump join x
-block join y:i32
+  jump join(copied)
+block no()
+  jump join(x)
+block join(y:i32)
   sum = add y x
   ret sum
 @opt not: br
 @opt not: copy
-@opt not: Select
-@opt check: Add v1 v1
+@opt not: = select
+@opt check: = add v1 v1
 @run 0 -29 -> -58
 @run 1 77 -> 154
 
 ---
 
 # Two edges directly into one block still carry distinct values.
-fn main cond:i32 x:i32 y:i32 -> i32
-  br cond join x | join y
-block join value:i32
+fn main(cond:i32 x:i32 y:i32) -> i32
+  br cond join(x) | join(y)
+block join(value:i32)
   ret value
 @opt not: br
-@opt check: Select
+@opt check: = select
 @run 0 17 31 -> 31
 @run 1 17 31 -> 17
 
 ---
 
-fn main x:i32 y:i32 yes:i32 no:i32 -> i32
+fn main(x:i32 y:i32 yes:i32 no:i32) -> i32
   c = lt x y
-  br c join yes | join no
-block join v:i32
+  br c join(yes) | join(no)
+block join(v:i32)
   ret v
-@opt check: Select
-@isel not: cmp.Lt
-@isel check: select.i32
+@opt check: = select
+@isel not: cmp.lt.32
+@isel check: select.32
 @asm check: cmp
 @asm nextln: cmovl
 @run -2 7 11 37 -> 11
@@ -84,15 +84,15 @@ block join v:i32
 ---
 
 # The arms forward their own parameters, in different orders.
-fn main c:i32 x:i32 y:i32 -> i32
-  br c left x y | right x y
-block left a:i32 b:i32
-  jump done a
-block right p:i32 q:i32
-  jump done q
-block done v:i32
+fn main(c:i32 x:i32 y:i32) -> i32
+  br c left(x y) | right(x y)
+block left(a:i32 b:i32)
+  jump done(a)
+block right(p:i32 q:i32)
+  jump done(q)
+block done(v:i32)
   ret v
 @opt not: br
-@opt check: Select
+@opt check: = select
 @run 0 17 31 -> 31
 @run 1 17 31 -> 17

@@ -1,4 +1,4 @@
-fn main x:i32 w:i32 -> i32
+fn main(x:i32 w:i32) -> i32
   z = const 0
   m = const -1
   a = add x z
@@ -6,13 +6,13 @@ fn main x:i32 w:i32 -> i32
   y = add b w
   ret y
 @opt not: const
-@opt check: Add v0 v1
+@opt check: = add v0 v1
 @opt nextln: ret
 @run -2147483648 -1 -> 2147483647
 
 ---
 
-fn main x:i32 -> i32
+fn main(x:i32) -> i32
   z = const 0
   a = mul x z
   b = sub x x
@@ -24,19 +24,19 @@ fn main x:i32 -> i32
 
 ---
 
-fn main x:i32 -> i32
+fn main(x:i32) -> i32
   k = const 7
   a = add k x
   b = sub k a
   ret b
-@opt check: Add v0 v1
-@opt nextln: Sub v1
+@opt check: = add v0 v1
+@opt nextln: = sub v1
 @run 3 -> -3
 @run -2147483648 -> -2147483648
 
 ---
 
-fn main x:i32 -> i32
+fn main(x:i32) -> i32
   k = const 0x80000000
   r = mul k x
   ret r
@@ -47,7 +47,7 @@ fn main x:i32 -> i32
 
 ---
 
-fn main x:i32 -> i32
+fn main(x:i32) -> i32
   k = const 12
   r = mul k x
   ret r
@@ -56,14 +56,14 @@ fn main x:i32 -> i32
 
 ---
 
-fn main p:ptr x:i32 d:i32 -> i32
+fn main(p:ptr x:i32 d:i32) -> i32
   store p x
   q = div x d
   zero = const 0
   y = mul q zero
   ret y
 @opt check: store
-@opt nextln: Div
+@opt nextln: = div
 @opt check: const 0
 @opt nextln: ret
 @run 7 0 -> !zero | aa aa aa aa | 07 00 00 00
@@ -72,7 +72,7 @@ fn main p:ptr x:i32 d:i32 -> i32
 
 ---
 
-fn main p:ptr x:i32 len:i32 -> i32
+fn main(p:ptr x:i32 len:i32) -> i32
   store p x
   one = const 1
   bounds one len

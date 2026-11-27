@@ -1,0 +1,125 @@
+error: put #[kernel] only on the enclosing impl or trait; keep a Rust method in an ordinary impl
+ --> tests/ui/declarations.rs:7:5
+  |
+7 |     #[kernel]
+  |     ^^^^^^^^^
+
+error: runtime parameters must be bool, i32, u32, i64, u64, usize, f32, f64 or a slice of u16, u32, i32, i64, f32, or f64
+  --> tests/ui/declarations.rs:16:24
+   |
+16 |     fn method_param(x: char) -> i32 {
+   |                        ^^^^
+
+error: expected a named binding
+  --> tests/ui/declarations.rs:24:32
+   |
+24 |     fn tuple_param(#[comptime] (a, b): (i32, i32)) -> i32 {
+   |                                ^^^^^^
+
+error: a Splice method parameter is #[comptime], a kernel scalar, a slice, or the &mut self receiver
+  --> tests/ui/declarations.rs:33:22
+   |
+33 |     fn context_param(state: &mut State) -> i32 {
+   |                      ^^^^^
+
+error: expected a safe synchronous kernel with Rust ABI and fixed arity
+  --> tests/ui/declarations.rs:41:5
+   |
+41 |     async fn later() -> i32 {
+   |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+error: put #[kernel] on the enclosing impl or trait to publish its methods
+  --> tests/ui/declarations.rs:49:5
+   |
+49 |     fn get(&self) -> i32 {
+   |     ^^^^^^^^^^^^^^^^^^^^
+
+error: put #[kernel] on the enclosing impl or trait to publish its methods
+  --> tests/ui/declarations.rs:56:5
+   |
+56 |     fn get(&self) -> i32;
+   |     ^^^^^^^^^^^^^^^^^^^^^
+
+error: a Splice trait method parameter is #[comptime], a kernel scalar or a slice
+  --> tests/ui/declarations.rs:61:12
+   |
+61 |     fn sum(x: splice::simd::Lane<i32>) -> i32;
+   |            ^
+
+error: expected #[comptime] on a method parameter
+  --> tests/ui/declarations.rs:67:15
+   |
+67 |     fn marked(#[inline] x: i32) -> i32 {
+   |               ^^^^^^^^^
+
+error: expected one #[comptime] marker without arguments
+  --> tests/ui/declarations.rs:75:27
+   |
+75 |     fn doubly(#[comptime] #[comptime] n: i32, x: i32) -> i32 {
+   |                           ^^^^^^^^^^^
+
+error: expected one #[comptime] marker without arguments
+  --> tests/ui/declarations.rs:83:22
+   |
+83 |     fn with_argument(#[comptime(1)] n: i32, x: i32) -> i32 {
+   |                      ^^^^^^^^^^^^^^
+
+error: expected a nonempty intrinsic name
+  --> tests/ui/declarations.rs:91:17
+   |
+91 |     #[intrinsic("")]
+   |                 ^^
+
+error: one #[intrinsic("name")] is allowed on a kernel method with a body
+   --> tests/ui/declarations.rs:101:5
+    |
+101 |     #[intrinsic("b")]
+    |     ^^^^^^^^^^^^^^^^^
+
+error: runtime parameters must be bool, i32, u32, i64, u64, usize, f32, f64 or a slice of u16, u32, i32, i64, f32, or f64
+   --> tests/ui/declarations.rs:109:16
+    |
+109 |     fn area(x: char) -> i32;
+    |                ^^^^
+
+error: expected a free function, impl or trait
+   --> tests/ui/declarations.rs:113:1
+    |
+113 | struct NotAFunction;
+    | ^^^^^^^^^^^^^^^^^^^^
+
+error: KernelType can only be derived for structs
+   --> tests/ui/declarations.rs:116:6
+    |
+116 | enum NotAStruct {
+    |      ^^^^^^^^^^
+
+error: expected `crate = path`, at most once
+   --> tests/ui/declarations.rs:121:10
+    |
+121 | #[splice(root = splice)]
+    |          ^^^^
+
+error: expected `crate = path`, at most once
+   --> tests/ui/declarations.rs:127:26
+    |
+127 | #[splice(crate = splice, crate = splice)]
+    |                          ^^^^^
+
+error: union fields do not have a known active variant
+   --> tests/ui/declarations.rs:133:7
+    |
+133 | union Bits {
+    |       ^^^^
+
+error: a kernel accepts at most 4 #[cfg]/#[cfg_attr] parameter attributes
+   --> tests/ui/declarations.rs:139:1
+    |
+139 | / fn many_conditions(
+140 | |     #[cfg(test)] a: i32,
+141 | |     #[cfg(test)] b: i32,
+142 | |     #[cfg(test)] c: i32,
+143 | |     #[cfg(test)] d: i32,
+144 | |     #[cfg(test)] e: i32,
+145 | | ) -> i32 {
+    | |________^

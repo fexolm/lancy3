@@ -1,6 +1,6 @@
 //! The generated Rust interface keeps the declared types and borrows. The
 //! scalar backend still receives the usual independent register and buffer lists.
-use super::{Binding, Scalar, lower::Context};
+use super::{Binding, lower::Context};
 use proc_macro2::{Ident, Span, TokenStream};
 use std::collections::HashSet;
 use syn::visit::Visit;
@@ -8,35 +8,6 @@ use syn::visit_mut::VisitMut;
 use syn::{
     FnArg, GenericParam, Generics, Lifetime, LifetimeParam, Pat, Path, ReturnType, Signature, Type,
 };
-
-pub(crate) fn has_early_bound_lifetime(ty: &Type, generics: &Generics) -> bool {
-    struct Lifetimes(HashSet<Ident>);
-    impl<'ast> Visit<'ast> for Lifetimes {
-        fn visit_lifetime(&mut self, lifetime: &'ast syn::Lifetime) {
-            self.0.insert(lifetime.ident.clone());
-        }
-    }
-
-    let mut used = Lifetimes(Default::default());
-    used.visit_type(ty);
-    let mut bounds = Lifetimes(Default::default());
-    for parameter in &generics.params {
-        if let GenericParam::Lifetime(parameter) = parameter {
-            // A parameter with an explicit bound is early-bound too.
-            if !parameter.bounds.is_empty() {
-                bounds.visit_lifetime_param(parameter);
-            }
-        } else {
-            bounds.visit_generic_param(parameter);
-        }
-    }
-    if let Some(where_clause) = &generics.where_clause {
-        bounds.visit_where_clause(where_clause);
-    }
-    generics.lifetimes().any(|lifetime| {
-        used.0.contains(&lifetime.lifetime.ident) && bounds.0.contains(&lifetime.lifetime.ident)
-    })
-}
 
 pub(super) struct Parameter<'a> {
     pub(super) name: Ident,
@@ -95,7 +66,6 @@ pub(super) fn generate(
     vis: &syn::Visibility,
     sig: &Signature,
     params: &[Parameter<'_>],
-    result: Scalar,
     unit_result: bool,
     context: Option<&Context>,
 ) -> Abi {
@@ -113,11 +83,8 @@ pub(super) fn generate(
         match param.binding {
             Binding::Aggregate(_) => unreachable!("aggregate local used as a formal parameter"),
             Binding::Host(_) => host.push((name, ty)),
-            Binding::Reg(kind, _) | Binding::Word(kind) => {
-                registers.push(match kind {
-                    Scalar::Bool => emit!(-i32::from(self.#name)),
-                    _ => emit!(self.#name),
-                });
+            Binding::Reg(..) | Binding::Word(_) => {
+                registers.push(emit!(#root::KernelScalar::to_word(self.#name)));
                 runtime.push((name, ty));
             }
             Binding::Buffer(buffer) => {
@@ -140,18 +107,12 @@ pub(super) fn generate(
         ReturnType::Default => syn::parse_quote!(()),
     };
     elision.visit_result(&mut result_ty);
-    let generics = &elision.generics;
-    let host_generics = used_generics(generics, host.iter().map(|(_, ty)| ty));
-    let (_, host_args, host_where) = host_generics.split_for_impl();
+    let api = crate::api::PublicApi::new(vis, &sig.generics, &elision.generics, &host, &runtime);
+    let api_items = &api.items;
+    let (_, host_args, _) = api.host.split_for_impl();
     let build_type = emit!(BuildArgs #host_args);
-    let host_fields = host.iter().map(|(name, ty)| emit!(#vis #name: #ty));
-    let build_struct =
-        emit!(#vis struct BuildArgs #host_generics #host_where { #(#host_fields,)* });
-
-    let call_generics = used_generics(generics, runtime.iter().map(|(_, ty)| ty));
-    let (call_decls, call_args, call_where) = call_generics.split_for_impl();
-    let call_fields = runtime.iter().map(|(name, ty)| emit!(#vis #name: #ty));
-    let call_struct = emit!(#vis struct CallArgs #call_generics #call_where { #(#call_fields,)* });
+    let call_generics = api.call.clone();
+    let (call_decls, call_args, _) = call_generics.split_for_impl();
     let mut signature_generics = call_generics.clone();
     signature_generics.params = signature_generics
         .params
@@ -194,15 +155,15 @@ pub(super) fn generate(
     let (_, _, invoke_where) = invoke_generics.split_for_impl();
     let buffers = written_buffers.iter().map(|(name, ty, elem)| {
         if elem.is_none() {
-            return emit!(#root::BufferArg::Context(&mut __splice_runtime_context));
+            return emit!(#root::BufferArg::context(&mut __splice_runtime_context));
         }
         let Type::Reference(reference) = ty else {
             unreachable!("buffer parameters are references")
         };
         if reference.mutability.is_some() {
-            emit!(#root::BufferElement::write_arg(self.#name))
+            emit!(#root::BufferArg::write(self.#name))
         } else {
-            emit!(#root::BufferElement::read_arg(self.#name))
+            emit!(#root::BufferArg::read(self.#name))
         }
     });
     let context_setup = context.zip(context_param).map(|(context, parameter)| {
@@ -210,16 +171,22 @@ pub(super) fn generate(
         let invoke = context.dispatcher(root, emit!(&__SPLICE_CONTEXT_SIGNATURE), &types);
         emit! {
             let __splice_object = self.#parameter;
-            let mut __splice_dispatch = |__splice_operation: u32, __splice_arguments: #root::ContextArguments<'_>| -> i32 {
+            let mut __splice_dispatch = |__splice_operation: u32, __splice_arguments: #root::__private::ContextArguments<'_>| -> u64 {
                 #invoke
             };
-            let mut __splice_runtime_context = #root::RuntimeContext::new_packet(&__SPLICE_CONTEXT_SIGNATURE, &mut __splice_dispatch);
+            let mut __splice_runtime_context = #root::__private::RuntimeContext::new(&__SPLICE_CONTEXT_SIGNATURE, &mut __splice_dispatch);
         }
     });
     let buffers = if let Some(columns) = columns {
         emit! {
             let mut __splice_buffers = ::std::vec![#(#buffers),*];
-            __splice_buffers.extend(self.#columns.iter().map(#root::BufferArg::as_read_only));
+            let __splice_fixed = __splice_buffers.len();
+            for (__splice_index, __splice_column) in self.#columns.iter().enumerate() {
+                // A context is not a column: report it at its position.
+                __splice_buffers.push(__splice_column.as_read_only().ok_or(
+                    #root::SignatureError::Context { buffer: __splice_fixed + __splice_index },
+                )?);
+            }
         }
     } else {
         emit!(let mut __splice_buffers = [#(#buffers),*];)
@@ -228,10 +195,8 @@ pub(super) fn generate(
         emit!({
             let _ = __splice_result;
         })
-    } else if result == Scalar::Bool {
-        emit!(__splice_result != 0)
     } else {
-        emit!(__splice_result)
+        emit!(<#result_ty as #root::KernelScalar>::from_word(__splice_result))
     };
     let implementation = emit! {
         impl #call_decls #root::CallArgs for CallArgs #call_args #invoke_where {
@@ -240,27 +205,23 @@ pub(super) fn generate(
             fn invoke<__SpliceExecutable: #root::Executable>(self, executable: &__SpliceExecutable)
                 -> ::core::result::Result<Self::Output, #root::CallError>
             {
-                #root::call_boundary(move || {
+                #root::__private::call_boundary(move || {
                     let __splice_registers = [#(#registers),*];
                     #context_setup
                     #buffers
                     let __splice_result = #root::Executable::call(
                         executable, &__splice_registers, &mut __splice_buffers,
                     )?;
-                    Ok(#decode)
+                    ::core::result::Result::Ok(#decode)
                 })
             }
         }
     };
-    let mut build_generics = sig.generics.clone();
-    build_generics.params = generics.params.iter().filter(|p| {
-        !matches!(p, GenericParam::Lifetime(l) if !host_generics.lifetimes().any(|h| h.lifetime == l.lifetime) && !sig.generics.lifetimes().any(|h| h.lifetime == l.lifetime))
-    }).cloned().collect();
     Abi {
         build_type,
         signature,
-        build_generics,
-        items: emit!(#build_struct #call_struct #marker #implementation),
+        build_generics: api.entry,
+        items: emit!(#api_items #marker #implementation),
     }
 }
 
@@ -314,47 +275,6 @@ pub(crate) fn used_generics<'a>(
     let mut used = GenericUses(HashSet::new());
     for ty in types {
         used.visit_type(ty);
-    }
-    select_generics(generics, used)
-}
-
-pub(crate) fn body_generics<'a>(
-    generics: &Generics,
-    types: impl Iterator<Item = &'a Type>,
-    body: &syn::Expr,
-) -> Generics {
-    let mut used = GenericUses(HashSet::new());
-    for ty in types {
-        used.visit_type(ty);
-    }
-    used.visit_expr(body);
-    loop {
-        let previous = used.0.len();
-        for param in &generics.params {
-            if used.0.contains(&param_name(param)) {
-                used.visit_generic_param(param);
-            }
-        }
-        if let Some(clause) = &generics.where_clause {
-            for predicate in &clause.predicates {
-                let mut subject = GenericUses(HashSet::new());
-                match predicate {
-                    syn::WherePredicate::Type(predicate) => {
-                        subject.visit_type(&predicate.bounded_ty)
-                    }
-                    syn::WherePredicate::Lifetime(predicate) => {
-                        subject.visit_lifetime(&predicate.lifetime);
-                    }
-                    _ => (),
-                }
-                if !subject.0.is_disjoint(&used.0) {
-                    used.visit_where_predicate(predicate);
-                }
-            }
-        }
-        if used.0.len() == previous {
-            break;
-        }
     }
     select_generics(generics, used)
 }

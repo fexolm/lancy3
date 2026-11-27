@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
 # %icmp_uge_i32
-fn main v0:i32 v1:i32 -> i32
+fn main(v0:i32 v1:i32) -> i32
   t0 = const -2147483648
   t1 = xor v0 t0
   t2 = xor v1 t0
@@ -20,7 +20,7 @@ fn main v0:i32 v1:i32 -> i32
 ---
 
 # %constant_inputs
-fn main -> i32
+fn main() -> i32
   v9 = const -128
   v11 = const 0
   t0 = const -2147483648
@@ -35,7 +35,7 @@ fn main -> i32
 ---
 
 # %icmp_uge_i32_imm
-fn main v0:i32 -> i32
+fn main(v0:i32) -> i32
   t0 = const 10
   t1 = const -2147483648
   t2 = xor v0 t1

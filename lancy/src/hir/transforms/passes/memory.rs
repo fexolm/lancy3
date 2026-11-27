@@ -4,7 +4,7 @@ use super::{
     facts::Facts,
 };
 use crate::hir::{
-    Block, Function, MAX_VECTOR_BYTES, MIN_VECTOR_BYTES, Op, Scale, Simd, Type, Value,
+    Block, Function, MAX_VECTOR_BYTES, MIN_VECTOR_BYTES, Op, Scale, Type, Value,
     transforms::{ControlFlowGraph, DomTree},
 };
 use crate::support::slotmap::DenseMap;
@@ -56,6 +56,8 @@ impl Address {
 struct Mask {
     indices: Option<Value>,
     value: Value,
+    /// A compressing store's limit: its mask does not name positions.
+    limit: Option<Value>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -66,8 +68,11 @@ struct Location {
 }
 
 impl Location {
+    /// Whether the lanes' positions are unknown: a gather, a scatter or a
+    /// compressing store.
     fn indexed(self) -> bool {
-        self.mask.is_some_and(|mask| mask.indices.is_some())
+        self.mask
+            .is_some_and(|mask| mask.indices.is_some() || mask.limit.is_some())
     }
 
     fn may_overlap(self, other: Self) -> bool {
@@ -134,8 +139,8 @@ fn in_slice(
         return None;
     }
     let address = location.address;
-    let (len, element, _) = f.slice_param(address.base)?;
-    let element = u64::from(element);
+    let slice = f.slice_param(address.base)?;
+    let (len, element) = (slice.len, u64::from(slice.element));
     let byte_width = location.ty.bytes(MAX_VECTOR_BYTES) as u64;
     let (index, count) = if let Some((index, scale)) = address.index {
         let stride = 1u64 << scale as u8;
@@ -176,6 +181,17 @@ struct Known {
     range: AccessRange,
     read: Option<Read>,
     removable_store: Option<(Block, usize)>,
+}
+
+impl Known {
+    /// A read inside a read-only slice: no store or call of the kernel can
+    /// change it while the kernel runs (BE-09).
+    fn immutable(&self, f: &Function) -> bool {
+        self.read.is_some()
+            && self.range.in_slice
+            && f.slice_param(self.range.location.address.base)
+                .is_some_and(|slice| !slice.writable)
+    }
 }
 
 enum Exit {
@@ -242,41 +258,22 @@ fn access(
     root: impl Fn(Value) -> Value,
     address: impl Fn(Value) -> Address,
 ) -> Option<(Location, Access)> {
-    let (pointer, ty, mask, kind) = match op {
-        Op::Load(ty, ptr) => (ptr, ty, None, Access::Read(None)),
-        Op::Simd(Simd::Load(lane, ptr)) => (ptr, Type::Vector(lane), None, Access::Read(None)),
-        Op::Store(ptr, value) | Op::Simd(Simd::Store(ptr, value)) => {
-            (ptr, f.value_type(value), None, Access::Write(root(value)))
-        }
-        Op::Simd(
-            Simd::MaskedLoad {
-                address,
-                mask,
-                passthrough: value,
-            }
-            | Simd::MaskedStore {
-                address,
-                mask,
-                value,
-            },
-        ) => {
-            let mask = Mask {
-                indices: address.indices.map(&root),
-                value: root(mask),
-            };
-            let kind = if matches!(op, Op::Simd(Simd::MaskedLoad { .. })) {
-                Access::Read(Some(root(value)))
-            } else {
-                Access::Write(root(value))
-            };
-            (address.base, f.value_type(value), Some(mask), kind)
-        }
-        _ => return None,
+    let access = op.access(f)?;
+    let value = access.value.map(&root);
+    let kind = if access.write {
+        Access::Write(value.expect("a store has a value"))
+    } else {
+        Access::Read(value)
     };
+    let mask = access.mask.map(|mask| Mask {
+        indices: access.indices.map(&root),
+        value: root(mask),
+        limit: access.limit.map(&root),
+    });
     Some((
         Location {
-            address: address(pointer),
-            ty,
+            address: address(access.address),
+            ty: access.ty,
             mask,
         },
         kind,
@@ -293,19 +290,7 @@ pub(super) fn optimize(
     let accesses = f
         .blocks()
         .flat_map(|block| f.instructions(block))
-        .filter(|&inst| {
-            matches!(
-                f.op(inst),
-                Op::Load(..)
-                    | Op::Store(..)
-                    | Op::Simd(
-                        Simd::Load(..)
-                            | Simd::Store(..)
-                            | Simd::MaskedLoad { .. }
-                            | Simd::MaskedStore { .. }
-                    )
-            )
-        })
+        .filter(|&inst| f.op(inst).access(f).is_some())
         .take(2)
         .count();
     if accesses < 2 {
@@ -326,6 +311,7 @@ pub(super) fn optimize(
     let mut addresses = DenseMap::filled(f.value_count(), None);
     let mut exits = DenseMap::from_fn(f.block_capacity(), |_| Exit::Unseen);
     let mut removed = Vec::new();
+    let mut in_bounds = Vec::new();
     let mut forwarded = false;
     for &block in cfg.reverse_postorder() {
         checks.clear();
@@ -364,10 +350,11 @@ pub(super) fn optimize(
                             entry.removable_store = None;
                         }
                     }
-                    Op::Call(_)
-                    | Op::RustCall(..)
-                    | Op::RustPacketCall(_)
-                    | Op::RustContextCall(..) => known.clear(),
+                    Op::Trap(_) => {
+                        traps = true;
+                        break;
+                    }
+                    _ if op.effects(f).writes => known.retain(|entry| entry.immutable(f)),
                     _ if !facts.is_total(f, inst) => {
                         // A check or arithmetic trap may expose completed stores.
                         for entry in &mut known {
@@ -411,6 +398,9 @@ pub(super) fn optimize(
             let entry = match kind {
                 Access::Read(passthrough) => {
                     let value = result.unwrap();
+                    if range.in_slice && matches!(op, Op::Load(..)) {
+                        in_bounds.push(value);
+                    }
                     for entry in &mut known {
                         if entry.removable_store.is_some() && range.may_overlap(entry.range, f) {
                             entry.removable_store = None;
@@ -427,7 +417,7 @@ pub(super) fn optimize(
                         if location.overwrites(entry.range.location) {
                             removed.extend(entry.removable_store);
                         }
-                        !range.may_overlap(entry.range, f)
+                        entry.immutable(f) || !range.may_overlap(entry.range, f)
                     });
                     // A scatter may overwrite an earlier lane at the same index.
                     // Only full stores supply a ready-to-use value for a load.
@@ -442,8 +432,7 @@ pub(super) fn optimize(
                     }
                 }
             };
-            const MAX_KNOWN: usize = 16;
-            if known.len() == MAX_KNOWN {
+            if known.len() == super::limits::KNOWN_ACCESSES {
                 known.remove(0);
             }
             known.push(entry);
@@ -453,6 +442,9 @@ pub(super) fn optimize(
         } else {
             Exit::Known(known)
         };
+    }
+    for value in in_bounds {
+        facts.load_in_bounds(value);
     }
     if removed.is_empty() {
         return;

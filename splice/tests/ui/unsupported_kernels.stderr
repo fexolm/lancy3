@@ -1,0 +1,17 @@
+error: runtime parameters must be bool, i32, u32, i64, u64, usize, f32, f64 or a slice of u16, u32, i32, i64, f32, or f64
+ --> tests/ui/unsupported_kernels.rs:5:12
+  |
+5 | fn wide(x: i128) -> i32 {
+  |            ^^^^
+
+error: a Splice kernel calls functions by path, not through a local function value
+  --> tests/ui/unsupported_kernels.rs:12:5
+   |
+12 |     callback(x)
+   |     ^^^^^^^^
+
+error: `print` cannot show a labeled break or continue across an unrolled loop
+  --> tests/ui/unsupported_kernels.rs:23:17
+   |
+23 |                 continue 'steps;
+   |                 ^^^^^^^^^^^^^^^

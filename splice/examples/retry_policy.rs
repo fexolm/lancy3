@@ -1,7 +1,7 @@
 use splice::kernel;
-use splice_lancy::Lancy;
+use splice::lancy::Lancy;
 
-#[derive(splice::ComptimeKey)]
+#[derive(splice::ComptimeKey, splice::KernelType)]
 struct RetryPolicy {
     base_ms: i32,
     max_ms: i32,
@@ -57,7 +57,7 @@ fn retry_delay(
     exponential_delay(policy, attempt)
 }
 
-fn main() -> Result<(), String> {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     let policy = RetryPolicy {
         base_ms: 100,
         max_ms: 2_000,

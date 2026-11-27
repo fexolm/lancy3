@@ -18,7 +18,9 @@ fn accumulate(input: &[i32], output: &mut [i32], bias: i32) -> i32 {
     sum
 }
 
-fn run<B: Codegen<Output: Executable>>(repetitions: usize) -> splice::Result<()> {
+fn run<B: Codegen<Output: Executable>>(
+    repetitions: usize,
+) -> Result<(), Box<dyn std::error::Error>> {
     let kernel = accumulate::build::<B>(accumulate::BuildArgs {})?;
     let input = [4, 8];
     let mut output = [0, 0];
@@ -33,7 +35,7 @@ fn run<B: Codegen<Output: Executable>>(repetitions: usize) -> splice::Result<()>
     Ok(())
 }
 
-fn main() -> splice::Result<()> {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = std::env::args().skip(1);
     let backend = args.next();
     let repetitions = args
@@ -41,10 +43,12 @@ fn main() -> splice::Result<()> {
         .map_or(Ok(1), |value| value.parse::<usize>())
         .map_err(|error| error.to_string())?;
     match backend.as_deref() {
-        Some("llvm") => run::<splice_llvm::Llvm>(repetitions),
-        Some("llvm_manual_simd") => run::<splice_llvm::LlvmManualSimd>(repetitions),
-        Some("cranelift") => run::<splice_cranelift::Cranelift>(repetitions),
-        Some("lancy") | None => run::<splice_lancy::Lancy>(repetitions),
-        Some(other) => Err(format!("unknown backend {other}")),
+        #[cfg(feature = "llvm")]
+        Some("llvm") => run::<splice::llvm::Llvm>(repetitions),
+        #[cfg(feature = "llvm")]
+        Some("llvm_manual_simd") => run::<splice::llvm::LlvmManualSimd>(repetitions),
+        Some("cranelift") => run::<splice::cranelift::Cranelift>(repetitions),
+        Some("lancy") | None => run::<splice::lancy::Lancy>(repetitions),
+        Some(other) => Err(format!("unknown backend {other}").into()),
     }
 }

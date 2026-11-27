@@ -4,7 +4,6 @@ use crate::{
     lir::aarch64::backend::{
         A, C, arrangements,
         inst::{Inst, class},
-        integer_float::Form,
         sve,
         width::{Conversion, Narrow, Widen},
     },
@@ -30,8 +29,8 @@ impl Rules<'_> {
         if let Some(half) = self.half_cast(from.lane()?, to.lane()?, v) {
             return Some(half);
         }
-        if let Some(inst) = self.integer_float_cast(from.lane()?, to.lane()?, v) {
-            return Some(inst);
+        if cold_conversion(from.lane()?, to.lane()?) {
+            return None;
         }
         if from.lane().is_some_and(scalar_int) && to.lane().is_some_and(scalar_int) {
             return Some(Inst::IntCast(from, to, dst, self.input(v)));
@@ -54,33 +53,18 @@ impl Rules<'_> {
         if let Some(half) = self.half_cast(from, to, v) {
             return Some(half);
         }
-        if let Some(inst) = self.integer_float_cast(from, to, v) {
-            return Some(inst);
+        if cold_conversion(from, to) {
+            return None;
         }
         let (code, arr) = packed_cast(from, to, self.config.profile)?;
         Some(Inst::PackedCast(code, arr, self.dst(), self.input(v)))
     }
 
-    fn integer_float_cast(&mut self, from: Lane, to: Lane, v: Value) -> Option<Inst> {
-        if from.float() == to.float() {
-            return None;
-        }
-        let (int, float) = if from.float() { (to, from) } else { (from, to) };
-        if int.bytes() != 16 && float.bytes() != 2 {
-            return None;
-        }
-        let packed = matches!(self.ty(v), Type::Vector(_));
-        let form = Form {
-            from,
-            to,
-            packed,
-            scalable: packed && sve(self.config.profile),
-        };
-        Some(Inst::IntegerFloatCast(form, self.dst(), self.input(v)))
-    }
-
-    pub(super) fn widen(&mut self, to: Lane, high: bool, v: Value) -> Inst {
+    pub(super) fn widen(&mut self, to: Lane, high: bool, v: Value) -> Option<Inst> {
         let from = self.ty(v).lane().unwrap();
+        if cold_conversion(from, to) {
+            return None;
+        }
         let profile = self.config.profile;
         let form = select_widen(from, to, high, profile).unwrap_or(Widen::Convert(
             Conversion {
@@ -90,19 +74,32 @@ impl Rules<'_> {
             },
             high,
         ));
-        Inst::Widen(form, self.dst(), self.input(v))
+        Some(Inst::Widen(form, self.dst(), self.input(v)))
     }
 
-    pub(super) fn narrow(&mut self, to: Lane, a: Value, b: Value) -> Inst {
+    pub(super) fn narrow(&mut self, to: Lane, a: Value, b: Value) -> Option<Inst> {
         let from = self.ty(a).lane().unwrap();
+        if cold_conversion(from, to) {
+            return None;
+        }
         let profile = self.config.profile;
         let form = select_narrow(from, to, profile).unwrap_or(Narrow::Convert(Conversion {
             from,
             to,
             scalable: sve(profile),
         }));
-        Inst::Narrow(form, self.dst(), self.input(a), self.input(b))
+        Some(Inst::Narrow(form, self.dst(), self.input(a), self.input(b)))
     }
+}
+
+/// Conversions between floats and 128-bit integers, and between half
+/// floats and integers, have no instructions: the numeric fallback does them.
+fn cold_conversion(from: Lane, to: Lane) -> bool {
+    if from.float() == to.float() {
+        return false;
+    }
+    let (int, float) = if from.float() { (to, from) } else { (from, to) };
+    int.bytes() == 16 || float.bytes() == 2
 }
 
 fn float_cast(from: Type, to: Type) -> Option<C> {

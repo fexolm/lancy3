@@ -1,43 +1,35 @@
 use super::{Body, Built, simd};
-use inkwell::{
-    intrinsics::Intrinsic,
-    values::{BasicValueEnum, PointerValue},
-};
-use splice::{
-    Function, debug,
-    hir::{Instr, ValueType},
+use inkwell::builder::Builder;
+use inkwell::values::BasicValueEnum;
+use splice_core::{
+    debug,
+    hir::{Reg, ScalarType, ValueType},
 };
 
 impl<'ctx> Body<'_, 'ctx> {
-    pub(super) fn debug_frame(&self, function: &Function) -> Built<PointerValue<'ctx>> {
-        let size = function
-            .instructions()
-            .iter()
-            .filter_map(|op| match op {
-                Instr::Debug(point) => Some(point.storage_bytes(function)),
-                _ => None,
-            })
-            .max()
-            .unwrap_or(0)
-            .max(1);
-        let size = self.ctx.i64_type().const_int(size as u64, false);
-        self.builder
-            .build_array_alloca(self.ctx.i8_type(), size, "debug_values")
-    }
-
-    pub(super) fn debug_point(
+    /// Save the runtime variables of source point `ordinal` of function `id`
+    /// in a snapshot of their own, and mark the point with a stack map record.
+    pub(in crate::lower) fn debug_point(
         &self,
-        function: &Function,
-        point: &debug::Point,
-        frame: PointerValue<'ctx>,
+        allocas: &Builder<'ctx>,
+        slots: &[debug::Slot],
         id: usize,
-        index: usize,
+        ordinal: usize,
     ) -> Built<()> {
+        let size = slots
+            .last()
+            .map_or(0, |slot| slot.offset + slot.ty.storage_bytes())
+            .max(1);
+        self.position_in_entry(allocas);
+        let frame = allocas.build_array_alloca(
+            self.ctx.i8_type(),
+            self.ctx.i64_type().const_int(size as u64, false),
+            "debug_values",
+        )?;
         let b = self.builder;
         let save = |offset: usize, value: BasicValueEnum<'ctx>| -> Built<()> {
             let offset = self.ctx.i64_type().const_int(offset as u64, false);
-            // SAFETY: debug_frame reserves at least the largest verified
-            // point layout. The store fits in that allocation.
+            // SAFETY: the snapshot holds every slot of this point.
             let dst = unsafe { b.build_in_bounds_gep(self.ctx.i8_type(), frame, &[offset], "")? };
             let store = b.build_store(dst, value)?;
             store
@@ -46,42 +38,44 @@ impl<'ctx> Body<'_, 'ctx> {
             store.set_volatile(true).expect("a store can be volatile");
             Ok(())
         };
-        for (var, layout, offset) in point.slots(function) {
-            match var.value {
-                debug::Value::Register(reg, _) => {
-                    let (ty, ptr) = self.registers[reg.0 as usize];
-                    let value = b.build_load(simd::llvm_type(self.ctx, ty), ptr, "")?;
-                    let value = if let ValueType::Mask(element) = ty {
-                        let ty = simd::llvm_type(self.ctx, ValueType::Vector(element.index()))
-                            .into_vector_type();
-                        b.build_int_s_extend(value.into_vector_value(), ty, "")?
+        let load = |reg: Reg| {
+            let (ty, ptr) = self.registers[reg.0 as usize];
+            b.build_load(
+                simd::llvm_type(self.ctx, self.machine.vector_bytes, ty),
+                ptr,
+                "",
+            )
+        };
+        for slot in slots {
+            for (offset, store) in slot.stores(|reg| self.registers[reg.0 as usize].0) {
+                let value = match store {
+                    debug::Store::Scalar(reg, ScalarType::Bool) => b
+                        .build_int_z_extend(load(reg)?.into_int_value(), self.ctx.i8_type(), "")?
+                        .into(),
+                    debug::Store::Scalar(reg, _) | debug::Store::Vector(reg) => load(reg)?,
+                    debug::Store::Mask(reg, element) => {
+                        let ty = simd::llvm_type(
+                            self.ctx,
+                            self.machine.vector_bytes,
+                            ValueType::Vector(element.index()),
+                        )
+                        .into_vector_type();
+                        b.build_int_s_extend(load(reg)?.into_vector_value(), ty, "")?
                             .into()
-                    } else if matches!(layout, debug::Type::Scalar(debug::Scalar::Index)) {
-                        b.build_int_s_extend(value.into_int_value(), self.ctx.i64_type(), "")?
-                            .into()
-                    } else {
-                        value
-                    };
-                    save(offset, value)?;
-                }
-                debug::Value::Slice(buffer) => {
-                    let slice = self.slices[buffer.index()];
-                    save(offset, slice.data.into())?;
-                    save(offset + 8, slice.len.into())?;
-                }
-                debug::Value::Constant(_) => unreachable!("only runtime values have slots"),
+                    }
+                    debug::Store::Data(buffer) => self.slices[buffer.index()].data.into(),
+                    debug::Store::Length(buffer) => self.slices[buffer.index()].len.into(),
+                };
+                save(offset, value)?;
             }
         }
         // The stack map records a static alloca as a frame register plus
         // displacement and places the source point after the snapshot stores.
-        let intr = Intrinsic::find("llvm.experimental.stackmap")
-            .unwrap()
-            .get_declaration(self.module, &[])
-            .unwrap();
+        let intr = self.intrinsic("llvm.experimental.stackmap", &[])?;
         let id = self
             .ctx
             .i64_type()
-            .const_int((id as u64) << 32 | index as u64, false);
+            .const_int((id as u64) << 32 | ordinal as u64, false);
         let shadow = self
             .ctx
             .i32_type()

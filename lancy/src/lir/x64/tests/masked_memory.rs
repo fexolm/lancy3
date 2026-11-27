@@ -3,8 +3,9 @@
 use super::packed_code::{host_supports, profiles, supports};
 use crate::hir::{Lane, Type};
 use crate::jit::packed_test;
-use crate::lir::x64::{Features, inst::simd};
+use crate::lir::x64::{Cpu, inst::simd};
 use iced_x86::{Decoder, DecoderOptions, Mnemonic, Register, code_asm::*};
+use splice_target::X86Features;
 
 fn word(slot: &[u8; 64], lane: usize, size: usize) -> u64 {
     let mut bits = [0; 8];
@@ -20,7 +21,7 @@ fn set(slot: &mut [u8; 64], lane: usize, size: usize, value: u64) {
 // Copy live inputs back to expose accidental destruction by the gather.
 fn wrap(
     body: &[u8],
-    cpu: Features,
+    cpu: Cpu,
     index: Option<usize>,
     mask: usize,
     value: usize,
@@ -58,7 +59,7 @@ fn wrap(
 }
 
 fn exercise(
-    cpu: Features,
+    cpu: Cpu,
     lane: Lane,
     index: Option<usize>,
     mask: usize,
@@ -68,7 +69,7 @@ fn exercise(
     let size = lane.bytes();
     let count = cpu.bytes / size;
     let gather = index.is_some() && dst.is_some();
-    let evex = cpu.bytes == 64 || cpu.avx10 >= 1;
+    let evex = cpu.bytes == 64 || cpu.isa.avx10 >= 1;
     let mut a = CodeAssembler::new(64).unwrap();
     simd::MaskedMemory {
         ty: Type::Vector(lane),
@@ -77,19 +78,19 @@ fn exercise(
         mask: super::super::inst::VectorMask::Lanes(mask),
         value: Some(value),
         dst,
-        temp: (!evex && cpu.avx2 && gather).then_some(4),
+        temp: (!evex && cpu.isa.avx2 && gather).then_some(4),
     }
     .emit(&mut a, cpu)
     .unwrap();
     let bytes = a.assemble(0).unwrap();
-    let mut host_ok = cpu.bytes <= Features::host().bytes;
+    let mut host_ok = cpu.bytes <= Cpu::host().bytes;
     let expected = match (index.is_some(), dst.is_some(), size, evex) {
-        (true, true, 4, _) if evex || cpu.avx2 => Some(Mnemonic::Vpgatherdd),
-        (true, true, 8, _) if evex || cpu.avx2 => Some(Mnemonic::Vpgatherqq),
+        (true, true, 4, _) if evex || cpu.isa.avx2 => Some(Mnemonic::Vpgatherdd),
+        (true, true, 8, _) if evex || cpu.isa.avx2 => Some(Mnemonic::Vpgatherqq),
         (true, false, 4, true) => Some(Mnemonic::Vpscatterdd),
         (true, false, 8, true) => Some(Mnemonic::Vpscatterqq),
-        (false, _, 1, true) if cpu.bw => Some(Mnemonic::Vmovdqu8),
-        (false, _, 2, true) if cpu.bw => Some(Mnemonic::Vmovdqu16),
+        (false, _, 1, true) if cpu.isa.bw => Some(Mnemonic::Vmovdqu8),
+        (false, _, 2, true) if cpu.isa.bw => Some(Mnemonic::Vmovdqu16),
         (false, _, 4, true) => Some(Mnemonic::Vmovdqu32),
         (false, _, 8, true) => Some(Mnemonic::Vmovdqu64),
         (false, _, 4, false) if cpu.bytes == 32 => Some(Mnemonic::Vmaskmovps),
@@ -222,22 +223,21 @@ fn exercise(
 #[test]
 fn masked_memory_uses_signed_lane_bits_and_only_available_isa() {
     let [sse2, avx2, avx512f, avx512bw] = profiles();
-    let avx10 = Features {
-        avx10: 1,
-        bw: true,
-        dq: true,
+    let avx10 = Cpu {
+        isa: X86Features {
+            avx10: 1,
+            bw: true,
+            dq: true,
+            ..avx2.isa
+        },
         ..avx2
     };
     for cpu in [
         sse2,
-        Features {
-            avx2: false,
-            ..avx2
-        },
         avx2,
         avx512f,
         avx512bw,
-        Features { bytes: 16, ..avx10 },
+        Cpu { bytes: 16, ..avx10 },
         avx10,
     ] {
         for lane in [Lane::I32, Lane::I64] {

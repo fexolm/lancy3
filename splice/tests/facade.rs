@@ -8,20 +8,20 @@ fn add_one(value: i32) -> i32 {
 #[cfg(feature = "lancy")]
 #[test]
 fn default_backend_builds_a_kernel() {
-    let code = add_one::build::<splice::Lancy>(add_one::BuildArgs {}).unwrap();
+    let code = add_one::build::<splice::lancy::Lancy>(add_one::BuildArgs {}).unwrap();
     assert_eq!(code.call(add_one::CallArgs { value: 41 }).unwrap(), 42);
 }
 
 #[cfg(feature = "cranelift")]
 #[test]
 fn cranelift_feature_builds_a_kernel() {
-    let code = add_one::build::<splice::Cranelift>(add_one::BuildArgs {}).unwrap();
+    let code = add_one::build::<splice::cranelift::Cranelift>(add_one::BuildArgs {}).unwrap();
     assert_eq!(code.call(add_one::CallArgs { value: 41 }).unwrap(), 42);
 }
 
 #[cfg(feature = "llvm")]
 #[test]
 fn llvm_feature_builds_a_kernel() {
-    let code = add_one::build::<splice::Llvm>(add_one::BuildArgs {}).unwrap();
+    let code = add_one::build::<splice::llvm::Llvm>(add_one::BuildArgs {}).unwrap();
     assert_eq!(code.call(add_one::CallArgs { value: 41 }).unwrap(), 42);
 }

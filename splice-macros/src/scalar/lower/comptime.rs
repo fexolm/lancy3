@@ -1,18 +1,21 @@
 //! Generate the mandatory build-time evaluation of an expression. Each
 //! operand is checked where Rust would evaluate it, including short circuits.
-use super::{Binding, Lower, Scalar};
+use super::{Binding, Evaluation, Lower, Scalar};
 use proc_macro2::{Ident, TokenStream};
-use std::collections::HashSet;
 use syn::{BinOp, Expr, FnArg, Pat, Result, Stmt};
 
 impl Lower<'_> {
+    /// The mandatory evaluator of a kernel (`__splice_eval`) or method
+    /// (`method`), and whether it evaluates the body: a body with a node the
+    /// evaluator cannot run on its `Option` inputs returns a staging error.
     pub(in crate::scalar) fn evaluator(
         &self,
         sig: &syn::Signature,
         block: &syn::Block,
         vis: &syn::Visibility,
         method: Option<&Ident>,
-    ) -> Result<TokenStream> {
+    ) -> Result<(TokenStream, bool)> {
+        use crate::scalar::methods::primitive_type;
         let name = match method {
             Some(name) => emit!(#name),
             None => emit!(__splice_eval),
@@ -32,104 +35,150 @@ impl Lower<'_> {
         let checks=sig.inputs.iter().zip(&names).filter_map(|(a,name)|{
             let FnArg::Typed(a)=a else{return None};
             a.attrs.iter().any(|a|a.path().is_ident("comptime")).then(||emit!(
-                if #name.is_none(){return Err("unknown argument passed to a comptime parameter".into());}
+                if #name.is_none(){return ::core::result::Result::Err(#root::BuildError::staging("unknown argument passed to a comptime parameter"));}
             ))
         });
         let ty = match &sig.output {
             syn::ReturnType::Type(_, ty) => emit!(#ty),
             _ => emit!(()),
         };
-        let inputs = names.iter().map(ToString::to_string).collect();
+        // A wide result (a primitive other than `i32` and `bool`) stays in
+        // Rust during mandatory evaluation: only owned primitives and
+        // expressions without opaque operands or calls.
         let wide = method.is_some()
-            && crate::scalar::methods::TraitMethodKind::for_result(&sig.output)
-                == crate::scalar::methods::TraitMethodKind::EvalOnly;
-        let body = if block.stmts.iter().all(evaluable_statement)
-            && (!wide || pure_wide_body(sig, block, &inputs))
-            && (method.is_some()
+            && matches!(&sig.output, syn::ReturnType::Type(_, ty) if primitive_type(ty)
+                && !matches!(Scalar::from_type(ty, &[]), Some(Scalar::I32 | Scalar::Bool)));
+        let parameters = if wide {
+            sig.inputs.iter().all(|arg| matches!(arg, FnArg::Typed(arg)
+                if primitive_type(&arg.ty) && matches!(arg.pat.as_ref(), Pat::Ident(pat) if pat.by_ref.is_none() && pat.subpat.is_none())))
+        } else {
+            method.is_some()
                 || types.iter().all(|t| {
                     matches!(t, syn::Type::Reference(reference) if reference.mutability.is_none())
                         || matches!(
                             Scalar::from_type(t, self.types),
-                            Some(Scalar::Int | Scalar::Bool | Scalar::Index)
+                            Some(Scalar::I32 | Scalar::Bool | Scalar::Index)
                         )
-                })) {
-            let mut evaluator = self.clone();
-            let label = syn::Lifetime::new("'__splice_evaluated", proc_macro2::Span::mixed_site());
-            evaluator.evaluator_return = Some(label.clone());
-            let body = evaluator.required_block(
-                block,
-                Some(self.result_type),
-                &HashSet::new(),
-                &inputs,
-            )?;
-            emit!(#[allow(unused_labels)] #label: { #body })
-        } else {
-            emit!(return Err("body cannot be evaluated at specialization".into()))
+                })
         };
-        Ok(emit! {
-            #[doc(hidden)]
-            #[allow(unused_variables,unreachable_code,clippy::type_complexity)]
-            #vis fn #name #generics ((#(#names,)*): (#(Option<#types>,)*))
-                -> #root::Result<#ty> #where_clause {
-                let _depth=#root::frontend::scalar::enter_expansion()?;
-                #(#checks)*
-                Ok(#body)
-            }
-        })
+        let mut evaluator = self.clone();
+        let exit = syn::Lifetime::new("'__splice_evaluated", proc_macro2::Span::mixed_site());
+        let evaluation = std::rc::Rc::new(Evaluation {
+            exit: exit.clone(),
+            wide,
+            unevaluable: std::cell::Cell::new(!parameters),
+        });
+        evaluator.evaluation = Some(evaluation.clone());
+        let body = evaluator.required_block(block, Some(self.result_type))?;
+        let evaluable = !evaluation.unevaluable.get();
+        let body = if evaluable {
+            emit!(#[allow(unused_labels)] #exit: { #body })
+        } else {
+            emit!(
+                return ::core::result::Result::Err(#root::BuildError::staging(
+                    "body cannot be evaluated at specialization"
+                ))
+            )
+        };
+        let overflow = super::overflow_prologue(root);
+        Ok((
+            emit! {
+                #[doc(hidden)]
+                #[allow(unused_variables,unreachable_code,clippy::type_complexity)]
+                #vis fn #name #generics ((#(#names,)*): (#(::core::option::Option<#types>,)*))
+                    -> #root::Result<#ty> #where_clause {
+                    let _depth=#root::frontend::scalar::enter_expansion()?;
+                    #overflow
+                    #(#checks)*
+                    ::core::result::Result::Ok(#body)
+                }
+            },
+            evaluable,
+        ))
+    }
+
+    /// Give up on evaluating the body: a node the evaluator cannot run.
+    /// The returned code is never emitted.
+    fn unevaluable(&self) -> TokenStream {
+        if let Some(evaluation) = &self.evaluation {
+            evaluation.unevaluable.set(true);
+        }
+        TokenStream::new()
+    }
+
+    /// Whether the parameters are `Option`s of their values: the mandatory
+    /// evaluator of a kernel with parameters.
+    fn inputs(&self) -> bool {
+        self.optional() && self.body.has_params()
+    }
+
+    /// Whether `path` names a parameter that the evaluator reads as an input.
+    fn input(&self, path: &syn::ExprPath) -> bool {
+        self.inputs()
+            && self
+                .body
+                .decl_of(path)
+                .is_some_and(|decl| self.body.is_param(decl))
+    }
+
+    /// Whether `path` names a local of the evaluated Rust: one the lowering
+    /// has not bound (it is declared inside the evaluated expression).
+    fn evaluated_local(&self, path: &syn::ExprPath) -> bool {
+        self.body
+            .decl_of(path)
+            .is_some_and(|decl| !self.bindings.contains_key(&decl))
+            && !self.input(path)
     }
 
     pub(super) fn required(&self, expr: &Expr, hint: Option<Scalar>) -> Result<TokenStream> {
-        self.required_expr(expr, hint, &HashSet::new(), &HashSet::new())
+        self.required_expr(expr, hint)
     }
 
-    fn required_expr(
-        &self,
-        expr: &Expr,
-        hint: Option<Scalar>,
-        locals: &HashSet<String>,
-        inputs: &HashSet<String>,
-    ) -> Result<TokenStream> {
+    fn required_expr(&self, expr: &Expr, hint: Option<Scalar>) -> Result<TokenStream> {
+        if self.evaluation.as_ref().is_some_and(|e| e.wide) && !wide_node(expr) {
+            return Ok(self.unevaluable());
+        }
         let support = &self.root;
-        let visit = |e: &Expr| self.required_expr(e, None, locals, inputs);
+        let visit = |e: &Expr| self.required_expr(e, None);
         let primitive = |value: TokenStream| {
+            let check = self.primitive(emit!(&value));
             emit!({
-                use #support::frontend::evaluation::{CheckPrimitive as _, Operand};
                 let value = #value;
-                (&Operand::of(&value)).check()?;
+                #check
                 value
             })
         };
-        let rejected = || {
+        // The error of an operation the evaluator does not run, where Rust
+        // reaches it: the Rust function a call path selects.
+        let opaque = || {
             // An unevaluated operand supplies the Rust result type when all
             // names have their original type in the specialization factory.
-            if inputs.is_empty() && !super::simd::uses_lane(expr) && self.host_only(expr) {
-                emit!(if false { #expr } else { return Err("opaque operation in comptime!".into()) })
+            if !self.inputs() && !super::simd::uses_lane(expr) && self.host_only(expr) {
+                emit!(if false { #expr } else { return ::core::result::Result::Err(#support::BuildError::staging("opaque operation in comptime!")) })
             } else {
                 let ty = match hint {
                     Some(Scalar::Bool) => emit!(bool),
                     Some(Scalar::Index | Scalar::Length) => emit!(usize),
                     _ => emit!(i32),
                 };
-                emit!(Err::<#ty,String>("value unavailable at specialization".into())?)
+                emit!(::core::result::Result::Err::<#ty,#support::BuildError>(#support::BuildError::staging("value unavailable at specialization"))?)
+            }
+        };
+        // A node the evaluator does not run. Its inputs are `Option`s, where
+        // the Rust expression does not type-check: the body is unevaluable.
+        let rejected = || {
+            if self.inputs() {
+                self.unevaluable()
+            } else {
+                opaque()
             }
         };
         Ok(match expr {
             Expr::Lit(_) => emit!(#expr),
-            Expr::Path(path)
-                if path.path.get_ident().is_some_and(|id| {
-                    inputs.contains(&id.to_string()) && !locals.contains(&id.to_string())
-                }) =>
-            {
-                emit!((#path).ok_or("runtime argument read in comptime!")?)
+            Expr::Path(path) if self.input(path) => {
+                emit!((#path).ok_or_else(|| #support::BuildError::staging("runtime argument read in comptime!"))?)
             }
-            Expr::Path(path)
-                if path
-                    .path
-                    .get_ident()
-                    .is_some_and(|id| locals.contains(&id.to_string())) =>
-            {
-                emit!(#path)
-            }
+            Expr::Path(path) if self.evaluated_local(path) => emit!(#path),
             Expr::Path(path) => match self.binding(path) {
                 Some(Binding::Reg(ty, _)) => {
                     let ty = match ty {
@@ -137,18 +186,19 @@ impl Lower<'_> {
                         Scalar::Index | Scalar::Length => emit!(usize),
                         _ => emit!(i32),
                     };
+                    // The printer has no registers: a runtime value is unknown.
                     if self.source_fault.is_some() {
-                        emit!(Err::<#ty,String>("runtime argument read in comptime!".into())?)
+                        emit!(::core::result::Result::Err::<#ty,#support::BuildError>(#support::BuildError::staging("runtime argument read in comptime!"))?)
                     } else {
                         let convert = match ty.to_string().as_str() {
-                            "bool" => emit!(word != 0),
-                            "usize" => emit!(word as usize),
-                            _ => emit!(word),
+                            "bool" => emit!(word.bits() != 0),
+                            "usize" => emit!(word.bits() as usize),
+                            _ => emit!(word.bits() as i32),
                         };
                         emit!({
                             let word=__splice_inputs.iter().find(|(reg,_)| *reg==#path)
                                 .and_then(|(_,known)| *known)
-                                .ok_or("runtime argument read in comptime!")?;
+                                .ok_or_else(|| #support::BuildError::staging("runtime argument read in comptime!"))?;
                             #convert
                         })
                     }
@@ -159,13 +209,9 @@ impl Lower<'_> {
                     } else {
                         emit!(i32)
                     };
-                    if self.source_fault.is_some() {
-                        emit!(Err::<#ty,String>("runtime value in comptime!".into())?)
-                    } else {
-                        emit!(<#ty as #support::frontend::scalar::ImportWord>::decode(
-                            #support::frontend::scalar::RunArg::known(&#path).ok_or("runtime value in comptime!")?
-                        ))
-                    }
+                    emit!(<#ty as #support::frontend::scalar::ImportWord>::from_constant(
+                        #support::frontend::scalar::RunArg::known(&#path).ok_or_else(|| #support::BuildError::staging("runtime value in comptime!"))?
+                    ))
                 }
                 Some(
                     Binding::Columns
@@ -176,7 +222,7 @@ impl Lower<'_> {
                 Some(Binding::Host(_)) => emit!(#path),
                 // A const path constructs a fresh value, including in a
                 // match scrutinee. Check its type before evaluating it.
-                None => emit!(#support::frontend::evaluation::Dropless::check()?.bind(#path)),
+                None => self.dropless(path),
             },
             Expr::Paren(p) => visit(&p.expr)?,
             Expr::Group(p) => visit(&p.expr)?,
@@ -189,20 +235,29 @@ impl Lower<'_> {
                 emit!([#(#elements),*])
             }
             Expr::Struct(literal) => {
-                let mut result = literal.clone();
-                for field in &mut result.fields {
-                    let value = visit(&field.expr)?;
-                    field.colon_token = Some(Default::default());
-                    field.expr = syn::parse2(value)?;
-                }
-                if let Some(rest) = &mut result.rest {
-                    **rest = syn::parse2(visit(rest)?)?;
-                }
-                emit!(#support::frontend::evaluation::Dropless::check()?.bind(#result))
+                let fields = literal
+                    .fields
+                    .iter()
+                    .map(|field| {
+                        let (member, value) = (&field.member, visit(&field.expr)?);
+                        Ok(emit!(#member: #value))
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                let rest = literal
+                    .rest
+                    .as_deref()
+                    .map(|rest| visit(rest).map(|rest| emit!(.. #rest)))
+                    .transpose()?;
+                let path = syn::ExprPath {
+                    attrs: literal.attrs.clone(),
+                    qself: literal.qself.clone(),
+                    path: literal.path.clone(),
+                };
+                self.dropless(emit!(#path { #(#fields,)* #rest }))
             }
             Expr::Index(i) => {
                 let read = self.known_index(visit(&i.expr)?, visit(&i.index)?);
-                emit!((#read).ok_or("kernel slice index out of bounds in comptime!")?)
+                emit!((#read).ok_or(#support::BuildError::Comptime(#support::Trap::Bounds))?)
             }
             Expr::Cast(c) => {
                 let value = primitive(visit(&c.expr)?);
@@ -215,19 +270,30 @@ impl Lower<'_> {
             Expr::Unary(u) => {
                 let value = primitive(visit(&u.expr)?);
                 let op = &u.op;
-                emit!(#op (#value))
+                let check = matches!(op, syn::UnOp::Neg(_)).then(|| {
+                    let checks = super::host::fault_checks(false);
+                    emit! {
+                        use #support::frontend::scalar::HostNegation as _;
+                        if #checks && let ::core::option::Option::Some(fault) = (&(&value,)).negation_fault() {
+                            return ::core::result::Result::Err(#support::BuildError::Comptime(fault.trap()));
+                        }
+                    }
+                });
+                emit!({ let value = #value; #check #op value })
             }
             Expr::Binary(b) => {
                 let op = &b.op;
                 let rhs = primitive(visit(&b.right)?);
-                if super::super::compound_op(op).is_some() {
-                    if matches!(&*b.left,Expr::Path(p) if p.path.get_ident().is_some_and(|n|locals.contains(&n.to_string())))
-                    {
+                if let Some(kind) = super::super::compound_op(op) {
+                    if matches!(&*b.left, Expr::Path(p) if self.evaluated_local(p)) {
                         let lhs = &b.left;
+                        let check = comptime_fault(support, kind, emit!(&(&#lhs, &right)));
+                        let primitive = self.primitive(emit!(&#lhs));
                         emit!({
-                            use #support::frontend::evaluation::{CheckPrimitive as _, Operand};
-                            (&Operand::of(&#lhs)).check()?;
-                            #lhs #op #rhs;
+                            #primitive
+                            let right = #rhs;
+                            #check
+                            #lhs #op right;
                         })
                     } else {
                         rejected()
@@ -236,7 +302,12 @@ impl Lower<'_> {
                     let lhs = primitive(visit(&b.left)?);
                     match op {
                         BinOp::And(_) | BinOp::Or(_) => emit!((#lhs) #op (#rhs)),
-                        _ => emit!({ let left=#lhs; let right=#rhs; left #op right }),
+                        _ => {
+                            let check = super::host::operator_kind(op).and_then(|kind| {
+                                comptime_fault(support, kind, emit!(&(&left, &right)))
+                            });
+                            emit!({ let left=#lhs; let right=#rhs; #check left #op right })
+                        }
                     }
                 }
             }
@@ -261,15 +332,15 @@ impl Lower<'_> {
                     rejected()
                 }
             }
-            Expr::Block(b) => self.required_block(&b.block, hint, locals, inputs)?,
+            Expr::Block(b) => self.required_block(&b.block, hint)?,
             Expr::Field(field)
                 if matches!(&*field.base, Expr::Path(path)
-                if path.path.get_ident().is_some_and(|id| !locals.contains(&id.to_string()))
-                && matches!(self.binding(path), Some(Binding::Aggregate(_)))) =>
+                    if matches!(self.binding(path), Some(Binding::Aggregate(_)))) =>
             {
                 let (word, _, constructor) = self
                     .aggregate_field(field)
                     .ok_or_else(|| syn::Error::new_spanned(field, "missing aggregate field"))?;
+                // The printer keeps the known constants of an aggregate.
                 let known = if self.source_fault.is_some() {
                     word
                 } else {
@@ -278,33 +349,27 @@ impl Lower<'_> {
                 let member = &field.member;
                 emit!(#support::frontend::scalar::known_field(#constructor, |v| &v.#member, #known)?)
             }
-            Expr::Field(field)
-                if matches!(&*field.base, Expr::Path(path)
-                    if path.path.get_ident().is_some_and(|id|
-                        inputs.contains(&id.to_string()) && !locals.contains(&id.to_string()))) =>
-            {
+            Expr::Field(field) if matches!(&*field.base, Expr::Path(path) if self.input(path)) => {
                 let base = &field.base;
-                let place = emit!(*#base.as_ref().ok_or("runtime argument read in comptime!")?);
+                let place = emit!(*#base.as_ref().ok_or_else(|| #support::BuildError::staging("runtime argument read in comptime!"))?);
                 self.known_field(place, &field.member)
             }
-            Expr::Field(field) if self.host_only(expr) || !inputs.is_empty() => {
+            Expr::Field(field) if self.host_only(expr) || self.inputs() => {
                 self.known_field(visit(&field.base)?, &field.member)
             }
             Expr::If(i) => {
-                let mut bindings = locals.clone();
                 let cond = if let Expr::Let(binding) = &*i.cond {
                     let value = visit(&binding.expr)?;
                     let pattern = &binding.pat;
-                    bind_locals(&mut bindings, pattern);
                     emit!(let #pattern = #value)
                 } else {
-                    self.required_expr(&i.cond, Some(Scalar::Bool), locals, inputs)?
+                    self.required_expr(&i.cond, Some(Scalar::Bool))?
                 };
-                let yes = self.required_block(&i.then_branch, hint, &bindings, inputs)?;
+                let yes = self.required_block(&i.then_branch, hint)?;
                 let no = i
                     .else_branch
                     .as_ref()
-                    .map(|(_, e)| self.required_expr(e, hint, locals, inputs))
+                    .map(|(_, e)| self.required_expr(e, hint))
                     .transpose()?
                     .map(|e| emit!(else {#e}));
                 emit!(if #cond {#yes} #no)
@@ -313,18 +378,16 @@ impl Lower<'_> {
                 let value = visit(&m.expr)?;
                 let mut arms = Vec::with_capacity(m.arms.len());
                 for arm in &m.arms {
-                    let mut bindings = locals.clone();
                     let pat = &arm.pat;
-                    bind_locals(&mut bindings, pat);
                     let guard = arm
                         .guard
                         .as_ref()
                         .map(|(_, guard)| {
-                            self.required_expr(guard, Some(Scalar::Bool), &bindings, inputs)
+                            self.required_expr(guard, Some(Scalar::Bool))
                                 .map(|test| emit!(if #test))
                         })
                         .transpose()?;
-                    let body = self.required_expr(&arm.body, hint, &bindings, inputs)?;
+                    let body = self.required_expr(&arm.body, hint)?;
                     let attrs = &arm.attrs;
                     arms.push(emit!(#(#attrs)* #pat #guard => { #body },));
                 }
@@ -332,13 +395,13 @@ impl Lower<'_> {
             }
             Expr::While(w) => {
                 let label = &w.label;
-                let cond = self.required_expr(&w.cond, Some(Scalar::Bool), locals, inputs)?;
-                let body = self.required_block(&w.body, None, locals, inputs)?;
+                let cond = self.required_expr(&w.cond, Some(Scalar::Bool))?;
+                let body = self.required_block(&w.body, None)?;
                 emit!(#label while #cond { #support::frontend::scalar::specialization_step()?; #body; })
             }
             Expr::Loop(l) => {
                 let label = &l.label;
-                let body = self.required_block(&l.body, None, locals, inputs)?;
+                let body = self.required_block(&l.body, None)?;
                 emit!(#label loop { #support::frontend::scalar::specialization_step()?; #body; })
             }
             Expr::ForLoop(f) => {
@@ -350,11 +413,7 @@ impl Lower<'_> {
                     let start = primitive(visit(start)?);
                     let end = primitive(visit(end)?);
                     let pat = &f.pat;
-                    let mut locals = locals.clone();
-                    crate::scalar::visit_bindings(pat, &mut |binding| {
-                        locals.insert(binding.ident.to_string());
-                    });
-                    let body = self.required_block(&f.body, None, &locals, inputs)?;
+                    let body = self.required_block(&f.body, None)?;
                     emit!(#label for #pat in (#start) #limits (#end) {
                         #support::frontend::scalar::specialization_step()?;
                         #body;
@@ -368,12 +427,12 @@ impl Lower<'_> {
                 let value = b.expr.as_ref().map(|value| visit(value)).transpose()?;
                 emit!(break #label #value)
             }
-            Expr::Return(r) if self.evaluator_return.is_some() => {
-                let label = self.evaluator_return.as_ref().unwrap();
+            Expr::Return(r) if self.evaluation.is_some() => {
+                let label = &self.evaluation.as_ref().unwrap().exit;
                 let value = r
                     .expr
                     .as_deref()
-                    .map(|e| self.required_expr(e, Some(self.result_type), locals, inputs))
+                    .map(|e| self.required_expr(e, Some(self.result_type)))
                     .transpose()?;
                 emit!(break #label #value)
             }
@@ -398,26 +457,23 @@ impl Lower<'_> {
                     .args
                     .iter()
                     .map(|arg| {
-                        if let Expr::Path(path) = arg
-                            && let Some(id) = path.path.get_ident()
-                            && !locals.contains(&id.to_string())
-                        {
-                            if inputs.contains(&id.to_string()) {
-                                return Ok(emit!(#id));
+                        if let Expr::Path(path) = arg {
+                            if self.input(path) {
+                                return Ok(emit!(#path));
                             }
                             if matches!(
                                 self.binding(path),
                                 Some(Binding::Reg(..) | Binding::Buffer(_) | Binding::Columns)
                             ) {
                                 return Ok(if trait_owner.is_some() {
-                                    emit!(None)
+                                    emit!(::core::option::Option::None)
                                 } else {
-                                    emit!(None::<i32>)
+                                    emit!(::core::option::Option::None::<i32>)
                                 });
                             }
                         }
                         let arg = visit(arg)?;
-                        Ok(emit!(Some(#arg)))
+                        Ok(emit!(::core::option::Option::Some(#arg)))
                     })
                     .collect::<Result<Vec<_>>>()?;
                 let output = match hint {
@@ -432,13 +488,13 @@ impl Lower<'_> {
                         &owner,
                         method,
                         emit!(#target((#(#args,)*))?),
-                        rejected(),
+                        opaque(),
                     )
                 } else {
                     emit!({
                     trait __SpliceOpaqueMethod {
                         fn #method<Args>(_: Args) -> #support::Result<#output> {
-                            Err("opaque Rust method in comptime!".into())
+                            ::core::result::Result::Err(#support::BuildError::staging("opaque Rust method in comptime!"))
                         }
                     }
                     impl<T: ?Sized> __SpliceOpaqueMethod for T {}
@@ -454,12 +510,9 @@ impl Lower<'_> {
                     .args
                     .iter()
                     .map(|a| {
-                        if let Expr::Path(p) = a
-                            && let Some(id) = p.path.get_ident()
-                            && !locals.contains(&id.to_string())
-                        {
-                            if inputs.contains(&id.to_string()) {
-                                return Ok(emit!(#id));
+                        if let Expr::Path(p) = a {
+                            if self.input(p) {
+                                return Ok(emit!(#p));
                             }
                             if matches!(
                                 self.binding(p),
@@ -467,16 +520,16 @@ impl Lower<'_> {
                             ) {
                                 let ty = match self.binding(p) {
                                     Some(Binding::Reg(Scalar::Bool, _)) => emit!(bool),
-                                    Some(Binding::Reg(Scalar::Int | Scalar::Inferred, _)) => {
+                                    Some(Binding::Reg(Scalar::I32 | Scalar::Inferred, _)) => {
                                         emit!(i32)
                                     }
-                                    _ => return Ok(emit!(None)),
+                                    _ => return Ok(emit!(::core::option::Option::None)),
                                 };
-                                return Ok(emit!(None::<#ty>));
+                                return Ok(emit!(::core::option::Option::None::<#ty>));
                             }
                         }
                         let a = visit(a)?;
-                        Ok(emit!(Some(#a)))
+                        Ok(emit!(::core::option::Option::Some(#a)))
                     })
                     .collect::<Result<Vec<_>>>()?;
                 let mut item = path.path.clone();
@@ -484,55 +537,61 @@ impl Lower<'_> {
                 self.dispatch_call(
                     path,
                     emit!(#item::__SpliceDefinition::__splice_eval #generics ((#(#args,)*))?),
-                    rejected(),
+                    opaque(),
                 )
             }
             Expr::Macro(m) if m.mac.path.is_ident("comptime") => {
-                self.required_expr(&m.mac.parse_body()?, hint, locals, inputs)?
+                self.required_expr(self.body.comptime(&m.mac), hint)?
             }
             _ => rejected(),
         })
     }
 
-    fn required_block(
-        &self,
-        block: &syn::Block,
-        hint: Option<Scalar>,
-        outer: &HashSet<String>,
-        inputs: &HashSet<String>,
-    ) -> Result<TokenStream> {
-        let mut locals = outer.clone();
+    fn required_block(&self, block: &syn::Block, hint: Option<Scalar>) -> Result<TokenStream> {
+        let root = self.root;
         let mut code = TokenStream::new();
         for stmt in &block.stmts {
             match stmt {
                 Stmt::Local(local) if local.init.is_some() => {
                     let init = local.init.as_ref().unwrap();
-                    let value = self.required_expr(&init.expr, None, &locals, inputs)?;
+                    if self.evaluation.as_ref().is_some_and(|e| e.wide) && !wide_local(local) {
+                        return Ok(self.unevaluable());
+                    }
+                    let value = match &*init.expr {
+                        // A tuple struct's constructor runs as Rust.
+                        Expr::Call(call) if self.body.projected_local(local) => {
+                            let func = &call.func;
+                            let args = call
+                                .args
+                                .iter()
+                                .map(|arg| self.required_expr(arg, None))
+                                .collect::<Result<Vec<_>>>()?;
+                            emit!(#func(#(#args),*))
+                        }
+                        init => self.required_expr(init, None)?,
+                    };
                     let otherwise = init
                         .diverge
                         .as_ref()
                         .map(|(_, expr)| {
-                            self.required_expr(expr, None, &locals, inputs)
+                            self.required_expr(expr, None)
                                 .map(|expr| emit!(else { #expr }))
                         })
                         .transpose()?;
                     let pat = &local.pat;
-                    bind_locals(&mut locals, pat);
-                    let root = self.root;
-                    code.extend(emit!(let #pat = #root::frontend::evaluation::Dropless::check()?.bind(#value) #otherwise;));
+                    let value = self.dropless(value);
+                    code.extend(emit!(let #pat = #value #otherwise;));
                 }
                 Stmt::Expr(e, semi) => {
-                    let value = self.required_expr(
-                        e,
-                        if semi.is_some() { None } else { hint },
-                        &locals,
-                        inputs,
-                    )?;
+                    let value = self.required_expr(e, if semi.is_some() { None } else { hint })?;
                     code.extend(emit!(#value #semi));
                 }
+                _ if self.inputs() => return Ok(self.unevaluable()),
                 _ => {
                     return Ok(emit!({
-                        return Err("unsupported statement in comptime!".into());
+                        return ::core::result::Result::Err(#root::BuildError::staging(
+                            "unsupported statement in comptime!",
+                        ));
                     }));
                 }
             }
@@ -541,162 +600,59 @@ impl Lower<'_> {
     }
 }
 
-fn bind_locals(locals: &mut HashSet<String>, pattern: &Pat) {
-    crate::scalar::visit_bindings(pattern, &mut |binding| {
-        locals.insert(binding.ident.to_string());
-    });
-}
-
-fn pure_wide_body(sig: &syn::Signature, block: &syn::Block, inputs: &HashSet<String>) -> bool {
-    use crate::scalar::methods::primitive_type;
-
-    fn pure_block(block: &syn::Block, names: &HashSet<String>) -> bool {
-        let mut names = names.clone();
-        block.stmts.iter().all(|stmt| match stmt {
-            Stmt::Expr(expr, _) => pure_expr(expr, &names),
-            Stmt::Local(local) => {
-                let Some(init) = &local.init else {
-                    return false;
-                };
-                if init.diverge.is_some()
-                    || !local.attrs.is_empty()
-                    || !pure_expr(&init.expr, &names)
-                {
-                    return false;
-                }
-                let pattern = match &local.pat {
-                    Pat::Type(pattern) if primitive_type(&pattern.ty) => pattern.pat.as_ref(),
-                    pat => pat,
-                };
-                match pattern {
-                    Pat::Ident(pattern) if pattern.by_ref.is_none() && pattern.subpat.is_none() => {
-                        names.insert(pattern.ident.to_string());
-                        true
-                    }
-                    Pat::Wild(_) => true,
-                    _ => false,
-                }
-            }
-            _ => false,
-        })
-    }
-
-    fn pure_expr(expr: &Expr, names: &HashSet<String>) -> bool {
-        let pure = |expr: &Expr| pure_expr(expr, names);
-        match expr {
-            Expr::Lit(literal) => matches!(
-                literal.lit,
-                syn::Lit::Bool(_) | syn::Lit::Char(_) | syn::Lit::Int(_) | syn::Lit::Float(_)
-            ),
-            Expr::Path(path) => {
-                path.qself.is_none()
-                    && path
-                        .path
-                        .get_ident()
-                        .is_some_and(|name| names.contains(&name.to_string()))
-            }
-            Expr::Paren(expr) => pure(&expr.expr),
-            Expr::Group(expr) => pure(&expr.expr),
-            Expr::Cast(cast) => primitive_type(&cast.ty) && pure(&cast.expr),
-            Expr::Unary(expr) => {
-                matches!(expr.op, syn::UnOp::Neg(_) | syn::UnOp::Not(_)) && pure(&expr.expr)
-            }
-            Expr::Binary(expr) => {
-                crate::scalar::compound_op(&expr.op).is_none()
-                    && pure(&expr.left)
-                    && pure(&expr.right)
-            }
-            Expr::Block(expr) => pure_block(&expr.block, names),
-            Expr::If(expr) => {
-                pure(&expr.cond)
-                    && pure_block(&expr.then_branch, names)
-                    && expr
-                        .else_branch
-                        .as_ref()
-                        .is_none_or(|(_, alternate)| pure(alternate))
-            }
-            Expr::Return(expr) => expr.expr.as_deref().is_some_and(pure),
-            Expr::Macro(expr) if expr.mac.path.is_ident("comptime") => {
-                expr.mac.parse_body::<Expr>().is_ok_and(|body| pure(&body))
-            }
-            _ => false,
-        }
-    }
-
-    // A wide result stays in Rust during mandatory evaluation. Limit this
-    // path to owned primitives and expressions with no opaque operands or
-    // calls, and use the regular evaluator to check the actual operations.
-    sig.inputs.iter().all(|arg| matches!(arg, FnArg::Typed(arg)
-        if primitive_type(&arg.ty) && matches!(arg.pat.as_ref(), Pat::Ident(pat) if pat.by_ref.is_none() && pat.subpat.is_none())))
-        && pure_block(block, inputs)
-}
-
-fn evaluable_statement(statement: &Stmt) -> bool {
-    match statement {
-        Stmt::Expr(e, _) => evaluable(e),
-        Stmt::Local(l) => l.init.as_ref().is_some_and(|i| {
-            evaluable(&i.expr) && i.diverge.as_ref().is_none_or(|(_, e)| evaluable(e))
-        }),
-        _ => false,
-    }
-}
-fn evaluable(expr: &Expr) -> bool {
+/// The nodes the evaluator of a wide result runs in Rust.
+fn wide_node(expr: &Expr) -> bool {
     match expr {
-        Expr::Path(_) | Expr::Lit(_) => true,
-        Expr::Tuple(t) => t.elems.iter().all(evaluable),
-        Expr::Array(a) => a.elems.iter().all(evaluable),
-        Expr::Struct(s) => {
-            s.fields.iter().all(|f| evaluable(&f.expr)) && s.rest.as_deref().is_none_or(evaluable)
-        }
-        Expr::Let(l) => evaluable(&l.expr),
-        Expr::Match(m) => {
-            evaluable(&m.expr)
-                && m.arms.iter().all(|a| {
-                    a.guard.as_ref().is_none_or(|(_, guard)| evaluable(guard)) && evaluable(&a.body)
-                })
-        }
-        Expr::Paren(p) => evaluable(&p.expr),
-        Expr::Group(p) => evaluable(&p.expr),
-        Expr::Call(call) => {
-            matches!(&*call.func, Expr::Path(_))
-                && !super::simd::uses_lane(&call.func)
-                && call.args.iter().all(evaluable)
-        }
-        Expr::Field(field) => evaluable(&field.base),
-        Expr::Cast(cast) => evaluable(&cast.expr),
-        Expr::Binary(b) => evaluable(&b.left) && evaluable(&b.right),
-        Expr::Unary(u) => evaluable(&u.expr),
-        Expr::MethodCall(call) => {
-            let name = call.method.to_string();
-            (matches!(name.as_str(), "len" | "is_empty") || super::memory::primitive_method(&name))
-                && evaluable(&call.receiver)
-                && call.args.iter().all(evaluable)
-        }
-        Expr::Block(b) => b.block.stmts.iter().all(evaluable_statement),
-        Expr::If(i) => {
-            evaluable(&i.cond)
-                && i.then_branch.stmts.iter().all(evaluable_statement)
-                && i.else_branch.as_ref().is_none_or(|(_, e)| evaluable(e))
-        }
-        Expr::While(w) => evaluable(&w.cond) && w.body.stmts.iter().all(evaluable_statement),
-        Expr::Loop(l) => l.body.stmts.iter().all(evaluable_statement),
-        Expr::ForLoop(f) => {
-            matches!(&*f.expr, Expr::Range(r) if r.start.as_ref().is_some_and(|e| evaluable(e)) && r.end.as_ref().is_some_and(|e| evaluable(e)))
-                && f.body.stmts.iter().all(evaluable_statement)
-        }
-        Expr::Return(r) => r.expr.as_deref().is_none_or(evaluable),
-        Expr::Break(b) => b.expr.as_ref().is_none_or(|e| evaluable(e)),
-        Expr::Continue(_) => true,
-        Expr::Macro(m) if m.mac.path.is_ident("comptime") => {
-            m.mac.parse_body::<Expr>().is_ok_and(|e| evaluable(&e))
-        }
+        Expr::Lit(literal) => matches!(
+            literal.lit,
+            syn::Lit::Bool(_) | syn::Lit::Char(_) | syn::Lit::Int(_) | syn::Lit::Float(_)
+        ),
+        Expr::Path(path) => path.qself.is_none() && path.path.get_ident().is_some(),
+        Expr::Cast(cast) => crate::scalar::methods::primitive_type(&cast.ty),
+        Expr::Unary(unary) => matches!(unary.op, syn::UnOp::Neg(_) | syn::UnOp::Not(_)),
+        Expr::Binary(binary) => crate::scalar::compound_op(&binary.op).is_none(),
+        Expr::Return(ret) => ret.expr.is_some(),
+        Expr::Macro(m) => m.mac.path.is_ident("comptime"),
+        Expr::Paren(_) | Expr::Group(_) | Expr::Block(_) | Expr::If(_) => true,
         _ => false,
     }
 }
 
-pub(in crate::scalar) fn can_fold(sig: &syn::Signature, block: &syn::Block) -> bool {
-    sig.inputs.iter().all(|arg|matches!(arg,FnArg::Typed(a) if matches!(Scalar::from_type(&a.ty,&[]), Some(Scalar::Int|Scalar::Bool)))) &&
-    block.stmts.iter().all(evaluable_statement)
+/// A local the evaluator of a wide result binds: a named or `_` pattern,
+/// at most annotated with a primitive type.
+fn wide_local(local: &syn::Local) -> bool {
+    let pattern = match &local.pat {
+        Pat::Type(pattern) if crate::scalar::methods::primitive_type(&pattern.ty) => &*pattern.pat,
+        pat => pat,
+    };
+    local.attrs.is_empty()
+        && local
+            .init
+            .as_ref()
+            .is_some_and(|init| init.diverge.is_none())
+        && match pattern {
+            Pat::Ident(pattern) => pattern.by_ref.is_none() && pattern.subpat.is_none(),
+            Pat::Wild(_) => true,
+            _ => false,
+        }
+}
+
+/// Whether a call with known arguments may fold through the evaluator: one
+/// that takes and returns only `i32` and `bool` words.
+pub(in crate::scalar) fn foldable_signature(sig: &syn::Signature) -> bool {
+    let word = |ty: &syn::Type| {
+        matches!(Scalar::from_type(ty, &[]), Some(Scalar::I32 | Scalar::Bool))
+            || matches!(ty, syn::Type::Tuple(unit) if unit.elems.is_empty())
+    };
+    let result = match &sig.output {
+        syn::ReturnType::Default => true,
+        syn::ReturnType::Type(_, ty) => word(ty),
+    };
+    result
+        && sig
+            .inputs
+            .iter()
+            .all(|arg| matches!(arg, FnArg::Typed(a) if word(&a.ty)))
 }
 
 pub(crate) fn uses_stage_requirements(block: &syn::Block) -> bool {
@@ -714,4 +670,17 @@ pub(crate) fn uses_stage_requirements(block: &syn::Block) -> bool {
     let mut uses = StageSensitive(false);
     uses.visit_block(block);
     uses.0
+}
+
+/// Return a build error instead of panicking when host operator `kind` faults
+/// on `operands` inside `comptime!`.
+fn comptime_fault(support: &syn::Path, kind: &str, operands: TokenStream) -> Option<TokenStream> {
+    let (guard, division) = super::host::operator_fault(support, kind, operands)?;
+    let checks = super::host::fault_checks(division);
+    Some(emit! {
+        use #support::frontend::scalar::{HostArithmetic as _, HostShift as _};
+        if #checks && let ::core::option::Option::Some(fault) = #guard {
+            return ::core::result::Result::Err(#support::BuildError::Comptime(fault.trap()));
+        }
+    })
 }

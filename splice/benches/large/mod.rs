@@ -4,12 +4,9 @@ mod delta;
 mod requantize;
 mod vector;
 
-use super::{Builders, Workload};
+use super::Workload;
 use criterion::Criterion;
-use splice::{BufferArg, Executable};
-use splice_cranelift::Cranelift;
-use splice_lancy::Lancy;
-use splice_llvm::LlvmManualSimd;
+use splice::{BufferArg, Executable, KernelScalar};
 use std::hint::black_box;
 
 pub(super) fn compare(c: &mut Criterion) {
@@ -20,15 +17,6 @@ pub(super) fn compare(c: &mut Criterion) {
     vector::compare(c);
 }
 
-fn samples(mut seed: u32) -> impl Iterator<Item = u32> {
-    std::iter::repeat_with(move || {
-        seed ^= seed << 13;
-        seed ^= seed >> 17;
-        seed ^= seed << 5;
-        seed
-    })
-}
-
 fn parquet_delta(c: &mut Criterion) {
     use delta::{BLOCK_VALUES, BLOCK_WORDS, MINIBLOCK, WIDTHS, decode};
     const BLOCKS: usize = 256;
@@ -36,7 +24,7 @@ fn parquet_delta(c: &mut Criterion) {
     let mut expected = vec![FIRST];
     let mut minima = Vec::with_capacity(BLOCKS);
     let mut packed = Vec::with_capacity(BLOCKS * BLOCK_WORDS as usize);
-    let mut random = samples(9051);
+    let mut random = crate::common::xorshift(9051);
     let mut value = FIRST;
     for _ in 0..BLOCKS {
         let minimum = -1_120_000 + (random.next().unwrap() % 110_001) as i32;
@@ -73,31 +61,27 @@ fn parquet_delta(c: &mut Criterion) {
         equal: <[i32]>::eq,
         run: |kernel: &dyn Executable, out: &mut [i32]| {
             let count = kernel.call(
-                &[FIRST],
+                &[FIRST.to_word()],
                 &mut [
-                    BufferArg::Read(&minima),
-                    BufferArg::Read(&packed),
-                    BufferArg::Write(out),
+                    BufferArg::read(&minima),
+                    BufferArg::read(&packed),
+                    BufferArg::write(out),
                 ],
             )?;
-            usize::try_from(count).map_err(|_| "invalid delta page buffers".into())
+            usize::try_from(i32::from_word(count)).map_err(|_| "invalid delta page buffers".into())
         },
     }
     .compare(
         c,
         decode::ir,
-        Builders {
-            lancy: &|| decode::build::<Lancy>(decode::BuildArgs {}),
-            cranelift: &|| decode::build::<Cranelift>(decode::BuildArgs {}),
-            llvm: &|| decode::build::<LlvmManualSimd>(decode::BuildArgs {}),
-        },
+        builders!(B => decode::build::<B>(decode::BuildArgs {})),
     );
 }
 
 fn decimal_csv(c: &mut Criterion) {
     use csv::{FIELDS, LIMIT, export};
     const ROWS: usize = 8192;
-    let mut records: Vec<_> = samples(4193)
+    let mut records: Vec<_> = crate::common::xorshift(4193)
         .take(ROWS * FIELDS)
         .map(|sample| (sample % (2 * LIMIT + 1) as u32) as i32 - LIMIT)
         .collect();
@@ -125,18 +109,15 @@ fn decimal_csv(c: &mut Criterion) {
         equal: <[i32]>::eq,
         run: |kernel: &dyn Executable, out: &mut [i32]| {
             let count =
-                kernel.call(&[], &mut [BufferArg::Read(&records), BufferArg::Write(out)])?;
-            usize::try_from(count).map_err(|_| "invalid CSV export buffers or value".into())
+                kernel.call(&[], &mut [BufferArg::read(&records), BufferArg::write(out)])?;
+            usize::try_from(i32::from_word(count))
+                .map_err(|_| "invalid CSV export buffers or value".into())
         },
     }
     .compare(
         c,
         export::ir,
-        Builders {
-            lancy: &|| export::build::<Lancy>(export::BuildArgs {}),
-            cranelift: &|| export::build::<Cranelift>(export::BuildArgs {}),
-            llvm: &|| export::build::<LlvmManualSimd>(export::BuildArgs {}),
-        },
+        builders!(B => export::build::<B>(export::BuildArgs {})),
     );
 }
 
@@ -146,11 +127,11 @@ fn per_channel_requantize(c: &mut Criterion) {
     let channels: [Channel; 16] =
         std::array::from_fn(|c| (61 + 11 * c as i32, 329 + 41 * c as i32, c as i32 - 8));
     let len = SITES * channels.len();
-    let mut accum: Vec<_> = samples(36011)
+    let mut accum: Vec<_> = crate::common::xorshift(36011)
         .take(len)
         .map(|x| (x % 16_385) as i32 - 8192)
         .collect();
-    let residual: Vec<_> = samples(21013)
+    let residual: Vec<_> = crate::common::xorshift(21013)
         .take(len)
         .map(|x| (x % 256) as i32 - 128)
         .collect();
@@ -177,34 +158,21 @@ fn per_channel_requantize(c: &mut Criterion) {
             let count = kernel.call(
                 &[],
                 &mut [
-                    BufferArg::Read(&accum),
-                    BufferArg::Read(&residual),
-                    BufferArg::Write(out),
+                    BufferArg::read(&accum),
+                    BufferArg::read(&residual),
+                    BufferArg::write(out),
                 ],
             )?;
-            usize::try_from(count).map_err(|_| "invalid requantization buffers".into())
+            usize::try_from(i32::from_word(count))
+                .map_err(|_| "invalid requantization buffers".into())
         },
     }
     .compare(
         c,
         || requantize::ir(black_box(&channels)),
-        Builders {
-            lancy: &|| {
-                requantize::build::<Lancy>(requantize::BuildArgs {
-                    channels: black_box(&channels),
-                })
-            },
-            cranelift: &|| {
-                requantize::build::<Cranelift>(requantize::BuildArgs {
-                    channels: black_box(&channels),
-                })
-            },
-            llvm: &|| {
-                requantize::build::<LlvmManualSimd>(requantize::BuildArgs {
-                    channels: black_box(&channels),
-                })
-            },
-        },
+        builders!(B => requantize::build::<B>(requantize::BuildArgs {
+            channels: black_box(&channels),
+        })),
     );
 }
 
@@ -227,7 +195,7 @@ fn audio_low_pass(c: &mut Criterion) {
             quantize(1.0 - alpha),
         )
     });
-    let pcm: Vec<_> = samples(7021)
+    let pcm: Vec<_> = crate::common::xorshift(7021)
         .take(SAMPLE_RATE)
         .enumerate()
         .map(|(i, noise)| {
@@ -265,33 +233,20 @@ fn audio_low_pass(c: &mut Criterion) {
             let count = kernel.call(
                 &[],
                 &mut [
-                    BufferArg::Read(&pcm),
-                    BufferArg::Write(out),
-                    BufferArg::Write(state),
+                    BufferArg::read(&pcm),
+                    BufferArg::write(out),
+                    BufferArg::write(state),
                 ],
             )?;
-            usize::try_from(count).map_err(|_| "invalid audio filter buffers".into())
+            usize::try_from(i32::from_word(count))
+                .map_err(|_| "invalid audio filter buffers".into())
         },
     }
     .compare(
         c,
         || low_pass::ir(black_box(&sections)),
-        Builders {
-            lancy: &|| {
-                low_pass::build::<Lancy>(low_pass::BuildArgs {
-                    sections: black_box(&sections),
-                })
-            },
-            cranelift: &|| {
-                low_pass::build::<Cranelift>(low_pass::BuildArgs {
-                    sections: black_box(&sections),
-                })
-            },
-            llvm: &|| {
-                low_pass::build::<LlvmManualSimd>(low_pass::BuildArgs {
-                    sections: black_box(&sections),
-                })
-            },
-        },
+        builders!(B => low_pass::build::<B>(low_pass::BuildArgs {
+            sections: black_box(&sections),
+        })),
     );
 }

@@ -1,6 +1,6 @@
 //! A physical plan with two i32 columns per row. Both children of an inner
 //! equijoin can themselves be arbitrary physical plans.
-use splice::{BufferArg, Executable};
+use splice::{BufferArg, CallError, Executable, KernelScalar};
 
 mod kernels;
 mod pipeline;
@@ -79,21 +79,49 @@ impl Catalog {
         code: &(impl Executable + ?Sized),
         workspace: &'a mut [i32],
         state: &mut [i32],
-    ) -> Result<&'a [i32], String> {
+    ) -> Result<&'a [i32], RunError> {
         let rows = code.call(
             &[],
             &mut [
-                BufferArg::Read(self.offsets()),
-                BufferArg::Read(self.data()),
-                BufferArg::Write(workspace),
-                BufferArg::Write(state),
+                BufferArg::read(self.offsets()),
+                BufferArg::read(self.data()),
+                BufferArg::write(workspace),
+                BufferArg::write(state),
             ],
         )?;
+        let rows = i32::from_word(rows);
         if rows < 0 {
-            return Err("query workspace is too small".into());
+            return Err(RunError::WorkspaceTooSmall);
         }
         workspace
             .get(..rows as usize * 2)
-            .ok_or_else(|| "invalid query result length".into())
+            .ok_or(RunError::ResultLength)
     }
 }
+
+/// Why a query produced no rows.
+#[derive(Debug, PartialEq)]
+pub enum RunError {
+    Call(CallError),
+    WorkspaceTooSmall,
+    /// The kernel reported more rows than the workspace holds.
+    ResultLength,
+}
+
+impl From<CallError> for RunError {
+    fn from(error: CallError) -> Self {
+        Self::Call(error)
+    }
+}
+
+impl std::fmt::Display for RunError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Call(error) => error.fmt(f),
+            Self::WorkspaceTooSmall => f.write_str("query workspace is too small"),
+            Self::ResultLength => f.write_str("invalid query result length"),
+        }
+    }
+}
+
+impl std::error::Error for RunError {}

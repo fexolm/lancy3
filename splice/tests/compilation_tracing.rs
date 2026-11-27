@@ -1,87 +1,144 @@
-use splice::{BuildOptions, Codegen, kernel};
-use splice_cranelift::Cranelift;
-use splice_lancy::Lancy;
-use splice_llvm::Llvm;
-use splice_text::Text;
-use std::{
-    io::{self, Write},
-    sync::{Arc, Mutex},
-};
-use tracing_subscriber::fmt::format::FmtSpan;
+use splice::{BuildOptions, Codegen, Mode, kernel};
+use std::collections::BTreeSet;
+use std::fmt::{Debug, Write};
+use std::sync::{Arc, Mutex};
+use tracing::Subscriber;
+use tracing::field::{Field, Visit};
+use tracing::span::{Attributes, Id};
+use tracing_subscriber::layer::{Context, Layer, SubscriberExt};
+use tracing_subscriber::registry::LookupSpan;
 
 #[kernel]
 fn increment(value: i32) -> i32 {
     value.wrapping_add(1)
 }
 
-struct Capture(Arc<Mutex<Vec<u8>>>);
+/// A span's name with its fields, such as `compile{backend="lancy"}`.
+struct Label(String);
 
-impl Write for Capture {
-    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        self.0.lock().unwrap().write(bytes)
+struct Fields(String);
+
+impl Visit for Fields {
+    fn record_debug(&mut self, field: &Field, value: &dyn Debug) {
+        let separator = if self.0.is_empty() { "" } else { "," };
+        write!(self.0, "{separator}{}={value:?}", field.name()).unwrap();
+    }
+}
+
+/// Records every closed span as its path of labels from the root, so the
+/// test checks which stages run inside which compilation, not log text.
+#[derive(Clone, Default)]
+struct Closed(Arc<Mutex<Vec<Vec<String>>>>);
+
+impl<S: Subscriber + for<'a> LookupSpan<'a>> Layer<S> for Closed {
+    fn on_new_span(&self, attrs: &Attributes<'_>, id: &Id, ctx: Context<'_, S>) {
+        let mut fields = Fields(String::new());
+        attrs.record(&mut fields);
+        let name = attrs.metadata().name();
+        let label = if fields.0.is_empty() {
+            name.to_owned()
+        } else {
+            format!("{name}{{{}}}", fields.0)
+        };
+        ctx.span(id).unwrap().extensions_mut().insert(Label(label));
     }
 
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
+    fn on_close(&self, id: Id, ctx: Context<'_, S>) {
+        let span = ctx.span(&id).unwrap();
+        let path = span
+            .scope()
+            .from_root()
+            .map(|span| span.extensions().get::<Label>().unwrap().0.clone())
+            .collect();
+        self.0.lock().unwrap().push(path);
     }
 }
 
 #[test]
-fn staged_and_portable_compilation_report_stage_durations() {
-    let output = Arc::new(Mutex::new(Vec::new()));
-    let writer = Arc::clone(&output);
-    let subscriber = tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::DEBUG)
-        .with_span_events(FmtSpan::CLOSE)
-        .with_ansi(false)
-        .with_writer(move || Capture(Arc::clone(&writer)))
-        .finish();
+fn staged_and_portable_compilation_report_their_nested_stages() {
+    let closed = Closed::default();
+    let subscriber = tracing_subscriber::registry().with(closed.clone());
     tracing::subscriber::with_default(subscriber, || {
-        let options = BuildOptions::Release;
+        let options = BuildOptions::host(Mode::Release).unwrap();
         let ir = increment::ir_with_options(options).unwrap();
-        for kernel in [
-            increment::build_with_options::<Lancy>(options, increment::BuildArgs {}).unwrap(),
-            Lancy::compile(&ir).unwrap(),
-        ] {
-            assert_eq!(kernel.call(increment::CallArgs { value: 41 }), Ok(42));
-        }
-        for kernel in [
-            increment::build_with_options::<Llvm>(options, increment::BuildArgs {}).unwrap(),
-            Llvm::compile(&ir).unwrap(),
-        ] {
-            assert_eq!(kernel.call(increment::CallArgs { value: 41 }), Ok(42));
-        }
-        let kernel =
-            increment::build_with_options::<Cranelift>(options, increment::BuildArgs {}).unwrap();
-        assert_eq!(kernel.call(increment::CallArgs { value: 41 }), Ok(42));
-        assert!(Text::compile(&ir).unwrap().starts_with("fn increment("));
+        splice_testkit::each_backend!(B => {
+            for kernel in [
+                increment::build_with_options::<B>(options, increment::BuildArgs {}).unwrap(),
+                B::compile(&ir).unwrap(),
+            ] {
+                assert_eq!(kernel.call(increment::CallArgs { value: 41 }), Ok(42));
+            }
+        });
     });
-    let bytes = output.lock().unwrap();
-    let log = std::str::from_utf8(&bytes).unwrap();
-    for (stage, expected_count) in [
-        ("materialize_ir", 2),
-        ("stage_lancy_hir", 1),
-        ("lower_lancy_hir", 1),
-        ("verify_lancy_hir", 4),
-        ("optimize_lancy_hir", 2),
-        ("select_instructions", 2),
-        ("schedule_instructions", 2),
-        ("allocate_registers", 2),
-        ("emit_machine_code", 2),
-        ("install_code", 2),
-        ("populate_llvm_ir", 2),
-        ("verify_llvm_ir", 2),
-        ("optimize_llvm_ir{auto_vectorize=true}", 2),
-        ("emit_llvm_object", 2),
-        ("link_llvm_object", 2),
-        ("lower_cranelift_ir", 1),
-        ("inline_cranelift_ir", 1),
-        ("emit_cranelift_code", 1),
-        ("finalize_cranelift_code", 1),
-        ("render_text_ir", 1),
+    let closed: BTreeSet<String> = closed
+        .0
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|p| p.join(" / "))
+        .collect();
+    let mut expected = vec!["materialize_ir".to_owned()];
+    let jit = "lancy_jit{inlining=Always,debug=false}";
+    for (input, frontend) in [
+        ("staged", "stage_lancy_hir"),
+        ("portable", "lower_lancy_hir"),
     ] {
-        let close = format!("{stage}: splice::compile: close time.busy=");
-        let count = log.lines().filter(|line| line.contains(&close)).count();
-        assert_eq!(count, expected_count, "{stage}\n{log}");
+        // Every build, staged or not, runs inside the shared `build` span.
+        let within = |backend: &str| match input {
+            "staged" => format!("build{{backend=\"{backend}\"}} / "),
+            _ => String::new(),
+        };
+        let root = format!(
+            "{}compile{{backend=\"lancy\",input=\"{input}\"}}",
+            within("splice_lancy::Lancy")
+        );
+        expected.push(format!("{root} / {frontend}"));
+        for stage in ["verify_lancy_hir", "install_code"] {
+            expected.push(format!("{root} / {jit} / {stage}"));
+        }
+        for stage in [
+            "verify_lancy_hir",
+            "optimize_lancy_hir",
+            "select_instructions",
+            "schedule_instructions",
+            "allocate_registers",
+            "emit_machine_code",
+        ] {
+            expected.push(format!(
+                "{root} / {jit} / optimize_and_lower_lancy / {stage}"
+            ));
+        }
+        for (backend, auto_vectorize) in [("Llvm", true), ("LlvmManualSimd", false)]
+            .into_iter()
+            .filter(|_| cfg!(feature = "llvm"))
+        {
+            let root = format!(
+                "{}compile{{backend=\"llvm\",input=\"{input}\"}}",
+                within(&format!("splice_llvm::{backend}"))
+            );
+            for stage in [
+                "populate_llvm_ir",
+                "verify_llvm_ir",
+                &format!("optimize_llvm_ir{{auto_vectorize={auto_vectorize}}}"),
+                "emit_llvm_object",
+                "link_llvm_object",
+            ] {
+                expected.push(format!("{root} / {stage}"));
+            }
+        }
+    }
+    for stage in [
+        "lower_cranelift_ir",
+        "inline_cranelift_ir",
+        "emit_cranelift_code",
+        "finalize_cranelift_code",
+    ] {
+        expected.push(format!(
+            "compile{{backend=\"cranelift\",input=\"portable\"}} / {stage}"
+        ));
+    }
+    let listing = closed.iter().cloned().collect::<Vec<_>>().join("\n");
+    for path in expected {
+        assert!(closed.contains(&path), "missing {path} in\n{listing}");
     }
 }

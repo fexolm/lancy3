@@ -1,25 +1,25 @@
 # The invariant divisor's original definition is retired by forwarding.
-fn main p:ptr n:i32 -> i32
+fn main(p:ptr n:i32) -> i32
   zero = const 0
   one = const 1
   two = const 2
   store p two
   loaded = load i32 p
-  jump head zero loaded
-block head i:i32 d:i32
+  jump head(zero loaded)
+block head(i:i32 d:i32)
   more = lt i n
-  br more body | done
-block body
+  br more body() | done()
+block body()
   next = add i one
   store p next
   unused = div n d
-  jump head next d
-block done
+  jump head(next d)
+block done()
   ret i
-@source check: load I32
-@source check: Div
+@source check: load i32
+@source check: = div
 @opt not: load
-@opt not: Div
+@opt not: = div
 @opt check: ret
 @run 0 -> 0 | aa aa aa aa | 02 00 00 00
 @run 3 -> 3 | aa aa aa aa | 03 00 00 00
@@ -27,64 +27,64 @@ block done
 ---
 
 # The forwarded divisor is zero. The store before the first trap is visible.
-fn main p:ptr n:i32 -> i32
+fn main(p:ptr n:i32) -> i32
   zero = const 0
   one = const 1
   store p zero
   loaded = load i32 p
-  jump head zero loaded
-block head i:i32 d:i32
+  jump head(zero loaded)
+block head(i:i32 d:i32)
   more = lt i n
-  br more body | done
-block body
+  br more body() | done()
+block body()
   next = add i one
   store p next
   unused = div n d
-  jump head next d
-block done
+  jump head(next d)
+block done()
   ret i
 @opt not: load
-@opt check: Div
+@opt check: = div
 @run 0 -> 0 | aa aa aa aa | 00 00 00 00
 @run 3 -> !zero | aa aa aa aa | 01 00 00 00
 
 ---
 
 # Forwarding makes formerly distinct incoming values agree.
-fn main p:ptr cond:i32 x:i32 y:i32 -> i32
+fn main(p:ptr cond:i32 x:i32 y:i32) -> i32
   two = const 2
   store p two
   a = load i32 p
   b = load i32 p
-  br cond join a x | join b y
-block join divisor:i32 value:i32
+  br cond join(a x) | join(b y)
+block join(divisor:i32 value:i32)
   unused = div value divisor
   ret value
-@source check: load I32
-@source check: load I32
-@source check: Div
+@source check: load i32
+@source check: load i32
+@source check: = div
 @opt not: load
 @opt check: br
-@opt not: Div
+@opt not: = div
 @opt check: ret
 @run 1 5 -9 -> 5 | aa aa aa aa | 02 00 00 00
 @run 0 5 -9 -> -9 | aa aa aa aa | 02 00 00 00
 
 ---
 
-fn main p:ptr cond:i32 x:i32 y:i32 -> i32
+fn main(p:ptr cond:i32 x:i32 y:i32) -> i32
   two = const 2
   zero = const 0
   store p two
   a = load i32 p
   store p zero
   b = load i32 p
-  br cond join a x | join b y
-block join divisor:i32 value:i32
+  br cond join(a x) | join(b y)
+block join(divisor:i32 value:i32)
   unused = div value divisor
   ret value
 @opt not: load
 @opt check: br
-@opt check: Div
+@opt check: = div
 @run 1 5 -9 -> 5 | aa aa aa aa | 00 00 00 00
 @run 0 5 -9 -> !zero | aa aa aa aa | 00 00 00 00

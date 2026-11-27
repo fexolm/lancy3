@@ -8,7 +8,7 @@ pub(crate) struct Format {
 }
 
 impl Format {
-    pub const fn for_lane(lane: Lane) -> Self {
+    pub(crate) const fn for_lane(lane: Lane) -> Self {
         match lane {
             Lane::F16 => Self {
                 fraction: 10,
@@ -21,16 +21,14 @@ impl Format {
             _ => unreachable!(),
         }
     }
-    #[cfg(any(test, target_arch = "aarch64"))]
-    pub fn fraction_bits(&self) -> u32 {
+    pub(crate) fn fraction_bits(&self) -> u32 {
         self.fraction
     }
 
-    pub fn infinity(&self) -> u16 {
+    pub(crate) fn infinity(&self) -> u16 {
         0x7fff & !((1 << self.fraction) - 1)
     }
-    #[cfg(any(test, target_arch = "aarch64"))]
-    pub fn decode(&self, raw: u16) -> f64 {
+    pub(crate) fn decode(&self, raw: u16) -> f64 {
         let magnitude = raw & 0x7fff;
         let frac = magnitude & ((1 << self.fraction) - 1);
         let exponent = i32::from(magnitude >> self.fraction);
@@ -46,7 +44,7 @@ impl Format {
     }
     /// Round once. A residual breaks a midpoint tie when binary64 rounded an
     /// exact product-plus-addend or wide integer onto that midpoint.
-    pub fn encode(&self, n: f64, residual: f64) -> u16 {
+    pub(crate) fn encode(&self, n: f64, residual: f64) -> u16 {
         let sign = ((n.to_bits() >> 48) as u16) & 0x8000;
         let abs = n.abs();
         if n.is_nan() {

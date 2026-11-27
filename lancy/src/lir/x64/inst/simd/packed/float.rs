@@ -94,7 +94,7 @@ impl Rule {
                         }
                     };
                 }
-                if v.width == 64 && v.cpu.dq {
+                if v.width == 64 && v.cpu.isa.dq {
                     let (imm, invert) = match op {
                         Unary::IsNan => (0x81, false),
                         Unary::IsInfinite => (0x18, false),
@@ -204,8 +204,10 @@ impl Rule {
                 integer::select_bits(v, d, a, b, d, c)
             }
             Self::MinMax(op) => {
-                // MINPS/MAXPS return the second operand for NaN or a tie. The
-                // first compare repairs a NaN second operand while retaining -0/+0.
+                // MINPS/MAXPS return the second operand for NaN or a tie.
+                // Equal operands combine their sign bits, so min(-0, +0) is
+                // -0 and max(-0, +0) is +0 in either order; then a NaN second
+                // operand is replaced by the first.
                 let (t, t1) = (t[0], t[1]);
                 match (n, op) {
                     (4, B::Min) => binary!(v, d, x, y, minps, vminps, vminps),
@@ -213,6 +215,15 @@ impl Rule {
                     (_, B::Min) => binary!(v, d, x, y, minpd, vminpd, vminpd),
                     _ => binary!(v, d, x, y, maxpd, vmaxpd, vmaxpd),
                 }?;
+                if op == B::Min {
+                    cmp(v, n, t, x, y, 0)?; // EQ_OQ
+                    v.and(t, t, x)?;
+                    v.or(d, d, t)?;
+                } else {
+                    cmp(v, n, t, x, y, 4)?; // NEQ_UQ
+                    v.or(t, t, x)?;
+                    v.and(d, d, t)?;
+                }
                 cmp(v, n, t, y, y, 3)?;
                 integer::select_bits(v, d, t, x, d, t1)
             }

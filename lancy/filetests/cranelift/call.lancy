@@ -2,13 +2,13 @@
 # SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 # Use Lancy's outlined internal ABI with a single i32 parameter and result.
 @policy never
-fn callee x:i32 -> i32
+fn callee(x:i32) -> i32
   ten = const 10
   result = add x ten
   ret result
 
-fn main x:i32 -> i32
-  result = call callee x
+fn main(x:i32) -> i32
+  result = call callee(x)
   ret result
 
 @inline check: call f0

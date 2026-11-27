@@ -2,7 +2,7 @@
 //! Only lengths, element accesses, and scalar computations become instructions.
 use super::{Lower, Scalar, Stage, Value, err};
 use proc_macro2::TokenStream;
-use syn::{BinOp, Expr, ExprCast, ExprIndex, ExprMethodCall, ExprReference, Result, UnOp};
+use syn::{BinOp, Expr, ExprCast, ExprIndex, ExprReference, Result, UnOp};
 
 pub(super) fn primitive_method(name: &str) -> bool {
     matches!(
@@ -25,7 +25,11 @@ pub(super) fn primitive_method(name: &str) -> bool {
 }
 
 impl Lower<'_> {
-    pub(super) fn method(&self, m: &ExprMethodCall, hint: Option<Scalar>) -> Result<Value> {
+    /// The method call `e`.
+    pub(super) fn method(&self, e: &Expr, hint: Option<Scalar>) -> Result<Value> {
+        let Expr::MethodCall(m) = e else {
+            unreachable!("a method call")
+        };
         if let Expr::Index(index) = &*m.receiver
             && let Expr::Path(table) = &*index.expr
             && matches!(self.binding(table), Some(super::Binding::Columns))
@@ -70,152 +74,71 @@ impl Lower<'_> {
             && m.args.is_empty()
             && matches!(receiver.stage, Stage::Buffer(_))
         {
-            let length = emit!({let buffer=#receiver; __splice_builder.buffer_len(buffer)});
+            let length = emit!({let buffer=#receiver; __splice_builder.buffer_len(buffer)?});
             return Ok(if m.method == "len" {
                 Value::new(Stage::Reg(Scalar::Length), length)
             } else {
                 Value::new(
                     Stage::Reg(Scalar::Bool),
-                    self.bin("Eq", length, emit!(__splice_builder.constant(0))),
+                    self.bin("Eq", length, self.constant(emit!(0usize))),
                 )
             });
         }
-        if receiver.stage.is_host() {
-            let args = m
-                .args
-                .iter()
-                .map(|arg| self.expr(arg))
-                .collect::<Result<Vec<_>>>()?;
-            if args.iter().all(|arg| arg.stage.is_host()) {
-                let root = self.root;
-                let name = &m.method;
-                let raw_name = name.to_string();
-                if matches!(raw_name.as_str(), "len" | "is_empty") && args.is_empty() {
-                    let empty = (name == "is_empty").then(|| emit!(== 0));
-                    return Ok(Value::new(
-                        Stage::Host,
-                        emit!({
-                            use #root::frontend::evaluation::{ReadLength as _, Operand};
-                            let receiver = &(#receiver);
-                            (&Operand::of(receiver)).length(receiver)? #empty
-                        }),
-                    ));
+        let kind = match receiver.stage {
+            Stage::Reg(t) | Stage::Word(t) if t.is_number() || t == Scalar::Inferred => t.base(),
+            // A host receiver with runtime arguments, such as `k.min(x)`,
+            // takes the arguments' type.
+            stage if stage.is_host() => {
+                if m.args.is_empty() {
+                    return err(m, "a host method cannot consume runtime values");
                 }
-                if primitive_method(&raw_name) {
-                    return Ok(Value::new(
-                        Stage::Host,
-                        emit!({
-                            use #root::frontend::evaluation::{CheckPrimitive as _, Operand};
-                            let value = #receiver;
-                            (&Operand::of(&value)).check()?;
-                            value.#name(#({let arg = #args; (&Operand::of(&arg)).check()?; arg}),*)
-                        }),
-                    ));
-                }
-                let expression = Expr::MethodCall(m.clone());
-                return Ok(Value::new(Stage::Host, self.required(&expression, hint)?));
+                Scalar::Inferred
             }
-        }
-        if matches!(
-            receiver.stage,
-            Stage::Reg(Scalar::Int) | Stage::Word(Scalar::Int)
-        ) {
-            let method = &m.method;
-            if method == "wrapping_neg" && m.args.is_empty() {
-                let value = self.reg(receiver, Scalar::Int, &m.receiver)?;
-                return Ok(Value::new(
-                    Stage::Reg(Scalar::Int),
-                    self.bin("Sub", emit!(__splice_builder.constant(0)), value),
-                ));
+            _ => {
+                return err(
+                    m,
+                    "expected slice.len/is_empty or an integer method such as min, max, wrapping_add or saturating_add",
+                );
             }
-            if matches!(
-                method.to_string().as_str(),
-                "saturating_add" | "saturating_sub" | "saturating_mul"
-            ) && let Some(right) = m.args.first()
-                && m.args.len() == 1
-            {
-                let left = self.reg(receiver, Scalar::Int, &m.receiver)?;
-                let right = self.operand(right, Scalar::Int)?;
-                let item = syn::parse_quote!(::core::primitive::i32::#method);
-                let operation = self.import_call(&item, &[left, right]);
-                return Ok(Value::new(Stage::Reg(Scalar::Int), operation));
-            }
-        }
-        let binary = match m.method.to_string().as_str() {
-            "min" => Some("Min"),
-            "max" => Some("Max"),
-            "wrapping_add" => Some("Add"),
-            "wrapping_sub" => Some("Sub"),
-            "wrapping_mul" => Some("Mul"),
-            _ => None,
         };
-        if let Some(op) = binary
-            && m.args.len() == 1
-        {
-            let rhs = &m.args[0];
-            let left = self.reg(receiver, Scalar::Int, &m.receiver)?;
-            let right = self.operand(rhs, Scalar::Int)?;
-            return Ok(Value::new(
-                Stage::Reg(Scalar::Int),
-                self.bin(op, left, right),
-            ));
-        }
-        if receiver.stage.is_host() {
-            return err(m, "a host method cannot consume runtime values");
-        }
-        err(
-            m,
-            "expected slice.len/is_empty, i32.min/max, or i32.wrapping_add/sub/mul",
-        )
+        // The registry stages the method on the receiver's type; the name
+        // must be registered for some type.
+        let root = self.root;
+        let name = m.method.to_string();
+        let receiver = self.reg(receiver, kind, &m.receiver)?;
+        let args = m
+            .args
+            .iter()
+            .map(|arg| self.operand(arg, kind))
+            .collect::<Result<Vec<_>>>()?;
+        let message = format!("`{name}` is not a kernel operation on runtime integers");
+        Ok(Value::new(
+            Stage::Reg(kind),
+            emit!({
+                const { ::core::assert!(#root::frontend::intrinsics::is_method(#name), #message) };
+                let operands = [#receiver, #(#args),*];
+                #root::frontend::intrinsics::method(__splice_builder, #name, &operands)?
+            }),
+        ))
     }
 
     pub(super) fn cast(&self, cast: &ExprCast) -> Result<Value> {
-        if Scalar::from_type(&cast.ty, self.types) == Some(Scalar::Int) {
-            let mut operand = cast.expr.as_ref();
-            loop {
-                operand = match operand {
-                    Expr::Paren(expr) => &expr.expr,
-                    Expr::Group(expr) => &expr.expr,
-                    _ => break,
-                };
-            }
-            if let Expr::Call(call) = operand
-                && matches!(call.func.as_ref(), Expr::Path(path) if crate::scalar::methods::trait_path(path).is_some())
-            {
-                return self.call(call, Some(Scalar::Int), Some(&cast.ty));
-            }
-        }
-        let value = self.expr(&cast.expr).or_else(|error| {
-            if super::simd::uses_lane(&cast.expr) {
-                return Err(error);
-            }
-            self.host_raw(&cast.expr)
-                .map(|code| Value::new(Stage::Host, code))
-                .map_err(|_| error)
-        })?;
-        if value.stage.is_host() {
-            let ty = &cast.ty;
-            return Ok(Value::new(Stage::Host, emit!((#value) as #ty)));
-        }
-        let Some(kind @ (Scalar::Int | Scalar::Index)) = Scalar::from_type(&cast.ty, self.types)
-        else {
-            return err(
-                &cast.ty,
-                "runtime casts support i32 and usize slice indices",
-            );
+        let value = self.expr(&cast.expr)?;
+        let Some(kind) = Scalar::from_type(&cast.ty, self.types).filter(|t| t.is_number()) else {
+            return err(&cast.ty, "a runtime cast converts to a number type");
         };
-        let code = match value.stage {
-            Stage::Reg(scalar @ (Scalar::Index | Scalar::Length | Scalar::Int))
-            | Stage::Word(scalar @ (Scalar::Index | Scalar::Length | Scalar::Int)) => {
-                self.reg(value, scalar, cast)?
-            }
-            Stage::Reg(Scalar::Bool) | Stage::Word(Scalar::Bool) => {
-                let bits = self.reg(value, Scalar::Bool, cast)?;
-                self.bin("And", bits, emit!(__splice_builder.constant(1)))
-            }
-            _ => return err(cast, "expected an integer or boolean to cast"),
+        let (Stage::Reg(scalar) | Stage::Word(scalar)) = value.stage else {
+            return err(cast, "expected a runtime scalar to cast");
         };
-        Ok(Value::new(Stage::Reg(kind), code))
+        if !scalar.is_scalar() && scalar != Scalar::Inferred {
+            return err(cast, "expected a runtime scalar to cast");
+        }
+        let value = self.reg(value, scalar, cast)?;
+        let ty = self.scalar_type(kind);
+        Ok(Value::new(
+            Stage::Reg(kind),
+            emit!({let __splice_value = #value; __splice_builder.cast(__splice_value, #ty)?}),
+        ))
     }
 
     pub(super) fn reference(&self, reference: &ExprReference) -> Result<Value> {
@@ -238,58 +161,48 @@ impl Lower<'_> {
         }
     }
 
-    fn index_operands(&self, index: &ExprIndex) -> Result<(bool, TokenStream, TokenStream)> {
+    /// A runtime slice element: whether the slice is writable, the slice,
+    /// the offset and the element's register type.
+    fn index_operands(
+        &self,
+        index: &ExprIndex,
+    ) -> Result<(bool, TokenStream, TokenStream, Scalar)> {
         let slice = self.expr(&index.expr)?;
         let Stage::Buffer(writable) = slice.stage else {
+            return err(&index.expr, "index a runtime slice parameter");
+        };
+        let Some(element) = writable.elem.scalar() else {
             return err(
-                &index.expr,
-                "index a runtime &[i32] or &mut [i32] parameter",
+                index,
+                "a u16 element has no scalar register; use Lane::load or Lane::store",
             );
         };
-        if writable.elem != super::Elem::I32 {
-            return err(index, "use Lane::load or Lane::store for typed SIMD slices");
-        }
         let value = self.expr(&index.index)?;
-        // Every host index above i32::MAX is out of bounds for a runtime
-        // slice. Keep the fault on the executed path, even for a literal.
-        let offset = if matches!(value.stage, Stage::Host | Stage::Literal(Scalar::Int)) {
-            emit!({let i: usize = #value; __splice_builder.constant(i32::try_from(i).unwrap_or(-1))})
-        } else {
-            self.reg(value, Scalar::Index, &index.index)?
-        };
-        Ok((writable.write, slice.code, offset))
+        // An out-of-bounds host index faults on the executed path, even
+        // for a literal.
+        let offset = self.reg(value, Scalar::Index, &index.index)?;
+        Ok((writable.write, slice.code, offset, element))
     }
 
     pub(super) fn index(&self, index: &ExprIndex) -> Result<Value> {
-        let receiver = self.expr(&index.expr)?;
-        if receiver.stage.is_host() {
-            let offset = self.expr(&index.index)?;
-            if !offset.stage.is_host() {
-                let root = self.root;
-                return Ok(Value::new(
-                    Stage::Reg(Scalar::Int),
-                    emit!(
-                        Err::<#root::hir::Reg, String>("runtime index requires a runtime slice".into())?
-                    ),
-                ));
-            }
-            let read = self.known_index(receiver.code, offset.code);
-            let fail = self.bounds_failure();
+        // A known element is a known value; a known slice with an index
+        // the generator does not know has no runtime element.
+        if self.expr(&index.expr)?.stage.is_host() {
+            let root = self.root;
             return Ok(Value::new(
-                Stage::Host,
-                emit!({
-                    let Some(value) = (#read) else { #fail };
-                    value
-                }),
+                Stage::Reg(Scalar::I32),
+                emit!(
+                    ::core::result::Result::Err::<#root::hir::Reg, #root::BuildError>(#root::BuildError::staging("runtime index requires a runtime slice"))?
+                ),
             ));
         }
-        let (_, slice, offset) = self.index_operands(index)?;
+        let (_, slice, offset, element) = self.index_operands(index)?;
 
         Ok(Value::new(
-            Stage::Reg(Scalar::Int),
+            Stage::Reg(element),
             emit!({
                 let (buffer, __splice_index) = (#slice, #offset);
-                __splice_builder.load(buffer, __splice_index)
+                __splice_builder.load(buffer, __splice_index)?
             }),
         ))
     }
@@ -298,7 +211,7 @@ impl Lower<'_> {
         if let Some(label) = &self.source_fault {
             let root = self.root;
             emit! {
-                __splice_source.transfer = Some(#root::frontend::source::Transfer::Return);
+                __splice_source.transfer = ::core::option::Option::Some(#root::frontend::source::Transfer::Return);
                 break #label r#"panic!("kernel slice index out of bounds")"#.to_owned();
             }
         } else {
@@ -307,9 +220,10 @@ impl Lower<'_> {
         }
     }
 
+    /// The element of a known slice, copied while the receiver (possibly a
+    /// temporary, such as an evaluator input) lives.
     pub(super) fn known_index(&self, receiver: TokenStream, offset: TokenStream) -> TokenStream {
-        let read = self.known_index_reference(receiver, offset);
-        emit!((#read)?.copied())
+        self.read_known_index(receiver, offset, emit!(?.copied()))
     }
 
     pub(super) fn known_index_reference(
@@ -317,12 +231,21 @@ impl Lower<'_> {
         receiver: TokenStream,
         offset: TokenStream,
     ) -> TokenStream {
+        self.read_known_index(receiver, offset, TokenStream::new())
+    }
+
+    fn read_known_index(
+        &self,
+        receiver: TokenStream,
+        offset: TokenStream,
+        then: TokenStream,
+    ) -> TokenStream {
         let root = self.root;
         emit!({
             use #root::frontend::evaluation::{Operand, ReadIndex as _};
             let receiver = &(#receiver);
             let index = #offset;
-            (&Operand::of(receiver)).read_index(receiver, index, |values, index| &values[index])
+            (&Operand::of(receiver)).read_index(receiver, index, |values, index| &values[index]) #then
         })
     }
 
@@ -332,16 +255,19 @@ impl Lower<'_> {
         rhs: &Expr,
         op: Option<(&str, &BinOp)>,
     ) -> Result<Value> {
-        let (writable, slice, offset) = self.index_operands(index)?;
+        let (writable, slice, offset, element) = self.index_operands(index)?;
         if !writable {
-            return err(index, "writing a kernel slice requires &mut [i32]");
+            return err(
+                index,
+                "writing a kernel slice requires a &mut slice parameter",
+            );
         }
-        let value = self.operand(rhs, Scalar::Int)?;
+        let value = self.operand(rhs, element)?;
 
         let combine = op.map(|(op, _)| {
             let combined = self.operator_bin(
                 op,
-                emit!(__splice_builder.load(buffer, __splice_index)),
+                emit!(__splice_builder.load(buffer, __splice_index)?),
                 emit!(__splice_value),
             );
             emit!(let __splice_value=#combined;)
@@ -352,7 +278,7 @@ impl Lower<'_> {
             let __splice_value = #value;
             let (buffer, __splice_index) = (#slice, #offset);
             #combine
-            __splice_builder.store(buffer, __splice_index, __splice_value);
+            __splice_builder.store(buffer, __splice_index, __splice_value)?;
         })))
     }
 }

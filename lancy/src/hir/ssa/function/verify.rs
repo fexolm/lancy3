@@ -1,10 +1,10 @@
-use super::{Block, Function, Op, Terminator, Type, Value};
+use super::{Block, Call, Function, Op, Terminator, Type, Value};
 use crate::CompileError;
 use crate::hir::{
-    IrError, Ternary,
+    IrError,
     transforms::{ControlFlowGraph, DomTree},
 };
-use crate::module::{FunctionIds, Module};
+use crate::module::{FunctionId, Module};
 use crate::support::slotmap::DenseMap;
 
 pub(crate) struct VerifiedBody<'a> {
@@ -12,6 +12,33 @@ pub(crate) struct VerifiedBody<'a> {
     pub cfg: ControlFlowGraph,
     pub dom: DomTree,
     pub has_call_scratch: bool,
+    /// The module ID of each call site's callee; `INVALID` for a call
+    /// record that no instruction uses.
+    callees: DenseMap<Call, FunctionId>,
+}
+
+impl VerifiedBody<'_> {
+    pub(crate) fn callee(&self, call: Call) -> FunctionId {
+        self.callees[call]
+    }
+
+    /// The body of `function`, which has the blocks, terminators and calls
+    /// of this one and more instructions inside its blocks (see
+    /// `transforms::canonical`), so the analyses still describe it.
+    pub(crate) fn with_instructions<'b>(&self, function: &'b Function) -> VerifiedBody<'b> {
+        if cfg!(debug_assertions) {
+            function
+                .verify()
+                .unwrap_or_else(|error| panic!("expanded body: {error}"));
+        }
+        VerifiedBody {
+            function,
+            cfg: self.cfg.clone(),
+            dom: self.dom.clone(),
+            has_call_scratch: self.has_call_scratch,
+            callees: self.callees.clone(),
+        }
+    }
 }
 
 impl Function {
@@ -89,178 +116,22 @@ impl Function {
                     used(v, i + 1)?;
                     Ok::<_, IrError>(self.value_type(v))
                 };
-                let expect = |v, ty| {
-                    let actual = operand(v)?;
-                    if actual != ty {
-                        return Err(IrError::OperandType {
-                            inst,
-                            value: v,
-                            expected: ty,
-                            actual,
-                        });
-                    }
-                    Ok(())
-                };
-                let ty = match *self.op(inst) {
-                    Op::Const(_) => Type::I32,
-                    Op::Simd(op) => {
-                        op.verify(inst, operand)?;
-                        let Some(ty) = op.result_type(|v| self.value_type(v)) else {
-                            continue;
-                        };
-                        ty
-                    }
-                    Op::Literal(lane, _) => lane.scalar(),
-                    Op::Copy(v) => operand(v)?,
-                    Op::Bin(op, a, b) => {
-                        let ty = operand(a)?;
-                        expect(b, ty)?;
-                        if matches!(ty, Type::Vector(_)) || !op.supports(ty) {
-                            return Err(IrError::InvalidNumeric { inst, ty });
-                        }
-                        op.result_type(ty)
-                    }
-                    Op::Unary(op, v) => {
-                        let ty = operand(v)?;
-                        if matches!(ty, Type::Vector(_)) || !op.supports(ty) {
-                            return Err(IrError::InvalidNumeric { inst, ty });
-                        }
-                        op.result_type(ty)
-                    }
-                    Op::Ternary(op, a, b, c) => {
-                        let ty = operand(b)?;
-                        if matches!(ty, Type::Vector(_)) {
-                            return Err(IrError::InvalidNumeric { inst, ty });
-                        }
-                        expect(
-                            a,
-                            if op == Ternary::Select {
-                                ty.mask_type()
-                            } else {
-                                ty
-                            },
-                        )?;
-                        expect(c, ty)?;
-                        if ty
-                            .lane()
-                            .is_none_or(|l| op == Ternary::MulAdd && !l.float())
-                        {
-                            return Err(IrError::InvalidNumeric { inst, ty });
-                        }
-                        ty
-                    }
-                    Op::Cast(to, v) | Op::Bitcast(to, v) => {
-                        let ty = operand(v)?;
-                        let valid = match (ty, to) {
-                            // Expose the address bits for alignment arithmetic.
-                            (Type::Ptr, Type::U64) => matches!(self.op(inst), Op::Bitcast(..)),
-                            (Type::Ptr, _) | (_, Type::Ptr) => false,
-                            (Type::Vector(_), _) | (_, Type::Vector(_)) => false,
-                            _ => {
-                                matches!(self.op(inst), Op::Cast(..))
-                                    || ty.bytes(16) == to.bytes(16)
-                            }
-                        };
-                        if !valid {
-                            return Err(IrError::InvalidNumeric { inst, ty });
-                        }
-                        to
-                    }
-                    Op::BoundsCheck(index, len) => {
-                        expect(index, Type::I32)?;
-                        expect(len, Type::I32)?;
-                        continue;
-                    }
-                    Op::CheckOverflow(cond) => {
-                        expect(cond, Type::I32)?;
-                        continue;
-                    }
-                    Op::RustCall(_, a, b) => {
-                        expect(a, Type::I32)?;
-                        expect(b, Type::I32)?;
-                        Type::I32
-                    }
-                    Op::RustPacketCall(site) => {
-                        let &(import, args) = self
-                            .packets
-                            .get(site)
-                            .ok_or(IrError::InvalidRustPacket { inst })?;
-                        if import.packet_bytes().is_none() || args.len != import.arity {
-                            return Err(IrError::InvalidRustPacket { inst });
-                        }
-                        for &word in &self.operands[args.range()] {
-                            expect(word, Type::I32)?;
-                        }
-                        Type::I32
-                    }
-                    Op::RustContextCall(import, [context, operation, a, b]) => {
-                        expect(context, Type::Ptr)?;
-                        expect(operation, Type::I32)?;
-                        expect(
-                            a,
-                            match import {
-                                super::super::RustContextImport::Scalars(_) => Type::I32,
-                                super::super::RustContextImport::Packet(_) => Type::Ptr,
-                            },
-                        )?;
-                        expect(b, Type::I32)?;
-                        Type::I32
-                    }
-                    Op::CallScratch(_) => {
-                        has_call_scratch = true;
-                        Type::Ptr
-                    }
-                    Op::PtrOffset(base, index, _) => {
-                        expect(base, Type::Ptr)?;
-                        expect(index, Type::I32)?;
-                        Type::Ptr
-                    }
-                    Op::Load(ty, addr) => {
-                        if matches!(ty, Type::Vector(_)) {
-                            return Err(IrError::InvalidNumeric { inst, ty });
-                        }
-                        expect(addr, Type::Ptr)?;
-                        ty
-                    }
-                    Op::Store(addr, value) => {
-                        expect(addr, Type::Ptr)?;
-                        let ty = operand(value)?;
-                        if matches!(ty, Type::Vector(_)) {
-                            return Err(IrError::InvalidNumeric { inst, ty });
-                        }
-                        continue;
-                    }
-                    Op::DebugStore(_, value) => {
-                        operand(value)?;
-                        continue;
-                    }
-                    Op::DebugPoint(_) => continue,
-                    Op::Call(id) => {
-                        let site = self
-                            .calls
-                            .get(id)
-                            .ok_or(IrError::UnknownCall { inst, call: id })?;
-                        let args = &self.operands[site.args.range()];
-                        if args.len() != site.callee.arity() {
-                            return Err(IrError::CallArity {
-                                call: id,
-                                expected: site.callee.arity(),
-                                actual: args.len(),
+                let op = *self.op(inst);
+                has_call_scratch |= matches!(op, Op::CallScratch { .. });
+                let expected = op.result_type(self, inst, operand)?;
+                match (expected, self.result(inst)) {
+                    (None, None) => {}
+                    (Some(expected), Some(result)) => {
+                        let actual = self.value_type(result);
+                        if actual != expected {
+                            return Err(IrError::ResultType {
+                                inst,
+                                expected,
+                                actual,
                             });
                         }
-                        for (&arg, &ty) in args.iter().zip(site.callee.param_types()) {
-                            expect(arg, ty)?;
-                        }
-                        site.callee.return_type()
                     }
-                };
-                let actual = self.value_type(self.result(inst).unwrap());
-                if actual != ty {
-                    return Err(IrError::ResultType {
-                        inst,
-                        expected: ty,
-                        actual,
-                    });
+                    _ => return Err(IrError::ReplacementResultCount { inst }),
                 }
             }
             let term = *self.terminator(block);
@@ -306,16 +177,16 @@ impl Function {
             cfg,
             dom,
             has_call_scratch,
+            callees: DenseMap::new(),
         })
     }
 }
 
 impl Function {
-    pub(crate) fn verified_module(
-        &self,
-    ) -> Result<(Module<VerifiedBody<'_>>, FunctionIds<Self>), CompileError> {
-        let _span = tracing::debug_span!(target: "splice::compile", "verify_lancy_hir").entered();
-        Module::discover(self, |function, callees| {
+    /// Verify this function and every distinct callee, numbered callee first.
+    pub(crate) fn verified_module(&self) -> Result<Module<VerifiedBody<'_>>, CompileError> {
+        let _span = tracing::debug_span!(target: "lancy::compile", "verify_lancy_hir").entered();
+        let (mut module, ids) = Module::discover(self, |function, callees| {
             let body = function.verified_body()?;
             for inst in function.insts.values() {
                 if let Op::Call(site) = inst.op {
@@ -323,6 +194,14 @@ impl Function {
                 }
             }
             Ok(body)
-        })
+        })?;
+        for body in module.functions.values_mut() {
+            let calls = &body.function.calls;
+            body.callees = DenseMap::from_fn(calls.len(), |call| {
+                let callee = std::sync::Arc::as_ptr(&calls[call].callee);
+                ids.get(&callee).copied().unwrap_or(FunctionId::INVALID)
+            });
+        }
+        Ok(module)
     }
 }

@@ -1,11 +1,18 @@
+use splice::Function;
+use splice::hir::{Constant, Instr, SimdOp};
+use splice::lancy::Lancy;
 use splice::{
     BufferArg, BufferKind, Codegen, Executable, TypedKernel, kernel,
     simd::{Element, Lane},
 };
-use splice_cranelift::Cranelift;
-use splice_lancy::Lancy;
-use splice_llvm::Llvm;
-use splice_text::Text;
+
+/// Whether staging left a call to the kernel function `name`.
+fn calls(function: &Function, name: &str) -> bool {
+    splice_testkit::instructions(function).any(|instruction| {
+        matches!(instruction, Instr::Call { function, .. }
+            if function.source().is_some_and(|source| source.name == name))
+    })
+}
 
 enum Expr {
     Ge { col: usize, val: i32 },
@@ -32,7 +39,7 @@ fn filter_ge(col: &[i32], #[comptime] val: i32, out: &mut [i32]) -> i32 {
     n
 }
 
-#[kernel]
+#[kernel(print)]
 #[allow(unused_variables, reason = "schema describes the staged column layout")]
 fn query(
     #[comptime] schema: &Schema,
@@ -54,7 +61,7 @@ fn query(
     }
 }
 
-#[kernel]
+#[kernel(print)]
 fn any_ge_float(col: &[f32], #[comptime] val: f32) -> i32 {
     let width = Lane::<f32>::lanes() as i32;
     let mut row = 0;
@@ -71,15 +78,19 @@ fn any_ge_float(col: &[f32], #[comptime] val: f32) -> i32 {
 }
 
 #[test]
-fn float_column_matches_the_rust_filter_including_nan_and_tail() -> splice::Result<()> {
+fn float_column_matches_the_rust_filter_including_nan_and_tail()
+-> Result<(), Box<dyn std::error::Error>> {
     fn check<E: Executable>(
         code: TypedKernel<query::Signature, E>,
         schema: &Schema,
         plan: &Plan,
-    ) -> splice::Result<()> {
+    ) -> Result<(), Box<dyn std::error::Error>> {
         for values in [&[][..], &[f32::NAN, 0.0, -1.0], &[2.5, f32::NAN]] {
             let expected = i32::from(values.iter().any(|&x| x >= 2.5));
-            let columns = [BufferArg::Read(&[99]), BufferArg::ReadF32(values)];
+            let columns = [
+                BufferArg::read::<i32>(&[99]),
+                BufferArg::read::<f32>(values),
+            ];
             assert_eq!(query(schema, plan, &mut [], &columns), expected);
             assert_eq!(
                 code.call(query::CallArgs {
@@ -91,17 +102,20 @@ fn float_column_matches_the_rust_filter_including_nan_and_tail() -> splice::Resu
         }
         Ok(())
     }
-    let schema = Schema(vec![BufferKind::Read, BufferKind::new(Element::F32, false)]);
+    let schema = Schema(vec![
+        BufferKind::READ_I32,
+        BufferKind::new(Element::F32, false),
+    ]);
     let plan = Plan::Filter {
         expr: Expr::GeFloat { col: 1, val: 2.5 },
     };
     let ir = query::ir(&schema, &plan)?;
-    let listing = query::build::<Text>(query::BuildArgs {
-        schema: &schema,
-        plan: &plan,
-    })?;
-    assert!(listing.contains("simd.ge.f32"));
-    assert!(!listing.contains("filter_ge"));
+    assert!(
+        splice_testkit::simd_ops(&ir)
+            .iter()
+            .any(|simd| simd.op == SimdOp::Ge && simd.element == Element::F32)
+    );
+    assert!(!calls(&ir, "filter_ge"));
     let rust = query::print(&schema, &plan)?;
     assert!(rust.contains("fn query(out: &mut [i32], columns:"));
     assert!(rust.contains("2.5"));
@@ -110,32 +124,18 @@ fn float_column_matches_the_rust_filter_including_nan_and_tail() -> splice::Resu
     assert!(!rust.contains("filter_ge"));
     assert!(!rust.contains("comptime"));
     assert!(!rust.contains("store out of bounds"));
-    check(
-        query::build::<Lancy>(query::BuildArgs {
-            schema: &schema,
-            plan: &plan,
-        })?,
-        &schema,
-        &plan,
-    )?;
-    check(Lancy::compile(&ir)?, &schema, &plan)?;
-    check(
-        query::build::<Llvm>(query::BuildArgs {
-            schema: &schema,
-            plan: &plan,
-        })?,
-        &schema,
-        &plan,
-    )?;
-    check(Llvm::compile(&ir)?, &schema, &plan)?;
-    check(
-        query::build::<Cranelift>(query::BuildArgs {
-            schema: &schema,
-            plan: &plan,
-        })?,
-        &schema,
-        &plan,
-    )
+    splice_testkit::each_backend!(B => {
+        check(
+            query::build::<B>(query::BuildArgs {
+                schema: &schema,
+                plan: &plan,
+            })?,
+            &schema,
+            &plan,
+        )?;
+        check(B::compile(&ir)?, &schema, &plan)?;
+    });
+    Ok(())
 }
 
 fn check<E: Executable>(
@@ -143,14 +143,14 @@ fn check<E: Executable>(
     schema: &Schema,
     plan: &Plan,
     slot: usize,
-) -> splice::Result<()> {
+) -> Result<(), Box<dyn std::error::Error>> {
     let aux = [9.0_f64];
     for values in [[-4, 7, 8, 3], [7, -1, 10, 22]] {
         let mut expected = [0; 4];
         let pair = if slot == 0 {
-            [BufferArg::Read(&values), BufferArg::ReadF64(&aux)]
+            [BufferArg::read(&values), BufferArg::read::<f64>(&aux)]
         } else {
-            [BufferArg::ReadF64(&aux), BufferArg::Read(&values)]
+            [BufferArg::read::<f64>(&aux), BufferArg::read(&values)]
         };
         let count = query(schema, plan, &mut expected, &pair);
         let mut actual = [0; 4];
@@ -167,16 +167,16 @@ fn check<E: Executable>(
     assert!(
         code.call(query::CallArgs {
             out: &mut out,
-            columns: &[BufferArg::ReadF64(&aux), BufferArg::ReadF64(&aux)],
+            columns: &[BufferArg::read::<f64>(&aux), BufferArg::read::<f64>(&aux)],
         })
         .is_err()
     );
     assert_eq!(out, [0]);
     let values = [100, 101];
     let columns = if slot == 0 {
-        [BufferArg::Read(&values), BufferArg::ReadF64(&aux)]
+        [BufferArg::read(&values), BufferArg::read::<f64>(&aux)]
     } else {
-        [BufferArg::ReadF64(&aux), BufferArg::Read(&values)]
+        [BufferArg::read::<f64>(&aux), BufferArg::read(&values)]
     };
     assert!(
         code.call(query::CallArgs {
@@ -190,8 +190,9 @@ fn check<E: Executable>(
 }
 
 #[test]
-fn sql_specialization_reads_the_selected_column_from_each_batch() -> splice::Result<()> {
-    let int = BufferKind::Read;
+fn sql_specialization_reads_the_selected_column_from_each_batch()
+-> Result<(), Box<dyn std::error::Error>> {
+    let int = BufferKind::READ_I32;
     let float = BufferKind::new(Element::F64, false);
     for (slot, val, layout) in [(0, 7, vec![int, float]), (1, 9, vec![float, int])] {
         let schema = Schema(layout);
@@ -199,54 +200,31 @@ fn sql_specialization_reads_the_selected_column_from_each_batch() -> splice::Res
             expr: Expr::Ge { col: slot, val },
         };
         let ir = query::ir(&schema, &plan)?;
-        let listing = query::build::<Text>(query::BuildArgs {
-            schema: &schema,
-            plan: &plan,
-        })?;
-        assert_eq!(listing.as_inner(), Text::compile(&ir)?.as_inner());
-        assert!(listing.contains(&format!(" = {val}\n")), "{listing}");
-        assert!(listing.contains("filter_ge"));
         assert!(
-            !query::build::<Text>(query::BuildArgs {
-                schema: &schema,
-                plan: &Plan::Empty
-            })?
-            .contains("filter_ge")
+            splice_testkit::instructions(&ir).any(|instruction| matches!(
+                instruction, Instr::Const(_, constant) if *constant == Constant::from(val)
+            )),
+            "{ir:?}"
         );
-        check(
-            query::build::<Lancy>(query::BuildArgs {
-                schema: &schema,
-                plan: &plan,
-            })?,
-            &schema,
-            &plan,
-            slot,
-        )?;
-        check(Lancy::compile(&ir)?, &schema, &plan, slot)?;
-        check(
-            query::build::<Llvm>(query::BuildArgs {
-                schema: &schema,
-                plan: &plan,
-            })?,
-            &schema,
-            &plan,
-            slot,
-        )?;
-        check(Llvm::compile(&ir)?, &schema, &plan, slot)?;
-        check(
-            query::build::<Cranelift>(query::BuildArgs {
-                schema: &schema,
-                plan: &plan,
-            })?,
-            &schema,
-            &plan,
-            slot,
-        )?;
+        assert!(calls(&ir, "filter_ge"));
+        assert!(!calls(&*query::ir(&schema, &Plan::Empty)?, "filter_ge"));
+        splice_testkit::each_backend!(B => {
+            check(
+                query::build::<B>(query::BuildArgs {
+                    schema: &schema,
+                    plan: &plan,
+                })?,
+                &schema,
+                &plan,
+                slot,
+            )?;
+            check(B::compile(&ir)?, &schema, &plan, slot)?;
+        });
     }
     Ok(())
 }
 
-#[kernel]
+#[kernel(print)]
 fn unchecked_query(
     #[comptime] col: usize,
     #[columns([BufferKind::new(Element::F64, false)])] columns: &[BufferArg<'_>],
@@ -256,20 +234,25 @@ fn unchecked_query(
 
 #[test]
 fn invalid_column_casts_return_build_errors() {
-    assert_eq!(
-        unchecked_query::ir(0).err().unwrap().to_string(),
-        "column 0 expects i32 elements"
+    let staging = |error: splice::BuildError, expected: &str| {
+        assert!(
+            matches!(&error, splice::BuildError::Staging(message) if message == expected),
+            "{error:?}"
+        );
+    };
+    staging(
+        unchecked_query::ir(0).err().unwrap(),
+        "column 0 expects i32 elements",
     );
-    assert_eq!(
+    staging(
         unchecked_query::build::<Lancy>(unchecked_query::BuildArgs { col: 1 })
             .err()
-            .unwrap()
-            .to_string(),
-        "unknown column 1"
+            .unwrap(),
+        "unknown column 1",
     );
-    assert_eq!(
+    staging(
         unchecked_query::print(0).unwrap_err(),
-        "column 0 expects i32 elements"
+        "column 0 expects i32 elements",
     );
-    assert_eq!(unchecked_query::print(1).unwrap_err(), "unknown column 1");
+    staging(unchecked_query::print(1).unwrap_err(), "unknown column 1");
 }

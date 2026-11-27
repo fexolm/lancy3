@@ -1,0 +1,33 @@
+error: expected `print` or `crate = path`, each at most once
+ --> tests/ui/kernel_options.rs:3:10
+  |
+3 | #[kernel(fast)]
+  |          ^^^^
+
+error: expected `print` or `crate = path`, each at most once
+ --> tests/ui/kernel_options.rs:8:17
+  |
+8 | #[kernel(print, print)]
+  |                 ^^^^^
+
+error: expected `print` or `crate = path`, each at most once
+  --> tests/ui/kernel_options.rs:14:10
+   |
+14 | #[kernel(rust)]
+   |          ^^^^
+
+error: #[kernel(print)] publishes `print` for a free function
+  --> tests/ui/kernel_options.rs:22:1
+   |
+22 | / impl Unit {
+23 | |     fn two() -> i32 {
+24 | |         2
+25 | |     }
+26 | | }
+   | |_^
+
+error[E0425]: cannot find function `print` in module `unprinted`
+  --> tests/ui/kernel_options.rs:35:24
+   |
+35 |     let _ = unprinted::print();
+   |                        ^^^^^ not found in `unprinted`

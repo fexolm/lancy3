@@ -155,7 +155,7 @@ pub(super) fn convert_branches(f: &mut Function, cfg: &ControlFlowGraph) -> bool
         if ty == Type::Ptr || second.is_some() {
             continue;
         }
-        let select = if matches!(ty, Type::Vector(_)) {
+        let cond = if matches!(ty, Type::Vector(_)) {
             // Branches test nonzero; SIMD selects test the sign bit per lane.
             let zero = f.append(block, Op::Const(0)).unwrap();
             let truth = f.append(block, Op::Bin(Binary::Ne, cond, zero)).unwrap();
@@ -165,12 +165,13 @@ pub(super) fn convert_branches(f: &mut Function, cfg: &ControlFlowGraph) -> bool
             } else {
                 f.append(block, Op::Cast(mask_type, truth)).unwrap()
             };
-            let mask = f.append(block, Op::Simd(Simd::Splat(mask))).unwrap();
-            Op::Simd(Simd::Ternary(Ternary::Select, mask, x, y))
+            f.append(block, Op::Simd(Simd::Splat(mask))).unwrap()
         } else {
-            Op::Ternary(Ternary::Select, cond, x, y)
+            cond
         };
-        args[index] = f.append(block, select).unwrap();
+        args[index] = f
+            .append(block, Op::Ternary(Ternary::Select, cond, x, y))
+            .unwrap();
         f.jump(block, target, &args);
         changed = true;
     }

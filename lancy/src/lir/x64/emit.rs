@@ -1,36 +1,73 @@
 //! Emit the allocated stream including regalloc2's ordered edge and spill moves.
-use super::{Features, inst::class, inst::simd};
+use super::{Cpu, Machine, abi::Abi, inst::class, inst::simd};
 use super::{
     compile::{CompiledFunction, compile},
     frame::{CHILD_ARGS, Frame},
-    inst::{Address, Alu, Cond, Inst, Quotient, Rhs, SelectCond, VectorMask},
+    inst::{
+        Address, Cond, Expansion, Inst, MaskSelect, NativeInst, Quotient, Rhs, SelectCond,
+        int::{self, Src},
+    },
 };
-use crate::hir::operation::Action;
+use crate::lir::regalloc::Allocations;
 use crate::{
-    CompileError,
-    hir::{Binary, Function, Type, ssa::VerifiedBody},
-    jit::{DebugFrame, DebugFunction},
-    lir::layout,
-    module::{FunctionId, FunctionIds, Module},
+    CompileError, Limit, Trap,
+    debug::{FrameInfo, FunctionInfo, Point},
+    hir::{Binary, Type, ssa::VerifiedBody},
+    lir::{Stage, Stages, layout},
+    module::{FunctionId, Module},
     support::slotmap::DenseMap,
 };
-use iced_x86::{BlockEncoderOptions, IcedError, code_asm::*};
+use iced_x86::{BlockEncoder, BlockEncoderOptions, IcedError, InstructionBlock, code_asm::*};
 use regalloc2::RegClass;
 use regalloc2::{Allocation, Edit, Function as _, InstOrEdit, VReg};
 use simd::{K, XMM, YMM, ZMM, opmask};
+use std::collections::HashMap;
 
-pub(super) type Constants = Vec<(CodeLabel, [u8; 64], usize)>;
-type AsmResult = Result<(), IcedError>;
-
-fn allocate_mask(mask: VectorMask<VReg>, regs: &[Allocation]) -> (VectorMask<usize>, usize) {
-    let mut next = 0;
-    let mask = mask.map(|_| {
-        let reg = gpr(regs[next]);
-        next += 1;
-        reg
-    });
-    (mask, next)
+/// The module's constant pool, emitted after the code (X64-16). Equal
+/// constants share one entry. Entries are written widest first, so each
+/// starts at a multiple of its size from the pool's start.
+#[derive(Default)]
+pub(super) struct Constants {
+    labels: HashMap<([u8; 64], usize), CodeLabel>,
+    entries: Vec<(CodeLabel, [u8; 64], usize)>,
 }
+
+impl Constants {
+    /// The label of the first `size` bytes of `bits`.
+    pub(super) fn label(
+        &mut self,
+        a: &mut CodeAssembler,
+        bits: [u8; 64],
+        size: usize,
+    ) -> CodeLabel {
+        let mut key = [0; 64];
+        key[..size].copy_from_slice(&bits[..size]);
+        *self.labels.entry((key, size)).or_insert_with(|| {
+            let label = a.create_label();
+            self.entries.push((label, key, size));
+            label
+        })
+    }
+
+    #[cfg(all(test, target_arch = "x86_64"))]
+    pub(super) fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    /// Write the pool; its size in bytes.
+    pub(super) fn emit(mut self, a: &mut CodeAssembler) -> Result<usize, IcedError> {
+        self.entries
+            .sort_by_key(|&(_, _, size)| std::cmp::Reverse(size));
+        let mut bytes = 0;
+        for (label, bits, size) in self.entries {
+            bind(a, label)?;
+            a.db(&bits[..size])?;
+            bytes += size;
+        }
+        Ok(bytes)
+    }
+}
+type AsmResult = Result<(), IcedError>;
 
 pub(super) const R64: [AsmRegister64; 16] = [
     rax, rcx, rdx, rbx, rsp, rbp, rsi, rdi, r8, r9, r10, r11, r12, r13, r14, r15,
@@ -45,9 +82,6 @@ pub(super) const R8: [AsmRegister8; 16] = [
     al, cl, dl, bl, spl, bpl, sil, dil, r8b, r9b, r10b, r11b, r12b, r13b, r14b, r15b,
 ];
 
-fn gpr(a: Allocation) -> usize {
-    a.as_reg().expect("register-constrained operand").hw_enc()
-}
 // Compilation bounds both the complete workspace and root argument table by disp32.
 fn disp(index: usize) -> i32 {
     (index * 8) as i32
@@ -61,36 +95,55 @@ impl Frame {
         slot(self.spill_base + a.as_stack().expect("allocated spill").index())
     }
 
-    fn emit_move(&self, a: &mut CodeAssembler, from: Allocation, to: Allocation) -> AsmResult {
+    /// An integer operand where it was allocated: x86's r/m operand can
+    /// read a spilled value directly.
+    fn source(&self, allocs: Allocations, rhs: Rhs) -> Src {
+        match rhs {
+            Rhs::Imm(n) => Src::Imm(n),
+            Rhs::Reg(v) => match allocs.get(v) {
+                at if at.is_stack() => Src::Mem(self.spill(at)),
+                at => Src::Reg(at.as_reg().expect("allocated register").hw_enc()),
+            },
+        }
+    }
+
+    fn emit_move(
+        &self,
+        machine: &Machine,
+        a: &mut CodeAssembler,
+        from: Allocation,
+        to: Allocation,
+    ) -> AsmResult {
         if from == to {
             return Ok(());
         }
+        let (cpu, bytes) = (machine.cpu, machine.register_bytes);
         match (from.as_reg(), to.as_reg()) {
             (Some(s), Some(d)) if s.class() == RegClass::Vector => {
-                simd::copy(a, d.hw_enc(), s.hw_enc(), Features::host().bytes)
+                simd::copy(a, d.hw_enc(), s.hw_enc(), bytes)
             }
             (Some(s), None) if s.class() == RegClass::Vector => {
-                simd::store(a, self.spill(to), s.hw_enc(), Features::host().bytes)
+                simd::store(a, self.spill(to), s.hw_enc(), bytes)
             }
             (None, Some(d)) if d.class() == RegClass::Vector => {
-                simd::load(a, d.hw_enc(), self.spill(from), Features::host().bytes)
+                simd::load(a, d.hw_enc(), self.spill(from), bytes)
             }
             (Some(s), Some(d)) if s.class() == RegClass::Float => {
-                if Features::host().bw {
+                if cpu.isa.bw {
                     a.kmovq(K[d.hw_enc()], K[s.hw_enc()])
                 } else {
                     a.kmovw(K[d.hw_enc()], K[s.hw_enc()])
                 }
             }
             (Some(s), None) if s.class() == RegClass::Float => {
-                if Features::host().bw {
+                if cpu.isa.bw {
                     a.kmovq(self.spill(to), K[s.hw_enc()])
                 } else {
                     a.kmovw(word_ptr(self.spill(to)), K[s.hw_enc()])
                 }
             }
             (None, Some(d)) if d.class() == RegClass::Float => {
-                if Features::host().bw {
+                if cpu.isa.bw {
                     a.kmovq(K[d.hw_enc()], self.spill(from))
                 } else {
                     a.kmovw(K[d.hw_enc()], word_ptr(self.spill(from)))
@@ -113,29 +166,25 @@ pub(super) fn bind(a: &mut CodeAssembler, mut label: CodeLabel) -> AsmResult {
 
 pub(crate) struct Code {
     pub bytes: Vec<u8>,
-    #[cfg(test)]
+    /// The instructions end here; the constant pool follows.
     pub text_len: usize,
     pub words: usize,
-    pub debug: Vec<DebugFunction>,
+    pub debug: Vec<FunctionInfo>,
+    pub sites: crate::lir::Sites,
 }
 
 pub(crate) fn emit(
+    target: &splice_target::Target,
     source: Module<VerifiedBody<'_>>,
-    ids: &FunctionIds<Function>,
+    debug: bool,
+    stages: Stages<'_>,
 ) -> Result<Code, CompileError> {
-    emit_mode(&compile(source, ids)?, false)
-}
-
-pub(crate) fn emit_debug(
-    source: Module<VerifiedBody<'_>>,
-    ids: &FunctionIds<Function>,
-) -> Result<Code, CompileError> {
-    emit_mode(&compile(source, ids)?, true)
-}
-
-#[cfg(test)]
-pub(super) fn emit_compiled(module: &Module<CompiledFunction>) -> Result<Code, CompileError> {
-    emit_mode(module, false)
+    let module = compile(Machine::new(target), source, stages)?;
+    let root = &module.functions[module.call_graph.root()].body;
+    stages(Stage::Layout(&|| layout::listing(root)));
+    let code = assemble(&module, debug)?;
+    stages(Stage::Assemble(&code.bytes[..code.text_len]));
+    Ok(code)
 }
 
 // The encoder translates these instruction indices after shortening branches.
@@ -145,17 +194,39 @@ fn position(a: &mut CodeAssembler) -> Result<u64, IcedError> {
     Ok(index)
 }
 
-fn emit_mode(module: &Module<CompiledFunction>, debug: bool) -> Result<Code, CompileError> {
-    let _span = tracing::debug_span!(target: "splice::compile", "emit_machine_code").entered();
+/// An assembly failure: either a limit of the target or an encoder error,
+/// which can only be a Lancy defect.
+enum Failure {
+    Assembly(IcedError),
+    Limit(Limit),
+}
+
+impl From<IcedError> for Failure {
+    fn from(error: IcedError) -> Self {
+        Self::Assembly(error)
+    }
+}
+
+impl From<Failure> for CompileError {
+    fn from(failure: Failure) -> Self {
+        match failure {
+            Failure::Assembly(error) => Self::internal(error),
+            Failure::Limit(limit) => limit.into(),
+        }
+    }
+}
+
+fn assemble(module: &Module<CompiledFunction>, debug: bool) -> Result<Code, Failure> {
+    let _span = tracing::debug_span!(target: "lancy::compile", "emit_machine_code").entered();
     let entry = module.call_graph.root();
     let mut a = CodeAssembler::new(64)?;
     let entries = DenseMap::from_fn(module.functions.len(), |_| a.create_label());
     let epilogue = a.create_label();
     a.endbr64()?;
-    // Windows passes (argv, workspace) in RCX/RDX; SysV uses RDI/RSI.
-    // The allocator models argv's incoming register. R11 is reserved.
-    a.mov(r11, if cfg!(windows) { rdx } else { rsi })?;
+    // The entry receives (argv, workspace) in the first two argument
+    // registers. The allocator models argv's incoming register. R11 is reserved.
     let root = &module.functions[entry];
+    a.mov(r11, R64[root.body.machine().abi.args[1].hw_enc()])?;
     let saved = root.saved;
     let words: usize = saved.into_iter().map(super::frame::save_words).sum();
     let saves = || {
@@ -174,8 +245,14 @@ fn emit_mode(module: &Module<CompiledFunction>, debug: bool) -> Result<Code, Com
             a.mov(mem, R64[reg.hw_enc()])?;
         }
     }
+    // AVX code leaves the upper vector state dirty; the host's SSE code
+    // would pay a transition or a false dependency for it (X64-02).
+    let avx = root.body.machine().cpu.isa.avx;
     let restore = |a: &mut CodeAssembler| {
         bind(a, epilogue)?;
+        if avx {
+            a.vzeroupper()?;
+        }
         for (mem, reg) in saves() {
             if reg.class() == RegClass::Vector {
                 simd::load(a, reg.hw_enc(), mem, 16)?;
@@ -185,7 +262,8 @@ fn emit_mode(module: &Module<CompiledFunction>, debug: bool) -> Result<Code, Com
         }
         a.ret()
     };
-    let mut constants = Vec::new();
+    let mut constants = Constants::default();
+    let mut sites = crate::lir::Sites::default();
     let mut debug_functions = Vec::new();
     // The root (last in postorder) follows the native entry prologue.
     for (id, machine) in module.functions.iter().rev() {
@@ -194,15 +272,18 @@ fn emit_mode(module: &Module<CompiledFunction>, debug: bool) -> Result<Code, Com
         let start = if debug { position(&mut a)? } else { 0 };
         let mut points = Vec::new();
         Emitter {
+            cpu: machine.body.machine().cpu,
+            abi: machine.body.machine().abi,
             a: &mut a,
             machine,
             constants: &mut constants,
             root: is_root,
             entries: &entries,
             epilogue,
-            failures: [None; 5],
+            exits: Exits::default(),
             debug,
             points: &mut points,
+            sites: &mut sites,
         }
         .function()?;
         if debug {
@@ -232,14 +313,12 @@ fn emit_mode(module: &Module<CompiledFunction>, debug: bool) -> Result<Code, Com
             } else {
                 (16, vec![(16, -16), (11, -8)], Vec::new())
             };
-            debug_functions.push(DebugFunction {
-                start,
-                end,
-                workspace_offset: machine.frame.debug_base * 8,
+            debug_functions.push(FunctionInfo {
+                code: start..end,
+                slots: machine.frame.debug_base * 8,
                 points,
-                frame: DebugFrame {
-                    start,
-                    end: frame_end,
+                frame: FrameInfo {
+                    code: start..frame_end,
                     cfa_from_sp: cfa,
                     saved,
                     workspace_saved,
@@ -250,27 +329,29 @@ fn emit_mode(module: &Module<CompiledFunction>, debug: bool) -> Result<Code, Com
     if !debug {
         restore(&mut a)?;
     }
-    #[cfg(test)]
-    let pool_bytes: usize = constants.iter().map(|(_, _, size)| size).sum();
-    for (label, bits, size) in constants {
-        bind(&mut a, label)?;
-        a.db(&bits[..size])?;
-    }
+    let pool_bytes = constants.emit(&mut a)?;
     let options = if debug {
         BlockEncoderOptions::RETURN_NEW_INSTRUCTION_OFFSETS
     } else {
         0
     };
-    let assembly = a.assemble_options(0, options)?.inner;
+    let mut instructions = a.take_instructions();
+    if avx {
+        for instruction in &mut instructions {
+            if let Some(vex) = super::vex::encode(instruction) {
+                *instruction = vex;
+            }
+        }
+    }
+    let assembly = BlockEncoder::encode(64, InstructionBlock::new(&instructions, 0), options)?;
     if debug {
         let offset = |index: u64| u64::from(assembly.new_instruction_offsets[index as usize]);
         for (i, f) in debug_functions.iter_mut().enumerate() {
-            f.start = if i == 0 { 0 } else { offset(f.start) };
-            f.end = offset(f.end);
-            f.frame.start = offset(f.frame.start);
-            f.frame.end = offset(f.frame.end);
-            for (_, at) in &mut f.points {
-                *at = offset(*at);
+            let start = if i == 0 { 0 } else { offset(f.code.start) };
+            f.code = start..offset(f.code.end);
+            f.frame.code = offset(f.frame.code.start)..offset(f.frame.code.end);
+            for point in &mut f.points {
+                point.offset = offset(point.offset);
             }
         }
     }
@@ -278,30 +359,49 @@ fn emit_mode(module: &Module<CompiledFunction>, debug: bool) -> Result<Code, Com
     // Executable::new may install at any address. All label references must
     // fit RIP-relative addressing, including the LEA for each continuation.
     if bytes.len() > i32::MAX as usize {
-        return Err(CompileError::BranchOutOfRange {
-            offset: 0,
-            target: bytes.len(),
-        });
+        return Err(Failure::Limit(Limit::CodeSize { bytes: bytes.len() }));
     }
     Ok(Code {
-        #[cfg(test)]
         text_len: bytes.len() - pool_bytes,
         bytes,
         words: root.workspace,
         debug: debug_functions,
+        sites,
     })
 }
 
+/// Side exits of one function, created on first use and emitted at its end.
+#[derive(Default)]
+struct Exits {
+    /// Indexed by `Trap::code() - 1`.
+    traps: [Option<CodeLabel>; Trap::ALL.len()],
+    /// The shared tail: report the trap code held in R10D.
+    report: Option<CodeLabel>,
+}
+
+impl Exits {
+    fn trap(&mut self, a: &mut CodeAssembler, trap: Trap) -> CodeLabel {
+        *self.traps[trap.code() as usize - 1].get_or_insert_with(|| a.create_label())
+    }
+
+    fn report(&mut self, a: &mut CodeAssembler) -> CodeLabel {
+        *self.report.get_or_insert_with(|| a.create_label())
+    }
+}
+
 struct Emitter<'a> {
+    cpu: Cpu,
+    abi: &'static Abi,
     constants: &'a mut Constants,
     a: &'a mut CodeAssembler,
     machine: &'a CompiledFunction,
     root: bool,
     entries: &'a DenseMap<FunctionId, CodeLabel>,
     epilogue: CodeLabel,
-    failures: [Option<CodeLabel>; 5],
+    exits: Exits,
     debug: bool,
-    points: &'a mut Vec<(u32, u64)>,
+    points: &'a mut Vec<Point>,
+    sites: &'a mut crate::lir::Sites,
 }
 
 impl Emitter<'_> {
@@ -316,11 +416,14 @@ impl Emitter<'_> {
             bind(self.a, labels[b.index()])?;
             for op in self.machine.allocation.block_insts_and_edits(body, b) {
                 match op {
-                    InstOrEdit::Edit(&Edit::Move { from, to }) => {
-                        self.machine.frame.emit_move(self.a, from, to)?
-                    }
+                    InstOrEdit::Edit(&Edit::Move { from, to }) => self.machine.frame.emit_move(
+                        self.machine.body.machine(),
+                        self.a,
+                        from,
+                        to,
+                    )?,
                     InstOrEdit::Inst(j) => {
-                        let allocs = self.machine.allocation.inst_allocs(j);
+                        let allocs = Allocations::of(body, &self.machine.allocation, j);
                         match body.insts()[j.index()] {
                             Inst::Jump => {
                                 let target = body.block_succs(b)[0].index();
@@ -334,33 +437,37 @@ impl Emitter<'_> {
                             | Inst::BrCmp(..)) => {
                                 let succ = body.block_succs(b);
                                 let (yes, no) = (succ[0].index(), succ[1].index());
-                                let condition = if let Inst::BranchAny(mask) = inst {
-                                    simd::test_vector_mask(
-                                        self.a,
-                                        super::Features::host(),
-                                        allocate_mask(mask, allocs).0,
-                                    )?;
-                                    Cond::Ne
-                                } else if let Inst::BranchAll(lane, mask) = inst {
-                                    let cpu = Features::host();
-                                    if mask.class() == RegClass::Float {
-                                        opmask::test_all(self.a, cpu, lane, gpr(allocs[0]))?;
-                                    } else {
-                                        simd::test_all(self.a, cpu, lane, gpr(allocs[0]))?;
+                                let condition = match inst {
+                                    Inst::BranchAny(mask) => {
+                                        let mask = mask.map(|v| allocs.reg(v));
+                                        simd::test_vector_mask(self.a, self.cpu, mask)?;
+                                        Cond::Ne
                                     }
-                                    Cond::Eq
-                                } else if let Inst::BrCmp(cc, _, rhs) = inst {
-                                    cmp(self.a, &self.machine.frame, allocs, rhs)?;
-                                    cc
-                                } else {
-                                    let r = R32[gpr(allocs[0])];
-                                    self.a.test(r, r)?;
-                                    Cond::Ne
+                                    Inst::BranchAll(lane, mask) => {
+                                        let (cpu, mask_reg) = (self.cpu, allocs.reg(mask));
+                                        if mask.class() == RegClass::Float {
+                                            opmask::test_all(self.a, cpu, lane, mask_reg)?;
+                                        } else {
+                                            simd::test_all(self.a, cpu, lane, mask_reg)?;
+                                        }
+                                        Cond::Eq
+                                    }
+                                    Inst::BrCmp(cc, bytes, lhs, rhs) => {
+                                        let src = self.machine.frame.source(allocs, rhs);
+                                        int::compare(self.a, bytes, allocs.reg(lhs), src)?;
+                                        cc
+                                    }
+                                    Inst::Branch(v) => {
+                                        let r = R32[allocs.reg(v)];
+                                        self.a.test(r, r)?;
+                                        Cond::Ne
+                                    }
+                                    _ => unreachable!("matched as a branch"),
                                 };
                                 if Some(yes) == next {
-                                    jcc(self.a, condition.inverse(), labels[no])?;
+                                    condition.inverse().jump(self.a, labels[no])?;
                                 } else {
-                                    jcc(self.a, condition, labels[yes])?;
+                                    condition.jump(self.a, labels[yes])?;
                                     if Some(no) != next {
                                         self.a.jmp(labels[no])?;
                                     }
@@ -372,356 +479,355 @@ impl Emitter<'_> {
                 }
             }
         }
-        for (i, label) in self.failures.into_iter().enumerate() {
-            if let Some(label) = label {
-                bind(self.a, label)?;
-                // A trap can bypass every internal continuation. Recover the
-                // root workspace, report through the live status pointer
-                // supplied by ScalarKernel::invoke, and restore the host ABI.
-                if !self.root {
-                    if self.debug {
-                        self.a.mov(r10, slot(1))?;
-                        self.a.mov(r10, qword_ptr(r10))?;
-                        self.a.mov(dword_ptr(r10), (i + 1) as i32)?;
-                        self.a.xor(eax, eax)?;
-                        self.a.ret()?;
-                        continue;
-                    }
-                    self.a.mov(r11, slot(1))?;
-                }
-                self.a.mov(r10, slot(0))?;
-                self.a.mov(dword_ptr(r10), (i + 1) as i32)?;
-                self.a.xor(eax, eax)?;
-                self.a.jmp(self.epilogue)?;
+        let Exits { traps, report } = self.exits;
+        let mut report = report;
+        for (trap, exit) in Trap::ALL.into_iter().zip(traps) {
+            if let Some(exit) = exit {
+                bind(self.a, exit)?;
+                self.a.mov(r10d, trap.code())?;
+                let tail = match report {
+                    Some(tail) => tail,
+                    None => *report.insert(self.a.create_label()),
+                };
+                self.a.jmp(tail)?;
             }
+        }
+        if let Some(report) = report {
+            bind(self.a, report)?;
+            // A trap can bypass every internal continuation. Recover the
+            // root workspace, report the code in R10D through the live status
+            // pointer supplied by Kernel::invoke, and restore the host ABI.
+            if !self.root {
+                if self.debug {
+                    self.a.mov(rax, slot(1))?;
+                    self.a.mov(rax, qword_ptr(rax))?;
+                    self.a.mov(dword_ptr(rax), r10d)?;
+                    self.a.xor(eax, eax)?;
+                    self.a.ret()?;
+                    return Ok(());
+                }
+                self.a.mov(r11, slot(1))?;
+            }
+            self.a.mov(rax, slot(0))?;
+            self.a.mov(dword_ptr(rax), r10d)?;
+            self.a.xor(eax, eax)?;
+            self.a.jmp(self.epilogue)?;
         }
         Ok(())
     }
 
-    fn lanes(
-        &mut self,
-        action: Action,
-        input: Type,
-        output: Type,
-        args: [Option<Type>; 3],
-        allocs: &[Allocation],
-    ) -> AsmResult {
-        use super::inst::lanes::{self, FRAME, INPUT, OUTPUT, WORKSPACE};
-        let a = &mut self.a;
-        a.sub(rsp, FRAME)?;
-        a.mov(qword_ptr(rsp + WORKSPACE), r11)?;
-        let mut allocs = allocs.iter().copied();
-        for (arg, offset) in args.into_iter().zip(INPUT) {
-            if let Some(ty) = arg {
-                store(a, ty, ptr(rsp + offset), gpr(allocs.next().unwrap()))?;
+    /// Call `lir::fallback` with the area below the Win64 shadow space and
+    /// report its trap code. Every generated frame enters with RSP 8 mod 16.
+    fn fallback(&mut self, expansion: Expansion, allocs: Allocations) -> AsmResult {
+        let Expansion {
+            action,
+            input,
+            output,
+            dst,
+            args,
+        } = expansion;
+        use crate::lir::fallback::{AREA_BYTES, RESULT, SLOT_BYTES, Site, entry};
+        let (width, abi) = (self.cpu.bytes, self.abi);
+        let area = abi.shadow;
+        let saved = area + AREA_BYTES as i32;
+        let frame = saved + 8;
+        let types = args.map(|arg| arg.map(|(ty, _)| ty));
+        let site = self
+            .sites
+            .add(Site::new(action, input, output, types, width));
+        let a = &mut *self.a;
+        a.sub(rsp, frame)?;
+        a.mov(qword_ptr(rsp + saved), r11)?;
+        for (i, arg) in args.into_iter().enumerate() {
+            if let Some((ty, v)) = arg {
+                let at = ptr(rsp + area + (i * SLOT_BYTES) as i32);
+                store(a, width, ty, at, allocs.reg(v))?;
             }
         }
-        let mut faults = [None; 3];
-        lanes::emit(a, action, input, output, &mut faults)?;
-        load(a, output, gpr(allocs.next().unwrap()), ptr(rsp + OUTPUT))?;
-        a.mov(r11, qword_ptr(rsp + WORKSPACE))?;
-        a.add(rsp, FRAME)?;
-        if faults.iter().any(Option::is_some) {
-            let done = a.create_label();
-            a.jmp(done)?;
-            for (i, local) in faults.into_iter().enumerate() {
-                if let Some(label) = local {
-                    bind(a, label)?;
-                    a.mov(r11, qword_ptr(rsp + WORKSPACE))?;
-                    a.add(rsp, FRAME)?;
-                    let fail = *self.failures[i].get_or_insert_with(|| a.create_label());
-                    a.jmp(fail)?;
-                }
-            }
-            bind(a, done)?;
+        let [site_arg, area_arg] = [0, 1].map(|i| R64[abi.args[i].hw_enc()]);
+        a.mov(site_arg, site)?;
+        a.lea(area_arg, ptr(rsp + area))?;
+        a.mov(r10, entry())?;
+        if self.cpu.isa.avx {
+            a.vzeroupper()?;
         }
-        Ok(())
+        a.call(r10)?;
+        // The result register may be RAX: keep the code in R10D.
+        a.mov(r10d, eax)?;
+        let result = ptr(rsp + area + RESULT as i32);
+        load(a, width, output, allocs.reg(dst), result)?;
+        a.mov(r11, qword_ptr(rsp + saved))?;
+        a.add(rsp, frame)?;
+        let report = self.exits.report(a);
+        a.test(r10d, r10d)?;
+        a.jne(report)
     }
 
-    fn instruction(&mut self, inst: Inst, allocs: &[Allocation]) -> AsmResult {
+    fn instruction(&mut self, inst: Inst, allocs: Allocations) -> AsmResult {
+        let (cpu, abi) = (self.cpu, self.abi);
+        let width = cpu.bytes;
         let a = &mut *self.a;
         let frame = &self.machine.frame;
-        let reg = |i: usize| gpr(allocs[i]);
-        let r = |i| R32[reg(i)];
-        let q = |i| R64[reg(i)];
-        // x86's r/m operand can directly consume a spilled RHS.
-        macro_rules! rm32 {
-            ($op:ident, $lhs:expr, $index:expr) => {{
-                let rhs = allocs[$index];
-                if let Some(p) = rhs.as_reg() {
-                    a.$op($lhs, R32[p.hw_enc()])
-                } else {
-                    a.$op(
-                        $lhs,
-                        dword_ptr(r11 + disp(frame.spill_base + rhs.as_stack().unwrap().index())),
-                    )
-                }
-            }};
-        }
+        let details = self.machine.body.details();
+        let reg = |v: VReg| allocs.reg(v);
+        let r = |v| R32[reg(v)];
+        let q = |v| R64[reg(v)];
         match inst {
             Inst::Argv(_) | Inst::Copy(..) => Ok(()), // incoming fixed def / tied operands
             Inst::LoadArg {
-                argv: Some(_),
+                argv: Some(argv),
+                dst,
                 ty,
                 index,
-                ..
-            } => load(a, ty, reg(1), ptr(q(0) + disp(index))),
+            } => load(a, width, ty, reg(dst), ptr(q(argv) + disp(index))),
             Inst::LoadArg {
                 argv: None,
+                dst,
                 ty,
                 index,
-                ..
-            } => load(a, ty, reg(0), slot(CHILD_ARGS + index)),
-            Inst::Native(native, ..) => {
-                let mut regs = [0; 10];
-                for (dst, &loc) in regs.iter_mut().zip(allocs) {
-                    *dst = gpr(loc);
-                }
-                let (operands, temps) =
-                    regs[..allocs.len()].split_at(allocs.len() - native.temporaries());
-                native.emit_allocated(a, operands, temps, Some(self.constants))
+            } => load(a, width, ty, reg(dst), slot(CHILD_ARGS + index)),
+            Inst::Native(id) => {
+                let NativeInst {
+                    native,
+                    dst,
+                    args,
+                    temps,
+                } = details.natives[id];
+                let operands: Vec<usize> =
+                    args.into_iter().flatten().chain([dst]).map(reg).collect();
+                let temps: Vec<usize> = temps.into_iter().flatten().map(reg).collect();
+                native.emit_allocated(a, &operands, &temps, self.constants)
             }
-            Inst::ExtractLane(lane, _, _, index) => simd::packed::rearrange::extract_lane(
-                a,
-                Features::host(),
-                lane,
-                reg(1),
-                reg(0),
-                index,
-            ),
-            Inst::ShiftDwords(_, _, count) => simd::packed::rearrange::shift_dwords(
-                a,
-                Features::host().bytes,
-                reg(1),
-                reg(0),
-                count,
-            ),
-            Inst::PairedShuffle(form, ..) => form.emit(
-                a,
-                self.constants,
-                Features::host().bytes,
-                [reg(2), reg(0), reg(1)],
-            ),
-            Inst::DwordLane {
+            Inst::ExtractLane(lane, dst, src, index) => {
+                simd::packed::rearrange::extract_lane(a, cpu, lane, reg(dst), reg(src), index)
+            }
+            Inst::ShiftDwords(dst, src, count) => {
+                simd::packed::rearrange::shift_dwords(a, width, reg(dst), reg(src), count)
+            }
+            Inst::PairedShuffle(form, dst, x, y) => {
+                form.emit(a, self.constants, width, [reg(dst), reg(x), reg(y)])
+            }
+            Inst::DynamicLane {
                 lane,
                 checked,
+                dst,
+                value,
+                index,
                 replacement,
                 temp,
-                ..
             } => {
-                let width = Features::host().bytes;
                 if checked {
-                    let fail = *self.failures[0].get_or_insert_with(|| a.create_label());
-                    a.cmp(r(1), (width / 4) as i32)?;
+                    let fail = self.exits.trap(a, Trap::Bounds);
+                    a.cmp(r(index), (width / lane.bytes()) as i32)?;
                     a.jae(fail)?;
                 }
-                let registers = [reg(2 + usize::from(replacement.is_some())), reg(0), reg(1)];
-                if replacement.is_some() {
+                let registers = [reg(dst), reg(value), reg(index)];
+                if lane.bytes() != 4 {
+                    // Through a vector of stack below RSP, addressed by lane.
+                    let scalar = lane.scalar();
+                    let at = ptr(rsp + r10 * lane.bytes() as i32);
+                    a.mov(r10d, r(index))?;
+                    a.sub(rsp, width as i32)?;
+                    store(a, width, Type::Vector(lane), ptr(rsp), reg(value))?;
+                    if let Some(replacement) = replacement {
+                        store(a, width, scalar, at, reg(replacement))?;
+                        load(a, width, Type::Vector(lane), reg(dst), ptr(rsp))?;
+                    } else {
+                        load(a, width, scalar, reg(dst), at)?;
+                    }
+                    a.add(rsp, width as i32)
+                } else if let Some(replacement) = replacement {
                     simd::packed::rearrange::insert_dword(
                         a,
                         self.constants,
                         width,
                         lane,
                         registers,
-                        reg(2),
-                        temp.map(|_| reg(4)),
+                        reg(replacement),
+                        temp.map(reg),
                     )
                 } else {
-                    simd::packed::rearrange::extract_dword(a, width, lane, registers)
+                    simd::packed::rearrange::extract_dword(
+                        a,
+                        self.constants,
+                        width,
+                        lane,
+                        registers,
+                        temp.map(reg),
+                    )
                 }
             }
-            Inst::VectorShiftImm(kind, lane, _, _, count) => {
-                simd::packed::integer::shift_dword_bits(
-                    a,
-                    Features::host(),
-                    kind,
-                    lane,
-                    reg(1),
-                    reg(0),
-                    count,
-                )
+            Inst::VectorShiftImm(kind, lane, dst, src, count) => {
+                let (dst, src) = (reg(dst), reg(src));
+                simd::packed::integer::shift_dword_bits(a, cpu, kind, lane, dst, src, count)
             }
-            Inst::Lanes {
-                action,
-                input,
-                output,
-                args,
-                ..
-            } => self.lanes(
-                action,
-                input,
-                output,
-                args.map(|arg| arg.map(|(ty, _)| ty)),
-                allocs,
-            ),
-            Inst::Literal(l, bits, _) => match l.bytes() {
+            Inst::Fallback(id) => self.fallback(details.expansions[id], allocs),
+            Inst::Literal(l, bits, dst) => match l.bytes() {
                 16 => {
-                    let label = a.create_label();
                     let mut data = [0; 64];
                     data[..16].copy_from_slice(&bits.to_le_bytes());
-                    self.constants.push((label, data, 16));
-                    simd::load(a, reg(0), ptr(label), 16)
+                    let label = self.constants.label(a, data, 16);
+                    simd::load(a, reg(dst), ptr(label), 16)
                 }
                 8 if l.float() => {
                     a.mov(r10, bits as u64)?;
-                    a.movq(simd::XMM[reg(0)], r10)
+                    a.movq(simd::XMM[reg(dst)], r10)
                 }
                 4 if l.float() => {
                     a.mov(r10d, bits as u32)?;
-                    a.movd(simd::XMM[reg(0)], r10d)
+                    a.movd(simd::XMM[reg(dst)], r10d)
                 }
-                8 => a.mov(q(0), bits as u64),
-                size => a.mov(r(0), (bits & (u128::MAX >> (128 - size * 8))) as u32),
+                8 => a.mov(q(dst), bits as u64),
+                size => a.mov(r(dst), (bits & (u128::MAX >> (128 - size * 8))) as u32),
             },
-            Inst::Iota(l, _) => {
-                let label = a.create_label();
-                let width = Features::host().bytes;
+            Inst::Iota(l, dst) => {
                 let bits = super::super::constants::iota_bytes(l, width);
-                self.constants.push((label, bits, width));
-                simd::load(a, reg(0), ptr(label), width)
+                let label = self.constants.label(a, bits, width);
+                simd::load(a, reg(dst), ptr(label), width)
             }
-            Inst::BitMove(from, to, ..) => match (class(to), from.bytes(Features::host().bytes)) {
-                (RegClass::Vector, 4) => a.movd(simd::XMM[reg(1)], r(0)),
-                (RegClass::Vector, 8) => a.movq(simd::XMM[reg(1)], q(0)),
-                (RegClass::Int, 4) => a.movd(r(1), simd::XMM[reg(0)]),
-                (RegClass::Int, 8) => a.movq(q(1), simd::XMM[reg(0)]),
+            Inst::BitMove(from, to, dst, src) => match (class(to), from.bytes(width)) {
+                (RegClass::Vector, 4) => a.movd(simd::XMM[reg(dst)], r(src)),
+                (RegClass::Vector, 8) => a.movq(simd::XMM[reg(dst)], q(src)),
+                (RegClass::Int, 4) => a.movd(r(dst), simd::XMM[reg(src)]),
+                (RegClass::Int, 8) => a.movq(q(dst), simd::XMM[reg(src)]),
                 _ => unreachable!(),
             },
-            Inst::IntBinary(op, ty, ..) => {
-                use crate::hir::Binary;
-                let size = ty.lane().unwrap().bytes();
-                macro_rules! integer {
-                    ($mn:ident) => {
-                        if size == 8 {
-                            a.$mn(q(0), q(1))
-                        } else {
-                            a.$mn(r(0), r(1))
-                        }
-                    };
-                }
-                match op {
-                    Binary::Add => integer!(add),
-                    Binary::Sub => integer!(sub),
-                    Binary::Mul => integer!(imul_2),
-                    Binary::And => integer!(and),
-                    Binary::Or => integer!(or),
-                    Binary::Xor => integer!(xor),
-                    _ => unreachable!(),
-                }?;
-                match size {
-                    1 => a.movzx(r(0), R8[reg(0)]),
-                    2 => a.movzx(r(0), R16[reg(0)]),
-                    _ => Ok(()),
-                }
+            Inst::Imm(dst, n) => a.mov(r(dst), n),
+            // Two-address forms: the destination reuses the left operand's register.
+            Inst::Alu(op, ty, dst, _, rhs) => op.emit(a, ty, reg(dst), frame.source(allocs, rhs)),
+            Inst::Shift {
+                op,
+                int,
+                dst,
+                count,
+                ..
+            } => {
+                let count = match count {
+                    Rhs::Imm(n) => Some(n),
+                    Rhs::Reg(_) => None,
+                };
+                op.emit(a, int, reg(dst), count)
             }
-            Inst::Imm(_, n) => a.mov(r(0), n),
-            Inst::Alu(op, _, _, Rhs::Imm(n)) => match op {
-                Alu::Add => a.add(r(0), n),
-                Alu::Sub => a.sub(r(0), n),
-                Alu::And => a.and(r(0), n),
-                Alu::Or => a.or(r(0), n),
-                Alu::Xor => a.xor(r(0), n),
-                Alu::Mul => a.imul_3(r(0), r(0), n),
-                Alu::Min | Alu::Max => unreachable!("cmov requires a register or memory"),
-            },
-            Inst::Alu(op, _, _, Rhs::Reg(_)) => match op {
-                Alu::Add => rm32!(add, r(2), 1),
-                Alu::Sub => rm32!(sub, r(2), 1),
-                Alu::And => rm32!(and, r(2), 1),
-                Alu::Or => rm32!(or, r(2), 1),
-                Alu::Xor => rm32!(xor, r(2), 1),
-                Alu::Mul => rm32!(imul_2, r(2), 1),
-                Alu::Min | Alu::Max => {
-                    rm32!(cmp, r(2), 1)?;
-                    if matches!(op, Alu::Min) {
-                        rm32!(cmovg, r(2), 1)
-                    } else {
-                        rm32!(cmovl, r(2), 1)
-                    }
-                }
-            },
-            Inst::Shift { left, count, .. } => match (left, count) {
-                (true, Rhs::Reg(_)) => a.shl(r(0), cl),
-                (false, Rhs::Reg(_)) => a.sar(r(0), cl),
-                (true, Rhs::Imm(n)) => a.shl(r(0), n & 31),
-                (false, Rhs::Imm(n)) => a.sar(r(0), n & 31),
-            },
-            Inst::Compare(cc, _, _, rhs) => {
-                cmp(a, frame, allocs, rhs)?;
-                let dst = allocs.len() - 1;
+            Inst::IntUnary(op, ty, dst, _, temp) => {
+                op.emit(a, cpu.isa, ty, reg(dst), temp.map(reg))
+            }
+            Inst::Saturating {
+                sub, int, dst, rhs, ..
+            } => int::saturating(a, sub, int, reg(dst), reg(rhs)),
+            Inst::Convert {
+                from,
+                to,
+                dst,
+                src,
+                temp,
+            } => super::inst::convert::emit(a, from, to, reg(dst), reg(src), temp.map(reg)),
+            Inst::Classify(op, lane, dst, _) => {
+                let fraction = if lane == crate::hir::Lane::F16 { 10 } else { 7 };
+                int::classify_half(a, op, fraction, reg(dst))
+            }
+            Inst::Extend(ty, dst, src) => int::extend(a, ty, reg(dst), reg(src)),
+            Inst::Compare(cc, bytes, dst, lhs, rhs) => {
+                int::compare(a, bytes, reg(lhs), frame.source(allocs, rhs))?;
                 let byte = R8[reg(dst)];
-                match cc {
-                    Cond::Eq => a.sete(byte),
-                    Cond::Ne => a.setne(byte),
-                    Cond::Lt => a.setl(byte),
-                    Cond::Le => a.setle(byte),
-                    Cond::Gt => a.setg(byte),
-                    Cond::Ge => a.setge(byte),
-                }?;
+                cc.set(a, byte)?;
                 a.movzx(r(dst), byte)?;
                 a.neg(r(dst))
             }
-            Inst::SelectI32 { cond, .. } => {
+            // The destination reuses the register of `no`.
+            Inst::Select {
+                wide,
+                dst,
+                cond,
+                yes,
+                ..
+            } => {
                 let cc = match cond {
-                    SelectCond::Nonzero(_) => {
-                        a.test(r(2), r(2))?;
+                    SelectCond::Nonzero(v) => {
+                        a.test(r(v), r(v))?;
                         Cond::Ne
                     }
-                    SelectCond::Compare(cc, _, rhs) => {
-                        cmp(a, frame, &allocs[2..], rhs)?;
+                    SelectCond::Compare(cc, bytes, lhs, rhs) => {
+                        int::compare(a, bytes, reg(lhs), frame.source(allocs, rhs))?;
                         cc
                     }
                 };
-                let dst = r(allocs.len() - 1);
-                match cc {
-                    Cond::Eq => rm32!(cmove, dst, 1),
-                    Cond::Ne => rm32!(cmovne, dst, 1),
-                    Cond::Lt => rm32!(cmovl, dst, 1),
-                    Cond::Le => rm32!(cmovle, dst, 1),
-                    Cond::Gt => rm32!(cmovg, dst, 1),
-                    Cond::Ge => rm32!(cmovge, dst, 1),
-                }
+                cc.select(a, wide, reg(dst), frame.source(allocs, Rhs::Reg(yes)))
             }
-            Inst::Cdq { .. } => a.cdq(),
-            Inst::IDiv { .. } => {
-                let zero = *self.failures[1].get_or_insert_with(|| a.create_label());
-                let overflow = *self.failures[2].get_or_insert_with(|| a.create_label());
-                let divide = a.create_label();
-                a.test(r(2), r(2))?;
+            // The destination reuses the register of `no`.
+            Inst::SelectVector { dst, cond, yes, .. } => {
+                let keep = a.create_label();
+                a.test(r(cond), r(cond))?;
+                a.je(keep)?;
+                simd::copy(a, reg(dst), reg(yes), width)?;
+                bind(a, keep)
+            }
+            Inst::DivideHigh { int, .. } => match (int.signed, int.wide()) {
+                (true, true) => a.cqo(),
+                (true, false) => a.cdq(),
+                (false, _) => a.xor(edx, edx),
+            },
+            Inst::Divide { int, divisor, .. } => {
+                let zero = self.exits.trap(a, Trap::DivisionByZero);
+                let divisor = reg(divisor);
+                if int.wide() {
+                    a.test(R64[divisor], R64[divisor])?;
+                } else {
+                    a.test(R32[divisor], R32[divisor])?;
+                }
                 a.jz(zero)?;
-                a.cmp(r(2), -1)?;
-                a.jne(divide)?;
-                a.cmp(eax, i32::MIN)?;
-                a.je(overflow)?;
-                bind(a, divide)?;
-                a.idiv(r(2))
+                if int.signed {
+                    // MIN / -1 overflows the type, also when it fits 32 bits.
+                    let overflow = self.exits.trap(a, Trap::DivisionOverflow);
+                    let divide = a.create_label();
+                    let (min, _) = int.range();
+                    if int.wide() {
+                        a.cmp(R64[divisor], -1)?;
+                        a.jne(divide)?;
+                        a.mov(r10, min)?;
+                        a.cmp(rax, r10)?;
+                    } else {
+                        a.cmp(R32[divisor], -1)?;
+                        a.jne(divide)?;
+                        a.cmp(eax, min as i32)?;
+                    }
+                    a.je(overflow)?;
+                    bind(a, divide)?;
+                }
+                match (int.signed, int.wide()) {
+                    (true, true) => a.idiv(R64[divisor]),
+                    (true, false) => a.idiv(R32[divisor]),
+                    (false, true) => a.div(R64[divisor]),
+                    (false, false) => a.div(R32[divisor]),
+                }
             }
             Inst::DivImm {
                 remainder,
+                dst: result,
+                value,
                 divisor,
                 quotient,
-                ..
             } => {
-                let input = r(0);
-                let dst = r(1);
+                let input = r(value);
+                let dst = r(result);
                 match quotient {
                     Quotient::PowerOfTwo(shift) => {
                         let bias = ((1u32 << shift) - 1) as i32;
-                        a.lea(dst, ptr(q(0) + bias))?;
+                        a.lea(dst, ptr(q(value) + bias))?;
                         a.test(input, input)?;
                         a.cmovns(dst, input)?;
                         a.sar(dst, shift)?;
                     }
                     Quotient::Reciprocal { multiplier, shift } => {
-                        a.movsxd(q(1), input)?;
+                        let wide = q(result);
+                        a.movsxd(wide, input)?;
                         if let Ok(multiplier) = i32::try_from(multiplier) {
-                            a.imul_3(q(1), q(1), multiplier)?;
+                            a.imul_3(wide, wide, multiplier)?;
                         } else {
                             // R10 is reserved for scratch and cannot hold an input.
                             a.mov(r10d, multiplier)?;
-                            a.imul_2(q(1), r10)?;
+                            a.imul_2(wide, r10)?;
                         }
-                        a.sar(q(1), shift)?;
+                        a.sar(wide, shift)?;
                         a.mov(r10d, input)?;
                         a.shr(r10d, 31)?;
                         a.add(dst, r10d)?;
@@ -738,132 +844,98 @@ impl Emitter<'_> {
                 Ok(())
             }
             Inst::CheckMask(mask) => {
-                let fail = *self.failures[0].get_or_insert_with(|| a.create_label());
-                simd::test_vector_mask(a, Features::host(), allocate_mask(mask, allocs).0)?;
+                let fail = self.exits.trap(a, Trap::Bounds);
+                simd::test_vector_mask(a, cpu, mask.map(reg))?;
                 a.jne(fail)
             }
-            Inst::AnyMask(_, mask) => {
-                let (mask, dst) = allocate_mask(mask, allocs);
-                simd::test_vector_mask(a, Features::host(), mask)?;
+            Inst::AnyMask(dst, mask) => {
+                simd::test_vector_mask(a, cpu, mask.map(reg))?;
                 a.mov(r(dst), 0)?;
                 a.setne(R8[reg(dst)])?;
                 a.neg(r(dst))
             }
-            Inst::AllMask(lane, ..) => {
-                opmask::test_all(a, Features::host(), lane, reg(0))?;
-                a.mov(r(1), 0)?;
-                a.sete(R8[reg(1)])?;
-                a.neg(r(1))
+            Inst::AllMask(lane, dst, mask) => {
+                opmask::test_all(a, cpu, lane, reg(mask))?;
+                a.mov(r(dst), 0)?;
+                a.sete(R8[reg(dst)])?;
+                a.neg(r(dst))
             }
-            Inst::SelectMask { lane, mask, .. } => {
-                let (mask, first) = allocate_mask(mask, allocs);
-                simd::blend_comparison(
-                    a,
-                    Features::host(),
+            Inst::SelectMask(id) => {
+                let MaskSelect {
                     lane,
                     mask,
-                    reg(first + 2),
-                    reg(first),
-                    reg(first + 1),
-                )
+                    yes,
+                    no,
+                    dst,
+                } = details.selects[id];
+                simd::blend_comparison(a, cpu, lane, mask.map(reg), reg(dst), reg(yes), reg(no))
             }
-            Inst::MaskCompare(lane, cc, ..) => simd::compare_mask(
-                a,
-                Features::host().bytes,
-                K[reg(2)],
-                lane,
-                reg(0),
-                reg(1),
-                cc,
-            ),
-            Inst::MaskLogic(lane, kind, ..) => opmask::logic(
-                a,
-                Features::host().bytes / lane.bytes(),
-                kind,
-                reg(2),
-                reg(0),
-                reg(1),
-            ),
-            Inst::MaskNot(lane, ..) => opmask::not(a, Features::host(), lane, reg(1), reg(0)),
-            Inst::MaskImmediate(_, bits) => opmask::immediate(a, reg(0), bits),
-            Inst::MaskPrefix(..) => {
-                a.mov(r10d, -1)?;
-                a.bzhi(r10d, r10d, r(0))?;
-                a.kmovw(K[reg(1)], r10d)
+            Inst::MaskCompare(lane, cc, dst, x, y) => {
+                simd::compare_mask(a, width, K[reg(dst)], lane, reg(x), reg(y), cc)
             }
-            Inst::MaskCount(..) => {
-                a.kmovw(r(1), K[reg(0)])?;
-                a.popcnt(r(1), r(1))
+            Inst::MaskLogic(lane, kind, dst, x, y) => {
+                opmask::logic(a, width / lane.bytes(), kind, reg(dst), reg(x), reg(y))
             }
-            Inst::MaskCompact(lane, expand, ..) => simd::compact(
-                a,
-                Features::host().bytes,
-                lane,
-                expand,
-                reg(2),
-                reg(0),
-                reg(1),
-            ),
-            Inst::CompactLookup(expand, ..) => simd::packed::compact::emit(
-                a,
-                Features::host(),
-                expand,
-                [reg(2), reg(0), reg(1), reg(3)],
-            ),
-            Inst::CompactStore { .. } => {
-                a.kmovw(r(4), K[reg(2)])?;
-                a.kmovw(r10d, K[reg(3)])?;
-                a.pdep(r10d, r10d, r(4))?;
+            Inst::MaskNot(lane, dst, x) => opmask::not(a, cpu, lane, reg(dst), reg(x)),
+            Inst::MaskImmediate(dst, bits) => opmask::immediate(a, reg(dst), bits),
+            Inst::MaskPrefix(lanes, dst, count, temp) => {
+                prefix_bits(a, r(temp), r(count), lanes)?;
+                a.kmovw(K[reg(dst)], r10d)
+            }
+            Inst::MaskCount(dst, mask) => {
+                a.kmovw(r(dst), K[reg(mask)])?;
+                a.popcnt(r(dst), r(dst))
+            }
+            Inst::MaskCompact(lane, expand, dst, x, y) => {
+                simd::compact(a, width, lane, expand, reg(dst), reg(x), reg(y))
+            }
+            Inst::CompactLookup(expand, dst, x, mask, index) => {
+                let registers = [reg(dst), reg(x), reg(mask), reg(index)];
+                simd::packed::compact::emit(a, cpu, expand, registers)
+            }
+            Inst::CompactStore {
+                base,
+                data,
+                mask,
+                limit,
+                temps: [bits, prefix],
+            } => {
+                // Deposit the written prefix on the mask lanes, so the
+                // compressing store writes the first `limit` active lanes.
+                prefix_bits(a, r(prefix), r(limit), (width / 4) as u8)?;
+                a.kmovw(r(bits), K[reg(mask)])?;
+                a.pdep(r10d, r10d, r(bits))?;
                 a.kmovw(k1, r10d)?;
-                let address = ptr(q(0)).k1();
-                match Features::host().bytes {
-                    16 => a.vpcompressd(address, XMM[reg(1)]),
-                    32 => a.vpcompressd(address, YMM[reg(1)]),
-                    _ => a.vpcompressd(address, ZMM[reg(1)]),
+                let address = ptr(q(base)).k1();
+                match width {
+                    16 => a.vpcompressd(address, XMM[reg(data)]),
+                    32 => a.vpcompressd(address, YMM[reg(data)]),
+                    _ => a.vpcompressd(address, ZMM[reg(data)]),
                 }
             }
-            Inst::CheckBounds(..) => {
-                let fail = *self.failures[0].get_or_insert_with(|| a.create_label());
-                rm32!(cmp, r(0), 1)?;
+            Inst::CheckBounds(index, length) => {
+                let fail = self.exits.trap(a, Trap::Bounds);
+                int::compare(a, 4, reg(index), frame.source(allocs, Rhs::Reg(length)))?;
                 a.jae(fail)
             }
-            Inst::CheckOverflow(..) => {
-                let fail = *self.failures[3].get_or_insert_with(|| a.create_label());
-                a.test(r(0), r(0))?;
+            Inst::TrapIf(v, trap) => {
+                let fail = self.exits.trap(a, trap);
+                a.test(r(v), r(v))?;
                 a.jne(fail)
             }
-            Inst::Movsxd(..) => a.movsxd(q(1), r(0)),
-            Inst::Lea(_, addr) => a.lea(q(allocs.len() - 1), memory(addr, allocs)),
-            Inst::Masked {
-                ty,
-                indices,
-                dst,
-                temp,
-                mask,
-                value,
-                ..
-            } => {
-                let i = 1 + usize::from(indices.is_some());
-                let (mask, operands) = allocate_mask(mask, &allocs[i..]);
-                let first = i + operands;
-                simd::MaskedMemory {
-                    ty,
-                    base: reg(0),
-                    index: indices.map(|_| reg(1)),
-                    mask,
-                    value: value.map(|_| reg(first)),
-                    dst: dst.map(|_| reg(first + usize::from(value.is_some()))),
-                    temp: temp.map(|_| reg(allocs.len() - 1)),
-                }
-                .emit(a, super::Features::host())
+            Inst::Trap(trap) => {
+                let fail = self.exits.trap(a, trap);
+                a.jmp(fail)
             }
-            Inst::Load(ty, _, addr) => load(a, ty, reg(allocs.len() - 1), memory(addr, allocs)),
-            Inst::PackedMemory(kind, lane, _, _, addr) => {
-                let src = reg(allocs.len() - 2);
-                let dst = reg(allocs.len() - 1);
+            Inst::Lea(dst, addr) => a.lea(q(dst), memory(addr, allocs)),
+            Inst::Masked(id) => details.masked[id].map(reg).emit(a, cpu),
+            Inst::Load(ty, dst, addr) => load(a, width, ty, reg(dst), memory(addr, allocs)),
+            Inst::PackedMemory(kind, lane, dst, src, addr) => {
+                let src = reg(src);
+                let dst = reg(dst);
                 let addr = memory(addr, allocs);
                 if kind == Binary::Add {
-                    return match (Features::host().bytes, lane.bytes()) {
+                    return match (width, lane.bytes()) {
                         (32, 4) => a.vpaddd(YMM[dst], YMM[src], addr),
                         (32, 8) => a.vpaddq(YMM[dst], YMM[src], addr),
                         (64, 4) => a.vpaddd(ZMM[dst], ZMM[src], addr),
@@ -871,7 +943,7 @@ impl Emitter<'_> {
                         _ => unreachable!(),
                     };
                 }
-                match (Features::host().bytes, kind) {
+                match (width, kind) {
                     (32, Binary::And) => a.vpand(YMM[dst], YMM[src], addr),
                     (32, Binary::Or) => a.vpor(YMM[dst], YMM[src], addr),
                     (32, Binary::Xor) => a.vpxor(YMM[dst], YMM[src], addr),
@@ -881,10 +953,10 @@ impl Emitter<'_> {
                     _ => unreachable!(),
                 }
             }
-            Inst::BroadcastMemory(lane, _, addr) => {
-                let dst = reg(allocs.len() - 1);
+            Inst::BroadcastMemory(lane, dst, addr) => {
+                let dst = reg(dst);
                 let addr = memory(addr, allocs);
-                match (Features::host().bytes, lane.bytes()) {
+                match (width, lane.bytes()) {
                     (32, 4) => a.vpbroadcastd(YMM[dst], addr),
                     (32, 8) => a.vpbroadcastq(YMM[dst], addr),
                     (64, 4) => a.vpbroadcastd(ZMM[dst], addr),
@@ -892,10 +964,9 @@ impl Emitter<'_> {
                     _ => unreachable!(),
                 }
             }
-            Inst::BroadcastLane(_, _, lane) => {
-                let src = reg(0);
-                let dst = reg(1);
-                let width = Features::host().bytes;
+            Inst::BroadcastLane(dst, src, lane) => {
+                let src = reg(src);
+                let dst = reg(dst);
                 let imm = i32::from(lane % 4) * 0x55;
                 if width == 16 {
                     return a.pshufd(XMM[dst], XMM[src], imm);
@@ -923,58 +994,51 @@ impl Emitter<'_> {
                     a.vpbroadcastd(ZMM[dst], lane)
                 }
             }
-            Inst::Store(ty, addr, _) => store(a, ty, memory(addr, allocs), reg(allocs.len() - 1)),
-            Inst::DebugStore(ty, offset, _) => store(
+            Inst::Store(ty, addr, value) => store(a, width, ty, memory(addr, allocs), reg(value)),
+            Inst::DebugStore(ty, offset, value) => store(
                 a,
+                width,
                 ty,
                 ptr(r11 + (disp(frame.debug_base) + offset as i32)),
-                reg(0),
+                reg(value),
             ),
-            Inst::DebugPoint(id) => {
-                if self.debug {
-                    self.points.push((id, position(a)?));
-                }
+            // A debug point gets its own address for the line table; release
+            // code emits nothing.
+            Inst::DebugPoint(id) if self.debug => {
+                self.points.push(Point {
+                    id,
+                    offset: position(a)?,
+                });
                 a.nop()
             }
-            Inst::StoreArg(i, ty, _) => store(a, ty, slot(frame.slots + CHILD_ARGS + i), reg(0)),
-            Inst::CallScratch(..) => a.lea(q(0), slot(frame.scratch_base)),
-            Inst::StorePacketWord(offset, _) => store(
-                a,
-                Type::I32,
+            Inst::DebugPoint(_) => Ok(()),
+            Inst::StoreArg(i, ty, value) => {
+                store(a, width, ty, slot(frame.slots + CHILD_ARGS + i), reg(value))
+            }
+            Inst::CallScratch(offset, _, dst) => a.lea(
+                q(dst),
                 ptr(r11 + (disp(frame.scratch_base) + offset as i32)),
-                reg(0),
             ),
-            Inst::RustCall(..) | Inst::RustPacketCall(..) | Inst::RustContextCall(..) => {
-                let entry = match inst {
-                    Inst::RustCall(import, ..) => (import.resolve)() as usize,
-                    Inst::RustPacketCall(import, _) => {
-                        let (symbol, words, count) = if cfg!(windows) {
-                            (rcx, rdx, r8)
-                        } else {
-                            (rdi, rsi, rdx)
-                        };
-                        a.mov(symbol, std::ptr::from_ref(import) as u64)?;
-                        a.lea(words, slot(frame.scratch_base))?;
-                        a.mov(count, u64::from(import.arity))?;
-                        splice_target::abi::invoke_packet_import as *const () as usize
-                    }
-                    Inst::RustContextCall(import, ..) => import.address(),
-                    _ => unreachable!(),
-                };
+            Inst::RustCall(function, ..) => {
                 // Every generated frame enters with RSP 8 mod 16. Leave the
                 // Win64 shadow space intact and save the volatile workspace
                 // outside it. SysV requires no shadow space.
-                let shadow = if cfg!(windows) { 32 } else { 0 };
+                let shadow = abi.shadow;
                 a.sub(rsp, shadow + 8)?;
                 a.mov(qword_ptr(rsp + shadow), r11)?;
-                a.mov(r10, entry as u64)?;
+                a.mov(r10, function.entry as usize as u64)?;
+                // Calls clobber every vector register's upper lanes.
+                if cpu.isa.avx {
+                    a.vzeroupper()?;
+                }
                 a.call(r10)?;
                 a.mov(r11, qword_ptr(rsp + shadow))?;
                 a.add(rsp, shadow + 8)?;
-                let fail = *self.failures[4].get_or_insert_with(|| a.create_label());
+                // The status's upper word is the entry's trap code.
+                let report = self.exits.report(a);
                 a.mov(r10, rax)?;
                 a.shr(r10, 32)?;
-                a.jne(fail)
+                a.jne(report)
             }
             Inst::Call { target, .. } => {
                 if self.root {
@@ -1014,8 +1078,8 @@ impl Emitter<'_> {
             }
             Inst::Ret(_) if self.root => {
                 let ty = self.machine.result;
-                match ty.bytes(Features::host().bytes) {
-                    16.. => store(a, ty, slot(1), 0)?,
+                match ty.bytes(width) {
+                    16.. => store(a, width, ty, slot(1), 0)?,
                     4 if ty == Type::F32 => a.movd(eax, simd::XMM[0])?,
                     8 if ty == Type::F64 => a.movq(rax, simd::XMM[0])?,
                     _ => {}
@@ -1035,8 +1099,14 @@ impl Emitter<'_> {
     }
 }
 
-fn load(a: &mut CodeAssembler, ty: Type, d: usize, mem: AsmMemoryOperand) -> AsmResult {
-    let size = ty.bytes(Features::host().bytes);
+fn load(
+    a: &mut CodeAssembler,
+    width: usize,
+    ty: Type,
+    d: usize,
+    mem: AsmMemoryOperand,
+) -> AsmResult {
+    let size = ty.bytes(width);
     if class(ty) == RegClass::Vector {
         return simd::load(a, d, mem, size);
     }
@@ -1048,8 +1118,14 @@ fn load(a: &mut CodeAssembler, ty: Type, d: usize, mem: AsmMemoryOperand) -> Asm
         _ => unreachable!(),
     }
 }
-fn store(a: &mut CodeAssembler, ty: Type, mem: AsmMemoryOperand, s: usize) -> AsmResult {
-    let size = ty.bytes(Features::host().bytes);
+fn store(
+    a: &mut CodeAssembler,
+    width: usize,
+    ty: Type,
+    mem: AsmMemoryOperand,
+    s: usize,
+) -> AsmResult {
+    let size = ty.bytes(width);
     if class(ty) == RegClass::Vector {
         return simd::store(a, mem, s, size);
     }
@@ -1062,35 +1138,31 @@ fn store(a: &mut CodeAssembler, ty: Type, mem: AsmMemoryOperand, s: usize) -> As
     }
 }
 
-fn memory(addr: Address, allocs: &[Allocation]) -> AsmMemoryOperand {
-    let base = R64[gpr(allocs[0])];
+fn memory(addr: Address, allocs: Allocations) -> AsmMemoryOperand {
+    let base = R64[allocs.reg(addr.base)];
     match addr.index {
-        Some((_, scale)) => ptr(base + R64[gpr(allocs[1])] * (1i32 << scale as u8) + addr.disp),
+        Some((index, scale)) => {
+            ptr(base + R64[allocs.reg(index)] * (1i32 << scale as u8) + addr.disp)
+        }
         None => ptr(base + addr.disp),
     }
 }
 
-fn cmp(a: &mut CodeAssembler, frame: &Frame, allocs: &[Allocation], rhs: Rhs) -> AsmResult {
-    let lhs = R32[gpr(allocs[0])];
-    match rhs {
-        Rhs::Imm(n) => a.cmp(lhs, n),
-        Rhs::Reg(_) => match allocs[1].as_reg() {
-            Some(p) => a.cmp(lhs, R32[p.hw_enc()]),
-            None => a.cmp(
-                lhs,
-                dword_ptr(r11 + disp(frame.spill_base + allocs[1].as_stack().unwrap().index())),
-            ),
-        },
-    }
-}
-
-fn jcc(a: &mut CodeAssembler, cc: Cond, label: CodeLabel) -> AsmResult {
-    match cc {
-        Cond::Eq => a.je(label),
-        Cond::Ne => a.jne(label),
-        Cond::Lt => a.jl(label),
-        Cond::Le => a.jle(label),
-        Cond::Gt => a.jg(label),
-        Cond::Ge => a.jge(label),
-    }
+/// `r10d` = the low `count` of `lanes` bits, with `count` clamped to
+/// `0..=lanes` in `temp`: `bzhi` reads only the low byte of its index.
+fn prefix_bits(
+    a: &mut CodeAssembler,
+    temp: AsmRegister32,
+    count: AsmRegister32,
+    lanes: u8,
+) -> AsmResult {
+    a.mov(temp, count)?;
+    a.xor(r10d, r10d)?;
+    a.test(temp, temp)?;
+    a.cmovs(temp, r10d)?;
+    a.mov(r10d, i32::from(lanes))?;
+    a.cmp(temp, r10d)?;
+    a.cmova(temp, r10d)?;
+    a.mov(r10d, -1)?;
+    a.bzhi(r10d, r10d, temp)
 }

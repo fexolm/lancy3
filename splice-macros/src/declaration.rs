@@ -5,10 +5,12 @@ use quote::{ToTokens, quote};
 use syn::visit::Visit;
 use syn::visit_mut::VisitMut;
 use syn::{Attribute, Block, Error, FnArg, Item, Meta, Path, Result, Signature, Visibility};
+
 mod selector;
 pub(crate) use selector::{trait_method_dispatch, trait_method_eval_dispatch};
 
-pub(crate) fn expand(root: Path, tokens: TokenStream) -> Result<TokenStream> {
+/// `print` (`#[kernel(print)]`) applies to a free function lowered to IR.
+pub(crate) fn expand(root: Path, print: bool, tokens: TokenStream) -> Result<TokenStream> {
     let method_error = "put #[kernel] on the enclosing impl or trait to publish its methods";
     let item = match syn::parse2::<Item>(tokens.clone()) {
         Ok(Item::Verbatim(_)) | Err(_)
@@ -18,38 +20,48 @@ pub(crate) fn expand(root: Path, tokens: TokenStream) -> Result<TokenStream> {
         }
         item => item?,
     };
+    if let Some(variants) = configured_parameters(&item)? {
+        return variants
+            .into_iter()
+            .map(|variant| expand(root.clone(), print, variant.into_token_stream()))
+            .collect();
+    }
     match item {
         Item::Fn(mut function) => {
             if method_context(&function.attrs, &function.sig) {
                 return Err(Error::new_spanned(&function.sig, method_error));
             }
+            hoist_lint_attributes(&mut function.attrs, &mut function.sig);
             signature(&function.sig)?;
             item_markers(&mut function.attrs, false)?;
-            crate::import::expand_function(root, function)
+            crate::scalar::expand(root, &mut function, print)
         }
+        Item::Impl(_) | Item::Trait(_) if print => Err(Error::new_spanned(
+            tokens,
+            "#[kernel(print)] publishes `print` for a free function",
+        )),
         Item::Impl(mut implementation) => {
             item_markers(&mut implementation.attrs, false)?;
             let mut specialized = Vec::new();
+            let mut errors = Errors::default();
             let trait_path = implementation.trait_.as_ref().map(|(_, path, _)| path);
             for member in &mut implementation.items {
                 if let syn::ImplItem::Fn(method) = member {
+                    method_markers(&method.attrs)?;
                     let gates = configuration(&method.attrs)?;
-                    let shape = crate::scalar::methods::stage_shape(
-                        &root,
-                        &method.sig,
-                        Some(&method.block),
-                        trait_path.is_none().then_some(&method.vis),
-                    );
-                    for item in shape {
-                        specialized.push(syn::ImplItem::Verbatim(quote!(#(#[#gates])* #item)));
-                    }
+                    let intrinsic = intrinsic_name(&method.attrs)?;
                     let generated = crate::scalar::methods::publish(
                         &root,
                         &method.sig,
                         &method.block,
                         &method.vis,
                         trait_path.is_some(),
-                    );
+                        intrinsic.as_ref(),
+                    )
+                    .unwrap_or_else(|error| {
+                        errors.push(error);
+                        Vec::new()
+                    });
                     if let Some(path) = trait_path
                         && !generated.is_empty()
                     {
@@ -78,6 +90,7 @@ pub(crate) fn expand(root: Path, tokens: TokenStream) -> Result<TokenStream> {
                     prepare_method(&mut method.attrs, &mut method.sig, Some(&mut method.block))?;
                 }
             }
+            errors.finish()?;
             if let Some(path) = trait_path {
                 let gates = configuration(&implementation.attrs)?;
                 implementation.items.extend(specialized);
@@ -99,22 +112,27 @@ pub(crate) fn expand(root: Path, tokens: TokenStream) -> Result<TokenStream> {
             let trait_owner = quote!(#name #arguments);
             let mut specialized = Vec::new();
             let mut selectors = Vec::new();
+            let mut errors = Errors::default();
             for member in &mut declaration.items {
                 if let syn::TraitItem::Fn(method) = member {
+                    method_markers(&method.attrs)?;
                     let gates = configuration(&method.attrs)?;
                     let (kind, defaults) =
-                        crate::scalar::methods::trait_defaults(&root, &method.sig, &trait_owner);
+                        crate::scalar::methods::trait_defaults(&root, &method.sig, &trait_owner)
+                            .unwrap_or_else(|error| {
+                                errors.push(error);
+                                (crate::scalar::methods::TraitMethodKind::Rust, Vec::new())
+                            });
                     selectors.push((method.sig.ident.clone(), kind, gates.clone()));
-                    for hidden in
-                        crate::scalar::methods::stage_shape(&root, &method.sig, None, None)
-                            .into_iter()
-                            .chain(defaults)
+                    for hidden in std::iter::once(crate::scalar::methods::stage_shape(&method.sig))
+                        .chain(defaults)
                     {
                         specialized.push(syn::TraitItem::Verbatim(quote!(#(#[#gates])* #hidden)));
                     }
                     prepare_method(&mut method.attrs, &mut method.sig, method.default.as_mut())?;
                 }
             }
+            errors.finish()?;
             declaration.items.extend(specialized);
             let gates = configuration(&declaration.attrs)?;
             let vis = &declaration.vis;
@@ -136,6 +154,107 @@ mod tests {
     use super::*;
 
     #[test]
+    fn rebased_use_trees_keep_their_targets() {
+        let mut body: syn::Expr = syn::parse_quote!({
+            use self::inner::{a, b};
+            use super::offset;
+            use crate::root;
+            offset() + self::f(1) + super::g()
+        });
+        rebase_expression(&mut body, &syn::Generics::default());
+        let text = quote::ToTokens::to_token_stream(&body).to_string();
+        assert!(text.contains("use super :: super :: offset ;"), "{text}");
+        assert!(text.contains("use super :: inner :: { a , b } ;"), "{text}");
+        assert!(text.contains("use crate :: root ;"), "{text}");
+        assert!(text.contains("super :: f (1)"), "{text}");
+        assert!(text.contains("super :: super :: g ()"), "{text}");
+    }
+
+    /// MAC-11: generated names do not depend on memory addresses or on how
+    /// many items the process expanded before.
+    #[test]
+    fn expansion_is_deterministic() {
+        let items = [
+            quote!(
+                fn total(#[comptime] k: i32, xs: &[i32], flag: bool) -> i32 {
+                    let mut sum = 0;
+                    for &x in xs {
+                        if flag {
+                            sum += x * k;
+                        }
+                    }
+                    sum + comptime!(k + 1)
+                }
+            ),
+            quote!(
+                pub trait Rule {
+                    fn apply(value: i32) -> i32;
+                }
+            ),
+        ];
+        for item in items {
+            let expand = || {
+                expand(syn::parse_quote!(::splice), false, item.clone())
+                    .unwrap()
+                    .to_string()
+            };
+            assert_eq!(expand(), expand());
+        }
+    }
+
+    /// MAC-10: the expansion of a small kernel pair stays within a token
+    /// budget, so growth of the generated code is a reviewed change. The
+    /// probe is the review's `size.rs`: a helper and a loop calling it.
+    #[test]
+    fn expansion_size_stays_within_its_budget() {
+        fn tokens(stream: TokenStream) -> usize {
+            stream
+                .into_iter()
+                .map(|tree| match tree {
+                    proc_macro2::TokenTree::Group(group) => 1 + tokens(group.stream()),
+                    _ => 1,
+                })
+                .sum()
+        }
+        let probe = [
+            quote!(
+                fn helper(x: i32) -> i32 {
+                    x * 2 + 1
+                }
+            ),
+            quote!(
+                fn body(#[comptime] k: i32, xs: &[i32]) -> i32 {
+                    let mut s = 0;
+                    for &x in xs {
+                        s += helper(x) + k * 3;
+                    }
+                    s
+                }
+            ),
+        ];
+        let total: usize = probe
+            .into_iter()
+            .map(|item| tokens(expand(syn::parse_quote!(::splice), false, item).unwrap()))
+            .sum();
+        // 7 213 tokens at the commit that introduced the budget.
+        const BUDGET: usize = 7_400;
+        assert!(total <= BUDGET, "{total} tokens, budget {BUDGET}");
+    }
+
+    /// MAC-09: a marker is recognized by its whole path.
+    #[test]
+    fn foreign_attributes_are_not_splice_markers() {
+        let item = quote!(impl Plan { fn read(#[x::comptime] value: i32) -> i32 { value } });
+        let error = expand(syn::parse_quote!(::splice), false, item).unwrap_err();
+        assert!(
+            error.to_string().contains("expected #[comptime]"),
+            "{error}"
+        );
+        let item = quote!(impl Plan { #[cuda::kernel] fn read(value: i32) -> i32 { value } });
+        assert!(expand(syn::parse_quote!(::splice), false, item).is_ok());
+    }
+
+    #[test]
     fn methods_must_be_published_by_their_block() {
         for item in [
             quote!(
@@ -154,7 +273,7 @@ mod tests {
             ),
             quote!(impl Plan { #[kernel] fn value() -> i32 { 1 } }),
         ] {
-            let error = expand(syn::parse_quote!(::splice), item).unwrap_err();
+            let error = expand(syn::parse_quote!(::splice), false, item).unwrap_err();
             assert!(
                 error.to_string().contains("enclosing impl or trait"),
                 "{error}"
@@ -170,17 +289,6 @@ fn configuration(attrs: &[Attribute]) -> Result<Vec<TokenStream>> {
         .collect()
 }
 
-/// An ordinary trait occupies only the type namespace. A published trait
-/// additionally imports a selector in the macro namespace.
-pub(crate) fn trait_dispatch(
-    root: &Path,
-    path: &Path,
-    published: TokenStream,
-    ordinary: TokenStream,
-) -> TokenStream {
-    select_trait(root, path, quote!(#published, #ordinary))
-}
-
 fn select_trait(root: &Path, path: &Path, input: TokenStream) -> TokenStream {
     let mut path = path.clone();
     for part in &mut path.segments {
@@ -189,13 +297,13 @@ fn select_trait(root: &Path, path: &Path, input: TokenStream) -> TokenStream {
     let alias = selector_alias("trait", path.segments.last().unwrap().ident.span());
     quote::quote_spanned!(proc_macro2::Span::mixed_site()=> {
         mod __splice_default_trait {
-            pub use #root::__splice_choose_rust as #alias;
+            pub use #root::__private::__splice_choose_rust as #alias;
         }
         use __splice_default_trait::*;
         {
             #[allow(unused_imports)]
             use #path as #alias;
-            #[allow(unused_imports)] use #root::__splice_method_case;
+            #[allow(unused_imports)] use #root::__private::__splice_method_case;
             #alias!(#input)
         }
     })
@@ -229,18 +337,42 @@ fn method_context(attrs: &[Attribute], sig: &Signature) -> bool {
     sig.receiver().is_some() || uses.0 || attrs.iter().any(|attr| marker(attr, "intrinsic"))
 }
 
+/// Report every unpublishable method of a block, not only the first.
+#[derive(Default)]
+struct Errors(Option<Error>);
+
+impl Errors {
+    fn push(&mut self, error: Error) {
+        match &mut self.0 {
+            Some(first) => first.combine(error),
+            None => self.0 = Some(error),
+        }
+    }
+
+    fn finish(self) -> Result<()> {
+        self.0.map_or(Ok(()), Err)
+    }
+}
+
+/// Every method of a `#[kernel]` block is lowered with the block. A plain
+/// Rust method that kernels call belongs in an ordinary `impl`.
+fn method_markers(attrs: &[Attribute]) -> Result<()> {
+    match attrs.iter().find(|attr| marker(attr, "kernel")) {
+        Some(attr) => Err(Error::new_spanned(
+            attr,
+            "put #[kernel] only on the enclosing impl or trait; keep a Rust method in an ordinary impl",
+        )),
+        None => Ok(()),
+    }
+}
+
 fn prepare_method(
     attrs: &mut Vec<Attribute>,
     sig: &mut Signature,
     body: Option<&mut Block>,
 ) -> Result<()> {
+    hoist_lint_attributes(attrs, sig);
     signature(sig)?;
-    if let Some(attr) = attrs.iter().find(|attr| marker(attr, "kernel")) {
-        return Err(Error::new_spanned(
-            attr,
-            "put #[kernel] only on the enclosing impl or trait",
-        ));
-    }
     item_markers(attrs, body.is_some())?;
     for arg in &mut sig.inputs {
         let attrs = match arg {
@@ -271,11 +403,215 @@ fn prepare_method(
     Ok(())
 }
 
+/// At most this many `#[cfg]`/`#[cfg_attr]` parameter attributes per
+/// function: each doubles the number of expanded variants.
+const CONFIGURED_PARAMETERS: usize = 4;
+
+/// The variants of an item whose function parameters carry `#[cfg(..)]` or
+/// `#[cfg_attr(..)]`: one copy per assignment of the conditions, gated by
+/// `#[cfg(..)]` on the function, with each condition applied. Every
+/// generated parameter list then matches the one rustc keeps. `None` if no
+/// parameter is configured.
+fn configured_parameters(item: &Item) -> Result<Option<Vec<Item>>> {
+    fn variants(sig: &Signature) -> Result<Option<Vec<(Attribute, Signature)>>> {
+        let mut conditions = Vec::new();
+        for (index, arg) in sig.inputs.iter().enumerate() {
+            let attrs = match arg {
+                FnArg::Typed(arg) => &arg.attrs,
+                FnArg::Receiver(arg) => &arg.attrs,
+            };
+            for (position, attr) in attrs.iter().enumerate() {
+                if let Some(condition) = condition(attr)? {
+                    conditions.push((index, position, condition));
+                }
+            }
+        }
+        if conditions.is_empty() {
+            return Ok(None);
+        }
+        if conditions.len() > CONFIGURED_PARAMETERS {
+            return Err(Error::new_spanned(
+                sig,
+                format!(
+                    "a kernel accepts at most {CONFIGURED_PARAMETERS} #[cfg]/#[cfg_attr] parameter attributes"
+                ),
+            ));
+        }
+        let mut result = Vec::new();
+        for choice in 0..1u32 << conditions.len() {
+            let enabled = |n: usize| choice & (1 << n) != 0;
+            let predicates = conditions.iter().enumerate().map(|(n, (_, _, c))| {
+                let predicate = &c.predicate;
+                if enabled(n) {
+                    quote!(#predicate)
+                } else {
+                    quote!(not(#predicate))
+                }
+            });
+            let gate: Attribute = syn::parse_quote!(#[cfg(all(#(#predicates),*))]);
+            let mut variant = sig.clone();
+            let mut removed = Vec::new();
+            // Apply later attributes first so that earlier positions stay valid.
+            for (n, (index, position, condition)) in conditions.iter().enumerate().rev() {
+                let attrs = match &mut variant.inputs[*index] {
+                    FnArg::Typed(arg) => &mut arg.attrs,
+                    FnArg::Receiver(arg) => &mut arg.attrs,
+                };
+                let applied = match (&condition.then, enabled(n)) {
+                    (None, true) | (Some(_), false) => Some(Vec::new()),
+                    (None, false) => None,
+                    (Some(then), true) => Some(then.clone()),
+                };
+                match applied {
+                    Some(replacement) => {
+                        attrs.splice(*position..=*position, replacement);
+                    }
+                    None => removed.push(*index),
+                }
+            }
+            removed.sort_unstable();
+            removed.dedup();
+            variant.inputs = std::mem::take(&mut variant.inputs)
+                .into_iter()
+                .enumerate()
+                .filter(|(index, _)| !removed.contains(index))
+                .map(|(_, arg)| arg)
+                .collect();
+            result.push((gate, variant));
+        }
+        Ok(Some(result))
+    }
+
+    Ok(match item {
+        Item::Fn(function) => variants(&function.sig)?.map(|variants| {
+            variants
+                .into_iter()
+                .map(|(gate, sig)| {
+                    let mut copy = function.clone();
+                    copy.attrs.insert(0, gate);
+                    copy.sig = sig;
+                    Item::Fn(copy)
+                })
+                .collect()
+        }),
+        Item::Impl(implementation) => {
+            let mut changed = false;
+            let mut copy = implementation.clone();
+            copy.items.clear();
+            for member in &implementation.items {
+                if let syn::ImplItem::Fn(method) = member
+                    && let Some(variants) = variants(&method.sig)?
+                {
+                    changed = true;
+                    for (gate, sig) in variants {
+                        let mut method = method.clone();
+                        method.attrs.insert(0, gate);
+                        method.sig = sig;
+                        copy.items.push(syn::ImplItem::Fn(method));
+                    }
+                } else {
+                    copy.items.push(member.clone());
+                }
+            }
+            changed.then(|| vec![Item::Impl(copy)])
+        }
+        Item::Trait(declaration) => {
+            let mut changed = false;
+            let mut copy = declaration.clone();
+            copy.items.clear();
+            for member in &declaration.items {
+                if let syn::TraitItem::Fn(method) = member
+                    && let Some(variants) = variants(&method.sig)?
+                {
+                    changed = true;
+                    for (gate, sig) in variants {
+                        let mut method = method.clone();
+                        method.attrs.insert(0, gate);
+                        method.sig = sig;
+                        copy.items.push(syn::TraitItem::Fn(method));
+                    }
+                } else {
+                    copy.items.push(member.clone());
+                }
+            }
+            changed.then(|| vec![Item::Trait(copy)])
+        }
+        _ => None,
+    })
+}
+
+/// A conditional parameter attribute: `#[cfg(predicate)]` keeps the
+/// parameter only if `predicate` holds (`then` is `None`: the parameter
+/// goes); `#[cfg_attr(predicate, a, b)]` becomes `#[a] #[b]` if it holds.
+struct Condition {
+    predicate: TokenStream,
+    then: Option<Vec<Attribute>>,
+}
+
+fn condition(attr: &Attribute) -> Result<Option<Condition>> {
+    let Meta::List(list) = &attr.meta else {
+        return Ok(None);
+    };
+    if list.path.is_ident("cfg") {
+        return Ok(Some(Condition {
+            predicate: list.tokens.clone(),
+            then: None,
+        }));
+    }
+    if !list.path.is_ident("cfg_attr") {
+        return Ok(None);
+    }
+    let args = list
+        .parse_args_with(syn::punctuated::Punctuated::<Meta, syn::Token![,]>::parse_terminated)?;
+    let mut args = args.into_iter();
+    let predicate = args
+        .next()
+        .ok_or_else(|| Error::new_spanned(list, "expected a cfg condition"))?;
+    Ok(Some(Condition {
+        predicate: predicate.into_token_stream(),
+        then: Some(args.map(|meta| syn::parse_quote!(#[#meta])).collect()),
+    }))
+}
+
+/// Move lint attributes (`#[allow(..)]` and friends) from parameters to the
+/// function. They only affect diagnostics, and the parameter keeps its Splice
+/// meaning from the remaining markers.
+fn hoist_lint_attributes(attrs: &mut Vec<Attribute>, sig: &mut Signature) {
+    const LINTS: [&str; 5] = ["allow", "expect", "warn", "deny", "forbid"];
+    for arg in &mut sig.inputs {
+        let params = match arg {
+            FnArg::Typed(arg) => &mut arg.attrs,
+            FnArg::Receiver(arg) => &mut arg.attrs,
+        };
+        let (lints, markers) = std::mem::take(params)
+            .into_iter()
+            .partition(|attr| LINTS.iter().any(|lint| attr.path().is_ident(lint)));
+        *params = markers;
+        attrs.extend::<Vec<_>>(lints);
+    }
+}
+
+/// Whether `attr` is the Splice marker `name`. `comptime`, `columns` and
+/// `intrinsic` are inert names only a `#[kernel]` item reads; `kernel` is
+/// also the attribute macro, which a method can name by its path in Splice.
+/// `#[cuda::kernel]` or `#[x::comptime]` is someone else's attribute.
 fn marker(attr: &Attribute, name: &str) -> bool {
-    attr.path()
-        .segments
-        .last()
-        .is_some_and(|segment| segment.ident == name)
+    let path = attr.path();
+    path.is_ident(name)
+        || (name == "kernel"
+            && path.segments.len() == 2
+            && path.segments[0].ident == "splice"
+            && path.segments[1].ident == name)
+}
+
+/// The name of the method's `#[intrinsic("name")]`, validated by
+/// [`item_markers`].
+fn intrinsic_name(attrs: &[Attribute]) -> Result<Option<syn::LitStr>> {
+    attrs
+        .iter()
+        .find(|attr| marker(attr, "intrinsic"))
+        .map(Attribute::parse_args)
+        .transpose()
 }
 
 fn item_markers(attrs: &mut Vec<Attribute>, intrinsic_body: bool) -> Result<()> {
@@ -368,6 +704,27 @@ pub(crate) fn native_body(block: &mut Block) -> Result<()> {
             }
             syn::visit_mut::visit_expr_mut(self, expr);
         }
+        fn visit_macro_mut(&mut self, mac: &mut syn::Macro) {
+            // `vec!` elements are expressions of the body: `comptime!` in
+            // them is plain Rust too.
+            if !crate::kast::vec_macro(&mac.path) {
+                return;
+            }
+            match crate::kast::vec_elements(mac) {
+                Ok(mut elements) => {
+                    self.visit_expr_mut(&mut elements);
+                    mac.tokens = match elements {
+                        syn::Expr::Array(array) => array.elems.into_token_stream(),
+                        syn::Expr::Repeat(repeat) => {
+                            let (value, len) = (&repeat.expr, &repeat.len);
+                            quote::quote!(#value; #len)
+                        }
+                        _ => unreachable!("brackets parse as an array or a repeat"),
+                    };
+                }
+                Err(error) => self.0 = Some(error),
+            }
+        }
         fn visit_item_mut(&mut self, _: &mut Item) {}
     }
     let mut native = Native(None);
@@ -389,26 +746,112 @@ pub(crate) fn nested_visibility(visibility: &Visibility) -> Visibility {
     }
 }
 
-struct RebasePaths;
+/// Rewrites paths of a user signature or expression moved into the
+/// generated `mod <fn>`: `self::` and `super::` gain a level, and a type
+/// the module itself declares (`BuildArgs`, `CallArgs`, `Signature`,
+/// `OpaqueKernel`) is the user's item outside it, unless the name is a
+/// generic parameter or an item declared inside the expression.
+struct RebasePaths {
+    local: std::collections::HashSet<String>,
+}
+
+/// Types the generated module declares; they shadow its `use super::*`.
+const MODULE_TYPES: [&str; 4] = ["BuildArgs", "CallArgs", "Signature", "OpaqueKernel"];
+
+impl RebasePaths {
+    fn new(generics: &syn::Generics) -> Self {
+        let local = generics
+            .params
+            .iter()
+            .filter_map(|param| match param {
+                syn::GenericParam::Type(ty) => Some(ty.ident.to_string()),
+                syn::GenericParam::Const(c) => Some(c.ident.to_string()),
+                syn::GenericParam::Lifetime(_) => None,
+            })
+            .collect();
+        Self { local }
+    }
+
+    /// Also keep the names of items declared inside `expr`.
+    fn declared_in(mut self, expr: &syn::Expr) -> Self {
+        struct Items<'a>(&'a mut std::collections::HashSet<String>);
+        impl<'ast> Visit<'ast> for Items<'_> {
+            fn visit_item(&mut self, item: &'ast Item) {
+                let name = match item {
+                    Item::Struct(i) => Some(&i.ident),
+                    Item::Enum(i) => Some(&i.ident),
+                    Item::Union(i) => Some(&i.ident),
+                    Item::Type(i) => Some(&i.ident),
+                    Item::Trait(i) => Some(&i.ident),
+                    _ => None,
+                };
+                self.0.extend(name.map(ToString::to_string));
+                if let Item::Use(item) = item {
+                    self.visit_use_tree(&item.tree);
+                }
+            }
+            fn visit_use_name(&mut self, name: &'ast syn::UseName) {
+                self.0.insert(name.ident.to_string());
+            }
+            fn visit_use_rename(&mut self, rename: &'ast syn::UseRename) {
+                self.0.insert(rename.rename.to_string());
+            }
+        }
+        Items(&mut self.local).visit_expr(expr);
+        self
+    }
+}
 
 impl VisitMut for RebasePaths {
     fn visit_path_mut(&mut self, path: &mut Path) {
         syn::visit_mut::visit_path_mut(self, path);
+        let first = &path.segments[0].ident;
+        if path.leading_colon.is_none()
+            && MODULE_TYPES.iter().any(|name| first == name)
+            && !self.local.contains(&first.to_string())
+        {
+            *path = syn::parse_quote!(super::#path);
+            return;
+        }
         if path.segments.len() < 2 {
             return;
         }
         if path.segments[0].ident == "self" {
-            path.segments[0].ident = syn::parse_quote!(super);
+            path.segments[0].ident =
+                proc_macro2::Ident::new("super", path.segments[0].ident.span());
         } else if path.segments[0].ident == "super" {
             *path = syn::parse_quote!(super::#path);
         }
     }
+
+    fn visit_item_use_mut(&mut self, item: &mut syn::ItemUse) {
+        if item.leading_colon.is_none()
+            && let syn::UseTree::Path(root) = &mut item.tree
+        {
+            if root.ident == "self" {
+                root.ident = proc_macro2::Ident::new("super", root.ident.span());
+            } else if root.ident == "super" {
+                let placeholder = syn::UseTree::Glob(syn::UseGlob {
+                    star_token: Default::default(),
+                });
+                let tree = std::mem::replace(&mut item.tree, placeholder);
+                item.tree = syn::UseTree::Path(syn::UsePath {
+                    ident: proc_macro2::Ident::new("super", proc_macro2::Span::call_site()),
+                    colon2_token: Default::default(),
+                    tree: Box::new(tree),
+                });
+            }
+        }
+    }
 }
 
-pub(crate) fn rebase_expression(expr: &mut syn::Expr) {
-    RebasePaths.visit_expr_mut(expr);
+/// Rebase `expr` of a function with `generics` into its generated module.
+pub(crate) fn rebase_expression(expr: &mut syn::Expr, generics: &syn::Generics) {
+    RebasePaths::new(generics)
+        .declared_in(expr)
+        .visit_expr_mut(expr);
 }
 
 pub(crate) fn rebase_signature(sig: &mut Signature) {
-    RebasePaths.visit_signature_mut(sig);
+    RebasePaths::new(&sig.generics).visit_signature_mut(sig);
 }

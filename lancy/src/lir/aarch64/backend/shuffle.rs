@@ -40,7 +40,8 @@ impl Emitter<'_> {
             return Ok(());
         }
         let indices = z(indices, A::D);
-        let index = z(17, A::D);
+        let temp = self.temp(0);
+        let index = z(temp, A::D);
         let scratch = z(dst, A::D);
         let p = |r| O::vec(r, A::D);
         let lanes = self.config.bytes / 8;
@@ -48,7 +49,8 @@ impl Emitter<'_> {
         let active = O::pred(R::P4, PredQual::Zero);
         // Check the entire index before doubling it to a pair of table offsets.
         self.a.put(C::Trn2_z_zz, &[scratch, indices, indices])?;
-        self.a.put(C::Cmpne_p_p_zi0, &[p(R::P5), active, scratch])?;
+        self.a
+            .put(C::Cmpne_p_p_zi, &[p(R::P5), active, scratch, O::imm(0)])?;
         self.a.put(C::Trn1_z_zz, &[index, indices, indices])?;
         self.a.put(
             C::Cmphi_p_p_zi,
@@ -59,13 +61,16 @@ impl Emitter<'_> {
             C::Orr_p_p_pp,
             &[bytes(R::P5), active, bytes(R::P5), bytes(R::P6)],
         )?;
-        self.a.put(C::Index_0_1_z, &[scratch])?;
+        self.a
+            .put(C::Index_z_ii, &[scratch, O::imm(0), O::imm(1)])?;
         self.a.put(C::And_z_zi, &[scratch, O::imm(1)])?;
         self.a.put(C::Add_z_zz_, &[index, index, index])?;
         self.a.put(C::Add_z_zz_, &[index, index, scratch])?;
-        self.sve_shuffle(A::D, [a, b, 17], dst)?;
-        self.a
-            .put(C::Cpy_zero_z_p, &[scratch, O::pred(R::P5, PredQual::Merge)])
+        self.sve_shuffle(A::D, [a, b, temp], dst)?;
+        self.a.put(
+            C::Cpy_z_p_i,
+            &[scratch, O::pred(R::P5, PredQual::Merge), O::imm(0)],
+        )
     }
 
     fn sve_shuffle(&mut self, arr: A, [a, b, indices]: [u8; 3], dst: u8) -> Result {
@@ -102,8 +107,10 @@ impl Emitter<'_> {
             C::Sel_z_p_zz,
             &[out, O::pred(R::P1, PredQual::None), out, scratch],
         )?;
-        self.a
-            .put(C::Cpy_zero_z_p, &[out, O::pred(R::P2, PredQual::Merge)])
+        self.a.put(
+            C::Cpy_z_p_i,
+            &[out, O::pred(R::P2, PredQual::Merge), O::imm(0)],
+        )
     }
 
     fn neon_shuffle(&mut self, arr: A, size: usize, [a, b, indices]: [u8; 3], dst: u8) -> Result {
@@ -126,8 +133,9 @@ impl Emitter<'_> {
         )?;
         self.a.put(C::Orr_asimdsame_only, &[out, out, scratch])?;
         self.copy_vec(16, a, false)?;
-        self.copy_vec(17, b, false)?;
-        // TBL2 also reads the implicit register immediately following V16.
+        // TBL2 also reads the register after V16: the instruction's fixed
+        // temporary V17.
+        self.copy_vec(self.temp(0), b, false)?;
         self.a.put(C::Tbl2_asimd, &[out, scratch, out])
     }
 
@@ -196,7 +204,7 @@ impl Emitter<'_> {
         let scratch = v(16, A::D2);
         let mask = v(mask, A::D2);
         self.a.put(C::Trn2_asimd, &[scratch, mask, mask])?;
-        self.a.put(C::Sshr_sign_asimdshf, &[scratch, scratch])?;
+        self.a.sign_fill(scratch, scratch)?;
         self.a.put(
             C::And_asimdsame_only,
             &[v(dst, A::B16), v(data, A::B16), v(16, A::B16)],
@@ -222,8 +230,10 @@ impl Emitter<'_> {
         let z = |n| O::vec(R::z(n).unwrap(), arr);
         let zero = O::vec(R::Z16, A::D);
         let (d, scratch) = (z(dst), z(16));
-        self.a
-            .put(C::Cpy_one_z_p, &[d, O::pred(R::P1, PredQual::Zero)])?;
+        self.a.put(
+            C::Cpy_z_p_i,
+            &[d, O::pred(R::P1, PredQual::Zero), O::imm(1)],
+        )?;
         let lanes = self.config.bytes / sve_lane_bytes(arr);
         for exponent in 0..lanes.trailing_zeros() {
             let distance = 1 << exponent;
@@ -248,7 +258,7 @@ impl Emitter<'_> {
         let v = |n, a| O::vec(R::v(n).unwrap(), a);
         let (d, scratch) = (v(dst, arr), v(16, arr));
         let (d_bytes, scratch_bytes) = (v(dst, A::B16), v(16, A::B16));
-        self.a.put(C::Sshr_sign_asimdshf, &[d, v(mask, arr)])?;
+        self.a.sign_fill(d, v(mask, arr))?;
         self.a.put(C::Neg_asimd, &[d, d])?;
         for exponent in 0..(16 / size).trailing_zeros() {
             let bytes = size << exponent;
@@ -272,8 +282,7 @@ impl Emitter<'_> {
         self.neon_byte_indices(arr, size, dst, dst)?;
         self.a
             .put(C::Tbl_asimd, &[d_bytes, v(data, A::B16), d_bytes])?;
-        self.a
-            .put(C::Sshr_sign_asimdshf, &[scratch, v(mask, arr)])?;
+        self.a.sign_fill(scratch, v(mask, arr))?;
         self.a
             .put(C::And_asimdsame_only, &[d_bytes, d_bytes, scratch_bytes])
     }

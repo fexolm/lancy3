@@ -1,6 +1,4 @@
-use super::{
-    A, C, Cond, Emitter, O, R, Result, arrangements, groups::z, integer_float::float_layout,
-};
+use super::{A, C, Cond, Emitter, O, PredQual, R, Result, arrangements, groups::z};
 use crate::hir::{Lane, Unary};
 
 #[derive(Clone, Copy, Debug)]
@@ -9,7 +7,6 @@ pub(super) enum Action {
     CopySign,
     Classify(Unary),
     Signum,
-    Next(bool),
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -18,6 +15,18 @@ pub(super) struct Form {
     pub packed: bool,
     pub scalable: bool,
     pub action: Action,
+}
+
+/// Fraction bits, exponent bias and sign bit of a float lane.
+pub(super) fn float_layout(lane: Lane) -> (u64, u64, u64) {
+    let (fraction, bias) = match lane {
+        Lane::F16 => (10, 15),
+        Lane::BF16 => (7, 127),
+        Lane::F32 => (23, 127),
+        Lane::F64 => (52, 1023),
+        _ => unreachable!("selected floating type"),
+    };
+    (fraction, bias, 1 << (lane.bytes() * 8 - 1))
 }
 
 fn x(n: u8) -> O {
@@ -34,6 +43,9 @@ impl Emitter<'_> {
     ) -> Result {
         let size = form.lane.bytes();
         let (neon, scalable) = arrangements(size);
+        if let Action::MinMax(min) = form.action {
+            return self.min_max(min, form.scalable, size, [src, rhs.unwrap(), dst]);
+        }
         if !form.packed {
             let ty = form.lane.scalar();
             for (from, to) in [(Some(src), 9), (rhs, 10)] {
@@ -67,7 +79,7 @@ impl Emitter<'_> {
                 );
             }
             let v = |n| O::vec(R::v(n).unwrap(), neon);
-            return self.a.put(C::Sshr_sign_asimdshf, &[v(dst), v(src)]);
+            return self.a.sign_fill(v(dst), v(src));
         }
         if form.scalable {
             return self.sve_each_lane(scalable, |e| {
@@ -96,14 +108,6 @@ impl Emitter<'_> {
         let infinity = sign - min_normal;
         let (a, b, out, mag, tmp) = (x(9), x(10), x(12), x(13), x(14));
         let zr = x(31);
-        if let Action::MinMax(min) = form.action {
-            let ty = form.lane.scalar();
-            let arr = if form.lane == Lane::F32 { A::S } else { A::D };
-            self.float_move(ty, true, 16, 9)?;
-            self.float_move(ty, true, 17, 10)?;
-            self.ordered_minmax(min, O::vec(R::V16, arr), O::vec(R::V17, arr))?;
-            return self.float_move(ty, false, 16, 12);
-        }
         if matches!(form.action, Action::Classify(Unary::SignBit)) {
             let bit = O::imm(sign.trailing_zeros().into());
             return self.a.put(C::Sbfm_64m_bitfield, &[out, a, bit, bit]);
@@ -124,7 +128,6 @@ impl Emitter<'_> {
                 self.a
                     .put(C::Csel_64_condsel, &[out, x(15), tmp, O::cond(Cond::Hi)])
             }
-            Action::Next(up) => self.float_neighbor(sign, infinity, up),
             Action::Classify(op) => {
                 use Unary::*;
                 let (offset, limit, cond) = match op {
@@ -145,39 +148,66 @@ impl Emitter<'_> {
                 self.a
                     .put(C::Sbfm_64m_bitfield, &[out, out, O::imm(0), O::imm(31)])
             }
-            Action::MinMax(_) => unreachable!("handled with FP comparison"),
+            Action::MinMax(_) => unreachable!("selected whole-register min/max"),
         }
     }
+}
 
-    fn float_neighbor(&mut self, sign: u64, infinity: u64, up: bool) -> Result {
-        let (a, out, mag, tmp) = (x(9), x(12), x(13), x(14));
-        let zr = x(31);
-        let unchanged = self.a.label();
-        let nonzero = self.a.label();
-        let done = self.a.label();
-        self.a.imm(R::X14, infinity)?;
-        self.a.put(C::Subs_64_addsub_shift, &[zr, mag, tmp])?;
-        self.a.jump_if(Cond::Hi, unchanged)?;
-        let toward = if up { 0 } else { sign };
-        self.a.imm(R::X14, toward | infinity)?;
-        self.a.put(C::Subs_64_addsub_shift, &[zr, a, tmp])?;
-        self.a.jump_if(Cond::Eq, unchanged)?;
-        self.a.put(C::Subs_64_addsub_imm, &[zr, mag, O::imm(0)])?;
-        self.a.jump_if(Cond::Ne, nonzero)?;
-        self.a.imm(R::X12, toward | 1)?;
-        self.a.jump(done);
-        self.a.bind(nonzero);
-        self.a.put(C::And_64_log_imm, &[mag, a, O::imm(sign)])?;
-        self.a.put(C::Subs_64_addsub_imm, &[zr, mag, O::imm(0)])?;
-        self.a.put(C::Add_64_addsub_imm, &[tmp, a, O::imm(1)])?;
-        self.a.put(C::Sub_64_addsub_imm, &[x(15), a, O::imm(1)])?;
-        let increase = if up { Cond::Eq } else { Cond::Ne };
-        self.a
-            .put(C::Csel_64_condsel, &[out, tmp, x(15), O::cond(increase)])?;
-        self.a.jump(done);
-        self.a.bind(unchanged);
-        self.a.put(C::Orr_64_log_shift, &[out, zr, a])?;
-        self.a.bind(done);
-        Ok(())
+impl Emitter<'_> {
+    /// F32/F64 `min`/`max` on whole registers (A64-01). FMINNM/FMAXNM
+    /// already return the number when one operand is a quiet NaN; two
+    /// selects make a signaling NaN behave the same: a NaN `rhs` yields
+    /// `lhs`, and otherwise a NaN `lhs` yields `rhs`. V16 holds the result
+    /// until both inputs are read, so `dst` may alias either.
+    fn min_max(&mut self, min: bool, scalable: bool, size: usize, [a, b, dst]: [u8; 3]) -> Result {
+        let (neon, arr) = arrangements(size);
+        if scalable {
+            let z = |n| z(n, arr);
+            let (p1, p2) = (R::P1, R::P2);
+            self.predicate(p1, arr, self.config.bytes / size)?;
+            self.copy_vec(16, a, true)?;
+            let code = if min {
+                C::Fminnm_z_p_zz
+            } else {
+                C::Fmaxnm_z_p_zz
+            };
+            self.a
+                .put(code, &[z(16), O::pred(p1, PredQual::Merge), z(16), z(b)])?;
+            for (number, fallback, out) in [(a, b, 16), (b, a, dst)] {
+                self.a.put(
+                    C::Fcmeq_p_p_zz,
+                    &[
+                        O::vec(p2, arr),
+                        O::pred(p1, PredQual::Zero),
+                        z(number),
+                        z(number),
+                    ],
+                )?;
+                self.a.put(
+                    C::Sel_z_p_zz,
+                    &[z(out), O::pred(p2, PredQual::None), z(16), z(fallback)],
+                )?;
+            }
+            return Ok(());
+        }
+        let v = |n, arr| O::vec(R::v(n).unwrap(), arr);
+        let mask = self.temp(0);
+        let code = if min {
+            C::Fminnm_asimdsame
+        } else {
+            C::Fmaxnm_asimdsame
+        };
+        self.a.put(code, &[v(16, neon), v(a, neon), v(b, neon)])?;
+        for (number, fallback) in [(a, b), (b, a)] {
+            self.a.put(
+                C::Fcmeq_asimdsame,
+                &[v(mask, neon), v(number, neon), v(number, neon)],
+            )?;
+            self.a.put(
+                C::Bif_asimd,
+                &[v(16, A::B16), v(fallback, A::B16), v(mask, A::B16)],
+            )?;
+        }
+        self.copy_vec(dst, 16, false)
     }
 }

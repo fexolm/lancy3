@@ -1,13 +1,22 @@
 //! Selected x64 instructions. R11 addresses the current workspace frame.
 //! R10 is the allocator's move scratch and is available inside a pseudo-op.
-pub(super) mod lanes;
+pub(super) mod convert;
+pub(super) mod int;
+mod names;
 pub(super) mod simd;
-use crate::hir::operation::Action;
-use crate::hir::{Binary, Lane, RustContextImport, RustImport, RustPacketImport, Scale, Type};
-use crate::{lir::TargetInst, module::FunctionId};
+pub(super) use super::abi::SCRATCH;
+use super::abi::{MASKS, Machine, gprs, vectors};
+use crate::hir::{Binary, Lane, RustFunction, Scale, Type};
+use crate::support::numeric::Action;
+use crate::support::slotmap::DenseMap;
+use crate::{
+    lir::{TargetInst, frame::FrameUse},
+    module::FunctionId,
+};
+pub(super) use int::{Alu, Cond, Int, IntUnary, Shift};
 use regalloc2::{MachineEnv, Operand, PReg, PRegSet, RegClass, VReg};
-use simd::Native;
 use simd::packed::rearrange::PairedShuffle;
+use simd::{MaskedMemory, Native};
 
 #[derive(Clone, Copy, Debug)]
 pub(super) enum VectorMask<R> {
@@ -58,39 +67,9 @@ impl VectorMask<VReg> {
     }
 }
 
-const fn gpr(enc: usize) -> PReg {
-    PReg::new(enc, RegClass::Int)
-}
-const AX: PReg = gpr(0);
-const CX: PReg = gpr(1);
-const DX: PReg = gpr(2);
-const ARGV: PReg = if cfg!(windows) { CX } else { gpr(7) };
-const RUST_ARGS: [PReg; 4] = if cfg!(windows) {
-    [CX, DX, gpr(8), gpr(9)]
-} else {
-    [gpr(7), gpr(6), DX, CX]
-};
-
-const fn gprs(encodings: &[usize]) -> PRegSet {
-    let mut set = PRegSet::empty();
-    let mut i = 0;
-    while i < encodings.len() {
-        set.add(gpr(encodings[i]));
-        i += 1;
-    }
-    set
-}
-
-const VOLATILE: PRegSet = if cfg!(windows) {
-    gprs(&[0, 1, 2, 8, 9])
-} else {
-    gprs(&[0, 1, 2, 6, 7, 8, 9])
-};
-const SAVED_GPRS: PRegSet = if cfg!(windows) {
-    gprs(&[3, 5, 6, 7, 12, 13, 14, 15])
-} else {
-    gprs(&[3, 5, 12, 13, 14, 15])
-};
+const AX: PReg = PReg::new(0, RegClass::Int);
+const CX: PReg = PReg::new(1, RegClass::Int);
+const DX: PReg = PReg::new(2, RegClass::Int);
 
 // XMM, YMM and ZMM are aliases. Scalars and packed values must share one class.
 pub(super) fn class(ty: Type) -> RegClass {
@@ -105,88 +84,6 @@ pub(super) fn class(ty: Type) -> RegClass {
 }
 fn return_reg(v: VReg) -> PReg {
     PReg::new(0, v.class())
-}
-const SCRATCH: usize = if cfg!(windows) { 5 } else { 15 };
-const fn vectors(mut start: usize, end: usize) -> PRegSet {
-    let mut regs = PRegSet::empty();
-    while start < end {
-        regs.add(PReg::new(start, RegClass::Vector));
-        start += 1;
-    }
-    regs
-}
-const SAVED_SIMD: PRegSet = if cfg!(windows) {
-    vectors(6, 16)
-} else {
-    PRegSet::empty()
-};
-pub(super) fn nonvolatile() -> PRegSet {
-    SAVED_GPRS | SAVED_SIMD
-}
-const SIMD: PRegSet = {
-    let mut set = PRegSet::empty();
-    let mut i = 0;
-    while i < SCRATCH {
-        set.add(PReg::new(i, RegClass::Vector));
-        i += 1;
-    }
-    set
-};
-// K0 cannot predicate EVEX, and K1 is reserved for destructive masks and moves.
-const MASKS: PRegSet = {
-    let mut regs = PRegSet::empty();
-    let mut i = 2;
-    while i <= 7 {
-        regs.add(PReg::new(i, RegClass::Float));
-        i += 1;
-    }
-    regs
-};
-
-static ENV: MachineEnv = MachineEnv {
-    preferred_regs_by_class: [VOLATILE, MASKS, SIMD],
-    non_preferred_regs_by_class: [SAVED_GPRS, PRegSet::empty(), SAVED_SIMD],
-    scratch_by_class: [
-        Some(gpr(10)),
-        Some(PReg::new(1, RegClass::Float)),
-        Some(PReg::new(SCRATCH, RegClass::Vector)),
-    ],
-    fixed_stack_slots: Vec::new(),
-};
-
-#[derive(Clone, Copy, Debug)]
-pub(super) enum Alu {
-    Add,
-    Sub,
-    Mul,
-    And,
-    Or,
-    Xor,
-    Min,
-    Max,
-}
-
-#[derive(Clone, Copy, Debug)]
-pub(super) enum Cond {
-    Eq,
-    Ne,
-    Lt,
-    Le,
-    Gt,
-    Ge,
-}
-
-impl Cond {
-    pub fn inverse(self) -> Self {
-        match self {
-            Self::Eq => Self::Ne,
-            Self::Ne => Self::Eq,
-            Self::Lt => Self::Ge,
-            Self::Ge => Self::Lt,
-            Self::Gt => Self::Le,
-            Self::Le => Self::Gt,
-        }
-    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -228,9 +125,16 @@ impl Address {
 #[derive(Clone, Copy, Debug)]
 pub(super) enum SelectCond {
     Nonzero(VReg),
-    Compare(Cond, VReg, Rhs),
+    /// An integer comparison of the operand size in bytes.
+    Compare(Cond, u8, VReg, Rhs),
 }
 
+/// A scalar integer narrower than its register holds its value in the low
+/// `size` bytes only; the upper bits are undefined. Producers leave whatever
+/// is convenient there (a signed `Cast` sign-extends, a load zero-extends,
+/// `Alu` keeps the carry-out), and every consumer reads just the low
+/// bytes: a narrow store, a `Cast` through `movsx`/`movzx`, an operation at
+/// the type's operand size or after extending in place, lanes inserted by size, and a root return the caller truncates to the result type.
 #[derive(Clone, Copy, Debug)]
 pub(super) enum Inst {
     Argv(VReg),
@@ -240,40 +144,70 @@ pub(super) enum Inst {
         ty: Type,
         index: usize,
     },
-    Native(Native, VReg, [Option<VReg>; 3], [Option<VReg>; 6]),
-    Lanes {
-        action: Action,
-        input: Type,
-        output: Type,
-        dst: VReg,
-        args: [Option<(Type, VReg)>; 3],
-    },
+    Native(NativeId),
+    /// Call the shared numeric fallback (`lir::fallback`).
+    Fallback(ExpansionId),
     Literal(Lane, u128, VReg),
     Iota(Lane, VReg),
     BitMove(Type, Type, VReg, VReg),
-    IntBinary(Binary, Type, VReg, VReg, VReg),
     Imm(VReg, i32),
     Copy(VReg, VReg),
-    Alu(Alu, VReg, VReg, Rhs),
+    Alu(Alu, Int, VReg, VReg, Rhs),
     Shift {
-        left: bool,
+        op: Shift,
+        int: Int,
         dst: VReg,
         value: VReg,
         count: Rhs,
     },
-    Compare(Cond, VReg, VReg, Rhs),
-    SelectI32 {
+    IntUnary(IntUnary, Int, VReg, VReg, Option<VReg>),
+    Saturating {
+        sub: bool,
+        int: Int,
+        dst: VReg,
+        lhs: VReg,
+        rhs: VReg,
+    },
+    /// A cast from or to a float scalar (see [`convert`]).
+    Convert {
+        from: Lane,
+        to: Lane,
+        dst: VReg,
+        src: VReg,
+        temp: Option<VReg>,
+    },
+    /// The class of a 16-bit float, in place, as an `i32` mask.
+    Classify(crate::hir::Unary, Lane, VReg, VReg),
+    /// Sign- or zero-extend an integer to the whole register.
+    Extend(Int, VReg, VReg),
+    /// The comparison of integers of the given size, as a mask.
+    Compare(Cond, u8, VReg, VReg, Rhs),
+    /// Choose between general registers, of 64 bits when `wide`.
+    Select {
+        wide: bool,
         dst: VReg,
         no: VReg,
         cond: SelectCond,
         yes: VReg,
     },
-    BrCmp(Cond, VReg, Rhs),
-    Cdq {
+    /// Choose between vector registers by a scalar condition.
+    SelectVector {
+        dst: VReg,
+        no: VReg,
+        cond: VReg,
+        yes: VReg,
+    },
+    BrCmp(Cond, u8, VReg, Rhs),
+    /// The high half of a dividend: its sign, or zero when unsigned.
+    DivideHigh {
+        int: Int,
         lo: VReg,
         hi: VReg,
     },
-    IDiv {
+    /// Hardware division of operands extended to 32 or 64 bits; the type
+    /// decides signedness and the overflowing dividend.
+    Divide {
+        int: Int,
         remainder: bool,
         dst: VReg,
         lo: VReg,
@@ -288,35 +222,31 @@ pub(super) enum Inst {
         quotient: Quotient,
     },
     CheckBounds(VReg, VReg),
-    CheckOverflow(VReg),
+    TrapIf(VReg, crate::Trap),
+    Trap(crate::Trap),
     CheckMask(VectorMask<VReg>),
     BranchAny(VectorMask<VReg>),
     BranchAll(Lane, VReg),
     AllMask(Lane, VReg, VReg),
     AnyMask(VReg, VectorMask<VReg>),
-    SelectMask {
-        lane: Lane,
-        mask: VectorMask<VReg>,
-        yes: VReg,
-        no: VReg,
-        dst: VReg,
-    },
+    SelectMask(SelectId),
     MaskCompare(Lane, i32, VReg, VReg, VReg),
     MaskLogic(Lane, Binary, VReg, VReg, VReg),
     MaskNot(Lane, VReg, VReg),
     MaskImmediate(VReg, u64),
-    MaskPrefix(VReg, VReg),
+    /// The predicate of the first `count` of `lanes` lanes: dst, count, temp.
+    MaskPrefix(u8, VReg, VReg, VReg),
     MaskCount(VReg, VReg),
     MaskCompact(Lane, bool, VReg, VReg, VReg),
     CompactLookup(bool, VReg, VReg, VReg, VReg),
+    /// Store the `mask` lanes of `data` packed at `base`, at most `limit`.
     CompactStore {
         base: VReg,
         data: VReg,
-        original: VReg,
-        enabled: VReg,
-        temp: VReg,
+        mask: VReg,
+        limit: VReg,
+        temps: [VReg; 2],
     },
-    Movsxd(VReg, VReg),
     Lea(VReg, Address),
     Load(Type, VReg, Address),
     PackedMemory(Binary, Lane, VReg, VReg, Address),
@@ -325,7 +255,7 @@ pub(super) enum Inst {
     ExtractLane(Lane, VReg, VReg, u8),
     ShiftDwords(VReg, VReg, u8),
     PairedShuffle(PairedShuffle, VReg, VReg, VReg),
-    DwordLane {
+    DynamicLane {
         lane: Lane,
         checked: bool,
         dst: VReg,
@@ -335,15 +265,7 @@ pub(super) enum Inst {
         temp: Option<VReg>,
     },
     VectorShiftImm(Binary, Lane, VReg, VReg, u8),
-    Masked {
-        ty: Type,
-        base: VReg,
-        indices: Option<VReg>,
-        temp: Option<VReg>,
-        mask: VectorMask<VReg>,
-        value: Option<VReg>,
-        dst: Option<VReg>,
-    },
+    Masked(MaskedId),
     Store(Type, Address, VReg),
     DebugStore(Type, u32, VReg),
     DebugPoint(u32),
@@ -351,40 +273,106 @@ pub(super) enum Inst {
     Call {
         target: FunctionId,
         dst: VReg,
-        clobbers: PRegSet,
+        clobbers: ClobberId,
     },
-    RustCall(&'static RustImport, VReg, VReg, VReg),
-    RustPacketCall(&'static RustPacketImport, VReg),
-    StorePacketWord(u32, VReg),
-    RustContextCall(RustContextImport, [VReg; 4], VReg),
-    CallScratch(u32, VReg),
+    RustCall(&'static RustFunction, [VReg; 4], VReg),
+    /// Address of the frame's scratch memory at a byte offset, with the
+    /// region's size in bytes.
+    CallScratch(u32, u32, VReg),
     Jump,
     Branch(VReg),
     Ret(VReg),
 }
 
-impl Inst {
-    pub fn call(target: FunctionId, dst: VReg, mut written: PRegSet) -> Self {
+crate::support::slotmap::slot_key!(pub(super) NativeId);
+crate::support::slotmap::slot_key!(pub(super) ExpansionId);
+crate::support::slotmap::slot_key!(pub(super) SelectId);
+crate::support::slotmap::slot_key!(pub(super) MaskedId);
+crate::support::slotmap::slot_key!(pub(super) ClobberId);
+
+/// An operation with a native vector or scalar form.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct NativeInst {
+    pub native: Native,
+    pub dst: VReg,
+    pub args: [Option<VReg>; 3],
+    pub temps: [Option<VReg>; 6],
+}
+
+/// An operation computed out of line by the numeric fallback, from typed
+/// arguments.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct Expansion {
+    pub action: Action,
+    pub input: Type,
+    pub output: Type,
+    pub dst: VReg,
+    pub args: [Option<(Type, VReg)>; 3],
+}
+
+/// A lane select by a vector mask.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct MaskSelect<R = VReg> {
+    pub lane: Lane,
+    pub mask: VectorMask<R>,
+    pub yes: R,
+    pub no: R,
+    pub dst: R,
+}
+
+/// The function's instruction payloads too large to keep in [`Inst`],
+/// which holds their keys. Selection stores a payload and pushes the key.
+#[derive(Default)]
+pub(super) struct Details {
+    pub natives: DenseMap<NativeId, NativeInst>,
+    pub expansions: DenseMap<ExpansionId, Expansion>,
+    pub selects: DenseMap<SelectId, MaskSelect>,
+    pub masked: DenseMap<MaskedId, MaskedMemory<VReg>>,
+    pub clobbers: DenseMap<ClobberId, PRegSet>,
+}
+
+impl Details {
+    pub(super) fn native(&mut self, native: NativeInst) -> Inst {
+        Inst::Native(self.natives.insert(native))
+    }
+    pub(super) fn fallback(&mut self, expansion: Expansion) -> Inst {
+        Inst::Fallback(self.expansions.insert(expansion))
+    }
+    pub(super) fn select(&mut self, select: MaskSelect) -> Inst {
+        Inst::SelectMask(self.selects.insert(select))
+    }
+    pub(super) fn masked(&mut self, access: MaskedMemory<VReg>) -> Inst {
+        Inst::Masked(self.masked.insert(access))
+    }
+    /// A call writes what the callee writes, except its result register.
+    pub(super) fn call(&mut self, target: FunctionId, dst: VReg, mut written: PRegSet) -> Inst {
         written.remove(return_reg(dst));
-        let clobbers = written;
-        Self::Call {
+        Inst::Call {
             target,
             dst,
-            clobbers,
+            clobbers: self.clobbers.insert(written),
         }
     }
 }
 
 impl TargetInst for Inst {
-    fn operands(&self, out: &mut Vec<Operand>) {
+    type Machine = Machine;
+    type Details = Details;
+    fn operands(&self, machine: &Machine, details: &Details, out: &mut Vec<Operand>) {
         use Operand as O;
         match *self {
-            Self::Argv(v) => out.push(O::reg_fixed_def(v, ARGV)),
+            Self::Argv(v) => out.push(O::reg_fixed_def(v, machine.abi.args[0])),
             Self::LoadArg { dst, argv, .. } => {
                 out.extend(argv.map(O::reg_use));
                 out.push(O::reg_def(dst));
             }
-            Self::Native(native, d, args, temps) => {
+            Self::Native(id) => {
+                let NativeInst {
+                    native,
+                    dst: d,
+                    args,
+                    temps,
+                } = details.natives[id];
                 out.extend(args.into_iter().flatten().map(O::reg_use));
                 out.push(if native.separate_output() {
                     O::reg_def_at_start(d)
@@ -395,21 +383,42 @@ impl TargetInst for Inst {
                 });
                 out.extend(temps.into_iter().flatten().map(O::reg_temp));
             }
-            Self::Lanes { dst, args, .. } => {
+            Self::Fallback(id) => {
+                let Expansion { dst, args, .. } = details.expansions[id];
                 out.extend(args.into_iter().flatten().map(|(_, reg)| O::reg_use(reg)));
                 out.push(O::reg_fixed_def(dst, return_reg(dst)));
             }
             Self::Literal(_, _, d) | Self::Iota(_, d) => out.push(O::reg_def(d)),
             Self::BitMove(_, _, d, a) => out.extend([O::reg_use(a), O::reg_def(d)]),
-            Self::IntBinary(_, _, d, a, b) => {
-                out.extend([O::reg_use(a), O::reg_use(b), O::reg_reuse_def(d, 0)])
-            }
             Self::Imm(d, _) => out.push(O::reg_def(d)),
             Self::Copy(d, a) => out.extend([O::reg_use(a), O::reg_reuse_def(d, 0)]),
-            Self::Alu(_, d, a, b) => {
+            Self::Alu(_, _, d, a, b) => {
                 out.push(O::reg_use(a));
                 b.operands(out);
                 out.push(O::reg_reuse_def(d, 0));
+            }
+            Self::IntUnary(_, _, d, a, temp) => {
+                out.extend([O::reg_use(a), O::reg_reuse_def(d, 0)]);
+                out.extend(temp.map(O::reg_temp));
+            }
+            Self::Convert {
+                from,
+                to,
+                dst,
+                src,
+                temp,
+            } => {
+                out.push(O::reg_use(src));
+                out.push(if convert::soft(from, to) && dst.class() == RegClass::Int {
+                    O::reg_fixed_def(dst, AX)
+                } else {
+                    O::reg_def(dst)
+                });
+                out.extend(temp.map(O::reg_temp));
+            }
+            Self::Classify(_, _, d, a) => out.extend([O::reg_use(a), O::reg_reuse_def(d, 0)]),
+            Self::Saturating { dst, lhs, rhs, .. } => {
+                out.extend([O::reg_use(lhs), O::reg_use(rhs), O::reg_reuse_def(dst, 0)])
             }
             Self::Shift {
                 dst, value, count, ..
@@ -420,35 +429,44 @@ impl TargetInst for Inst {
                 }
                 out.push(O::reg_reuse_def(dst, 0));
             }
-            Self::Compare(_, d, a, b) => {
+            Self::Compare(_, _, d, a, b) => {
                 out.push(O::reg_use(a));
                 b.operands(out);
                 out.push(O::reg_def(d));
             }
-            Self::SelectI32 { dst, no, cond, yes } => {
+            Self::Select {
+                dst, no, cond, yes, ..
+            } => {
                 out.extend([O::reg_use(no), O::any_use(yes)]);
                 match cond {
                     SelectCond::Nonzero(v) => out.push(O::reg_use(v)),
-                    SelectCond::Compare(_, a, b) => {
+                    SelectCond::Compare(_, _, a, b) => {
                         out.push(O::reg_use(a));
                         b.operands(out);
                     }
                 }
                 out.push(O::reg_reuse_def(dst, 0));
             }
-            Self::BrCmp(_, a, b) => {
+            Self::SelectVector { dst, no, cond, yes } => out.extend([
+                O::reg_use(no),
+                O::reg_use(yes),
+                O::reg_use(cond),
+                O::reg_reuse_def(dst, 0),
+            ]),
+            Self::BrCmp(_, _, a, b) => {
                 out.push(O::reg_use(a));
                 b.operands(out);
             }
-            Self::Cdq { lo, hi } => {
+            Self::DivideHigh { lo, hi, .. } => {
                 out.extend([O::reg_fixed_use(lo, AX), O::reg_fixed_def(hi, DX)])
             }
-            Self::IDiv {
+            Self::Divide {
                 remainder,
                 dst,
                 lo,
                 hi,
                 divisor,
+                ..
             } => out.extend([
                 O::reg_fixed_use(lo, AX),
                 O::reg_fixed_use(hi, DX),
@@ -459,8 +477,8 @@ impl TargetInst for Inst {
                 out.extend([O::reg_use(value), O::reg_def_at_start(dst)])
             }
             Self::CheckBounds(i, n) => out.extend([O::reg_use(i), O::any_use(n)]),
-            Self::CheckOverflow(v) => out.push(O::reg_use(v)),
-            Self::Movsxd(d, a) => out.extend([O::reg_use(a), O::reg_def(d)]),
+            Self::TrapIf(v, _) => out.push(O::reg_use(v)),
+            Self::Extend(_, d, a) => out.extend([O::reg_use(a), O::reg_def(d)]),
             Self::Lea(d, addr) | Self::Load(_, d, addr) | Self::BroadcastMemory(_, d, addr) => {
                 addr.operands(out);
                 out.push(O::reg_def(d));
@@ -477,9 +495,10 @@ impl TargetInst for Inst {
                 mask.operands(out);
                 out.push(O::reg_def(d));
             }
-            Self::SelectMask {
-                mask, yes, no, dst, ..
-            } => {
+            Self::SelectMask(id) => {
+                let MaskSelect {
+                    mask, yes, no, dst, ..
+                } = details.selects[id];
                 mask.operands(out);
                 out.extend([O::reg_use(yes), O::reg_use(no), O::reg_def(dst)]);
             }
@@ -489,14 +508,14 @@ impl TargetInst for Inst {
             | Self::MaskCompact(_, _, d, x, y) => {
                 out.extend([O::reg_use(x), O::reg_use(y), O::reg_def(d)]);
             }
-            Self::MaskNot(_, d, x)
-            | Self::AllMask(_, d, x)
-            | Self::MaskPrefix(d, x)
-            | Self::MaskCount(d, x) => {
+            Self::MaskNot(_, d, x) | Self::AllMask(_, d, x) | Self::MaskCount(d, x) => {
                 out.extend([O::reg_use(x), O::reg_def(d)]);
             }
+            Self::MaskPrefix(_, d, count, temp) => {
+                out.extend([O::reg_use(count), O::reg_def(d), O::reg_temp(temp)]);
+            }
             Self::MaskImmediate(d, _) => out.push(O::reg_def(d)),
-            Self::DwordLane {
+            Self::DynamicLane {
                 dst,
                 value,
                 index,
@@ -510,8 +529,8 @@ impl TargetInst for Inst {
                 out.extend(temp.map(O::reg_temp));
             }
             Self::CompactLookup(_, d, x, m, index) => {
-                let cpu = super::Features::host();
-                let dst = if cpu.bytes == 16 && !cpu.ssse3 {
+                let cpu = machine.cpu;
+                let dst = if cpu.bytes == 16 && !cpu.isa.ssse3 {
                     // The SSE2 sequence reads the source after writing the result.
                     O::reg_def_at_start(d)
                 } else {
@@ -522,27 +541,29 @@ impl TargetInst for Inst {
             Self::CompactStore {
                 base,
                 data,
-                original,
-                enabled,
-                temp,
+                mask,
+                limit,
+                temps: [bits, prefix],
             } => out.extend([
                 O::reg_use(base),
                 O::reg_use(data),
-                O::reg_use(original),
-                O::reg_use(enabled),
-                O::reg_temp(temp),
+                O::reg_use(mask),
+                O::reg_use(limit),
+                O::reg_temp(bits),
+                O::reg_temp(prefix),
             ]),
-            Self::Masked {
-                base,
-                indices,
-                temp,
-                mask,
-                value,
-                dst,
-                ..
-            } => {
+            Self::Masked(id) => {
+                let MaskedMemory {
+                    base,
+                    index,
+                    temp,
+                    mask,
+                    value,
+                    dst,
+                    ..
+                } = details.masked[id];
                 out.push(O::reg_use(base));
-                out.extend(indices.map(O::reg_use));
+                out.extend(index.map(O::reg_use));
                 mask.operands(out);
                 out.extend(value.map(O::reg_use));
                 out.extend(dst.map(O::reg_def));
@@ -556,58 +577,69 @@ impl TargetInst for Inst {
             Self::BranchAll(_, v)
             | Self::StoreArg(_, _, v)
             | Self::DebugStore(_, _, v)
-            | Self::StorePacketWord(_, v)
             | Self::Branch(v) => out.push(O::reg_use(v)),
             Self::Call { dst, .. } => out.push(O::reg_fixed_def(dst, return_reg(dst))),
-            Self::RustCall(_, a, b, dst) => out.extend([
-                O::reg_fixed_use(a, RUST_ARGS[0]),
-                O::reg_fixed_use(b, RUST_ARGS[1]),
-                O::reg_fixed_def(dst, AX),
-            ]),
-            Self::RustPacketCall(_, dst) => out.push(O::reg_fixed_def(dst, AX)),
-            Self::RustContextCall(_, args, dst) => {
+            Self::RustCall(_, args, dst) => {
                 out.extend(
                     args.into_iter()
-                        .zip(RUST_ARGS)
+                        .zip(machine.abi.args)
                         .map(|(arg, reg)| O::reg_fixed_use(arg, reg)),
                 );
                 out.push(O::reg_fixed_def(dst, AX));
             }
-            Self::CallScratch(_, dst) => out.push(O::reg_def(dst)),
+            Self::CallScratch(_, _, dst) => out.push(O::reg_def(dst)),
             Self::Ret(v) => out.push(O::reg_fixed_use(v, return_reg(v))),
-            Self::Jump | Self::DebugPoint(_) => {}
+            Self::Jump | Self::DebugPoint(_) | Self::Trap(_) => {}
         }
     }
-    fn clobbers(&self) -> PRegSet {
+    fn clobbers(&self, machine: &Machine, details: &Details) -> PRegSet {
+        let abi = machine.abi;
+        // A wider value in a preserved vector register loses its upper lanes.
+        let wide = machine.register_bytes > 16;
+        let callee = || {
+            let mut regs = abi.volatile | MASKS | abi.volatile_vectors;
+            if wide {
+                regs.union_from(abi.saved & vectors(0, 16));
+            }
+            regs
+        };
         match self {
-            Self::Call { clobbers, .. } => *clobbers,
-            Self::RustCall(..) | Self::RustPacketCall(..) | Self::RustContextCall(..) => {
-                let wide = super::Features::host().bytes > 16;
-                let mut regs = VOLATILE | MASKS | SIMD;
-                if wide {
-                    // Win64 preserves XMM6..15, but not their upper lanes.
-                    regs.union_from(SAVED_SIMD);
-                }
+            Self::Call { clobbers, .. } => details.clobbers[*clobbers],
+            Self::RustCall(..) => {
+                let mut regs = callee();
                 regs.remove(AX);
                 regs
             }
-            Self::Lanes {
-                action, input, dst, ..
-            } => {
-                // The inline expansions use only these scratch registers. A real
-                // math call may also overwrite the upper halves of Windows YMM/ZMM6..15.
-                let mut set = if lanes::calls_library(*action, *input) {
-                    let wide = super::Features::host().bytes > 16;
-                    VOLATILE | MASKS | SIMD | if wide { SAVED_SIMD } else { PRegSet::empty() }
-                } else {
-                    gprs(&[0, 1, 2, 8, 9]) | vectors(0, 3)
-                };
-                set.remove(return_reg(*dst));
+            Self::Fallback(id) => {
+                let mut set = callee();
+                set.remove(return_reg(details.expansions[*id].dst));
                 set
             }
-            Self::IDiv { remainder, .. } => PRegSet::empty().with(if *remainder { AX } else { DX }),
+            Self::Divide { remainder, .. } => {
+                PRegSet::empty().with(if *remainder { AX } else { DX })
+            }
+            Self::Convert { from, to, dst, .. } if convert::soft(*from, *to) => {
+                let mut set = gprs(&[0, 1, 2, 8, 9]);
+                if dst.class() == RegClass::Int {
+                    set.remove(AX);
+                }
+                set
+            }
             _ => PRegSet::empty(),
         }
+    }
+    fn frame_use(&self, machine: &Machine) -> Option<FrameUse> {
+        Some(match *self {
+            Self::DebugStore(ty, offset, _) => {
+                FrameUse::Debug(offset as usize + ty.bytes(machine.cpu.bytes))
+            }
+            Self::CallScratch(offset, bytes, _) => {
+                FrameUse::Scratch(offset as usize + bytes as usize)
+            }
+            // Outgoing arguments go to the callee's frame above this one;
+            // the fallback and dynamic lane accesses reserve stack below RSP.
+            _ => return None,
+        })
     }
     fn is_branch(&self) -> bool {
         matches!(
@@ -622,14 +654,25 @@ impl TargetInst for Inst {
     fn is_ret(&self) -> bool {
         matches!(self, Self::Ret(_))
     }
-    fn machine_env() -> &'static MachineEnv {
-        &ENV
+    fn machine_env(machine: &Machine) -> &'static MachineEnv {
+        machine.abi.env()
     }
-    fn spillslot_size(class: RegClass) -> usize {
+    fn spillslot_size(machine: &Machine, class: RegClass) -> usize {
         if class == RegClass::Vector {
-            super::Features::host().bytes / 8
+            machine.register_bytes / 8
         } else {
             1
         }
     }
+}
+
+#[cfg(test)]
+#[test]
+fn instructions_stay_small() {
+    // `Function` stores and the scheduler permutes instructions by value.
+    assert!(
+        std::mem::size_of::<Inst>() <= 32,
+        "{}",
+        std::mem::size_of::<Inst>()
+    );
 }

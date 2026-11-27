@@ -3,16 +3,21 @@
 
 #[cfg(test)]
 mod interpret;
+#[cfg(test)]
+pub(crate) use interpret::{InterpretError, buffer_address};
 mod verify;
 
 pub(crate) use verify::VerifiedBody;
 
-use super::{Op, RustPacketImport, Terminator, Type, Value};
+use super::{Op, Terminator, Type, Value};
 use crate::hir::IrError;
 use crate::support::slotmap::{DenseMap, SlotMap};
 use std::{ops::Range, sync::Arc};
 
-crate::slot_key!(pub Block);
+crate::support::slotmap::slot_key!(
+    /// A basic block.
+    pub Block
+);
 
 #[derive(Clone, Debug)]
 struct BlockData {
@@ -33,7 +38,10 @@ impl Default for BlockData {
     }
 }
 
-crate::slot_key!(pub Inst);
+crate::support::slotmap::slot_key!(
+    /// An instruction.
+    pub Inst
+);
 
 #[derive(Clone, Debug)]
 struct InstData {
@@ -63,17 +71,49 @@ impl Span {
     }
 }
 
-crate::slot_key!(pub Call);
-crate::slot_key!(pub PacketCall);
-
+crate::support::slotmap::slot_key!(
+    /// A call site, recorded by [`Function::add_call`].
+    pub Call
+);
 #[derive(Clone, Debug)]
 struct CallData {
     callee: Arc<Function>,
     args: Span,
 }
 
-crate::slot_key!(pub Edge);
+crate::support::slotmap::slot_key!(
+    /// A control-flow edge with its arguments, recorded by [`Function::add_edge`].
+    pub Edge
+);
 
+/// An SSA function under construction or verified by [`Function::verify`].
+///
+/// # Panics
+///
+/// `Block`, `Value`, `Inst`, `Edge` and `Call` handles index
+/// the function that issued them. Every method that takes a handle panics
+/// for a handle of another function or a block retired by
+/// [`Function::merge_blocks`], and [`Function::add_edge`] and
+/// [`Function::add_call`] panic past 2^32 operands in all. Ill-typed
+/// operations are rejected by [`Function::append`] and structural errors
+/// that a builder can make with valid handles by `verify`, both as an
+/// [`IrError`].
+///
+/// Each kind of handle has its own type, so a block cannot stand for a value:
+///
+/// ```
+/// # use lancy::hir::Function;
+/// let mut f = Function::scalar(1);
+/// let block = f.create_block();
+/// assert!(f.params(block).is_empty());
+/// ```
+///
+/// ```compile_fail
+/// # use lancy::hir::Function;
+/// let f = Function::scalar(1);
+/// let value = f.params(f.entry())[0];
+/// f.params(value);
+/// ```
 #[derive(Clone, Debug)]
 pub struct Function {
     arity: usize,
@@ -82,11 +122,27 @@ pub struct Function {
     insts: SlotMap<Inst, InstData>,
     edges: DenseMap<Edge, (Block, Span)>,
     calls: DenseMap<Call, CallData>,
-    packets: DenseMap<PacketCall, (&'static RustPacketImport, Span)>,
     operands: Vec<Value>,
     types: DenseMap<Value, Type>,
-    slice_base: usize,
-    slices: Box<[(u8, bool)]>,
+    slices: Vec<SliceParam>,
+    /// The position in `slices` of each pointer and length parameter.
+    slice_of: DenseMap<Value, Option<u32>>,
+}
+
+/// A slice that the caller passes as a pointer and an `i32` length entry
+/// parameter, with `element` bytes per element. This is part of the raw call
+/// contract: `len` elements are initialized, writable bytes are exclusively
+/// borrowed, and shared bytes stay immutable throughout the call.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SliceParam {
+    /// The pointer parameter.
+    pub ptr: Value,
+    /// The length parameter, in elements.
+    pub len: Value,
+    /// Bytes per element.
+    pub element: u8,
+    /// Whether the kernel may write the slice.
+    pub writable: bool,
 }
 
 impl Function {
@@ -95,6 +151,7 @@ impl Function {
         Self::from_types(params.iter().copied(), return_type)
     }
 
+    /// A function of `arity` `i32` parameters and an `i32` result.
     pub fn scalar(arity: usize) -> Self {
         Self::from_types(std::iter::repeat_n(Type::I32, arity), Type::I32)
     }
@@ -108,11 +165,10 @@ impl Function {
             insts: SlotMap::new(),
             edges: DenseMap::new(),
             calls: DenseMap::new(),
-            packets: DenseMap::new(),
             operands: Vec::new(),
             types: DenseMap::with_capacity(arity),
-            slice_base: arity,
-            slices: Box::new([]),
+            slices: Vec::new(),
+            slice_of: DenseMap::new(),
         };
         let entry = f.create_block();
         for ty in params {
@@ -121,49 +177,67 @@ impl Function {
         f
     }
 
+    /// Number of parameters.
     pub fn arity(&self) -> usize {
         self.arity
     }
+    /// Parameter types in ABI order.
     pub fn param_types(&self) -> &[Type] {
         &self.types.as_slice()[..self.arity]
     }
+    /// The result type.
     pub fn return_type(&self) -> Type {
         self.return_type
     }
+    /// The type of a parameter or result.
     pub fn value_type(&self, value: Value) -> Type {
         self.types[value]
     }
 
-    /// Declare consecutive (pointer, i32 length) parameters as initialized
-    /// slices, given the (element byte width, writable) pair for each.
-    /// This is part of the raw call contract. Writable bytes are exclusively
-    /// borrowed and shared bytes stay immutable throughout the call.
-    pub fn set_slice_params(&mut self, first: usize, slices: Box<[(u8, bool)]>) {
-        let params = &self.param_types()[first..first + 2 * slices.len()];
-        assert!(
-            params
-                .chunks_exact(2)
-                .all(|pair| pair == [Type::Ptr, Type::I32])
-        );
-        assert!(slices.iter().all(|&(bytes, _)| matches!(bytes, 2 | 4 | 8)));
-        self.slice_base = first;
+    /// Declare the slice parameters of the raw call contract (see
+    /// [`SliceParam`]). Each is a distinct `(Ptr, I32)` pair of entry
+    /// parameters, with elements of 2, 4 or 8 bytes: the element widths of
+    /// the buffers Lancy's bounds proofs model. A rejected declaration
+    /// leaves the previous one.
+    pub fn set_slice_params(&mut self, slices: Vec<SliceParam>) -> Result<(), IrError> {
+        let entry = self.params(self.entry());
+        let mut slice_of = DenseMap::filled(self.value_count(), None);
+        for (i, slice) in slices.iter().enumerate() {
+            let is_param = |v: Value, ty| entry.contains(&v) && self.types[v] == ty;
+            if !is_param(slice.ptr, Type::Ptr)
+                || !is_param(slice.len, Type::I32)
+                || !matches!(slice.element, 2 | 4 | 8)
+                || slice_of[slice.ptr].is_some()
+                || slice_of[slice.len].is_some()
+            {
+                return Err(IrError::InvalidSliceParam { slice: *slice });
+            }
+            slice_of[slice.ptr] = Some(i as u32);
+            slice_of[slice.len] = Some(i as u32);
+        }
         self.slices = slices;
+        self.slice_of = slice_of;
+        Ok(())
     }
 
     pub(crate) fn copy_slice_params(&mut self, source: &Self) {
-        self.slice_base = source.slice_base;
         self.slices.clone_from(&source.slices);
+        self.slice_of.clone_from(&source.slice_of);
     }
 
-    /// For a declared slice pointer, return its length parameter, element byte width
-    /// and whether the caller grants exclusive writable access.
-    pub fn slice_param(&self, ptr: Value) -> Option<(Value, u8, bool)> {
-        let offset = ptr.index().checked_sub(self.slice_base)?;
-        if !offset.is_multiple_of(2) {
-            return None;
-        }
-        let &(bytes, writable) = self.slices.get(offset / 2)?;
-        Some((Value::from_index(ptr.index() + 1), bytes, writable))
+    fn slice(&self, value: Value) -> Option<&SliceParam> {
+        let index = (*self.slice_of.get(value)?)?;
+        Some(&self.slices[index as usize])
+    }
+
+    /// The declared slices, in declaration order.
+    pub fn slice_params(&self) -> &[SliceParam] {
+        &self.slices
+    }
+
+    /// The declared slice whose pointer is `ptr`.
+    pub fn slice_param(&self, ptr: Value) -> Option<SliceParam> {
+        self.slice(ptr).filter(|slice| slice.ptr == ptr).copied()
     }
 
     pub(in crate::hir) fn has_slice_params(&self) -> bool {
@@ -171,19 +245,33 @@ impl Function {
     }
 
     pub(in crate::hir) fn has_disjoint_slice_params(&self) -> bool {
-        self.slices.len() > 1 && self.slices.iter().any(|&(_, writable)| writable)
+        self.slices.len() > 1 && self.slices.iter().any(|slice| slice.writable)
     }
 
     pub(in crate::hir) fn is_slice_length(&self, value: Value) -> bool {
-        value
-            .index()
-            .checked_sub(1)
-            .and_then(|index| self.slice_param(Value::from_index(index)))
-            .is_some_and(|(len, _, _)| len == value)
+        self.slice(value).is_some_and(|slice| slice.len == value)
     }
 
+    /// Replace an operation without verifying the function: the passes'
+    /// editor. Debug builds check that the new operation keeps the type of
+    /// the result; `verify` checks the whole function after a pass.
     pub(in crate::hir) fn replace_op_preserving_type(&mut self, inst: Inst, op: Op) {
         self.insts[inst].op = op;
+        self.debug_assert_typed(inst);
+    }
+
+    fn debug_assert_typed(&self, inst: Inst) {
+        if cfg!(debug_assertions) {
+            let ty = self
+                .op(inst)
+                .result_type(self, inst, |v| Ok(self.types[v]))
+                .unwrap_or_else(|error| panic!("pass edit of {inst:?}: {error}"));
+            assert_eq!(
+                ty,
+                self.result(inst).map(|v| self.types[v]),
+                "pass edit of {inst:?} changes its result type"
+            );
+        }
     }
 
     pub(in crate::hir) fn disjoint_buffer_params(&self, a: Value, b: Value) -> bool {
@@ -191,24 +279,38 @@ impl Function {
             && self
                 .slice_param(a)
                 .zip(self.slice_param(b))
-                .is_some_and(|((_, _, write_a), (_, _, write_b))| write_a || write_b)
+                .is_some_and(|(a, b)| a.writable || b.writable)
     }
+    /// The entry block; its parameters are the function's.
     pub fn entry(&self) -> Block {
         Block::from_index(0)
     }
+    /// Number of value IDs issued.
     pub fn value_count(&self) -> usize {
         self.types.len()
+    }
+    /// The type of every value, indexed by `Value`.
+    pub(crate) fn value_types(&self) -> &[Type] {
+        self.types.as_slice()
     }
     /// Number of block IDs issued, including blocks retired by a merge.
     pub fn block_capacity(&self) -> usize {
         self.blocks.slot_count()
     }
+    /// The live blocks in ID order.
     pub fn blocks(&self) -> impl Iterator<Item = Block> + '_ {
         self.blocks.keys()
     }
+    /// The parameters of `b`.
     pub fn params(&self, b: Block) -> &[Value] {
         &self.blocks[b].params
     }
+    /// The column of `value` among the parameters of `b`. Blocks have few
+    /// parameters, and their IDs need not be in any order.
+    pub fn param_index(&self, b: Block, value: Value) -> Option<usize> {
+        self.params(b).iter().position(|&param| param == value)
+    }
+    /// The instructions of `b` in order.
     pub fn instructions(&self, b: Block) -> impl Iterator<Item = Inst> + '_ {
         let mut cursor = self.blocks[b].first;
         std::iter::from_fn(move || {
@@ -220,9 +322,11 @@ impl Function {
             Some(inst)
         })
     }
+    /// The operation of an instruction.
     pub fn op(&self, i: Inst) -> &Op {
         &self.insts[i].op
     }
+    /// The value an instruction defines, if any.
     pub fn result(&self, i: Inst) -> Option<Value> {
         let result = self.insts[i].result;
         (result != Value::INVALID).then_some(result)
@@ -231,22 +335,42 @@ impl Function {
         let mut op = *self.op(i);
         match op {
             Op::Call(site) => self.call(site).1.iter().copied().for_each(visit),
-            Op::RustPacketCall(site) => self.packet_call(site).1.iter().copied().for_each(visit),
             _ => op.map_operands(|v| {
                 visit(v);
                 v
             }),
         }
     }
+    /// # Panics
+    ///
+    /// If `b` has no terminator yet. A verified function terminates every block.
     pub fn terminator(&self, b: Block) -> &Terminator {
         self.blocks[b]
             .term
             .as_ref()
             .expect("unterminated SSA block")
     }
+    /// The target and arguments of an edge.
     pub fn edge(&self, edge: Edge) -> (Block, &[Value]) {
         let (block, args) = self.edges[edge];
         (block, &self.operands[args.range()])
+    }
+
+    /// Operands held by the arena, and those that live edge and call
+    /// records reference.
+    #[cfg(test)]
+    pub(crate) fn operand_arena(&self) -> (usize, usize) {
+        let edges = self
+            .blocks()
+            .flat_map(|b| self.terminator(b).edges())
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .map(|e| self.edge(e).1.len());
+        let calls = self.insts.values().map(|inst| match inst.op {
+            Op::Call(call) => self.call(call).1.len(),
+            _ => 0,
+        });
+        (self.operands.len(), edges.chain(calls).sum())
     }
 
     pub(in crate::hir) fn edge_count(&self) -> usize {
@@ -254,20 +378,18 @@ impl Function {
     }
 
     /// Filter non-entry parameters and the corresponding column of every edge.
+    /// Filter non-entry parameters and the corresponding column of every edge.
     pub(in crate::hir) fn retain_block_params(&mut self, keep: impl Fn(Value) -> bool) {
-        // Include retired edges only when their spans still describe current parameters.
-        // An edge can be referenced by multiple terminators, so compact each record once.
+        // After compaction a live edge record's arguments match its target's
+        // parameters. A record shared by several terminators is filtered once.
+        self.compact();
         let entry = self.entry();
         for (target, span) in self.edges.values_mut() {
-            if *target == entry {
+            if *target == Block::INVALID || *target == entry {
                 continue;
             }
-            let Some(block) = self.blocks.get(*target) else {
-                continue;
-            };
-            if span.len as usize != block.params.len() {
-                continue;
-            }
+            debug_assert_eq!(span.len as usize, self.blocks[*target].params.len());
+            let block = &self.blocks[*target];
             let args = &mut self.operands[span.range()];
             let mut kept = 0;
             for (i, &param) in block.params.iter().enumerate() {
@@ -282,31 +404,74 @@ impl Function {
             block.params.retain(|&p| keep(p));
         }
     }
+
+    /// Rebuild the operand arena from the edge and call records that a
+    /// terminator or instruction references. Unreferenced edge records are
+    /// retired: their target becomes `Block::INVALID` and their
+    /// arguments empty. Every ID stays valid, so analyses that name edges
+    /// remain usable.
+    pub(in crate::hir) fn compact(&mut self) {
+        let old = std::mem::take(&mut self.operands);
+        let mut referenced = DenseMap::filled(self.edges.len(), false);
+        for block in self.blocks.values() {
+            for edge in block.term.into_iter().flat_map(Terminator::edges) {
+                referenced[edge] = true;
+            }
+        }
+        for (edge, (target, span)) in self.edges.iter_mut() {
+            if referenced[edge] {
+                *span = Span::append(&mut self.operands, &old[span.range()]);
+            } else {
+                *target = Block::INVALID;
+                *span = Span { start: 0, len: 0 };
+            }
+        }
+        let mut calls = DenseMap::filled(self.calls.len(), false);
+        for inst in self.insts.values() {
+            if let Op::Call(call) = inst.op {
+                calls[call] = true;
+            }
+        }
+        for (call, data) in self.calls.iter_mut() {
+            let live = if calls[call] {
+                &old[data.args.range()]
+            } else {
+                &[]
+            };
+            data.args = Span::append(&mut self.operands, live);
+        }
+    }
+
+    pub(in crate::hir) fn call_site(&self, call: Call) -> Option<(&Arc<Function>, &[Value])> {
+        let data = self.calls.get(call)?;
+        Some((&data.callee, &self.operands[data.args.range()]))
+    }
+
+    /// The callee and arguments of a call.
     pub fn call(&self, call: Call) -> (&Arc<Function>, &[Value]) {
         let data = &self.calls[call];
         (&data.callee, &self.operands[data.args.range()])
     }
 
-    pub fn packet_call(&self, call: PacketCall) -> (&'static RustPacketImport, &[Value]) {
-        let (import, args) = self.packets[call];
-        (import, &self.operands[args.range()])
-    }
-
+    /// A new empty block without parameters.
     pub fn create_block(&mut self) -> Block {
         self.blocks.insert(BlockData::default())
     }
 
+    /// Append an `i32` parameter to `block`.
     pub fn append_param(&mut self, block: Block) -> Value {
         self.append_typed_param(block, Type::I32)
     }
+    /// Append a parameter of type `ty` to `block`.
     pub fn append_typed_param(&mut self, block: Block, ty: Type) -> Value {
         let params = &mut self.blocks[block].params;
         let value = self.types.insert(ty);
         params.push(value);
         value
     }
-    pub fn append_inst(&mut self, b: Block, op: Op) -> Inst {
-        let id = self.new_instruction(op);
+    /// Append `op` to `b` after checking its operand types.
+    pub fn append_inst(&mut self, b: Block, op: Op) -> Result<Inst, IrError> {
+        let id = self.new_instruction(op)?;
         let last = self.blocks[b].last;
         if last == Inst::INVALID {
             self.blocks[b].first = id;
@@ -314,79 +479,68 @@ impl Function {
             self.insts[last].next = id;
         }
         self.blocks[b].last = id;
-        id
+        Ok(id)
     }
 
-    /// Insert before the first instruction. Operands must already dominate
-    /// the start of the block.
-    pub(in crate::hir) fn prepend(&mut self, b: Block, op: Op) -> Option<Value> {
-        let id = self.new_instruction(op);
+    /// Append a value-defining `op` to `b` and return its result.
+    pub fn append(&mut self, b: Block, op: Op) -> Result<Value, IrError> {
+        let inst = self.append_inst(b, op)?;
+        self.result(inst).ok_or(IrError::NoResult { inst })
+    }
+
+    /// Insert `op` after `after` in `b`, or first when `after` is `None`.
+    /// Its operands must be available at that point.
+    pub(in crate::hir) fn insert_after(
+        &mut self,
+        b: Block,
+        after: Option<Inst>,
+        op: Op,
+    ) -> Result<Inst, IrError> {
+        let id = self.new_instruction(op)?;
         let block = &mut self.blocks[b];
-        self.insts[id].next = block.first;
-        if block.last == Inst::INVALID {
+        let next = match after {
+            Some(prev) => std::mem::replace(&mut self.insts[prev].next, id),
+            None => std::mem::replace(&mut block.first, id),
+        };
+        self.insts[id].next = next;
+        if next == Inst::INVALID {
             block.last = id;
         }
-        block.first = id;
-        self.result(id)
+        Ok(id)
     }
 
-    fn new_instruction(&mut self, op: Op) -> Inst {
-        let result = if op.produces_value() {
-            let ty = match op {
-                Op::Simd(op) => op
-                    .result_type(|v| self.types.get(v).copied().unwrap_or(Type::I32))
-                    .expect("value-producing SIMD operation"),
-                Op::Literal(lane, _) => lane.scalar(),
-                Op::Ternary(_, _, v, _) => self.types.get(v).copied().unwrap_or(Type::I32),
-                Op::Unary(op, v) => op.result_type(self.types.get(v).copied().unwrap_or(Type::I32)),
-                Op::Cast(ty, _) | Op::Bitcast(ty, _) => ty,
-                Op::Bin(op, v, _) => {
-                    op.result_type(self.types.get(v).copied().unwrap_or(Type::I32))
-                }
-                Op::PtrOffset(..) | Op::CallScratch(_) => Type::Ptr,
-                Op::Load(ty, _) => ty,
-                Op::Copy(v) => self.types.get(v).copied().unwrap_or(Type::I32),
-                Op::Call(c) => self
-                    .calls
-                    .get(c)
-                    .map_or(Type::I32, |c| c.callee.return_type()),
-                _ => Type::I32,
-            };
-            self.types.insert(ty)
-        } else {
-            Value::INVALID
-        };
-        self.insts.insert(InstData {
+    fn new_instruction(&mut self, op: Op) -> Result<Inst, IrError> {
+        // Instruction IDs are issued in order and never reused.
+        let inst = Inst::from_index(self.insts.slot_count());
+        let ty = op.result_type(self, inst, |v| Ok(self.types[v]))?;
+        debug_assert_eq!(ty.is_some(), op.has_result());
+        let result = ty.map_or(Value::INVALID, |ty| self.types.insert(ty));
+        let id = self.insts.insert(InstData {
             op,
             result,
             next: Inst::INVALID,
-        })
+        });
+        debug_assert_eq!(id, inst);
+        Ok(id)
     }
-    pub fn append(&mut self, b: Block, op: Op) -> Option<Value> {
-        let id = self.append_inst(b, op);
-        self.result(id)
-    }
+
+    /// Record a call of `callee` with `args`, for an [`Op::Call`].
     pub fn add_call(&mut self, callee: Arc<Function>, args: &[Value]) -> Call {
         let args = Span::append(&mut self.operands, args);
         self.calls.insert(CallData { callee, args })
     }
 
-    pub fn add_packet_call(
-        &mut self,
-        import: &'static RustPacketImport,
-        args: &[Value],
-    ) -> PacketCall {
-        let args = Span::append(&mut self.operands, args);
-        self.packets.insert((import, args))
-    }
+    /// Record an edge to `target` passing `args` to its parameters.
     pub fn add_edge(&mut self, target: Block, args: &[Value]) -> Edge {
         let args = Span::append(&mut self.operands, args);
         self.edges.insert((target, args))
     }
+    /// End `b` with `term`, replacing any earlier terminator.
     pub fn set_terminator(&mut self, b: Block, term: Terminator) {
         self.blocks[b].term = Some(term);
     }
 
+    /// End `from` with a jump to `to` passing `args`.
     pub fn jump(&mut self, from: Block, to: Block, args: &[Value]) {
         let edge = self.add_edge(to, args);
         self.set_terminator(from, Terminator::Jump(edge));
@@ -409,7 +563,7 @@ impl Function {
                     IrError::UnknownInstruction { inst }
                 });
             };
-            if old.op.produces_value() != op.produces_value() {
+            if old.op.has_result() != op.has_result() {
                 return Err(IrError::ReplacementResultCount { inst });
             }
         }
@@ -430,9 +584,9 @@ impl Function {
     /// Splice a successor with exactly one incoming edge into its predecessor.
     /// Live IDs are stable. The successor block and its block-parameter IDs
     /// are retired. Arguments substitute parameters simultaneously, including
-    /// references in dominated blocks, calls and successor edges.
+    /// references in dominated blocks, calls and successor edges. Only the
+    /// two blocks and their edge are checked; `verify` checks the result.
     pub fn merge_blocks(&mut self, pred: Block, succ: Block) -> Result<(), IrError> {
-        self.verify()?;
         if pred == succ {
             return Err(IrError::MergeSameBlock { block: pred });
         }
@@ -454,11 +608,14 @@ impl Function {
                 actual: target,
             });
         }
-        let incoming = self
-            .blocks()
-            .flat_map(|b| self.terminator(b).edges())
-            .filter(|&e| self.edges[e].0 == succ)
-            .count();
+        let mut incoming = 0;
+        for b in self.blocks() {
+            incoming += self
+                .checked_terminator(b)?
+                .edges()
+                .filter(|&e| self.edges[e].0 == succ)
+                .count();
+        }
         if incoming != 1 {
             return Err(IrError::MergePredecessors {
                 block: succ,
@@ -494,7 +651,8 @@ impl Function {
             inst.op.map_operands(map);
         }
         for v in &mut self.operands {
-            // Unreferenced call/edge records can hold speculative operands.
+            // Unreferenced call/edge records can hold values created after
+            // `aliases`.
             if let Some(&alias) = aliases.get(*v) {
                 *v = alias;
             }
@@ -543,6 +701,7 @@ impl Function {
         block: Block,
         mut rewrite: impl FnMut(Op, Option<Value>, &DenseMap<Value, Type>) -> Option<Op>,
     ) {
+        let id = block;
         let block = &mut self.blocks[block];
         let mut prev = Inst::INVALID;
         let mut i = block.first;
@@ -567,6 +726,12 @@ impl Function {
             i = next;
         }
         block.last = prev;
+        if cfg!(debug_assertions) {
+            let rewritten: Vec<_> = self.instructions(id).collect();
+            for inst in rewritten {
+                self.debug_assert_typed(inst);
+            }
+        }
     }
 
     /// Move instructions to the ends of earlier dominating blocks.
@@ -599,6 +764,7 @@ impl Function {
                 target.last = i;
                 self.insts[i].op = op;
                 self.insts[i].next = Inst::INVALID;
+                self.debug_assert_typed(i);
             } else {
                 prev = i;
             }
@@ -607,16 +773,50 @@ impl Function {
         self.blocks[from].last = prev;
     }
 
-    pub(in crate::hir) fn callees_mut(&mut self) -> impl Iterator<Item = &mut Arc<Function>> {
-        self.calls.values_mut().map(|site| &mut site.callee)
+    pub(in crate::hir) fn calls_mut(&mut self) -> impl Iterator<Item = (Call, &mut Arc<Function>)> {
+        self.calls
+            .iter_mut()
+            .map(|(call, site)| (call, &mut site.callee))
+    }
+
+    /// Scratch bytes addressed by this frame's own operations, rounded up so
+    /// that a region placed above them stays 8-byte aligned.
+    pub(crate) fn scratch_bytes(&self) -> u64 {
+        self.frame_extent(|op| match op {
+            Op::CallScratch { offset, bytes } => Some(u64::from(offset) + u64::from(bytes)),
+            _ => None,
+        })
+    }
+
+    /// Debugger workspace bytes written by this frame at any vector width,
+    /// rounded up like [`Self::scratch_bytes`].
+    pub(crate) fn debug_bytes(&self) -> u64 {
+        self.frame_extent(|op| match op {
+            Op::DebugStore(offset, value) => {
+                let bytes = self.types[value].bytes(crate::hir::MAX_VECTOR_BYTES);
+                Some(u64::from(offset) + bytes as u64)
+            }
+            _ => None,
+        })
+    }
+
+    fn frame_extent(&self, end: impl Fn(Op) -> Option<u64>) -> u64 {
+        self.blocks()
+            .flat_map(|block| self.instructions(block))
+            .filter_map(|inst| end(self.insts[inst].op))
+            .max()
+            .unwrap_or(0)
+            .next_multiple_of(8)
     }
 }
 
 #[cfg(test)]
 impl Function {
-    pub fn interpret(&self, args: &[i32]) -> Result<i32, String> {
+    pub(crate) fn interpret(&self, args: &[i32]) -> Result<i32, InterpretError> {
         if self.param_types().iter().any(|&ty| ty != Type::I32) || self.return_type != Type::I32 {
-            return Err("expected an i32-only signature".into());
+            return Err(InterpretError::Unsupported(
+                "a signature that is not all i32",
+            ));
         }
         let args: Vec<_> = args.iter().map(|&x| x as u32 as u64).collect();
         // SAFETY: no pointer can enter a verified function through this signature.
@@ -626,37 +826,77 @@ impl Function {
     /// # Safety
     /// Pointer arguments and addresses read from memory must be valid for all
     /// accesses executed by the function and its callees, including writes.
-    pub(crate) unsafe fn interpret_raw(&self, args: &[u64]) -> Result<u64, String> {
+    pub(crate) unsafe fn interpret_raw(&self, args: &[u64]) -> Result<u64, InterpretError> {
         if args.len() != self.arity() {
-            return Err("wrong argument count".into());
+            return Err(crate::CallError::Signature(crate::SignatureError::Arity {
+                expected: self.arity(),
+                actual: args.len(),
+            })
+            .into());
         }
-        self.verified_module().map_err(|error| error.to_string())?;
+        let width = crate::test_target::width();
+        if self.param_types().iter().any(|ty| ty.bytes(width) > 8)
+            || self.return_type.bytes(width) > 8
+        {
+            return Err(InterpretError::Unsupported(
+                "a root signature wider than a word",
+            ));
+        }
+        self.verified_module()
+            .map_err(|error| InterpretError::Invalid(error.to_string()))?;
+        let args = args.iter().map(|&x| interpret::word(x)).collect();
         // SAFETY: the caller supplies every pointer reachable during execution.
-        unsafe { interpret::run(self, args, None) }
+        let result = unsafe { interpret::run(self, args, None) }?;
+        Ok(u64::from_le_bytes(result[..8].try_into().unwrap()))
     }
 
-    /// Execute a filetest with one buffer. Its pointer is represented by a
-    /// byte offset so an invalid fixture is rejected before entering the JIT.
-    pub(crate) fn interpret_buffer(&self, args: &[i32], buffer: &mut [u8]) -> Result<i32, String> {
-        let Some((Type::Ptr, scalars)) = self.param_types().split_first() else {
-            return Err("expected leading buffer argument".into());
-        };
-        if self.return_type != Type::I32
-            || scalars.len() != args.len()
-            || scalars.iter().any(|&t| t != Type::I32)
-        {
-            return Err("expected (ptr, i32...) -> i32 matching the run arguments".into());
+    /// Execute a filetest. Each pointer argument is an
+    /// [`interpret::buffer_address`] into `buffers`, so an invalid fixture is
+    /// rejected before entering the JIT.
+    pub(crate) fn interpret_buffers(
+        &self,
+        args: &[crate::support::numeric::Bits],
+        buffers: &mut [Vec<u8>],
+    ) -> Result<crate::support::numeric::Bits, InterpretError> {
+        if args.len() != self.arity() {
+            return Err(crate::CallError::Signature(crate::SignatureError::Arity {
+                expected: self.arity(),
+                actual: args.len(),
+            })
+            .into());
         }
-        if let Some((_, width, _)) = self.slice_param(Value::from_index(0))
-            && (args[0] < 0 || args[0] as usize > buffer.len() / usize::from(width))
-        {
-            return Err("declared slice extends beyond the run buffer".into());
+        let params = self.params(self.entry());
+        let word = |i: usize| u64::from_le_bytes(args[i][..8].try_into().unwrap());
+        for (i, &ty) in self.param_types().iter().enumerate() {
+            if ty != Type::Ptr {
+                continue;
+            }
+            let buffer = (0..buffers.len())
+                .find(|&k| interpret::buffer_address(k) == word(i))
+                .ok_or(InterpretError::Unsupported(
+                    "a pointer that is not a run buffer",
+                ))?;
+            if let Some(slice) = self.slice_param(params[i]) {
+                let len = params.iter().position(|&param| param == slice.len).unwrap();
+                let len = word(len) as u32 as i32;
+                if len < 0 || len as usize > buffers[buffer].len() / usize::from(slice.element) {
+                    return Err(InterpretError::OutOfBuffer {
+                        buffer,
+                        offset: buffers[buffer].len() as u64,
+                    });
+                }
+            }
         }
-        self.verified_module().map_err(|e| e.to_string())?;
-        let words: Vec<_> = std::iter::once(0)
-            .chain(args.iter().map(|&x| u64::from(x as u32)))
-            .collect();
-        // SAFETY: buffer mode services every load/store through checked slice accesses.
-        unsafe { interpret::run(self, &words, Some(buffer)) }.map(|v| v as i32)
+        self.verified_module()
+            .map_err(|error| InterpretError::Invalid(error.to_string()))?;
+        if self.param_types().contains(&Type::Ptr) {
+            // SAFETY: buffer mode services every load/store through checked accesses.
+            unsafe { interpret::run(self, args.to_vec(), Some(buffers)) }
+        } else {
+            // SAFETY: no pointer enters a verified function without pointer
+            // parameters; its only addresses come from CallScratch inside a
+            // live interpreter frame.
+            unsafe { interpret::run(self, args.to_vec(), None) }
+        }
     }
 }

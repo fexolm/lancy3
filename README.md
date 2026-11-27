@@ -9,20 +9,20 @@
 splice-kernel = "0.1"
 ```
 
-В коде используйте `splice::{kernel, Lancy}`. Для других бэкендов включите features `cranelift`, `llvm` или `text`, например `splice-kernel = { version = "0.1", features = ["cranelift"] }`. Чтобы отключить Lancy, укажите `default-features = false`. LLVM требует установленную версию, указанную ниже. Для самостоятельного использования Lancy добавьте `lancy = "0.1"`.
+В коде используйте `splice::kernel` и `splice::lancy::Lancy`. Каждый бэкенд — модуль фасада: `splice::lancy`, `splice::cranelift` (feature `cranelift`) и `splice::llvm` (feature `llvm`, там же `LlvmManualSimd` и `to_llvm_ir`). Для других бэкендов включите features `cranelift` или `llvm`, например `splice-kernel = { version = "0.1", features = ["cranelift"] }`. Чтобы отключить Lancy, укажите `default-features = false`. LLVM требует установленную версию, указанную ниже. Для самостоятельного использования Lancy добавьте `lancy = "0.1"`.
 
-Для первого выпуска публикуйте пакеты по порядку, дожидаясь появления каждого в индексе crates.io: `splice-target`, `splice-macros`, `lancy`, `splice-core`, `splice-jit`, `splice-lancy`, `splice-cranelift`, `splice-llvm`, `splice-text`, затем `splice-kernel`. Перед публикацией каждого пакета выполните `cargo publish -p ИМЯ --dry-run`, затем `cargo publish -p ИМЯ`.
+Пакеты публикуются вместе: `cargo publish --workspace` сам упорядочивает их по зависимостям (`splice-target`, `splice-macros`, `lancy`, `splice-core`, `splice-jit`, бэкенды, затем `splice-kernel`); `cargo xtask package` проверяет это без публикации.
 
 Проект распространяется по выбору пользователя на условиях MIT или Apache-2.0.
 
 Splice — язык для CPU-ядер, которые специализируются по данным приложения после его запуска. Функция с атрибутом `#[kernel]` сохраняет обычный вызов Rust. Макрос также создаёт фабрику JIT-кода. Параметр типа `B` у фабрики выбирает компилятор ядра.
 
 ```rust
-use splice::{kernel, Cranelift, Lancy, Llvm, Text};
+use splice::{kernel, lancy::Lancy};
 
 enum Price { Retail, Wholesale(i32) }
 
-#[kernel]
+#[kernel(print)]
 fn total(#[comptime] plan: &Price, price: i32, qty: i32) -> i32 {
     match plan {
         Price::Retail => price.wrapping_mul(qty),
@@ -30,33 +30,28 @@ fn total(#[comptime] plan: &Price, price: i32, qty: i32) -> i32 {
     }
 }
 
-fn main() -> Result<(), String> {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     let plan = Price::Wholesale(3);
     let fast_build = total::build::<Lancy>(total::BuildArgs { plan: &plan })?;
-    let cranelift = total::build::<Cranelift>(total::BuildArgs { plan: &plan })?;
-    let llvm = total::build::<Llvm>(total::BuildArgs { plan: &plan })?;
-    let listing = total::build::<Text>(total::BuildArgs { plan: &plan })?;
-    print!("{listing}");
+    print!("{}", total::print(&plan)?);
     assert_eq!(fast_build.call(total::CallArgs { price: 10, qty: 4 })?, 28);
-    assert_eq!(cranelift.call(total::CallArgs { price: 10, qty: 4 })?, 28);
-    assert_eq!(llvm.call(total::CallArgs { price: 10, qty: 4 })?, 28);
     Ok(())
 }
 ```
 
-Вызов `build::<Lancy>` строит SSA HIR Lancy прямо при обходе кернела. Вызов `build::<Llvm>` таким же образом строит LLVM IR. Вызов `build::<Cranelift>` строит и проверяет переносимый IR, затем компилирует его в машинный код через Cranelift. Хостовый Rust выбирает вариант `match` по плану, вычисляет известные выражения и разворачивает `for` по `#[comptime]`-срезу. Параметры специализации могут содержать заимствования и пользовательские enum. Коллекцию специализации можно подготовить в приложении и передать в `BuildArgs` по ссылке. Вызов `comptime!(e)` требует вычислить выражение при сборке. Для изменяемой памяти конкретного запуска передайте `&mut [T]` в `CallArgs`.
+Вызов `build::<Lancy>` строит SSA HIR Lancy прямо при обходе кернела. С `splice::llvm::Llvm` тот же вызов таким же образом строит LLVM IR, а `build::<splice::cranelift::Cranelift>` строит и проверяет переносимый IR, затем компилирует его в машинный код через Cranelift. Хостовый Rust выбирает вариант `match` по плану, вычисляет известные выражения и разворачивает `for` по `#[comptime]`-срезу. Параметры специализации могут содержать заимствования и пользовательские enum. Коллекцию специализации можно подготовить в приложении и передать в `BuildArgs` по ссылке. Вызов `comptime!(e)` требует вычислить выражение при сборке. Для изменяемой памяти конкретного запуска передайте `&mut [T]` в `CallArgs`.
 
 В пределах одной сборки вложенные вызовы делят тело по объявлению функции, её параметрам типа и значениям `const`- и `#[comptime]`-аргументов. Обычная функция без параметров специализации строится один раз. Для чисел, строк и срезов ключ учитывает содержимое. Для своих структур и перечислений можно добавить `#[derive(splice::ComptimeKey)]`, а для параметра типа — ограничение `T: splice::ComptimeKey`. Аргументы с состоянием, для которых ключ не задан, сохраняют отдельный обход тела при каждом вызове.
 
-`build::<Text>` возвращает текст функции после специализации. В примере сигнатура содержит только `price` и `qty`, а скидка 3 появляется в теле перед умножением. В листинге сохраняются имена параметров, операции со срезами и вызовы. Повторные вызовы одной специализации ссылаются на одно определение. Переходы между метками показывают оставшиеся runtime-ветвления и циклы. Листинг отражает семантику Splice до оптимизаций машинного бэкенда.
+`total::ir(&plan)?` возвращает переносимый IR после специализации: `splice::Function` с инструкциями `splice::hir::Instr`. В примере сигнатура содержит только `price` и `qty`, а скидка 3 появляется в теле константой перед умножением. Повторные вызовы одной специализации ссылаются на одно тело (`Instr::Call` с общим `Arc<Function>`). IR отражает семантику Splice до оптимизаций машинного бэкенда.
 
-`kernel_name::print(...)` выполняет специализацию по тем же аргументам и возвращает Rust-код до построения IR. Входы `#[comptime]` исчезают из сигнатуры, а runtime-условия и циклы сохраняют форму Rust. Напечатанный код использует обычные операции Rust, включая `Lane` для SIMD. Побочные эффекты обычной Rust-функции происходят в `call`, когда выполнение доходит до вызова. Для вывода во время подготовки плана приложение может вызвать `println!` перед передачей `BuildArgs`.
+`kernel_name::print(...)` (есть у ядра с `#[kernel(print)]`) выполняет специализацию по тем же аргументам и возвращает Rust-код до построения IR. Входы `#[comptime]` исчезают из сигнатуры, а runtime-условия и циклы сохраняют форму Rust. Напечатанный код использует обычные операции Rust, включая `Lane` для SIMD. Побочные эффекты обычной Rust-функции происходят в `call`, когда выполнение доходит до вызова. Для вывода во время подготовки плана приложение может вызвать `println!` перед передачей `BuildArgs`.
 
-Свободная функция `total` объявляет структуры `total::BuildArgs` и `total::CallArgs`. Фабрика принимает аргументы специализации по именам. У исполняемого ядра метод `call` принимает именованные аргументы запуска. Ошибки сборки и вызова имеют типы `splice::BuildError` и `splice::CallError`. Вариант `let ir = total::ir(&plan)?;` принимает аргументы специализации позиционно. Вызов `Lancy::compile(&ir)?`, `Cranelift::compile(&ir)?` или `Llvm::compile(&ir)?` сохраняет тип аргументов запуска. Для доступа к листингу как к строке результат `Text` можно вывести через `Display` или вызвать `into_inner()`. [Спецификация языка](docs/splice-language.md)
+Свободная функция `total` объявляет структуры `total::BuildArgs` и `total::CallArgs`. Фабрика принимает аргументы специализации по именам. У исполняемого ядра метод `call` принимает именованные аргументы запуска. Ошибки сборки и вызова имеют типы `splice::BuildError` и `splice::CallError`. Вариант `let ir = total::ir(&plan)?;` принимает аргументы специализации позиционно. Вызов `Lancy::compile(&ir)?`, `Cranelift::compile(&ir)?` или `Llvm::compile(&ir)?` сохраняет тип аргументов запуска. [Спецификация языка](docs/splice-language.md)
 
 При вложенном вызове Rust получает срезы в порядке аргументов. Повторная передача общего среза и повторное заимствование `&mut [T]` сохраняют обычные правила Rust. Если вызов завершился паникой, выполненные перед ней записи видны через исходный буфер.
 
-`#[kernel]` ставится на свободную функцию или целиком на `impl` или `trait`. Для специализации вызова через трейт размечают оба блока, `trait` и `impl Trait for T`. Вызов `<T as Trait>::f(&plan)` может специализироваться, пока живы заимствования внутри `T`. Обычный вызов `plan.f()` выполняет Rust-метод при запуске ядра.
+`#[kernel]` ставится на свободную функцию или целиком на `impl` или `trait`. Тело, которое Splice не может понизить в IR, — ошибка компиляции: Rust-ядер нет, а обычные Rust-функции и методы ядро вызывает как Rust-вызовы. Rust-методы типа пишут в обычном `impl` рядом с `#[kernel] impl`. Для специализации вызова через трейт размечают оба блока, `trait` и `impl Trait for T`. Вызов `<T as Trait>::f(&plan)` может специализироваться, пока живы заимствования внутри `T`. Обычный вызов `plan.f()` выполняет Rust-метод при запуске ядра.
 
 | Крейт | Ответственность |
 | --- | --- |
@@ -66,7 +61,6 @@ fn main() -> Result<(), String> {
 | [splice-lancy](splice-lancy/src/lib.rs) | Переводит поток операций Splice или готовую переносимую функцию в SSA HIR и вызывает JIT Lancy. |
 | [splice-cranelift](splice-cranelift/src/lib.rs) | Собирает CLIF всех функций кернела в одном модуле. Инлайнер Cranelift может встроить каждое тело один раз и расходует на дополнительные копии бюджет, равный исходному числу инструкций модуля. JIT компилирует точку входа и оставшиеся вызываемые функции с `opt_level=speed`. |
 | [splice-llvm](splice-llvm/src/lib.rs) | Помещает точку входа и все внутренние функции кернела в один LLVM-модуль через Inkwell. Запускает `default<O3>` для всего модуля и устанавливает машинный код через ORC LLJIT. `to_llvm_ir(&ir)` печатает модуль до оптимизации. |
-| [splice-text](splice-text/src/lib.rs) | Печатает специализированную функцию и её вызываемые функции. Доступен через feature `text` пакета `splice-kernel`. |
 | [lancy](lancy/README.md) | Самостоятельный x64-бэкенд. Проверяет SSA HIR, строит LIR, распределяет регистры и устанавливает машинный код. |
 
 Скалярные аргументы `i32` и типизированные срезы передаются двумя списками с сохранением порядка внутри каждого списка. Все три компилятора поддерживают вызовы других ядер, циклы, ранний возврат, проверяемые обращения к срезам и целочисленное деление. Обработка колонок выражается обычным циклом над срезами.
@@ -76,26 +70,49 @@ fn main() -> Result<(), String> {
 Вход `#[columns(layout)] columns: &[BufferArg<'_>]` описывает набор колонок, который меняется между вызовами. Выражение `layout` вычисляется при `build` или `ir` и задаёт порядок и типы колонок через `BufferKind`. `columns[slot].as_slice::<T>()` получает `&[T]` для известного при сборке номера колонки. Поддерживаются `u16`, `u32`, `i32`, `i64`, `f32` и `f64`. Splice проверяет номер и тип в раскладке при сборке, а `Executable::call` проверяет переданные буферы перед входом в JIT.
 
 ```rust
+# use splice::{BufferArg, BufferKind, kernel, lancy::Lancy, simd::Element};
+# #[derive(splice::KernelType)]
+# struct Schema { layout: [BufferKind; 1], elements: [Element; 1] }
+# enum Expr { Ge { col: usize, val: i32 } }
+# enum Plan { Filter { expr: Expr }, Empty }
+# #[kernel]
+# fn filter_ge(col: &[i32], #[comptime] val: i32, out: &mut [i32]) -> i32 {
+#     let mut n = 0;
+#     for row in 0..col.len() {
+#         if col[row] >= val { out[n as usize] = col[row]; n += 1; }
+#     }
+#     n
+# }
 #[kernel]
 fn query(
     #[comptime] schema: &Schema,
     #[comptime] plan: &Plan,
     out: &mut [i32],
-    #[columns(schema.buffer_kinds())] columns: &[BufferArg<'_>],
+    #[columns(&schema.layout)] columns: &[BufferArg<'_>],
 ) -> i32 {
     match plan {
-        Plan::Filter { expr: Expr::Ge { col, val } } => match schema.column(*col) {
-            Some(Element::I32) => filter_ge(columns[*col].as_slice::<i32>(), *val, out),
+        Plan::Filter { expr: Expr::Ge { col, val } } => match schema.elements[*col] {
+            Element::I32 => filter_ge(columns[*col].as_slice::<i32>(), *val, out),
             _ => -1,
         },
         Plan::Empty => 0,
     }
 }
+# fn main() -> Result<(), Box<dyn std::error::Error>> {
+# let schema = Schema { layout: [BufferKind::READ_I32], elements: [Element::I32] };
+# let plan = Plan::Filter { expr: Expr::Ge { col: 0, val: 2 } };
+# let code = query::build::<Lancy>(query::BuildArgs { schema: &schema, plan: &plan })?;
+# let (column, mut out) = ([1, 2, 3], [0; 3]);
+# let columns = [BufferArg::read(&column)];
+# assert_eq!(code.call(query::CallArgs { out: &mut out, columns: &columns })?, 2);
+# assert_eq!(out[..2], [2, 3]);
+# Ok(())
+# }
 ```
 
 Здесь `filter_ge` — обычное ядро с `&[i32]` и порогом `#[comptime] val: i32`. При вызове `call` поля структуры обозначают выходной буфер и набор колонок в порядке раскладки. Одно ядро принимает разные батчи с этой раскладкой. Для другой раскладки нужно собрать специализацию по новой схеме. Ядро принимает одну таблицу после обычных параметров-срезов. Таблица доступна в точке входа, а выбранный из неё срез можно передавать во вложенные ядра. [Исполняемый пример и тесты](splice/tests/column_table.rs)
 
-В `schema_plan` схема выбирает конкретные специализации `filter<T>`, `join<T>` и `project<T>`. Фильтр читает `i32`, `f32` и `i64`, соединение сравнивает ключи `i64`, а проекция вычисляет два булевых выражения над `u16` и `f64`. Ядра используют `&[T]` и `Lane<T>` с ограничением `T: LaneElement`. Режим `rust` печатает точку входа и все выбранные специализации. [Код примера](splice/examples/schema_plan.rs)
+В `schema_plan` схема выбирает конкретные специализации `filter<T>`, `join<T>` и `project<T>`. Фильтр читает `i32`, `f32` и `i64`, соединение сравнивает ключи `i64`, а проекция вычисляет два булевых выражения над `u16` и `f64`. Ядра используют `&[T]` и `Lane<T>` с ограничением `T: LaneElement`. Элемент читается маскированной загрузкой одной полосы (`Lane::<T>::first_n(1)` и `load_select`): скалярное `col[row]` есть для конкретных типов `u32`, `i32`, `i64`, `f32`, `f64`, но не для обобщённого `T: LaneElement` — у `u16` нет скалярного регистра, а сравнение с comptime-значением `T` требует его типа при сборке. Режим `rust` печатает точку входа и все выбранные специализации. [Код примера](splice/examples/schema_plan.rs)
 
 ```sh
 cargo run -p splice-kernel --release --example schema_plan
@@ -111,51 +128,29 @@ cargo run -p splice-kernel --release --example schema_plan -- rust
 ```sh
 cargo run -p splice-kernel --release --example sql_plan -- lancy
 cargo run -p splice-kernel --release --example sql_plan -- cranelift
-cargo run -p splice-kernel --release --example sql_plan -- llvm
-cargo run -p splice-kernel --release --example sql_plan -- text
+cargo run -p splice-kernel --release --features llvm --example sql_plan -- llvm
 cargo run -p splice-kernel --release --example sql_plan -- rust
-cargo bench -p splice-kernel --bench backends -- sql_plan
+cargo xtask bench sql_plan
 cargo test -p splice-kernel --release --example sql_plan --test simd
 ```
 
 Стенд Criterion.rs измеряет проекцию по 65 536 строкам и SQL-план с четырьмя хеш-соединениями. В таблице продаж 29 360 128 строк, в каждом из четырёх справочников по 1 835 008 товаров. Один вызов SQL-плана возвращает 11 010 048 строк. Данные фиксированы для всех бэкендов и готовятся до измерения.
 
-Во всех группах стенда LLVM компилирует через `LlvmManualSimd`. На обоих путях сборки включён O3, а loop vectorization и SLP отключены. Явные SIMD-операции используют инструкции выбранного профиля. Исторические замеры SQL-плана ниже относятся к прежней конфигурации с обычным O3.
+Во всех группах стенда LLVM компилирует через `LlvmManualSimd`. На обоих путях сборки включён O3, а loop vectorization и SLP отключены. Явные SIMD-операции используют инструкции выбранного профиля. Исторические замеры SQL-плана в [docs/bench-history.md](docs/bench-history.md) относятся к прежней конфигурации с обычным O3.
 
-Для одного SQL-плана выполните `cargo bench -p splice-kernel --bench backends -- sql_plan`. Фильтр `sql_plan/execute/build` выбирает вызовы ядер, собранных через `build::<B>`. HTML-отчёт и интервалы оценок доступны в `target/criterion/report/index.html`. [Код стенда](splice/benches/backends.rs) · [Как читать отчёт Criterion](https://criterion-rs.github.io/book/user_guide/command_line_output.html)
+Для одного SQL-плана выполните `cargo xtask bench sql_plan`. Фильтр `sql_plan/execute/build` выбирает вызовы ядер, собранных через `build::<B>`. HTML-отчёт и интервалы оценок доступны в `target/criterion/report/index.html`. [Код стенда](splice/benches/backends.rs) · [Как читать отчёт Criterion](https://criterion-rs.github.io/book/user_guide/command_line_output.html)
 
 Каждый замер `compile/build` включает специализацию и установку нового исполняемого ядра. Для Cranelift этот путь включает построение переносимого IR. Группа `stage_ir` измеряет построение IR отдельно, а `compile/from_ir` передаёт всем трём бэкендам одну готовую функцию. Освобождение JIT-кода происходит после замера сборки. Группы `execute/build` и `execute/from_ir` повторно вызывают готовые ядра на одних входах с заранее выделенным выходным буфером. Для SQL-плана стенд до и после измерений проверяет значения и число вхождений каждой пары по отдельной скалярной формуле для исходных данных.
 
-AMD Ryzen 7 9800X3D, Windows x64, AVX-512, 16 полос `i32`. Время полного вызова через `build::<B>` в миллисекундах, включая построение индексов. Эти замеры сделаны до переноса локального состояния SQL-ядра в срез. Для потокового ядра Criterion сделал 15 выборок (`--warm-up-time 0.5 --measurement-time 3 --sample-size 15`), для прежних версий — 10. Входы и размер рабочего буфера одинаковы.
-
-| Бэкенд | Скалярный | SIMD с промежуточными таблицами | Потоковый SIMD до правок бэкендов | Потоковый SIMD после правок |
-| --- | ---: | ---: | ---: | ---: |
-| Lancy | 186,15 | 211,50 | 111,70 | 121,54 |
-| Cranelift | 234,77 | 245,64 | 170,75 | 153,37 |
-| LLVM | 113,90 | 178,35 | 142,57 | 74,52 |
-
-В последнем прогоне Lancy служит контролем. В LLVM расширение индексов `i32` до `i64` превращало один поиск по 16 адресам в два `vpgatherqd`. Индексы сохраняют ширину 32 бита и дают один `vpgatherdd` на пачку. На этом процессоре LLVM также генерирует `vpcompressd` для упаковки выбранных строк. В Cranelift 0.132 Splice использует 128-битные части. Полный `gather` проходит общую проверку границ, затем загружает элементы по отдельным адресам. Маскированный поиск обходит пустые части, в остальных выбирает безопасный адрес каждой загрузки. [LLVM](splice-llvm/src/lower/body/simd.rs) · [Cranelift](splice-cranelift/src/lower/simd.rs)
-
-Отдельный профиль прежнего плана Lancy получен по 24 вызовам с метками на границах операторов. Для каждого вида работы приведена сумма средних времён по всем его вызовам в плане, в миллисекундах.
-
-| Работа в старом плане | Скалярный | SIMD |
-| --- | ---: | ---: |
-| Сканирование пяти таблиц | 30,89 | 12,67 |
-| Фильтры и уплотнение их выходов | 28,29 | 31,51 |
-| Проекции | 9,81 | 5,36 |
-| Построение хеш-индексов | 8,70 | 9,00 |
-| Поиск в индексах | 85,77 | 136,53 |
-| Перенос результатов соединений | 25,42 | 13,65 |
-
-В последнем соединении старый SIMD тратил 86,48 мс на поиск, скаляр — 39,86 мс. В сгенерированном коде путь коллизий выполнял зависимые `vpgatherdd`, конвертировал маски через `vpmovd2m` и сводил счётчики полос через `vextracti64x4` и сложения. В отдельном парном замере удвоение числа бакетов только последнего индекса сократило время его поиска с 86,81 до 50,58 мс при тех же входах и выходах.
+Текущие замеры всех бэкендов на каждом профиле — в [docs/benchmarks.md](docs/benchmarks.md): этот файл генерирует `cargo xtask bench-tables --run > docs/benchmarks.md` вместе с коммитом, версиями rustc, LLVM и Cranelift и набором расширений, который получил каждый бэкенд. Прежние замеры с другой машины и версий кода — в [docs/bench-history.md](docs/bench-history.md).
 
 ## SIMD в ядрах
 
-`Lane<T>` представляет один вектор. Обычная Rust-функция и все три JIT используют одинаковую ширину на текущей машине. `Lane::<T>::lanes()` возвращает число **элементов**. Например, для 32 байт это восемь `f32` или четыре `f64`, для 64 байт — шестнадцать или восемь. В переносимом IR размер вектора определяется типом элемента при компиляции бэкендом.
+`Lane<T>` представляет один вектор. JIT-ядро использует ширину цели из `BuildOptions`, обычная Rust-функция — ширину цели по умолчанию (`SPLICE_SIMD`), поэтому при сборке для цели по умолчанию они совпадают. `Lane::<T>::lanes()` возвращает число **элементов**. Например, для 32 байт это восемь `f32` или четыре `f64`, для 64 байт — шестнадцать или восемь. В переносимом IR размер вектора определяется типом элемента при компиляции бэкендом.
 
 ```rust
 use splice::{kernel, Executable};
-use splice_lancy::Lancy;
+use splice::lancy::Lancy;
 
 #[kernel]
 fn add_block(a: &[u16], b: &[u16], dst: &mut [u16]) -> i32 {
@@ -172,6 +167,7 @@ let jit = add_block::build::<Lancy>(add_block::BuildArgs {})?;
 let count = jit.call(add_block::CallArgs { a: &a, b: &b, dst: &mut dst })?;
 assert_eq!(count as usize, n);
 assert_eq!(dst, vec![0u16; n]);
+# Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
 - Элементы векторов и срезов поддерживают `u16`, `u32`, `i32`, `i64`, `f32` и `f64`. `+`, `-` и `*` для целых выполняются по модулю разрядности. Целые поддерживают побитовые операции, вещественные — деление, `sqrt` и `mul_add` с одним округлением. `splat` заполняет полосы одним значением, включая runtime-параметр `i32`. `iota()` нумерует их с нуля.
@@ -196,23 +192,12 @@ assert_eq!(dst, vec![0u16; n]);
 cargo run -p splice-kernel --release --example simd_matmul
 cargo run -p splice-kernel --release --example simd_hash_lookup
 cargo test -p splice-kernel --release --example simd_matmul --example simd_hash_lookup
-cargo bench -p splice-kernel --bench backends -- simd_
+cargo xtask bench simd_
 ```
 
 Criterion использует те же функции, что примеры и тесты. Для матриц нагрузка равна 96×128 на 128×128, для поиска — 32 768 запросов к таблице из 16 384 слотов при заполнении 75% и доле попаданий 50%. Наборы данных детерминированы. Перед измерением и после него стенд сверяет весь выход с независимой скалярной реализацией. Группы `compile` и `execute` измеряют сборку и повторный вызов отдельно для каждого из двух путей — `build` и `from_ir`.
 
-AMD Ryzen 7 9800X3D, Windows x64, 16 полос `i32`. Первые четыре измерения относятся к прогону до правок LLVM и Cranelift, по 30 выборок Criterion. Последний столбец содержит время вызова через `build` после правок, по 15 выборок. Для повторения с теми же настройками выполните `cargo bench -p splice-kernel --bench backends -- simd_ --warm-up-time 1 --measurement-time 3 --sample-size 30 --noplot`.
-
-| Ядро | Бэкенд | Сборка `build` | Вызов после `build` | Сборка из IR | Вызов после сборки из IR | Вызов `build` после правок |
-| --- | --- | ---: | ---: | ---: | ---: | ---: |
-| Матрицы | Lancy | 571,1 мкс | 95,2 мкс | 526,0 мкс | 91,7 мкс | 92,3 мкс |
-| Матрицы | Cranelift | 3,28 мс | 108,5 мкс | 3,18 мс | 110,7 мкс | 109,4 мкс |
-| Матрицы | LLVM | 39,94 мс | 61,4 мкс | 40,26 мс | 74,1 мкс | 62,0 мкс |
-| Хеш-поиск | Lancy | 143,6 мкс | 696,0 мкс | 136,6 мкс | 697,6 мкс | 691,3 мкс |
-| Хеш-поиск | Cranelift | 2,14 мс | 757,7 мкс | 2,15 мс | 864,8 мкс | 615,7 мкс |
-| Хеш-поиск | LLVM | 7,99 мс | 575,2 мкс | 7,96 мс | 603,2 мкс | 538,9 мкс |
-
-В предыдущем замере на этой машине поиск Lancy после `build` занимал 49,89 мс на ту же пачку. Теперь цикл читает активные слоты через `vpgatherdd zmm{k}, [base + zmm*4]`, сравнивает 16 ключей одновременно и сохраняет выбранные позиции. На обоих путях весь буфер результатов совпал с эталоном. [Ядро поиска](splice/examples/workloads/probe.rs) · [Эмиссия маскированного доступа](lancy/src/lir/x64/inst/simd.rs)
+Замеры — в [docs/benchmarks.md](docs/benchmarks.md), прежние — в [docs/bench-history.md](docs/bench-history.md).
 
 ### Большие скалярные ядра
 
@@ -226,19 +211,10 @@ AMD Ryzen 7 9800X3D, Windows x64, 16 полос `i32`. Первые четыре
 | [`large_decimal_csv`](splice/benches/large/csv.rs) | 8 192 строки по четыре знаковых значения с тремя дробными разрядами, упаковка ASCII в `i32` | 362 |
 
 ```sh
-cargo bench -p splice-kernel --bench backends -- 'large_(audio|parquet|per_channel|decimal)' --warm-up-time 1 --measurement-time 2 --sample-size 30 --noplot
+cargo xtask bench 'large_(audio|parquet|per_channel|decimal)' --warm-up-time 1 --measurement-time 2 --sample-size 30 --noplot
 ```
 
-AMD Ryzen 7 9800X3D, Windows x64, 30 выборок Criterion. В таблице указано время повторного вызова в мкс на весь набор данных. Каждая ячейка содержит замеры `build / from_ir`.
-
-| Нагрузка | Lancy | Cranelift | LLVM |
-| --- | ---: | ---: | ---: |
-| ФНЧ Баттерворта до переноса состояния в срез | 760,5 / 753,6 | 483,0 / 493,6 | 397,2 / 407,2 |
-| Parquet delta | 18,73 / 18,73 | 14,57 / 14,25 | 11,30 / 11,39 |
-| Поканальное реквантование | 161,2 / 160,9 | 130,3 / 129,8 | 68,71 / 69,23 |
-| Экспорт CSV | 372,7 / 366,6 | 336,3 / 330,5 | 185,8 / 188,4 |
-
-Сборку стенд измеряет отдельно. На самом большом ядре, Parquet delta, прямой `build` занял 1,40 мс у Lancy, 6,54 мс у Cranelift и 142,46 мс у LLVM.
+Замеры — в [docs/benchmarks.md](docs/benchmarks.md), прежние — в [docs/bench-history.md](docs/bench-history.md).
 
 ### Большие SIMD-ядра
 
@@ -252,19 +228,12 @@ AMD Ryzen 7 9800X3D, Windows x64, 30 выборок Criterion. В таблице
 | [`large_simd_remap_rgb16`](splice/benches/large/vector/remap.rs) | Плитка 145×145, три 16-битных канала, перенос пикселей по поканальным картам радиальной коррекции |
 
 ```sh
-cargo bench -p splice-kernel --bench backends -- large_simd_ --warm-up-time 0.5 --measurement-time 1 --sample-size 20 --nresamples 10000 --noplot
+cargo xtask bench large_simd_ --warm-up-time 0.5 --measurement-time 1 --sample-size 20 --nresamples 10000 --noplot
 ```
 
 Для сравнения исполнения на другой ширине задайте `SPLICE_SIMD=avx2` или `SPLICE_SIMD=sse` и замените фильтр `large_simd_` на `'large_simd_.*/execute/'`.
 
-AMD Ryzen 7 9800X3D, Windows x64, 20 выборок Criterion. Время повторного вызова после `build` в мкс на весь набор. Порядок чисел в ячейке — Lancy / Cranelift / LLVM.
-
-| Нагрузка | `auto` (AVX‑512) | `avx2` | `sse` |
-| --- | ---: | ---: | ---: |
-| Y′CbCr → RGBA8 | 99,61 / 130,24 / 23,32 | 438,68 / 129,68 / 57,49 | 2 472,0 / 139,19 / 179,57 |
-| Интегральные таблицы | 87,05 / 94,55 / 32,38 | 128,76 / 108,99 / 60,10 | 776,59 / 116,63 / 75,58 |
-| Murmur3 | 95,52 / 185,70 / 29,62 | 412,80 / 188,18 / 73,38 | 2 370,3 / 193,64 / 272,67 |
-| Перенос RGB16 | 31,91 / 19,35 / 17,37 | 39,37 / 18,68 / 15,50 | 48,67 / 18,31 / 23,75 |
+Замеры — в [docs/benchmarks.md](docs/benchmarks.md), прежние — в [docs/bench-history.md](docs/bench-history.md).
 
 ## Кернелы для сравнения оптимизаций
 
@@ -282,22 +251,22 @@ AMD Ryzen 7 9800X3D, Windows x64, 20 выборок Criterion. Время пов
 | `gap_loop_dead_checksum` | Копирование 65 539 отсчётов со специализированным отключением результата контрольной суммы из внутреннего цикла |
 
 ```powershell
-cargo bench -p splice-kernel --bench backends -- '^gap_' --warm-up-time 0.3 --measurement-time 0.7 --sample-size 15 --nresamples 10000 --noplot
+cargo xtask bench '^gap_' --warm-up-time 0.3 --measurement-time 0.7 --sample-size 15 --nresamples 10000 --noplot
 ```
 
-На Ryzen 7 9800X3D под Windows x64 сворачивание рекуррентностей сократило время `gap_ramp_integral` после прямого `build` с 1,42 мс до 28,7 мкс. Слияние трёх проходов тональной кривой сократило вызов со 101,6 до 67,1 мкс. Удаление неиспользуемой контрольной суммы сократило вызов с 2,25 мс до 42,2 мкс. Сравнение выполнено на одинаковых кернелах с предыдущим и новым набором проходов Lancy.
+Замеры — в [docs/benchmarks.md](docs/benchmarks.md), прежние — в [docs/bench-history.md](docs/bench-history.md).
 
 Фронтенд передаёт виды аргументов `BufferKind` из `&[T]` и `&mut [T]` при прямой сборке и в переносимом IR. Для двух разных параметров `BufferKind::may_alias` даёт консервативный ответ о возможном пересечении. Два среза для чтения могут иметь общие элементы, изменяемый срез имеет исключительный доступ. LLVM использует этот контракт для `readonly` и `noalias`. Lancy получает сведения о срезах через проверенный интерфейс Splice. На `gap_alias_reload` они позволяют выносить чтение коэффициентов за пределы цикла после проверки длины.
 
-При построении SSA для Lancy повторное чтение одного элемента `&[i32]` в том же блоке переиспользует результат первой загрузки. Первая проверка границ остаётся на месте. На `gap_alias_reload` это убирает одну из шести загрузок за итерацию без дополнительных обращений к spill-слотам на x86-64.
+Проход памяти Lancy переиспользует загрузку из среза только для чтения и после записи в другой срез, короткого пути векторной записи или Rust-вызова: такой срез не меняется, пока ядро работает. Первая проверка границ остаётся на месте. На `gap_alias_reload` это убирает одну из шести загрузок за итерацию.
 
 ## Время этапов компиляции
 
 Splice публикует вложенные спаны `tracing` уровня `DEBUG` с target
-`splice::compile`. Для замеров добавьте в приложение `tracing-subscriber = "0.3"`
+`splice::compile` (бэкенды — `splice_core::compile`, сам Lancy — `lancy::compile`). Для замеров добавьте в приложение `tracing-subscriber = "0.3"`
 и установите подписчик до вызова `build::<B>` или `B::compile`.
 
-```rust
+```rust,no_run
 use tracing_subscriber::fmt::format::FmtSpan;
 
 tracing_subscriber::fmt()
@@ -315,9 +284,11 @@ tracing_subscriber::fmt()
 
 ## Отладка JIT-ядер
 
-`kernel::build::<B>(kernel::BuildArgs {})` и `kernel::ir()` выбирают режим по `debug_assertions` вызывающего крейта. В обычной debug-сборке Lancy, Cranelift, LLVM и LLVM Manual SIMD сохраняют исходные строки, значения переменных на этих строках и отдельные кадры скалярных вызовов. В release-сборке действуют оптимизации бэкенда. Режим можно явно задать первым аргументом `build_with_options::<B>(BuildOptions::Debug, ...)` или `ir_with_options(BuildOptions::Debug, ...)`. При компиляции переносимого IR бэкенд по умолчанию использует записанный в нём режим. `B::compile_with_options(&ir, BuildOptions::Release)` позволяет отдельно запустить оптимизированную компиляцию.
+`kernel::build::<B>(kernel::BuildArgs {})` и `kernel::ir()` выбирают режим по `debug_assertions` вызывающего крейта. В обычной debug-сборке Lancy, Cranelift, LLVM и LLVM Manual SIMD сохраняют исходные строки, значения переменных на этих строках и отдельные кадры скалярных вызовов. В release-сборке действуют оптимизации бэкенда. Режим и цель можно явно задать первым аргументом `build_with_options::<B>(BuildOptions::new(Mode::Debug, target), ...)` или `ir_with_options(BuildOptions::host(Mode::Debug)?, ...)`. При компиляции переносимого IR бэкенд по умолчанию использует записанные в нём режим и цель. `B::compile_with_options(&ir, BuildOptions::new(Mode::Release, target))` позволяет отдельно запустить оптимизированную компиляцию, в том числе для другой цели.
 
 В GDB или IDE с отладчиком, поддерживающим GDB JIT Interface, можно остановиться по имени `splice_jit::<имя>`, пройти по строкам исходного Rust и посмотреть значения через `info locals`. Для точки останова в файле символы появляются после сборки ядра. Срезы показывают указатель и длину, векторы показывают полосы, а маски используют целочисленное представление полос. В отладочной информации также доступны неизменяемые примитивные значения специализации. Сложные значения `#[comptime]` и другие данные, существующие только на хосте, можно посмотреть в кадре специализации. SIMD-помощники, которые фронтенд разворачивает в вызывающую функцию, используют её машинный кадр.
+
+Список GDB JIT Interface (`__jit_debug_descriptor`) общий для процесса, им владеет `splice-jit`. Поэтому Cargo не допускает две версии `splice-jit` в одном графе (`links = "splice_jit_gdb"`). Если LLVM слинкован статически, используются его определения символов. Отладочную поддержку ORC и GDB-слушатель LLVM включать нельзя: LLVM писал бы в тот же список без замка `splice-jit`.
 
 ```sh
 cargo build -p splice-kernel --example debug_kernel
@@ -345,14 +316,18 @@ perf report --stdio
 
 Нужен Rust 1.94+. На Windows x86-64, Linux x86-64 и Linux AArch64 доступны Lancy, Cranelift и LLVM. Бэкенды Lancy и Cranelift собираются отдельно от LLVM. Для приложения с Cranelift включите feature `cranelift` пакета `splice-kernel`.
 
-* **Windows x64 MSVC.** Для `splice-llvm` выбран LLVM 19.1. Сборка находит LLVM в стандартном каталоге или в компонентах C++ Clang для Visual Studio. Для другой папки установки задайте `LLVM_SYS_191_PREFIX` до сборки. В ней должны быть `lib/LLVM-C.lib` и `bin/LLVM-C.dll`. Cargo подготавливает DLL для `cargo run`, тестов и бенчмарков. Для самостоятельного запуска готового приложения положите соответствующую DLL рядом с исполняемым файлом или добавьте её каталог в `PATH`.
-* **Linux x86-64 и AArch64.** Выбран LLVM 21.1 с динамической линковкой. Нужны инструменты разработки, включая `llvm-config-21`, и разделяемая библиотека LLVM. Для отдельной установки укажите префикс через `LLVM_SYS_211_PREFIX`.
+Для `splice-llvm` на всех платформах выбран LLVM 19.1, поэтому тесты и замеры на разных ОС сравнивают один и тот же компилятор.
+
+* **Windows x64 MSVC.** Сборка находит LLVM в стандартном каталоге или в компонентах C++ Clang для Visual Studio. Для другой папки установки задайте `LLVM_SYS_191_PREFIX` до сборки. В ней должны быть `lib/LLVM-C.lib` и `bin/LLVM-C.dll`. Cargo подготавливает DLL для `cargo run`, тестов и бенчмарков. Для самостоятельного запуска готового приложения положите соответствующую DLL рядом с исполняемым файлом или добавьте её каталог в `PATH`.
+* **Linux x86-64 и AArch64.** LLVM линкуется динамически, а если `llvm-config` не сообщает о `libLLVM.so` — статически (сборку со статическим LLVM проверяет `cargo xtask static-llvm`). Нужны инструменты разработки, включая `llvm-config-19`, и разделяемая библиотека LLVM; в Ubuntu 24.04 достаточно пакета `llvm-19-dev`. Для другой установки укажите префикс через `LLVM_SYS_191_PREFIX`, например `/usr/lib/llvm-19`.
+
+Без LLVM работают `cargo test -p splice-kernel` (Lancy и Cranelift) и тесты остальных крейтов, кроме `splice-llvm` и `splice-testkit`. Те же проверки, что в CI, запускает `cargo xtask ci` (`--quick` — только rustfmt, Clippy и тесты воркспейса); список команд — в [xtask](xtask/src/main.rs).
 
 Версии Inkwell и LLVM указаны в [манифесте бэкенда](splice-llvm/Cargo.toml). Операции над LLVM-инструкциями, типами, значениями и базовыми блоками используют [Inkwell Builder](https://docs.rs/inkwell/0.11.0/inkwell/builder/struct.Builder.html).
 
 ### Выбор SIMD-профиля
 
-Задайте `SPLICE_SIMD` до запуска процесса. `auto` выбирает профиль по возможностям CPU и ОС. Явный профиль позволяет проверить более раннюю ISA на новом процессоре. Если CPU или ОС не поддерживают указанный профиль, JIT возвращает ошибку сборки. Обычная Rust-функция использует ту же ширину, что и JIT, и сообщает об ошибочном профиле паникой при запросе полос.
+Цель сборки — значение `splice::Target` в `BuildOptions { mode, target }`: набор расширений ISA, ширина вектора и соглашение о вызовах. `Target::from_profile(profile)` строит цель профиля, и в одном процессе можно собирать ядра для нескольких целей. `SPLICE_SIMD` задаёт только цель по умолчанию (`Target::host()`), которую берут `kernel::build`, `kernel::ir` и обычная Rust-функция. `auto` выбирает профиль по возможностям CPU и ОС. Явный профиль позволяет проверить более раннюю ISA на новом процессоре: `sse` — SSE2, `avx2` — x86-64-v3, `avx512` — x86-64-v4, и на любой машине это один и тот же набор. Если CPU или ОС не поддерживают цель, JIT возвращает ошибку сборки. Обычная Rust-функция сообщает об ошибочном `SPLICE_SIMD` паникой при запросе полос.
 
 | Платформа | `SPLICE_SIMD` | Логическая ширина |
 | --- | --- | --- |
@@ -361,7 +336,7 @@ perf report --stdio
 | Linux AArch64 | `neon` | 16 байт |
 | Linux AArch64 | `sve`, `sve2` | 16, 32 или 64 байта, в пределах SVE VL потока при первом использовании SIMD |
 
-На AArch64 `auto` предпочитает SVE2, затем SVE и NEON. Lancy выбирает машинные формы в собственном `isel` и кодирует их своим энкодером. LLVM выбирает инструкции SVE/SVE2 для фиксированных векторов, когда позволяет их ширина. Для 128-битных векторов LLVM может выбрать NEON. Lancy и LLVM проверяют SVE VL вызывающего потока перед выполнением ядра. Cranelift использует 128-битные части общего логического вектора и поддерживаемые им инструкции хоста. В профиле `sse` Cranelift может использовать доступные SSSE3 и SSE4. [Бэкенд Lancy](lancy/README.md#бэкенд-aarch64)
+На AArch64 `auto` предпочитает SVE2, затем SVE и NEON. Lancy выбирает машинные формы в собственном `isel` и кодирует их своим энкодером. LLVM выбирает инструкции SVE/SVE2 для фиксированных векторов, когда позволяет их ширина. Для 128-битных векторов LLVM может выбрать NEON. Lancy и LLVM проверяют SVE VL вызывающего потока перед выполнением ядра. Cranelift использует 128-битные части общего логического вектора. Все бэкенды переводят одну цель: Lancy получает её расширения как есть, LLVM — базовый CPU `x86-64`/`generic` со строкой признаков цели, Cranelift — соответствующие флаги ISA; CPUID ни один из них не спрашивает. Cranelift и LLVM собирают только соглашение о вызовах C этой ОС, Lancy — также Win64 и SysV на любой x86-64 ОС. [Бэкенд Lancy](lancy/README.md#бэкенд-aarch64)
 
 В PowerShell задайте профиль перед вызовом Cargo, например `$env:SPLICE_SIMD = 'avx2'`.
 

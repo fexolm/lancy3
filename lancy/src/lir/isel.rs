@@ -23,7 +23,7 @@ pub(super) struct Edges<'a> {
 }
 
 impl<'a> Edges<'a> {
-    pub fn new(source: &'a VerifiedBody<'_>) -> Self {
+    pub(super) fn new(source: &'a VerifiedBody<'_>) -> Self {
         let VerifiedBody {
             function: f,
             cfg,
@@ -54,11 +54,14 @@ impl<'a> Edges<'a> {
             && self.cfg.predecessors(target).len() > 1
     }
 
-    pub fn function<I: TargetInst>(&self) -> Result<super::Function<I>, CompileError> {
-        super::Function::new(self.count, self.f.value_count())
+    pub(super) fn function<I: TargetInst>(
+        &self,
+        machine: I::Machine,
+    ) -> Result<super::Function<I>, CompileError> {
+        super::Function::new(machine, self.count, self.f.value_count())
     }
 
-    pub fn finish<I: TargetInst>(
+    pub(super) fn finish<I: TargetInst>(
         &self,
         body: &mut super::Function<I>,
         b: Block,
@@ -93,7 +96,7 @@ impl<'a> Edges<'a> {
         for e in term.edges() {
             let (target, args) = self.f.edge(e);
             if self.split(b, target) {
-                body.push(jump());
+                body.push(jump())?;
                 let backedge = self.dom.dominates(target, b);
                 body.edge(
                     self.mapping[target],
@@ -119,6 +122,8 @@ pub(super) enum Root {
 #[derive(Default, Clone)]
 struct Definition {
     source: Option<(Block, Op)>,
+    /// The definition has no effects, so it may move or disappear.
+    pure: bool,
     uses: usize,
     register: bool,
 }
@@ -126,51 +131,50 @@ struct Definition {
 pub(super) struct Context {
     defs: DenseMap<Value, Definition>,
     current: Block,
-    #[cfg(target_arch = "x86_64")]
+    /// The value defined right before the root being selected, if any.
     previous: Option<(Value, Op)>,
-    #[cfg(target_arch = "x86_64")]
     covered: Option<Value>,
 }
 
 impl Context {
-    pub fn require(&mut self, v: Value) {
+    pub(super) fn require(&mut self, v: Value) {
         self.defs[v].register = true;
     }
-    pub fn constant(&self, v: Value) -> Option<i32> {
+    pub(super) fn constant(&self, v: Value) -> Option<i32> {
         match self.defining_op(v) {
             Some(Op::Const(n)) => Some(n),
             _ => None,
         }
     }
 
-    pub fn defining_op(&self, v: Value) -> Option<Op> {
+    pub(super) fn defining_op(&self, v: Value) -> Option<Op> {
         self.defs[v].source.map(|(_, op)| op)
     }
     /// Only sink total computations. Memory accesses, checks and division
     /// keep their original execution point, including when their result is dead.
-    pub fn single_use(&self, v: Value) -> Option<Op> {
+    pub(super) fn single_use(&self, v: Value) -> Option<Op> {
         let def = &self.defs[v];
         let (b, op) = def.source?;
-        (b == self.current && def.uses == 1 && op.pure(None)).then_some(op)
+        (b == self.current && def.uses == 1 && def.pure).then_some(op)
     }
 
-    #[cfg(target_arch = "x86_64")]
-    pub fn adjacent_single_use(&self, v: Value) -> Option<Op> {
+    /// The definition of `v` if it is the instruction right before the
+    /// root and the root is its only use: nothing executes between them, so
+    /// the root may perform it, even a memory access, after [`Self::cover`].
+    pub(super) fn adjacent_single_use(&self, v: Value) -> Option<Op> {
         let (previous, op) = self.previous?;
         (previous == v && self.defs[v].uses == 1).then_some(op)
     }
 
-    #[cfg(target_arch = "x86_64")]
-    pub fn cover_adjacent_load(&mut self, v: Value) {
-        debug_assert!(matches!(
-            self.adjacent_single_use(v),
-            Some(Op::Load(..) | Op::Simd(crate::hir::Simd::Load(..)))
-        ));
+    /// The root performs the adjacent definition of `v` itself; selection
+    /// skips that instruction.
+    pub(super) fn cover(&mut self, v: Value) {
+        debug_assert!(self.adjacent_single_use(v).is_some());
         self.covered = Some(v);
     }
 }
 
-pub(super) fn select<I>(
+pub(super) fn select<I: Copy>(
     f: &Function,
     cfg: &ControlFlowGraph,
     mut rule: impl FnMut(&mut Context, Root, &mut Vec<I>) -> Result<(), CompileError>,
@@ -178,9 +182,7 @@ pub(super) fn select<I>(
     let mut ctx = Context {
         defs: DenseMap::filled(f.value_count(), Definition::default()),
         current: f.entry(),
-        #[cfg(target_arch = "x86_64")]
         previous: None,
-        #[cfg(target_arch = "x86_64")]
         covered: None,
     };
     for &b in cfg.reverse_postorder() {
@@ -188,6 +190,7 @@ pub(super) fn select<I>(
             let op = *f.op(i);
             if let Some(v) = f.result(i) {
                 ctx.defs[v].source = Some((b, op));
+                ctx.defs[v].pure = op.effects(f).is_none();
             }
             f.visit_operands(i, |v| ctx.defs[v].uses += 1);
         }
@@ -204,41 +207,47 @@ pub(super) fn select<I>(
     }
     let mut blocks = DenseMap::from_fn(f.block_capacity(), |_| Vec::new());
     let mut instructions = Vec::new();
+    // Roots are selected from the terminator backwards; each rule appends
+    // its instructions in execution order, and the groups are then laid out
+    // in program order.
+    let mut selected = Vec::new();
+    let mut groups = Vec::new();
     for &b in cfg.reverse_postorder().iter().rev() {
         ctx.current = b;
-        let out: &mut Vec<I> = &mut blocks[b];
+        selected.clear();
+        groups.clear();
         let mut emit = |ctx: &mut Context, root| -> Result<(), CompileError> {
-            let first = out.len();
-            rule(ctx, root, out)?;
-            out[first..].reverse();
+            let first = selected.len();
+            rule(ctx, root, &mut selected)?;
+            groups.push(first..selected.len());
             Ok(())
         };
+        ctx.previous = f
+            .instructions(b)
+            .last()
+            .and_then(|i| Some((f.result(i)?, *f.op(i))));
         emit(&mut ctx, Root::Term(*f.terminator(b)))?;
         instructions.extend(f.instructions(b));
         while let Some(i) = instructions.pop() {
-            #[cfg(target_arch = "x86_64")]
             if let Some(covered) = ctx.covered.take() {
                 debug_assert_eq!(f.result(i), Some(covered));
                 continue;
             }
-            #[cfg(all(target_arch = "x86_64", feature = "experimental-simd"))]
-            {
-                ctx.previous = instructions
-                    .last()
-                    .and_then(|&prev| Some((f.result(prev)?, *f.op(prev))));
-            }
+            ctx.previous = instructions
+                .last()
+                .and_then(|&prev| Some((f.result(prev)?, *f.op(prev))));
             if f.result(i)
-                .is_some_and(|v| !ctx.defs[v].register && f.op(i).pure(Some(f.value_type(v))))
+                .is_some_and(|v| !ctx.defs[v].register && ctx.defs[v].pure)
             {
                 continue;
             }
             emit(&mut ctx, Root::Inst(i))?;
         }
-        #[cfg(all(target_arch = "x86_64", feature = "experimental-simd"))]
-        {
-            ctx.previous = None;
+        let out = &mut blocks[b];
+        out.reserve(selected.len());
+        for group in groups.iter().rev() {
+            out.extend_from_slice(&selected[group.clone()]);
         }
-        out.reverse();
     }
     Ok(blocks)
 }

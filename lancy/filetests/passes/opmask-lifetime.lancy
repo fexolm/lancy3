@@ -1,25 +1,25 @@
-fn main arm:i32 limit:i32 -> i32
-  i = simd.iota i32
-  end = simd.splat limit
-  br arm left | right
-block left
-  l = simd.lt i end
-  jump join l
-block right
-  r = simd.ge i end
-  jump join r
-block join pred:vec.i32
+fn main(arm:i32 limit:i32) -> i32
+  i = iota i32
+  end = splat limit
+  br arm left() | right()
+block left()
+  l = lt i end
+  jump join(l)
+block right()
+  r = ge i end
+  jump join(r)
+block join(pred:vec.i32)
   none = const 0
   one = const 1
-  zeros = simd.splat none
-  ones = simd.splat one
-  inv = simd.not pred
-  selected = simd.select pred ones zeros
-  first = simd.extract selected none
-  any_inactive = simd.any inv
+  zeros = splat none
+  ones = splat one
+  inv = not pred
+  selected = select pred ones zeros
+  first = extract selected none
+  any_inactive = any inv
   out = add first any_inactive
   ret out
-@isel regex: MASK=mask\.not\.I32|native\.Vector\(I32\)\.Unary\(Not\)
+@isel regex: MASK=mask\.not\.i32|native\.vec.i32\.not
 @isel check: $MASK
 @run 1 1 -> 0
 @run 0 1 -> -1
@@ -27,95 +27,89 @@ block join pred:vec.i32
 @run 0 0 -> 1
 ---
 # The second predecessor supplies noncanonical lanes.
-fn main arm:i32 limit:i32 -> i32
-  i = simd.iota i32
-  end = simd.splat limit
-  br arm left | right
-block left
-  l = simd.lt i end
-  jump join l
-block right
+fn main(arm:i32 limit:i32) -> i32
+  i = iota i32
+  end = splat limit
+  br arm left() | right()
+block left()
+  l = lt i end
+  jump join(l)
+block right()
   one = const 1
-  r = simd.splat one
-  jump join r
-block join pred:vec.i32
+  r = splat one
+  jump join(r)
+block join(pred:vec.i32)
   zero = const 0
   yes = const 1
-  n = simd.splat zero
-  y = simd.splat yes
-  selected = simd.select pred y n
-  first = simd.extract selected zero
-  any = simd.any pred
+  n = splat zero
+  y = splat yes
+  selected = select pred y n
+  first = extract selected zero
+  any = any pred
   out = add first any
   ret out
-@isel check: native.Vector(I32).Ternary(Select)
+@isel check: native.vec.i32.select
 @run 1 1 -> 0
 @run 0 1 -> -1
 ---
 # Both indexed loads consume the same mask. Only lane zero may access memory.
-fn main p:ptr one:i32 -> i32
-  ids = simd.iota i32
-  n = simd.splat one
-  mask = simd.lt ids n
+fn main(p:ptr one:i32) -> i32
+  ids = iota i32
+  n = splat one
+  mask = lt ids n
   z = const 0
-  zero = simd.splat z
+  zero = splat z
   offset = const 1
   next = offset p offset 4
-  a = simd.maskedload p ids mask zero
-  b = simd.maskedload next ids mask zero
-  sum = simd.add a b
-  result = simd.extract sum z
+  a = maskedload p ids mask zero
+  b = maskedload next ids mask zero
+  sum = add a b
+  result = extract sum z
   ret result
-@isel check: maskedload.Vector(I32)
-@isel check: maskedload.Vector(I32)
+@isel check: maskedload.vec.i32
+@isel check: maskedload.vec.i32
 @run 1 -> 20 | 07 00 00 00 0d 00 00 00 | 07 00 00 00 0d 00 00 00
 @run 0 -> 0 | 07 00 00 00 0d 00 00 00 | 07 00 00 00 0d 00 00 00
 ---
-# Clamp the full unsigned count before producing its prefix.
-fn main x:i32 -> i32
-  lanes = simd.lanes i32
-  n = bitcast u32 lanes
-  xu = bitcast u32 x
-  k = min xu n
-  count = bitcast i32 k
-  i = simd.iota i32
-  end = simd.splat count
-  pred = simd.lt i end
-  any = simd.any pred
-  all = simd.all pred
+# A prefix predicate clamps its count: none for a negative count, every
+# lane past the lane count.
+fn main(x:i32) -> i32
+  pred = firstlanes i32 x
+  any = any pred
+  all = all pred
   result = add any all
   ret result
-@isel regex: PREFIX=mask\.prefix|mask\.cmp\.I32|native\.Vector\(I32\)\.Binary\(Lt\)
+@isel regex: PREFIX=mask\.prefix|mask\.cmp\.i32|native\.vec.i32\.lt
 @isel check: $PREFIX
 @run 0 -> 0
 @run 1 -> -1
 @run 16 -> -2
 @run 256 -> -2
-@run -1 -> -2
+@run 2147483647 -> -2
+@run -1 -> 0
 ---
 # Count and any use one canonical predicate.
-fn main limit:i32 -> i32
-  i = simd.iota i32
-  end = simd.splat limit
-  mask = simd.lt i end
-  flags = simd.neg mask
-  count = simd.reduce add flags
-  any = simd.any mask
+fn main(limit:i32) -> i32
+  i = iota i32
+  end = splat limit
+  mask = lt i end
+  count = maskcount mask
+  any = any mask
   result = add count any
   ret result
-@isel regex: COUNT=mask\.count|native\.Vector\(I32\)\.Reduce\(Add\)|lanes\.Vector\(I32\)\.Reduce\(Add\)
+@isel regex: COUNT=mask\.count|native\.vec.i32\.reduce.add|lanes\.vec.i32\.reduce.add
 @isel check: $COUNT
 @run 0 -> 0
 @run 1 -> 0
 @run 3 -> 2
 ---
 # Reduction of arbitrary negated data is not popcount.
-fn main x:i32 -> i32
+fn main(x:i32) -> i32
   zero = const 0
-  zeros = simd.splat zero
-  data = simd.insert zeros zero x
-  negative = simd.neg data
-  result = simd.reduce add negative
+  zeros = splat zero
+  data = insert zeros zero x
+  negative = neg data
+  result = reduce add negative
   ret result
 @isel check: arg 0
 @isel not: mask.count
@@ -125,28 +119,28 @@ fn main x:i32 -> i32
 @run 0x80000000 -> 0x80000000
 ---
 # Store the fitting prefix of an odd-lane selection, then report a short buffer.
-fn main p:ptr capacity:i32 -> i32
+fn main(p:ptr capacity:i32) -> i32
   zero = const 0
   one = const 1
-  zeros = simd.splat zero
-  ones = simd.splat one
-  i = simd.iota i32
-  odd_bits = simd.and i ones
-  odd = simd.ne odd_bits zeros
-  packed = simd.compress i odd
-  flags = simd.neg odd
-  count = simd.reduce add flags
-  len = simd.splat count
-  size = simd.splat capacity
-  prefix = simd.lt i len
-  in_bounds = simd.lt i size
-  enabled = simd.and prefix in_bounds
-  simd.maskedstore p - enabled packed
-  bad = simd.xor prefix enabled
-  fail = simd.any bad
+  zeros = splat zero
+  ones = splat one
+  i = iota i32
+  odd_bits = and i ones
+  odd = ne odd_bits zeros
+  packed = compress i odd
+  flags = neg odd
+  count = reduce add flags
+  len = splat count
+  size = splat capacity
+  prefix = lt i len
+  in_bounds = lt i size
+  enabled = and prefix in_bounds
+  maskedstore p - enabled packed
+  bad = xor prefix enabled
+  fail = any bad
   bounds fail one
   ret count
-@isel regex: STORE=compress\.store|maskedstore\.Vector\(I32\)
+@isel regex: STORE=compress\.store|maskedstore\.vec.i32
 @isel check: $STORE
 @run 1 -> !bounds | aa aa aa aa ff ff ff ff | 01 00 00 00 ff ff ff ff
 @run 0 -> !bounds | aa aa aa aa | aa aa aa aa

@@ -5,8 +5,8 @@ use syn::{FnArg, GenericParam, ReturnType, Signature, Type};
 
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub(crate) enum TraitMethodKind {
+    /// A result that crosses the scalar call ABI: a kernel scalar or `()`.
     Word,
-    Bool,
     EvalOnly,
     Rust,
 }
@@ -16,8 +16,7 @@ impl TraitMethodKind {
         match output {
             ReturnType::Default => Self::Word,
             ReturnType::Type(_, ty) => match Scalar::from_type(ty, &[]) {
-                Some(Scalar::Int) => Self::Word,
-                Some(Scalar::Bool) => Self::Bool,
+                Some(scalar) if scalar.is_scalar() => Self::Word,
                 _ if matches!(ty.as_ref(), Type::Tuple(tuple) if tuple.elems.is_empty()) => {
                     Self::Word
                 }
@@ -29,21 +28,23 @@ impl TraitMethodKind {
 }
 
 pub(in crate::scalar) fn primitive_type(ty: &Type) -> bool {
-    matches!(ty, Type::Path(path) if path.qself.is_none() && path.path.get_ident().is_some_and(|name| {
-        matches!(name.to_string().as_str(),
-            "bool" | "char" | "i8" | "i16" | "i32" | "i64" | "i128" | "isize"
-            | "u8" | "u16" | "u32" | "u64" | "u128" | "usize" | "f32" | "f64")
-    }))
+    crate::kast::types::Primitive::of(ty).is_some()
 }
 
 pub(crate) fn trait_defaults(
     root: &syn::Path,
     signature: &Signature,
     trait_owner: &TokenStream,
-) -> (TraitMethodKind, Vec<TokenStream>) {
+) -> syn::Result<(TraitMethodKind, Vec<TokenStream>)> {
     let kind = TraitMethodKind::for_result(&signature.output);
     if kind == TraitMethodKind::Rust {
-        return (kind, Vec::new());
+        let ReturnType::Type(_, ty) = &signature.output else {
+            unreachable!("a method without a result returns ()")
+        };
+        return Err(syn::Error::new_spanned(
+            ty,
+            "a Splice trait method returns () or a primitive; keep a Rust method in an ordinary trait",
+        ));
     }
     let mut signature = normalize(signature, None);
     signature
@@ -67,22 +68,19 @@ pub(crate) fn trait_defaults(
     let evaluator = emit! {
         #[doc(hidden)]
         #[allow(clippy::type_complexity)]
-        fn #eval_name #generics (_: (#(Option<#operand_types>,)*)) -> #root::Result<#result_type> #where_ {
-            Err("a trait method without a published implementation is opaque".into())
+        fn #eval_name #generics (_: (#(::core::option::Option<#operand_types>,)*)) -> #root::Result<#result_type> #where_ {
+            ::core::result::Result::Err(#root::BuildError::staging("a trait method without a published implementation is opaque"))
         }
     };
     if kind == TraitMethodKind::EvalOnly {
-        return (kind, vec![evaluator]);
+        return Ok((kind, vec![evaluator]));
     }
-    let Ok(params) = signature
+    let params = signature
         .inputs
         .iter()
         .zip(abi::parameter_names(&signature))
         .map(|(argument, name)| parameter(argument, &types, name))
-        .collect::<syn::Result<Vec<_>>>()
-    else {
-        return (TraitMethodKind::Rust, Vec::new());
-    };
+        .collect::<syn::Result<Vec<_>>>()?;
     let mut declarations = Vec::new();
     let mut args = Vec::new();
     let mut stage_checks = Vec::new();
@@ -93,15 +91,7 @@ pub(crate) fn trait_defaults(
         let id = &param.name;
         let ty = param.ty;
         declarations.push(match param.binding {
-            Binding::Host(_)
-                if matches!(
-                    Scalar::from_type(ty, &types),
-                    Some(Scalar::Int | Scalar::Bool | Scalar::Index)
-                ) =>
-            {
-                if matches!(Scalar::from_type(ty, &types), Some(Scalar::Index)) {
-                    materializable = false;
-                }
+            Binding::Host(_) if Scalar::from_type(ty, &types).is_some_and(Scalar::is_scalar) => {
                 stage_checks
                     .push(emit!(let #id = #support::Host(#support::KnownArg::require(#id)?);));
                 emit!(#id: impl #support::KnownArg<#ty>)
@@ -110,12 +100,17 @@ pub(crate) fn trait_defaults(
                 materializable = false;
                 emit!(#id: #support::Host<#ty>)
             }
-            Binding::Reg(Scalar::Int | Scalar::Bool, _) => emit!(#id: impl #support::RunArg),
+            Binding::Reg(scalar, _) if scalar.is_scalar() => emit!(#id: impl #support::RunArg),
             Binding::Buffer(_) => {
                 materializable = false;
                 emit!(#id: #hir::Buffer)
             }
-            _ => return (TraitMethodKind::Rust, Vec::new()),
+            _ => {
+                return Err(syn::Error::new_spanned(
+                    param.pattern,
+                    "a Splice trait method parameter is #[comptime], a kernel scalar or a slice",
+                ));
+            }
         });
         args.push(id);
     }
@@ -134,59 +129,36 @@ pub(crate) fn trait_defaults(
             })
             .collect();
         let func = (!generic_args.is_empty()).then(|| emit!(::<#(#generic_args),*>));
-        let native_call = |words: &[TokenStream]| {
-            let args = words
-                .iter()
-                .map(|word| emit!(#support::ImportWord::decode(#word)));
-            emit!(<Self as #trait_owner>::#name #func (#(#args),*))
+        let words = (0..arity).map(|index| emit!(#support::ImportWord::decode(args.word(#index))));
+        let adapter = emit! {
+            #[doc(hidden)]
+            #[allow(unused_variables)]
+            fn #adapter_name #generics (args: #root::__private::ContextArguments<'_>) -> u64 #where_ {
+                #support::ImportWord::encode(<Self as #trait_owner>::#name #func (#(#words),*))
+            }
         };
-        let (adapter, call) = if arity <= 2 {
-            let native = native_call(&[emit!(left), emit!(right)][..arity]);
-            (
-                emit! {
-                    #[doc(hidden)]
-                    #[allow(unused_variables)]
-                    extern "C" fn #adapter_name #generics (left: i32, right: i32) -> i64 #where_ {
-                        #support::invoke_import(|| #native)
-                    }
-                },
-                emit! {
-                    __splice_builder.rust_call(#hir::RustCall {
-                        symbol: &#hir::RustSymbol {name: stringify!(#name), resolve: || <Self as #trait_owner>::#adapter_name #func},
-                        arity: #arity as u8,
-                    }, &args)
-                },
-            )
-        } else {
-            let words = (0..arity)
-                .map(|index| emit!(words[#index]))
-                .collect::<Vec<_>>();
-            let native = native_call(&words);
-            (
-                emit! {
-                    #[doc(hidden)]
-                    fn #adapter_name #generics (words: &[i32]) -> i32 #where_ {
-                        #support::ImportWord::encode(#native)
-                    }
-                },
-                emit! {
-                    __splice_builder.rust_packet_call(&#hir::RustPacketSymbol {
-                        name: stringify!(#name),
-                        arity: #arity as u32,
-                        resolve: || <Self as #trait_owner>::#adapter_name #func,
-                    }, &args)
-                },
+        let arity = arity as u32;
+        let call = emit! {
+            __splice_builder.rust_call(
+                #hir::RustTarget::Static(const {
+                    &#root::__private::StaticRustSymbol::new(
+                        ::core::stringify!(#name), #arity, 0, <Self as #trait_owner>::#adapter_name #func,
+                    )
+                }),
+                &args,
+                &[],
+                <#result_type as #support::ImportWord>::TYPE,
             )
         };
         items.push(adapter);
         emit! {
-            let args = [#(#support::RunArg::reg(#args, __splice_builder)),*];
+            let args = [#(#support::RunArg::reg(#args, __splice_builder)?),*];
             #call
         }
     } else {
-        emit!(Err(
-            "trait method requires Rust arguments that cannot cross the scalar ABI".into()
-        ))
+        emit!(::core::result::Result::Err(#root::BuildError::staging(
+            "trait method requires Rust arguments that cannot cross the scalar ABI"
+        )))
     };
     items.push(emit! {
         #[doc(hidden)]
@@ -199,50 +171,23 @@ pub(crate) fn trait_defaults(
         }
     });
     items.push(evaluator);
-    (kind, items)
+    Ok((kind, items))
 }
 
-pub(crate) fn stage_shape(
-    root: &syn::Path,
-    signature: &Signature,
-    body: Option<&syn::Block>,
-    inherent_visibility: Option<&syn::Visibility>,
-) -> [TokenStream; 2] {
-    let (shape_kind, policy_kind, bound) = if inherent_visibility.is_some() {
-        (
-            "inherent_region_stage_shape",
-            "inherent_region_needs_stages",
-            TokenStream::new(),
-        )
-    } else {
-        (
-            "stage_shape",
-            "region_needs_stages",
-            emit!(where Self: Sized),
-        )
-    };
-    let method = entry_name(shape_kind, &signature.ident);
-    let policy = entry_name(policy_kind, &signature.ident);
-    let needs_stages = body.map_or_else(
-        || emit!(false),
-        |body| crate::import::method_policy(root, signature, body),
-    );
+/// The stage of each parameter of a trait method, which a caller of an
+/// implementation outside a `#[kernel]` block checks before calling it as
+/// Rust.
+pub(crate) fn stage_shape(signature: &Signature) -> TokenStream {
+    let method = entry_name("stage_shape", &signature.ident);
     let stages = parameter_stages(signature);
     let masks = stage_masks(&stages);
-    [
-        emit! {
-            #[doc(hidden)]
-            #[allow(dead_code, clippy::type_complexity)]
-            #inherent_visibility fn #method() -> (#([(); #stages],)*) #bound {
-                (#(#masks,)*)
-            }
-        },
-        emit! {
-            #[doc(hidden)]
-            #[allow(dead_code)]
-            #inherent_visibility fn #policy() -> bool #bound { #needs_stages }
-        },
-    ]
+    emit! {
+        #[doc(hidden)]
+        #[allow(dead_code, clippy::type_complexity)]
+        fn #method() -> (#([(); #stages],)*) where Self: Sized {
+            (#(#masks,)*)
+        }
+    }
 }
 
 fn stage_masks(stages: &[usize]) -> impl Iterator<Item = TokenStream> + '_ {

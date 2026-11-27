@@ -11,11 +11,11 @@ pub(super) struct Point {
 
 pub(super) type Points = HashMap<usize, Vec<Point>>;
 
-pub(super) fn read(bytes: &[u8]) -> splice::Result<Points> {
+pub(super) fn read(bytes: &[u8]) -> splice_core::Result<Points> {
     let mut bytes = bytes;
     let header = take::<16>(&mut bytes)?;
     if header[..4] != [3, 0, 0, 0] {
-        return Err("unsupported LLVM stack map version".into());
+        return Err(crate::error("unsupported LLVM stack map version"));
     }
     let word = |offset| u32::from_le_bytes(header[offset..offset + 4].try_into().unwrap()) as usize;
     // The record ID contains our kernel ID, so function address relocations
@@ -28,11 +28,15 @@ pub(super) fn read(bytes: &[u8]) -> splice::Result<Points> {
         let function = u32::from_le_bytes(record[4..8].try_into().unwrap()) as usize;
         let offset = u32::from_le_bytes(record[8..12].try_into().unwrap());
         if record[12..] != [0, 0, 1, 0] {
-            return Err("LLVM debug record must contain one snapshot address".into());
+            return Err(crate::error(
+                "LLVM debug record must contain one snapshot address",
+            ));
         }
         let location = take::<12>(&mut bytes)?;
         if location[..4] != [2, 0, 8, 0] {
-            return Err("LLVM did not encode the snapshot as a direct stack address".into());
+            return Err(crate::error(
+                "LLVM did not encode the snapshot as a direct stack address",
+            ));
         }
         let register = u16::from_le_bytes(location[4..6].try_into().unwrap());
         let displacement = i32::from_le_bytes(location[8..12].try_into().unwrap());
@@ -50,15 +54,17 @@ pub(super) fn read(bytes: &[u8]) -> splice::Result<Points> {
     Ok(points)
 }
 
-fn skip(bytes: &mut &[u8], size: usize) -> splice::Result<()> {
-    *bytes = bytes.get(size..).ok_or("truncated LLVM stack map")?;
+fn skip(bytes: &mut &[u8], size: usize) -> splice_core::Result<()> {
+    *bytes = bytes
+        .get(size..)
+        .ok_or_else(|| crate::error("truncated LLVM stack map"))?;
     Ok(())
 }
 
-fn take<const N: usize>(bytes: &mut &[u8]) -> splice::Result<[u8; N]> {
+fn take<const N: usize>(bytes: &mut &[u8]) -> splice_core::Result<[u8; N]> {
     let (record, rest) = bytes
         .split_first_chunk::<N>()
-        .ok_or("truncated LLVM stack map")?;
+        .ok_or_else(|| crate::error("truncated LLVM stack map"))?;
     *bytes = rest;
     Ok(*record)
 }

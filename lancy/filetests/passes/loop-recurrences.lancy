@@ -1,21 +1,21 @@
 # A wrapping sum of an affine sequence, with forwarding on the loop edges.
-fn main n:i32 initial:i32 step:i32 -> i32
+fn main(n:i32 initial:i32 step:i32) -> i32
   zero = const 0
   one = const 1
-  jump head zero initial zero step
-block head i:i32 term:i32 acc:i32 delta:i32
+  jump head(zero initial zero step)
+block head(i:i32 term:i32 acc:i32 delta:i32)
   more = lt i n
-  br more body i term acc delta | done acc
-block body current_i:i32 current_term:i32 current_acc:i32 current_delta:i32
+  br more body(i term acc delta) | done(acc)
+block body(current_i:i32 current_term:i32 current_acc:i32 current_delta:i32)
   next_i = add current_i one
   next_acc = add current_acc current_term
   next_term = add current_term current_delta
-  jump head next_i next_term next_acc current_delta
-block done result:i32
+  jump head(next_i next_term next_acc current_delta)
+block done(result:i32)
   ret result
 @source check: br
 @opt not: br
-@opt check: Mul
+@opt check: = mul
 @opt not: br
 @run 4 10 3 -> 58
 @run 4 10 -3 -> 22
@@ -27,23 +27,23 @@ block done result:i32
 ---
 
 # A sum of the next terms and an independently live final term.
-fn main n:i32 initial:i32 step:i32 -> i32
+fn main(n:i32 initial:i32 step:i32) -> i32
   zero = const 0
   one = const 1
-  jump head zero initial zero
-block head i:i32 term:i32 acc:i32
+  jump head(zero initial zero)
+block head(i:i32 term:i32 acc:i32)
   more = lt i n
-  br more body | done
-block body
+  br more body() | done()
+block body()
   next_i = add i one
   next_term = add term step
   next_acc = add acc next_term
-  jump head next_i next_term next_acc
-block done
+  jump head(next_i next_term next_acc)
+block done()
   result = add acc term
   ret result
 @opt not: br
-@opt check: Mul
+@opt check: = mul
 @opt not: br
 @run 4 10 3 -> 92
 @run 0 10 3 -> 10
@@ -51,22 +51,22 @@ block done
 ---
 
 # Runtime start, signed bounds, and a scaled induction value.
-fn main start:i32 bound:i32 k:i32 b:i32 seed:i32 -> i32
+fn main(start:i32 bound:i32 k:i32 b:i32 seed:i32) -> i32
   one = const 1
-  jump head start seed
-block head i:i32 acc:i32
+  jump head(start seed)
+block head(i:i32 acc:i32)
   more = lt i bound
-  br more body | done acc
-block body
+  br more body() | done(acc)
+block body()
   next_i = add i one
   scaled = mul i k
   term = add scaled b
   next_acc = add acc term
-  jump head next_i next_acc
-block done out:i32
+  jump head(next_i next_acc)
+block done(out:i32)
   ret out
 @opt not: br
-@opt check: And
+@opt check: = and
 @opt not: br
 @run -2 3 4 7 9 -> 44
 @run 3 6 -2 5 7 -> -2
@@ -75,19 +75,19 @@ block done out:i32
 ---
 
 # The increment uses an already-quadratic recurrence. Keep the degree-three loop.
-fn main n:i32 -> i32
+fn main(n:i32) -> i32
   zero = const 0
   one = const 1
-  jump head zero zero zero
-block head i:i32 a:i32 b:i32
+  jump head(zero zero zero)
+block head(i:i32 a:i32 b:i32)
   more = lt i n
-  br more body | done b
-block body
+  br more body() | done(b)
+block body()
   next_i = add i one
   next_a = add a i
   next_b = add b a
-  jump head next_i next_a next_b
-block done result:i32
+  jump head(next_i next_a next_b)
+block done(result:i32)
   ret result
 @opt check: br
 @run 5 -> 10
@@ -95,20 +95,20 @@ block done result:i32
 ---
 
 # A store of each partial sum is observable even if the final sum is closed-form.
-fn main p:ptr n:i32 step:i32 -> i32
+fn main(p:ptr n:i32 step:i32) -> i32
   zero = const 0
   one = const 1
-  jump head zero zero
-block head i:i32 acc:i32
+  jump head(zero zero)
+block head(i:i32 acc:i32)
   more = lt i n
-  br more body | done acc
-block body
+  br more body() | done(acc)
+block body()
   next_i = add i one
   next_acc = add acc step
   address = offset p i 4
   store address next_acc
-  jump head next_i next_acc
-block done result:i32
+  jump head(next_i next_acc)
+block done(result:i32)
   ret result
 @opt check: br
 @opt check: store
@@ -117,19 +117,19 @@ block done result:i32
 ---
 
 # Reversing the operands and taking the false edge gives the same strict loop.
-fn main start:i32 limit:i32 seed:i32 -> i32
+fn main(start:i32 limit:i32 seed:i32) -> i32
   one = const 1
-  jump head start seed
-block head i:i32 sum:i32
+  jump head(start seed)
+block head(i:i32 sum:i32)
   done = le limit i
-  br done exit sum | inc
-block inc
+  br done exit(sum) | inc()
+block inc()
   next = add i one
   total = add sum i
-  jump head next total
-block exit out:i32
+  jump head(next total)
+block exit(out:i32)
   ret out
-@source check: Le
+@source check: = le
 @opt not: br
 @opt check: ret
 @run 1 4 10 -> 16
@@ -140,16 +140,16 @@ block exit out:i32
 ---
 
 # The false edge here includes equality and must run one additional iteration.
-fn main start:i32 limit:i32 -> i32
+fn main(start:i32 limit:i32) -> i32
   one = const 1
-  jump head start
-block head i:i32
+  jump head(start)
+block head(i:i32)
   done = lt limit i
-  br done exit | inc
-block inc
+  br done exit() | inc()
+block inc()
   next = add i one
-  jump head next
-block exit
+  jump head(next)
+block exit()
   ret i
 @opt check: br
 @run 2 2 -> 3

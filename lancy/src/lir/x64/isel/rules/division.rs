@@ -2,9 +2,9 @@ use super::Rules;
 use crate::{
     CompileError,
     hir::{Binary, Value},
-    lir::x64::inst::{Inst, Quotient},
+    lir::x64::inst::{Inst, Int, Quotient},
 };
-use regalloc2::{RegClass, VReg};
+use regalloc2::VReg;
 
 impl Rules<'_> {
     pub(super) fn i32_division(
@@ -35,16 +35,7 @@ impl Rules<'_> {
             // Division by zero and signed overflow use the checked register form.
             _ => {}
         }
-        let lo = self.input(a);
-        let hi = self.body.temp(RegClass::Int)?;
-        self.out.push(Inst::Cdq { lo, hi });
-        Ok(Inst::IDiv {
-            remainder,
-            dst,
-            lo,
-            hi,
-            divisor: self.input(b),
-        })
+        self.division(remainder, Int::I32, dst, a, b)
     }
 }
 

@@ -1,18 +1,18 @@
 use lancy::hir::{Binary, Block, Function, IrError, Op, Terminator};
-use lancy::{CallError, CompileError, ScalarKernel};
+use lancy::{CallError, CompileError, Kernel, SignatureError, Trap};
 use std::sync::Arc;
 
 #[test]
 fn verify_rejects_bad_edges_dominance_call_signatures_and_unterminated_blocks() {
     let mut f = Function::scalar(1);
-    let missing = f.add_edge(Block(99), &[]);
+    let missing = f.add_edge(Block::from_index(99), &[]);
     f.set_terminator(f.entry(), Terminator::Jump(missing));
     assert_eq!(
         f.verify(),
         Err(IrError::UnknownTarget {
             from: f.entry(),
             edge: missing,
-            target: Block(99)
+            target: Block::from_index(99)
         })
     );
 
@@ -42,10 +42,8 @@ fn verify_rejects_bad_edges_dominance_call_signatures_and_unterminated_blocks() 
     identity.set_terminator(entry, Terminator::Return(identity.params(entry)[0]));
     let mut f = Function::scalar(0);
     let call = f.add_call(Arc::new(identity), &[]);
-    let output = f.append(f.entry(), Op::Call(call)).unwrap();
-    f.set_terminator(f.entry(), Terminator::Return(output));
     assert_eq!(
-        f.verify(),
+        f.append(f.entry(), Op::Call(call)),
         Err(IrError::CallArity {
             call,
             expected: 1,
@@ -54,7 +52,9 @@ fn verify_rejects_bad_edges_dominance_call_signatures_and_unterminated_blocks() 
     );
 
     let f = Function::scalar(0);
-    let Err(CompileError::InvalidIr(error)) = ScalarKernel::compile(&f) else {
+    let Err(CompileError::InvalidIr(error)) =
+        Kernel::compile(&f, &lancy::CompileOptions::host().unwrap())
+    else {
         panic!("expected an SSA error for an empty function");
     };
     assert_eq!(error, IrError::UnterminatedBlock { block: f.entry() });
@@ -62,8 +62,6 @@ fn verify_rejects_bad_edges_dominance_call_signatures_and_unterminated_blocks() 
 
 #[test]
 fn compile_preserves_the_verifier_error_from_a_callee() {
-    use std::error::Error;
-
     let child = Arc::new(Function::scalar(0));
     let mut parent = Function::scalar(0);
     let site = parent.add_call(child.clone(), &[]);
@@ -71,12 +69,12 @@ fn compile_preserves_the_verifier_error_from_a_callee() {
     parent.set_terminator(parent.entry(), Terminator::Return(returned));
     parent.verify().unwrap();
 
-    let Err(err) = ScalarKernel::compile(&parent) else {
+    let Err(err) = Kernel::compile(&parent, &lancy::CompileOptions::host().unwrap()) else {
         panic!("compiled an unterminated callee");
     };
     assert!(matches!(
-        err.source().and_then(|source| source.downcast_ref::<IrError>()),
-        Some(IrError::UnterminatedBlock { block }) if *block == child.entry()
+        err,
+        CompileError::InvalidIr(IrError::UnterminatedBlock { block }) if block == child.entry()
     ));
 }
 
@@ -88,11 +86,14 @@ fn a_compiled_division_reports_each_arithmetic_trap() {
     let result = f.append(entry, Op::Bin(Binary::Div, lhs, rhs)).unwrap();
     f.set_terminator(entry, Terminator::Return(result));
 
-    let kernel = ScalarKernel::compile(&f).unwrap();
-    assert_eq!(kernel.call(&[7, 0]), Err(CallError::DivisionByZero));
+    let kernel = Kernel::compile(&f, &lancy::CompileOptions::host().unwrap()).unwrap();
+    assert_eq!(
+        kernel.call(&[7, 0]),
+        Err(CallError::Trap(Trap::DivisionByZero))
+    );
     assert_eq!(
         kernel.call(&[i32::MIN, -1]),
-        Err(CallError::DivisionOverflow)
+        Err(CallError::Trap(Trap::DivisionOverflow))
     );
     assert_eq!(kernel.call(&[15, 3]), Ok(5));
 }
@@ -135,7 +136,7 @@ fn calls_and_joins_preserve_noncanonical_branch_masks() {
     f.set_terminator(entry, Terminator::Branch { cond, yes, no });
     f.set_terminator(join, Terminator::Return(output));
 
-    let kernel = ScalarKernel::compile(&f).unwrap();
+    let kernel = Kernel::compile(&f, &lancy::CompileOptions::host().unwrap()).unwrap();
     for (mask, x) in [
         (1, i32::MIN),
         (-2, i32::MAX),
@@ -152,10 +153,10 @@ fn calls_and_joins_preserve_noncanonical_branch_masks() {
     }
     assert_eq!(
         kernel.call(&[1]),
-        Err(CallError::Arity {
+        Err(CallError::Signature(SignatureError::Arity {
             expected: 2,
             actual: 1
-        })
+        }))
     );
 }
 
@@ -184,7 +185,7 @@ fn loop_carried_parameters_handle_zero_trip_inputs() {
     f.set_terminator(body, Terminator::Jump(back));
     f.set_terminator(exit, Terminator::Return(total));
 
-    let kernel = ScalarKernel::compile(&f).unwrap();
+    let kernel = Kernel::compile(&f, &lancy::CompileOptions::host().unwrap()).unwrap();
     for (n, sum) in [(0, 0), (4, 10), (1, 1), (10, 55), (-1, 0)] {
         assert_eq!(kernel.call(&[n]).unwrap(), sum);
     }
@@ -243,7 +244,7 @@ fn jit_agrees_with_rust_on_forward_edges_and_shared_returns() {
             let no = f.add_edge(blocks[other].0, &[value]);
             f.set_terminator(block, Terminator::Branch { cond, yes, no });
         }
-        let kernel = ScalarKernel::compile(&f).unwrap();
+        let kernel = Kernel::compile(&f, &lancy::CompileOptions::host().unwrap()).unwrap();
         for mask in [0, 1, 7, 0x55, 0xaa, -1] {
             let args = [mask, -207, 42];
             let mut value: i32 = args[1];
@@ -261,6 +262,95 @@ fn jit_agrees_with_rust_on_forward_edges_and_shared_returns() {
                 }
             }
             assert_eq!(kernel.call(&args).unwrap(), value);
+        }
+    }
+}
+
+#[test]
+fn release_code_drops_debug_points() {
+    let build = |points: u32| {
+        let mut f = Function::scalar(1);
+        let entry = f.entry();
+        let mut value = f.params(entry)[0];
+        for id in 0..points {
+            f.append_inst(entry, Op::DebugPoint(id)).unwrap();
+        }
+        let three = f.append(entry, Op::Const(3)).unwrap();
+        value = f.append(entry, Op::Bin(Binary::Mul, value, three)).unwrap();
+        for id in 0..points {
+            f.append_inst(entry, Op::DebugPoint(points + id)).unwrap();
+        }
+        f.set_terminator(entry, Terminator::Return(value));
+        Kernel::compile(&f, &lancy::CompileOptions::host().unwrap()).unwrap()
+    };
+    let (plain, marked) = (build(0), build(32));
+    assert_eq!(marked.call(&[7]), Ok(21));
+    assert_eq!(marked.code_size(), plain.code_size());
+}
+
+/// `get(xs, i) = xs[i]` through a call, with `xs` a declared read-only
+/// `i32` slice of the raw call contract.
+fn slice_get() -> Function {
+    use lancy::hir::{Scale, SliceParam, Type};
+    let params = [Type::Ptr, Type::I32, Type::I32];
+    let mut callee = Function::new(&params, Type::I32);
+    let entry = callee.entry();
+    let [p, n, i] = callee.params(entry).try_into().unwrap();
+    callee.append_inst(entry, Op::BoundsCheck(i, n)).unwrap();
+    let at = callee
+        .append(entry, Op::PtrOffset(p, i, Scale::Four))
+        .unwrap();
+    let value = callee.append(entry, Op::Load(Type::I32, at)).unwrap();
+    callee.set_terminator(entry, Terminator::Return(value));
+
+    let mut root = Function::new(&params, Type::I32);
+    let entry = root.entry();
+    let args: Vec<_> = root.params(entry).to_vec();
+    root.set_slice_params(vec![SliceParam {
+        ptr: args[0],
+        len: args[1],
+        element: 4,
+        writable: false,
+    }])
+    .unwrap();
+    let call = root.add_call(Arc::new(callee), &args);
+    let value = root.append(entry, Op::Call(call)).unwrap();
+    root.set_terminator(entry, Terminator::Return(value));
+    root
+}
+
+#[test]
+fn slices_need_the_unchecked_packed_call_in_every_build() {
+    let host = lancy::CompileOptions::host().unwrap();
+    let f = slice_get();
+    let xs = [10, 20, 30];
+    for options in [
+        host,
+        host.with_inlining(lancy::Inlining::Never),
+        host.with_debug(),
+    ] {
+        let kernel = Kernel::compile(&f, &options).unwrap();
+        assert_eq!(
+            kernel.call_packed(&[0, 0, 0], &mut [0]),
+            Err(CallError::Signature(SignatureError::PointerSignature))
+        );
+        let get = |i: i32| {
+            let mut result = [0];
+            let args = [xs.as_ptr() as u64, xs.len() as u64, u64::from(i as u32)];
+            // SAFETY: `xs` is a live, initialized, shared slice of `len`
+            // elements, and the kernel only reads it.
+            unsafe { kernel.call_packed_unchecked(&args, &mut result) }.map(|()| result[0] as i32)
+        };
+        assert_eq!(get(2), Ok(30));
+        assert_eq!(get(3), Err(CallError::Trap(Trap::Bounds)));
+        assert_eq!(get(-1), Err(CallError::Trap(Trap::Bounds)));
+
+        let bodies = kernel.debug_functions();
+        assert_eq!(bodies.is_empty(), !options.debug);
+        for body in bodies {
+            let (code, frame) = (body.code(), body.frame().code());
+            assert!(code.start <= frame.start && frame.end <= code.end);
+            assert!(code.end <= kernel.code_size() as u64);
         }
     }
 }

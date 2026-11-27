@@ -1,0 +1,19 @@
+# F32/F64 min and max are FMINNM/FMAXNM on whole registers; two selects
+# make a signaling NaN behave like a quiet one. No lane loop and no move
+# through a general register (A64-01).
+fn main(x:vec.f32 y:vec.f32) -> vec.f32
+  r = min x y
+  ret r
+@aarch64 neon has v.fminnm
+@aarch64 sve has z.fminnm
+@aarch64 sve2 has z.fminnm
+@aarch64 all lacks z.lastb
+@aarch64 all lacks fmov.x.d
+---
+fn main(x:f64 y:f64) -> f64
+  r = max x y
+  ret r
+@aarch64 all has v.fmaxnm
+@aarch64 all lacks fcmp
+@run 1.5 2.5 -> 2.5
+@run -0.0 0.0 -> 0.0

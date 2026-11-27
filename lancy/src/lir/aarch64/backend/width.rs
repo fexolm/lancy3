@@ -1,6 +1,5 @@
 use super::{
-    A, C, Emitter, O, PredQual, R, Result, arrangements, groups::z, integer_float,
-    operations::sve_lane_bytes,
+    A, C, Emitter, O, PredQual, R, Result, arrangements, groups::z, operations::sve_lane_bytes,
 };
 use crate::hir::Lane;
 
@@ -190,25 +189,6 @@ impl Emitter<'_> {
             }
             self.float_move(from.scalar(), true, 16, 9)?;
             return self.half_cast(from, to, 16, 9);
-        }
-        if to.bytes() == 16 {
-            return self.float_to_wide(from, to.signed());
-        }
-        if from.bytes() == 16 {
-            return self.integer_to_float_bits(from.signed(), to);
-        }
-        if (from.float() && from.bytes() == 2) || (to.float() && to.bytes() == 2) {
-            self.integer_float_half_lane(
-                integer_float::Form {
-                    from,
-                    to,
-                    packed: false,
-                    scalable: false,
-                },
-                9,
-                12,
-            )?;
-            return self.copy_converted_lane();
         }
         if from.float() {
             let code = if to.signed() {

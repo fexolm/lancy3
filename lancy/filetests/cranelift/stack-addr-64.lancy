@@ -1,7 +1,7 @@
 # Adapted from Wasmtime v45.0.3, runtests/stack-addr-64.clif (%stack_addr_iadd).
 # SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 # Access the same scratch word via two equivalent address expressions.
-fn main base:ptr x:i32 -> i32
+fn main(base:ptr x:i32) -> i32
   eight = const 8
   two = const 2
   a = offset base eight 1
@@ -23,7 +23,7 @@ fn main base:ptr x:i32 -> i32
 ---
 
 # %stack_addr_64, with three separate i32 words and two padding gaps.
-fn main p:ptr x:i32 -> i32
+fn main(p:ptr x:i32) -> i32
   store p x
   first = load i32 p
   eight = const 8

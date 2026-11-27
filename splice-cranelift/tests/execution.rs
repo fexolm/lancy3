@@ -1,9 +1,16 @@
-use splice::hir::{Binary, FunctionBuilder};
-use splice::{BufferArg, Codegen, Executable, kernel};
+use splice_core::frontend::{KernelBuilder, Signature};
+use splice_core::hir::{Binary, FunctionBuilder};
+use splice_core::hir::{Constant, ScalarType};
+use splice_core::{BufferArg, CallError, Codegen, Executable, KernelScalar, Trap, kernel};
 use splice_cranelift::Cranelift;
 use std::sync::Arc;
 
-#[kernel]
+/// This machine's `SPLICE_SIMD` target in the mode of this test build.
+fn options() -> splice_core::BuildOptions {
+    splice_core::BuildOptions::host(splice_core::Mode::for_profile(cfg!(debug_assertions))).unwrap()
+}
+
+#[kernel(crate = splice_core)]
 fn update(out: &mut [i32], row: i32, values: &[i32], divisor: i32, #[comptime] bias: i32) -> i32 {
     out[row as usize] = bias;
     let value = values[row as usize] / divisor;
@@ -11,7 +18,7 @@ fn update(out: &mut [i32], row: i32, values: &[i32], divisor: i32, #[comptime] b
     value
 }
 
-#[kernel]
+#[kernel(crate = splice_core)]
 fn batch(values: &[i32], out: &mut [i32], divisor: i32, #[comptime] bias: i32) -> i32 {
     let mut result = bias;
     for row in 0..out.len() {
@@ -42,22 +49,17 @@ fn staged_and_portable_calls_keep_writes_up_to_the_first_fault() {
             assert_eq!(out, expected);
         }
         for (input, divisor, message, expected) in [
-            (
-                &values[..1],
-                3,
-                "kernel slice index out of bounds",
-                [3, 42, 0],
-            ),
+            (&values[..1], 3, CallError::Trap(Trap::Bounds), [3, 42, 0]),
             (
                 &values[..],
                 -1,
-                "kernel signed division overflow",
+                CallError::Trap(Trap::DivisionOverflow),
                 [-9, 42, 0],
             ),
             (
                 &values[..],
                 0,
-                "kernel integer division by zero",
+                CallError::Trap(Trap::DivisionByZero),
                 [42, 0, 0],
             ),
         ] {
@@ -68,8 +70,7 @@ fn staged_and_portable_calls_keep_writes_up_to_the_first_fault() {
                     out: &mut out,
                     divisor
                 })
-                .unwrap_err()
-                .to_string(),
+                .unwrap_err(),
                 message
             );
             assert_eq!(out, expected);
@@ -84,17 +85,40 @@ fn staged_and_portable_calls_keep_writes_up_to_the_first_fault() {
         );
         let code = code.as_inner();
         let mut out = [17];
-        assert!(
+        use splice_core::SignatureError::*;
+        assert_eq!(
             code.call(
                 &[],
-                &mut [BufferArg::Read(&values), BufferArg::Write(&mut out)]
-            )
-            .is_err()
+                &mut [BufferArg::read(&values), BufferArg::write(&mut out)]
+            ),
+            Err(Scalars {
+                expected: 1,
+                actual: 0
+            }
+            .into())
         );
-        assert!(code.call(&[1], &mut [BufferArg::Write(&mut out)]).is_err());
-        assert!(
-            code.call(&[1], &mut [BufferArg::Read(&values), BufferArg::Read(&out)])
-                .is_err()
+        assert_eq!(
+            code.call(&[1], &mut [BufferArg::write(&mut out)]),
+            Err(Buffers {
+                expected: 2,
+                actual: 1
+            }
+            .into())
+        );
+        assert_eq!(
+            code.call(&[1], &mut [BufferArg::read(&values), BufferArg::read(&out)]),
+            Err(ReadOnly { buffer: 1 }.into())
+        );
+        assert_eq!(
+            code.call(
+                &[1],
+                &mut [BufferArg::from(&[1.0f32][..]), BufferArg::write(&mut out)]
+            ),
+            Err(splice_core::SignatureError::Element {
+                buffer: 0,
+                expected: splice_core::simd::Element::I32
+            }
+            .into())
         );
         assert_eq!(out, [17]);
     }
@@ -107,15 +131,21 @@ fn every_binary_operation_matches_splice_on_signed_boundaries() {
     for op in [
         Add, Sub, Mul, Div, Rem, And, Or, Xor, Eq, Ne, Lt, Le, Gt, Ge, Shl, Shr, Min, Max,
     ] {
-        let mut f = FunctionBuilder::new(2);
-        let result = f.binary(op, f.arg(0), f.arg(1));
-        f.ret(result);
+        let output = op.output(ScalarType::I32).unwrap();
+        let mut f = FunctionBuilder::new(
+            options(),
+            Signature::new(&[ScalarType::I32; 2], output, &[]),
+        );
+        let result = f.binary(op, f.arg(0).unwrap(), f.arg(1).unwrap()).unwrap();
+        f.ret(result).unwrap();
         let kernel = Cranelift::compile(&f.finish().unwrap()).unwrap();
         for a in cases {
             for b in cases {
                 assert_eq!(
-                    kernel.call(&[a, b], &mut []).ok(),
-                    op.checked_eval(a, b),
+                    kernel.call(&[a, b].map(i32::to_word), &mut []),
+                    op.checked_eval(a.into(), b.into())
+                        .map(|c| c.bits())
+                        .map_err(CallError::from),
                     "{a} {op:?} {b}"
                 );
             }
@@ -135,9 +165,8 @@ fn negative_and_past_end_indices_stop_before_the_first_store() {
                 values: &[5],
                 divisor: 1
             })
-            .unwrap_err()
-            .to_string(),
-            "kernel slice index out of bounds"
+            .unwrap_err(),
+            CallError::Trap(Trap::Bounds)
         );
         assert_eq!(out, [17]);
     }
@@ -146,73 +175,96 @@ fn negative_and_past_end_indices_stop_before_the_first_store() {
 #[test]
 fn unrepresentable_callee_signature_returns_a_build_error() {
     let count = usize::from(u16::MAX) + 2;
-    let mut callee = FunctionBuilder::new(count);
-    callee.ret(callee.arg(0));
-    let mut root = FunctionBuilder::new(1);
-    let value = root.call(callee.finish().unwrap(), &vec![root.arg(0); count]);
-    root.ret(value);
+    let mut callee = FunctionBuilder::new(
+        options(),
+        Signature::new(&vec![ScalarType::I32; count], ScalarType::I32, &[]),
+    );
+    callee.ret(callee.arg(0).unwrap()).unwrap();
+    let mut root = FunctionBuilder::new(
+        options(),
+        Signature::new(&[ScalarType::I32; 1], ScalarType::I32, &[]),
+    );
+    let callee = Arc::new(callee.finish().unwrap());
+    let value = root
+        .call_function(&callee, &vec![root.arg(0).unwrap(); count], &[])
+        .unwrap();
+    root.ret(value).unwrap();
     let result = Cranelift::compile(&root.finish().unwrap());
-    assert!(result.err().unwrap().contains("too many parameters"));
+    assert!(
+        matches!(result.err().unwrap(), splice_core::BuildError::Unsupported(feature) if feature.contains("too many parameters"))
+    );
 }
 
 #[test]
 fn shared_callees_stack_arguments_and_backedges_outlive_the_ir() {
-    let mut child = FunctionBuilder::new(8);
-    let next = child.binary(Binary::Add, child.arg(0), child.arg(7));
-    child.ret(next);
+    let mut child = FunctionBuilder::new(
+        options(),
+        Signature::new(&[ScalarType::I32; 8], ScalarType::I32, &[]),
+    );
+    let next = child
+        .binary(Binary::Add, child.arg(0).unwrap(), child.arg(7).unwrap())
+        .unwrap();
+    child.ret(next).unwrap();
     let child = Arc::new(child.finish().unwrap());
 
-    let mut f = FunctionBuilder::new(1);
-    let limit = f.arg(0);
-    let counter = f.constant(0);
-    let zero = f.constant(0);
-    let one = f.constant(1);
-    let (head, body, done) = (f.label(), f.label(), f.label());
-    f.mark(head);
-    let more = f.binary(Binary::Lt, counter, limit);
-    f.branch(more, body, done);
-    f.mark(body);
+    let mut f = FunctionBuilder::new(
+        options(),
+        Signature::new(&[ScalarType::I32; 1], ScalarType::I32, &[]),
+    );
+    let limit = f.arg(0).unwrap();
+    let counter = f.constant(Constant::from(0)).unwrap();
+    let zero = f.constant(Constant::from(0)).unwrap();
+    let one = f.constant(Constant::from(1)).unwrap();
+    let (head, body, done) = (f.label().unwrap(), f.label().unwrap(), f.label().unwrap());
+    f.mark(head).unwrap();
+    let more = f.binary(Binary::Lt, counter, limit).unwrap();
+    f.branch(more, body, done).unwrap();
+    f.mark(body).unwrap();
     for _ in 0..2 {
         let mut args = [zero; 8];
         args[0] = counter;
         args[7] = one;
-        let step = f.call_shared(child.clone(), &args);
-        f.assign(counter, step);
+        let step = f.call_function(&child, &args, &[]).unwrap();
+        f.assign(counter, step).unwrap();
     }
-    f.jump(head);
-    f.mark(done);
-    f.ret(counter);
-    let orphan = f.label();
-    f.mark(orphan);
-    f.constant(99); // verified, unreachable fallthrough
+    f.jump(head).unwrap();
+    f.mark(done).unwrap();
+    f.ret(counter).unwrap();
+    let orphan = f.label().unwrap();
+    f.mark(orphan).unwrap();
+    f.constant(Constant::from(99)).unwrap(); // verified, unreachable fallthrough
 
     let code = Cranelift::compile(&f.finish().unwrap()).unwrap();
     std::thread::scope(|scope| {
         for (limit, expected) in [(-2, 0), (1, 2), (19, 20)] {
             let code = &code;
-            scope.spawn(move || assert_eq!(code.call(&[limit], &mut []), Ok(expected)));
+            scope.spawn(move || assert_eq!(code.call(&[limit.to_word()], &mut []), Ok(expected)));
         }
     });
 }
 
 #[test]
 fn masked_f64_memory_keeps_global_lane_order_across_chunks() {
-    use splice::{
+    use splice_core::{
         BufferKind,
         hir::{Buffer, Simd, SimdOp},
         simd::Element::{F64, I64},
     };
 
-    let mut f = FunctionBuilder::with_buffers(
-        0,
-        vec![
-            BufferKind::new(F64, false),
-            BufferKind::new(I64, false),
-            BufferKind::new(F64, false),
-            BufferKind::new(F64, true),
-        ],
+    let mut f = FunctionBuilder::new(
+        options(),
+        Signature::new(
+            &[ScalarType::I32; 0],
+            ScalarType::I32,
+            &[
+                BufferKind::new(F64, false),
+                BufferKind::new(I64, false),
+                BufferKind::new(F64, false),
+                BufferKind::new(F64, true),
+            ],
+        ),
     );
-    let offset = f.constant(0);
+    let offset = f.constant(Constant::from(0usize)).unwrap();
     let mut simd = |element, op, args: &[_]| f.simd(Simd { element, op }, args).unwrap();
     let data = simd(F64, SimdOp::Load(Buffer(0)), &[offset]).unwrap();
     let indices = simd(I64, SimdOp::Load(Buffer(1)), &[offset]).unwrap();
@@ -233,11 +285,15 @@ fn masked_f64_memory_keeps_global_lane_order_across_chunks() {
     );
     let any = simd(F64, SimdOp::Any, &[active]).unwrap();
     let all = simd(F64, SimdOp::All, &[active]).unwrap();
-    let result = f.binary(Binary::Add, any, all);
-    f.ret(result);
+    let any = f.cast(any, ScalarType::I32).unwrap();
+    let all = f.cast(all, ScalarType::I32).unwrap();
+    let result = f.binary(Binary::Add, any, all).unwrap();
+    f.ret(result).unwrap();
     let code = Cranelift::compile(&f.finish().unwrap()).unwrap();
 
-    let mut data: Vec<_> = (0..F64.lanes()).map(|i| (i + 1) as f64).collect();
+    let mut data: Vec<_> = (0..F64.lanes(options().target.vector_bytes()))
+        .map(|i| (i + 1) as f64)
+        .collect();
     let mut indices = vec![1; data.len()];
     data[1] = f64::NAN;
     indices[1] = i64::MAX;
@@ -253,11 +309,11 @@ fn masked_f64_memory_keeps_global_lane_order_across_chunks() {
         indices[last] = last_index;
         let mut expected = [17.0, 29.0];
         let mut actual = expected;
-        let mut expected_result = Ok(-1);
+        let mut expected_result = Ok(1);
         for (&x, &i) in data.iter().zip(&indices) {
             if x > 0.0 {
                 let Some(slot) = expected.get_mut(i as usize) else {
-                    expected_result = Err("kernel slice index out of bounds".to_owned());
+                    expected_result = Err(CallError::Trap(Trap::Bounds));
                     break;
                 };
                 *slot = x + table[i as usize];

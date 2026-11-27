@@ -4,9 +4,10 @@ use gimli::write::{
     LineString, Range, RangeList, Sections, Unit, UnitEntryId,
 };
 use gimli::{self as dw, Encoding, Format, LineEncoding, LittleEndian, Register};
-use splice::debug::{ConstantType, Location, Scalar, Type};
-use splice::simd::Element;
-use std::path::{Path, PathBuf};
+use splice_core::debug::{ConstantType, Location, Type};
+use splice_core::hir::ScalarType;
+use splice_core::simd::Element;
+use std::path::Path;
 
 pub(crate) const ENCODING: Encoding = Encoding {
     format: Format::Dwarf32,
@@ -14,18 +15,11 @@ pub(crate) const ENCODING: Encoding = Encoding {
     address_size: 8,
 };
 
+/// The file of a source location; a relative file is relative to its
+/// compilation directory.
 fn source_path(source: Location) -> String {
-    let file = Path::new(source.file);
-    if file.is_absolute() {
-        return source.file.replace('\\', "/");
-    }
-    let manifest = Path::new(source.directory);
-    // rustc can make file! relative to the workspace or to the package.
-    manifest
-        .ancestors()
-        .map(|dir| dir.join(file))
-        .find(|path| path.is_file())
-        .unwrap_or_else(|| PathBuf::from(source.directory).join(file))
+    Path::new(source.directory)
+        .join(source.file)
         .to_string_lossy()
         .replace('\\', "/")
 }
@@ -62,9 +56,15 @@ fn element(unit: &mut Unit, elem: Element) -> UnitEntryId {
 
 fn emit_type(unit: &mut Unit, ty: Type) -> UnitEntryId {
     match ty {
-        Type::Scalar(Scalar::Bool) => base(unit, "bool", 1, dw::DW_ATE_boolean),
-        Type::Scalar(Scalar::Index) => base(unit, "usize", 8, dw::DW_ATE_unsigned),
-        Type::Scalar(Scalar::I32) => element(unit, Element::I32),
+        Type::Scalar(ty) => {
+            let encoding = match ty {
+                ScalarType::Bool => dw::DW_ATE_boolean,
+                ScalarType::F32 | ScalarType::F64 => dw::DW_ATE_float,
+                ScalarType::I32 | ScalarType::I64 => dw::DW_ATE_signed,
+                ScalarType::U32 | ScalarType::U64 | ScalarType::Index => dw::DW_ATE_unsigned,
+            };
+            base(unit, ty.name(), ty.bytes(), encoding)
+        }
         Type::Constant(kind) => match kind {
             ConstantType::Bool => base(unit, "bool", 1, dw::DW_ATE_boolean),
             ConstantType::Usize => base(unit, "usize", 8, dw::DW_ATE_unsigned),
@@ -87,13 +87,16 @@ fn emit_type(unit: &mut Unit, ty: Type) -> UnitEntryId {
                 dw::DW_ATE_float,
             ),
         },
-        Type::Vector(elem) => {
+        Type::Vector {
+            element: elem,
+            lanes,
+        } => {
             let elem_ty = element(unit, elem);
             let id = unit.add(unit.root(), dw::DW_TAG_array_type);
             unit.get_mut(id).set(dw::DW_AT_type, A::UnitRef(elem_ty));
             let count = unit.add(id, dw::DW_TAG_subrange_type);
             unit.get_mut(count)
-                .set(dw::DW_AT_count, A::Udata(elem.lanes() as u64));
+                .set(dw::DW_AT_count, A::Udata(lanes as u64));
             id
         }
         Type::Slice(elem) => {

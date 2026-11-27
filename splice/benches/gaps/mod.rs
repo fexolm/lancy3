@@ -1,9 +1,6 @@
 use super::{Builders, Workload};
 use criterion::Criterion;
-use splice::{BufferArg, Executable, kernel};
-use splice_cranelift::Cranelift;
-use splice_lancy::Lancy;
-use splice_llvm::LlvmManualSimd;
+use splice::{BufferArg, Executable, KernelScalar, kernel};
 use std::hint::black_box;
 
 mod loops;
@@ -189,8 +186,8 @@ fn run_unary<S>(
         expected: &|| expected,
         equal: <[i32]>::eq,
         run: |kernel: &dyn Executable, out: &mut [i32]| {
-            let count = kernel.call(&[], &mut [BufferArg::Read(input), BufferArg::Write(out)])?;
-            usize::try_from(count).map_err(|_| "invalid benchmark buffers".into())
+            let count = kernel.call(&[], &mut [BufferArg::read(input), BufferArg::write(out)])?;
+            usize::try_from(i32::from_word(count)).map_err(|_| "invalid benchmark buffers".into())
         },
     }
     .compare(c, stage, builds);
@@ -198,14 +195,9 @@ fn run_unary<S>(
 
 pub(super) fn compare(c: &mut Criterion) {
     const N: usize = 65_539;
-    let mut seed = 0x4ac2_497bu32;
-    let pixels: Vec<i32> = (0..N)
-        .map(|_| {
-            seed ^= seed << 13;
-            seed ^= seed >> 17;
-            seed ^= seed << 5;
-            (seed & 4095) as i32
-        })
+    let pixels: Vec<i32> = crate::common::xorshift(0x4ac2_497b)
+        .take(N)
+        .map(|x| (x & 4095) as i32)
         .collect();
     let samples: Vec<i32> = pixels.iter().map(|&x| x / 2 - 1024).collect();
 
@@ -223,23 +215,9 @@ pub(super) fn compare(c: &mut Criterion) {
             &curve,
             c,
             || tone_curve::ir(black_box(fused)),
-            Builders {
-                lancy: &|| {
-                    tone_curve::build::<Lancy>(tone_curve::BuildArgs {
-                        fused: black_box(fused),
-                    })
-                },
-                cranelift: &|| {
-                    tone_curve::build::<Cranelift>(tone_curve::BuildArgs {
-                        fused: black_box(fused),
-                    })
-                },
-                llvm: &|| {
-                    tone_curve::build::<LlvmManualSimd>(tone_curve::BuildArgs {
-                        fused: black_box(fused),
-                    })
-                },
-            },
+            builders!(B => tone_curve::build::<B>(tone_curve::BuildArgs {
+                fused: black_box(fused),
+            })),
         );
     }
 
@@ -257,11 +235,7 @@ pub(super) fn compare(c: &mut Criterion) {
         &energy,
         c,
         local_energy::ir,
-        Builders {
-            lancy: &|| local_energy::build::<Lancy>(local_energy::BuildArgs {}),
-            cranelift: &|| local_energy::build::<Cranelift>(local_energy::BuildArgs {}),
-            llvm: &|| local_energy::build::<LlvmManualSimd>(local_energy::BuildArgs {}),
-        },
+        builders!(B => local_energy::build::<B>(local_energy::BuildArgs {})),
     );
 
     let scores: Vec<_> = samples
@@ -278,11 +252,7 @@ pub(super) fn compare(c: &mut Criterion) {
         &scores,
         c,
         feature_score::ir,
-        Builders {
-            lancy: &|| feature_score::build::<Lancy>(feature_score::BuildArgs {}),
-            cranelift: &|| feature_score::build::<Cranelift>(feature_score::BuildArgs {}),
-            llvm: &|| feature_score::build::<LlvmManualSimd>(feature_score::BuildArgs {}),
-        },
+        builders!(B => feature_score::build::<B>(feature_score::BuildArgs {})),
     );
 
     let coefficients = [733, -179, -1261, 583];
@@ -301,34 +271,21 @@ pub(super) fn compare(c: &mut Criterion) {
                 let count = kernel.call(
                     &[],
                     &mut [
-                        BufferArg::Read(&samples),
-                        BufferArg::Read(&coefficients),
-                        BufferArg::Write(out),
+                        BufferArg::read(&samples),
+                        BufferArg::read(&coefficients),
+                        BufferArg::write(out),
                     ],
                 )?;
-                usize::try_from(count).map_err(|_| "invalid calibration buffers".into())
+                usize::try_from(i32::from_word(count))
+                    .map_err(|_| "invalid calibration buffers".into())
             },
         }
         .compare(
             c,
             || calibrate::ir(black_box(hoist)),
-            Builders {
-                lancy: &|| {
-                    calibrate::build::<Lancy>(calibrate::BuildArgs {
-                        hoist: black_box(hoist),
-                    })
-                },
-                cranelift: &|| {
-                    calibrate::build::<Cranelift>(calibrate::BuildArgs {
-                        hoist: black_box(hoist),
-                    })
-                },
-                llvm: &|| {
-                    calibrate::build::<LlvmManualSimd>(calibrate::BuildArgs {
-                        hoist: black_box(hoist),
-                    })
-                },
-            },
+            builders!(B => calibrate::build::<B>(calibrate::BuildArgs {
+                hoist: black_box(hoist),
+            })),
         );
     }
 
@@ -351,11 +308,7 @@ pub(super) fn compare(c: &mut Criterion) {
         &integrals,
         c,
         ramp_integral::ir,
-        Builders {
-            lancy: &|| ramp_integral::build::<Lancy>(ramp_integral::BuildArgs {}),
-            cranelift: &|| ramp_integral::build::<Cranelift>(ramp_integral::BuildArgs {}),
-            llvm: &|| ramp_integral::build::<LlvmManualSimd>(ramp_integral::BuildArgs {}),
-        },
+        builders!(B => ramp_integral::build::<B>(ramp_integral::BuildArgs {})),
     );
 
     let mut state = (0i64, 0i64, 0i64, 0u32);
@@ -381,11 +334,7 @@ pub(super) fn compare(c: &mut Criterion) {
         &adjusted,
         c,
         envelope::ir,
-        Builders {
-            lancy: &|| envelope::build::<Lancy>(envelope::BuildArgs {}),
-            cranelift: &|| envelope::build::<Cranelift>(envelope::BuildArgs {}),
-            llvm: &|| envelope::build::<LlvmManualSimd>(envelope::BuildArgs {}),
-        },
+        builders!(B => envelope::build::<B>(envelope::BuildArgs {})),
     );
 
     loops::compare(c);

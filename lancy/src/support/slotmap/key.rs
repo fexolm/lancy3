@@ -1,27 +1,34 @@
 /// A compact typed index. The maximum `u32` is reserved as a sentinel.
 /// For each representable index `i`, `Self::from_index(i).index()` must equal `i`.
-pub trait SlotKey: Copy {
+pub(crate) trait SlotKey: Copy {
     fn from_index(index: usize) -> Self;
     fn index(self) -> usize;
 }
 
 /// Define a distinct four-byte key type for a family of IR entities.
-#[macro_export]
 macro_rules! slot_key {
-    ($vis:vis $name:ident) => {
+    ($(#[$meta:meta])* $vis:vis $name:ident) => {
+        $(#[$meta])*
         #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Ord, PartialOrd)]
         #[repr(transparent)]
-        $vis struct $name(pub u32);
+        $vis struct $name(pub(crate) u32);
 
         impl $name {
-            pub const INVALID: Self = Self(u32::MAX);
+            /// The reserved sentinel; never names a live entity.
+            $vis const INVALID: Self = Self(u32::MAX);
 
-            pub const fn from_index(index: usize) -> Self {
+            /// The key with position `index`.
+            ///
+            /// # Panics
+            ///
+            /// If `index` is not below `u32::MAX`.
+            $vis const fn from_index(index: usize) -> Self {
                 assert!(index < Self::INVALID.0 as usize, "slot key exceeds 32-bit range");
                 Self(index as u32)
             }
 
-            pub const fn index(self) -> usize {
+            /// The position of this key.
+            $vis const fn index(self) -> usize {
                 self.0 as usize
             }
         }
@@ -37,3 +44,4 @@ macro_rules! slot_key {
         }
     };
 }
+pub(crate) use slot_key;

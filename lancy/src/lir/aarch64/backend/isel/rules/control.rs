@@ -1,6 +1,7 @@
 use super::Rules;
+use crate::lir::frame::argument_words;
 use crate::{
-    hir::{Call, Function, Terminator},
+    hir::{Call, Terminator},
     lir::aarch64::backend::inst::Inst,
     module::FunctionId,
 };
@@ -18,17 +19,16 @@ impl Rules<'_> {
     pub(super) fn call(
         &mut self,
         site: Call,
-        callee: impl Fn(&Function) -> (FunctionId, PRegSet),
+        callee: impl Fn(Call) -> (FunctionId, PRegSet),
     ) -> Inst {
-        let (function, args) = self.f.call(site);
-        let mut offset = 0;
-        for &arg in args {
-            let ty = self.ty(arg);
+        let (_, args) = self.f.call(site);
+        let types = args.iter().map(|&v| self.ty(v));
+        let words: Vec<_> = argument_words(types, self.config.bytes).collect();
+        for (&arg, (ty, word)) in args.iter().zip(words) {
             let input = self.input(arg);
-            self.out.push(Inst::StoreArg(ty, offset, input));
-            offset += ty.bytes(self.config.bytes).next_multiple_of(8);
+            self.out.push(Inst::StoreArg(ty, word * 8, input));
         }
-        let (target, writes) = callee(function);
+        let (target, writes) = callee(site);
         Inst::Call(target, writes, self.ty(self.result()), self.dst())
     }
 }

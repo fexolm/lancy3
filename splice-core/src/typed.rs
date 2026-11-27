@@ -1,66 +1,7 @@
 //! The declaration marker ties a kernel's Rust argument type to its specialized IR.
-use crate::{BuildOptions, Codegen, Executable, Function};
-use std::{
-    fmt,
-    marker::PhantomData,
-    ops::Deref,
-    panic::{AssertUnwindSafe, catch_unwind},
-};
-
-macro_rules! phase_error {
-    ($name:ident) => {
-        #[derive(Clone, Debug, Eq, PartialEq)]
-        pub struct $name(String);
-        impl fmt::Display for $name {
-            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                self.0.fmt(f)
-            }
-        }
-        impl std::error::Error for $name {}
-        impl From<String> for $name {
-            fn from(message: String) -> Self {
-                Self(message)
-            }
-        }
-        impl From<$name> for String {
-            fn from(error: $name) -> Self {
-                error.0
-            }
-        }
-    };
-}
-phase_error!(BuildError);
-phase_error!(CallError);
-
-fn boundary<T, E: From<String>>(action: impl FnOnce() -> crate::Result<T>) -> Result<T, E> {
-    // Returning an error abandons this build or invocation. Mutations to the
-    // caller's arguments made before an unwind retain their Rust semantics.
-    match catch_unwind(AssertUnwindSafe(action)) {
-        Ok(value) => value.map_err(E::from),
-        Err(payload) => {
-            let message = payload
-                .downcast_ref::<String>()
-                .cloned()
-                .or_else(|| payload.downcast_ref::<&str>().map(|s| (*s).to_owned()))
-                .unwrap_or_else(|| "kernel panicked".to_owned());
-            // A panic payload can itself own a panicking destructor. Keep that
-            // second unwind inside Rust as well, including at an extern entry.
-            if let Err(secondary) = catch_unwind(AssertUnwindSafe(|| drop(payload))) {
-                std::mem::forget(secondary);
-            }
-            Err(E::from(message))
-        }
-    }
-}
-
-#[doc(hidden)]
-pub fn build_boundary<T>(action: impl FnOnce() -> crate::Result<T>) -> Result<T, BuildError> {
-    boundary(action)
-}
-#[doc(hidden)]
-pub fn call_boundary<T>(action: impl FnOnce() -> crate::Result<T>) -> Result<T, CallError> {
-    boundary(action)
-}
+use crate::error::build_boundary;
+use crate::{BuildError, BuildOptions, CallError, Codegen, Executable, Function};
+use std::{fmt, marker::PhantomData, ops::Deref};
 
 /// Argument record emitted by an individual kernel declaration.
 pub trait CallArgs {
@@ -80,8 +21,11 @@ impl<S> fmt::Debug for TypedIr<S> {
     }
 }
 impl<S> TypedIr<S> {
+    /// Give `function` the declaration's argument types. `S` is a kernel's
+    /// `Signature` marker: only the kernel's own module can construct one,
+    /// so the IR of one kernel cannot be retyped as another's.
     #[doc(hidden)]
-    pub fn new(function: Function) -> Self {
+    pub fn new(function: Function, _: S) -> Self {
         Self {
             function,
             signature: PhantomData,
@@ -112,8 +56,14 @@ impl<S, K: fmt::Debug> fmt::Debug for TypedKernel<S, K> {
     }
 }
 impl<S, K> TypedKernel<S, K> {
+    /// Give `output` the declaration's call interface; `S` seals it as
+    /// [`TypedIr::new`] does.
     #[doc(hidden)]
-    pub fn new(output: K) -> Self {
+    pub fn new(output: K, _: S) -> Self {
+        Self::retyped(output)
+    }
+    /// The output of compiling a [`TypedIr<S>`] keeps its declaration.
+    fn retyped(output: K) -> Self {
         Self {
             output,
             signature: PhantomData,
@@ -138,11 +88,6 @@ impl<S, K> Deref for TypedKernel<S, K> {
         &self.output
     }
 }
-impl<S, K: fmt::Display> fmt::Display for TypedKernel<S, K> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.output.fmt(f)
-    }
-}
 
 pub trait CompileInput<B: Codegen> {
     type Output;
@@ -152,12 +97,9 @@ pub trait CompileInput<B: Codegen> {
 }
 impl<B: Codegen> CompileInput<B> for Function {
     type Output = B::Output;
-    type Error = String;
+    type Error = BuildError;
     fn compile_with(&self, options: Option<BuildOptions>) -> crate::Result<B::Output> {
-        match options {
-            Some(options) => B::compile_raw_with_options(self, options),
-            None => B::compile_raw(self),
-        }
+        B::compile_function(self, options.unwrap_or(self.options()))
     }
 }
 impl<S, B: Codegen> CompileInput<B> for TypedIr<S> {
@@ -166,7 +108,7 @@ impl<S, B: Codegen> CompileInput<B> for TypedIr<S> {
     fn compile_with(&self, options: Option<BuildOptions>) -> Result<Self::Output, BuildError> {
         build_boundary(|| {
             <Function as CompileInput<B>>::compile_with(&self.function, options)
-                .map(TypedKernel::new)
+                .map(TypedKernel::retyped)
         })
     }
 }

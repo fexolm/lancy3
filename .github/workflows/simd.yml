@@ -1,91 +1,149 @@
 name: Tests
 
+# Every step is a `cargo xtask` command, so CI and a local `cargo xtask ci`
+# run the same checks; see xtask/src/main.rs.
 on:
   push:
+    branches: [main]
   pull_request:
   workflow_dispatch:
 
 permissions:
   contents: read
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  TOOLCHAIN: 1.94.1
+
 jobs:
-  x86:
-    runs-on: ubuntu-24.04
+  lint:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    env:
+      LLVM_SYS_191_PREFIX: /usr/lib/llvm-19
     steps:
       - uses: actions/checkout@v4
       - name: Install Rust and LLVM
         run: |
-          rustup toolchain install 1.94.1 --profile minimal --component clippy,rustfmt
-          curl --fail --silent --show-error https://apt.llvm.org/llvm-snapshot.gpg.key |
-            sudo gpg --dearmor -o /usr/share/keyrings/apt-llvm.gpg
-          echo 'deb [signed-by=/usr/share/keyrings/apt-llvm.gpg] https://apt.llvm.org/noble/ llvm-toolchain-noble-21 main' |
-            sudo tee /etc/apt/sources.list.d/apt-llvm.list
+          rustup toolchain install "$TOOLCHAIN" --profile minimal --component clippy,rustfmt
           sudo apt-get update
-          sudo apt-get install -y g++ libffi-dev llvm-21-dev
-      - name: Check and test the workspace
-        env:
-          LLVM_SYS_211_PREFIX: /usr/lib/llvm-21
-        run: |
-          cargo +1.94.1 fmt --all -- --check
-          cargo +1.94.1 clippy --workspace --all-targets --locked -- -D warnings
-          cargo +1.94.1 test --workspace --release --locked
-      - name: Exercise native x86 SIMD profiles
-        env:
-          LLVM_SYS_211_PREFIX: /usr/lib/llvm-21
-        run: |
-          test_profile() {
-            export SPLICE_SIMD="$1"
-            cargo +1.94.1 test --release --locked -p lancy
-            cargo +1.94.1 test --release --locked -p splice --test simd
-            cargo +1.94.1 test --release --locked -p splice-llvm
-          }
-          cargo +1.94.1 build --release --locked -p splice-target --example simd_profile
-          test_profile sse
-          for profile in avx2 avx512 avx10; do
-            if SPLICE_SIMD="$profile" target/release/examples/simd_profile; then
-              test_profile "$profile"
-            else
-              echo "::notice::Skipping native $profile execution on this runner"
-            fi
-          done
+          sudo apt-get install -y g++ libffi-dev llvm-19-dev
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo +"$TOOLCHAIN" metadata --locked --format-version 1 > /dev/null
+      - run: cargo +"$TOOLCHAIN" xtask lint
+      - run: cargo +"$TOOLCHAIN" xtask doc
+      - run: cargo +"$TOOLCHAIN" xtask package
 
-  arm64:
-    runs-on: ubuntu-24.04-arm
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, ubuntu-24.04-arm, windows-2022]
+        mode: [release, debug]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        run: rustup toolchain install ${{ env.TOOLCHAIN }} --profile minimal
+      - name: Install LLVM (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y g++ libffi-dev llvm-19-dev
+          echo "LLVM_SYS_191_PREFIX=/usr/lib/llvm-19" >> "$GITHUB_ENV"
+      - name: Install LLVM (Windows)
+        if: runner.os == 'Windows'
+        uses: KyleMayes/install-llvm-action@v2
+        with:
+          version: "19.1.7"
+      - name: Point splice-llvm at LLVM (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: echo "LLVM_SYS_191_PREFIX=$LLVM_PATH" >> "$GITHUB_ENV"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.mode }}
+      - name: Test
+        shell: bash
+        run: cargo +"$TOOLCHAIN" xtask test ${{ matrix.mode == 'debug' && '--debug' || '' }}
+
+  features:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
     env:
-      LLVM_SYS_211_PREFIX: /usr/lib/llvm-21
+      LLVM_SYS_191_PREFIX: /usr/lib/llvm-19
+    steps:
+      - uses: actions/checkout@v4
+      # Ubuntu's static LLVM link line names Polly, packaged separately.
+      - name: Install Rust and LLVM
+        run: |
+          rustup toolchain install "$TOOLCHAIN" --profile minimal
+          sudo apt-get update
+          sudo apt-get install -y g++ libffi-dev llvm-19-dev libpolly-19-dev
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo +"$TOOLCHAIN" xtask features
+      - run: cargo +"$TOOLCHAIN" xtask static-llvm
+
+  # Every code generating package under each SIMD profile. A profile the
+  # runner's CPU lacks is skipped with a notice in the log.
+  profile:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-24.04, simd: sse }
+          - { os: ubuntu-24.04, simd: avx2 }
+          - { os: ubuntu-24.04, simd: avx512 }
+          - { os: ubuntu-24.04, simd: avx10 }
+          - { os: ubuntu-24.04-arm, simd: neon }
+          - { os: ubuntu-24.04-arm, simd: sve }
+          - { os: ubuntu-24.04-arm, simd: sve2 }
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    env:
+      LLVM_SYS_191_PREFIX: /usr/lib/llvm-19
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust and LLVM
+        run: |
+          rustup toolchain install "$TOOLCHAIN" --profile minimal
+          sudo apt-get update
+          sudo apt-get install -y g++ libffi-dev llvm-19-dev
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo +"$TOOLCHAIN" xtask profile ${{ matrix.simd }}
+
+  # SVE vector lengths the runners do not have, including the
+  # non-power-of-two 48 bytes LLVM cannot target.
+  qemu:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { simd: sve, cpu: a64fx, vl: 32, bytes: 32 }
+          - { simd: sve2, cpu: "max,pauth-impdef=on", vl: 64, bytes: 64 }
+          - { simd: sve2, cpu: "max,pauth-impdef=on", vl: 48, bytes: 32 }
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 90
+    env:
+      LLVM_SYS_191_PREFIX: /usr/lib/llvm-19
+      CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUNNER: qemu-aarch64 -cpu ${{ matrix.cpu }},sve-default-vector-length=${{ matrix.vl }}
     steps:
       - uses: actions/checkout@v4
       - name: Install Rust, LLVM and QEMU
         run: |
-          rustup toolchain install 1.94.1 --profile minimal --component clippy
-          curl --fail --silent --show-error https://apt.llvm.org/llvm-snapshot.gpg.key |
-            sudo gpg --dearmor -o /usr/share/keyrings/apt-llvm.gpg
-          echo 'deb [signed-by=/usr/share/keyrings/apt-llvm.gpg] https://apt.llvm.org/noble/ llvm-toolchain-noble-21 main' |
-            sudo tee /etc/apt/sources.list.d/apt-llvm.list
+          rustup toolchain install "$TOOLCHAIN" --profile minimal
           sudo apt-get update
-          sudo apt-get install -y g++ libffi-dev llvm-21-dev qemu-user
-      - name: Check and test the workspace with NEON
-        env:
-          SPLICE_SIMD: neon
-        run: |
-          cargo +1.94.1 clippy --workspace --all-targets --locked -- -D warnings
-          cargo +1.94.1 test --workspace --release --locked --target aarch64-unknown-linux-gnu
-      - name: Exercise native SVE hardware when available
-        run: |
-          cargo +1.94.1 build --release --locked --target aarch64-unknown-linux-gnu -p splice-target --example simd_profile
-          for profile in sve sve2; do
-            if SPLICE_SIMD="$profile" target/aarch64-unknown-linux-gnu/release/examples/simd_profile; then
-              SPLICE_SIMD="$profile" cargo +1.94.1 test --release --locked --target aarch64-unknown-linux-gnu -p lancy -p splice-target -p splice-lancy -p splice-llvm -p splice --tests
-            fi
-          done
-      - name: Test SVE and SVE2 in QEMU
-        run: |
-          for row in 'sve a64fx 32 32' 'sve2 max 64 64' 'sve2 max 48 32'; do
-            read -r SPLICE_SIMD cpu vl width <<< "$row"
-            export SPLICE_SIMD
-            export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUNNER="qemu-aarch64 -cpu $cpu,sve-default-vector-length=$vl"
-            selected=$(cargo +1.94.1 run --quiet --release --locked --target aarch64-unknown-linux-gnu -p splice-target --example simd_profile)
-            echo "$selected"
-            [[ "$selected" == *", $width bytes" ]]
-            cargo +1.94.1 test --release --locked --target aarch64-unknown-linux-gnu -p lancy -p splice-target -p splice-lancy -p splice-llvm -p splice-cranelift -p splice --tests
-          done
+          sudo apt-get install -y g++ libffi-dev llvm-19-dev qemu-user
+      - uses: Swatinem/rust-cache@v2
+      - run: >
+          cargo +"$TOOLCHAIN" xtask profile ${{ matrix.simd }}
+          --target aarch64-unknown-linux-gnu --expect-bytes ${{ matrix.bytes }}

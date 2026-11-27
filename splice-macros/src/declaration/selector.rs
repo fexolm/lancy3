@@ -3,14 +3,12 @@ use crate::scalar::methods::TraitMethodKind;
 use proc_macro2::{Ident, TokenStream};
 use quote::{format_ident, quote};
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use syn::{Path, Visibility};
 
 impl TraitMethodKind {
     fn tag(self) -> TokenStream {
         match self {
             Self::Word => quote!(word),
-            Self::Bool => quote!(boolean),
             Self::EvalOnly => quote!(eval),
             Self::Rust => quote!(opaque),
         }
@@ -24,12 +22,13 @@ pub(super) fn definition(
     methods: Vec<(Ident, TraitMethodKind, Vec<TokenStream>)>,
 ) -> TokenStream {
     // macro_export places every public selector at the crate root, including
-    // selectors for identically named traits generated in different modules.
-    static NEXT: AtomicUsize = AtomicUsize::new(0);
+    // selectors for identically named traits declared in different modules.
+    // The declaration's source position tells them apart and keeps the
+    // expansion deterministic.
     let symbol = format_ident!(
-        "__splice_trait_{}_{}",
+        "__splice_trait_{}_{:016x}",
         name.to_string().trim_start_matches("r#"),
-        NEXT.fetch_add(1, Ordering::Relaxed)
+        position_hash(name.span())
     );
     let export = matches!(vis, Visibility::Public(_)).then(|| quote!(#[macro_export]));
     let mut groups = BTreeMap::<Ident, Vec<_>>::new();
@@ -99,13 +98,26 @@ pub(crate) fn trait_method_dispatch(
     owner: &Path,
     method: &Ident,
     scalar: TokenStream,
-    boolean: TokenStream,
     opaque: TokenStream,
     ordinary: TokenStream,
 ) -> TokenStream {
     super::select_trait(
         root,
         owner,
-        quote!(@expr #method, __splice_method_case, (call #scalar, #boolean, #opaque, #ordinary)),
+        quote!(@expr #method, __splice_method_case, (call #scalar, #opaque, #ordinary)),
     )
+}
+
+/// FNV-1a of the file, line and column of `span`.
+fn position_hash(span: proc_macro2::Span) -> u64 {
+    let (file, line, column) = if proc_macro::is_available() {
+        let span = span.unwrap();
+        (span.file(), span.line(), span.column())
+    } else {
+        (String::new(), 0, 0)
+    };
+    let position = format!("{file}:{line}:{column}");
+    position.bytes().fold(0xcbf2_9ce4_8422_2325, |hash, byte| {
+        (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3)
+    })
 }

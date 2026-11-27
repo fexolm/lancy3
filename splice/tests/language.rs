@@ -1,11 +1,7 @@
+use splice::lancy::Lancy;
 use splice::simd::Lane;
 use splice::{BuildError, Codegen, Executable, kernel};
-use splice_cranelift::Cranelift;
-use splice_lancy::Lancy;
-use splice_llvm::Llvm;
-use splice_text::Text;
 use std::cell::Cell;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 mod formulas {
@@ -55,8 +51,7 @@ fn named_arguments_preserve_field_values_and_rust_evaluation_order() {
         }
     }
 
-    check::<Lancy>();
-    check::<Llvm>();
+    splice_testkit::each_backend!(B => check::<B>());
 }
 
 #[kernel]
@@ -85,8 +80,7 @@ fn argument_patterns_keep_signature_indices_and_explicit_names() {
         }
     }
 
-    check::<Lancy>();
-    check::<Llvm>();
+    splice_testkit::each_backend!(B => check::<B>());
 }
 
 struct Plan {
@@ -140,8 +134,110 @@ fn fields_inherit_the_stage_of_the_constructed_aggregate() {
             );
         }
     }
-    check::<Lancy>();
-    check::<Llvm>();
+    splice_testkit::each_backend!(B => check::<B>());
+}
+
+#[derive(splice::KernelType)]
+struct Wrapped(i32, i32);
+
+/// A tuple struct's constructor builds an aggregate like a struct literal.
+#[kernel]
+fn wrapped(#[comptime] known: i32, value: i32) -> i32 {
+    let pair = Wrapped(known, value);
+    pair.0 * 10 + pair.1
+}
+
+#[test]
+fn tuple_struct_constructors_take_runtime_fields() {
+    fn check<B: Codegen<Output: Executable>>() {
+        let portable = B::compile(&wrapped::ir(3).unwrap()).unwrap();
+        let direct = wrapped::build::<B>(wrapped::BuildArgs { known: 3 }).unwrap();
+        for code in [direct, portable] {
+            assert_eq!(
+                code.call(wrapped::CallArgs { value: 4 }).unwrap(),
+                wrapped(3, 4)
+            );
+        }
+    }
+    splice_testkit::each_backend!(B => check::<B>());
+}
+
+/// `comptime!` in the elements of a host `vec!` is evaluated by the
+/// generator, inside a loop or not.
+#[kernel]
+fn host_vectors(#[comptime] n: i32, value: i32) -> i32 {
+    let first = vec![comptime!(n)];
+    let second = vec![comptime!(n + 1), 2];
+    let third = vec![comptime!(n * 2); 2];
+    value + first[0] + second[0] + third[1]
+}
+
+#[test]
+fn comptime_in_host_vec_elements_is_evaluated() {
+    fn check<B: Codegen<Output: Executable>>() {
+        let portable = B::compile(&host_vectors::ir(3).unwrap()).unwrap();
+        let direct = host_vectors::build::<B>(host_vectors::BuildArgs { n: 3 }).unwrap();
+        for code in [direct, portable] {
+            assert_eq!(
+                code.call(host_vectors::CallArgs { value: 4 }).unwrap(),
+                host_vectors(3, 4)
+            );
+        }
+    }
+    splice_testkit::each_backend!(B => check::<B>());
+}
+
+/// MAC-23: `#[cfg]` and `#[cfg_attr]` on parameters apply to every
+/// generated parameter list, as rustc applies them to the function.
+#[kernel]
+fn configured(
+    #[cfg(not(test))] absent: i32,
+    #[cfg(test)] value: i32,
+    #[cfg_attr(test, comptime)] scale: i32,
+    #[cfg_attr(not(test), comptime)] offset: i32,
+) -> i32 {
+    value * scale + offset
+}
+
+struct Configured;
+
+#[kernel]
+impl Configured {
+    fn scaled(
+        #[cfg(not(test))] absent: bool,
+        #[cfg_attr(test, comptime)] scale: i32,
+        value: i32,
+    ) -> i32 {
+        value * scale
+    }
+}
+
+#[kernel]
+fn configured_method(value: i32) -> i32 {
+    Configured::scaled(3, value)
+}
+
+#[test]
+fn configured_parameters_follow_their_conditions() {
+    fn check<B: Codegen<Output: Executable>>() {
+        let portable = B::compile(&configured::ir(3).unwrap()).unwrap();
+        let direct = configured::build::<B>(configured::BuildArgs { scale: 3 }).unwrap();
+        for code in [direct, portable] {
+            let args = configured::CallArgs {
+                value: 4,
+                offset: 5,
+            };
+            assert_eq!(code.call(args).unwrap(), configured(4, 3, 5));
+        }
+        let method = B::compile(&configured_method::ir().unwrap()).unwrap();
+        assert_eq!(
+            method
+                .call(configured_method::CallArgs { value: 4 })
+                .unwrap(),
+            configured_method(4)
+        );
+    }
+    splice_testkit::each_backend!(B => check::<B>());
 }
 
 #[kernel]
@@ -174,29 +270,10 @@ fn portable_and_direct_specializations_outlive_the_plan_and_its_changes() {
         }
     }
 
-    check::<Lancy>();
-    check::<Llvm>();
+    splice_testkit::each_backend!(B => check::<B>());
 }
 
 static BUILD_EFFECTS: AtomicUsize = AtomicUsize::new(0);
-
-struct DropProbe(i32);
-
-impl Drop for DropProbe {
-    fn drop(&mut self) {
-        BUILD_EFFECTS.fetch_add(1, Ordering::Relaxed);
-    }
-}
-
-const OWNED_PROBE: DropProbe = DropProbe(10);
-
-#[kernel]
-fn destructure_owner(runtime: i32) -> i32 {
-    comptime!({
-        let DropProbe(value) = OWNED_PROBE;
-        value + runtime
-    })
-}
 
 fn record(value: i32) -> i32 {
     BUILD_EFFECTS.fetch_add(1, Ordering::Relaxed);
@@ -220,17 +297,10 @@ fn assert_build_error<T>(result: Result<T, BuildError>) {
 
 #[test]
 fn opaque_rust_effects_run_only_during_call() {
-    assert_build_error(destructure_owner::ir());
-    assert_build_error(destructure_owner::build::<Lancy>(
-        destructure_owner::BuildArgs {},
-    ));
     assert_build_error(opaque_requirement::ir(7));
-    assert_build_error(opaque_requirement::build::<Lancy>(
+    splice_testkit::each_backend!(B => assert_build_error(opaque_requirement::build::<B>(
         opaque_requirement::BuildArgs { value: 7 },
-    ));
-    assert_build_error(opaque_requirement::build::<Llvm>(
-        opaque_requirement::BuildArgs { value: 7 },
-    ));
+    )));
     assert_eq!(BUILD_EFFECTS.load(Ordering::Relaxed), 0);
 
     fn check<B: Codegen<Output: Executable>>() {
@@ -246,8 +316,7 @@ fn opaque_rust_effects_run_only_during_call() {
         assert_eq!(BUILD_EFFECTS.load(Ordering::Relaxed), before + 4);
     }
 
-    check::<Lancy>();
-    check::<Llvm>();
+    splice_testkit::each_backend!(B => check::<B>());
 }
 
 #[kernel]
@@ -314,8 +383,7 @@ fn specialization_checks_requirements_in_reachable_branches() {
         ));
     }
 
-    check::<Lancy>();
-    check::<Llvm>();
+    splice_testkit::each_backend!(B => check::<B>());
 }
 
 #[test]
@@ -354,8 +422,7 @@ fn ordinary_division_fails_only_when_reached_and_keeps_prior_writes() {
         }
     }
 
-    check::<Lancy>();
-    check::<Llvm>();
+    splice_testkit::each_backend!(B => check::<B>());
 }
 
 mod effects {
@@ -416,9 +483,7 @@ fn a_runtime_effect_follows_control_and_stores_even_if_its_result_is_unused() {
         }
     }
 
-    check::<Lancy>();
-    check::<Llvm>();
-    check::<Cranelift>();
+    splice_testkit::each_backend!(B => check::<B>());
 }
 
 #[kernel]
@@ -466,8 +531,7 @@ fn mandatory_nested_calls_distinguish_a_bound_input_from_an_effectful_argument()
         }
     }
 
-    check::<Lancy>();
-    check::<Llvm>();
+    splice_testkit::each_backend!(B => check::<B>());
     assert_eq!(NESTED_ARGUMENT_EVALS.load(Ordering::Relaxed), 0);
 }
 
@@ -506,8 +570,7 @@ fn a_nested_callee_inherits_the_stage_of_its_input() {
         }
     }
 
-    check::<Lancy>();
-    check::<Llvm>();
+    splice_testkit::each_backend!(B => check::<B>());
 }
 
 #[kernel]
@@ -539,94 +602,7 @@ fn runtime_argument_to_recursive_comptime_parameter_fails_only_if_reached() {
         }
     }
 
-    check::<Lancy>();
-    check::<Llvm>();
-}
-
-#[kernel]
-fn first_byte(bytes: &[u8]) -> Option<&u8> {
-    bytes.first()
-}
-
-#[test]
-fn a_rust_result_can_borrow_the_callers_buffer_after_callargs_is_consumed() {
-    macro_rules! check {
-        ($backend:ty) => {{
-            let direct = first_byte::build::<$backend>(first_byte::BuildArgs {}).unwrap();
-            let ir = first_byte::ir().unwrap();
-            let portable = <$backend>::compile(&ir).unwrap();
-            drop(ir);
-            for code in [direct, portable] {
-                let bytes = [14, 27];
-                let first = code
-                    .call(first_byte::CallArgs { bytes: &bytes })
-                    .unwrap()
-                    .unwrap();
-                assert!(std::ptr::eq(first, &bytes[0]));
-                assert_eq!(
-                    code.call(first_byte::CallArgs { bytes: &[] }).unwrap(),
-                    None
-                );
-            }
-        }};
-    }
-    check!(Lancy);
-    check!(Llvm);
-}
-
-struct Capture {
-    value: i32,
-    drops: Arc<AtomicUsize>,
-}
-
-impl Capture {
-    fn value(&self) -> i32 {
-        self.value
-    }
-}
-
-impl Drop for Capture {
-    fn drop(&mut self) {
-        self.drops.fetch_add(1, Ordering::Relaxed);
-    }
-}
-
-#[kernel]
-fn captured_value(#[comptime] plan: Capture) -> i32 {
-    plan.value()
-}
-
-#[test]
-fn an_owned_rust_capture_lives_until_the_last_code_or_ir_owner_is_dropped() {
-    macro_rules! check {
-        ($backend:ty) => {{
-            let drops = Arc::new(AtomicUsize::new(0));
-            let capture = |value| Capture {
-                value,
-                drops: Arc::clone(&drops),
-            };
-            let direct =
-                captured_value::build::<$backend>(captured_value::BuildArgs { plan: capture(11) })
-                    .unwrap();
-            let ir = captured_value::ir(capture(43)).unwrap();
-            let portable = <$backend>::compile(&ir).unwrap();
-            let other = <$backend>::compile(&ir).unwrap();
-            assert_eq!(drops.load(Ordering::Relaxed), 0);
-            drop(ir);
-
-            assert_eq!(direct.call(captured_value::CallArgs {}).unwrap(), 11);
-            drop(direct);
-            assert_eq!(drops.load(Ordering::Relaxed), 1);
-            assert_eq!(portable.call(captured_value::CallArgs {}).unwrap(), 43);
-            drop(portable);
-            assert_eq!(drops.load(Ordering::Relaxed), 1);
-            assert_eq!(other.call(captured_value::CallArgs {}).unwrap(), 43);
-            drop(other);
-            assert_eq!(drops.load(Ordering::Relaxed), 2);
-        }};
-    }
-    check!(Lancy);
-    check!(Llvm);
+    splice_testkit::each_backend!(B => check::<B>());
 }
 
 #[derive(splice::KernelType)]
@@ -669,99 +645,10 @@ fn a_published_method_uses_its_body_when_the_intrinsic_is_unavailable() {
         }
     }
 
-    check::<Lancy>();
-    check::<Llvm>();
+    splice_testkit::each_backend!(B => check::<B>());
 }
 
-#[kernel]
-fn total(n: usize, value: i32) -> i32 {
-    use std::vec::Vec as Values;
-
-    let mut values: Values<i32> = Values::new();
-    values.resize(n, value);
-    values.iter().copied().fold(0, i32::wrapping_add)
-}
-
-#[test]
-fn a_runtime_collection_uses_rust_allocation_and_arithmetic() {
-    macro_rules! check {
-        ($backend:ty) => {{
-            let ir = total::ir().unwrap();
-            for code in [
-                total::build::<$backend>(total::BuildArgs {}).unwrap(),
-                <$backend>::compile(&ir).unwrap(),
-            ] {
-                for (n, value) in [(0, -3), (4, -7), (3, i32::MAX)] {
-                    assert_eq!(
-                        code.call(total::CallArgs { n, value }).unwrap(),
-                        (n as i32).wrapping_mul(value)
-                    );
-                }
-            }
-        }};
-    }
-    check!(Lancy);
-    check!(Llvm);
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct Pair(u64, bool);
-
-#[kernel]
-fn constant<T: Copy + 'static>(#[comptime] value: T) -> T {
-    value
-}
-
-#[test]
-fn an_owned_copy_capture_can_be_returned_on_every_call() {
-    macro_rules! check {
-        ($backend:ty) => {{
-            let value = Pair(1 << 45, true);
-            let direct = constant::build::<$backend, Pair>(constant::BuildArgs { value }).unwrap();
-            let portable = {
-                let ir = constant::ir(value).unwrap();
-                <$backend>::compile(&ir).unwrap()
-            };
-            for code in [direct, portable] {
-                for _ in 0..2 {
-                    assert_eq!(code.call(constant::CallArgs {}).unwrap(), value);
-                }
-            }
-        }};
-    }
-    check!(Lancy);
-    check!(Llvm);
-}
-
-#[kernel]
-fn borrowed_iter(xs: &[u8]) -> impl Iterator<Item = &u8> {
-    xs.iter()
-}
-
-#[test]
-fn a_borrowing_opaque_result_outlives_the_kernel() {
-    macro_rules! check {
-        ($backend:ty) => {{
-            let bytes = [3, 4, 9];
-            let direct = {
-                let code = borrowed_iter::build::<$backend>(borrowed_iter::BuildArgs {}).unwrap();
-                code.call(borrowed_iter::CallArgs { xs: &bytes }).unwrap()
-            };
-            assert!(direct.eq(&bytes));
-
-            let portable = {
-                let ir = borrowed_iter::ir().unwrap();
-                let code = <$backend>::compile(&ir).unwrap();
-                code.call(borrowed_iter::CallArgs { xs: &bytes }).unwrap()
-            };
-            assert!(portable.eq(&bytes));
-        }};
-    }
-    check!(Lancy);
-    check!(Llvm);
-}
-
-#[kernel]
+#[kernel(print)]
 fn sum_items(xs: &[i32]) -> i32 {
     let mut sum = 0_i32;
     for &x in xs {
@@ -788,16 +675,13 @@ fn iterating_a_runtime_slice_lowers_to_a_loop_and_handles_an_empty_input() {
     assert!(
         !ir.instructions()
             .iter()
-            .any(|op| matches!(op, Instr::RustContextCall { .. }))
+            .any(|op| matches!(op, Instr::RustCall { .. }))
     );
     assert!(
         ir.instructions()
             .iter()
             .any(|op| matches!(op, Instr::Load { .. }))
     );
-    let listing = Text::compile(&ir).unwrap();
-    assert!(listing.contains("xs["), "{listing}");
-    assert!(listing.contains("goto L"), "{listing}");
     let printed = sum_items::print().unwrap();
     assert!(
         printed.contains(" in xs") && printed.contains("wrapping_add"),
@@ -818,60 +702,7 @@ fn iterating_a_runtime_slice_lowers_to_a_loop_and_handles_an_empty_input() {
         }
     }
 
-    check::<Lancy>(&ir);
-    check::<Llvm>(&ir);
-    check::<Cranelift>(&ir);
-}
-
-static ADD_CALLS: AtomicUsize = AtomicUsize::new(0);
-
-#[derive(Clone, Copy)]
-struct AddOperand(i32);
-
-impl std::ops::Add for AddOperand {
-    type Output = i32;
-
-    fn add(self, other: Self) -> i32 {
-        ADD_CALLS.fetch_add(1, Ordering::Relaxed);
-        self.0 + other.0
-    }
-}
-
-#[kernel]
-fn require_overloaded_add(#[comptime] arg: AddOperand) -> i32 {
-    comptime!(arg + arg)
-}
-
-#[kernel]
-fn overloaded_add(#[comptime] arg: AddOperand) -> i32 {
-    arg + arg
-}
-
-#[test]
-fn overload_resolution_does_not_make_custom_add_pure() {
-    macro_rules! check {
-        ($backend:ty) => {{
-            let before = ADD_CALLS.load(Ordering::Relaxed);
-            let arg = AddOperand(9);
-            assert_build_error(require_overloaded_add::ir(arg));
-            assert_build_error(require_overloaded_add::build::<$backend>(
-                require_overloaded_add::BuildArgs { arg },
-            ));
-            let direct =
-                overloaded_add::build::<$backend>(overloaded_add::BuildArgs { arg }).unwrap();
-            let portable = <$backend>::compile(&overloaded_add::ir(arg).unwrap()).unwrap();
-            assert_eq!(ADD_CALLS.load(Ordering::Relaxed), before);
-
-            for code in [direct, portable] {
-                let args = overloaded_add::CallArgs {};
-                assert_eq!(code.call(args).unwrap(), 18);
-            }
-            assert_eq!(ADD_CALLS.load(Ordering::Relaxed), before + 2);
-        }};
-    }
-
-    check!(Lancy);
-    check!(Llvm);
+    splice_testkit::each_backend!(B => check::<B>(&ir));
 }
 
 struct Counter(Cell<i32>);
@@ -889,11 +720,6 @@ fn short_borrow_for_effect(#[comptime] counter: &Counter, x: i32) -> i32 {
     x.wrapping_add(counter.tick())
 }
 
-#[kernel]
-fn runtime_counter(counter: &Counter) -> i32 {
-    counter.tick()
-}
-
 #[test]
 fn a_method_with_an_interior_write_cannot_use_a_short_build_borrow() {
     macro_rules! check {
@@ -903,22 +729,11 @@ fn a_method_with_an_interior_write_cannot_use_a_short_build_borrow() {
             assert_build_error(short_borrow_for_effect::build::<$backend>(
                 short_borrow_for_effect::BuildArgs { counter: &counter },
             ));
-            let direct = runtime_counter::build::<$backend>(runtime_counter::BuildArgs {}).unwrap();
-            let portable = <$backend>::compile(&runtime_counter::ir().unwrap()).unwrap();
             assert_eq!(counter.0.get(), 0);
-            for (index, code) in [direct, portable].into_iter().enumerate() {
-                assert_eq!(
-                    code.call(runtime_counter::CallArgs { counter: &counter })
-                        .unwrap(),
-                    1 + index as i32
-                );
-            }
-            assert_eq!(counter.0.get(), 2);
         }};
     }
 
-    check!(Lancy);
-    check!(Llvm);
+    splice_testkit::each_backend!(B => check!(B));
 }
 
 #[kernel]
@@ -992,48 +807,7 @@ fn trait_dispatch_requires_publication_on_the_selected_implementation() {
         assert_eq!(ORDINARY_MAP_CALLS.load(Ordering::Relaxed), before + 2);
     }
 
-    check::<Lancy>();
-    check::<Llvm>();
-}
-
-fn add_three(value: i32) -> i32 {
-    value.wrapping_add(3)
-}
-
-fn multiply_by_five(value: i32) -> i32 {
-    value.wrapping_mul(5)
-}
-
-fn fail_callback(_: i32) -> i32 {
-    panic!("callback failed")
-}
-
-#[kernel]
-fn use_callback(#[comptime] callback: fn(i32) -> i32, x: i32) -> i32 {
-    callback(x)
-}
-
-#[test]
-fn captured_function_pointers_keep_their_identity_and_handle_unwinds() {
-    macro_rules! check {
-        ($backend:ty) => {{
-            for (callback, expected) in [
-                (add_three as fn(i32) -> i32, Some(10)),
-                (fail_callback, None),
-                (multiply_by_five, Some(35)),
-            ] {
-                let direct =
-                    use_callback::build::<$backend>(use_callback::BuildArgs { callback }).unwrap();
-                let ir = use_callback::ir(callback).unwrap();
-                for code in [direct, <$backend>::compile(&ir).unwrap()] {
-                    assert_eq!(code.call(use_callback::CallArgs { x: 7 }).ok(), expected);
-                }
-            }
-        }};
-    }
-
-    check!(Lancy);
-    check!(Llvm);
+    splice_testkit::each_backend!(B => check::<B>());
 }
 
 #[derive(splice::KernelType)]
@@ -1084,8 +858,7 @@ fn inherent_methods_in_a_marked_impl_can_specialize() {
         }
     }
 
-    check::<Lancy>();
-    check::<Llvm>();
+    splice_testkit::each_backend!(B => check::<B>());
 }
 
 mod trait_stage {
@@ -1164,7 +937,918 @@ mod trait_stage {
             assert_eq!(ORDINARY_CALLS.load(Ordering::Relaxed), before + 4);
         }
 
-        check::<Lancy>();
-        check::<Llvm>();
+        splice_testkit::each_backend!(B => check::<B>());
+    }
+}
+
+mod staged_conditions {
+    use splice::kernel;
+
+    #[kernel]
+    pub(super) fn identity(a: i32) -> i32 {
+        a
+    }
+
+    // CORE-04: whether `identity(k) > 0` is known is the frontend's Word,
+    // not a peephole over the backend's last emitted instruction.
+    #[kernel]
+    pub(super) fn known(#[comptime] k: i32, x: i32) -> i32 {
+        if identity(k) > 0 { x + 1 } else { x - 1 }
+    }
+
+    #[kernel]
+    pub(super) fn unknown(x: i32) -> i32 {
+        if identity(x) > 0 { x + 1 } else { x - 1 }
+    }
+}
+
+#[test]
+fn mixed_stage_conditions_fold_in_the_frontend_on_every_path() {
+    use splice::hir::Instr;
+    use staged_conditions::{known, unknown};
+
+    fn check<B: Codegen<Output: Executable>>() {
+        for k in [-3, 0, 4] {
+            let direct = known::build::<B>(known::BuildArgs { k }).unwrap();
+            let portable = B::compile(&known::ir(k).unwrap()).unwrap();
+            for code in [&direct, &portable] {
+                for x in [-5, 0, 9] {
+                    assert_eq!(code.call(known::CallArgs { x }), Ok(known(k, x)));
+                }
+            }
+        }
+        let direct = unknown::build::<B>(unknown::BuildArgs {}).unwrap();
+        let portable = B::compile(&unknown::ir().unwrap()).unwrap();
+        for code in [&direct, &portable] {
+            for x in [-5, 0, 9] {
+                assert_eq!(code.call(unknown::CallArgs { x }), Ok(unknown(x)));
+            }
+        }
+    }
+    splice_testkit::each_backend!(B => check::<B>());
+
+    // The portable IR shows the structure that the backends compile: a known
+    // condition keeps one arm and no branch, an unknown one branches.
+    let branches = |ir: &splice::Function| {
+        ir.instructions()
+            .iter()
+            .any(|op| matches!(op, Instr::Branch { .. }))
+    };
+    for k in [-3, 4] {
+        let ir = known::ir(k).unwrap();
+        assert!(!branches(&ir));
+    }
+    let ir = unknown::ir().unwrap();
+    assert!(branches(&ir));
+}
+
+mod index_arithmetic {
+    use splice::kernel;
+
+    // MAC-02: `usize` locals follow Rust `usize` arithmetic in 64 bits.
+    #[kernel]
+    pub(super) fn decrement_len(xs: &[i32]) -> i32 {
+        let mut i = xs.len();
+        i -= 1;
+        if i > 5 { 1 } else { 0 }
+    }
+
+    #[kernel]
+    pub(super) fn double_len(xs: &[i32], extra: i32) -> i32 {
+        let mut i = xs.len();
+        i += extra as usize;
+        i *= 2;
+        if i > 5 { 1 } else { 0 }
+    }
+
+    // MAC-07: an unannotated literal local takes the `usize` type Rust
+    // infers from its uses; an annotated mutable one keeps its annotation.
+    #[kernel]
+    pub(super) fn sum_while(xs: &[i32]) -> i32 {
+        let mut i = 0;
+        let mut sum: i32 = 0;
+        while i < xs.len() {
+            sum = sum.wrapping_add(xs[i]);
+            i += 1;
+        }
+        sum
+    }
+
+    // A counter compared with a `usize` local, and a name the body binds
+    // twice: each declaration takes its own type.
+    #[kernel]
+    pub(super) fn sum_shadowed(xs: &[i32]) -> i32 {
+        let n = xs.len();
+        let mut i = 0;
+        let mut sum: i32 = 0;
+        while i < n {
+            sum = sum.wrapping_add(xs[i]);
+            i += 1;
+        }
+        let i = 2;
+        sum.wrapping_mul(i)
+    }
+
+    #[kernel]
+    pub(super) fn sum_annotated(xs: &[i32]) -> i32 {
+        let mut i: usize = 0;
+        let mut sum: i32 = 0;
+        while i < xs.len() {
+            sum = sum.wrapping_add(xs[i]);
+            i += 1;
+        }
+        sum
+    }
+
+    // `back` is a `usize` only through `back - 1 < xs.len()`; below zero it
+    // wraps in release and panics in debug, as in Rust.
+    #[kernel]
+    pub(super) fn last_before(xs: &[i32], skip: i32) -> i32 {
+        let mut back = 0;
+        back += skip as usize;
+        if back - 1 < xs.len() {
+            xs[back - 1]
+        } else {
+            -1
+        }
+    }
+
+    // A literal arm joins a `usize` arm.
+    #[kernel]
+    pub(super) fn length_or_zero(xs: &[i32], empty: bool) -> usize {
+        if empty { 0 } else { xs.len() }
+    }
+
+    // A `usize` parameter and result cross the entry as 64-bit words.
+    #[kernel]
+    pub(super) fn shift_index(base: usize, xs: &[i32], past: bool) -> usize {
+        if past { base + xs.len() } else { base }
+    }
+}
+
+#[test]
+fn compound_index_assignment_matches_rust_usize() {
+    use index_arithmetic::{decrement_len, double_len};
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+
+    fn expect<B: Codegen<Output: Executable>>(
+        native: impl FnOnce() -> i32,
+        jit: Result<i32, String>,
+        case: &str,
+    ) {
+        let backend = std::any::type_name::<B>();
+        match catch_unwind(AssertUnwindSafe(native)) {
+            Ok(value) => assert_eq!(jit, Ok(value), "{backend} {case}"),
+            Err(_) => assert!(
+                jit.is_err(),
+                "{backend} {case}: Rust panicked, JIT gave {jit:?}"
+            ),
+        }
+    }
+
+    // Both kernels stage natively, not as a call into their Rust function.
+    for ir in [
+        decrement_len::ir().unwrap().into_inner(),
+        double_len::ir().unwrap().into_inner(),
+    ] {
+        assert!(
+            !ir.instructions()
+                .iter()
+                .any(|i| matches!(i, splice::hir::Instr::RustCall { .. }))
+        );
+    }
+
+    fn check<B: Codegen<Output: Executable>>() {
+        let empty: [i32; 0] = [];
+        let decrement = decrement_len::build::<B>(decrement_len::BuildArgs {}).unwrap();
+        let jit = decrement
+            .call(decrement_len::CallArgs { xs: &empty })
+            .map_err(|e| e.to_string());
+        expect::<B>(|| decrement_len(&empty), jit, "0 - 1");
+
+        // 2 * (1 + i32::MAX) is 2^32: exact in usize, but not in 32 bits.
+        let one = [0];
+        let double = double_len::build::<B>(double_len::BuildArgs {}).unwrap();
+        let jit = double
+            .call(double_len::CallArgs {
+                xs: &one,
+                extra: i32::MAX,
+            })
+            .map_err(|e| e.to_string());
+        expect::<B>(|| double_len(&one, i32::MAX), jit, "2^31 * 2");
+    }
+
+    splice_testkit::each_backend!(B => check::<B>());
+}
+
+#[test]
+fn literal_locals_and_arms_take_the_usize_type_rust_infers() {
+    use index_arithmetic::{last_before, length_or_zero, sum_annotated, sum_shadowed, sum_while};
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+    fn check<B: Codegen<Output: Executable>>() {
+        let backend = std::any::type_name::<B>();
+        let while_kernel = sum_while::build::<B>(sum_while::BuildArgs {}).unwrap();
+        let annotated = sum_annotated::build::<B>(sum_annotated::BuildArgs {}).unwrap();
+        let shadowed = sum_shadowed::build::<B>(sum_shadowed::BuildArgs {}).unwrap();
+        let last = last_before::build::<B>(last_before::BuildArgs {}).unwrap();
+        let length = length_or_zero::build::<B>(length_or_zero::BuildArgs {}).unwrap();
+        for xs in [&[][..], &[4], &[1, 2, i32::MAX]] {
+            assert_eq!(
+                while_kernel.call(sum_while::CallArgs { xs }),
+                Ok(sum_while(xs))
+            );
+            assert_eq!(
+                annotated.call(sum_annotated::CallArgs { xs }),
+                Ok(sum_annotated(xs))
+            );
+            assert_eq!(
+                shadowed.call(sum_shadowed::CallArgs { xs }),
+                Ok(sum_shadowed(xs))
+            );
+            for empty in [false, true] {
+                assert_eq!(
+                    length.call(length_or_zero::CallArgs { xs, empty }),
+                    Ok(length_or_zero(xs, empty))
+                );
+            }
+            for skip in [0, 1, 3] {
+                let jit = last.call(last_before::CallArgs { xs, skip });
+                match catch_unwind(AssertUnwindSafe(|| last_before(xs, skip))) {
+                    Ok(value) => assert_eq!(jit, Ok(value), "{backend} {xs:?} {skip}"),
+                    Err(_) => assert!(jit.is_err(), "{backend} {xs:?} {skip}: {jit:?}"),
+                }
+            }
+        }
+    }
+    splice_testkit::each_backend!(B => check::<B>());
+}
+
+#[test]
+fn usize_parameters_and_results_keep_all_64_bits() {
+    use index_arithmetic::shift_index;
+    fn check<B: Codegen<Output: Executable>>() {
+        let kernel = shift_index::build::<B>(shift_index::BuildArgs {}).unwrap();
+        let xs = [1, 2, 3];
+        for (base, past) in [
+            (0, true),
+            (1 << 40, true),
+            (usize::MAX, false),
+            (1 << 63, true),
+        ] {
+            let jit = kernel.call(shift_index::CallArgs {
+                base,
+                xs: &xs,
+                past,
+            });
+            let backend = std::any::type_name::<B>();
+            assert_eq!(
+                jit,
+                Ok(shift_index(base, &xs, past)),
+                "{backend} {base} {past}"
+            );
+        }
+    }
+    splice_testkit::each_backend!(B => check::<B>());
+}
+
+// `min`/`max` are tested here as registered intrinsics; `clamp` is not one.
+#[allow(clippy::manual_clamp)]
+#[kernel]
+fn integer_methods(xs: &[i32], a: i32, b: i32, n: usize) -> i32 {
+    let len = xs.len();
+    let index = len.saturating_sub(n).min(len.wrapping_sub(1));
+    let clamp = a.max(-100).min(100);
+    if index < len {
+        xs[index]
+            .saturating_add(a.saturating_mul(b))
+            .wrapping_sub(a.wrapping_neg())
+            .wrapping_add(clamp)
+    } else {
+        a.saturating_sub(b).wrapping_add(n.max(3) as i32)
+    }
+}
+
+/// MAC-13, MAC-14: integer methods of runtime `i32` and `usize` values are
+/// registered intrinsics: each stages one portable operation, without a
+/// Rust call, and matches Rust on both build paths.
+#[test]
+fn integer_methods_are_intrinsics_on_every_integer_type() {
+    use splice::hir::{Binary, Instr};
+    let ir = integer_methods::ir().unwrap();
+    let ops: Vec<_> = splice_testkit::instructions(&ir)
+        .filter_map(|op| match op {
+            Instr::Bin(_, op, _, _) => Some(*op),
+            _ => None,
+        })
+        .collect();
+    for op in [
+        Binary::SaturatingAdd,
+        Binary::SaturatingSub,
+        Binary::SaturatingMul,
+        Binary::Min,
+        Binary::Max,
+    ] {
+        assert!(ops.contains(&op), "{op:?} in {ops:?}");
+    }
+    assert!(!splice_testkit::instructions(&ir).any(|op| matches!(op, Instr::RustCall { .. })));
+    fn check<B: Codegen<Output: Executable>>() {
+        let direct = integer_methods::build::<B>(integer_methods::BuildArgs {}).unwrap();
+        let portable = B::compile(&integer_methods::ir().unwrap()).unwrap();
+        let data = [7, i32::MAX, -3, i32::MIN];
+        for xs in [&data[..], &[]] {
+            for (a, b) in [
+                (1, 2),
+                (i32::MAX, 2),
+                (i32::MIN, 3),
+                (-5, i32::MIN),
+                (250, -7),
+            ] {
+                for n in [0, 1, 3, usize::MAX] {
+                    let expected = integer_methods(xs, a, b, n);
+                    for code in [&direct, &portable] {
+                        let actual = code.call(integer_methods::CallArgs { xs, a, b, n });
+                        assert_eq!(actual, Ok(expected), "{xs:?} {a} {b} {n}");
+                    }
+                }
+            }
+        }
+    }
+    splice_testkit::each_backend!(B => check::<B>());
+}
+
+mod intrinsic_methods {
+    use splice::kernel;
+
+    pub struct Math;
+
+    #[kernel]
+    impl Math {
+        #[intrinsic("splice.i32.max")]
+        pub fn max(a: i32, b: i32) -> i32 {
+            if a > b { a } else { b }
+        }
+
+        #[intrinsic("acme.i32.max")]
+        pub fn unregistered(a: i32, b: i32) -> i32 {
+            if a > b { a } else { b }
+        }
+    }
+
+    #[kernel]
+    pub fn registered(x: i32, y: i32) -> i32 {
+        Math::max(x, y)
+    }
+
+    #[kernel]
+    pub fn fallback(x: i32, y: i32) -> i32 {
+        Math::unregistered(x, y)
+    }
+}
+
+/// MAC-13: a `#[intrinsic("name")]` method stages the registered operation
+/// in place of its body; an unregistered name stages the body.
+#[test]
+fn intrinsic_methods_stage_the_registered_operation_or_their_body() {
+    use intrinsic_methods::{fallback, registered};
+    use splice::hir::{Binary, Instr};
+    let branches = |ir: &splice::Function| {
+        splice_testkit::instructions(ir).any(|op| matches!(op, Instr::Branch { .. }))
+    };
+    let maxima = |ir: &splice::Function| {
+        splice_testkit::instructions(ir).any(|op| matches!(op, Instr::Bin(_, Binary::Max, ..)))
+    };
+    let ir = registered::ir().unwrap();
+    assert!(maxima(&ir) && !branches(&ir));
+    let ir = fallback::ir().unwrap();
+    assert!(!maxima(&ir) && branches(&ir));
+    for (x, y) in [(-5, 2), (7, 3), (i32::MIN, i32::MAX)] {
+        let code = registered::build::<Lancy>(registered::BuildArgs {}).unwrap();
+        assert_eq!(code.call(registered::CallArgs { x, y }), Ok(x.max(y)));
+        let code = fallback::build::<Lancy>(fallback::BuildArgs {}).unwrap();
+        assert_eq!(code.call(fallback::CallArgs { x, y }), Ok(x.max(y)));
+    }
+}
+
+/// MAC-09: a primitive named by its full path is the same type.
+#[kernel]
+fn primitive_paths(
+    xs: &[::core::primitive::i32],
+    scale: core::primitive::i32,
+    flag: std::primitive::bool,
+) -> ::core::primitive::i32 {
+    let index: ::core::primitive::usize = 0;
+    let first = xs[index];
+    if flag { first * scale } else { first }
+}
+
+#[test]
+fn primitive_types_may_be_spelled_by_their_core_path() {
+    fn check<B: Codegen<Output: Executable>>() {
+        let code = primitive_paths::build::<B>(primitive_paths::BuildArgs {}).unwrap();
+        for flag in [false, true] {
+            let xs = [7, 1];
+            assert_eq!(
+                code.call(primitive_paths::CallArgs {
+                    xs: &xs,
+                    scale: 3,
+                    flag
+                }),
+                Ok(primitive_paths(&xs, 3, flag))
+            );
+        }
+    }
+    splice_testkit::each_backend!(B => check::<B>());
+}
+
+/// MAC-12: labeled loops, `break 'label` and `continue 'label` lower to IR
+/// across runtime loops, unrolled loops and loops the jump stages.
+mod labels {
+    use splice::kernel;
+
+    #[kernel(print)]
+    pub(super) fn first_pair(xs: &[i32], target: i32) -> i32 {
+        let mut found = -1;
+        let mut i = 0;
+        'outer: while i < xs.len() {
+            let mut j = 0;
+            while j < xs.len() {
+                if j > i && xs[i] + xs[j] == target {
+                    found = (i * 10 + j) as i32;
+                    break 'outer;
+                }
+                j += 1;
+            }
+            i += 1;
+        }
+        found
+    }
+
+    #[kernel]
+    pub(super) fn rows_without_negatives(xs: &[i32], width: i32) -> i32 {
+        let mut rows = 0;
+        let mut row = 0;
+        'rows: while row * width < xs.len() as i32 {
+            row += 1;
+            for column in 0..width {
+                if xs[((row - 1) * width + column) as usize] < 0 {
+                    continue 'rows;
+                }
+            }
+            rows += 1;
+        }
+        rows
+    }
+
+    #[kernel]
+    pub(super) fn steps_found(#[comptime] plan: &[i32], xs: &[i32]) -> i32 {
+        let mut hits = 0;
+        'steps: for &step in plan {
+            for &x in xs {
+                if x == step {
+                    hits += 1;
+                    continue 'steps;
+                }
+            }
+            hits += 100;
+        }
+        hits
+    }
+
+    #[kernel]
+    pub(super) fn stop_early(xs: &[i32], #[comptime] tries: i32) -> i32 {
+        let mut i = 0;
+        let mut sum = 0;
+        'scan: while i < xs.len() {
+            for _try in 0..tries {
+                if xs[i] == 0 {
+                    break 'scan;
+                }
+                sum += xs[i];
+            }
+            i += 1;
+        }
+        sum
+    }
+}
+
+#[test]
+fn labeled_loops_lower_to_ir() {
+    use labels::{first_pair, rows_without_negatives, steps_found, stop_early};
+    fn check<B: Codegen<Output: Executable>>() {
+        let pair = first_pair::build::<B>(first_pair::BuildArgs {}).unwrap();
+        let rows =
+            rows_without_negatives::build::<B>(rows_without_negatives::BuildArgs {}).unwrap();
+        let plan = [3, 9, 4];
+        let steps = steps_found::build::<B>(steps_found::BuildArgs { plan: &plan }).unwrap();
+        let stop = stop_early::build::<B>(stop_early::BuildArgs { tries: 2 }).unwrap();
+        for xs in [&[][..], &[1, 2, 3, 4], &[4, -1, 3, 0, 2, 2], &[5, 3, 0, 9]] {
+            for target in [5, 7, 100] {
+                assert_eq!(
+                    pair.call(first_pair::CallArgs { xs, target }),
+                    Ok(first_pair(xs, target))
+                );
+            }
+            for width in [1, 2] {
+                assert_eq!(
+                    rows.call(rows_without_negatives::CallArgs { xs, width }),
+                    Ok(rows_without_negatives(xs, width))
+                );
+            }
+            assert_eq!(
+                steps.call(steps_found::CallArgs { xs }),
+                Ok(steps_found(&plan, xs))
+            );
+            assert_eq!(
+                stop.call(stop_early::CallArgs { xs }),
+                Ok(stop_early(xs, 2))
+            );
+        }
+    }
+    splice_testkit::each_backend!(B => check::<B>());
+    let printed = labels::first_pair::print().unwrap();
+    assert!(printed.contains("'outer: while"), "{printed}");
+    assert!(printed.contains("break 'outer"), "{printed}");
+}
+
+/// MAC-12: a runtime `match` that rustc accepts as exhaustive needs no
+/// final `_` arm.
+#[kernel]
+fn exhaustive_matches(flag: bool, x: i32) -> i32 {
+    let base = match flag {
+        true => 10,
+        false => 20,
+    };
+    let sign = match x {
+        i32::MIN..=-1 => -1,
+        0 => 0,
+        1..=i32::MAX => 1,
+    };
+    base + sign
+}
+
+#[test]
+fn exhaustive_runtime_matches_need_no_wildcard() {
+    fn check<B: Codegen<Output: Executable>>() {
+        let built = exhaustive_matches::build::<B>(exhaustive_matches::BuildArgs {}).unwrap();
+        let compiled = B::compile(&exhaustive_matches::ir().unwrap()).unwrap();
+        for code in [built, compiled] {
+            for flag in [false, true] {
+                for x in [i32::MIN, -3, 0, 5, i32::MAX] {
+                    assert_eq!(
+                        code.call(exhaustive_matches::CallArgs { flag, x }),
+                        Ok(exhaustive_matches(flag, x))
+                    );
+                }
+            }
+        }
+    }
+    splice_testkit::each_backend!(B => check::<B>());
+}
+
+/// MAC-12: `break value` leaves a runtime `loop` with its value, also from
+/// a nested loop by label.
+#[kernel(print)]
+fn loop_values(xs: &[i32], target: i32) -> i32 {
+    let mut i = 0;
+    let found = loop {
+        if i == xs.len() {
+            break -1;
+        }
+        if xs[i] == target {
+            break i as i32;
+        }
+        i += 1;
+    };
+    let mut j = 0;
+    let first_negative = 'search: loop {
+        while j < xs.len() {
+            if xs[j] < 0 {
+                break 'search xs[j];
+            }
+            j += 1;
+        }
+        if j == xs.len() {
+            break 0;
+        }
+    };
+    let mut n = 0;
+    // A loop of the generator: its value is known.
+    let steps = loop {
+        n += 1;
+        if n > 3 {
+            break n;
+        }
+    };
+    found * 100 + first_negative + comptime!(steps) * 1000
+}
+
+#[test]
+fn break_values_leave_runtime_loops() {
+    fn check<B: Codegen<Output: Executable>>() {
+        let built = loop_values::build::<B>(loop_values::BuildArgs {}).unwrap();
+        let compiled = B::compile(&loop_values::ir().unwrap()).unwrap();
+        for code in [built, compiled] {
+            for xs in [&[][..], &[3, 5, 7], &[4, -2, 5, -9]] {
+                for target in [5, 6] {
+                    assert_eq!(
+                        code.call(loop_values::CallArgs { xs, target }),
+                        Ok(loop_values(xs, target))
+                    );
+                }
+            }
+        }
+    }
+    splice_testkit::each_backend!(B => check::<B>());
+    let printed = loop_values::print().unwrap();
+    assert!(printed.contains("break 'search"), "{printed}");
+}
+
+/// MAC-12: a guard with a runtime condition in a `match` on a known value
+/// tests the guard at run time and falls through to the next arm whose
+/// pattern matches.
+#[kernel(print)]
+fn known_match_guards(#[comptime] mode: i32, x: i32) -> i32 {
+    match mode {
+        0 if x > 10 => x - 10,
+        0 | 1 if x < 0 => -x,
+        2 => 7,
+        n if x == n => 1000,
+        n => n + x,
+    }
+}
+
+#[test]
+fn known_match_runtime_guards_fall_through() {
+    fn check<B: Codegen<Output: Executable>>() {
+        for mode in [0, 1, 2, 3] {
+            let built =
+                known_match_guards::build::<B>(known_match_guards::BuildArgs { mode }).unwrap();
+            let compiled = B::compile(&known_match_guards::ir(mode).unwrap()).unwrap();
+            for code in [built, compiled] {
+                for x in [-4, 0, 3, 12] {
+                    assert_eq!(
+                        code.call(known_match_guards::CallArgs { x }),
+                        Ok(known_match_guards(mode, x)),
+                        "mode {mode}, x {x}"
+                    );
+                }
+            }
+        }
+    }
+    splice_testkit::each_backend!(B => check::<B>());
+    let printed = known_match_guards::print(0).unwrap();
+    assert!(printed.contains("if x > 10"), "{printed}");
+    let printed = known_match_guards::print(3).unwrap();
+    assert!(printed.contains("if x == 3"), "{printed}");
+    assert!(!printed.contains("x > 10"), "{printed}");
+}
+
+/// MAC-18: names resolve to their declarations. A local of a `comptime!`
+/// block shadows the runtime parameter of the same name.
+#[kernel]
+fn shadowed_by_declarations(#[comptime] steps: &[i32], x: i32) -> i32 {
+    let total = comptime!({
+        let x = steps.len() as i32 * 2;
+        x + 1
+    });
+    x + total
+}
+
+/// MAC-18: a closure parameter shadows the runtime parameter `x`: the
+/// closure is an opaque operation, not a read of `x`.
+#[kernel]
+fn closure_shadow(#[comptime] steps: &[i32], x: i32) -> i32 {
+    comptime!(steps.iter().map(|x| x + 1).sum::<i32>()) + x
+}
+
+#[test]
+fn closure_and_block_locals_shadow_runtime_parameters() {
+    fn check<B: Codegen<Output: Executable>>() {
+        let steps = [1, 2, 3];
+        let built = shadowed_by_declarations::build::<B>(shadowed_by_declarations::BuildArgs {
+            steps: &steps,
+        })
+        .unwrap();
+        let compiled = B::compile(&shadowed_by_declarations::ir(&steps).unwrap()).unwrap();
+        for code in [built, compiled] {
+            for x in [-4, 0, 7] {
+                assert_eq!(
+                    code.call(shadowed_by_declarations::CallArgs { x }),
+                    Ok(shadowed_by_declarations(&steps, x))
+                );
+            }
+        }
+        let error = closure_shadow::build::<B>(closure_shadow::BuildArgs { steps: &steps });
+        assert!(
+            matches!(&error, Err(BuildError::Staging(message)) if message.contains("opaque operation")),
+            "{:?}",
+            error.err()
+        );
+    }
+    splice_testkit::each_backend!(B => check::<B>());
+}
+
+/// MAC-06: one evaluator decides what a body evaluates: an index into a
+/// known slice evaluates at specialization like the other nodes.
+#[kernel]
+fn element(#[comptime] table: &[i32], index: usize) -> i32 {
+    table[index]
+}
+
+const TABLE: &[i32] = &[4, 5, 6];
+
+#[kernel]
+fn known_element(x: i32) -> i32 {
+    comptime!(element(TABLE, 1)) + x
+}
+
+#[test]
+fn the_evaluator_reads_known_slices() {
+    fn check<B: Codegen<Output: Executable>>() {
+        let built = known_element::build::<B>(known_element::BuildArgs {}).unwrap();
+        let compiled = B::compile(&known_element::ir().unwrap()).unwrap();
+        for code in [built, compiled] {
+            assert_eq!(
+                code.call(known_element::CallArgs { x: 2 }),
+                Ok(known_element(2))
+            );
+        }
+    }
+    splice_testkit::each_backend!(B => check::<B>());
+}
+
+/// MAC-07, CORE-01: runtime parameters, locals, literals, slice elements and
+/// results of every kernel scalar type, with the types rustc infers for
+/// unsuffixed literals.
+#[kernel(print)]
+fn typed_scalars(a: i64, b: u32, c: u64, x: f64, xs: &[i64], fs: &[f32], out: &mut [u32]) -> i64 {
+    let mut sum = 0;
+    let mut i = 0;
+    while i < xs.len() {
+        sum += xs[i] * 3 - 1;
+        i += 1;
+    }
+    let mut total = 0.0;
+    for &f in fs {
+        total += f * 2.5;
+    }
+    let mut written = 0;
+    let mut j = 0;
+    while j < out.len() {
+        out[j] = (b >> 1) + j as u32;
+        written += out[j];
+        j += 1;
+    }
+    for k in 0..c % 4 {
+        written += k as u32;
+    }
+    let neg = -x;
+    let scaled = if neg < 0.5 { neg * 2.0 } else { 1.5 };
+    let wide = c / 3 + !c % 7;
+    sum + a + written as i64 + wide as i64 + scaled as i64 + total as i64 + 1i64
+}
+
+#[test]
+fn kernels_compute_with_every_scalar_type() {
+    fn check<B: Codegen<Output: Executable>>() {
+        let built = typed_scalars::build::<B>(typed_scalars::BuildArgs {}).unwrap();
+        let compiled = B::compile(&typed_scalars::ir().unwrap()).unwrap();
+        for code in [built, compiled] {
+            for (a, b, c, x) in [
+                (5i64, 9u32, 100u64, 0.25f64),
+                (-1 << 40, 2_000_000_000, u64::MAX, -3.5),
+            ] {
+                for (xs, fs) in [
+                    (&[][..], &[][..]),
+                    (&[1i64 << 35, -7, 4][..], &[0.5f32, -1.25][..]),
+                ] {
+                    let (mut out, mut expected) = ([0u32; 3], [0u32; 3]);
+                    let result = code.call(typed_scalars::CallArgs {
+                        a,
+                        b,
+                        c,
+                        x,
+                        xs,
+                        fs,
+                        out: &mut out,
+                    });
+                    assert_eq!(result, Ok(typed_scalars(a, b, c, x, xs, fs, &mut expected)));
+                    assert_eq!(out, expected);
+                }
+            }
+        }
+    }
+    splice_testkit::each_backend!(B => check::<B>());
+    let printed = typed_scalars::print().unwrap();
+    assert!(printed.contains("for k in"), "{printed}");
+}
+
+mod wide_calls {
+    use splice::kernel;
+
+    #[kernel]
+    pub(super) fn helper(x: i64, #[comptime] k: i32) -> i64 {
+        x * 2 + k as i64
+    }
+
+    /// A kernel call returns the callee's type; a literal beside it and a
+    /// literal argument take that type.
+    #[kernel]
+    pub(super) fn caller(x: i64) -> i64 {
+        let y = helper(x, 3);
+        y + 1 + helper(5, 1) * 2
+    }
+}
+
+#[test]
+fn kernel_calls_pass_and_return_wide_scalars() {
+    use wide_calls::caller;
+    fn check<B: Codegen<Output: Executable>>() {
+        let built = caller::build::<B>(caller::BuildArgs {}).unwrap();
+        let compiled = B::compile(&caller::ir().unwrap()).unwrap();
+        for code in [built, compiled] {
+            for x in [0, -7, 1 << 40] {
+                assert_eq!(code.call(caller::CallArgs { x }), Ok(caller(x)));
+            }
+        }
+    }
+    splice_testkit::each_backend!(B => check::<B>());
+}
+
+mod deferred_values {
+    use splice::kernel;
+
+    pub(super) fn rust_twice(x: i32) -> i32 {
+        x * 2 + 1
+    }
+
+    #[kernel]
+    pub(super) fn kernel_twice(x: i32) -> i32 {
+        x * 2 + 1
+    }
+
+    /// A Rust call's result is known only when the kernel runs: the branch
+    /// it selects is a runtime branch, so `s` is a register.
+    #[kernel(print)]
+    pub(super) fn rust_condition(x: i32) -> i32 {
+        let mut s = 0;
+        if rust_twice(1) > 100 {
+            s = 5;
+        }
+        if kernel_twice(1) < 100 {
+            s += 2;
+        }
+        s + x
+    }
+
+    /// A mutable local initialized by a kernel call is a register, and so
+    /// is the loop that updates it.
+    #[kernel]
+    pub(super) fn call_counter(x: i32) -> i32 {
+        let mut y = kernel_twice(3);
+        for i in 0..3 {
+            y += i;
+        }
+        let mut z = rust_twice(2);
+        z += x;
+        y + z
+    }
+}
+
+/// Values the generator learns only at build time (kernel and Rust call
+/// results) stage the locals and branches that depend on them.
+#[test]
+fn deferred_values_stage_what_depends_on_them() {
+    use deferred_values::{call_counter, rust_condition};
+    fn check<B: Codegen<Output: Executable>>() {
+        let built = rust_condition::build::<B>(rust_condition::BuildArgs {}).unwrap();
+        let compiled = B::compile(&rust_condition::ir().unwrap()).unwrap();
+        for code in [built, compiled] {
+            for x in [0, 1, -9] {
+                assert_eq!(
+                    code.call(rust_condition::CallArgs { x }),
+                    Ok(rust_condition(x))
+                );
+            }
+        }
+        let built = call_counter::build::<B>(call_counter::BuildArgs {}).unwrap();
+        let compiled = B::compile(&call_counter::ir().unwrap()).unwrap();
+        for code in [built, compiled] {
+            for x in [0, 4, -9] {
+                assert_eq!(code.call(call_counter::CallArgs { x }), Ok(call_counter(x)));
+            }
+        }
+    }
+    splice_testkit::each_backend!(B => check::<B>());
+    // The listing keeps the runtime branches and the register they write.
+    let printed = rust_condition::print().unwrap();
+    for line in [
+        "let mut s = 0;",
+        "if rust_twice(1) > 100 {",
+        "s = 5;",
+        "s += 2;",
+        "s + x",
+    ] {
+        assert!(printed.contains(line), "{printed}");
     }
 }

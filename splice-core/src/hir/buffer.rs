@@ -1,6 +1,9 @@
+use crate::runtime_context::{ContextSignature, RuntimeContext};
 use crate::simd::{Element, LaneElement};
-use crate::{ContextSignature, RuntimeContext};
 use std::collections::HashMap;
+use std::fmt;
+use std::marker::PhantomData;
+use std::ptr::NonNull;
 
 /// A buffer parameter in a function's separate buffer argument list.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -20,10 +23,10 @@ pub struct BufferKind {
 }
 
 impl BufferKind {
-    #[allow(non_upper_case_globals)]
-    pub const Read: Self = Self::new(Element::I32, false);
-    #[allow(non_upper_case_globals)]
-    pub const Write: Self = Self::new(Element::I32, true);
+    /// A shared `i32` slice.
+    pub const READ_I32: Self = Self::new(Element::I32, false);
+    /// A writable `i32` slice.
+    pub const WRITE_I32: Self = Self::new(Element::I32, true);
     pub const fn new(element: Element, writable: bool) -> Self {
         Self {
             element,
@@ -62,177 +65,158 @@ impl BufferKind {
     }
 }
 
-/// A borrowed typed slice. Writable slices also support loads.
-#[derive(Debug)]
-pub enum BufferArg<'a> {
-    #[doc(hidden)]
-    Context(&'a mut RuntimeContext<'a>),
-    Read(&'a [i32]),
-    Write(&'a mut [i32]),
-    ReadU16(&'a [u16]),
-    WriteU16(&'a mut [u16]),
-    ReadU32(&'a [u32]),
-    WriteU32(&'a mut [u32]),
-    ReadI64(&'a [i64]),
-    WriteI64(&'a mut [i64]),
-    ReadF32(&'a [f32]),
-    WriteF32(&'a mut [f32]),
-    ReadF64(&'a [f64]),
-    WriteF64(&'a mut [f64]),
+/// A borrowed typed slice, or the Rust context of a kernel call. Writable
+/// slices also support loads.
+pub struct BufferArg<'a> {
+    data: NonNull<u8>,
+    len: usize,
+    kind: BufferKind,
+    /// The borrow the argument was made from: shared for read-only slices,
+    /// exclusive for writable slices and contexts.
+    borrow: PhantomData<&'a mut [u8]>,
+}
+
+impl fmt::Debug for BufferArg<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("BufferArg")
+            .field("kind", &self.kind)
+            .field("len", &self.len)
+            .finish_non_exhaustive()
+    }
 }
 
 /// An element type that can be borrowed from a [`BufferArg`].
-pub trait BufferElement: LaneElement {
-    fn read_arg(slice: &[Self]) -> BufferArg<'_>;
-    fn write_arg(slice: &mut [Self]) -> BufferArg<'_>;
-    #[doc(hidden)]
-    fn borrow<'a>(buffer: &'a BufferArg<'_>) -> Option<&'a [Self]>;
+pub trait BufferElement: LaneElement {}
+impl BufferElement for i32 {}
+impl BufferElement for u16 {}
+impl BufferElement for u32 {}
+impl BufferElement for i64 {}
+impl BufferElement for f32 {}
+impl BufferElement for f64 {}
+
+impl<'a, T: BufferElement> From<&'a [T]> for BufferArg<'a> {
+    fn from(slice: &'a [T]) -> Self {
+        Self::read(slice)
+    }
+}
+impl<'a, T: BufferElement> From<&'a mut [T]> for BufferArg<'a> {
+    fn from(slice: &'a mut [T]) -> Self {
+        Self::write(slice)
+    }
 }
 
-macro_rules! buffer_from {
-    ($ty:ty,$read:ident,$write:ident) => {
-        impl BufferElement for $ty {
-            fn read_arg(slice: &[Self]) -> BufferArg<'_> {
-                BufferArg::$read(slice)
-            }
-            fn write_arg(slice: &mut [Self]) -> BufferArg<'_> {
-                BufferArg::$write(slice)
-            }
-            fn borrow<'a>(buffer: &'a BufferArg<'_>) -> Option<&'a [Self]> {
-                match buffer {
-                    BufferArg::$read(slice) => Some(slice),
-                    BufferArg::$write(slice) => Some(slice),
-                    _ => None,
-                }
-            }
+impl<'a> BufferArg<'a> {
+    /// A read-only slice. Native code never writes through it: the verifier
+    /// rejects stores to read-only buffers.
+    pub fn read<T: BufferElement>(slice: &'a [T]) -> Self {
+        Self {
+            data: NonNull::from(slice).cast(),
+            len: slice.len(),
+            kind: BufferKind::new(T::ELEMENT, false),
+            borrow: PhantomData,
         }
-        impl<'a> From<&'a [$ty]> for BufferArg<'a> {
-            fn from(s: &'a [$ty]) -> Self {
-                Self::$read(s)
-            }
+    }
+
+    pub fn write<T: BufferElement>(slice: &'a mut [T]) -> Self {
+        let len = slice.len();
+        Self {
+            data: NonNull::from(slice).cast(),
+            len,
+            kind: BufferKind::new(T::ELEMENT, true),
+            borrow: PhantomData,
         }
-        impl<'a> From<&'a mut [$ty]> for BufferArg<'a> {
-            fn from(s: &'a mut [$ty]) -> Self {
-                Self::$write(s)
-            }
+    }
+
+    #[doc(hidden)]
+    pub fn context(context: &'a mut RuntimeContext<'a>) -> Self {
+        let kind = BufferKind::context(context.signature());
+        Self {
+            data: NonNull::from(context).cast(),
+            len: 0,
+            kind,
+            borrow: PhantomData,
         }
-    };
+    }
 }
-buffer_from!(i32, Read, Write);
-buffer_from!(u16, ReadU16, WriteU16);
-buffer_from!(u32, ReadU32, WriteU32);
-buffer_from!(i64, ReadI64, WriteI64);
-buffer_from!(f32, ReadF32, WriteF32);
-buffer_from!(f64, ReadF64, WriteF64);
 
 impl BufferArg<'_> {
-    /// Reborrow a dynamic column through a shared reference.
-    pub fn as_read_only(&self) -> BufferArg<'_> {
-        match self {
-            Self::Context(_) => panic!("a Rust context cannot be a read-only slice"),
-            Self::Read(s) => BufferArg::Read(s),
-            Self::Write(s) => BufferArg::Read(s),
-            Self::ReadU16(s) => BufferArg::ReadU16(s),
-            Self::WriteU16(s) => BufferArg::ReadU16(s),
-            Self::ReadU32(s) => BufferArg::ReadU32(s),
-            Self::WriteU32(s) => BufferArg::ReadU32(s),
-            Self::ReadI64(s) => BufferArg::ReadI64(s),
-            Self::WriteI64(s) => BufferArg::ReadI64(s),
-            Self::ReadF32(s) => BufferArg::ReadF32(s),
-            Self::WriteF32(s) => BufferArg::ReadF32(s),
-            Self::ReadF64(s) => BufferArg::ReadF64(s),
-            Self::WriteF64(s) => BufferArg::ReadF64(s),
-        }
+    /// Reborrow a slice through a shared reference. A Rust context has no
+    /// read-only form.
+    pub fn as_read_only(&self) -> Option<BufferArg<'_>> {
+        self.kind.context.is_none().then_some(BufferArg {
+            kind: BufferKind {
+                writable: false,
+                ..self.kind
+            },
+            ..*self
+        })
     }
 
     pub fn kind(&self) -> BufferKind {
-        match self {
-            Self::Context(context) => BufferKind::context(context.signature()),
-            Self::Read(_) => BufferKind::new(Element::I32, false),
-            Self::Write(_) => BufferKind::new(Element::I32, true),
-            Self::ReadU16(_) => BufferKind::new(Element::U16, false),
-            Self::WriteU16(_) => BufferKind::new(Element::U16, true),
-            Self::ReadU32(_) => BufferKind::new(Element::U32, false),
-            Self::WriteU32(_) => BufferKind::new(Element::U32, true),
-            Self::ReadI64(_) => BufferKind::new(Element::I64, false),
-            Self::WriteI64(_) => BufferKind::new(Element::I64, true),
-            Self::ReadF32(_) => BufferKind::new(Element::F32, false),
-            Self::WriteF32(_) => BufferKind::new(Element::F32, true),
-            Self::ReadF64(_) => BufferKind::new(Element::F64, false),
-            Self::WriteF64(_) => BufferKind::new(Element::F64, true),
-        }
+        self.kind
     }
+    /// The number of elements. A Rust context has none.
     pub fn len(&self) -> usize {
-        match self {
-            Self::Context(_) => 0,
-            Self::Read(s) => s.len(),
-            Self::Write(s) => s.len(),
-            Self::ReadU16(s) => s.len(),
-            Self::WriteU16(s) => s.len(),
-            Self::ReadU32(s) => s.len(),
-            Self::WriteU32(s) => s.len(),
-            Self::ReadI64(s) => s.len(),
-            Self::WriteI64(s) => s.len(),
-            Self::ReadF32(s) => s.len(),
-            Self::WriteF32(s) => s.len(),
-            Self::ReadF64(s) => s.len(),
-            Self::WriteF64(s) => s.len(),
-        }
+        self.len
     }
     pub fn is_empty(&self) -> bool {
-        self.len() == 0
+        self.len == 0
     }
-    /// Raw slice address for validated native backends. Only writable arguments permit writes.
+    /// Raw address for validated native backends. Only writable arguments
+    /// and contexts permit writes.
     pub fn data(&mut self) -> *mut u8 {
-        match self {
-            Self::Context(context) => std::ptr::from_mut(&mut **context).cast(),
-            Self::Read(s) => s.as_ptr().cast_mut().cast(),
-            Self::Write(s) => s.as_mut_ptr().cast(),
-            Self::ReadU16(s) => s.as_ptr().cast_mut().cast(),
-            Self::WriteU16(s) => s.as_mut_ptr().cast(),
-            Self::ReadU32(s) => s.as_ptr().cast_mut().cast(),
-            Self::WriteU32(s) => s.as_mut_ptr().cast(),
-            Self::ReadI64(s) => s.as_ptr().cast_mut().cast(),
-            Self::WriteI64(s) => s.as_mut_ptr().cast(),
-            Self::ReadF32(s) => s.as_ptr().cast_mut().cast(),
-            Self::WriteF32(s) => s.as_mut_ptr().cast(),
-            Self::ReadF64(s) => s.as_ptr().cast_mut().cast(),
-            Self::WriteF64(s) => s.as_mut_ptr().cast(),
-        }
+        self.data.as_ptr()
     }
-    /// Borrow the slice as `T`. Panics if this argument has a different element type.
+    /// Borrow the slice as `T`.
+    ///
+    /// # Panics
+    /// If this argument holds a different element type or a Rust context.
+    #[allow(unsafe_code)]
     pub fn as_slice<T: BufferElement>(&self) -> &[T] {
-        T::borrow(self).unwrap_or_else(|| panic!("expected a {} buffer", T::ELEMENT.name()))
+        assert!(
+            self.kind.context.is_none() && self.kind.element == T::ELEMENT,
+            "expected a {} buffer",
+            T::ELEMENT.name()
+        );
+        // SAFETY: `read` and `write` made `data` and `len` from a live
+        // `&[T]` or `&mut [T]` that this argument borrows, and the element
+        // type matches. `&self` permits only shared access to it.
+        unsafe { std::slice::from_raw_parts(self.data.as_ptr().cast(), self.len) }
     }
 }
 
 /// Check arity, mutability and representable slice lengths before entering native code.
-pub fn validate_buffers(kinds: &[BufferKind], args: &[BufferArg<'_>]) -> Result<(), String> {
+///
+/// Every slice is at most `i32::MAX` elements long: backends rely on it, for
+/// example LLVM sign-extends 32-bit gather offsets, which is the index itself
+/// only below `2^31`.
+#[inline]
+pub fn validate_buffers(
+    kinds: &[BufferKind],
+    args: &[BufferArg<'_>],
+) -> Result<(), crate::SignatureError> {
+    use crate::SignatureError::*;
     if kinds.len() != args.len() {
-        return Err(format!(
-            "expected {} buffers, got {}",
-            kinds.len(),
-            args.len()
-        ));
+        return Err(Buffers {
+            expected: kinds.len(),
+            actual: args.len(),
+        });
     }
-    for (i, (&kind, arg)) in kinds.iter().zip(args).enumerate() {
-        if let Some(signature) = kind.context_signature() {
-            signature.validate()?;
-        }
+    for (buffer, (&kind, arg)) in kinds.iter().zip(args).enumerate() {
         if !kind.same_type(arg.kind()) {
             if kind.context_signature().is_some() {
-                return Err(format!("buffer {i} has the wrong Rust context signature"));
+                return Err(Context { buffer });
             }
-            return Err(format!(
-                "buffer {i} expects {} elements",
-                kind.element().name()
-            ));
+            return Err(Element {
+                buffer,
+                expected: kind.element(),
+            });
         }
         if !kind.accepts(arg.kind()) {
-            return Err(format!("buffer {i} requires a writable slice"));
+            return Err(ReadOnly { buffer });
         }
         if arg.len() > i32::MAX as usize {
-            return Err(format!("buffer {i} length exceeds i32::MAX"));
+            return Err(Length { buffer });
         }
     }
     Ok(())
@@ -244,13 +228,13 @@ pub fn check_forwarding(
     caller: &[BufferKind],
     callee: &[BufferKind],
     actual: &[Buffer],
-) -> Result<(), String> {
+) -> crate::Result<()> {
     if callee.len() != actual.len() {
-        return Err(format!(
+        return Err(crate::BuildError::verify(format!(
             "expected {} buffer arguments, got {}",
             callee.len(),
             actual.len()
-        ));
+        )));
     }
     if actual.is_empty() {
         return Ok(());
@@ -259,23 +243,68 @@ pub fn check_forwarding(
     for (&required, &buffer) in callee.iter().zip(actual) {
         let kind = caller
             .get(buffer.index())
-            .ok_or_else(|| format!("unknown buffer {}", buffer.0))?;
+            .ok_or_else(|| crate::BuildError::verify(format!("unknown buffer {}", buffer.0)))?;
         if !required.same_type(*kind) {
-            return Err(format!("buffer {} has wrong element type", buffer.0));
+            return Err(crate::BuildError::verify(format!(
+                "buffer {} has wrong element type",
+                buffer.0
+            )));
         }
         if !required.accepts(*kind) {
-            return Err(format!("buffer {} is read-only", buffer.0));
+            return Err(crate::BuildError::verify(format!(
+                "buffer {} is read-only",
+                buffer.0
+            )));
         }
         if actual.len() > 1
             && seen
                 .insert(buffer, required)
                 .is_some_and(|prior| !prior.may_alias(required))
         {
-            return Err(format!(
+            return Err(crate::BuildError::verify(format!(
                 "writable buffer {} aliases another call argument",
                 buffer.0
-            ));
+            )));
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_argument_keeps_its_borrow_kind_and_length() {
+        let mut data = [1.5f32, 2.5, 3.5];
+        let mut arg = BufferArg::write(&mut data);
+        assert_eq!(arg.kind(), BufferKind::new(Element::F32, true));
+        assert_eq!(arg.len(), 3);
+        let address = arg.data();
+        let shared = arg.as_read_only().expect("a slice has a read-only form");
+        assert_eq!(shared.kind(), BufferKind::new(Element::F32, false));
+        assert_eq!(shared.as_slice::<f32>(), &[1.5, 2.5, 3.5]);
+        assert_eq!(address, data.as_mut_ptr().cast());
+    }
+
+    /// Backends address slices with signed 32-bit offsets (BE-19).
+    #[test]
+    #[cfg(all(target_os = "linux", target_pointer_width = "64"))]
+    fn a_slice_longer_than_i32_max_is_rejected() {
+        // Zeroed pages are mapped lazily: the 4 GiB are never touched.
+        let long = vec![0u16; i32::MAX as usize + 1];
+        let kinds = [BufferKind::new(Element::U16, false)];
+        assert!(matches!(
+            validate_buffers(&kinds, &[BufferArg::read(&long)]),
+            Err(crate::SignatureError::Length { buffer: 0 })
+        ));
+        let fits = &long[..i32::MAX as usize];
+        assert!(validate_buffers(&kinds, &[BufferArg::read(fits)]).is_ok());
+    }
+
+    #[test]
+    #[should_panic(expected = "expected a i64 buffer")]
+    fn borrowing_another_element_type_panics() {
+        BufferArg::read(&[1i32]).as_slice::<i64>();
+    }
 }

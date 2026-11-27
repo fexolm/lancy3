@@ -1,0 +1,99 @@
+# Scratch memory belongs to a frame. The caller's word at offset 0 survives
+# the call, so inlining moves the callee's scratch above it (HIR-01).
+fn callee(x:i32) -> i32
+  p = call_scratch 0 8
+  v = const 19
+  store p v
+  r = load i32 p
+  ret r
+
+fn main(x:i32) -> i32
+  p = call_scratch 0 8
+  seven = const 7
+  store p seven
+  r = call callee(x)
+  back = load i32 p
+  hundred = const 100
+  scaled = mul back hundred
+  result = add scaled r
+  ret result
+
+@inline check: call_scratch 0 8
+@inline check: call_scratch 8 8
+@inline not: call f
+@run 0 -> 719
+---
+# The same program keeps separate frames without inlining.
+fn callee(x:i32) -> i32
+  p = call_scratch 0 8
+  v = const 19
+  store p v
+  r = load i32 p
+  ret r
+
+fn main(x:i32) -> i32
+  p = call_scratch 0 8
+  seven = const 7
+  store p seven
+  r = call callee(x)
+  back = load i32 p
+  hundred = const 100
+  scaled = mul back hundred
+  result = add scaled r
+  ret result
+
+@policy never
+@inline check: call f0
+@run 0 -> 719
+---
+# A Rust packet is written to scratch too. An inlined callee's packet must not
+# overwrite the caller's scratch word.
+fn callee(x:i32) -> i32
+  packet = call_scratch 0 16
+  a = const 1
+  four = const 4
+  eight = const 8
+  twelve = const 12
+  pb = offset packet four 1
+  pc = offset packet eight 1
+  pd = offset packet twelve 1
+  store packet a
+  store pb a
+  store pc a
+  store pd x
+  zero = const 0
+  r = rust_call sum4 packet zero packet zero
+  ret r
+
+fn main(x:i32) -> i32
+  p = call_scratch 0 8
+  seven = const 7
+  store p seven
+  r = call callee(x)
+  back = load i32 p
+  hundred = const 100
+  scaled = mul back hundred
+  result = add scaled r
+  ret result
+
+@inline check: call_scratch 0 8
+@inline check: call_scratch 8 16
+@inline check: rust_call sum4
+@run 16 -> 719
+---
+# The debugger workspace moves the same way (HIR-13).
+fn callee(x:i32) -> i32
+  debug_store 0 x
+  ret x
+
+fn main(x:i32) -> i32
+  debug_store 0 x
+  wide = cast i64 x
+  debug_store 8 wide
+  r = call callee(x)
+  ret r
+
+@inline check: debug_store 0
+@inline check: debug_store 8
+@inline check: debug_store 16
+@run 5 -> 5

@@ -1,0 +1,11 @@
+[package]
+name = "xtask"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+description = "The workspace's CI steps, runnable locally as `cargo xtask`"
+
+[lints]
+workspace = true

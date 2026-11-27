@@ -3,8 +3,7 @@ use crate::hir::transforms::{ControlFlowGraph, DomTree};
 use crate::hir::{Block, Edge, Function, Op, Terminator, Value};
 use std::collections::{BTreeSet, HashMap};
 
-const MAX_BLOCKS: usize = 16;
-const MAX_CLONE_COST: usize = 128;
+use super::super::limits::{UNSWITCH_BLOCKS, UNSWITCH_COST};
 
 #[derive(Default)]
 struct Region {
@@ -72,8 +71,8 @@ pub(super) fn run(
                 region.unsupported = true;
             }
         }
-        region.unsupported |= region.blocks.len() > MAX_BLOCKS
-            || region.cost > MAX_CLONE_COST
+        region.unsupported |= region.blocks.len() > UNSWITCH_BLOCKS
+            || region.cost > UNSWITCH_COST
             || matches!(term, Terminator::Return(_));
         // The predicate is already computed on entry, including for zero
         // iterations. Both branch arms must lead back into the loop region.
@@ -188,7 +187,10 @@ fn split(f: &mut Function, preheader: Block, region: &Region) {
         let insts: Vec<_> = f.instructions(block).collect();
         for inst in insts {
             let op = map_op(f, *f.op(inst), &values);
-            if let Some(copy) = f.append(blocks[&block], op) {
+            let copy = f
+                .append_inst(blocks[&block], op)
+                .expect("a copy of a verified operation");
+            if let Some(copy) = f.result(copy) {
                 values.insert(f.result(inst).unwrap(), copy);
             }
         }
@@ -221,12 +223,6 @@ fn map_op(f: &mut Function, mut op: Op, values: &HashMap<Value, Value>) -> Op {
         if args.iter().any(|v| values.contains_key(v)) {
             let args: Vec<_> = args.iter().copied().map(map).collect();
             op = Op::Call(f.add_call(callee.clone(), &args));
-        }
-    } else if let Op::RustPacketCall(site) = op {
-        let (import, args) = f.packet_call(site);
-        if args.iter().any(|v| values.contains_key(v)) {
-            let args: Vec<_> = args.iter().copied().map(map).collect();
-            op = Op::RustPacketCall(f.add_packet_call(import, &args));
         }
     } else {
         op.map_operands(map);

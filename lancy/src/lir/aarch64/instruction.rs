@@ -1,19 +1,18 @@
 use super::operand::{Arrangement as A, Bank, Operand as O, PredQual, ShiftKind};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Feature {
+pub(crate) enum Feature {
     Neon,
     Sve,
     Sve2,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct FeatureSet(u8);
+pub(crate) struct FeatureSet(u8);
 
 impl FeatureSet {
-    pub const NONE: Self = Self(0);
-    pub const ALL: Self = Self(7);
-    pub const fn with(self, feature: Feature) -> Self {
+    pub(crate) const NONE: Self = Self(0);
+    pub(crate) const fn with(self, feature: Feature) -> Self {
         Self(
             self.0
                 | match feature {
@@ -23,362 +22,394 @@ impl FeatureSet {
                 },
         )
     }
-    pub const fn contains(self, feature: Feature) -> bool {
+    pub(crate) const fn contains(self, feature: Feature) -> bool {
         self.0 & Self::NONE.with(feature).0 == Self::NONE.with(feature).0
     }
 }
 
-/// Exact instruction forms supported by the Lancy encoder.
-#[allow(non_camel_case_types)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Code {
-    Pnext_p_p_p,
-    Orr_p_p_pp,
-    Lastb_r_p_z,
-    Cpy_z_p_r,
-    Fcvt_d_h,
-    Fcvt_h_d,
-    Fcvtxn_s_d,
-    Fminnm_scalar,
-    Fmaxnm_scalar,
-    And_32_log_imm,
-    And_64_log_imm,
-    Adcs_64,
-    Sbcs_64,
-    Umulh_64,
-    And_z_zi,
-    Trn1_z_zz,
-    Sdiv_z_p_zz,
-    Udiv_z_p_zz,
-    Mls_z_p_zz,
-    Cmpeq_minus1_p_p_z,
-    Brkb_p_p_p,
-    Ptest_p_p,
-    Whilelo_p_x_x,
-    Cntp_x_p_p,
-    Umov_lane,
-    Ins_lane,
-    Ld1b_z_p_bz_sxtw,
-    Ld1h_z_p_bz_sxtw,
-    St1b_z_p_bz_sxtw,
-    St1h_z_p_bz_sxtw,
-    St1w_z_p_bz_sxtw,
-    St1d_z_p_bz_lsl,
-    Adc_64,
-    Sbc_64,
-    Pfalse_p,
-    Trn1_p_pp,
-    Trn2_z_zz,
-    Trn2_asimd,
-    Dup_q0_z,
-    Ucvtf_half_z_p_z,
-    Sminv_asimd,
-    Smaxv_asimd,
-    Uminv_asimd,
-    Umaxv_asimd,
-    Sminv_v_p_z,
-    Smaxv_v_p_z,
-    Uminv_v_p_z,
-    Umaxv_v_p_z,
-    Andv_v_p_z,
-    Orv_v_p_z,
-    Eorv_v_p_z,
-    Fadda_scalar_p_z,
-    Bic_p_p_pp,
-    Fmov_scalar,
-    Dup_s_lane_asimd,
-    Faddp_d_asimd,
-    Sxtl_asimd,
-    Sxtl2_asimd,
-    Uxtl_asimd,
-    Uxtl2_asimd,
-    Xtn_asimd,
-    Xtn2_asimd,
-    Fcvtl_asimd,
-    Fcvtl2_asimd,
-    Fcvtn_asimd,
-    Fcvtn2_asimd,
-    Sunpklo_z,
-    Uunpklo_z,
-    Zip1_z_zz,
-    Uzp1_z_zz,
-    Uzp1_asimd,
-    Fcvt_z_d_p_s,
-    Fcvt_z_s_p_d,
-    Shl_asimd_imm,
-    Sshr_asimd_imm,
-    Ushr_asimd_imm,
-    Lsl_z_zi,
-    Lsr_z_zi,
-    Asr_z_zi,
-    Tbl_z_zz,
-    Sub_z_zi,
-    Cmphi_p_p_zi,
-    Cmpls_p_p_zi,
-    Cpy_zero_z_p,
-    Histcnt_z_p_zz,
-    Tbl_asimd,
-    Tbl2_asimd,
-    Tbx_asimd,
-    Ext_asimd,
-    Ext_z_zzi,
-    Splice_z_p_zz,
-    Cpy_one_z_p,
-    Smin_asimd,
-    Smax_asimd,
-    Umin_asimd,
-    Umax_asimd,
-    Sqadd_asimd,
-    Uqadd_asimd,
-    Sqsub_asimd,
-    Uqsub_asimd,
-    Sshl_asimd,
-    Ushl_asimd,
-    Bit_asimd,
-    Bif_asimd,
-    Movi_asimd,
-    Dupm_z,
-    Smin_z_p_zz,
-    Smax_z_p_zz,
-    Umin_z_p_zz,
-    Umax_z_p_zz,
-    Sqadd_z_zz,
-    Uqadd_z_zz,
-    Sqsub_z_zz,
-    Uqsub_z_zz,
-    Lsl_z_p_zz,
-    Lsr_z_p_zz,
-    Asr_z_p_zz,
-    Fneg_scalar,
-    Fabs_scalar,
-    Fsqrt_scalar,
-    Frintm_scalar,
-    Frintp_scalar,
-    Frintz_scalar,
-    Frinta_scalar,
-    Frintn_scalar,
-    Fneg_asimd,
-    Fabs_asimd,
-    Fsqrt_asimd,
-    Frintm_asimd,
-    Frintp_asimd,
-    Frintz_asimd,
-    Frinta_asimd,
-    Frintn_asimd,
-    Fneg_z_p_z,
-    Fabs_z_p_z,
-    Fsqrt_z_p_z,
-    Frintm_z_p_z,
-    Frintp_z_p_z,
-    Frintz_z_p_z,
-    Frinta_z_p_z,
-    Frintn_z_p_z,
-    Not_z_p_z,
-    Neg_z_p_z,
-    Abs_z_p_z,
-    Clz_z_p_z,
-    Rbit_z_p_z,
-    Cnt_z_p_z,
-    Orn_32_log_shift,
-    Orn_64_log_shift,
-    Orr_32_log_imm,
-    Orr_64_log_imm,
-    Eor_32_log_imm,
-    Clz_32,
-    Clz_64,
-    Rbit_32,
-    Rbit_64,
-    Csneg_32_condsel,
-    Csneg_64_condsel,
-    Cnt_asimd,
-    Neg_asimd,
-    Abs_asimd,
-    Clz_asimd,
-    Rbit_asimd,
-    Rev16_asimd,
-    Rev32_asimd,
-    Uaddlp_asimd,
-    Mov_x_v_d1,
-    Fmov_imm_scalar,
-    Fmov_imm_asimd,
-    Fmov_imm_z,
-    Fmadd_scalar,
-    Fmla_asimd,
-    Fmla_z_p_zz,
-    Compact_z_p_z,
-    Fcvt_s_d,
-    Fcvt_d_s,
-    Scvtf_scalar,
-    Ucvtf_scalar,
-    Fcvtzs_scalar,
-    Fcvtzu_scalar,
-    Scvtf_asimd,
-    Ucvtf_asimd,
-    Fcvtzs_asimd,
-    Fcvtzu_asimd,
-    Scvtf_z_p_z,
-    Ucvtf_z_p_z,
-    Fcvtzs_z_p_z,
-    Fcvtzu_z_p_z,
-    Bsl_asimdsame,
-    Bic_asimdsame,
-    Sshr_sign_asimdshf,
-    Bic_z_zz_,
-    Fcsel_scalar,
-    Addv_asimd,
-    Addp_d_asimd,
-    Uaddv_d_p_z,
-    Fcmp_scalar,
-    Cmeq_asimdsame,
-    Cmgt_asimdsame,
-    Cmge_asimdsame,
-    Cmhi_asimdsame,
-    Cmhs_asimdsame,
-    Fcmeq_asimdsame,
-    Fcmgt_asimdsame,
-    Fcmge_asimdsame,
-    Mvn_asimdmisc,
-    Cmeq0_asimdmisc,
-    Umaxv_b,
-    Umov_w_b0,
-    Cmpeq_p_p_zi0,
-    Cmpne_p_p_zi0,
-    Cmpeq_p_p_zz,
-    Cmpne_p_p_zz,
-    Cmpgt_p_p_zz,
-    Cmpge_p_p_zz,
-    Cmphi_p_p_zz,
-    Cmphs_p_p_zz,
-    Fcmeq_p_p_zz,
-    Fcmne_p_p_zz,
-    Fcmuo_p_p_zz,
-    Fcmgt_p_p_zz,
-    Fcmge_p_p_zz,
-    Cpy_minus1_z_p,
-    Index_0_1_z,
-    Add_32_addsub_imm,
-    Add_64_addsub_imm,
-    Sub_32_addsub_imm,
-    Sub_64_addsub_imm,
-    Adds_32_addsub_imm,
-    Adds_64_addsub_imm,
-    Subs_32_addsub_imm,
-    Subs_64_addsub_imm,
-    Add_32_addsub_shift,
-    Add_64_addsub_shift,
-    Adds_64_addsub_shift,
-    Sub_32_addsub_shift,
-    Sub_64_addsub_shift,
-    Subs_32_addsub_shift,
-    Subs_64_addsub_shift,
-    And_32_log_shift,
-    And_64_log_shift,
-    Orr_32_log_shift,
-    Orr_64_log_shift,
-    Eor_32_log_shift,
-    Eor_64_log_shift,
-    Madd_32a_dp_3src,
-    Madd_64a_dp_3src,
-    Msub_32a_dp_3src,
-    Msub_64a_dp_3src,
-    Sdiv_32_dp_2src,
-    Sdiv_64_dp_2src,
-    Udiv_32_dp_2src,
-    Udiv_64_dp_2src,
-    Movz_32_movewide,
-    Movz_64_movewide,
-    Movk_32_movewide,
-    Movk_64_movewide,
-    Fmov_s_w,
-    Fmov_w_s,
-    Fmov_d_x,
-    Fmov_x_d,
-    Fadd_scalar,
-    Fsub_scalar,
-    Fmul_scalar,
-    Fdiv_scalar,
-    Mov_v_d1_x,
-    Sbfm_32m_bitfield,
-    Sbfm_64m_bitfield,
-    Ubfm_64m_bitfield,
-    Add_64_addsub_sxtw,
-    Ubfm_32m_bitfield,
-    Lslv_32_dp_2src,
-    Lslv_64_dp_2src,
-    Rorv_32_dp_2src,
-    Rorv_64_dp_2src,
-    Asrv_32_dp_2src,
-    Asrv_64_dp_2src,
-    Lsrv_32_dp_2src,
-    Lsrv_64_dp_2src,
-    Csel_32_condsel,
-    Csel_64_condsel,
-    Csinv_32_condsel,
-    Ldr_32_ldst_pos,
-    Ldr_64_ldst_pos,
-    Str_32_ldst_pos,
-    Str_64_ldst_pos,
-    Ldrb_32_ldst_pos,
-    Strb_32_ldst_pos,
-    Ldrh_32_ldst_pos,
-    Strh_32_ldst_pos,
-    Ldr_q_ldst_pos,
-    Str_q_ldst_pos,
-    Ldr_s_ldst_pos,
-    Str_s_ldst_pos,
-    Ldr_d_ldst_pos,
-    Str_d_ldst_pos,
-    Nop_HI_hints,
-    B_only_branch_imm,
-    Bl_only_branch_imm,
-    B_only_condbranch,
-    Cbz_32_compbranch,
-    Cbz_64_compbranch,
-    Cbnz_32_compbranch,
-    Cbnz_64_compbranch,
-    Br_64_branch_reg,
-    Blr_64_branch_reg,
-    Ret_64r_branch_reg,
-    Add_asimdsame_only,
-    Sub_asimdsame_only,
-    Mul_asimdsame_only,
-    And_asimdsame_only,
-    Orr_asimdsame_only,
-    Eor_asimdsame_only,
-    Fadd_asimdsame,
-    Fsub_asimdsame,
-    Fmul_asimdsame,
-    Fdiv_asimdsame,
-    Dup_asimdgen,
-    Saddl_asimddiff_L,
-    Ptrue_p_s_,
-    Add_z_zz_,
-    Sub_z_zz_,
-    Mul_z_zz_,
-    Mul_z_p_zz_,
-    Fadd_z_zz_,
-    Fsub_z_zz_,
-    Fmul_z_zz_,
-    Fdiv_z_p_zz_,
-    Fdivr_z_p_zz_,
-    Dup_z_r,
-    Cmplt_p_p_zi0,
-    Sel_z_p_zz,
-    Ld1w_z_p_bz_sxtw,
-    Ld1d_z_p_bz_lsl,
-    And_z_zz_,
-    Orr_z_zz_,
-    Eor_z_zz_,
-    Ld1b_z_p_bi_u8,
-    Ld1h_z_p_bi_u16,
-    Ld1w_z_p_bi_u32,
-    Ld1d_z_p_bi_u64,
-    St1b_z_p_bi_,
-    St1h_z_p_bi_,
-    St1w_z_p_bi_,
-    St1d_z_p_bi_,
-    Eor3_z_zzz_,
-    Bsl_z_zzz_,
+/// The encoder's instruction table: one row per exact instruction form.
+///
+/// `Name = base, extension, gpr, form;` gives the encoding with every
+/// operand field zero, the extension the form needs (`Base` for none),
+/// the width of its general-purpose operands (`w`, `x`, or `_` for a form
+/// without them) and the [`Form`] that places the operands. The rows
+/// generate [`Code`], [`Code::required_feature`] and the encoding.
+macro_rules! codes {
+    ($($code:ident = $base:literal, $feature:ident, $gpr:tt, $form:expr;)*) => {
+        /// Exact instruction forms supported by the Lancy encoder.
+        #[allow(non_camel_case_types)]
+        #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+        pub(crate) enum Code {
+            $($code,)*
+        }
+
+        impl Code {
+            /// The encoding's name in the Arm architecture description.
+            pub(crate) const fn name(self) -> &'static str {
+                match self {
+                    $(Self::$code => stringify!($code),)*
+                }
+            }
+
+            pub(crate) const fn required_feature(self) -> Option<Feature> {
+                match self {
+                    $(Self::$code => codes!(@feature $feature),)*
+                }
+            }
+
+            fn row(self) -> (u32, bool, Form) {
+                use Form::*;
+                match self {
+                    $(Self::$code => ($base, codes!(@wide $gpr), $form),)*
+                }
+            }
+        }
+    };
+    (@feature Base) => { None };
+    (@feature $feature:ident) => { Some(Feature::$feature) };
+    (@wide x) => { true };
+    (@wide $gpr:tt) => { false };
+}
+
+codes! {
+    Pnext_p_p_p =          0x2519c400, Sve,  _, PredNext;
+    Orr_p_p_pp =           0x25804000, Sve,  _, SvePredBits;
+    Lastb_r_p_z =          0x0521a000, Sve,  _, SveGprLane(false);
+    Cpy_z_p_r =            0x0528a000, Sve,  _, SveGprLane(true);
+    Fcvt_d_h =             0x1ee2c000, Base, _, ArrangedPair(A::D, A::H);
+    Fcvt_h_d =             0x1e63c000, Base, _, ArrangedPair(A::H, A::D);
+    Fcvtxn_s_d =           0x7e616800, Neon, _, ArrangedPair(A::S, A::D);
+    Fminnm_scalar =        0x1e207800, Base, _, FloatScalar;
+    Fmaxnm_scalar =        0x1e206800, Base, _, FloatScalar;
+    And_32_log_imm =       0x12000000, Base, w, LogicalImmediate;
+    And_64_log_imm =       0x92000000, Base, x, LogicalImmediate;
+    Adcs_64 =              0xba000000, Base, x, Three;
+    Sbcs_64 =              0xfa000000, Base, x, Three;
+    Umulh_64 =             0x9bc07c00, Base, x, Three;
+    And_z_zi =             0x05800000, Sve,  _, SveDupMask;
+    Trn1_z_zz =            0x05207000, Sve,  _, SveArithmetic;
+    Sdiv_z_p_zz =          0x04140000, Sve,  _, SveDestructiveWide;
+    Udiv_z_p_zz =          0x04150000, Sve,  _, SveDestructiveWide;
+    Mls_z_p_zz =           0x04006000, Sve,  _, SveMultiplyAccumulate;
+    Brkb_p_p_p =           0x25904000, Sve,  _, PredBreak;
+    Ptest_p_p =            0x2550c000, Sve,  _, PredTest;
+    Whilelo_p_x_x =        0x25201c00, Sve,  _, PredWhile;
+    Cntp_x_p_p =           0x25208000, Sve,  _, PredCount;
+    Umov_lane =            0x0e003c00, Neon, _, NeonGprLane(false);
+    Ins_lane =             0x4e001c00, Neon, _, NeonGprLane(true);
+    Ld1b_z_p_bz_sxtw =     0x84404000, Sve,  _, SveIndexed(A::S, PredQual::Zero);
+    Ld1h_z_p_bz_sxtw =     0x84e04000, Sve,  _, SveIndexed(A::S, PredQual::Zero);
+    St1b_z_p_bz_sxtw =     0xe440c000, Sve,  _, SveIndexed(A::S, PredQual::None);
+    St1h_z_p_bz_sxtw =     0xe4e0c000, Sve,  _, SveIndexed(A::S, PredQual::None);
+    St1w_z_p_bz_sxtw =     0xe560c000, Sve,  _, SveIndexed(A::S, PredQual::None);
+    St1d_z_p_bz_lsl =      0xe5a0a000, Sve,  _, SveIndexed(A::D, PredQual::None);
+    Adc_64 =               0x9a000000, Base, x, Three;
+    Sbc_64 =               0xda000000, Base, x, Three;
+    Pfalse_p =             0x2518e400, Sve,  _, PredFalse;
+    Trn1_p_pp =            0x05205000, Sve,  _, PredPermute;
+    Trn2_z_zz =            0x05207400, Sve,  _, SveArithmetic;
+    Trn2_asimd =           0x0e006800, Neon, _, Neon(false);
+    Dup_z_zi =             0x05202000, Sve,  _, SveDupLane;
+    Ucvtf_half_z_p_z =     0x6553a000, Sve,  _, SveFloatWidth(A::H, A::H);
+    Sminv_asimd =          0x4e31a800, Neon, _, NeonSum(false);
+    Smaxv_asimd =          0x4e30a800, Neon, _, NeonSum(false);
+    Uminv_asimd =          0x6e31a800, Neon, _, NeonSum(false);
+    Umaxv_asimd =          0x6e30a800, Neon, _, NeonSum(false);
+    Sminv_v_p_z =          0x040a2000, Sve,  _, SveSum;
+    Smaxv_v_p_z =          0x04082000, Sve,  _, SveSum;
+    Uminv_v_p_z =          0x040b2000, Sve,  _, SveSum;
+    Umaxv_v_p_z =          0x04092000, Sve,  _, SveSum;
+    Andv_v_p_z =           0x041a2000, Sve,  _, SveSum;
+    Orv_v_p_z =            0x04182000, Sve,  _, SveSum;
+    Eorv_v_p_z =           0x04192000, Sve,  _, SveSum;
+    Fadda_scalar_p_z =     0x65182000, Sve,  _, SveFadda;
+    Bic_p_p_pp =           0x25004010, Sve,  _, SvePredBits;
+    Fmov_scalar =          0x1e204000, Base, _, FloatScalarUnary;
+    Dup_s_lane_asimd =     0x5e040400, Neon, _, NeonSingle;
+    Faddp_d_asimd =        0x7e70d800, Neon, _, ArrangedPair(A::D, A::D2);
+    Sxtl_asimd =           0x0f00a400, Neon, _, NeonExtend(false);
+    Sxtl2_asimd =          0x4f00a400, Neon, _, NeonExtend(true);
+    Uxtl_asimd =           0x2f00a400, Neon, _, NeonExtend(false);
+    Uxtl2_asimd =          0x6f00a400, Neon, _, NeonExtend(true);
+    Xtn_asimd =            0x0e212800, Neon, _, NeonNarrow(false);
+    Xtn2_asimd =           0x4e212800, Neon, _, NeonNarrow(true);
+    Fcvtl_asimd =          0x0e617800, Neon, _, ArrangedPair(A::D2, A::S2);
+    Fcvtl2_asimd =         0x4e617800, Neon, _, ArrangedPair(A::D2, A::S4);
+    Fcvtn_asimd =          0x0e616800, Neon, _, ArrangedPair(A::S2, A::D2);
+    Fcvtn2_asimd =         0x4e616800, Neon, _, ArrangedPair(A::S4, A::D2);
+    Sunpklo_z =            0x05303800, Sve,  _, SveExtend;
+    Uunpklo_z =            0x05323800, Sve,  _, SveExtend;
+    Zip1_z_zz =            0x05206000, Sve,  _, SveArithmetic;
+    Uzp1_z_zz =            0x05206800, Sve,  _, SveArithmetic;
+    Uzp1_asimd =           0x0e001800, Neon, _, Neon(false);
+    Fcvt_z_d_p_s =         0x65cba000, Sve,  _, SveFloatWidth(A::D, A::S);
+    Fcvt_z_s_p_d =         0x65caa000, Sve,  _, SveFloatWidth(A::S, A::D);
+    Shl_asimd_imm =        0x4f005400, Neon, _, VectorShiftImmediate { sve: false, left: true };
+    Sshr_asimd_imm =       0x4f000400, Neon, _, VectorShiftImmediate { sve: false, left: false };
+    Ushr_asimd_imm =       0x6f000400, Neon, _, VectorShiftImmediate { sve: false, left: false };
+    Lsl_z_zi =             0x04209c00, Sve,  _, VectorShiftImmediate { sve: true, left: true };
+    Lsr_z_zi =             0x04209400, Sve,  _, VectorShiftImmediate { sve: true, left: false };
+    Asr_z_zi =             0x04209000, Sve,  _, VectorShiftImmediate { sve: true, left: false };
+    Tbl_z_zz =             0x05203000, Sve,  _, SveArithmetic;
+    Sub_z_zi =             0x2521c000, Sve,  _, SveSubImmediate;
+    Cmphi_p_p_zi =         0x24200010, Sve,  _, SveUnsignedCompareImmediate;
+    Cmpls_p_p_zi =         0x24202010, Sve,  _, SveUnsignedCompareImmediate;
+    Histcnt_z_p_zz =       0x45a0c000, Sve2, _, SveHistcnt;
+    Tbl_asimd =            0x0e000000, Neon, _, NeonTable;
+    Tbl2_asimd =           0x0e002000, Neon, _, NeonTable;
+    Tbx_asimd =            0x0e001000, Neon, _, NeonTable;
+    Ext_asimd =            0x6e000000, Neon, _, NeonExt;
+    Ext_z_zzi =            0x05200000, Sve,  _, SveExt;
+    Splice_z_p_zz =        0x052c8000, Sve,  _, SveSplice;
+    Smin_asimd =           0x0e206c00, Neon, _, Neon(true);
+    Smax_asimd =           0x0e206400, Neon, _, Neon(true);
+    Umin_asimd =           0x2e206c00, Neon, _, Neon(true);
+    Umax_asimd =           0x2e206400, Neon, _, Neon(true);
+    Sqadd_asimd =          0x0e200c00, Neon, _, Neon(false);
+    Uqadd_asimd =          0x2e200c00, Neon, _, Neon(false);
+    Sqsub_asimd =          0x0e202c00, Neon, _, Neon(false);
+    Uqsub_asimd =          0x2e202c00, Neon, _, Neon(false);
+    Sshl_asimd =           0x0e204400, Neon, _, Neon(false);
+    Ushl_asimd =           0x2e204400, Neon, _, Neon(false);
+    Bit_asimd =            0x2ea01c00, Neon, _, NeonBits;
+    Bif_asimd =            0x2ee01c00, Neon, _, NeonBits;
+    Movi_asimd =           0x4f000400, Neon, _, NeonIntImmediate;
+    Dupm_z =               0x05c00000, Sve,  _, SveDupMask;
+    Smin_z_p_zz =          0x040a0000, Sve,  _, SveDestructive;
+    Smax_z_p_zz =          0x04080000, Sve,  _, SveDestructive;
+    Umin_z_p_zz =          0x040b0000, Sve,  _, SveDestructive;
+    Umax_z_p_zz =          0x04090000, Sve,  _, SveDestructive;
+    Sqadd_z_zz =           0x04201000, Sve,  _, SveArithmetic;
+    Uqadd_z_zz =           0x04201400, Sve,  _, SveArithmetic;
+    Sqsub_z_zz =           0x04201800, Sve,  _, SveArithmetic;
+    Uqsub_z_zz =           0x04201c00, Sve,  _, SveArithmetic;
+    Lsl_z_p_zz =           0x04138000, Sve,  _, SveDestructive;
+    Lsr_z_p_zz =           0x04118000, Sve,  _, SveDestructive;
+    Asr_z_p_zz =           0x04108000, Sve,  _, SveDestructive;
+    Fneg_scalar =          0x1e214000, Base, _, FloatScalarUnary;
+    Fabs_scalar =          0x1e20c000, Base, _, FloatScalarUnary;
+    Fsqrt_scalar =         0x1e21c000, Base, _, FloatScalarUnary;
+    Frintm_scalar =        0x1e254000, Base, _, FloatScalarUnary;
+    Frintp_scalar =        0x1e24c000, Base, _, FloatScalarUnary;
+    Frintz_scalar =        0x1e25c000, Base, _, FloatScalarUnary;
+    Frinta_scalar =        0x1e264000, Base, _, FloatScalarUnary;
+    Frintn_scalar =        0x1e244000, Base, _, FloatScalarUnary;
+    Fneg_asimd =           0x2ea0f800, Neon, _, FloatNeonUnary;
+    Fabs_asimd =           0x0ea0f800, Neon, _, FloatNeonUnary;
+    Fsqrt_asimd =          0x2ea1f800, Neon, _, FloatNeonUnary;
+    Frintm_asimd =         0x0e219800, Neon, _, FloatNeonUnary;
+    Frintp_asimd =         0x0ea18800, Neon, _, FloatNeonUnary;
+    Frintz_asimd =         0x0ea19800, Neon, _, FloatNeonUnary;
+    Frinta_asimd =         0x2e218800, Neon, _, FloatNeonUnary;
+    Frintn_asimd =         0x0e218800, Neon, _, FloatNeonUnary;
+    Fneg_z_p_z =           0x041da000, Sve,  _, SveUnary(1);
+    Fabs_z_p_z =           0x041ca000, Sve,  _, SveUnary(1);
+    Fsqrt_z_p_z =          0x650da000, Sve,  _, SveUnary(1);
+    Frintm_z_p_z =         0x6502a000, Sve,  _, SveUnary(1);
+    Frintp_z_p_z =         0x6501a000, Sve,  _, SveUnary(1);
+    Frintz_z_p_z =         0x6503a000, Sve,  _, SveUnary(1);
+    Frinta_z_p_z =         0x6504a000, Sve,  _, SveUnary(1);
+    Frintn_z_p_z =         0x6500a000, Sve,  _, SveUnary(1);
+    Not_z_p_z =            0x041ea000, Sve,  _, SveUnary(0);
+    Neg_z_p_z =            0x0417a000, Sve,  _, SveUnary(0);
+    Abs_z_p_z =            0x0416a000, Sve,  _, SveUnary(0);
+    Clz_z_p_z =            0x0419a000, Sve,  _, SveUnary(0);
+    Rbit_z_p_z =           0x05278000, Sve,  _, SveUnary(0);
+    Cnt_z_p_z =            0x041aa000, Sve,  _, SveUnary(0);
+    Orn_32_log_shift =     0x2a200000, Base, w, Shift(true);
+    Orn_64_log_shift =     0xaa200000, Base, x, Shift(true);
+    Orr_32_log_imm =       0x32000000, Base, w, LogicalImmediate;
+    Eor_32_log_imm =       0x52000000, Base, w, LogicalImmediate;
+    Clz_32 =               0x5ac01000, Base, _, RegPair(Bank::W, Bank::W);
+    Clz_64 =               0xdac01000, Base, _, RegPair(Bank::X, Bank::X);
+    Rbit_32 =              0x5ac00000, Base, _, RegPair(Bank::W, Bank::W);
+    Rbit_64 =              0xdac00000, Base, _, RegPair(Bank::X, Bank::X);
+    Csneg_32_condsel =     0x5a800400, Base, w, Select;
+    Csneg_64_condsel =     0xda800400, Base, x, Select;
+    Cnt_asimd =            0x4e205800, Neon, _, NeonUnary(0);
+    Neg_asimd =            0x6e20b800, Neon, _, NeonUnary(3);
+    Abs_asimd =            0x4e20b800, Neon, _, NeonUnary(3);
+    Clz_asimd =            0x6e204800, Neon, _, NeonUnary(2);
+    Rbit_asimd =           0x6e605800, Neon, _, NeonUnary(0);
+    Rev16_asimd =          0x4e201800, Neon, _, NeonUnary(0);
+    Rev32_asimd =          0x6e200800, Neon, _, NeonUnary(0);
+    Uaddlp_asimd =         0x6e202800, Neon, _, NeonPairwiseLong;
+    Fmov_imm_scalar =      0x1e201000, Base, _, FloatImmediate;
+    Fmov_imm_asimd =       0x4f00f400, Neon, _, FloatNeonImmediate;
+    Fmov_imm_z =           0x2539c000, Sve,  _, SveFloatImmediate;
+    Fmadd_scalar =         0x1f000000, Base, _, FloatFma;
+    Fmla_asimd =           0x0e20cc00, Neon, _, FloatNeon;
+    Fmla_z_p_zz =          0x65200000, Sve,  _, SveFma;
+    Compact_z_p_z =        0x05218000, Sve,  _, SveCompact;
+    Fcvt_s_d =             0x1e624000, Base, _, RegPair(Bank::V, Bank::V);
+    Fcvt_d_s =             0x1e22c000, Base, _, RegPair(Bank::V, Bank::V);
+    Scvtf_scalar =         0x1e220000, Base, _, FloatInt(true);
+    Ucvtf_scalar =         0x1e230000, Base, _, FloatInt(true);
+    Fcvtzs_scalar =        0x1e380000, Base, _, FloatInt(false);
+    Fcvtzu_scalar =        0x1e390000, Base, _, FloatInt(false);
+    Scvtf_asimd =          0x0e21d800, Neon, _, FloatNeonUnary;
+    Ucvtf_asimd =          0x2e21d800, Neon, _, FloatNeonUnary;
+    Fcvtzs_asimd =         0x0ea1b800, Neon, _, FloatNeonUnary;
+    Fcvtzu_asimd =         0x2ea1b800, Neon, _, FloatNeonUnary;
+    Scvtf_z_p_z =          0x6594a000, Sve,  _, SveConvert;
+    Ucvtf_z_p_z =          0x6595a000, Sve,  _, SveConvert;
+    Fcvtzs_z_p_z =         0x659ca000, Sve,  _, SveConvert;
+    Fcvtzu_z_p_z =         0x659da000, Sve,  _, SveConvert;
+    Bsl_asimdsame =        0x2e601c00, Neon, _, NeonBits;
+    Bic_asimdsame =        0x0e601c00, Neon, _, NeonBits;
+    Bic_z_zz_ =            0x04e03000, Sve,  _, SveBits;
+    Fcsel_scalar =         0x1e200c00, Base, _, FloatSelect;
+    Addv_asimd =           0x4e31b800, Neon, _, NeonSum(false);
+    Addp_d_asimd =         0x5ef1b800, Neon, _, NeonSum(true);
+    Uaddv_d_p_z =          0x04012000, Sve,  _, SveSum;
+    Fcmp_scalar =          0x1e202000, Base, _, FloatCompare;
+    Cmeq_asimdsame =       0x2e208c00, Neon, _, Neon(false);
+    Cmgt_asimdsame =       0x0e203400, Neon, _, Neon(false);
+    Cmge_asimdsame =       0x0e203c00, Neon, _, Neon(false);
+    Cmhi_asimdsame =       0x2e203400, Neon, _, Neon(false);
+    Cmhs_asimdsame =       0x2e203c00, Neon, _, Neon(false);
+    Fcmeq_asimdsame =      0x0e20e400, Neon, _, FloatNeon;
+    Fcmgt_asimdsame =      0x2ea0e400, Neon, _, FloatNeon;
+    Fcmge_asimdsame =      0x2e20e400, Neon, _, FloatNeon;
+    Mvn_asimdmisc =        0x6e205800, Neon, _, NeonUnary(0);
+    Cmeq0_asimdmisc =      0x4e209800, Neon, _, NeonUnary(3);
+    Cmpeq_p_p_zi =         0x25008000, Sve,  _, SveCompareImmediate;
+    Cmpne_p_p_zi =         0x25008010, Sve,  _, SveCompareImmediate;
+    Cmpeq_p_p_zz =         0x2400a000, Sve,  _, SveCompare(false);
+    Cmpne_p_p_zz =         0x2400a010, Sve,  _, SveCompare(false);
+    Cmpgt_p_p_zz =         0x24008010, Sve,  _, SveCompare(false);
+    Cmpge_p_p_zz =         0x24008000, Sve,  _, SveCompare(false);
+    Cmphi_p_p_zz =         0x24000010, Sve,  _, SveCompare(false);
+    Cmphs_p_p_zz =         0x24000000, Sve,  _, SveCompare(false);
+    Fcmeq_p_p_zz =         0x65006000, Sve,  _, SveCompare(true);
+    Fcmne_p_p_zz =         0x65006010, Sve,  _, SveCompare(true);
+    Fcmuo_p_p_zz =         0x6500c000, Sve,  _, SveCompare(true);
+    Fcmgt_p_p_zz =         0x65004010, Sve,  _, SveCompare(true);
+    Fcmge_p_p_zz =         0x65004000, Sve,  _, SveCompare(true);
+    Cpy_z_p_i =            0x05100000, Sve,  _, SveCopyImmediate;
+    Index_z_ii =           0x04204000, Sve,  _, SveIndex;
+    Add_32_addsub_imm =    0x11000000, Base, w, AddImm(false);
+    Add_64_addsub_imm =    0x91000000, Base, x, AddImm(false);
+    Sub_32_addsub_imm =    0x51000000, Base, w, AddImm(false);
+    Sub_64_addsub_imm =    0xd1000000, Base, x, AddImm(false);
+    Adds_32_addsub_imm =   0x31000000, Base, w, AddImm(true);
+    Adds_64_addsub_imm =   0xb1000000, Base, x, AddImm(true);
+    Subs_32_addsub_imm =   0x71000000, Base, w, AddImm(true);
+    Subs_64_addsub_imm =   0xf1000000, Base, x, AddImm(true);
+    Add_32_addsub_shift =  0x0b000000, Base, w, Shift(false);
+    Add_64_addsub_shift =  0x8b000000, Base, x, Shift(false);
+    Adds_64_addsub_shift = 0xab000000, Base, x, Shift(false);
+    Sub_32_addsub_shift =  0x4b000000, Base, w, Shift(false);
+    Sub_64_addsub_shift =  0xcb000000, Base, x, Shift(false);
+    Subs_32_addsub_shift = 0x6b000000, Base, w, Shift(false);
+    Subs_64_addsub_shift = 0xeb000000, Base, x, Shift(false);
+    And_32_log_shift =     0x0a000000, Base, w, Shift(true);
+    And_64_log_shift =     0x8a000000, Base, x, Shift(true);
+    Orr_32_log_shift =     0x2a000000, Base, w, Shift(true);
+    Orr_64_log_shift =     0xaa000000, Base, x, Shift(true);
+    Eor_32_log_shift =     0x4a000000, Base, w, Shift(true);
+    Eor_64_log_shift =     0xca000000, Base, x, Shift(true);
+    Madd_32a_dp_3src =     0x1b000000, Base, w, Multiply;
+    Madd_64a_dp_3src =     0x9b000000, Base, x, Multiply;
+    Msub_32a_dp_3src =     0x1b008000, Base, w, Multiply;
+    Msub_64a_dp_3src =     0x9b008000, Base, x, Multiply;
+    Sdiv_32_dp_2src =      0x1ac00c00, Base, w, Three;
+    Sdiv_64_dp_2src =      0x9ac00c00, Base, x, Three;
+    Udiv_32_dp_2src =      0x1ac00800, Base, w, Three;
+    Udiv_64_dp_2src =      0x9ac00800, Base, x, Three;
+    Movz_32_movewide =     0x52800000, Base, w, Move;
+    Movz_64_movewide =     0xd2800000, Base, x, Move;
+    Movk_32_movewide =     0x72800000, Base, w, Move;
+    Movk_64_movewide =     0xf2800000, Base, x, Move;
+    Fmov_s_w =             0x1e270000, Base, _, RegPair(Bank::V, Bank::W);
+    Fmov_w_s =             0x1e260000, Base, _, RegPair(Bank::W, Bank::V);
+    Fmov_d_x =             0x9e670000, Base, _, RegPair(Bank::V, Bank::X);
+    Fmov_x_d =             0x9e660000, Base, _, RegPair(Bank::X, Bank::V);
+    Fadd_scalar =          0x1e202800, Base, _, FloatScalar;
+    Fsub_scalar =          0x1e203800, Base, _, FloatScalar;
+    Fmul_scalar =          0x1e200800, Base, _, FloatScalar;
+    Fdiv_scalar =          0x1e201800, Base, _, FloatScalar;
+    Sbfm_32m_bitfield =    0x13000000, Base, w, Bitfield;
+    Sbfm_64m_bitfield =    0x93400000, Base, x, Bitfield;
+    Ubfm_64m_bitfield =    0xd3400000, Base, x, Bitfield;
+    Add_64_addsub_sxtw =   0x8b20c000, Base, _, ExtendedAdd;
+    Ubfm_32m_bitfield =    0x53000000, Base, w, Bitfield;
+    Lslv_32_dp_2src =      0x1ac02000, Base, w, Three;
+    Lslv_64_dp_2src =      0x9ac02000, Base, x, Three;
+    Rorv_32_dp_2src =      0x1ac02c00, Base, w, Three;
+    Rorv_64_dp_2src =      0x9ac02c00, Base, x, Three;
+    Asrv_32_dp_2src =      0x1ac02800, Base, w, Three;
+    Asrv_64_dp_2src =      0x9ac02800, Base, x, Three;
+    Lsrv_32_dp_2src =      0x1ac02400, Base, w, Three;
+    Lsrv_64_dp_2src =      0x9ac02400, Base, x, Three;
+    Csel_32_condsel =      0x1a800000, Base, w, Select;
+    Csel_64_condsel =      0x9a800000, Base, x, Select;
+    Csinv_32_condsel =     0x5a800000, Base, w, Select;
+    Ldr_32_ldst_pos =      0xb9400000, Base, w, Load(4);
+    Ldr_64_ldst_pos =      0xf9400000, Base, x, Load(8);
+    Str_32_ldst_pos =      0xb9000000, Base, w, Store(4);
+    Str_64_ldst_pos =      0xf9000000, Base, x, Store(8);
+    Ldrb_32_ldst_pos =     0x39400000, Base, w, Load(1);
+    Strb_32_ldst_pos =     0x39000000, Base, w, Store(1);
+    Ldrh_32_ldst_pos =     0x79400000, Base, w, Load(2);
+    Strh_32_ldst_pos =     0x79000000, Base, w, Store(2);
+    Ldr_q_ldst_pos =       0x3dc00000, Neon, w, Load(16);
+    Str_q_ldst_pos =       0x3d800000, Neon, w, Store(16);
+    Ldr_s_ldst_pos =       0xbd400000, Base, _, FloatLoad(4);
+    Str_s_ldst_pos =       0xbd000000, Base, _, FloatStore(4);
+    Ldr_d_ldst_pos =       0xfd400000, Base, _, FloatLoad(8);
+    Str_d_ldst_pos =       0xfd000000, Base, _, FloatStore(8);
+    Nop_HI_hints =         0xd503201f, Base, _, None;
+    B_only_branch_imm =    0x14000000, Base, _, Branch(BranchKind::Direct);
+    Bl_only_branch_imm =   0x94000000, Base, _, Branch(BranchKind::Direct);
+    B_only_condbranch =    0x54000000, Base, _, Branch(BranchKind::Condition);
+    Cbz_32_compbranch =    0x34000000, Base, w, Branch(BranchKind::Compare);
+    Cbnz_32_compbranch =   0x35000000, Base, w, Branch(BranchKind::Compare);
+    Blr_64_branch_reg =    0xd63f0000, Base, _, Indirect;
+    Ret_64r_branch_reg =   0xd65f0000, Base, _, Indirect;
+    Add_asimdsame_only =   0x0e208400, Neon, _, Neon(false);
+    Sub_asimdsame_only =   0x2e208400, Neon, _, Neon(false);
+    Mul_asimdsame_only =   0x0e209c00, Neon, _, Neon(true);
+    And_asimdsame_only =   0x0e201c00, Neon, _, NeonBits;
+    Orr_asimdsame_only =   0x0ea01c00, Neon, _, NeonBits;
+    Eor_asimdsame_only =   0x2e201c00, Neon, _, NeonBits;
+    Fadd_asimdsame =       0x0e20d400, Neon, _, FloatNeon;
+    Fmaxnm_asimdsame =     0x0e20c400, Neon, _, FloatNeon;
+    Fminnm_asimdsame =     0x0ea0c400, Neon, _, FloatNeon;
+    Fsub_asimdsame =       0x0ea0d400, Neon, _, FloatNeon;
+    Fmul_asimdsame =       0x2e20dc00, Neon, _, FloatNeon;
+    Fdiv_asimdsame =       0x2e20fc00, Neon, _, FloatNeon;
+    Dup_asimdgen =         0x4e000c00, Neon, _, Dup(false);
+    Ptrue_p_s_ =           0x2518e000, Sve,  _, Ptrue;
+    Add_z_zz_ =            0x04200000, Sve,  _, SveArithmetic;
+    Sub_z_zz_ =            0x04200400, Sve,  _, SveArithmetic;
+    Mul_z_zz_ =            0x04206000, Sve2, _, SveArithmetic;
+    Mul_z_p_zz_ =          0x04100000, Sve,  _, SveDestructive;
+    Fadd_z_zz_ =           0x65000000, Sve,  _, SveArithmetic;
+    Fsub_z_zz_ =           0x65000400, Sve,  _, SveArithmetic;
+    Fmul_z_zz_ =           0x65000800, Sve,  _, SveArithmetic;
+    Fdiv_z_p_zz_ =         0x650d8000, Sve,  _, SveDestructive;
+    Fmaxnm_z_p_zz =        0x65048000, Sve,  _, SveDestructive;
+    Fminnm_z_p_zz =        0x65058000, Sve,  _, SveDestructive;
+    Fdivr_z_p_zz_ =        0x650c8000, Sve,  _, SveDestructive;
+    Dup_z_r =              0x05203800, Sve,  _, Dup(true);
+    Cmplt_p_p_zi =         0x25002000, Sve,  _, SveCompareImmediate;
+    Sel_z_p_zz =           0x0520c000, Sve,  _, SveSelect;
+    Ld1w_z_p_bz_sxtw =     0x85604000, Sve,  _, SveIndexed(A::S, PredQual::Zero);
+    Ld1d_z_p_bz_lsl =      0xc5e0c000, Sve,  _, SveIndexed(A::D, PredQual::Zero);
+    And_z_zz_ =            0x04203000, Sve,  _, SveBits;
+    Orr_z_zz_ =            0x04603000, Sve,  _, SveBits;
+    Eor_z_zz_ =            0x04a03000, Sve,  _, SveBits;
+    Ld1b_z_p_bi_u8 =       0xa400a000, Sve,  _, SveMemory(A::B, PredQual::Zero);
+    Ld1h_z_p_bi_u16 =      0xa4a0a000, Sve,  _, SveMemory(A::H, PredQual::Zero);
+    Ld1w_z_p_bi_u32 =      0xa540a000, Sve,  _, SveMemory(A::S, PredQual::Zero);
+    Ld1d_z_p_bi_u64 =      0xa5e0a000, Sve,  _, SveMemory(A::D, PredQual::Zero);
+    St1b_z_p_bi_ =         0xe400e000, Sve,  _, SveMemory(A::B, PredQual::None);
+    St1h_z_p_bi_ =         0xe4a0e000, Sve,  _, SveMemory(A::H, PredQual::None);
+    St1w_z_p_bi_ =         0xe540e000, Sve,  _, SveMemory(A::S, PredQual::None);
+    St1d_z_p_bi_ =         0xe5e0e000, Sve,  _, SveMemory(A::D, PredQual::None);
+    Eor3_z_zzz_ =          0x04203800, Sve2, _, SveTiedTernary;
+    Bsl_z_zzz_ =           0x04203c00, Sve2, _, SveTiedTernary;
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
@@ -387,8 +418,6 @@ pub enum EncodeError {
     OperandCount { expected: usize, got: usize },
     #[error("invalid operand at index {0}")]
     Operand(usize),
-    #[error("invalid instruction suffix {0}")]
-    Suffix(u8),
     #[error("unaligned AArch64 instruction address {0:#x}")]
     Address(u64),
     #[error("branch from {pc:#x} to {target:#x} is out of range or unaligned")]
@@ -416,55 +445,6 @@ impl Branch {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
-pub struct Instruction {
-    code: Code,
-    pc: u64,
-    word: u32,
-    branch: Option<Branch>,
-}
-
-impl Instruction {
-    pub fn with(code: Code, operands: &[O], pc: u64) -> Result<Self, EncodeError> {
-        Self::with_suffix(code, 0, operands, pc)
-    }
-
-    pub fn with_suffix(
-        code: Code,
-        suffix: u8,
-        operands: &[O],
-        pc: u64,
-    ) -> Result<Self, EncodeError> {
-        aligned(pc)?;
-        let (word, branch) = code.lower(suffix, operands)?;
-        let instruction = Self {
-            code,
-            pc,
-            word,
-            branch,
-        };
-        instruction.encode()?;
-        Ok(instruction)
-    }
-
-    pub fn code(&self) -> Code {
-        self.code
-    }
-    pub fn pc(&self) -> u64 {
-        self.pc
-    }
-    pub fn label_target(&self) -> Option<u64> {
-        self.branch.map(|branch| branch.target)
-    }
-    pub fn encode(&self) -> Result<u32, EncodeError> {
-        self.encode_at(self.pc)
-    }
-    pub fn encode_at(&self, pc: u64) -> Result<u32, EncodeError> {
-        aligned(pc)?;
-        Ok(self.word | self.branch.map_or(Ok(0), |branch| branch.field(pc))?)
-    }
-}
-
 fn aligned(pc: u64) -> Result<(), EncodeError> {
     if pc.is_multiple_of(4) {
         Ok(())
@@ -476,487 +456,31 @@ fn aligned(pc: u64) -> Result<(), EncodeError> {
 type Encoded = (u32, Option<Branch>);
 
 impl Code {
-    pub(super) fn encode(self, suffix: u8, operands: &[O], pc: u64) -> Result<u32, EncodeError> {
+    pub(crate) fn encode(self, operands: &[O], pc: u64) -> Result<u32, EncodeError> {
         aligned(pc)?;
-        let (word, branch) = self.lower(suffix, operands)?;
+        let (word, branch) = self.lower(operands)?;
         Ok(word | branch.map_or(Ok(0), |branch| branch.field(pc))?)
     }
 
-    pub const fn required_feature(self) -> Option<Feature> {
-        use Code::*;
-        match self {
-            Pnext_p_p_p | Orr_p_p_pp | Lastb_r_p_z | Cpy_z_p_r => Some(Feature::Sve),
-            Fcvtxn_s_d => Some(Feature::Neon),
-            And_z_zi | Trn1_z_zz => Some(Feature::Sve),
-            Umov_lane | Ins_lane => Some(Feature::Neon),
-            Sdiv_z_p_zz | Udiv_z_p_zz | Mls_z_p_zz | Cmpeq_minus1_p_p_z | Brkb_p_p_p
-            | Ptest_p_p | Whilelo_p_x_x | Cntp_x_p_p | Ld1b_z_p_bz_sxtw | Ld1h_z_p_bz_sxtw
-            | St1b_z_p_bz_sxtw | St1h_z_p_bz_sxtw | St1w_z_p_bz_sxtw | St1d_z_p_bz_lsl => {
-                Some(Feature::Sve)
-            }
-            Trn2_asimd | Uzp1_asimd => Some(Feature::Neon),
-            Pfalse_p | Trn1_p_pp | Trn2_z_zz | Dup_q0_z | Ucvtf_half_z_p_z => Some(Feature::Sve),
-            Sminv_asimd | Smaxv_asimd | Uminv_asimd | Umaxv_asimd | Dup_s_lane_asimd
-            | Faddp_d_asimd => Some(Feature::Neon),
-            Sminv_v_p_z | Smaxv_v_p_z | Uminv_v_p_z | Umaxv_v_p_z | Andv_v_p_z | Orv_v_p_z
-            | Eorv_v_p_z | Fadda_scalar_p_z | Bic_p_p_pp => Some(Feature::Sve),
-            Sxtl_asimd | Sxtl2_asimd | Uxtl_asimd | Uxtl2_asimd | Xtn_asimd | Xtn2_asimd
-            | Fcvtl_asimd | Fcvtl2_asimd | Fcvtn_asimd | Fcvtn2_asimd => Some(Feature::Neon),
-            Sunpklo_z | Uunpklo_z | Zip1_z_zz | Uzp1_z_zz | Fcvt_z_d_p_s | Fcvt_z_s_p_d => {
-                Some(Feature::Sve)
-            }
-            Shl_asimd_imm | Sshr_asimd_imm | Ushr_asimd_imm | Tbl_asimd | Tbl2_asimd
-            | Tbx_asimd | Ext_asimd => Some(Feature::Neon),
-            Ext_z_zzi | Splice_z_p_zz | Cpy_one_z_p => Some(Feature::Sve),
-            Lsl_z_zi | Lsr_z_zi | Asr_z_zi | Tbl_z_zz | Sub_z_zi | Cmphi_p_p_zi | Cmpls_p_p_zi
-            | Cpy_zero_z_p => Some(Feature::Sve),
-            Histcnt_z_p_zz => Some(Feature::Sve2),
-            Smin_asimd | Smax_asimd | Umin_asimd | Umax_asimd | Sqadd_asimd | Uqadd_asimd
-            | Sqsub_asimd | Uqsub_asimd | Sshl_asimd | Ushl_asimd | Bit_asimd | Bif_asimd
-            | Movi_asimd => Some(Feature::Neon),
-            Dupm_z | Smin_z_p_zz | Smax_z_p_zz | Umin_z_p_zz | Umax_z_p_zz | Sqadd_z_zz
-            | Uqadd_z_zz | Sqsub_z_zz | Uqsub_z_zz | Lsl_z_p_zz | Lsr_z_p_zz | Asr_z_p_zz => {
-                Some(Feature::Sve)
-            }
-            Fneg_asimd | Fabs_asimd | Fsqrt_asimd | Frintm_asimd | Frintp_asimd | Frintz_asimd
-            | Frinta_asimd | Frintn_asimd | Cnt_asimd | Neg_asimd | Abs_asimd | Clz_asimd
-            | Rbit_asimd | Rev16_asimd | Rev32_asimd | Uaddlp_asimd | Mov_x_v_d1
-            | Fmov_imm_asimd => Some(Feature::Neon),
-            Fneg_z_p_z | Fabs_z_p_z | Fsqrt_z_p_z | Frintm_z_p_z | Frintp_z_p_z | Frintz_z_p_z
-            | Frinta_z_p_z | Frintn_z_p_z | Not_z_p_z | Neg_z_p_z | Abs_z_p_z | Clz_z_p_z
-            | Rbit_z_p_z | Cnt_z_p_z | Fmov_imm_z => Some(Feature::Sve),
-            Fmla_asimd => Some(Feature::Neon),
-            Fmla_z_p_zz | Compact_z_p_z => Some(Feature::Sve),
-            Scvtf_asimd | Ucvtf_asimd | Fcvtzs_asimd | Fcvtzu_asimd => Some(Feature::Neon),
-            Scvtf_z_p_z | Ucvtf_z_p_z | Fcvtzs_z_p_z | Fcvtzu_z_p_z => Some(Feature::Sve),
-            Bsl_asimdsame | Bic_asimdsame | Sshr_sign_asimdshf | Addv_asimd | Addp_d_asimd => {
-                Some(Feature::Neon)
-            }
-            Bic_z_zz_ | Uaddv_d_p_z => Some(Feature::Sve),
-            Cmeq_asimdsame | Cmgt_asimdsame | Cmge_asimdsame | Cmhi_asimdsame | Cmhs_asimdsame
-            | Fcmeq_asimdsame | Fcmgt_asimdsame | Fcmge_asimdsame | Mvn_asimdmisc
-            | Cmeq0_asimdmisc | Umaxv_b | Umov_w_b0 => Some(Feature::Neon),
-            Cmpeq_p_p_zi0 | Cmpne_p_p_zi0 | Cmpeq_p_p_zz | Cmpne_p_p_zz | Cmpgt_p_p_zz
-            | Cmpge_p_p_zz | Cmphi_p_p_zz | Cmphs_p_p_zz | Fcmeq_p_p_zz | Fcmne_p_p_zz
-            | Fcmgt_p_p_zz | Fcmge_p_p_zz | Fcmuo_p_p_zz | Cpy_minus1_z_p | Index_0_1_z => {
-                Some(Feature::Sve)
-            }
-            Ptrue_p_s_ | Add_z_zz_ | Sub_z_zz_ | Mul_z_p_zz_ | And_z_zz_ | Orr_z_zz_
-            | Eor_z_zz_ | Ld1b_z_p_bi_u8 | Ld1h_z_p_bi_u16 | Ld1w_z_p_bi_u32 | Ld1d_z_p_bi_u64
-            | St1b_z_p_bi_ | St1h_z_p_bi_ | St1w_z_p_bi_ | St1d_z_p_bi_ | Fadd_z_zz_
-            | Fsub_z_zz_ | Fmul_z_zz_ | Fdiv_z_p_zz_ | Fdivr_z_p_zz_ | Dup_z_r | Cmplt_p_p_zi0
-            | Sel_z_p_zz | Ld1w_z_p_bz_sxtw | Ld1d_z_p_bz_lsl => Some(Feature::Sve),
-            Eor3_z_zzz_ | Bsl_z_zzz_ | Mul_z_zz_ => Some(Feature::Sve2),
-            Add_asimdsame_only | Sub_asimdsame_only | Mul_asimdsame_only | And_asimdsame_only
-            | Orr_asimdsame_only | Eor_asimdsame_only | Saddl_asimddiff_L | Ldr_q_ldst_pos
-            | Str_q_ldst_pos | Mov_v_d1_x | Fadd_asimdsame | Fsub_asimdsame | Fmul_asimdsame
-            | Fdiv_asimdsame | Dup_asimdgen => Some(Feature::Neon),
+    /// The register the instruction writes, if it writes one.
+    pub(super) fn written(self, operands: &[O]) -> Option<super::Register> {
+        if !self.row().2.writes_first() {
+            return None;
+        }
+        match operands.first()? {
+            O::Register(r) | O::Vector(r, _) => Some(*r),
             _ => None,
         }
     }
 
-    pub fn is_available(self, features: FeatureSet) -> bool {
+    pub(crate) fn is_available(self, features: FeatureSet) -> bool {
         self.required_feature().is_none_or(|f| features.contains(f))
     }
 
-    fn lower(self, suffix: u8, operands: &[O]) -> Result<Encoded, EncodeError> {
-        use Code::*;
-        if suffix > u8::from(self == Saddl_asimddiff_L) {
-            return Err(EncodeError::Suffix(suffix));
-        }
-        let (base, wide, form) = match self {
-            Pnext_p_p_p => (0x2519c400, false, Form::PredNext),
-            Orr_p_p_pp => (0x25804000, false, Form::SvePredBits),
-            Lastb_r_p_z => (0x0521a000, false, Form::SveGprLane(false)),
-            Cpy_z_p_r => (0x0528a000, false, Form::SveGprLane(true)),
-            Fcvt_d_h => (0x1ee2c000, false, Form::ArrangedPair(A::D, A::H)),
-            Fcvt_h_d => (0x1e63c000, false, Form::ArrangedPair(A::H, A::D)),
-            Fcvtxn_s_d => (0x7e616800, false, Form::ArrangedPair(A::S, A::D)),
-            Fminnm_scalar => (0x1e207800, false, Form::FloatScalar),
-            Fmaxnm_scalar => (0x1e206800, false, Form::FloatScalar),
-            And_32_log_imm => (0x12000000, false, Form::LogicalImmediate),
-            And_64_log_imm => (0x12000000, true, Form::LogicalImmediate),
-            Adcs_64 => (0xba000000, true, Form::Three),
-            Sbcs_64 => (0xfa000000, true, Form::Three),
-            Umulh_64 => (0x9bc07c00, true, Form::Three),
-            And_z_zi => (0x05800000, false, Form::SveDupMask),
-            Trn1_z_zz => (0x05207000, false, Form::SveArithmetic),
-            Sdiv_z_p_zz => (0x04140000, false, Form::SveDestructiveWide),
-            Udiv_z_p_zz => (0x04150000, false, Form::SveDestructiveWide),
-            Mls_z_p_zz => (0x04006000, false, Form::SveMultiplyAccumulate),
-            Cmpeq_minus1_p_p_z => (0x251f8000, false, Form::SveCompareZero),
-            Brkb_p_p_p => (0x25904000, false, Form::PredBreak),
-            Ptest_p_p => (0x2550c000, false, Form::PredTest),
-            Whilelo_p_x_x => (0x25201c00, false, Form::PredWhile),
-            Cntp_x_p_p => (0x25208000, false, Form::PredCount),
-            Umov_lane => (0x0e003c00, false, Form::NeonGprLane(false)),
-            Ins_lane => (0x4e001c00, false, Form::NeonGprLane(true)),
-            Ld1b_z_p_bz_sxtw => (0x84404000, false, Form::SveIndexed(A::S, PredQual::Zero)),
-            Ld1h_z_p_bz_sxtw => (0x84e04000, false, Form::SveIndexed(A::S, PredQual::Zero)),
-            St1b_z_p_bz_sxtw => (0xe440c000, false, Form::SveIndexed(A::S, PredQual::None)),
-            St1h_z_p_bz_sxtw => (0xe4e0c000, false, Form::SveIndexed(A::S, PredQual::None)),
-            St1w_z_p_bz_sxtw => (0xe560c000, false, Form::SveIndexed(A::S, PredQual::None)),
-            St1d_z_p_bz_lsl => (0xe5a0a000, false, Form::SveIndexed(A::D, PredQual::None)),
-            Adc_64 => (0x1a000000, true, Form::Three),
-            Sbc_64 => (0x5a000000, true, Form::Three),
-            Pfalse_p => (0x2518e400, false, Form::PredFalse),
-            Trn1_p_pp => (0x05205000, false, Form::PredPermute),
-            Trn2_z_zz => (0x05207400, false, Form::SveArithmetic),
-            Trn2_asimd => (0x0e006800, false, Form::Neon(false)),
-            Dup_q0_z => (0x05302000, false, Form::RegPair(Bank::Z, Bank::Z)),
-            Ucvtf_half_z_p_z => (0x6553a000, false, Form::SveFloatWidth(A::H, A::H)),
-            Sminv_asimd => (0x4e31a800, false, Form::NeonSum(false)),
-            Smaxv_asimd => (0x4e30a800, false, Form::NeonSum(false)),
-            Uminv_asimd => (0x6e31a800, false, Form::NeonSum(false)),
-            Umaxv_asimd => (0x6e30a800, false, Form::NeonSum(false)),
-            Sminv_v_p_z => (0x040a2000, false, Form::SveSum),
-            Smaxv_v_p_z => (0x04082000, false, Form::SveSum),
-            Uminv_v_p_z => (0x040b2000, false, Form::SveSum),
-            Umaxv_v_p_z => (0x04092000, false, Form::SveSum),
-            Andv_v_p_z => (0x041a2000, false, Form::SveSum),
-            Orv_v_p_z => (0x04182000, false, Form::SveSum),
-            Eorv_v_p_z => (0x04192000, false, Form::SveSum),
-            Fadda_scalar_p_z => (0x65182000, false, Form::SveFadda),
-            Bic_p_p_pp => (0x25004010, false, Form::SvePredBits),
-            Fmov_scalar => (0x1e204000, false, Form::FloatScalarUnary),
-            Dup_s_lane_asimd => (0x5e040400, false, Form::NeonSingle),
-            Faddp_d_asimd => (0x7e70d800, false, Form::ArrangedPair(A::D, A::D2)),
-            Sxtl_asimd => (0x0f00a400, false, Form::NeonExtend(false)),
-            Sxtl2_asimd => (0x4f00a400, false, Form::NeonExtend(true)),
-            Uxtl_asimd => (0x2f00a400, false, Form::NeonExtend(false)),
-            Uxtl2_asimd => (0x6f00a400, false, Form::NeonExtend(true)),
-            Xtn_asimd => (0x0e212800, false, Form::NeonNarrow(false)),
-            Xtn2_asimd => (0x4e212800, false, Form::NeonNarrow(true)),
-            Fcvtl_asimd => (0x0e617800, false, Form::ArrangedPair(A::D2, A::S2)),
-            Fcvtl2_asimd => (0x4e617800, false, Form::ArrangedPair(A::D2, A::S4)),
-            Fcvtn_asimd => (0x0e616800, false, Form::ArrangedPair(A::S2, A::D2)),
-            Fcvtn2_asimd => (0x4e616800, false, Form::ArrangedPair(A::S4, A::D2)),
-            Sunpklo_z => (0x05303800, false, Form::SveExtend),
-            Uunpklo_z => (0x05323800, false, Form::SveExtend),
-            Zip1_z_zz => (0x05206000, false, Form::SveArithmetic),
-            Uzp1_z_zz => (0x05206800, false, Form::SveArithmetic),
-            Uzp1_asimd => (0x0e001800, false, Form::Neon(false)),
-            Fcvt_z_d_p_s => (0x65cba000, false, Form::SveFloatWidth(A::D, A::S)),
-            Fcvt_z_s_p_d => (0x65caa000, false, Form::SveFloatWidth(A::S, A::D)),
-            Shl_asimd_imm => (
-                0x4f005400,
-                false,
-                Form::VectorShiftImmediate {
-                    sve: false,
-                    left: true,
-                },
-            ),
-            Sshr_asimd_imm => (
-                0x4f000400,
-                false,
-                Form::VectorShiftImmediate {
-                    sve: false,
-                    left: false,
-                },
-            ),
-            Ushr_asimd_imm => (
-                0x6f000400,
-                false,
-                Form::VectorShiftImmediate {
-                    sve: false,
-                    left: false,
-                },
-            ),
-            Lsl_z_zi => (
-                0x04209c00,
-                false,
-                Form::VectorShiftImmediate {
-                    sve: true,
-                    left: true,
-                },
-            ),
-            Lsr_z_zi => (
-                0x04209400,
-                false,
-                Form::VectorShiftImmediate {
-                    sve: true,
-                    left: false,
-                },
-            ),
-            Asr_z_zi => (
-                0x04209000,
-                false,
-                Form::VectorShiftImmediate {
-                    sve: true,
-                    left: false,
-                },
-            ),
-            Tbl_z_zz => (0x05203000, false, Form::SveArithmetic),
-            Sub_z_zi => (0x2521c000, false, Form::SveSubImmediate),
-            Cmphi_p_p_zi => (0x24200010, false, Form::SveUnsignedCompareImmediate),
-            Cmpls_p_p_zi => (0x24202010, false, Form::SveUnsignedCompareImmediate),
-            Cpy_zero_z_p => (0x05104000, false, Form::SveMaskZero),
-            Histcnt_z_p_zz => (0x45a0c000, false, Form::SveHistcnt),
-            Tbl_asimd => (0x0e000000, false, Form::NeonTable),
-            Tbl2_asimd => (0x0e002000, false, Form::NeonTable),
-            Tbx_asimd => (0x0e001000, false, Form::NeonTable),
-            Ext_asimd => (0x6e000000, false, Form::NeonExt),
-            Ext_z_zzi => (0x05200000, false, Form::SveExt),
-            Splice_z_p_zz => (0x052c8000, false, Form::SveSplice),
-            Cpy_one_z_p => (0x05100020, false, Form::SveMaskValue),
-            Smin_asimd => (0x0e206c00, false, Form::Neon(true)),
-            Smax_asimd => (0x0e206400, false, Form::Neon(true)),
-            Umin_asimd => (0x2e206c00, false, Form::Neon(true)),
-            Umax_asimd => (0x2e206400, false, Form::Neon(true)),
-            Sqadd_asimd => (0x0e200c00, false, Form::Neon(false)),
-            Uqadd_asimd => (0x2e200c00, false, Form::Neon(false)),
-            Sqsub_asimd => (0x0e202c00, false, Form::Neon(false)),
-            Uqsub_asimd => (0x2e202c00, false, Form::Neon(false)),
-            Sshl_asimd => (0x0e204400, false, Form::Neon(false)),
-            Ushl_asimd => (0x2e204400, false, Form::Neon(false)),
-            Bit_asimd => (0x2ea01c00, false, Form::NeonBits),
-            Bif_asimd => (0x2ee01c00, false, Form::NeonBits),
-            Movi_asimd => (0x4f000400, false, Form::NeonIntImmediate),
-            Dupm_z => (0x05c00000, false, Form::SveDupMask),
-            Smin_z_p_zz => (0x040a0000, false, Form::SveDestructive),
-            Smax_z_p_zz => (0x04080000, false, Form::SveDestructive),
-            Umin_z_p_zz => (0x040b0000, false, Form::SveDestructive),
-            Umax_z_p_zz => (0x04090000, false, Form::SveDestructive),
-            Sqadd_z_zz => (0x04201000, false, Form::SveArithmetic),
-            Uqadd_z_zz => (0x04201400, false, Form::SveArithmetic),
-            Sqsub_z_zz => (0x04201800, false, Form::SveArithmetic),
-            Uqsub_z_zz => (0x04201c00, false, Form::SveArithmetic),
-            Lsl_z_p_zz => (0x04138000, false, Form::SveDestructive),
-            Lsr_z_p_zz => (0x04118000, false, Form::SveDestructive),
-            Asr_z_p_zz => (0x04108000, false, Form::SveDestructive),
-            Fneg_scalar => (0x1e214000, false, Form::FloatScalarUnary),
-            Fabs_scalar => (0x1e20c000, false, Form::FloatScalarUnary),
-            Fsqrt_scalar => (0x1e21c000, false, Form::FloatScalarUnary),
-            Frintm_scalar => (0x1e254000, false, Form::FloatScalarUnary),
-            Frintp_scalar => (0x1e24c000, false, Form::FloatScalarUnary),
-            Frintz_scalar => (0x1e25c000, false, Form::FloatScalarUnary),
-            Frinta_scalar => (0x1e264000, false, Form::FloatScalarUnary),
-            Frintn_scalar => (0x1e244000, false, Form::FloatScalarUnary),
-            Fneg_asimd => (0x2ea0f800, false, Form::FloatNeonUnary),
-            Fabs_asimd => (0x0ea0f800, false, Form::FloatNeonUnary),
-            Fsqrt_asimd => (0x2ea1f800, false, Form::FloatNeonUnary),
-            Frintm_asimd => (0x0e219800, false, Form::FloatNeonUnary),
-            Frintp_asimd => (0x0ea18800, false, Form::FloatNeonUnary),
-            Frintz_asimd => (0x0ea19800, false, Form::FloatNeonUnary),
-            Frinta_asimd => (0x2e218800, false, Form::FloatNeonUnary),
-            Frintn_asimd => (0x0e218800, false, Form::FloatNeonUnary),
-            Fneg_z_p_z => (0x041da000, false, Form::SveUnary(1)),
-            Fabs_z_p_z => (0x041ca000, false, Form::SveUnary(1)),
-            Fsqrt_z_p_z => (0x650da000, false, Form::SveUnary(1)),
-            Frintm_z_p_z => (0x6502a000, false, Form::SveUnary(1)),
-            Frintp_z_p_z => (0x6501a000, false, Form::SveUnary(1)),
-            Frintz_z_p_z => (0x6503a000, false, Form::SveUnary(1)),
-            Frinta_z_p_z => (0x6504a000, false, Form::SveUnary(1)),
-            Frintn_z_p_z => (0x6500a000, false, Form::SveUnary(1)),
-            Not_z_p_z => (0x041ea000, false, Form::SveUnary(0)),
-            Neg_z_p_z => (0x0417a000, false, Form::SveUnary(0)),
-            Abs_z_p_z => (0x0416a000, false, Form::SveUnary(0)),
-            Clz_z_p_z => (0x0419a000, false, Form::SveUnary(0)),
-            Rbit_z_p_z => (0x05278000, false, Form::SveUnary(0)),
-            Cnt_z_p_z => (0x041aa000, false, Form::SveUnary(0)),
-            Orn_32_log_shift => (0x2a200000, false, Form::Shift(true)),
-            Orn_64_log_shift => (0x2a200000, true, Form::Shift(true)),
-            Orr_32_log_imm => (0x32000000, false, Form::LogicalImmediate),
-            Orr_64_log_imm => (0x32000000, true, Form::LogicalImmediate),
-            Eor_32_log_imm => (0x52000000, false, Form::LogicalImmediate),
-            Clz_32 => (0x5ac01000, false, Form::RegPair(Bank::W, Bank::W)),
-            Clz_64 => (0xdac01000, false, Form::RegPair(Bank::X, Bank::X)),
-            Rbit_32 => (0x5ac00000, false, Form::RegPair(Bank::W, Bank::W)),
-            Rbit_64 => (0xdac00000, false, Form::RegPair(Bank::X, Bank::X)),
-            Csneg_32_condsel => (0x5a800400, false, Form::Select),
-            Csneg_64_condsel => (0x5a800400, true, Form::Select),
-            Cnt_asimd => (0x4e205800, false, Form::NeonUnary(0)),
-            Neg_asimd => (0x6e20b800, false, Form::NeonUnary(3)),
-            Abs_asimd => (0x4e20b800, false, Form::NeonUnary(3)),
-            Clz_asimd => (0x6e204800, false, Form::NeonUnary(2)),
-            Rbit_asimd => (0x6e605800, false, Form::NeonUnary(0)),
-            Rev16_asimd => (0x4e201800, false, Form::NeonUnary(0)),
-            Rev32_asimd => (0x6e200800, false, Form::NeonUnary(0)),
-            Uaddlp_asimd => (0x6e202800, false, Form::NeonPairwiseLong),
-            Mov_x_v_d1 => (0x4e183c00, false, Form::RegPair(Bank::X, Bank::V)),
-            Fmov_imm_scalar => (0x1e201000, false, Form::FloatImmediate),
-            Fmov_imm_asimd => (0x4f00f400, false, Form::FloatNeonImmediate),
-            Fmov_imm_z => (0x2539c000, false, Form::SveFloatImmediate),
-            Fmadd_scalar => (0x1f000000, false, Form::FloatFma),
-            Fmla_asimd => (0x0e20cc00, false, Form::FloatNeon),
-            Fmla_z_p_zz => (0x65200000, false, Form::SveFma),
-            Compact_z_p_z => (0x05218000, false, Form::SveCompact),
-            Fcvt_s_d => (0x1e624000, false, Form::RegPair(Bank::V, Bank::V)),
-            Fcvt_d_s => (0x1e22c000, false, Form::RegPair(Bank::V, Bank::V)),
-            Scvtf_scalar => (0x1e220000, false, Form::FloatInt(true)),
-            Ucvtf_scalar => (0x1e230000, false, Form::FloatInt(true)),
-            Fcvtzs_scalar => (0x1e380000, false, Form::FloatInt(false)),
-            Fcvtzu_scalar => (0x1e390000, false, Form::FloatInt(false)),
-            Scvtf_asimd => (0x0e21d800, false, Form::FloatNeonUnary),
-            Ucvtf_asimd => (0x2e21d800, false, Form::FloatNeonUnary),
-            Fcvtzs_asimd => (0x0ea1b800, false, Form::FloatNeonUnary),
-            Fcvtzu_asimd => (0x2ea1b800, false, Form::FloatNeonUnary),
-            Scvtf_z_p_z => (0x6594a000, false, Form::SveConvert),
-            Ucvtf_z_p_z => (0x6595a000, false, Form::SveConvert),
-            Fcvtzs_z_p_z => (0x659ca000, false, Form::SveConvert),
-            Fcvtzu_z_p_z => (0x659da000, false, Form::SveConvert),
-            Bsl_asimdsame => (0x2e601c00, false, Form::NeonBits),
-            Bic_asimdsame => (0x0e601c00, false, Form::NeonBits),
-            Sshr_sign_asimdshf => (0x4f000400, false, Form::NeonSign),
-            Bic_z_zz_ => (0x04e03000, false, Form::SveBits),
-            Fcsel_scalar => (0x1e200c00, false, Form::FloatSelect),
-            Addv_asimd => (0x4e31b800, false, Form::NeonSum(false)),
-            Addp_d_asimd => (0x5ef1b800, false, Form::NeonSum(true)),
-            Uaddv_d_p_z => (0x04012000, false, Form::SveSum),
-            Fcmp_scalar => (0x1e202000, false, Form::FloatCompare),
-            Cmeq_asimdsame => (0x2e208c00, false, Form::Neon(false)),
-            Cmgt_asimdsame => (0x0e203400, false, Form::Neon(false)),
-            Cmge_asimdsame => (0x0e203c00, false, Form::Neon(false)),
-            Cmhi_asimdsame => (0x2e203400, false, Form::Neon(false)),
-            Cmhs_asimdsame => (0x2e203c00, false, Form::Neon(false)),
-            Fcmeq_asimdsame => (0x0e20e400, false, Form::FloatNeon),
-            Fcmgt_asimdsame => (0x2ea0e400, false, Form::FloatNeon),
-            Fcmge_asimdsame => (0x2e20e400, false, Form::FloatNeon),
-            Mvn_asimdmisc => (0x6e205800, false, Form::NeonUnary(0)),
-            Cmeq0_asimdmisc => (0x4e209800, false, Form::NeonUnary(3)),
-            Umaxv_b => (0x6e30a800, false, Form::RegPair(Bank::V, Bank::V)),
-            Umov_w_b0 => (0x0e013c00, false, Form::RegPair(Bank::W, Bank::V)),
-            Cmpeq_p_p_zi0 => (0x25008000, false, Form::SveCompareZero),
-            Cmpne_p_p_zi0 => (0x25008010, false, Form::SveCompareZero),
-            Cmpeq_p_p_zz => (0x2400a000, false, Form::SveCompare(false)),
-            Cmpne_p_p_zz => (0x2400a010, false, Form::SveCompare(false)),
-            Cmpgt_p_p_zz => (0x24008010, false, Form::SveCompare(false)),
-            Cmpge_p_p_zz => (0x24008000, false, Form::SveCompare(false)),
-            Cmphi_p_p_zz => (0x24000010, false, Form::SveCompare(false)),
-            Cmphs_p_p_zz => (0x24000000, false, Form::SveCompare(false)),
-            Fcmeq_p_p_zz => (0x65006000, false, Form::SveCompare(true)),
-            Fcmne_p_p_zz => (0x65006010, false, Form::SveCompare(true)),
-            Fcmuo_p_p_zz => (0x6500c000, false, Form::SveCompare(true)),
-            Fcmgt_p_p_zz => (0x65004010, false, Form::SveCompare(true)),
-            Fcmge_p_p_zz => (0x65004000, false, Form::SveCompare(true)),
-            Cpy_minus1_z_p => (0x05101fe0, false, Form::SveMaskValue),
-            Index_0_1_z => (0x04214000, false, Form::SveIndex),
-            Add_32_addsub_imm => (0x11000000, false, Form::AddImm(false)),
-            Add_64_addsub_imm => (0x11000000, true, Form::AddImm(false)),
-            Sub_32_addsub_imm => (0x51000000, false, Form::AddImm(false)),
-            Sub_64_addsub_imm => (0x51000000, true, Form::AddImm(false)),
-            Adds_32_addsub_imm => (0x31000000, false, Form::AddImm(true)),
-            Adds_64_addsub_imm => (0x31000000, true, Form::AddImm(true)),
-            Subs_32_addsub_imm => (0x71000000, false, Form::AddImm(true)),
-            Subs_64_addsub_imm => (0x71000000, true, Form::AddImm(true)),
-            Add_32_addsub_shift => (0x0b000000, false, Form::Shift(false)),
-            Add_64_addsub_shift => (0x0b000000, true, Form::Shift(false)),
-            Adds_64_addsub_shift => (0x2b000000, true, Form::Shift(false)),
-            Sub_32_addsub_shift => (0x4b000000, false, Form::Shift(false)),
-            Sub_64_addsub_shift => (0x4b000000, true, Form::Shift(false)),
-            Subs_32_addsub_shift => (0x6b000000, false, Form::Shift(false)),
-            Subs_64_addsub_shift => (0x6b000000, true, Form::Shift(false)),
-            And_32_log_shift => (0x0a000000, false, Form::Shift(true)),
-            And_64_log_shift => (0x0a000000, true, Form::Shift(true)),
-            Orr_32_log_shift => (0x2a000000, false, Form::Shift(true)),
-            Orr_64_log_shift => (0x2a000000, true, Form::Shift(true)),
-            Eor_32_log_shift => (0x4a000000, false, Form::Shift(true)),
-            Eor_64_log_shift => (0x4a000000, true, Form::Shift(true)),
-            Madd_32a_dp_3src => (0x1b000000, false, Form::Multiply),
-            Madd_64a_dp_3src => (0x1b000000, true, Form::Multiply),
-            Msub_32a_dp_3src => (0x1b008000, false, Form::Multiply),
-            Msub_64a_dp_3src => (0x1b008000, true, Form::Multiply),
-            Sdiv_32_dp_2src => (0x1ac00c00, false, Form::Three),
-            Sdiv_64_dp_2src => (0x1ac00c00, true, Form::Three),
-            Udiv_32_dp_2src => (0x1ac00800, false, Form::Three),
-            Udiv_64_dp_2src => (0x1ac00800, true, Form::Three),
-            Movz_32_movewide => (0x52800000, false, Form::Move),
-            Movz_64_movewide => (0x52800000, true, Form::Move),
-            Movk_32_movewide => (0x72800000, false, Form::Move),
-            Movk_64_movewide => (0x72800000, true, Form::Move),
-            Fmov_s_w => (0x1e270000, false, Form::RegPair(Bank::V, Bank::W)),
-            Fmov_w_s => (0x1e260000, false, Form::RegPair(Bank::W, Bank::V)),
-            Fmov_d_x => (0x9e670000, false, Form::RegPair(Bank::V, Bank::X)),
-            Fmov_x_d => (0x9e660000, false, Form::RegPair(Bank::X, Bank::V)),
-            Fadd_scalar => (0x1e202800, false, Form::FloatScalar),
-            Fsub_scalar => (0x1e203800, false, Form::FloatScalar),
-            Fmul_scalar => (0x1e200800, false, Form::FloatScalar),
-            Fdiv_scalar => (0x1e201800, false, Form::FloatScalar),
-            Mov_v_d1_x => (0x4e181c00, false, Form::RegPair(Bank::V, Bank::X)),
-            Sbfm_32m_bitfield => (0x13000000, false, Form::Bitfield),
-            Sbfm_64m_bitfield => (0x13400000, true, Form::Bitfield),
-            Ubfm_32m_bitfield => (0x53000000, false, Form::Bitfield),
-            Ubfm_64m_bitfield => (0x53400000, true, Form::Bitfield),
-            Add_64_addsub_sxtw => (0x8b20c000, false, Form::ExtendedAdd),
-            Lslv_32_dp_2src => (0x1ac02000, false, Form::Three),
-            Lslv_64_dp_2src => (0x1ac02000, true, Form::Three),
-            Rorv_32_dp_2src => (0x1ac02c00, false, Form::Three),
-            Rorv_64_dp_2src => (0x1ac02c00, true, Form::Three),
-            Asrv_32_dp_2src => (0x1ac02800, false, Form::Three),
-            Asrv_64_dp_2src => (0x1ac02800, true, Form::Three),
-            Lsrv_32_dp_2src => (0x1ac02400, false, Form::Three),
-            Lsrv_64_dp_2src => (0x1ac02400, true, Form::Three),
-            Csel_32_condsel => (0x1a800000, false, Form::Select),
-            Csel_64_condsel => (0x1a800000, true, Form::Select),
-            Csinv_32_condsel => (0x5a800000, false, Form::Select),
-            Ldr_32_ldst_pos => (0xb9400000, false, Form::Memory(4)),
-            Ldr_64_ldst_pos => (0x79400000, true, Form::Memory(8)),
-            Str_32_ldst_pos => (0xb9000000, false, Form::Memory(4)),
-            Str_64_ldst_pos => (0x79000000, true, Form::Memory(8)),
-            Ldrb_32_ldst_pos => (0x39400000, false, Form::Memory(1)),
-            Strb_32_ldst_pos => (0x39000000, false, Form::Memory(1)),
-            Ldrh_32_ldst_pos => (0x79400000, false, Form::Memory(2)),
-            Strh_32_ldst_pos => (0x79000000, false, Form::Memory(2)),
-            Ldr_q_ldst_pos => (0x3dc00000, false, Form::Memory(16)),
-            Str_q_ldst_pos => (0x3d800000, false, Form::Memory(16)),
-            Ldr_s_ldst_pos => (0xbd400000, false, Form::FloatMemory(4)),
-            Str_s_ldst_pos => (0xbd000000, false, Form::FloatMemory(4)),
-            Ldr_d_ldst_pos => (0xfd400000, false, Form::FloatMemory(8)),
-            Str_d_ldst_pos => (0xfd000000, false, Form::FloatMemory(8)),
-            Nop_HI_hints => (0xd503201f, false, Form::None),
-            B_only_branch_imm => (0x14000000, false, Form::Branch(BranchKind::Direct)),
-            Bl_only_branch_imm => (0x94000000, false, Form::Branch(BranchKind::Direct)),
-            B_only_condbranch => (0x54000000, false, Form::Branch(BranchKind::Condition)),
-            Cbz_32_compbranch => (0x34000000, false, Form::Branch(BranchKind::Compare)),
-            Cbz_64_compbranch => (0x34000000, true, Form::Branch(BranchKind::Compare)),
-            Cbnz_32_compbranch => (0x35000000, false, Form::Branch(BranchKind::Compare)),
-            Cbnz_64_compbranch => (0x35000000, true, Form::Branch(BranchKind::Compare)),
-            Br_64_branch_reg => (0xd61f0000, false, Form::Indirect),
-            Blr_64_branch_reg => (0xd63f0000, false, Form::Indirect),
-            Ret_64r_branch_reg => (0xd65f0000, false, Form::Indirect),
-            Add_asimdsame_only => (0x0e208400, false, Form::Neon(false)),
-            Sub_asimdsame_only => (0x2e208400, false, Form::Neon(false)),
-            Mul_asimdsame_only => (0x0e209c00, false, Form::Neon(true)),
-            And_asimdsame_only => (0x0e201c00, false, Form::NeonBits),
-            Orr_asimdsame_only => (0x0ea01c00, false, Form::NeonBits),
-            Eor_asimdsame_only => (0x2e201c00, false, Form::NeonBits),
-            Fadd_asimdsame => (0x0e20d400, false, Form::FloatNeon),
-            Fsub_asimdsame => (0x0ea0d400, false, Form::FloatNeon),
-            Fmul_asimdsame => (0x2e20dc00, false, Form::FloatNeon),
-            Fdiv_asimdsame => (0x2e20fc00, false, Form::FloatNeon),
-            Dup_asimdgen => (0x4e000c00, false, Form::Dup(false)),
-            Saddl_asimddiff_L => (0x0e200000, false, Form::Widen(suffix)),
-            Ptrue_p_s_ => (0x2518e000, false, Form::Ptrue),
-            Add_z_zz_ => (0x04200000, false, Form::SveArithmetic),
-            Sub_z_zz_ => (0x04200400, false, Form::SveArithmetic),
-            Mul_z_zz_ => (0x04206000, false, Form::SveArithmetic),
-            Mul_z_p_zz_ => (0x04100000, false, Form::SveDestructive),
-            Fadd_z_zz_ => (0x65000000, false, Form::SveArithmetic),
-            Fsub_z_zz_ => (0x65000400, false, Form::SveArithmetic),
-            Fmul_z_zz_ => (0x65000800, false, Form::SveArithmetic),
-            Fdiv_z_p_zz_ => (0x650d8000, false, Form::SveDestructive),
-            Fdivr_z_p_zz_ => (0x650c8000, false, Form::SveDestructive),
-            Dup_z_r => (0x05203800, false, Form::Dup(true)),
-            Cmplt_p_p_zi0 => (0x25002000, false, Form::SveCompareZero),
-            Sel_z_p_zz => (0x0520c000, false, Form::SveSelect),
-            Ld1w_z_p_bz_sxtw => (0x85604000, false, Form::SveIndexed(A::S, PredQual::Zero)),
-            Ld1d_z_p_bz_lsl => (0xc5e0c000, false, Form::SveIndexed(A::D, PredQual::Zero)),
-            And_z_zz_ => (0x04203000, false, Form::SveBits),
-            Orr_z_zz_ => (0x04603000, false, Form::SveBits),
-            Eor_z_zz_ => (0x04a03000, false, Form::SveBits),
-            Ld1b_z_p_bi_u8 => (0xa400a000, false, Form::SveMemory(A::B, PredQual::Zero)),
-            Ld1h_z_p_bi_u16 => (0xa4a0a000, false, Form::SveMemory(A::H, PredQual::Zero)),
-            Ld1w_z_p_bi_u32 => (0xa540a000, false, Form::SveMemory(A::S, PredQual::Zero)),
-            Ld1d_z_p_bi_u64 => (0xa5e0a000, false, Form::SveMemory(A::D, PredQual::Zero)),
-            St1b_z_p_bi_ => (0xe400e000, false, Form::SveMemory(A::B, PredQual::None)),
-            St1h_z_p_bi_ => (0xe4a0e000, false, Form::SveMemory(A::H, PredQual::None)),
-            St1w_z_p_bi_ => (0xe540e000, false, Form::SveMemory(A::S, PredQual::None)),
-            St1d_z_p_bi_ => (0xe5e0e000, false, Form::SveMemory(A::D, PredQual::None)),
-            Eor3_z_zzz_ => (0x04203800, false, Form::SveTiedTernary),
-            Bsl_z_zzz_ => (0x04203c00, false, Form::SveTiedTernary),
-        };
+    fn lower(self, operands: &[O]) -> Result<Encoded, EncodeError> {
+        let (base, wide, form) = self.row();
         let (fields, branch) = form.fields(operands, wide)?;
-        Ok((base | (u32::from(wide) << 31) | fields, branch))
+        Ok((base | fields, branch))
     }
 }
 
@@ -972,7 +496,10 @@ enum Form {
     AddImm(bool),
     Shift(bool),
     LogicalImmediate,
-    VectorShiftImmediate { sve: bool, left: bool },
+    VectorShiftImmediate {
+        sve: bool,
+        left: bool,
+    },
     Three,
     Multiply,
     Move,
@@ -989,7 +516,6 @@ enum Form {
     SveSubImmediate,
     SveUnsignedCompareImmediate,
     SveHistcnt,
-    SveMaskZero,
     FloatSelect,
     FloatFma,
     SveFma,
@@ -1005,7 +531,6 @@ enum Form {
     NeonPairwiseLong,
     NeonExtend(bool),
     NeonNarrow(bool),
-    NeonSign,
     NeonSum(bool),
     SveSum,
     SveFadda,
@@ -1013,22 +538,26 @@ enum Form {
     NeonSingle,
     FloatNeon,
     Dup(bool),
-    SveCompareZero,
+    SveCompareImmediate,
     SveCompare(bool),
-    SveMaskValue,
     SveIndex,
+    SveCopyImmediate,
+    SveDupLane,
     SveSelect,
     SveIndexed(A, PredQual),
     Bitfield,
     Select,
-    Memory(i64),
-    FloatMemory(i64),
+    /// A general or Q register and a scaled unsigned offset.
+    Load(i64),
+    Store(i64),
+    /// An S or D register and a scaled unsigned offset.
+    FloatLoad(i64),
+    FloatStore(i64),
     Branch(BranchKind),
     Indirect,
     Neon(bool),
     NeonBits,
     NeonTable,
-    Widen(u8),
     Ptrue,
     PredFalse,
     PredPermute,
@@ -1090,6 +619,17 @@ fn immediate(o: O, i: usize) -> Result<(u64, u8), EncodeError> {
     }
 }
 
+/// A two's complement immediate of `bits` bits, as its field value.
+fn signed(o: O, bits: u32, i: usize) -> Result<u32, EncodeError> {
+    let limit = 1i64 << (bits - 1);
+    match o {
+        O::Immediate(v) if (-limit..limit).contains(&(v as i64)) => {
+            Ok(v as u32 & ((1 << bits) - 1))
+        }
+        _ => Err(EncodeError::Operand(i)),
+    }
+}
+
 fn size(a: A) -> Option<u32> {
     match a {
         A::B => Some(0),
@@ -1134,19 +674,35 @@ fn logical_immediate(value: u64, width: u32) -> Option<u32> {
 }
 
 impl Form {
+    /// The first operand is a register the instruction writes. Stores,
+    /// comparisons into flags and branches only read their operands.
+    fn writes_first(&self) -> bool {
+        !matches!(
+            self,
+            Self::None
+                | Self::Indirect
+                | Self::Branch(_)
+                | Self::PredTest
+                | Self::FloatCompare
+                | Self::Store(_)
+                | Self::FloatStore(_)
+                | Self::SveIndexed(_, PredQual::None)
+                | Self::SveMemory(_, PredQual::None)
+        )
+    }
+
     fn fields(self, o: &[O], wide: bool) -> Result<Encoded, EncodeError> {
         let expected = match self {
             Self::None => 0,
-            Self::Indirect
-            | Self::Branch(BranchKind::Direct)
-            | Self::SveIndex
-            | Self::PredFalse => 1,
+            Self::Indirect | Self::Branch(BranchKind::Direct) | Self::PredFalse => 1,
             Self::Move
             | Self::RegPair(..)
             | Self::ArrangedPair(..)
             | Self::Dup(_)
-            | Self::Memory(_)
-            | Self::FloatMemory(_)
+            | Self::Load(_)
+            | Self::Store(_)
+            | Self::FloatLoad(_)
+            | Self::FloatStore(_)
             | Self::Branch(_)
             | Self::Ptrue
             | Self::FloatCompare
@@ -1155,7 +711,6 @@ impl Form {
             | Self::NeonExtend(_)
             | Self::NeonNarrow(_)
             | Self::SveExtend
-            | Self::NeonSign
             | Self::NeonSum(_)
             | Self::FloatInt(_)
             | Self::FloatNeonUnary
@@ -1166,9 +721,7 @@ impl Form {
             | Self::SveFloatImmediate
             | Self::SveDupMask
             | Self::SveSubImmediate
-            | Self::SveMaskZero
-            | Self::PredTest
-            | Self::SveMaskValue => 2,
+            | Self::PredTest => 2,
             Self::Multiply
             | Self::SveTiedTernary
             | Self::Bitfield
@@ -1178,6 +731,7 @@ impl Form {
             | Self::FloatFma
             | Self::SveFma
             | Self::SveCompare(_)
+            | Self::SveCompareImmediate
             | Self::SveUnsignedCompareImmediate
             | Self::SveHistcnt
             | Self::SveIndexed(..)
@@ -1438,11 +992,6 @@ impl Form {
                     | arranged(o[2], Bank::Z, arr, 2)? << 5
                     | arranged(o[3], Bank::Z, arr, 3)? << 16
             }
-            Self::SveMaskZero => {
-                let (d, arr) = vector(o[0], Bank::Z, 0)?;
-                let s = size(arr).ok_or(EncodeError::Operand(0))?;
-                d | s << 22 | predicate(o[1], PredQual::Merge, 15, 1)? << 16
-            }
             Self::SveFloatImmediate => {
                 let (d, arr) = vector(o[0], Bank::Z, 0)?;
                 let f = match arr {
@@ -1532,17 +1081,6 @@ impl Form {
                 arranged(o[0], Bank::Z, dst, 0)?
                     | predicate(o[1], PredQual::Merge, 7, 1)? << 10
                     | arranged(o[2], Bank::Z, src, 2)? << 5
-            }
-            Self::NeonSign => {
-                let (d, a) = vector(o[0], Bank::V, 0)?;
-                let bits = match a {
-                    A::B16 => 8,
-                    A::H8 => 16,
-                    A::S4 => 32,
-                    A::D2 => 64,
-                    _ => return Err(EncodeError::Operand(0)),
-                };
-                d | arranged(o[1], Bank::V, a, 1)? << 5 | (bits + 1) << 16
             }
             Self::NeonSum(pair) => {
                 let (src, a) = vector(o[1], Bank::V, 1)?;
@@ -1677,13 +1215,43 @@ impl Form {
             Self::SveIndex => {
                 let (d, a) = vector(o[0], Bank::Z, 0)?;
                 d | size(a).ok_or(EncodeError::Operand(0))? << 22
+                    | signed(o[1], 5, 1)? << 5
+                    | signed(o[2], 5, 2)? << 16
             }
-            Self::SveMaskValue => {
+            Self::SveCopyImmediate => {
                 let (d, a) = vector(o[0], Bank::Z, 0)?;
-                d | predicate(o[1], PredQual::Zero, 15, 1)? << 16
+                let merge = match o[1] {
+                    O::Predicate(_, PredQual::Merge) => 1,
+                    _ => 0,
+                };
+                let qual = if merge == 1 {
+                    PredQual::Merge
+                } else {
+                    PredQual::Zero
+                };
+                d | predicate(o[1], qual, 15, 1)? << 16
+                    | merge << 14
+                    | signed(o[2], 8, 2)? << 5
                     | size(a).ok_or(EncodeError::Operand(0))? << 22
             }
-            Self::SveCompareZero | Self::SveCompare(_) => {
+            Self::SveDupLane => {
+                let (d, a) = vector(o[0], Bank::Z, 0)?;
+                let s = match a {
+                    A::Q => 4,
+                    _ => size(a).ok_or(EncodeError::Operand(0))?,
+                };
+                let O::Immediate(index) = o[2] else {
+                    return Err(EncodeError::Operand(2));
+                };
+                if index >= 64 >> s {
+                    return Err(EncodeError::Operand(2));
+                }
+                // imm2:tsz holds the lane size as the lowest set bit and the
+                // index above it.
+                let field = (index as u32) << (s + 1) | 1 << s;
+                d | arranged(o[1], Bank::Z, a, 1)? << 5 | (field & 31) << 16 | (field >> 5) << 22
+            }
+            Self::SveCompareImmediate | Self::SveCompare(_) => {
                 let (d, a) = vector(o[0], Bank::P, 0)?;
                 let s = size(a).ok_or(EncodeError::Operand(0))?;
                 if s == 0 && matches!(self, Self::SveCompare(true)) {
@@ -1692,7 +1260,7 @@ impl Form {
                 let rhs = if matches!(self, Self::SveCompare(_)) {
                     arranged(o[3], Bank::Z, a, 3)? << 16
                 } else {
-                    0
+                    signed(o[3], 5, 3)? << 16
                 };
                 d | predicate(o[1], PredQual::Zero, 7, 1)? << 10
                     | arranged(o[2], Bank::Z, a, 2)? << 5
@@ -1727,14 +1295,18 @@ impl Form {
                 }
                 r(0)? | r(1)? << 5 | (a as u32) << 16 | (b as u32) << 10
             }
-            Self::Memory(scale) | Self::FloatMemory(scale) => {
+            Self::Load(scale)
+            | Self::Store(scale)
+            | Self::FloatLoad(scale)
+            | Self::FloatStore(scale) => {
                 let O::Memory(base, offset) = o[1] else {
                     return Err(EncodeError::Operand(1));
                 };
                 if offset < 0 || offset % scale != 0 || offset / scale > 4095 {
                     return Err(EncodeError::Operand(1));
                 }
-                let rt = if scale == 16 || matches!(self, Self::FloatMemory(_)) {
+                let rt = if scale == 16 || matches!(self, Self::FloatLoad(_) | Self::FloatStore(_))
+                {
                     reg(o[0], Bank::V, false, 0)?
                 } else {
                     r(0)?
@@ -1796,20 +1368,6 @@ impl Form {
                 d | q
                     | arranged(o[1], Bank::V, A::B16, 1)? << 5
                     | arranged(o[2], Bank::V, arr, 2)? << 16
-            }
-            Self::Widen(high) => {
-                let (vd, dst) = vector(o[0], Bank::V, 0)?;
-                let (s, low, upper) = match dst {
-                    A::H8 => (0, A::B8, A::B16),
-                    A::S4 => (1, A::H4, A::H8),
-                    A::D2 => (2, A::S2, A::S4),
-                    _ => return Err(EncodeError::Operand(0)),
-                };
-                let src = if high == 0 { low } else { upper };
-                vd | arranged(o[1], Bank::V, src, 1)? << 5
-                    | arranged(o[2], Bank::V, src, 2)? << 16
-                    | u32::from(high) << 30
-                    | s << 22
             }
             Self::Ptrue => {
                 let (p, a) = vector(o[0], Bank::P, 0)?;
@@ -1890,15 +1448,12 @@ impl Form {
                 if actual != qualifier || p.bank != Bank::P || p.number > 7 {
                     return Err(EncodeError::Operand(1));
                 }
-                let (base, offset) = match o[2] {
-                    O::Memory(base, 0) => (base, 0),
-                    O::MemoryVl(base, offset @ -8..=7) => (base, offset),
-                    _ => return Err(EncodeError::Operand(2)),
+                let O::Memory(base, 0) = o[2] else {
+                    return Err(EncodeError::Operand(2));
                 };
                 arranged(o[0], Bank::Z, a, 0)?
                     | reg(O::reg(base), Bank::X, true, 2)? << 5
                     | u32::from(p.number) << 10
-                    | ((offset as u32) & 15) << 16
             }
             Self::SveTiedTernary => {
                 let z = |i| arranged(o[i], Bank::Z, A::D, i);
@@ -1910,5 +1465,77 @@ impl Form {
             }
         };
         Ok((bits, None))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::logical_immediate;
+    use std::collections::HashSet;
+
+    /// DecodeBitMasks from the Arm ARM, for an independent reference.
+    fn decode(n: u32, immr: u32, imms: u32, width: u32) -> Option<u64> {
+        let combined = (n << 6) | (!imms & 0x3f);
+        let len = combined.checked_ilog2()?;
+        if (1 << len) > width {
+            return None;
+        }
+        let size = 1u32 << len;
+        let levels = size - 1;
+        let s = imms & levels;
+        let r = immr & levels;
+        if s == levels {
+            return None;
+        }
+        let mask = u64::MAX >> (64 - size);
+        let run = u64::MAX >> (63 - s);
+        let element = ((run >> r) | (run << ((size - r) % size))) & mask;
+        let element = if r == 0 { run & mask } else { element };
+        Some((u64::MAX >> (64 - width)) / mask * element)
+    }
+
+    #[test]
+    fn logical_immediates_round_trip_through_every_encoding() {
+        for width in [32, 64] {
+            let mut encodable = HashSet::new();
+            for n in 0..=u32::from(width == 64) {
+                for immr in 0..64 {
+                    for imms in 0..64 {
+                        if (width == 32 && immr >= 32) || decode(n, immr, imms, width).is_none() {
+                            continue;
+                        }
+                        let value = decode(n, immr, imms, width).unwrap();
+                        encodable.insert(value);
+                        let fields = logical_immediate(value, width)
+                            .unwrap_or_else(|| panic!("{value:#x} is encodable at {width}"));
+                        assert_eq!(
+                            decode(
+                                fields >> 22 & 1,
+                                fields >> 16 & 0x3f,
+                                fields >> 10 & 0x3f,
+                                width
+                            ),
+                            Some(value),
+                            "{value:#x} at {width} encodes as {fields:#x}"
+                        );
+                    }
+                }
+            }
+            assert_eq!(encodable.len(), if width == 64 { 5334 } else { 1302 });
+            let mut state = 0x2545_f491_4f6c_dd1du64;
+            for _ in 0..100_000 {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                for value in [state, state & 0xffff_0000, state >> 40, !(state >> 3)] {
+                    let value = value & (u64::MAX >> (64 - width));
+                    assert_eq!(
+                        logical_immediate(value, width).is_some(),
+                        encodable.contains(&value),
+                        "{value:#x} at {width}"
+                    );
+                }
+            }
+        }
     }
 }

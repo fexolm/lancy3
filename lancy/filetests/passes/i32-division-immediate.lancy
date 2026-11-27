@@ -1,11 +1,11 @@
-fn main out:ptr x:i32 -> i32
+fn main(out:ptr x:i32) -> i32
   d = const -7
   q = div x d
   r = rem x d
   store out q
   ret r
-@isel check: idiv.imm=-7 Reciprocal
-@isel check: irem.imm=-7 Reciprocal
+@isel check: idiv.imm=-7 reciprocal
+@isel check: irem.imm=-7 reciprocal
 @asm not: idiv
 @asm check: imul
 @asm not: idiv
@@ -16,11 +16,11 @@ fn main out:ptr x:i32 -> i32
 
 ---
 
-fn main x:i32 -> i32
+fn main(x:i32) -> i32
   d = const 10
   q = div x d
   ret q
-@isel check: idiv.imm=10 Reciprocal { multiplier: 1717986919, shift: 34 }
+@isel check: idiv.imm=10 reciprocal=0x66666667 shift=34
 @asm not: idiv
 @asm check: imul
 @run -2147483648 -> -214748364
@@ -30,14 +30,14 @@ fn main x:i32 -> i32
 
 ---
 
-fn main out:ptr x:i32 -> i32
+fn main(out:ptr x:i32) -> i32
   d = const 8
   q = div x d
   r = rem x d
   store out q
   ret r
-@isel check: idiv.imm=8 PowerOfTwo(3)
-@isel check: irem.imm=8 PowerOfTwo(3)
+@isel check: idiv.imm=8 pow2 shift=3
+@isel check: irem.imm=8 pow2 shift=3
 @asm not: idiv
 @asm check: sar
 @asm not: idiv
@@ -47,20 +47,20 @@ fn main out:ptr x:i32 -> i32
 
 ---
 
-fn main out:ptr x:i32 -> i32
+fn main(out:ptr x:i32) -> i32
   d = const -2147483648
   q = div x d
   r = rem x d
   store out q
   ret r
-@isel check: idiv.imm=-2147483648 PowerOfTwo(31)
-@isel check: irem.imm=-2147483648 PowerOfTwo(31)
+@isel check: idiv.imm=-2147483648 pow2 shift=31
+@isel check: irem.imm=-2147483648 pow2 shift=31
 @run -2147483647 -> -2147483647 | aa aa aa aa | 00 00 00 00
 @run -2147483648 -> 0 | aa aa aa aa | 01 00 00 00
 
 ---
 
-fn main out:ptr x:i32 -> i32
+fn main(out:ptr x:i32) -> i32
   d = const -1
   store out x
   dead = rem x d
@@ -68,19 +68,19 @@ fn main out:ptr x:i32 -> i32
   next = offset out one 4
   store next x
   ret x
-@isel check: store.I32
-@isel check: irem
-@isel check: store.I32
+@isel check: store.i32
+@isel check: rem.i32
+@isel check: store.i32
 @asm check: idiv
 @run -2147483648 -> !overflow | aa aa aa aa bb bb bb bb | 00 00 00 80 bb bb bb bb
 @run 7 -> 7 | aa aa aa aa bb bb bb bb | 07 00 00 00 07 00 00 00
 
 ---
 
-fn main x:i32 -> i32
+fn main(x:i32) -> i32
   d = const 0
   q = div x d
   ret q
-@isel check: idiv
+@isel check: div.i32
 @asm check: idiv
 @run 7 -> !zero

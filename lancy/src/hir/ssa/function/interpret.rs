@@ -1,9 +1,33 @@
+use crate::hir::operation::operation;
 use crate::hir::{Block, Edge, Function, Inst, Op, Simd, Terminator, Type, Value};
-use crate::hir::{
-    eval::{Bits, evaluate, read},
-    operation::operation,
-};
+use crate::support::numeric::{Bits, evaluate, read};
 use crate::support::slotmap::DenseMap;
+use crate::{CallError, Trap};
+
+/// Why the test interpreter stopped without a result.
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+pub(crate) enum InterpretError {
+    /// The trap native code raises for the same input.
+    #[error(transparent)]
+    Trap(#[from] CallError),
+    /// A fixture access left its run buffer.
+    #[error("access outside buffer {buffer} at offset {offset}")]
+    OutOfBuffer { buffer: usize, offset: u64 },
+    /// The interpreter cannot model this signature or operation.
+    #[error("unsupported by the interpreter: {0}")]
+    Unsupported(&'static str),
+    /// The function does not verify.
+    #[error("invalid IR: {0}")]
+    Invalid(String),
+}
+
+impl From<Trap> for InterpretError {
+    fn from(trap: Trap) -> Self {
+        Self::Trap(trap.into())
+    }
+}
+
+type Result<T> = std::result::Result<T, InterpretError>;
 
 struct Frame<'a> {
     function: &'a Function,
@@ -12,6 +36,8 @@ struct Frame<'a> {
     values: DenseMap<Value, Bits>,
     return_to: Option<Value>,
     transfer: Vec<Bits>,
+    /// This invocation's scratch memory, in words to keep it 8-byte aligned.
+    scratch: Vec<u64>,
 }
 
 impl<'a> Frame<'a> {
@@ -32,6 +58,7 @@ impl<'a> Frame<'a> {
             values,
             return_to,
             transfer: Vec::new(),
+            scratch: vec![0; (function.scratch_bytes() / 8) as usize],
         }
     }
 
@@ -52,34 +79,43 @@ impl<'a> Frame<'a> {
     }
 }
 
-fn buffer_value(bytes: &mut [u8], addr: u64, ty: Type, width: usize) -> Result<&mut [u8], String> {
-    if ty == Type::Ptr {
-        return Err("filetest buffer cannot contain native pointers".into());
-    }
-    bytes
-        .get_mut(addr as usize..)
-        .and_then(|tail| tail.get_mut(..ty.bytes(width)))
-        .ok_or_else(|| format!("filetest access outside buffer at offset {addr}"))
+/// Run buffer `k` starts at address `k << 32`, so a pointer names its buffer
+/// and every access is checked against that buffer alone.
+pub(crate) fn buffer_address(buffer: usize) -> u64 {
+    (buffer as u64) << 32
 }
 
-fn word(x: u64) -> Bits {
+fn buffer_value(buffers: &mut [Vec<u8>], addr: u64, ty: Type, width: usize) -> Result<&mut [u8]> {
+    if ty == Type::Ptr {
+        return Err(InterpretError::Unsupported(
+            "native pointers in a run buffer",
+        ));
+    }
+    let (buffer, offset) = ((addr >> 32) as usize, addr & u64::from(u32::MAX));
+    buffers
+        .get_mut(buffer)
+        .and_then(|bytes| bytes.get_mut(offset as usize..))
+        .and_then(|tail| tail.get_mut(..ty.bytes(width)))
+        .ok_or(InterpretError::OutOfBuffer { buffer, offset })
+}
+
+pub(super) fn word(x: u64) -> Bits {
     let mut bits = [0; 64];
     bits[..8].copy_from_slice(&x.to_le_bytes());
     bits
 }
 
+/// # Safety
+/// Without `buffer`, pointer arguments and addresses read from memory must be
+/// valid for every executed access. With it, pointers are
+/// [`buffer_address`]es and every access is checked.
 pub(super) unsafe fn run(
     function: &Function,
-    args: &[u64],
-    mut buffer: Option<&mut [u8]>,
-) -> Result<u64, String> {
-    let width = crate::ScalarKernel::vector_bytes();
-    if function.param_types().iter().any(|ty| ty.bytes(width) > 8)
-        || function.return_type().bytes(width) > 8
-    {
-        return Err("expected word-sized root signature".into());
-    }
-    let mut frames = vec![Frame::new(function, args.iter().copied().map(word), None)];
+    args: Vec<Bits>,
+    mut buffer: Option<&mut [Vec<u8>]>,
+) -> Result<Bits> {
+    let width = crate::test_target::width();
+    let mut frames = vec![Frame::new(function, args, None)];
     loop {
         let f = frames.last_mut().unwrap();
         let graph = f.function;
@@ -93,7 +129,7 @@ pub(super) unsafe fn run(
                     if let Some(ret) = ret {
                         frames.last_mut().unwrap().values[ret] = result;
                     } else {
-                        return Ok(read(&result[..8]) as u64);
+                        return Ok(result);
                     }
                 }
                 Terminator::Jump(edge) => f.jump(edge),
@@ -116,16 +152,17 @@ pub(super) unsafe fn run(
             Op::Copy(v) => f.values[v],
             Op::BoundsCheck(index, len) => {
                 if f.read(index) as u32 >= f.read(len) as u32 {
-                    return Err("kernel slice index out of bounds".into());
+                    return Err(Trap::Bounds.into());
                 }
                 continue;
             }
-            Op::CheckOverflow(cond) => {
+            Op::TrapIf(cond, trap) => {
                 if f.read(cond) as u32 != 0 {
-                    return Err(crate::CallError::IntegerOverflow.to_string());
+                    return Err(trap.into());
                 }
                 continue;
             }
+            Op::Trap(trap) => return Err(trap.into()),
             Op::PtrOffset(base, index, scale) => word(
                 f.read(base)
                     .wrapping_add((f.read(index) as i32 as i64 as u64) << scale as u8),
@@ -184,7 +221,33 @@ pub(super) unsafe fn run(
                 }
                 result
             }
-            Op::Load(_, addr) | Op::Simd(Simd::Load(_, addr)) => {
+            Op::Simd(Simd::CompressStore {
+                base,
+                mask,
+                value,
+                limit,
+            }) => {
+                let lane = graph.value_type(value).lane().unwrap();
+                let size = lane.bytes();
+                let limit = (f.read(limit) as u32 as i32).max(0) as usize;
+                let active = (0..width / size)
+                    .filter(|i| f.values[mask][(i + 1) * size - 1] & 0x80 != 0)
+                    .take(limit);
+                for (slot, i) in active.enumerate() {
+                    let addr = f.read(base).wrapping_add((slot * size) as u64);
+                    let data = &f.values[value][i * size..(i + 1) * size];
+                    if let Some(buf) = buffer.as_deref_mut() {
+                        buffer_value(buf, addr, lane.scalar(), width)?.copy_from_slice(data);
+                    } else {
+                        // SAFETY: interpret_raw's caller covers the written prefix.
+                        unsafe {
+                            std::ptr::copy_nonoverlapping(data.as_ptr(), addr as *mut u8, size)
+                        }
+                    }
+                }
+                continue;
+            }
+            Op::Load(_, addr) => {
                 let ty = graph.value_type(graph.result(inst).unwrap());
                 let addr = f.read(addr);
                 let mut bits = [0; 64];
@@ -192,7 +255,9 @@ pub(super) unsafe fn run(
                 if let Some(buf) = buffer.as_deref_mut() {
                     dest.copy_from_slice(buffer_value(buf, addr, ty, width)?);
                 } else {
-                    // SAFETY: interpret_raw's caller supplies a live readable range of the declared width.
+                    // SAFETY: the address comes from interpret_raw's caller, which supplies
+                    // a live readable range of the declared width, or from CallScratch,
+                    // whose verified range lies in a live frame's `scratch`.
                     unsafe {
                         std::ptr::copy_nonoverlapping(
                             addr as *const u8,
@@ -203,14 +268,15 @@ pub(super) unsafe fn run(
                 }
                 bits
             }
-            Op::Store(addr, v) | Op::Simd(Simd::Store(addr, v)) => {
+            Op::Store(addr, v) => {
                 let addr = f.read(addr);
                 let ty = graph.value_type(v);
                 let src = &f.values[v][..ty.bytes(width)];
                 if let Some(buf) = buffer.as_deref_mut() {
                     buffer_value(buf, addr, ty, width)?.copy_from_slice(src);
                 } else {
-                    // SAFETY: interpret_raw's caller supplies a writable range disjoint from interpreter storage.
+                    // SAFETY: interpret_raw's caller supplies a writable range disjoint from
+                    // interpreter storage; a CallScratch range lies in a live frame's `scratch`.
                     unsafe {
                         std::ptr::copy_nonoverlapping(src.as_ptr(), addr as *mut u8, src.len())
                     };
@@ -218,24 +284,30 @@ pub(super) unsafe fn run(
                 continue;
             }
             Op::DebugStore(..) | Op::DebugPoint(_) => continue,
-            Op::RustCall(import, a, b) => {
-                let result = ((import.resolve)())(f.read(a) as i32, f.read(b) as i32);
-                if result >> 32 != 0 {
-                    return Err(crate::CallError::RustPanic.to_string());
-                }
-                word(u64::from(result as u32))
+            Op::RustCall(..) if buffer.is_some() => {
+                return Err(InterpretError::Unsupported("Rust calls with a run buffer"));
             }
-            Op::RustPacketCall(site) => {
-                let (import, words) = graph.packet_call(site);
-                let arguments: Vec<_> = words.iter().map(|&value| f.read(value) as i32).collect();
-                let result = import.invoke(&arguments);
-                if result >> 32 != 0 {
-                    return Err(crate::CallError::RustPanic.to_string());
-                }
-                word(u64::from(result as u32))
+            Op::RustCall(function, [receiver, operation, packet, extra]) => {
+                // SAFETY: without a run buffer every pointer is a live address
+                // (see `run`), and the entry is the function's own contract.
+                let status = unsafe {
+                    (function.entry)(
+                        f.read(receiver) as *mut u8,
+                        f.read(operation) as u32,
+                        f.read(packet) as *mut u8,
+                        f.read(extra) as i32,
+                    )
+                };
+                word(u64::from(splice_target::abi::decode_status(status)?))
             }
-            Op::RustContextCall(..) => return Err("interpreter has no Rust context".into()),
-            Op::CallScratch(_) => return Err("interpreter has no native call workspace".into()),
+            Op::CallScratch { .. } if buffer.is_some() => {
+                return Err(InterpretError::Unsupported(
+                    "call scratch with a run buffer",
+                ));
+            }
+            Op::CallScratch { offset, .. } => {
+                word(f.scratch.as_mut_ptr() as u64 + u64::from(offset))
+            }
             Op::Call(call) => {
                 let (callee, args) = graph.call(call);
                 let child = Frame::new(
@@ -250,11 +322,7 @@ pub(super) unsafe fn run(
                 let (action, input, output, inputs) =
                     operation(op, |v| graph.value_type(v)).unwrap();
                 let args = inputs.map(|v| v.map_or([0; 64], |v| f.values[v]));
-                evaluate(action, input, output, &args, width).map_err(|e| match e {
-                    crate::CallError::DivisionOverflow => "signed division overflow".to_owned(),
-                    crate::CallError::DivisionByZero => "integer division by zero".to_owned(),
-                    e => e.to_string(),
-                })?
+                evaluate(action, input, output, &args, width)?
             }
         };
         f.values[graph.result(inst).unwrap()] = result;

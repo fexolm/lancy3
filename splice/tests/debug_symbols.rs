@@ -1,4 +1,9 @@
-use splice::{BuildOptions, Codegen, Executable, debug, hir::Instr, kernel, simd::Lane};
+use splice::frontend::Signature;
+use splice::hir::ValueType;
+use splice::hir::{Binary, Constant, ScalarType};
+use splice::{
+    BuildOptions, CallError, Codegen, Executable, Mode, Trap, debug, hir::Instr, kernel, simd::Lane,
+};
 
 #[kernel]
 fn update(dst: &mut [i32], index: i32, value: i32) -> i32 {
@@ -41,12 +46,12 @@ fn irrefutable_pattern(#[comptime] plan: Option<std::convert::Infallible>, flag:
 }
 
 fn exercise<B: Codegen<Output: Executable>>() {
-    let debug = BuildOptions::Debug;
+    let debug = BuildOptions::host(Mode::Debug).unwrap();
     let ir = test_kernel::ir_with_options(debug).unwrap();
     for kernel in [
         test_kernel::build_with_options::<B>(debug, test_kernel::BuildArgs {}).unwrap(),
         B::compile(&ir).unwrap(),
-        B::compile_with_options(&ir, BuildOptions::Release).unwrap(),
+        B::compile_with_options(&ir, BuildOptions::host(Mode::Release).unwrap()).unwrap(),
     ] {
         let mut buf = [0, 0];
         assert_eq!(
@@ -64,9 +69,8 @@ fn exercise<B: Codegen<Output: Executable>>() {
                     bias: 12,
                     dst: &mut short
                 })
-                .unwrap_err()
-                .to_string(),
-            "kernel slice index out of bounds",
+                .unwrap_err(),
+            CallError::Trap(Trap::Bounds),
         );
         assert_eq!(short, [13]);
     }
@@ -74,10 +78,7 @@ fn exercise<B: Codegen<Output: Executable>>() {
 
 #[test]
 fn debug_and_release_follow_the_same_execution_contract() {
-    exercise::<splice_lancy::Lancy>();
-    exercise::<splice_cranelift::Cranelift>();
-    exercise::<splice_llvm::Llvm>();
-    exercise::<splice_llvm::LlvmManualSimd>();
+    splice_testkit::each_backend!(B => exercise::<B>());
 }
 
 #[test]
@@ -85,9 +86,9 @@ fn staging_preserves_names_types_and_locations_in_debug_only() {
     let default_ir = test_kernel::ir().unwrap();
     assert_eq!(
         default_ir.options(),
-        BuildOptions::for_profile(cfg!(debug_assertions))
+        BuildOptions::host(Mode::for_profile(cfg!(debug_assertions))).unwrap()
     );
-    let ir = test_kernel::ir_with_options(BuildOptions::Debug).unwrap();
+    let ir = test_kernel::ir_with_options(BuildOptions::host(Mode::Debug).unwrap()).unwrap();
     let points: Vec<_> = ir
         .instructions()
         .iter()
@@ -101,9 +102,18 @@ fn staging_preserves_names_types_and_locations_in_debug_only() {
             .iter()
             .all(|p| p.location.file.ends_with("debug_symbols.rs") && p.location.line > 10)
     );
+    // MAC-26: the file is this file's absolute path, whatever directory
+    // rustc ran in, so debuggers find it without a search.
+    let this_file = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/debug_symbols.rs");
+    assert!(points.iter().all(|p| {
+        let file = std::path::Path::new(p.location.file);
+        file.is_absolute() && file.canonicalize().ok() == this_file.canonicalize().ok()
+    }));
     assert!(points.iter().any(|p| {
-        p.slots(&ir)
-            .any(|(var, ty, _)| var.name == "lanes" && matches!(ty, debug::Type::Vector(_)))
+        p.function_slots(&ir, ir.options().target.vector_bytes())
+            .any(|slot| {
+                slot.variable.name == "lanes" && matches!(slot.ty, debug::Type::Vector { .. })
+            })
     }));
     assert!(
         points
@@ -121,7 +131,7 @@ fn staging_preserves_names_types_and_locations_in_debug_only() {
     assert!(points.iter().any(|p| p.variables.iter().any(|v| {
         v.name == "step" && matches!(v.value, debug::Value::Constant(Some(value)) if value.parts() == (debug::ConstantType::Signed(4), 1))
     })));
-    let release = test_kernel::ir_with_options(BuildOptions::Release).unwrap();
+    let release = test_kernel::ir_with_options(BuildOptions::host(Mode::Release).unwrap()).unwrap();
     assert!(
         release
             .instructions()
@@ -132,8 +142,9 @@ fn staging_preserves_names_types_and_locations_in_debug_only() {
 
 #[test]
 fn selected_match_patterns_and_guards_have_their_own_source_points() {
-    irrefutable_pattern::ir_with_options(BuildOptions::Debug, None).unwrap();
-    let ir = pattern_scopes::ir_with_options(BuildOptions::Debug, Some(9)).unwrap();
+    irrefutable_pattern::ir_with_options(BuildOptions::host(Mode::Debug).unwrap(), None).unwrap();
+    let ir =
+        pattern_scopes::ir_with_options(BuildOptions::host(Mode::Debug).unwrap(), Some(9)).unwrap();
     let locations: std::collections::BTreeSet<_> = ir.instructions().iter().filter_map(|inst| {
         let Instr::Debug(point) = inst else { return None; };
         point.variables.iter().any(|var| {
@@ -143,4 +154,229 @@ fn selected_match_patterns_and_guards_have_their_own_source_points() {
     // The selected outer arm, guard and body of the first runtime arm, and
     // the fallback body each have a distinct source position.
     assert_eq!(locations.len(), 4);
+}
+
+/// `value` is assigned only when `flag` is nonzero, but a source point after
+/// the join names it. Debug reads are not uses, so this is valid in debug
+/// mode exactly as in release mode (CORE-18).
+fn partially_assigned(b: &mut dyn splice::frontend::KernelBuilder) -> splice::Result<()> {
+    observe_partially_assigned(b, false)
+}
+
+/// Returning `value` is a real use, which stays an error.
+fn partially_returned(b: &mut dyn splice::frontend::KernelBuilder) -> splice::Result<()> {
+    observe_partially_assigned(b, true)
+}
+
+fn observe_partially_assigned(
+    b: &mut dyn splice::frontend::KernelBuilder,
+    use_value: bool,
+) -> splice::Result<()> {
+    let word = b.arg(0)?;
+    let zero = b.constant(Constant::from(0))?;
+    let flag = b.binary(Binary::Ne, word, zero)?;
+    let value = b.local(ValueType::Scalar(ScalarType::I32))?;
+    let (assign, join) = (b.label()?, b.label()?);
+    b.branch(flag, assign, join)?;
+    b.mark(assign)?;
+    let five = b.constant(Constant::from(5))?;
+    b.assign(value, five)?;
+    b.jump(join)?;
+    b.mark(join)?;
+    let location = debug::Location {
+        file: file!(),
+        directory: env!("CARGO_MANIFEST_DIR"),
+        line: line!(),
+        column: 1,
+    };
+    let variables = [debug::Variable {
+        name: "value",
+        value: debug::Value::Register(value),
+    }];
+    b.debug_point(location, &variables)?;
+    b.ret(if use_value { value } else { word })?;
+    Ok(())
+}
+
+fn exercise_partial<B: Codegen<Output: Executable>>() {
+    let options = BuildOptions::host(Mode::Debug).unwrap();
+    let ir = splice::frontend::materialize(
+        Signature::new(&[ScalarType::I32; 1], ScalarType::I32, &[]),
+        Box::new(partially_assigned),
+        options,
+    )
+    .unwrap();
+    assert!(
+        ir.instructions()
+            .iter()
+            .any(|op| matches!(op, Instr::Debug(_)))
+    );
+    for kernel in [
+        B::build_with_options(
+            Signature::new(&[ScalarType::I32; 1], ScalarType::I32, &[]),
+            Box::new(partially_assigned),
+            options,
+        )
+        .unwrap(),
+        B::compile(&ir).unwrap(),
+    ] {
+        for flag in [0, 3] {
+            assert_eq!(
+                splice_testkit::call_i32(&kernel, &[flag], &mut []),
+                Ok(flag)
+            );
+        }
+    }
+    for options in [
+        BuildOptions::host(Mode::Debug).unwrap(),
+        BuildOptions::host(Mode::Release).unwrap(),
+    ] {
+        assert!(
+            B::build_with_options(
+                Signature::new(&[ScalarType::I32; 1], ScalarType::I32, &[]),
+                Box::new(partially_returned),
+                options
+            )
+            .is_err()
+        );
+    }
+}
+
+#[test]
+fn source_points_may_name_partially_assigned_variables() {
+    splice_testkit::each_backend!(B => exercise_partial::<B>());
+}
+
+#[kernel]
+fn flagged(x: i32) -> i32 {
+    let positive = x > 0;
+    let doubled = x * 2; // gdb: positive is assigned
+    if positive { doubled } else { x }
+}
+
+/// A runtime `bool` reads as a Rust `bool` in GDB on every native backend
+/// (CORE-16). Needs `gdb`; run with `--ignored`.
+#[test]
+#[ignore = "requires gdb"]
+fn gdb_shows_runtime_bools_as_rust_bools() {
+    const CHILD: &str = "SPLICE_GDB_BOOL_CHILD";
+    if std::env::var_os(CHILD).is_some() {
+        // Each kernel stays alive until the end: GDB can keep a breakpoint
+        // byte of a freed kernel and write it back into code that reuses
+        // the address.
+        fn run<B: Codegen<Output: Executable>>() -> impl Sized {
+            let options = BuildOptions::host(Mode::Debug).unwrap();
+            let code = flagged::build_with_options::<B>(options, flagged::BuildArgs {}).unwrap();
+            assert_eq!(code.call(flagged::CallArgs { x: 4 }), Ok(8));
+            code
+        }
+        let _lancy = run::<splice::lancy::Lancy>();
+        let _cranelift = run::<splice::cranelift::Cranelift>();
+        #[cfg(feature = "llvm")]
+        let _llvm = run::<splice::llvm::Llvm>();
+        return;
+    }
+    let backends = if cfg!(feature = "llvm") { 3 } else { 2 };
+    let source = include_str!("debug_symbols.rs");
+    let line = 1 + source
+        .lines()
+        .position(|l| l.ends_with("// gdb: positive is assigned"))
+        .unwrap();
+    let output = std::process::Command::new("gdb")
+        .args(["-q", "-batch", "-ex", "set breakpoint pending on"])
+        .args([
+            "-ex",
+            &format!("break debug_symbols.rs:{line}"),
+            "-ex",
+            "run",
+        ])
+        .args(["-ex", "print positive", "-ex", "continue"].repeat(backends))
+        .arg("--args")
+        .arg(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "gdb_shows_runtime_bools_as_rust_bools",
+            "--ignored",
+        ])
+        .env(CHILD, "1")
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let values: Vec<_> = stdout
+        .lines()
+        .filter_map(|l| l.strip_prefix('$')?.split_once(" = ").map(|(_, v)| v))
+        .collect();
+    assert_eq!(values, vec!["true"; backends], "{stdout}");
+}
+
+#[kernel]
+fn masked(xs: &[i32]) -> i32 {
+    let above = splice::simd::Lane::<i32>::load(xs, 0).simd_gt(splice::simd::Lane::splat(1));
+    let count = above.count(); // gdb: above is assigned
+    count.wrapping_add(xs[0])
+}
+
+/// A runtime mask reads as the vector of its index lanes in GDB on every
+/// native backend: all bits set for an active lane (CORE-16). Needs `gdb`;
+/// run with `--ignored`.
+#[test]
+#[ignore = "requires gdb"]
+fn gdb_shows_runtime_masks_as_lane_vectors() {
+    const CHILD: &str = "SPLICE_GDB_MASK_CHILD";
+    let lanes = splice::Target::host().unwrap().vector_bytes() / 4;
+    if std::env::var_os(CHILD).is_some() {
+        // As in `gdb_shows_runtime_bools_as_rust_bools`.
+        fn run<B: Codegen<Output: Executable>>(lanes: usize) -> impl Sized {
+            let options = BuildOptions::host(Mode::Debug).unwrap();
+            let code = masked::build_with_options::<B>(options, masked::BuildArgs {}).unwrap();
+            let xs: Vec<i32> = (0..lanes as i32).collect();
+            assert_eq!(
+                code.call(masked::CallArgs { xs: &xs }),
+                Ok(lanes as i32 - 2)
+            );
+            code
+        }
+        let _lancy = run::<splice::lancy::Lancy>(lanes);
+        let _cranelift = run::<splice::cranelift::Cranelift>(lanes);
+        #[cfg(feature = "llvm")]
+        let _llvm = run::<splice::llvm::Llvm>(lanes);
+        return;
+    }
+    let backends = if cfg!(feature = "llvm") { 3 } else { 2 };
+    let source = include_str!("debug_symbols.rs");
+    let line = 1 + source
+        .lines()
+        .position(|l| l.ends_with("// gdb: above is assigned"))
+        .unwrap();
+    let output = std::process::Command::new("gdb")
+        .args(["-q", "-batch", "-ex", "set breakpoint pending on"])
+        .args(["-ex", "set print repeats unlimited"])
+        .args([
+            "-ex",
+            &format!("break debug_symbols.rs:{line}"),
+            "-ex",
+            "run",
+        ])
+        .args(["-ex", "print above", "-ex", "continue"].repeat(backends))
+        .arg("--args")
+        .arg(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "gdb_shows_runtime_masks_as_lane_vectors",
+            "--ignored",
+        ])
+        .env(CHILD, "1")
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let values: Vec<_> = stdout
+        .lines()
+        .filter_map(|l| l.strip_prefix('$')?.split_once(" = ").map(|(_, v)| v))
+        .collect();
+    let expected = (0..lanes)
+        .map(|lane| if lane < 2 { "0" } else { "-1" })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let expected = format!("[{expected}]");
+    assert_eq!(values, vec![expected; backends], "{stdout}");
 }

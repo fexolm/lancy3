@@ -1,0 +1,21 @@
+[package]
+name = "splice-testkit"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+description = "Backend matrix and differential checks for Splice tests"
+
+[features]
+default = ["llvm"]
+llvm = ["splice/llvm"]
+
+[dependencies]
+splice = { package = "splice-kernel", path = "../splice", default-features = false, features = ["lancy", "cranelift"] }
+
+[dev-dependencies]
+splice-target = { path = "../splice-target" }
+
+[lints]
+workspace = true

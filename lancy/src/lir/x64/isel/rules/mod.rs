@@ -12,31 +12,51 @@ mod packed;
 mod packed_float;
 mod packed_integer;
 mod packed_rearrange;
+mod scalar;
 
 pub(in crate::lir::x64) use packed::packed_half;
 
-use super::super::inst::{Cond, Inst, SelectCond, class};
-use super::masks::Masks;
+use super::super::inst::{Inst, SelectCond, class};
+use super::masks::{Masks, native_compress_store, native_count};
+use crate::lir::x64::Cpu;
 use crate::{
     CompileError,
-    hir::{Function, Lane, Op, Simd, Ternary, Type, Value},
+    hir::{Call, Function, Inst as HirInst, Lane, Op, Simd, Ternary, Type, Value},
     lir::{
         self,
         isel::{Context, Root},
     },
     module::FunctionId,
 };
-use regalloc2::{PRegSet, VReg};
-use splice_target::Features;
+use regalloc2::{PRegSet, RegClass, VReg};
+
+/// Whether `inst`, a canonical predicate operation, has a rule here:
+/// its predicate operands and result live in mask registers, and the
+/// machine has the instructions. `canonical::expand` defines the others.
+pub(super) fn native_canonical(f: &Function, inst: HirInst, cpu: Cpu, masks: &Masks) -> bool {
+    let lane = |v| f.value_type(v).lane().unwrap();
+    match *f.op(inst) {
+        Op::Simd(Simd::FirstLanes(lane, _)) => {
+            cpu.isa.bmi2
+                && cpu.bytes / lane.bytes() <= 16
+                && f.result(inst).is_some_and(|v| masks.contains(v))
+        }
+        Op::Simd(Simd::MaskCount(mask)) => native_count(cpu, lane(mask)) && masks.contains(mask),
+        Op::Simd(Simd::CompressStore { mask, value, .. }) => {
+            native_compress_store(cpu, lane(value)) && masks.contains(mask)
+        }
+        _ => false,
+    }
+}
 
 pub(super) fn select(
     ctx: &mut Context,
     f: &Function,
     body: &mut lir::Function<Inst>,
     out: &mut Vec<Inst>,
-    target: (Features, &Masks),
+    target: (Cpu, &Masks),
     root: Root,
-    callee: impl Fn(&Function) -> (FunctionId, PRegSet),
+    callee: impl Fn(Call) -> (FunctionId, PRegSet),
 ) -> Result<(), CompileError> {
     let mut rules = Rules {
         ctx,
@@ -63,7 +83,7 @@ struct Rules<'a> {
     f: &'a Function,
     body: &'a mut lir::Function<Inst>,
     out: &'a mut Vec<Inst>,
-    cpu: Features,
+    cpu: Cpu,
     masks: &'a Masks,
     result: Option<Value>,
 }
@@ -72,11 +92,11 @@ impl Rules<'_> {
     fn instruction(
         &mut self,
         op: Op,
-        callee: impl Fn(&Function) -> (FunctionId, PRegSet),
+        callee: impl Fn(Call) -> (FunctionId, PRegSet),
     ) -> Result<Inst, CompileError> {
         Ok(match op {
             Op::Const(n) => Inst::Imm(self.dst(), n),
-            Op::CallScratch(bytes) => Inst::CallScratch(bytes, self.dst()),
+            Op::CallScratch { offset, bytes } => Inst::CallScratch(offset, bytes, self.dst()),
             Op::Literal(lane, bits) => Inst::Literal(lane, bits, self.dst()),
             Op::Simd(Simd::Iota(lane)) => Inst::Iota(lane, self.dst()),
             Op::Simd(Simd::LaneCount(lane)) => {
@@ -85,32 +105,45 @@ impl Rules<'_> {
             Op::Bitcast(to, v) if class(to) != class(self.ty(v)) => {
                 Inst::BitMove(self.ty(v), to, self.dst(), self.input(v))
             }
-            Op::Copy(v) | Op::Bitcast(_, v) | Op::Simd(Simd::Bitcast(_, v)) => {
-                Inst::Copy(self.dst(), self.input(v))
+            Op::Copy(v) | Op::Bitcast(_, v) => Inst::Copy(self.dst(), self.input(v)),
+            Op::Bin(kind, a, b) if !matches!(self.ty(a), Type::Vector(_)) => {
+                self.binary(kind, a, b)?
             }
-            Op::Bin(kind, a, b) => self.binary(kind, a, b)?,
-            Op::Ternary(Ternary::Select, cond, yes, no) if self.ty(yes) == Type::I32 => {
+            Op::Ternary(Ternary::Select, cond, yes, no)
+                if !matches!(self.ty(cond), Type::Vector(_))
+                    && class(self.ty(yes)) == RegClass::Int =>
+            {
                 let cond = if let Some(Op::Bin(kind, a, b)) = self.ctx.single_use(cond)
-                    && self.ty(a) == Type::I32
-                    && let Some(cc) = Cond::from_binary(kind)
+                    && let Some((cc, int)) = self.integer_condition(kind, a)
                 {
-                    SelectCond::Compare(cc, self.input(a), self.rhs(b))
+                    SelectCond::Compare(cc, int.bytes, self.input(a), self.rhs(b))
                 } else {
                     SelectCond::Nonzero(self.input(cond))
                 };
-                Inst::SelectI32 {
+                Inst::Select {
+                    wide: self.ty(yes).bytes(self.cpu.bytes) == 8,
                     dst: self.dst(),
                     no: self.input(no),
                     cond,
                     yes: self.input(yes),
                 }
             }
+            Op::Ternary(Ternary::Select, cond, yes, no)
+                if !matches!(self.ty(cond), Type::Vector(_)) =>
+            {
+                Inst::SelectVector {
+                    dst: self.dst(),
+                    no: self.input(no),
+                    cond: self.input(cond),
+                    yes: self.input(yes),
+                }
+            }
             Op::BoundsCheck(index, length) => self.bounds_check(index, length),
-            Op::CheckOverflow(cond) => Inst::CheckOverflow(self.input(cond)),
+            Op::TrapIf(cond, trap) => Inst::TrapIf(self.input(cond), trap),
+            Op::Trap(trap) => Inst::Trap(trap),
             Op::PtrOffset(base, index, scale) => self.pointer_offset(base, index, scale)?,
             Op::Load(ty, ptr) => self.load(ty, ptr)?,
-            Op::Simd(Simd::Load(lane, ptr)) => self.load(Type::Vector(lane), ptr)?,
-            Op::Store(ptr, value) | Op::Simd(Simd::Store(ptr, value)) => self.store(ptr, value)?,
+            Op::Store(ptr, value) => self.store(ptr, value)?,
             Op::DebugStore(offset, value) => {
                 Inst::DebugStore(self.ty(value), offset, self.input(value))
             }
@@ -125,20 +158,17 @@ impl Rules<'_> {
                 mask,
                 value,
             }) => self.masked_memory(address, mask, value)?,
+            Op::Simd(Simd::FirstLanes(lane, count)) => self.first_lanes(lane, count)?,
+            Op::Simd(Simd::MaskCount(mask)) => Inst::MaskCount(self.dst(), self.input(mask)),
+            Op::Simd(Simd::CompressStore {
+                base,
+                mask,
+                value,
+                limit,
+            }) => self.compress_store(base, mask, value, limit)?,
             Op::Call(site) => self.call(site, callee),
-            Op::RustCall(import, a, b) => {
-                Inst::RustCall(import, self.input(a), self.input(b), self.dst())
-            }
-            Op::RustPacketCall(site) => {
-                let (import, args) = self.f.packet_call(site);
-                for (index, &word) in args.iter().enumerate() {
-                    let word = self.input(word);
-                    self.out.push(Inst::StorePacketWord(index as u32 * 4, word));
-                }
-                Inst::RustPacketCall(import, self.dst())
-            }
-            Op::RustContextCall(import, args) => {
-                Inst::RustContextCall(import, args.map(|arg| self.input(arg)), self.dst())
+            Op::RustCall(function, args) => {
+                Inst::RustCall(function, args.map(|arg| self.input(arg)), self.dst())
             }
             op => self.numeric(op)?,
         })

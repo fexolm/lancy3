@@ -1,11 +1,13 @@
+use splice::hir::{Buffer, Constant, ScalarType, Simd, SimdOp};
 use splice::{
-    BufferArg, BuildError, Codegen, Executable, TypedKernel, kernel,
-    simd::{Lane, Mask},
+    BufferArg, BufferKind, BuildError, CallError, Codegen, Executable, Trap, TypedKernel, kernel,
+    simd::{Element, Lane, Mask},
 };
-use splice_cranelift::Cranelift;
-use splice_lancy::Lancy;
-use splice_llvm::Llvm;
-use splice_text::Text;
+
+/// This machine's `SPLICE_SIMD` target in the mode of this test build.
+fn options() -> splice::BuildOptions {
+    splice::BuildOptions::host(splice::Mode::for_profile(cfg!(debug_assertions))).unwrap()
+}
 
 #[kernel]
 fn add_block(lhs: &[u16], rhs: &[u16], dst: &mut [u16]) -> i32 {
@@ -85,21 +87,11 @@ macro_rules! compile_all {
     ($name:ident) => {{
         let ir = $name::ir().unwrap();
         let mut v = Vec::new();
-        kernels(
+        splice_testkit::each_backend!(B => kernels(
             &mut v,
-            $name::build::<Lancy>($name::BuildArgs {}),
-            Lancy::compile(&ir),
-        );
-        kernels(
-            &mut v,
-            $name::build::<Llvm>($name::BuildArgs {}),
-            Llvm::compile(&ir),
-        );
-        kernels(
-            &mut v,
-            $name::build::<Cranelift>($name::BuildArgs {}),
-            Cranelift::compile(&ir),
-        );
+            $name::build::<B>($name::BuildArgs {}),
+            B::compile(&ir),
+        ));
         v
     }};
 }
@@ -149,7 +141,8 @@ fn typed_simd_conversions_and_fused_arithmetic_match_rust() {
         let expected = input
             .iter()
             .fold(0i32, |sum, &x| sum.wrapping_add(x as i32));
-        let result = kernel.call(
+        let result = splice_testkit::call_i32(
+            &kernel,
             &[],
             &mut [
                 BufferArg::from(input.as_slice()),
@@ -196,7 +189,8 @@ fn unsigned_lanes_compare_shift_and_narrow_across_backends() {
         let mut out = vec![21u32; n + 1];
         let mut narrow = vec![43u16; n * 2 + 1];
         assert_eq!(
-            kernel.call(
+            splice_testkit::call_i32(
+                &kernel,
                 &[],
                 &mut [
                     BufferArg::from(input.as_slice()),
@@ -232,7 +226,8 @@ fn unsigned_indices_above_i32_max_fault_only_when_active() {
         let mut out = vec![21u32; n];
         for count in [1, 2] {
             out.fill(21);
-            let actual = kernel.call(
+            let actual = splice_testkit::call_i32(
+                &kernel,
                 &[count],
                 &mut [
                     BufferArg::from(&[17u32][..]),
@@ -245,7 +240,7 @@ fn unsigned_indices_above_i32_max_fault_only_when_active() {
                 assert_eq!(out[0], 17);
                 assert!(out[1..].iter().all(|&x| x == 9));
             } else {
-                assert_eq!(actual, Err("kernel slice index out of bounds".into()));
+                assert_eq!(actual, Err(CallError::Trap(Trap::Bounds)));
                 assert!(out.iter().all(|&x| x == 21));
             }
         }
@@ -300,13 +295,14 @@ fn signed_vector_min_max_stay_explicit_and_preserve_lane_order() {
     for kernel in compile_all!(signed_bounds) {
         let mut mins = vec![23; lanes + 2];
         let mut maxs = vec![23; lanes + 2];
-        let result = kernel.call(
+        let result = splice_testkit::call_i32(
+            &kernel,
             &[],
             &mut [
-                BufferArg::Read(&lhs),
-                BufferArg::Read(&rhs),
-                BufferArg::Write(&mut mins),
-                BufferArg::Write(&mut maxs),
+                BufferArg::read(&lhs),
+                BufferArg::read(&rhs),
+                BufferArg::write(&mut mins),
+                BufferArg::write(&mut maxs),
             ],
         );
         assert_eq!(result, Ok(lanes as i32));
@@ -349,27 +345,18 @@ fn vector_rotate_wraps_the_count_and_rotates_signed_lane_bits() {
             matches!(instr, Instr::Simd { inst, .. } if inst.op == SimdOp::RotateLeft(count & 31))
         }));
         let mut backends = Vec::new();
-        kernels(
+        splice_testkit::each_backend!(B => kernels(
             &mut backends,
-            rotate_words::build::<Lancy>(rotate_words::BuildArgs { count }),
-            Lancy::compile(&ir),
-        );
-        kernels(
-            &mut backends,
-            rotate_words::build::<Cranelift>(rotate_words::BuildArgs { count }),
-            Cranelift::compile(&ir),
-        );
-        kernels(
-            &mut backends,
-            rotate_words::build::<Llvm>(rotate_words::BuildArgs { count }),
-            Llvm::compile(&ir),
-        );
+            rotate_words::build::<B>(rotate_words::BuildArgs { count }),
+            B::compile(&ir),
+        ));
         let expected: Vec<_> = source.iter().map(|v| v.rotate_left(count)).collect();
         for kernel in backends {
             let mut out = vec![23; lanes + 1];
-            let result = kernel.call(
+            let result = splice_testkit::call_i32(
+                &kernel,
                 &[],
-                &mut [BufferArg::Read(&source), BufferArg::Write(&mut out)],
+                &mut [BufferArg::read(&source), BufferArg::write(&mut out)],
             );
             assert_eq!(result, Ok(lanes as i32));
             assert_eq!(out[..lanes], expected, "rotation count {count}");
@@ -399,7 +386,8 @@ fn triple_xor_and_complement_preserve_every_lane_and_the_tail() {
     }
     for kernel in compile_all!(xor_complement) {
         let mut out = vec![77; a.len()];
-        let result = kernel.call(
+        let result = splice_testkit::call_i32(
+            &kernel,
             &[],
             &mut [
                 a.as_slice().into(),
@@ -435,7 +423,8 @@ fn floating_iota_uses_numeric_lane_indices() {
         let mut singles = [-1.0_f32; 64];
         let mut doubles = [-1.0_f64; 64];
         assert_eq!(
-            kernel.call(
+            splice_testkit::call_i32(
+                &kernel,
                 &[],
                 &mut [singles.as_mut_slice().into(), doubles.as_mut_slice().into()]
             ),
@@ -500,7 +489,8 @@ fn column_permutations_and_wrapping_prefixes_cross_the_full_vector() {
     for code in compile_all!(column_batches) {
         out.fill(-1);
         assert_eq!(
-            code.call(
+            splice_testkit::call_i32(
+                &code,
                 &[],
                 &mut [
                     (&left[..]).into(),
@@ -552,7 +542,9 @@ fn alignment_prefix_uses_the_actual_subslice_and_offset() {
                 let expected = slice.as_ptr().wrapping_add(offset).align_offset(align) as i32;
                 assert_eq!(batch_alignment(slice, offset as i32), expected);
                 for kernel in &kernels {
-                    let actual = kernel.call(&[offset as i32], &mut [slice.into()]).unwrap();
+                    let actual =
+                        splice_testkit::call_i32(&kernel, &[offset as i32], &mut [slice.into()])
+                            .unwrap();
                     assert_eq!(actual, expected, "start={start} len={len} offset={offset}");
                 }
             }
@@ -626,17 +618,17 @@ fn compress_and_swizzle_return_vectors_with_zero_in_unused_lanes() {
         assert_eq!(out, want);
         for kernel in &kernels {
             out.fill(12345);
-            let result = kernel
-                .call(
-                    &[],
-                    &mut [
-                        (&values[..]).into(),
-                        (&mask[..]).into(),
-                        (&indices[..]).into(),
-                        (&mut out[..]).into(),
-                    ],
-                )
-                .unwrap();
+            let result = splice_testkit::call_i32(
+                &kernel,
+                &[],
+                &mut [
+                    (&values[..]).into(),
+                    (&mask[..]).into(),
+                    (&indices[..]).into(),
+                    (&mut out[..]).into(),
+                ],
+            )
+            .unwrap();
             assert_eq!(result, last);
             assert_eq!(out, want);
         }
@@ -691,7 +683,8 @@ fn compress_store_counts_lanes_and_writes_the_fitting_prefix_in_order() {
         assert_eq!(out, expected);
         for k in &kernels {
             out.fill(0x1234_5678);
-            let result = k.call(
+            let result = splice_testkit::call_i32(
+                &k,
                 &[offset],
                 &mut [
                     (&src[..]).into(),
@@ -720,22 +713,28 @@ fn scalable_add_wraps_at_u16_and_preserves_prefix_on_short_store() {
     assert_eq!(add_block(&a, &b, &mut native), w as i32);
     assert_eq!(native, expected);
     let ir = add_block::ir().unwrap();
-    let text = Text::compile(&ir).unwrap();
     assert_eq!(
-        text.as_inner(),
-        add_block::build::<Text>(add_block::BuildArgs {})
-            .unwrap()
-            .as_inner()
+        ir.buffer_kinds(),
+        [
+            BufferKind::new(Element::U16, false),
+            BufferKind::new(Element::U16, false),
+            BufferKind::new(Element::U16, true)
+        ]
     );
-    for part in [
-        "lhs: &[u16]",
-        "dst: &mut [u16]",
-        "simd.load.u16",
-        "simd.add.u16",
-        "simd.store.u16",
-        "simd.lanes.u16",
+    let ops = splice_testkit::simd_ops(&ir);
+    for op in [
+        SimdOp::Load(Buffer(0)),
+        SimdOp::Add,
+        SimdOp::Store(Buffer(2)),
+        SimdOp::Lanes,
     ] {
-        assert!(text.contains(part), "{text}");
+        assert!(
+            ops.contains(&Simd {
+                element: Element::U16,
+                op
+            }),
+            "{ops:?}"
+        );
     }
     for k in compile_all!(add_block) {
         for len in [w + 2, w + 1, w, 1, 0] {
@@ -745,7 +744,7 @@ fn scalable_add_wraps_at_u16_and_preserves_prefix_on_short_store() {
                 BufferArg::from(&b[..]),
                 BufferArg::from(&mut got[..len]),
             ];
-            let r = k.call(&[], &mut bufs);
+            let r = splice_testkit::call_i32(&k, &[], &mut bufs);
             if len > w {
                 assert_eq!(r.unwrap(), w as i32);
             } else {
@@ -757,12 +756,13 @@ fn scalable_add_wraps_at_u16_and_preserves_prefix_on_short_store() {
         }
         let mut wrong = vec![0i32; w + 1];
         assert!(
-            k.call(
+            splice_testkit::call_i32(
+                &k,
                 &[],
                 &mut [
                     (&a[..]).into(),
                     (&b[..]).into(),
-                    BufferArg::Write(&mut wrong)
+                    BufferArg::write(&mut wrong)
                 ]
             )
             .is_err()
@@ -796,7 +796,8 @@ fn masked_indices_skip_inactive_accesses_and_write_in_order() {
         assert_eq!(rust, want);
         for k in &ks {
             let mut got = [90u16, 91, 92];
-            let r = k.call(
+            let r = splice_testkit::call_i32(
+                &k,
                 &[],
                 &mut [
                     (&ids[..]).into(),
@@ -825,7 +826,8 @@ fn masked_indices_skip_inactive_accesses_and_write_in_order() {
         for k in &ks {
             let mut got = vec![99u16; n];
             assert_eq!(
-                k.call(
+                splice_testkit::call_i32(
+                    &k,
                     &[],
                     &mut [
                         src.into(),
@@ -866,7 +868,11 @@ fn unmasked_scatter_writes_aliases_in_lane_order_up_to_the_first_fault() {
         assert_eq!(out, want);
         for kernel in &kernels {
             out.fill(71);
-            let result = kernel.call(&[], &mut [ids.as_slice().into(), (&mut out[1..4]).into()]);
+            let result = splice_testkit::call_i32(
+                &kernel,
+                &[],
+                &mut [ids.as_slice().into(), (&mut out[1..4]).into()],
+            );
             assert_eq!(result.is_err(), fault.is_some());
             assert_eq!(out, want);
         }
@@ -908,7 +914,8 @@ fn masked_contiguous_access_skips_empty_masks_and_preserves_the_valid_store_pref
         assert_eq!(out, want);
         for kernel in &kernels {
             out.fill(-91);
-            let result = kernel.call(
+            let result = splice_testkit::call_i32(
+                &kernel,
                 &[offset],
                 &mut [
                     src.into(),
@@ -934,7 +941,8 @@ fn masked_tail_uses_each_fallback_and_skips_writes() {
     for k in compile_all!(tail) {
         let mut got = vec![100u16; w + 2];
         assert_eq!(
-            k.call(
+            splice_testkit::call_i32(
+                &k,
                 &[],
                 &mut [
                     (&[7u16, 12][..]).into(),
@@ -974,7 +982,8 @@ fn element_size_controls_lane_count_and_typed_joins() {
             let mut b = vec![0f32; n];
             let mut d = vec![0f64; m];
             assert_eq!(
-                k.call(
+                splice_testkit::call_i32(
+                    &k,
                     &[flag],
                     &mut [
                         (&a[..]).into(),
@@ -1036,7 +1045,8 @@ fn masked_u16_gather_visits_every_set_bit_and_keeps_each_fallback() {
         for kernel in &kernels {
             out.fill(99);
             assert_eq!(
-                kernel.call(
+                splice_testkit::call_i32(
+                    &kernel,
                     &[],
                     &mut [
                         src.into(),
@@ -1068,10 +1078,11 @@ fn inactive_gather_retains_each_fallback_lane() {
     for k in compile_all!(gather_fallback) {
         let mut out = vec![0; w];
         assert_eq!(
-            k.call(
+            splice_testkit::call_i32(
+                &k,
                 &[17],
                 &mut [
-                    BufferArg::Read(&[11]),
+                    BufferArg::read::<i32>(&[11]),
                     (&ids[..]).into(),
                     (&mask[..]).into(),
                     (&mut out[..]).into()
@@ -1086,7 +1097,8 @@ fn inactive_gather_retains_each_fallback_lane() {
             invalid[1] = bad;
             // The first active invalid lane traps before the subsequent store.
             out.fill(99);
-            let result = k.call(
+            let result = splice_testkit::call_i32(
+                &k,
                 &[17],
                 &mut [
                     (&[0, 11, 0][1..2]).into(),
@@ -1155,7 +1167,7 @@ macro_rules! gather_bounds_test {
                     assert_eq!(out, want);
                     for kernel in &kernels {
                         out.fill(129);
-                        let result = kernel.call(
+                        let result = splice_testkit::call_i32(&kernel,
                             &[i32::from(masked)],
                             &mut [src.into(), ids.as_slice().into(), (&mut out[1..=2 * w]).into()],
                         );
@@ -1203,7 +1215,8 @@ fn signed_i64_scatter_checks_full_indices_and_commits_only_the_valid_prefix() {
             ids[1] = bad;
             for active in [1, n] {
                 let mut out = [91_i64, 42, 42, 92];
-                let result = k.call(
+                let result = splice_testkit::call_i32(
+                    &k,
                     &[active as i32],
                     &mut [(&ids[..]).into(), (&mut out[1..3]).into()],
                 );
@@ -1229,12 +1242,12 @@ fn floating_division_and_unordered_comparison() {
     let ks = compile_all!(ieee_division);
     for k in &ks {
         let mut out = vec![0f32; n];
-        let r = k
-            .call(
-                &[],
-                &mut [(&a[..]).into(), (&b[..]).into(), (&mut out[..]).into()],
-            )
-            .unwrap();
+        let r = splice_testkit::call_i32(
+            &k,
+            &[],
+            &mut [(&a[..]).into(), (&b[..]).into(), (&mut out[..]).into()],
+        )
+        .unwrap();
         assert_eq!(r, 1);
         for (x, y) in out.into_iter().zip(&expected) {
             if y.is_nan() {
@@ -1250,30 +1263,50 @@ fn floating_division_and_unordered_comparison() {
 fn verifier_checks_vector_mask_and_buffer_element_types() {
     use splice::{
         BufferKind,
-        hir::{Buffer, FunctionBuilder, Simd, SimdOp},
+        frontend::{KernelBuilder, Signature, materialize},
+        hir::{Buffer, Reg, Simd, SimdOp},
         simd::Element,
     };
-    let mut b = FunctionBuilder::with_buffers(0, vec![BufferKind::new(Element::F32, false)]);
-    let offset = b.constant(0);
-    let f = b
-        .simd(
-            Simd {
-                element: Element::F32,
-                op: SimdOp::Load(Buffer(0)),
-            },
-            &[offset],
+    const KINDS: [BufferKind; 1] = [BufferKind::new(Element::F32, false)];
+    /// An operation built from the offset and the loaded vector.
+    type Operation = fn(Reg, Reg) -> (Element, SimdOp, Vec<Reg>);
+    let stage = |bad: Option<Operation>| {
+        materialize(
+            Signature::new(&[ScalarType::I32; 0], ScalarType::I32, &KINDS),
+            Box::new(move |b: &mut dyn KernelBuilder| {
+                let offset = b.constant(Constant::from(0usize))?;
+                let f = b
+                    .simd(
+                        Simd {
+                            element: Element::F32,
+                            op: SimdOp::Load(Buffer(0)),
+                        },
+                        &[offset],
+                    )?
+                    .unwrap();
+                if let Some(bad) = bad {
+                    let (element, op, args) = bad(offset, f);
+                    b.simd(Simd { element, op }, &args)?;
+                }
+                let zero = b.constant(Constant::from(0))?;
+                b.ret(zero)
+            }),
+            options(),
         )
-        .unwrap()
-        .unwrap();
-    for (element, op, args) in [
-        (Element::F64, SimdOp::Load(Buffer(0)), vec![offset]),
-        (Element::F32, SimdOp::Any, vec![f]),
-        (Element::F32, SimdOp::Store(Buffer(0)), vec![offset, f]),
-    ] {
-        assert!(b.simd(Simd { element, op }, &args).is_err());
+    };
+    assert!(stage(None).is_ok());
+    let cases: [Operation; 4] = [
+        |offset, _| (Element::F64, SimdOp::Load(Buffer(0)), vec![offset]),
+        |_, f| (Element::F32, SimdOp::Any, vec![f]),
+        |offset, f| (Element::F32, SimdOp::Store(Buffer(0)), vec![offset, f]),
+        |_, f| (Element::F32, SimdOp::Store(Buffer(0)), vec![f, f]),
+    ];
+    for bad in cases {
+        assert!(matches!(
+            stage(Some(bad)),
+            Err(splice::BuildError::Verify { .. })
+        ));
     }
-    b.ret(f);
-    assert!(b.finish().is_err());
 }
 
 #[kernel]
@@ -1305,7 +1338,7 @@ fn first_n_caps_before_narrowing_and_drives_partial_blocks() {
             let mut out = vec![100u16; w];
             let expected = (n as usize).min(w);
             assert_eq!(
-                kernel.call(&[n], &mut [(&mut out[..]).into()]).unwrap(),
+                splice_testkit::call_i32(&kernel, &[n], &mut [(&mut out[..]).into()]).unwrap(),
                 i32::from(expected == w)
             );
             assert_eq!(out.iter().filter(|&&v| v == 11).count(), expected);
@@ -1325,7 +1358,7 @@ fn first_n_caps_before_narrowing_and_drives_partial_blocks() {
         for k in &kernels {
             let mut dst = vec![-999f64; n + 1];
             assert_eq!(
-                k.call(&[], &mut [(&src[..]).into(), (&mut dst[..n]).into()])
+                splice_testkit::call_i32(&k, &[], &mut [(&src[..]).into(), (&mut dst[..n]).into()])
                     .unwrap(),
                 n as i32
             );
@@ -1361,7 +1394,7 @@ fn typed_slice_forwarding_and_block_local_import() {
     for k in compile_all!(forwarded) {
         let mut out = vec![0f32; n];
         assert_eq!(
-            k.call(&[], &mut [(&input[..]).into(), (&mut out[..]).into()])
+            splice_testkit::call_i32(&k, &[], &mut [(&input[..]).into(), (&mut out[..]).into()])
                 .unwrap(),
             n as i32
         );
@@ -1395,7 +1428,8 @@ fn integer_mask_selects_float_lanes() {
     for k in compile_all!(gather_positive_indices) {
         let mut out = vec![0f32; n];
         assert_eq!(
-            k.call(
+            splice_testkit::call_i32(
+                &k,
                 &[],
                 &mut [
                     (&[3.5f32][..]).into(),
@@ -1440,7 +1474,11 @@ fn data_operands_determine_the_element_type_independently_of_the_mask() {
     for kernel in compile_all!(inferred_vectors) {
         out.fill(0.);
         assert_eq!(
-            kernel.call(&[], &mut [src.as_slice().into(), out.as_mut_slice().into()]),
+            splice_testkit::call_i32(
+                &kernel,
+                &[],
+                &mut [src.as_slice().into(), out.as_mut_slice().into()]
+            ),
             Ok(1)
         );
         assert_eq!(out, expected);
@@ -1476,7 +1514,8 @@ fn vector_load_checks_the_whole_block_after_prior_writes() {
         assert_eq!(out, expected);
         for kernel in &kernels {
             out.fill(-1);
-            let result = kernel.call(
+            let result = splice_testkit::call_i32(
+                &kernel,
                 &[offset],
                 &mut [src.as_slice().into(), out.as_mut_slice().into()],
             );
@@ -1527,7 +1566,8 @@ fn register_refill_and_wrapping_lane_index_match_across_backends() {
             for kernel in &kernels {
                 dst.fill(976);
                 assert_eq!(
-                    kernel.call(
+                    splice_testkit::call_i32(
+                        &kernel,
                         &[idx],
                         &mut [
                             src.as_slice().into(),
@@ -1541,9 +1581,13 @@ fn register_refill_and_wrapping_lane_index_match_across_backends() {
             }
         }
     }
-    let listing = refill_lanes::build::<Text>(refill_lanes::BuildArgs {}).unwrap();
-    for op in ["expand", "extract_wrapping", "replace_wrapping"] {
-        assert!(listing.contains(op));
+    let ops = splice_testkit::simd_ops(&refill_lanes::ir().unwrap());
+    for op in [
+        SimdOp::Expand,
+        SimdOp::ExtractWrapping,
+        SimdOp::ReplaceWrapping,
+    ] {
+        assert!(ops.iter().any(|simd| simd.op == op), "{ops:?}");
     }
 }
 
@@ -1580,8 +1624,7 @@ fn host_scratch_slots_retain_independent_runtime_values() {
         let want = if slot == 0 { 29 } else { 22 };
         let mut expected = [0; 2];
         assert_eq!(scratch_slots(slot, 5, &mut expected), want);
-        check::<Lancy>(slot, want, expected);
-        check::<Llvm>(slot, want, expected);
+        splice_testkit::each_backend!(B => check::<B>(slot, want, expected));
     }
 }
 #[kernel]
@@ -1605,7 +1648,8 @@ fn i64_multiply_keeps_the_low_word_of_every_product() {
             let (lhs, rhs): (Vec<_>, Vec<_>) =
                 inputs.into_iter().cycle().skip(offset).take(n).unzip();
             let mut dst = vec![33; n + 1];
-            let result = k.call(
+            let result = splice_testkit::call_i32(
+                &k,
                 &[],
                 &mut [(&lhs[..]).into(), (&rhs[..]).into(), (&mut dst[..]).into()],
             );

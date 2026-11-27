@@ -1,16 +1,16 @@
-fn main bits:i32 -> i32
+fn main(bits:i32) -> i32
   x = bitcast f32 bits
-  v = simd.splat x
-  sum = simd.reduce add v
+  v = splat x
+  sum = reduce add v
   r = bitcast i32 sum
   ret r
-@aarch64-isel check: Reduce(FloatAdd(
-@aarch64 sve has 0xff3fe000 0x65182000
-@aarch64 sve2 has 0xff3fe000 0x65182000
-@aarch64 all lacks 0xfffffc1f 0xd63f0000
+@aarch64-isel check: reduce fadd
+@aarch64 sve has z.fadda
+@aarch64 sve2 has z.fadda
+@aarch64 all lacks blr
 @run 0x80000000 -> 0x80000000
 ---
-fn main x:i32 -> i32
+fn main(x:i32) -> i32
   zero = const 0
   one = const 1
   two = const 2
@@ -19,38 +19,38 @@ fn main x:i32 -> i32
   filler = literal f32 0x0
   delta = literal f32 0x3f800000
   end = literal f32 0xcb800000
-  empty = simd.splat filler
-  a = simd.insert empty zero input
-  b = simd.insert a one delta
-  c = simd.insert b two delta
-  values = simd.insert c three end
-  sum = simd.reduce add values
+  empty = splat filler
+  a = insert empty zero input
+  b = insert a one delta
+  c = insert b two delta
+  values = insert c three end
+  sum = reduce add values
   result = bitcast i32 sum
   ret result
-@aarch64 all lacks 0xfffffc1f 0xd63f0000
+@aarch64 all lacks blr
 @run 0x4b800000 -> 0
 ---
-fn main x:i32 -> i32
+fn main(x:i32) -> i32
   f = cast f32 x
-  v = simd.splat f
-  sum = simd.reduce add v
-  n = simd.lanes f32
+  v = splat f
+  sum = reduce add v
+  n = lanes f32
   got = cast i32 sum
   expected = mul x n
   r = sub got expected
   ret r
-@aarch64 all lacks 0xfffffc1f 0xd63f0000
+@aarch64 all lacks blr
 @run 1 -> 0
 @run -3 -> 0
 ---
-fn main x:i32 -> i32
-  lanes = simd.lanes u64
+fn main(x:i32) -> i32
+  lanes = lanes u64
   one = const 1
   zero = const 0
   last = sub lanes one
-  steps = simd.iota u64
-  either = simd.reduce or steps
-  distinct = simd.reduce xor steps
+  steps = iota u64
+  either = reduce or steps
+  distinct = reduce xor steps
   two = shr lanes one
   parity = and two one
   a = cast i32 either
@@ -58,45 +58,45 @@ fn main x:i32 -> i32
   first = xor a last
   second = xor b parity
   raw = cast u64 x
-  copies = simd.splat raw
-  logical = simd.insert copies zero raw
-  both = simd.reduce and logical
+  copies = splat raw
+  logical = insert copies zero raw
+  both = reduce and logical
   c = cast i32 both
   third = xor c x
   check = or first second
   r = or check third
   ret r
-@aarch64-isel check: Reduce(
-@aarch64 sve has 0xff3fe000 0x04182000
-@aarch64 sve2 has 0xff3fe000 0x041a2000
-@aarch64 all lacks 0xfffffc1f 0xd63f0000
+@aarch64-isel check: reduce 
+@aarch64 sve has z.orv
+@aarch64 sve2 has z.andv
+@aarch64 all lacks blr
 @run 1431655765 -> 0
 @run -1 -> 0
 ---
-fn main x:i32 -> i32
+fn main(x:i32) -> i32
   lane = cast i8 x
-  base = simd.splat lane
-  ramp = simd.iota i8
-  values = simd.add base ramp
-  largest = simd.reduce max values
-  smallest = simd.reduce min values
+  base = splat lane
+  ramp = iota i8
+  values = add base ramp
+  largest = reduce max values
+  smallest = reduce min values
   lo = cast i32 smallest
   hi = cast i32 largest
   r = add lo hi
   ret r
-@aarch64 all lacks 0xfffffc1f 0xd63f0000
+@aarch64 all lacks blr
 @run 127 -> -1
 ---
-fn main raw:i32 -> i32
+fn main(raw:i32) -> i32
   bits = cast u16 raw
   a = bitcast bf16 bits
-  v = simd.splat a
-  x = simd.reduce mul v
+  v = splat a
+  x = reduce mul v
   b = bitcast u16 x
   r = cast i32 b
   ret r
-@aarch64-isel check: Reduce(Ordered(Mul, BF16,
-@aarch64 all lacks 0xfffffc1f 0xd63f0000
+@aarch64-isel check: reduce ordered mul bf16
+@aarch64 all lacks blr
 @run 0 -> 0
 @run 0xbf80 -> 0x3f80
 @run 0x7f80 -> 0x7f80

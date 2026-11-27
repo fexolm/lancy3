@@ -3,12 +3,14 @@ mod probe;
 
 use probe::{fixture, lookup, reference};
 use splice::Executable;
-use splice_cranelift::Cranelift;
-use splice_lancy::Lancy;
-use splice_llvm::Llvm;
+use splice::cranelift::Cranelift;
+use splice::lancy::Lancy;
+#[cfg(feature = "llvm")]
+use splice::llvm::Llvm;
 
-fn main() -> Result<(), String> {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     let kernel: Box<dyn Executable> = match std::env::args().nth(1).as_deref() {
+        #[cfg(feature = "llvm")]
         Some("llvm") => Box::new(lookup::build::<Llvm>(lookup::BuildArgs {})?.into_inner()),
         Some("cranelift") => {
             Box::new(lookup::build::<Cranelift>(lookup::BuildArgs {})?.into_inner())
@@ -16,7 +18,7 @@ fn main() -> Result<(), String> {
         None | Some("lancy") => {
             Box::new(lookup::build::<Lancy>(lookup::BuildArgs {})?.into_inner())
         }
-        Some(name) => return Err(format!("unknown backend {name}")),
+        Some(name) => return Err(format!("unknown backend {name}").into()),
     };
     let (table, queries) = fixture(16, 12, 9);
     let mut slots = vec![-2; queries.len()];
@@ -39,8 +41,10 @@ fn main() -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use splice::KernelScalar;
+    use splice::hir::{Simd, SimdOp};
+    use splice::simd::Element;
     use splice::{Codegen, simd::Lane};
-    use splice_text::Text;
 
     fn check(
         kernels: &[Box<dyn Executable>],
@@ -71,7 +75,7 @@ mod tests {
                     ],
                 )
                 .unwrap();
-            assert_eq!(result, count);
+            assert_eq!(result, count.to_word());
             assert_eq!(&guarded[1..1 + output_len], expected);
             assert_eq!((guarded[0], guarded[output_len + 1]), (GUARD, GUARD));
         }
@@ -80,7 +84,7 @@ mod tests {
     #[test]
     fn independent_probes_stop_on_matches_empty_slots_and_full_laps() {
         let ir = lookup::ir().unwrap();
-        let kernels: [Box<dyn Executable>; 6] = [
+        let kernels: Vec<Box<dyn Executable>> = vec![
             Box::new(
                 lookup::build::<Lancy>(lookup::BuildArgs {})
                     .unwrap()
@@ -93,11 +97,13 @@ mod tests {
                     .into_inner(),
             ),
             Box::new(Cranelift::compile(&ir).unwrap().into_inner()),
+            #[cfg(feature = "llvm")]
             Box::new(
                 lookup::build::<Llvm>(lookup::BuildArgs {})
                     .unwrap()
                     .into_inner(),
             ),
+            #[cfg(feature = "llvm")]
             Box::new(Llvm::compile(&ir).unwrap().into_inner()),
         ];
         let w = Lane::<i32>::lanes();
@@ -134,20 +140,16 @@ mod tests {
 
     #[test]
     fn lookup_ir_uses_masked_gather_and_pack_arithmetic() {
-        let listing = lookup::build::<Text>(lookup::BuildArgs {}).unwrap();
-        assert_eq!(
-            listing.as_inner(),
-            Text::compile(&lookup::ir().unwrap()).unwrap().as_inner()
-        );
-        for op in [
-            "simd.load_select.i32",
-            "simd.mul.i32",
-            "simd.gather_select.i32",
-            "simd.any.i32",
-            "simd.mask_and.i32",
-            "simd.store_select.i32",
-        ] {
-            assert!(listing.contains(op), "{op} missing from {listing}");
-        }
+        let ops = splice_testkit::simd_ops(&lookup::ir().unwrap());
+        let has = |op: fn(&SimdOp) -> bool| {
+            ops.iter()
+                .any(|&Simd { element, op: o }| element == Element::I32 && op(&o))
+        };
+        assert!(has(|op| matches!(op, SimdOp::LoadSelect(_))), "{ops:?}");
+        assert!(has(|op| *op == SimdOp::Mul), "{ops:?}");
+        assert!(has(|op| matches!(op, SimdOp::GatherSelect(_))), "{ops:?}");
+        assert!(has(|op| *op == SimdOp::Any), "{ops:?}");
+        assert!(has(|op| *op == SimdOp::MaskAnd), "{ops:?}");
+        assert!(has(|op| matches!(op, SimdOp::StoreSelect(_))), "{ops:?}");
     }
 }

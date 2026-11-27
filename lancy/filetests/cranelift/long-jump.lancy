@@ -2,19 +2,19 @@
 # SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
 # %a
-fn main v0:i32 -> i32
-  jump block1 v0
-block block1 v1:i32
+fn main(v0:i32) -> i32
+  jump block1(v0)
+block block1(v1:i32)
   ret v0
 @run 0 -> 0
 
 ---
 
 # Lancy has no block-padding setting. Make the skipped block exceed rel8.
-fn main skip:i32 x:i32 -> i32
+fn main(skip:i32 x:i32) -> i32
   one = const 1
-  br skip exit x | work
-block work
+  br skip exit(x) | work()
+block work()
   a0 = add x one
   a1 = add a0 one
   a2 = add a1 one
@@ -63,8 +63,8 @@ block work
   a45 = add a44 one
   a46 = add a45 one
   a47 = add a46 one
-  jump exit a47
-block exit result:i32
+  jump exit(a47)
+block exit(result:i32)
   ret result
 @asm check: e9
 @asm sameln: jmp

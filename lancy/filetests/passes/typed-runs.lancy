@@ -1,0 +1,30 @@
+# @run literals follow the signature: an unsuffixed value takes the parameter
+# type, a suffix must match it, and hexadecimal is the bit pattern.
+fn main(x:f32 y:f32) -> f32
+  v = add x y
+  ret v
+@run 1.5 1.0f32 -> 2.5f32
+@run -0 0 -> 0
+@run 0x7f800000_f32 1 -> inf
+---
+fn main(x:f64 y:i64) -> f64
+  c = cast f64 y
+  v = mul x c
+  ret v
+@run 0.5 -6i64 -> -3f64
+---
+# Vector lanes repeat to fill the profile's vector, on every width.
+fn main(x:vec.i32 y:vec.i32) -> vec.i32
+  v = sub x y
+  ret v
+@run vec.i32[5 7] vec.i32[1] -> vec.i32[4 6]
+@run vec.i32[0x80000000] vec.i32[1] -> vec.i32[0x7fffffff]
+---
+# One buffer pair per pointer parameter, in order.
+fn main(src:ptr dst:ptr n:i8) -> u16
+  x = load i32 src
+  store dst x
+  w = cast u16 n
+  ret w
+@run -1 -> 0xffff | 01 02 03 04 | 01 02 03 04 | aa aa aa aa aa | 01 02 03 04 aa
+@run 7i8 -> 7u16 | 00 00 00 80 | 00 00 00 80 | 00 00 00 00 | 00 00 00 80

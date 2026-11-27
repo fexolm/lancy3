@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
 # %or_and_y_with_not_y
-fn main v0:i32 v1:i32 -> i32
+fn main(v0:i32 v1:i32) -> i32
   v2 = and v0 v1
   t0 = const -1
   v3 = xor v1 t0
@@ -18,7 +18,7 @@ fn main v0:i32 v1:i32 -> i32
 ---
 
 # %or_and_constant_with_not_constant
-fn main v0:i32 -> i32
+fn main(v0:i32) -> i32
   v1 = const -4
   v2 = and v0 v1
   v3 = const 3

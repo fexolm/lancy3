@@ -1,7 +1,6 @@
 use crate::jit::Jit;
 use inkwell::memory_buffer::MemoryBuffer;
-use splice::{Function, hir::Instr};
-use splice_jit::gimli::write::FrameTable;
+use splice_jit::Publish;
 use std::ffi::CString;
 
 struct NativeFunction {
@@ -20,12 +19,14 @@ pub(super) struct ObjectSymbols {
 }
 
 impl ObjectSymbols {
-    pub fn read(object: &MemoryBuffer<'_>, debug: bool) -> splice::Result<Self> {
-        let file = object.create_binary_file(None).map_err(|e| e.to_string())?;
+    pub fn read(object: &MemoryBuffer<'_>, debug: bool) -> splice_core::Result<Self> {
+        let file = object.create_binary_file(None).map_err(crate::error)?;
         let mut symbols = file
             .get_symbols()
-            .ok_or("LLVM object has no symbol table")?;
-        let mut sections = file.get_sections().ok_or("LLVM object has no sections")?;
+            .ok_or_else(|| crate::error("LLVM object has no symbol table"))?;
+        let mut sections = file
+            .get_sections()
+            .ok_or_else(|| crate::error("LLVM object has no sections"))?;
         let mut result = Self::default();
         while let Some(symbol) = symbols.next_symbol() {
             let Some(name) = symbol.get_name() else {
@@ -44,7 +45,7 @@ impl ObjectSymbols {
                 sections.move_to_containing_section(&symbol);
                 let section = sections
                     .next_section()
-                    .ok_or("LLVM function missing its text section")?;
+                    .ok_or_else(|| crate::error("LLVM function missing its text section"))?;
                 result.functions.push(NativeFunction {
                     name: name.into(),
                     source_id,
@@ -71,11 +72,13 @@ impl ObjectSymbols {
                     .unwrap_or(f.section_end);
                 result.functions[index].size = end
                     .checked_sub(f.start)
-                    .ok_or("invalid LLVM function range")?;
+                    .ok_or_else(|| crate::error("invalid LLVM function range"))?;
             }
         }
         if debug {
-            let mut sections = file.get_sections().ok_or("LLVM object has no sections")?;
+            let mut sections = file
+                .get_sections()
+                .ok_or_else(|| crate::error("LLVM object has no sections"))?;
             while let Some(section) = sections.next_section() {
                 if section.get_name() == Some(c".llvm_stackmaps") {
                     result.points = stack_map::read(section.get_contents())?;
@@ -86,36 +89,27 @@ impl ObjectSymbols {
         Ok(result)
     }
 
-    pub fn publish(
+    /// Add the linked functions to `publish`, with source statements in a
+    /// debug build. LLVM's frames carry no unwind rows: a debug build keeps
+    /// frame pointers, which debuggers unwind through.
+    pub fn describe(
         self,
+        publish: &mut Publish,
         jit: &Jit,
-        source: Option<&Function>,
-        kernel_source: Option<&splice::frontend::KernelSource>,
+        staged: &crate::lower::Staged,
         debug: bool,
-    ) -> splice::Result<Option<splice_jit::Registration>> {
-        let sources = source
-            .filter(|_| debug)
-            .map(|source| source.reachable_functions().0);
-        let mut functions = Vec::with_capacity(self.functions.len());
+    ) -> splice_core::Result<()> {
         for native in self.functions {
             let address = jit.lookup(&native.name)?;
-            let f = native
-                .source_id
-                .and_then(|id| sources.as_ref()?.get(id).copied());
+            let f = native.source_id.and_then(|id| staged.functions.get(id));
             let name = f
-                .and_then(Function::source)
-                .or(kernel_source)
+                .and_then(|f| f.source)
+                .or(staged.source)
                 .map_or("kernel", |src| src.name);
-            let name = if f.is_some() || !debug {
-                format!("splice_jit::{name}")
+            let function = if f.is_some() || !debug {
+                publish.function(name, address, native.size)
             } else {
-                format!("splice_jit::{name}::entry")
-            };
-            let mut function = splice_jit::Function {
-                name,
-                address,
-                size: native.size,
-                statements: Vec::new(),
+                publish.function(&format!("{name}::entry"), address, native.size)
             };
             if let (Some(id), Some(f)) = (native.source_id, f)
                 && let Some(points) = self.points.get(&id)
@@ -123,32 +117,28 @@ impl ObjectSymbols {
                 for location in points {
                     let offset = u64::from(location.offset);
                     if offset >= native.size {
-                        return Err(format!(
+                        return Err(crate::error(format!(
                             "LLVM sequence point {offset:#x} lies outside {} (size {:#x})",
                             native.name.to_string_lossy(),
                             native.size
-                        ));
+                        )));
                     }
-                    let Some(Instr::Debug(point)) = f.instructions().get(location.index) else {
-                        return Err(
-                            "LLVM label does not correspond to a Splice source point".into()
-                        );
+                    let Some((point, slots)) = f.points.get(location.index) else {
+                        return Err(crate::error(
+                            "LLVM label does not correspond to a Splice source point",
+                        ));
                     };
                     function.statement(
-                        f,
                         point,
+                        slots.iter().copied(),
                         address + offset,
                         location.register,
                         i64::from(location.displacement),
                     );
                 }
             }
-            functions.push(function);
         }
-        splice_jit::profile(&functions);
-        debug
-            .then(|| splice_jit::Registration::new(&functions, &FrameTable::default()))
-            .transpose()
+        Ok(())
     }
 }
 mod stack_map;

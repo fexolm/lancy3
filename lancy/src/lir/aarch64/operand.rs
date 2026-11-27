@@ -9,7 +9,7 @@ pub(crate) enum Bank {
 
 /// An architectural register, including the distinct SP and zero roles of register 31.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Register {
+pub(crate) struct Register {
     pub(crate) bank: Bank,
     pub(crate) number: u8,
     pub(crate) sp: bool,
@@ -17,7 +17,8 @@ pub struct Register {
 
 macro_rules! registers {
     ($bank:ident; $($name:ident = $number:literal),+ $(,)?) => {
-        $(pub const $name: Self = Self { bank: Bank::$bank, number: $number, sp: false };)+
+        $(#[allow(dead_code, reason = "the register file is named completely")]
+        pub(crate) const $name: Self = Self { bank: Bank::$bank, number: $number, sp: false };)+
     };
 }
 
@@ -50,11 +51,12 @@ impl Register {
         P0 = 0, P1 = 1, P2 = 2, P3 = 3, P4 = 4, P5 = 5, P6 = 6, P7 = 7,
         P8 = 8, P9 = 9, P10 = 10, P11 = 11, P12 = 12, P13 = 13, P14 = 14, P15 = 15,
     );
-    pub const SP: Self = Self {
+    pub(crate) const SP: Self = Self {
         sp: true,
         ..Self::XZR
     };
-    pub const WSP: Self = Self {
+    #[allow(dead_code, reason = "the register file is named completely")]
+    pub(crate) const WSP: Self = Self {
         sp: true,
         ..Self::WZR
     };
@@ -66,49 +68,66 @@ impl Register {
             sp: false,
         })
     }
-    pub fn x(n: u8) -> Option<Self> {
+    pub(crate) fn x(n: u8) -> Option<Self> {
         Self::numbered(Bank::X, n, 32)
     }
-    pub fn w(n: u8) -> Option<Self> {
+    pub(crate) fn w(n: u8) -> Option<Self> {
         Self::numbered(Bank::W, n, 32)
     }
-    pub fn v(n: u8) -> Option<Self> {
+    pub(crate) fn v(n: u8) -> Option<Self> {
         Self::numbered(Bank::V, n, 32)
     }
-    pub fn z(n: u8) -> Option<Self> {
+    pub(crate) fn z(n: u8) -> Option<Self> {
         Self::numbered(Bank::Z, n, 32)
-    }
-    pub fn p(n: u8) -> Option<Self> {
-        Self::numbered(Bank::P, n, 16)
     }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Arrangement {
+pub(crate) enum Arrangement {
     B8,
     B16,
     H4,
     H8,
     S2,
     S4,
-    D1,
     D2,
     B,
     H,
     S,
     D,
+    /// The 128-bit element of an SVE vector.
+    Q,
+}
+impl Arrangement {
+    /// The assembler suffix: `4s` for a NEON vector, `s` for an element.
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::B8 => "8b",
+            Self::B16 => "16b",
+            Self::H4 => "4h",
+            Self::H8 => "8h",
+            Self::S2 => "2s",
+            Self::S4 => "4s",
+            Self::D2 => "2d",
+            Self::B => "b",
+            Self::H => "h",
+            Self::S => "s",
+            Self::D => "d",
+            Self::Q => "q",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub(crate) enum ShiftKind {
+    Lsl = 0,
+    Lsr = 1,
+    Ror = 3,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
-pub enum ShiftKind {
-    Lsl,
-    Lsr,
-    Asr,
-    Ror,
-}
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[repr(u8)]
-pub enum ConditionCode {
+pub(crate) enum ConditionCode {
     Eq,
     Ne,
     Cs,
@@ -127,22 +146,30 @@ pub enum ConditionCode {
     Nv,
 }
 
+impl ConditionCode {
+    pub(crate) const fn name(self) -> &'static str {
+        [
+            "eq", "ne", "cs", "cc", "mi", "pl", "vs", "vc", "hi", "ls", "ge", "lt", "gt", "le",
+            "al", "nv",
+        ][self as usize]
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum PredQual {
+pub(crate) enum PredQual {
     None,
     Zero,
     Merge,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Operand {
+pub(crate) enum Operand {
     Register(Register),
     Vector(Register, Arrangement),
     Immediate(u64),
     ShiftedImmediate(u64, u8),
     ShiftedRegister(Register, ShiftKind, u8),
     Memory(Register, i64),
-    MemoryVl(Register, i64),
     Predicate(Register, PredQual),
     Label(u64),
     Condition(ConditionCode),
@@ -150,40 +177,41 @@ pub enum Operand {
 }
 
 impl Operand {
-    pub const fn reg(r: Register) -> Self {
+    pub(crate) const fn reg(r: Register) -> Self {
         Self::Register(r)
     }
-    pub const fn vec(r: Register, a: Arrangement) -> Self {
+    pub(crate) const fn vec(r: Register, a: Arrangement) -> Self {
         Self::Vector(r, a)
     }
-    pub const fn imm(v: u64) -> Self {
+    pub(crate) const fn imm(v: u64) -> Self {
         Self::Immediate(v)
     }
-    pub const fn imm_lsl(v: u64, shift: u8) -> Self {
+    /// A signed immediate, for the forms whose field is two's complement.
+    pub(crate) const fn simm(v: i64) -> Self {
+        Self::Immediate(v as u64)
+    }
+    pub(crate) const fn imm_lsl(v: u64, shift: u8) -> Self {
         Self::ShiftedImmediate(v, shift)
     }
-    pub const fn shifted(r: Register, shift: ShiftKind, amount: u8) -> Self {
+    pub(crate) const fn shifted(r: Register, shift: ShiftKind, amount: u8) -> Self {
         Self::ShiftedRegister(r, shift, amount)
     }
-    pub const fn mem(r: Register) -> Self {
+    pub(crate) const fn mem(r: Register) -> Self {
         Self::Memory(r, 0)
     }
-    pub const fn mem_off(r: Register, offset: i64) -> Self {
+    pub(crate) const fn mem_off(r: Register, offset: i64) -> Self {
         Self::Memory(r, offset)
     }
-    pub const fn mem_mul_vl(r: Register, offset: i64) -> Self {
-        Self::MemoryVl(r, offset)
-    }
-    pub const fn pred(r: Register, qualifier: PredQual) -> Self {
+    pub(crate) const fn pred(r: Register, qualifier: PredQual) -> Self {
         Self::Predicate(r, qualifier)
     }
-    pub const fn label(v: u64) -> Self {
+    pub(crate) const fn label(v: u64) -> Self {
         Self::Label(v)
     }
-    pub const fn cond(v: ConditionCode) -> Self {
+    pub(crate) const fn cond(v: ConditionCode) -> Self {
         Self::Condition(v)
     }
-    pub const fn named(v: u32) -> Self {
+    pub(crate) const fn named(v: u32) -> Self {
         Self::Named(v)
     }
 }

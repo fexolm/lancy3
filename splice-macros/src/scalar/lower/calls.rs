@@ -4,15 +4,16 @@ use proc_macro2::TokenStream;
 use syn::{Expr, Result};
 
 impl Lower<'_> {
-    pub(super) fn call(
-        &self,
-        c: &syn::ExprCall,
-        hint: Option<Scalar>,
-        cast: Option<&syn::Type>,
-    ) -> Result<Value> {
+    pub(super) fn call(&self, c: &syn::ExprCall, hint: Option<Scalar>) -> Result<Value> {
         let Expr::Path(p) = &*c.func else {
             return err(&c.func, "expected a kernel function path");
         };
+        if self.body.decl_of(p).is_some() {
+            return err(
+                &c.func,
+                "a Splice kernel calls functions by path, not through a local function value",
+            );
+        }
         let root = self.root;
         let support = emit!(#root::frontend::scalar);
         let values = c
@@ -34,8 +35,9 @@ impl Lower<'_> {
         let output = if recursive {
             self.result_type
         } else {
+            // The callee's result type is the builder's.
             hint.filter(|t| matches!(t, Scalar::Bool | Scalar::Vector(_) | Scalar::Mask(_)))
-                .unwrap_or(Scalar::Int)
+                .unwrap_or(Scalar::Inferred)
         };
         let mut check = TokenStream::new();
         let target = if recursive {
@@ -63,13 +65,19 @@ impl Lower<'_> {
             let parameters = (0..values.len())
                 .map(|i| quote::format_ident!("__SpliceArg{i}"))
                 .collect::<Vec<_>>();
+            // Only rustc knows whether `Type::m` is a method of a `#[kernel]
+            // impl. Its inherent stage entry takes precedence over this
+            // blanket fallback, which leaves an ordinary method to the Rust
+            // call below. Stable Rust has no other way to ask: an
+            // associated function cannot be imported (the selector of free
+            // functions) and inherent associated types are unstable.
             check = emit! {
                 trait __SpliceOpaqueMethod {
                     fn #published() -> bool { false }
                     fn #name<#(#parameters),*>(#(_: #parameters,)* _: &mut dyn #root::frontend::KernelBuilder)
                         -> #root::Result<#root::hir::Reg>
                     {
-                        Err("method does not have a scalar Splice implementation".into())
+                        ::core::result::Result::Err(#root::BuildError::staging("method does not have a scalar Splice implementation"))
                     }
                 }
                 impl<T: ?Sized> __SpliceOpaqueMethod for T {}
@@ -78,8 +86,12 @@ impl Lower<'_> {
         } else {
             let mut path = p.path.clone();
             let fish = std::mem::take(&mut path.segments.last_mut().unwrap().arguments);
-            let expected = output.value_type(root, self.types);
-            check = emit!(const {assert!(matches!(#path::__SPLICE_RETURN,#expected),"annotate the kernel helper result with its Lane<T> or Mask<T> type")};);
+            let expected = if output == Scalar::Inferred {
+                emit!(#root::hir::ValueType::Scalar(_))
+            } else {
+                output.value_type(root, self.types)
+            };
+            check = emit!(const {::core::assert!(::core::matches!(#path::__SPLICE_RETURN,#expected),"annotate the kernel helper result with its Lane<T> or Mask<T> type")};);
             emit!(#path::__splice_call #fish)
         };
         let all_known = named && values.iter().all(|v| v.stage.is_host());
@@ -105,23 +117,15 @@ impl Lower<'_> {
                 (_, Stage::Word(_)) => value.code,
                 (_, stage) if stage.is_host() => emit!(#support::Host(#value)),
                 (Some(Binding::Host(_)), _) => emit!({
-                    return Err("runtime value passed to a comptime parameter".into());
+                    return ::core::result::Result::Err(#root::BuildError::staging(
+                        "runtime value passed to a comptime parameter",
+                    ));
                 }),
-                (
-                    None,
-                    Stage::Reg(
-                        Scalar::Int
-                        | Scalar::Bool
-                        | Scalar::Inferred
-                        | Scalar::Vector(_)
-                        | Scalar::Mask(_),
-                    )
-                    | Stage::Buffer(_),
-                ) => value.code,
+                (None, Stage::Reg(_) | Stage::Buffer(_)) => value.code,
                 _ => {
                     return err(
                         expr,
-                        "expected a comptime value, a runtime i32, or a runtime slice",
+                        "expected a comptime value, a runtime scalar, or a runtime slice",
                     );
                 }
             };
@@ -142,11 +146,11 @@ impl Lower<'_> {
             let generics = std::mem::take(&mut item.segments.last_mut().unwrap().arguments);
             let kernel = emit!({
                 let (#(#params,)*)=(#(#original_args,)*);
-                let mut runtime=||{Ok::<_,String>(#support::Word::Runtime(#target(#(#bound,)* __splice_builder)?))};
+                let mut runtime=||{::core::result::Result::Ok::<_,#root::BuildError>(#support::Word::Runtime(#target(#(#bound,)* __splice_builder)?))};
                 #item::__splice_fold!(
-                    match #root::build_boundary(|| #item::__SpliceDefinition::__splice_eval #generics ((#(Some(#params),)*))) {
-                        Ok(value)=>#support::Word::Known(#support::ImportWord::encode(value)),
-                        Err(_)=>runtime()?,
+                    match #root::__private::build_boundary(|| #item::__SpliceDefinition::__splice_eval #generics ((#(::core::option::Option::Some(#params),)*))) {
+                        ::core::result::Result::Ok(value)=>#support::Word::known(value),
+                        ::core::result::Result::Err(_)=>runtime()?,
                     },
                     runtime()?
                 )
@@ -182,20 +186,12 @@ impl Lower<'_> {
                 })
                 .collect();
             let mut shape = crate::scalar::methods::rename_path(p, "stage_shape");
-            let mut policy = crate::scalar::methods::rename_path(p, "region_needs_stages");
-            for metadata in [&mut shape, &mut policy] {
-                metadata.path.segments.last_mut().unwrap().arguments = syn::PathArguments::None;
-            }
-            let opaque = self.import_result(p, &opaque_args, cast, Some((&shape, &policy)));
-            let ordinary = self.import_result(p, &bound, cast, None);
+            shape.path.segments.last_mut().unwrap().arguments = syn::PathArguments::None;
+            let opaque = self.import_result(p, &opaque_args, Some(&shape));
+            let ordinary = self.import_result(p, &bound, None);
             let kernel = staged_call(&bound);
-            let boolean = if cast.is_some() {
-                self.bin("And", kernel.clone(), emit!(__splice_builder.constant(1)))
-            } else {
-                kernel.clone()
-            };
             let dispatch = crate::declaration::trait_method_dispatch(
-                root, &owner, method, kernel, boolean, opaque, ordinary,
+                root, &owner, method, kernel, opaque, ordinary,
             );
             emit!({ let (#(#names,)*) = (#(#args,)*); #dispatch })
         } else if method {
@@ -223,15 +219,14 @@ impl Lower<'_> {
         dispatch_free(self.root, path, kernel, rust)
     }
     pub(super) fn import_call(&self, path: &syn::ExprPath, args: &[TokenStream]) -> TokenStream {
-        self.import_result(path, args, None, None)
+        self.import_result(path, args, None)
     }
 
     fn import_result(
         &self,
         path: &syn::ExprPath,
         args: &[TokenStream],
-        cast: Option<&syn::Type>,
-        stage_checks: Option<(&syn::ExprPath, &syn::ExprPath)>,
+        stage_shape: Option<&syn::ExprPath>,
     ) -> TokenStream {
         let root = self.root;
         let native = emit!(#root::frontend::native);
@@ -239,30 +234,27 @@ impl Lower<'_> {
         let slots: Vec<_> = (0..arity)
             .map(|index| quote::format_ident!("__SpliceOperand{index}"))
             .collect();
-        let (candidate, prepare) = if let Some(ty) = cast {
-            (
-                emit!(__splice_candidate(#path, |result| result as #ty)),
-                emit! {
-                    fn __splice_candidate<#(#slots,)* R, F: ::core::ops::Fn(R) -> i32>(
-                        entry: fn(#(#slots),*) -> R, project: F,
-                    ) -> #native::Candidate<fn(#(#slots),*) -> R, #native::MapResult<F>> {
-                        #native::Candidate(entry, #native::MapResult(project))
-                    }
-                },
-            )
-        } else {
-            (
-                emit!(__splice_candidate(#path)),
-                emit! {
-                    fn __splice_candidate<#(#slots,)* R>(entry: fn(#(#slots),*) -> R)
-                        -> #native::Candidate<fn(#(#slots),*) -> R, #native::EncodeResult>
-                    {
-                        #native::Candidate(entry, #native::EncodeResult)
-                    }
-                },
-            )
+        let candidate = emit!(__splice_candidate(#path));
+        let prepare = emit! {
+            fn __splice_candidate<#(#slots,)* R>(entry: fn(#(#slots),*) -> R)
+                -> #native::Candidate<fn(#(#slots),*) -> R>
+            {
+                #native::Candidate(entry)
+            }
         };
-        let (generics, _, where_clause) = self.generics.split_for_impl();
+        // The adapter is a nested item: it cannot name `Self`, so it drops
+        // the bounds of `Self` (such as the `Self: Sized` of a trait method).
+        let mut item_generics = self.generics.clone();
+        if let Some(clause) = &mut item_generics.where_clause {
+            clause.predicates = std::mem::take(&mut clause.predicates)
+                .into_iter()
+                .filter(|predicate| {
+                    !matches!(predicate, syn::WherePredicate::Type(bound)
+                        if matches!(&bound.bounded_ty, syn::Type::Path(ty) if ty.qself.is_none() && ty.path.is_ident("Self")))
+                })
+                .collect();
+        }
+        let (generics, _, where_clause) = item_generics.split_for_impl();
         let type_args = self
             .generics
             .params
@@ -279,56 +271,44 @@ impl Lower<'_> {
         use syn::visit::Visit;
         let mut uses_self = crate::declaration::UsesSelf::default();
         uses_self.visit_expr_path(path);
-        uses_self.visit_generics(self.generics);
+        uses_self.visit_generics(&item_generics);
         if uses_self.0 {
-            return emit!(Err::<#root::hir::Reg,String>("unpublished Self method requires its owning Rust context".into())?);
+            return emit!(::core::result::Result::Err::<#root::hir::Reg,#root::BuildError>(#root::BuildError::staging("unpublished Self method requires its owning Rust context"))?);
         }
-        let (adapter, call) = if arity <= 2 {
-            (
-                emit! {
-                    use #root::frontend::native::ScalarAdapter as _;
-                    extern "C" fn adapter #generics (a:i32,b:i32)->i64 #where_clause {
-                        use #root::frontend::native::ScalarAdapter as _;
-                        (&#candidate).invoke(a,b)
-                    }
-                },
-                emit! {
-                    __splice_builder.rust_call(#root::hir::RustCall {
-                        symbol: &#root::hir::RustSymbol {name:stringify!(#path), resolve: || adapter #fish}, arity:#arity as u8,
-                    },&operands)?
-                },
-            )
-        } else {
-            let indices = 0..arity;
-            let word = emit!(#root::frontend::scalar::ImportWord);
-            (
-                emit! {
-                    trait __SplicePacketAdapter {
-                        fn supported(self) -> bool;
-                        fn invoke(self, words: &[i32]) -> i32;
-                    }
-                    impl<#(#slots: #word,)* R, P: #native::ProjectResult<R>> __SplicePacketAdapter for &#native::Candidate<fn(#(#slots),*) -> R, P> {
-                        fn supported(self) -> bool { true }
-                        fn invoke(self, words: &[i32]) -> i32 {
-                            #native::ProjectResult::project(&self.1, (self.0)(#(<#slots as #word>::decode(words[#indices])),*))
-                        }
-                    }
-                    impl<F, P> __SplicePacketAdapter for &&#native::Candidate<F, P> {
-                        fn supported(self) -> bool { false }
-                        fn invoke(self, _: &[i32]) -> i32 { unreachable!("verified scalar packet adapter") }
-                    }
-                    fn adapter #generics (words: &[i32]) -> i32 #where_clause {
-                        (&#candidate).invoke(words)
-                    }
-                },
-                emit! {
-                    __splice_builder.rust_packet_call(&#root::hir::RustPacketSymbol {
-                        name: stringify!(#path), arity: #arity as u32, resolve: || adapter #fish,
-                    }, &operands)?
-                },
-            )
+        let indices = 0..arity;
+        let word = emit!(#root::frontend::scalar::ImportWord);
+        let words = arity as u32;
+        let adapter = emit! {
+            trait __SplicePacketAdapter {
+                fn result(self) -> ::core::option::Option<#root::hir::ScalarType>;
+                fn invoke(self, args: #root::__private::ContextArguments<'_>) -> u64;
+            }
+            impl<#(#slots: #word,)* R: #word> __SplicePacketAdapter for &#native::Candidate<fn(#(#slots),*) -> R> {
+                fn result(self) -> ::core::option::Option<#root::hir::ScalarType> { ::core::option::Option::Some(<R as #word>::TYPE) }
+                #[allow(unused_variables)]
+                fn invoke(self, args: #root::__private::ContextArguments<'_>) -> u64 {
+                    #word::encode((self.0)(#(<#slots as #word>::decode(args.word(#indices))),*))
+                }
+            }
+            impl<F> __SplicePacketAdapter for &&#native::Candidate<F> {
+                fn result(self) -> ::core::option::Option<#root::hir::ScalarType> { ::core::option::Option::None }
+                fn invoke(self, _: #root::__private::ContextArguments<'_>) -> u64 { ::core::unreachable!("verified scalar packet adapter") }
+            }
+            fn adapter #generics (args: #root::__private::ContextArguments<'_>) -> u64 #where_clause {
+                (&#candidate).invoke(args)
+            }
         };
-        let operands = if let Some((shape, needs_stages)) = stage_checks {
+        let call = emit! {
+            __splice_builder.rust_call(
+                #root::hir::RustTarget::Static(const {
+                    &#root::__private::StaticRustSymbol::new(::core::stringify!(#path), #words, 0, adapter #fish)
+                }),
+                &operands,
+                &[],
+                __splice_result,
+            )?
+        };
+        let operands = if let Some(shape) = stage_shape {
             let indices: Vec<_> = (0..arity).map(syn::Index::from).collect();
             emit! {
                 let __splice_import_values = (#(Operand(#args),)*);
@@ -336,11 +316,8 @@ impl Lower<'_> {
                 #(if !__splice_import_stages.#indices.is_empty()
                     && !(&__splice_import_values.#indices).known()
                 {
-                    return Err("runtime value passed to a comptime parameter".into());
+                    return ::core::result::Result::Err(#root::BuildError::staging("runtime value passed to a comptime parameter"));
                 })*
-                if #needs_stages() {
-                    return Err("a published kernel call cannot be specialized inside this Rust region".into());
-                }
                 let operands = [#((&__splice_import_values.#indices).materialize(__splice_builder)?),*];
             }
         } else {
@@ -350,9 +327,9 @@ impl Lower<'_> {
             #prepare
             #adapter
             use #root::frontend::native::{Materialize as _, Operand};
-            if !(&#candidate).supported() {
-                return Err("Rust import requires a non-scalar argument or result".into());
-            }
+            let ::core::option::Option::Some(__splice_result) = (&#candidate).result() else {
+                return ::core::result::Result::Err(#root::BuildError::staging("Rust import requires a non-scalar argument or result"));
+            };
             #operands
             #call
         })
@@ -388,7 +365,7 @@ pub(crate) fn select_free(
     emit!({
         mod __splice_default {
             pub mod #alias {
-                pub use #root::__splice_choose_rust as #selector;
+                pub use #root::__private::__splice_choose_rust as #selector;
             }
         }
         #[allow(unused_imports)] use __splice_default::*;

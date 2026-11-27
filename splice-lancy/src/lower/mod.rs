@@ -1,32 +1,58 @@
 //! Stage Splice's typed operations directly into Lancy SSA.
 //! Only mutable-name bindings and the operands of forward edges are deferred.
-mod portable;
+//! The portable path replays a function into the same builder.
+mod block_map;
 mod seal;
 mod simd;
-pub use portable::lower;
-pub(super) use portable::{DebugSources, lower_debug};
 #[cfg(test)]
 mod tests;
 
+use block_map::BlockMap;
+use lancy::Trap;
 use lancy::hir::{self, Block, Function, Op, Value};
-use lancy::support::slotmap::DenseMap;
-use splice::{
-    BufferKind, ContextArguments, StaticRustSymbol,
-    frontend::{Body, KernelBuilder, KernelSource, Specialization},
+use splice_core::{
+    BufferKind,
+    frontend::{Body, KernelBuilder, KernelSource, Signature, Specialization},
     hir::{
-        Binary, Buffer, ContextSlice, Label, Reg, RustCall, RustContextTarget, RustPacketSymbol,
-        Simd, ValueType,
+        Binary, Buffer, Constant, ContextSlice, Label, PacketStore, PacketValue, Reg, RustTarget,
+        ScalarType, Simd, ValueType,
     },
-    simd::Element,
 };
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
+
+/// The Lancy type of a scalar register. A `bool` is an `i32` mask, the
+/// form of Lancy comparisons: zero or all bits set.
+fn scalar_type(ty: ScalarType) -> hir::Type {
+    match ty {
+        ScalarType::Bool | ScalarType::I32 => hir::Type::I32,
+        ScalarType::U32 => hir::Type::U32,
+        ScalarType::I64 => hir::Type::I64,
+        ScalarType::U64 => hir::Type::U64,
+        ScalarType::Index => hir::Type::Usize,
+        ScalarType::F32 => hir::Type::F32,
+        ScalarType::F64 => hir::Type::F64,
+    }
+}
+
+/// The type twice as wide as an integer type, for overflow checks.
+fn wide(ty: ScalarType) -> hir::Type {
+    match ty {
+        ScalarType::I32 => hir::Type::I64,
+        ScalarType::U32 => hir::Type::U64,
+        ScalarType::I64 => hir::Type::I128,
+        _ => hir::Type::U128,
+    }
+}
 
 fn binary(op: Binary) -> hir::Binary {
     use hir::Binary as H;
     match op {
-        Binary::Add | Binary::CheckedAdd => H::Add,
-        Binary::Sub | Binary::CheckedSub => H::Sub,
-        Binary::Mul | Binary::CheckedMul => H::Mul,
+        Binary::Add | Binary::CheckedAdd | Binary::SaturatingAdd => H::Add,
+        Binary::Sub | Binary::CheckedSub | Binary::SaturatingSub => H::Sub,
+        Binary::Mul | Binary::CheckedMul | Binary::SaturatingMul => H::Mul,
         Binary::Div => H::Div,
         Binary::Rem => H::Rem,
         Binary::And => H::And,
@@ -45,78 +71,171 @@ fn binary(op: Binary) -> hir::Binary {
     }
 }
 
-#[cfg(test)]
-pub(crate) fn build(
-    arity: usize,
-    kinds: &[BufferKind],
-    body: Body<'_>,
-) -> Result<Function, String> {
-    build_with_source(arity, kinds, body).map(|(function, _)| function)
+/// A source point of a debug build: the function it belongs to and, after
+/// the marker that opens each function, the point with its saved values.
+pub(crate) struct DebugSource {
+    pub function: Option<&'static KernelSource>,
+    pub point: Option<(splice_core::debug::Point, Vec<splice_core::debug::Slot>)>,
 }
 
-pub(crate) fn build_with_source(
-    arity: usize,
-    kinds: &[BufferKind],
+/// Stage a validated body into Lancy SSA.
+pub(crate) fn stage(
+    signature: Signature<'_>,
     body: Body<'_>,
-) -> Result<(Function, Option<&'static KernelSource>), String> {
-    splice_target::simd()?;
-    let mut builder = Builder::new(arity, kinds)?;
-    body(&mut builder)?;
-    let source = builder.source;
-    Ok((builder.seal()?, source))
+    vector_bytes: usize,
+    debug: Option<&mut Vec<DebugSource>>,
+) -> splice_core::Result<(Function, Option<&'static KernelSource>)> {
+    let mut debug = debug;
+    let sources = debug.as_deref_mut().map(std::mem::take);
+    let mut builder = Builder::new(signature, true, vector_bytes, sources)?;
+    let staged = body(&mut builder);
+    if let (Some(out), Some(sources)) = (debug, builder.debug.take()) {
+        *out = sources;
+    }
+    staged?;
+    builder.finish()
+}
+
+/// Lower a verified portable function and its callees. Preserve shared
+/// callee identities. Raw invocation of the result must uphold Splice's
+/// slice contract: immutable buffers may overlap and writable buffers have
+/// exclusive access.
+pub fn lower(
+    root: &splice_core::Function,
+    target: &splice_core::Target,
+) -> splice_core::Result<hir::Function> {
+    lower_with(root, target.vector_bytes(), None)
+}
+
+pub(crate) fn lower_with(
+    root: &splice_core::Function,
+    vector_bytes: usize,
+    debug: Option<&mut Vec<DebugSource>>,
+) -> splice_core::Result<hir::Function> {
+    let (graph, _) = stage(
+        root.signature(),
+        Box::new(|b| splice_core::hir::replay(root, b)),
+        vector_bytes,
+        debug,
+    )?;
+    Ok(graph)
 }
 
 impl<'a> Builder<'a> {
-    fn new(arity: usize, kinds: &'a [BufferKind]) -> Result<Self, String> {
-        splice::hir::check_context_layout(kinds)?;
-        let count = u32::try_from(arity).map_err(|_| "too many kernel parameters")?;
+    /// A function with `signature`. The root function is the kernel's
+    /// entry: its `bool` parameters and result are 0 or 1.
+    fn new(
+        signature: Signature<'a>,
+        root: bool,
+        vector_bytes: usize,
+        debug: Option<Vec<DebugSource>>,
+    ) -> splice_core::Result<Self> {
+        let Signature {
+            params: scalars,
+            result,
+            buffers: kinds,
+        } = signature;
+        let arity = scalars.len();
+        let count = u32::try_from(arity)
+            .map_err(|_| splice_core::BuildError::unsupported("too many kernel parameters"))?;
         if count == u32::MAX {
-            return Err("too many kernel parameters".into());
+            return Err(splice_core::BuildError::unsupported(
+                "too many kernel parameters",
+            ));
         }
-        let mut params = vec![hir::Type::I32; arity];
+        let mut params: Vec<_> = scalars.iter().map(|&ty| scalar_type(ty)).collect();
         for _ in kinds {
             params.extend([hir::Type::Ptr, hir::Type::I32]);
         }
-        let mut graph = Function::new(&params, hir::Type::I32);
+        let mut graph = Function::new(&params, scalar_type(result));
         // BufferArg enforces these borrows at entry; call-site validation
         // preserves them when a nested kernel receives forwarded buffers.
-        graph.set_slice_params(
-            arity,
-            kinds
-                .iter()
-                .map(|kind| (kind.element().bytes() as u8, kind.writable()))
-                .collect(),
-        );
         let entry = graph.entry();
+        let buffers = graph.params(entry)[arity..].chunks_exact(2);
+        let slices = buffers
+            .zip(kinds)
+            .map(|(pair, kind)| hir::SliceParam {
+                ptr: pair[0],
+                len: pair[1],
+                element: kind.element().bytes() as u8,
+                writable: kind.writable(),
+            })
+            .collect();
+        graph
+            .set_slice_params(slices)
+            .expect("buffer parameters are (Ptr, I32) pairs");
         let mut first = State::default();
-        first.defs.extend(
-            graph
-                .params(entry)
-                .iter()
-                .take(arity)
-                .enumerate()
-                .map(|(i, &v)| (Reg(i as u32), v)),
-        );
-        let mut blocks = DenseMap::new();
+        for (i, &ty) in scalars.iter().enumerate() {
+            let mut v = graph.params(entry)[i];
+            if root && ty == ScalarType::Bool {
+                let zero = graph.append(entry, Op::Const(0)).unwrap();
+                v = graph
+                    .append(entry, Op::Bin(hir::Binary::Sub, zero, v))
+                    .unwrap();
+            }
+            first.defs.insert(Reg(i as u32), v);
+        }
+        let mut blocks = BlockMap::new();
         let state = blocks.insert(first);
         debug_assert_eq!(state, entry);
-        Ok(Self {
+        let mut builder = Self {
             graph,
             source: None,
             callees: HashMap::new(),
+            functions: HashMap::new(),
             arity,
+            root,
+            result,
             kinds,
+            vector_bytes,
             blocks,
             current: Some(entry),
-            types: vec![ValueType::Scalar; arity],
+            types: scalars.iter().map(|&ty| ValueType::Scalar(ty)).collect(),
             demands: Vec::new(),
+            observed: HashMap::new(),
+            unassigned: HashSet::new(),
             labels: Vec::new(),
-            immediate: None,
-            error: None,
-            has_shared_i32: kinds.contains(&BufferKind::Read),
-            constants: HashMap::new(),
-            shared_loads: HashMap::new(),
-        })
+            indices: HashMap::new(),
+            debug,
+            marker: 0,
+        };
+        if let Some(sources) = &mut builder.debug {
+            // Each function opens with a marker that names it.
+            builder.marker = sources.len();
+            let id = u32::try_from(builder.marker)
+                .map_err(|_| splice_core::BuildError::unsupported("too many debug points"))?;
+            sources.push(DebugSource {
+                function: None,
+                point: None,
+            });
+            builder
+                .graph
+                .append_inst(entry, Op::DebugPoint(id))
+                .expect("a debug point");
+        }
+        Ok(builder)
+    }
+
+    fn finish(self) -> splice_core::Result<(Function, Option<&'static KernelSource>)> {
+        let source = self.source;
+        Ok((self.seal()?, source))
+    }
+
+    /// Stage a nested function sharing this build's caches.
+    fn nested(
+        &mut self,
+        signature: Signature<'_>,
+        body: impl FnOnce(&mut dyn KernelBuilder) -> splice_core::Result<()>,
+    ) -> splice_core::Result<Arc<Function>> {
+        let mut child = Builder::new(signature, false, self.vector_bytes, self.debug.take())?;
+        std::mem::swap(&mut child.callees, &mut self.callees);
+        std::mem::swap(&mut child.functions, &mut self.functions);
+        let staged = body(&mut child);
+        std::mem::swap(&mut child.callees, &mut self.callees);
+        std::mem::swap(&mut child.functions, &mut self.functions);
+        self.debug = child.debug.take();
+        staged?;
+        Ok(Arc::new(child.seal()?))
     }
 }
 
@@ -140,549 +259,699 @@ impl Exit {
 #[derive(Default)]
 struct State {
     defs: HashMap<Reg, Value>,
-    incoming: Vec<Reg>,
+    /// The register of each parameter, and whether the parameter is the
+    /// `index32` form of the register's `Index` (see `Narrow::Bounded`).
+    incoming: Vec<(Reg, bool)>,
     exit: Option<Exit>,
-}
-#[derive(Default)]
-struct Destination {
-    block: Option<Block>,
-    marked: bool,
 }
 
 struct Builder<'a> {
     graph: Function,
     source: Option<&'static KernelSource>,
     callees: HashMap<Specialization, Arc<Function>>,
+    /// Lowered portable callees, by identity.
+    functions: HashMap<*const splice_core::Function, (Arc<splice_core::Function>, Arc<Function>)>,
     arity: usize,
+    /// Whether this is the kernel's entry rather than a callee.
+    root: bool,
+    result: ScalarType,
     kinds: &'a [BufferKind],
-    blocks: DenseMap<Block, State>,
+    /// Width of the target's vectors; fixes lane counts and alignment.
+    vector_bytes: usize,
+    blocks: BlockMap<State>,
     current: Option<Block>,
     types: Vec<ValueType>,
-    demands: Vec<(Block, Reg)>,
-    labels: Vec<Destination>,
-    immediate: Option<(Reg, bool)>,
-    error: Option<String>,
-    has_shared_i32: bool,
-    constants: HashMap<Value, i32>,
-    shared_loads: HashMap<(Buffer, LoadIndex), Value>,
+    /// Blocks whose parameter for a register needs a value from every
+    /// predecessor. `required` is false while only source points observe it.
+    demands: Vec<Demand>,
+    /// Parameters that only source points read, with their block.
+    observed: HashMap<Value, (Block, Reg)>,
+    /// Placeholders for a register that is unassigned on some path.
+    unassigned: HashSet<Value>,
+    labels: Vec<Option<Block>>,
+    /// The `i32` form of `Index` values (see `index32`).
+    indices: HashMap<Value, Narrow>,
+    /// The source points of a debug build, shared by its functions.
+    debug: Option<Vec<DebugSource>>,
+    /// This function's entry in `debug`.
+    marker: usize,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
-enum LoadIndex {
-    Constant(i32),
-    Value(Value),
+#[derive(Clone, Copy)]
+struct Demand {
+    block: Block,
+    reg: Reg,
+    required: bool,
+}
+
+/// How an `Index` value relates to a Lancy `i32`.
+#[derive(Clone, Copy)]
+enum Narrow {
+    /// The `Index` sign-extends `value`, which is nonnegative if `nonnegative`.
+    Extends {
+        value: Value,
+        nonnegative: bool,
+    },
+    Constant(u64),
+    /// An `i32` that `index32` may stand for the `Index`: equal to it when
+    /// it is in bounds of a slice, out of bounds when it is not. A block
+    /// parameter of an `Index` has one as its own parameter, so the narrow
+    /// form survives control flow.
+    Bounded(Value),
 }
 
 impl Builder<'_> {
-    fn valid(&mut self, r: Reg) {
-        if r.0 as usize >= self.types.len() {
-            self.error
-                .get_or_insert_with(|| format!("invalid register {r:?}"));
-        }
-    }
-    fn expect_type(&mut self, r: Reg, ty: ValueType) {
-        if self.types.get(r.0 as usize) != Some(&ty) {
-            self.error
-                .get_or_insert_with(|| format!("expected {ty:?} register, got {r:?}"));
-        }
-    }
-    fn scalar(&mut self, r: Reg) -> Value {
-        self.expect_type(r, ValueType::Scalar);
-        self.read(r)
-    }
-    fn slice(&mut self, buffer: Buffer, write: bool) -> (Value, Value) {
-        match self.kinds.get(buffer.index()) {
-            None => {
-                self.error
-                    .get_or_insert_with(|| format!("unknown buffer {}", buffer.0));
-                return (Value::INVALID, Value::INVALID);
-            }
-            Some(kind) if write && !kind.writable() => {
-                self.error
-                    .get_or_insert_with(|| format!("buffer {} is read-only", buffer.0));
-            }
-            _ => {}
-        }
+    fn slice(&self, buffer: Buffer) -> (Value, Value) {
         let first = self.arity + 2 * buffer.index();
         let params = self.graph.params(self.graph.entry());
         (params[first], params[first + 1])
     }
 
-    fn address(&mut self, buffer: Buffer, index: Value, write: bool) -> Value {
-        if self
-            .kinds
-            .get(buffer.index())
-            .is_some_and(|k| k.context_signature().is_some() || k.element() != Element::I32)
-        {
-            self.error
-                .get_or_insert_with(|| "scalar memory access requires an i32 buffer".into());
+    /// The `i32` Lancy index of a `usize` slice index or offset, with the
+    /// same bounds check: every slice length fits `i32`, so an `Index` past
+    /// `i32::MAX` clamps to it. An `Index` that sign-extends an `i32` is out
+    /// of bounds exactly when the `i32` is negative or too large.
+    fn index32(&mut self, index: Value) -> Value {
+        if let Some(&Narrow::Constant(bits)) = self.indices.get(&index) {
+            return self.const32(bits.min(i32::MAX as u64) as i32);
         }
-        let (base, len) = self.slice(buffer, write);
-        let Some(block) = self.current else {
-            return Value::INVALID;
+        let block = self.current.expect("open block");
+        self.index32_in(block, index)
+    }
+    /// [`Self::index32`] at the end of `block`.
+    fn index32_in(&mut self, block: Block, index: Value) -> Value {
+        let mut append = |op| self.graph.append(block, op).expect("an index32 operation");
+        match self.indices.get(&index).copied() {
+            Some(Narrow::Extends { value, .. } | Narrow::Bounded(value)) => value,
+            Some(Narrow::Constant(bits)) => append(Op::Const(bits.min(i32::MAX as u64) as i32)),
+            None => {
+                let max = append(Op::Literal(hir::Lane::Usize, i32::MAX as u128));
+                let clamped = append(Op::Bin(hir::Binary::Min, index, max));
+                append(Op::Cast(hir::Type::I32, clamped))
+            }
+        }
+    }
+    fn const32(&mut self, n: i32) -> Value {
+        self.value(Op::Const(n))
+    }
+    /// The `i32` that `index` sign-extends, and whether it is nonnegative.
+    fn exact32(&mut self, index: Value) -> Option<(Value, bool)> {
+        match *self.indices.get(&index)? {
+            Narrow::Extends { value, nonnegative } => Some((value, nonnegative)),
+            Narrow::Bounded(_) => None,
+            Narrow::Constant(bits) => {
+                let n = i32::try_from(bits).ok()?;
+                Some((self.const32(n), true))
+            }
+        }
+    }
+    /// An `Index` comparison of two values with exact `i32` forms, done on
+    /// those forms so that Lancy's `i32` bounds analysis sees the guard.
+    /// Sign extension preserves unsigned order, so the unsigned `i32`
+    /// comparison is exact; it is signed when both sides are nonnegative.
+    fn compare32(&mut self, kind: hir::Binary, a: Value, b: Value) -> Option<Value> {
+        // Check both before `exact32` materializes a constant.
+        let exact = |n: Narrow| match n {
+            Narrow::Extends { .. } => true,
+            Narrow::Constant(bits) => i32::try_from(bits).is_ok(),
+            Narrow::Bounded(_) => false,
         };
-        self.graph.append(block, Op::BoundsCheck(index, len));
+        if !exact(*self.indices.get(&a)?) || !exact(*self.indices.get(&b)?) {
+            return None;
+        }
+        let ((a, a_nonnegative), (b, b_nonnegative)) = (self.exact32(a)?, self.exact32(b)?);
+        let ordered = !matches!(kind, hir::Binary::Eq | hir::Binary::Ne);
+        let (a, b) = if ordered && !(a_nonnegative && b_nonnegative) {
+            let bias = self.value(Op::Const(i32::MIN));
+            (
+                self.value(Op::Bin(hir::Binary::Xor, a, bias)),
+                self.value(Op::Bin(hir::Binary::Xor, b, bias)),
+            )
+        } else {
+            (a, b)
+        };
+        Some(self.value(Op::Bin(kind, a, b)))
+    }
+    fn address(&mut self, buffer: Buffer, index: Value) -> Value {
+        let (base, len) = self.slice(buffer);
+        let scale = simd::stride(self.kinds[buffer.index()].element());
+        let block = self.current.expect("open block");
         self.graph
-            .append(block, Op::PtrOffset(base, index, hir::Scale::Four))
+            .append_inst(block, Op::BoundsCheck(index, len))
+            .expect("an i32 bounds check");
+        self.graph
+            .append(block, Op::PtrOffset(base, index, scale))
             .unwrap()
     }
-    fn parameter(&mut self, block: Block, r: Reg) -> Value {
-        let ty = self
-            .types
-            .get(r.0 as usize)
-            .copied()
-            .unwrap_or(ValueType::Scalar);
+    fn parameter(&mut self, block: Block, r: Reg, required: bool) -> Value {
+        let ty = self.types[r.0 as usize];
         let v = self.graph.append_typed_param(block, simd::native_type(ty));
         let state = &mut self.blocks[block];
-        state.incoming.push(r);
+        state.incoming.push((r, false));
         state.defs.insert(r, v);
-        self.demands.push((block, r));
+        if ty == ValueType::Scalar(ScalarType::Index) {
+            // Unused, it is removed with the dead parameters.
+            let narrow = self.graph.append_typed_param(block, hir::Type::I32);
+            self.blocks[block].incoming.push((r, true));
+            self.indices.insert(v, Narrow::Bounded(narrow));
+        }
+        if !required {
+            self.observed.insert(v, (block, r));
+        }
+        self.demands.push(Demand {
+            block,
+            reg: r,
+            required,
+        });
         v
     }
+    /// A use of `v` requires every parameter it came from to be assigned.
+    fn require(&mut self, v: Value) {
+        if let Some((block, reg)) = self.observed.remove(&v) {
+            self.demands.push(Demand {
+                block,
+                reg,
+                required: true,
+            });
+        }
+    }
     fn read(&mut self, r: Reg) -> Value {
-        self.valid(r);
-        let Some(b) = self.current else {
-            return Value::INVALID;
-        };
+        let b = self.current.expect("open block");
+        if let Some(&v) = self.blocks[b].defs.get(&r) {
+            self.require(v);
+            return v;
+        }
+        if b == self.graph.entry() {
+            // Assigned on no path: the verifier rejects the kernel once the
+            // body finishes, so until then the read sees zero.
+            let v = self.zero(self.types[r.0 as usize]);
+            self.blocks[b].defs.insert(r, v);
+            return v;
+        }
+        self.parameter(b, r, true)
+    }
+    /// Read a scalar register for a source point. It need not be assigned on
+    /// every path; where it is not, the point sees zero.
+    fn observe(&mut self, r: Reg) -> Value {
+        let b = self.current.expect("open block");
         if let Some(&v) = self.blocks[b].defs.get(&r) {
             return v;
         }
         if b == self.graph.entry() {
-            self.error
-                .get_or_insert_with(|| format!("uninitialized {r:?} at function entry"));
-            return Value::INVALID;
+            return self.zero(self.types[r.0 as usize]);
         }
-        self.parameter(b, r)
+        self.parameter(b, r, false)
     }
-    fn result(&mut self, op: Op) -> Reg {
-        self.immediate = None;
-        let r = self.local();
-        self.define(r, op);
-        r
+    /// Operations in a block that no edge reaches have no effect.
+    fn reachable(&self) -> bool {
+        self.current.is_some()
+    }
+    fn value(&mut self, op: Op) -> Value {
+        self.graph
+            .append(self.current.expect("open block"), op)
+            .expect("a well-typed lowering of verified IR defines a value")
+    }
+    /// A scalar register as the 8-byte word of a Rust call operand: its
+    /// bits zero-extended.
+    fn word(&mut self, r: Reg) -> Value {
+        let v = self.read(r);
+        let narrow = match self.scalar(r) {
+            ScalarType::Bool | ScalarType::I32 | ScalarType::F32 => {
+                self.value(Op::Bitcast(hir::Type::U32, v))
+            }
+            ScalarType::U32 => v,
+            ScalarType::I64 | ScalarType::F64 => return self.value(Op::Bitcast(hir::Type::U64, v)),
+            ScalarType::U64 | ScalarType::Index => return v,
+        };
+        self.value(Op::Cast(hir::Type::U64, narrow))
+    }
+    fn scalar(&self, r: Reg) -> ScalarType {
+        match self.types[r.0 as usize] {
+            ValueType::Scalar(ty) => ty,
+            _ => unreachable!("validated scalar register"),
+        }
+    }
+    /// A constant of `ty` with the given bits.
+    fn literal(&mut self, ty: ScalarType, bits: u64) -> Value {
+        match ty {
+            ScalarType::Bool => self.value(Op::Const(-((bits & 1) as i32))),
+            ScalarType::I32 => self.value(Op::Const(bits as u32 as i32)),
+            _ => {
+                let lane = scalar_type(ty).lane().expect("scalar lane");
+                self.value(Op::literal(lane, bits.into()))
+            }
+        }
     }
 
     fn arithmetic(&mut self, dst: Reg, op: Binary, lhs: Reg, rhs: Reg) {
-        self.immediate = None;
-        let (a, b) = (self.scalar(lhs), self.scalar(rhs));
-        let Some(block) = self.current else {
-            return;
-        };
+        let ty = self.scalar(lhs);
+        let (a, b) = (self.read(lhs), self.read(rhs));
         let kind = binary(op);
-        let mut value = |op| self.graph.append(block, op).unwrap();
         match op {
             Binary::CheckedAdd | Binary::CheckedSub | Binary::CheckedMul => {
-                let a = value(Op::Cast(hir::Type::I64, a));
-                let b = value(Op::Cast(hir::Type::I64, b));
-                let wide = value(Op::Bin(kind, a, b));
-                let narrow = value(Op::Cast(hir::Type::I32, wide));
-                let sign_extended = value(Op::Cast(hir::Type::I64, narrow));
-                let overflow = value(Op::Bin(hir::Binary::Ne, wide, sign_extended));
-                let overflow = value(Op::Cast(hir::Type::I32, overflow));
-                self.graph.append(block, Op::CheckOverflow(overflow));
-                self.blocks[block].defs.insert(dst, narrow);
+                // The exact result in twice the width must survive narrowing.
+                let (narrow_type, wide_type) = (scalar_type(ty), wide(ty));
+                let a = self.value(Op::Cast(wide_type, a));
+                let b = self.value(Op::Cast(wide_type, b));
+                let exact = self.value(Op::Bin(kind, a, b));
+                let narrow = self.value(Op::Cast(narrow_type, exact));
+                let extended = self.value(Op::Cast(wide_type, narrow));
+                let overflow = self.value(Op::Bin(hir::Binary::Ne, exact, extended));
+                self.effect(Op::TrapIf(overflow, Trap::Overflow));
+                self.bind(dst, narrow);
+            }
+            Binary::SaturatingAdd | Binary::SaturatingSub | Binary::SaturatingMul => {
+                // The exact result in twice the width, clamped if narrowing
+                // changes it. Signed sums and differences leave the range on
+                // the side of `a`, products on the side of their sign.
+                let (narrow_type, wide_type) = (scalar_type(ty), wide(ty));
+                let wide_a = self.value(Op::Cast(wide_type, a));
+                let wide_b = self.value(Op::Cast(wide_type, b));
+                let exact = self.value(Op::Bin(kind, wide_a, wide_b));
+                let narrow = self.value(Op::Cast(narrow_type, exact));
+                let extended = self.value(Op::Cast(wide_type, narrow));
+                let overflow = self.value(Op::Bin(hir::Binary::Ne, exact, extended));
+                let bits = ty.bits();
+                let saturated = if ty.is_signed() {
+                    let side = if op == Binary::SaturatingMul {
+                        self.value(Op::Bin(hir::Binary::Xor, a, b))
+                    } else {
+                        a
+                    };
+                    let zero = self.literal(ty, 0);
+                    let negative = self.value(Op::Bin(hir::Binary::Lt, side, zero));
+                    let min = self.literal(ty, 1 << (bits - 1));
+                    let max = self.literal(ty, (1 << (bits - 1)) - 1);
+                    self.value(Op::Ternary(hir::Ternary::Select, negative, min, max))
+                } else if op == Binary::SaturatingSub {
+                    self.literal(ty, 0)
+                } else {
+                    self.literal(ty, u64::MAX >> (64 - bits))
+                };
+                let v = self.value(Op::Ternary(
+                    hir::Ternary::Select,
+                    overflow,
+                    saturated,
+                    narrow,
+                ));
+                self.bind(dst, v);
             }
             Binary::CheckedShl | Binary::CheckedShr => {
-                let high_mask = value(Op::Const(!31));
-                let overflow = value(Op::Bin(hir::Binary::And, b, high_mask));
-                self.graph.append(block, Op::CheckOverflow(overflow));
+                // The amount, as an unsigned value, must be below the width.
+                let high_bits = self.literal(ty, !u64::from(ty.bits() - 1));
+                let high = self.value(Op::Bin(hir::Binary::And, b, high_bits));
+                let overflow = if ty == ScalarType::I32 {
+                    high
+                } else {
+                    let zero = self.literal(ty, 0);
+                    self.value(Op::Bin(hir::Binary::Ne, high, zero))
+                };
+                self.effect(Op::TrapIf(overflow, Trap::Overflow));
                 self.define(dst, Op::Bin(kind, a, b));
+            }
+            Binary::Eq | Binary::Ne | Binary::Lt | Binary::Le | Binary::Gt | Binary::Ge
+                if ty == ScalarType::Index =>
+            {
+                let v = self
+                    .compare32(kind, a, b)
+                    .unwrap_or_else(|| self.value(Op::Bin(kind, a, b)));
+                self.bind(dst, v);
             }
             _ => self.define(dst, Op::Bin(kind, a, b)),
         }
     }
-    fn define(&mut self, r: Reg, op: Op) {
-        if let Some(b) = self.current {
-            let v = self.graph.append(b, op).expect("operation defines a value");
-            if let Op::Const(n) = op
-                && self.has_shared_i32
-            {
-                self.constants.insert(v, n);
+    /// Rust's `src as to`.
+    fn convert(&mut self, dst: Reg, src: Reg, to: ScalarType) {
+        let from = self.scalar(src);
+        let v = self.read(src);
+        let value = if from == to {
+            v
+        } else if from == ScalarType::Bool {
+            // The mask becomes 0 or 1.
+            let one = self.value(Op::Const(1));
+            let bit = self.value(Op::Bin(hir::Binary::And, v, one));
+            if to == ScalarType::I32 {
+                bit
+            } else {
+                self.value(Op::Cast(scalar_type(to), bit))
             }
-            self.blocks[b].defs.insert(r, v);
+        } else if let (ScalarType::Index, ScalarType::I32, Some(&Narrow::Extends { value, .. })) =
+            (from, to, self.indices.get(&v))
+        {
+            value
+        } else {
+            self.value(Op::Cast(scalar_type(to), v))
+        };
+        if from == ScalarType::I32 && to == ScalarType::Index {
+            let narrow = Narrow::Extends {
+                value: v,
+                nonnegative: false,
+            };
+            self.indices.insert(value, narrow);
         }
+        self.bind(dst, value);
+    }
+    fn bind(&mut self, r: Reg, v: Value) {
+        let b = self.current.expect("open block");
+        self.blocks[b].defs.insert(r, v);
+    }
+    fn define(&mut self, r: Reg, op: Op) {
+        let v = self.value(op);
+        self.bind(r, v);
     }
     fn define_load(&mut self, dst: Reg, buffer: Buffer, index: Value) {
-        let Some(block) = self.current else {
-            return;
-        };
-        let shared = self.kinds.get(buffer.index()) == Some(&BufferKind::Read);
-        let key = if shared {
-            // A Splice shared slice cannot be modified via another parameter
-            // or a callee. The first load already checked this index.
-            let index = self
-                .constants
-                .get(&index)
-                .copied()
-                .map_or(LoadIndex::Value(index), LoadIndex::Constant);
-            let key = (buffer, index);
-            if let Some(&value) = self.shared_loads.get(&key) {
-                self.blocks[block].defs.insert(dst, value);
-                return;
-            }
-            Some(key)
-        } else {
-            None
-        };
-        let address = self.address(buffer, index, false);
-        self.define(dst, Op::Load(hir::Type::I32, address));
-        if let Some(key) = key {
-            self.shared_loads.insert(key, self.blocks[block].defs[&dst]);
-        }
+        let address = self.address(buffer, index);
+        let ty = scalar_type(self.scalar(dst));
+        self.define(dst, Op::Load(ty, address));
     }
-    fn call_op(&mut self, callee: Arc<Function>, args: &[Reg], buffers: &[Buffer]) -> Op {
-        let mut values: Vec<_> = args.iter().map(|&r| self.scalar(r)).collect();
-        for &buffer in buffers {
-            let (ptr, len) = self.slice(buffer, false);
-            values.extend([ptr, len]);
-        }
-        Op::Call(self.graph.add_call(callee, &values))
-    }
-    fn define_rust_call(&mut self, dst: Reg, import: RustCall, args: &[Reg]) -> splice::Result<()> {
-        import.validate(args.iter().map(|&arg| self.reg_type(arg)))?;
-        let [a, b] = self.rust_operands(args);
-        self.define(dst, Op::RustCall(import.symbol, a, b));
-        Ok(())
-    }
-
-    fn define_packet_call(
+    fn call(
         &mut self,
-        dst: Reg,
-        import: &'static RustPacketSymbol,
+        callee: Arc<Function>,
+        result: ScalarType,
         args: &[Reg],
-    ) -> splice::Result<()> {
-        splice::hir::check_rust_packet_call(import, args.iter().map(|&arg| self.reg_type(arg)))?;
-        self.immediate = None;
-        self.shared_loads.clear();
-        if self.current.is_some() {
-            let args: Vec<_> = args.iter().map(|&arg| self.scalar(arg)).collect();
-            let call = self.graph.add_packet_call(import, &args);
-            self.define(dst, Op::RustPacketCall(call));
+        buffers: &[Buffer],
+    ) -> splice_core::Result<Reg> {
+        let dst = self.local(ValueType::Scalar(result))?;
+        if self.reachable() {
+            let mut values: Vec<_> = args.iter().map(|&r| self.read(r)).collect();
+            for &buffer in buffers {
+                let (ptr, len) = self.slice(buffer);
+                values.extend([ptr, len]);
+            }
+            let call = self.graph.add_call(callee, &values);
+            self.define(dst, Op::Call(call));
         }
-        Ok(())
+        Ok(dst)
     }
 
-    fn define_context_call(
-        &mut self,
-        dst: Reg,
-        target: RustContextTarget,
-        args: &[Reg],
-        slices: &[ContextSlice],
-    ) -> splice::Result<()> {
-        splice::hir::check_rust_context_call(
-            self.kinds,
-            target,
-            args.iter().map(|&arg| self.reg_type(arg)),
-            slices,
-        )?;
-        let Some(block) = self.current else {
-            return Ok(());
-        };
-        let (context, operation) = match target {
-            RustContextTarget::Borrowed { context, operation } => {
-                (Some(self.slice(context, false).0), operation)
-            }
-            RustContextTarget::Static(_) => (None, 0),
-        };
-        let operation = self.constant(operation as i32);
-        let operation = self.scalar(operation);
-        let (import, args) = if let Some(context) = context
-            && slices.is_empty()
-            && args.len() <= 2
-        {
-            let [a, b] = self.rust_operands(args);
-            (
-                hir::RustContextImport::Scalars(splice::invoke_runtime_context),
-                [context, operation, a, b],
-            )
-        } else {
-            self.immediate = None;
-            self.shared_loads.clear();
-            let layout = ContextArguments::packet_layout(args.len() as u32, slices.len() as u32)
-                .expect("validated packet size");
-            let packet = self
-                .graph
-                .append(block, Op::CallScratch(layout.bytes.max(8)))
-                .unwrap();
-            let store = |graph: &mut Function, offset, value| {
-                let offset = graph.append(block, Op::Const(offset as i32)).unwrap();
-                let ptr = graph
-                    .append(block, Op::PtrOffset(packet, offset, hir::Scale::One))
-                    .unwrap();
-                graph.append(block, Op::Store(ptr, value));
-            };
-            for (index, &reg) in args.iter().enumerate() {
-                let value = self.scalar(reg);
-                store(&mut self.graph, index as u32 * 4, value);
-            }
-            for (index, &ContextSlice { buffer, writable }) in slices.iter().enumerate() {
-                let (ptr, len) = self.slice(buffer, writable);
-                let tag = ContextArguments::view_tag(self.kinds[buffer.index()].element(), writable)
-                    as i32;
-                let tag = self.graph.append(block, Op::Const(tag)).unwrap();
-                let offset = layout.slices_at + index as u32 * ContextArguments::SLICE_BYTES;
-                store(&mut self.graph, offset, ptr);
-                store(
-                    &mut self.graph,
-                    offset + ContextArguments::LENGTH_OFFSET,
-                    len,
-                );
-                store(
-                    &mut self.graph,
-                    offset + ContextArguments::ELEMENT_OFFSET,
-                    tag,
-                );
-            }
-            let zero = self.graph.append(block, Op::Const(0)).unwrap();
-            let entry = match target {
-                RustContextTarget::Borrowed { .. } => splice::invoke_packet_runtime_context,
-                RustContextTarget::Static(symbol) => symbol.entry(),
-            };
-            // The static entry reads only the packet (arg 2). Reuse its live
-            // pointer for the unused context slot in the native ABI.
-            (
-                hir::RustContextImport::Packet(entry),
-                [context.unwrap_or(packet), operation, packet, zero],
-            )
-        };
-        self.define(dst, Op::RustContextCall(import, args));
-        Ok(())
-    }
-
-    fn rust_operands(&mut self, args: &[Reg]) -> [Value; 2] {
-        let [a, b] = match args {
-            [a, b] => [*a, *b],
-            [a] => [*a, self.constant(0)],
-            [] => [self.constant(0); 2],
-            _ => unreachable!("validated Rust import arity"),
-        };
-        let (a, b) = (self.scalar(a), self.scalar(b));
-        self.immediate = None;
-        self.shared_loads.clear();
-        [a, b]
-    }
     fn staged_call(
         &mut self,
-        arity: usize,
-        kinds: &[BufferKind],
+        signature: Signature<'_>,
         args: &[Reg],
         buffers: &[Buffer],
         key: Option<Specialization>,
         body: Body<'_>,
-    ) -> splice::Result<Reg> {
-        splice::hir::check_call(
-            arity,
-            kinds,
-            args.iter().map(|&r| self.reg_type(r)),
-            self.kinds,
-            buffers,
-        )?;
+    ) -> splice_core::Result<Reg> {
         let callee = if let Some(hit) = key.as_ref().and_then(|k| self.callees.get(k)) {
             hit.clone()
         } else {
-            let mut child = Builder::new(arity, kinds)?;
-            std::mem::swap(&mut child.callees, &mut self.callees);
-            let staged = body(&mut child);
-            std::mem::swap(&mut child.callees, &mut self.callees);
-            staged?;
-            let callee = Arc::new(child.seal()?);
+            let callee = self.nested(signature, body)?;
             if let Some(key) = key {
                 self.callees.insert(key, callee.clone());
             }
             callee
         };
-        let op = self.call_op(callee, args, buffers);
-        Ok(self.result(op))
+        self.call(callee, signature.result, args, buffers)
     }
     fn target(&mut self, label: Label) -> Block {
-        let Some(dest) = self.labels.get_mut(label.0 as usize) else {
-            self.error
-                .get_or_insert_with(|| format!("invalid label {label:?}"));
-            return self.graph.entry();
-        };
-        *dest.block.get_or_insert_with(|| {
-            let block = self.graph.create_block();
-            let state = self.blocks.insert(State::default());
-            debug_assert_eq!(state, block);
-            block
-        })
+        if let Some(block) = self.labels[label.0 as usize] {
+            return block;
+        }
+        let block = self.block();
+        self.labels[label.0 as usize] = Some(block);
+        block
     }
     fn end(&mut self, exit: Exit) {
-        self.immediate = None;
         if let Some(b) = self.current.take() {
             self.blocks[b].exit = Some(exit);
-            self.constants.clear();
-            self.shared_loads.clear();
         }
+    }
+    fn effect(&mut self, op: Op) {
+        self.graph
+            .append_inst(self.current.expect("open block"), op)
+            .expect("a well-typed lowering of verified IR");
+    }
+    /// A block for control flow inside one operation.
+    fn block(&mut self) -> Block {
+        let block = self.graph.create_block();
+        let state = self.blocks.insert(State::default());
+        debug_assert_eq!(state, block);
+        block
+    }
+    /// Continue in `block`, falling through from the open block.
+    fn begin(&mut self, block: Block) {
+        self.end(Exit::Jump(block));
+        self.current = Some(block);
     }
 }
 
 impl KernelBuilder for Builder<'_> {
     fn set_source(&mut self, source: &'static KernelSource) {
         self.source = Some(source);
+        if let Some(sources) = &mut self.debug {
+            sources[self.marker].function = Some(source);
+        }
+    }
+    fn debug_enabled(&self) -> bool {
+        self.debug.is_some()
+    }
+    fn debug_point(
+        &mut self,
+        location: splice_core::debug::Location,
+        variables: &[splice_core::debug::Variable],
+    ) -> splice_core::Result<()> {
+        if self.debug.is_none() || !self.reachable() {
+            return Ok(());
+        }
+        let point = splice_core::debug::Point {
+            location,
+            variables: variables.into(),
+        };
+        let slots: Vec<_> = point
+            .slots(|r| self.types[r.0 as usize], self.kinds, self.vector_bytes)
+            .collect();
+        for slot in &slots {
+            let types = &self.types;
+            let stores: Vec<_> = slot.stores(|r| types[r.0 as usize]).collect();
+            for (at, store) in stores {
+                let value = match store {
+                    splice_core::debug::Store::Scalar(reg, ScalarType::Bool) => {
+                        // A comparison mask: zero or all bits set.
+                        let value = self.observe(reg);
+                        let one = self.value(Op::Const(1));
+                        let bit = self.value(Op::Bin(hir::Binary::And, value, one));
+                        self.value(Op::Cast(hir::Type::U8, bit))
+                    }
+                    // A Lancy mask is already a vector of all-ones or zero
+                    // index lanes.
+                    splice_core::debug::Store::Scalar(reg, _)
+                    | splice_core::debug::Store::Vector(reg)
+                    | splice_core::debug::Store::Mask(reg, _) => self.observe(reg),
+                    splice_core::debug::Store::Data(buffer) => self.slice(buffer).0,
+                    splice_core::debug::Store::Length(buffer) => {
+                        let len = self.slice(buffer).1;
+                        self.value(Op::Cast(hir::Type::I64, len))
+                    }
+                };
+                let at = u32::try_from(at)
+                    .ok()
+                    .filter(|at| at.checked_add(8).is_some())
+                    .ok_or_else(|| splice_core::BuildError::unsupported("debug frame too large"))?;
+                self.effect(Op::DebugStore(at, value));
+            }
+        }
+        let sources = self.debug.as_mut().expect("debug build");
+        let id = u32::try_from(sources.len())
+            .map_err(|_| splice_core::BuildError::unsupported("too many debug points"))?;
+        sources.push(DebugSource {
+            function: sources[self.marker].function,
+            point: Some((point, slots)),
+        });
+        self.effect(Op::DebugPoint(id));
+        Ok(())
     }
     fn reg_type(&self, r: Reg) -> Option<ValueType> {
         self.types.get(r.0 as usize).copied()
     }
-    fn arg(&self, index: usize) -> Reg {
-        Reg(if index < self.arity {
-            index as u32
-        } else {
-            u32::MAX
-        })
-    }
-    fn local(&mut self) -> Reg {
-        self.typed_local(ValueType::Scalar)
-    }
-    fn typed_local(&mut self, ty: ValueType) -> Reg {
-        let r = Reg(u32::try_from(self.types.len()).expect("exhausted register handles"));
+    fn local(&mut self, ty: ValueType) -> splice_core::Result<Reg> {
+        let r = u32::try_from(self.types.len())
+            .map(Reg)
+            .map_err(|_| splice_core::BuildError::unsupported("too many registers"))?;
         self.types.push(ty);
-        r
+        Ok(r)
     }
-    fn simd(&mut self, inst: Simd, args: &[Reg]) -> splice::Result<Option<Reg>> {
+    fn simd(&mut self, inst: Simd, args: &[Reg]) -> splice_core::Result<Option<Reg>> {
         let value = self.emit_simd(inst, args)?;
-        let dst = inst.output().map(|ty| self.typed_local(ty));
+        let dst = inst.output().map(|ty| self.local(ty)).transpose()?;
         self.bind_simd(dst, value);
         Ok(dst)
     }
-    fn constant(&mut self, n: i32) -> Reg {
-        let r = self.result(Op::Const(n));
-        self.immediate = Some((r, n != 0));
-        r
-    }
-    fn buffer_len(&mut self, buffer: Buffer) -> Reg {
-        if self
-            .kinds
-            .get(buffer.index())
-            .is_some_and(|kind| kind.context_signature().is_some())
-        {
-            self.error
-                .get_or_insert_with(|| "slice length cannot use Rust context".into());
+    fn constant(&mut self, c: Constant) -> splice_core::Result<Reg> {
+        let dst = self.local(ValueType::Scalar(c.ty()))?;
+        if self.reachable() {
+            let v = self.literal(c.ty(), c.bits());
+            if c.ty() == ScalarType::Index {
+                self.indices.insert(v, Narrow::Constant(c.bits()));
+            }
+            self.bind(dst, v);
         }
-        let (_, len) = self.slice(buffer, false);
-        self.result(Op::Copy(len))
+        Ok(dst)
     }
-    fn load(&mut self, buffer: Buffer, index: Reg) -> Reg {
-        let index = self.scalar(index);
-        self.immediate = None;
-        let dst = self.local();
-        self.define_load(dst, buffer, index);
-        dst
-    }
-    fn store(&mut self, buffer: Buffer, index: Reg, value: Reg) {
-        let (index, value) = (self.scalar(index), self.scalar(value));
-        let addr = self.address(buffer, index, true);
-        self.immediate = None;
-        if let Some(b) = self.current {
-            self.graph.append(b, Op::Store(addr, value));
+    fn cast(&mut self, src: Reg, to: ScalarType) -> splice_core::Result<Reg> {
+        let dst = self.local(ValueType::Scalar(to))?;
+        if self.reachable() {
+            self.convert(dst, src, to);
         }
+        Ok(dst)
     }
-    fn immediate_condition(&self, reg: Reg) -> Option<bool> {
-        self.immediate.filter(|(r, _)| *r == reg).map(|(_, v)| v)
-    }
-    fn binary(&mut self, op: Binary, a: Reg, b: Reg) -> Reg {
-        let dst = self.local();
-        self.arithmetic(dst, op, a, b);
-        dst
-    }
-    fn assign(&mut self, dst: Reg, src: Reg) {
-        self.valid(dst);
-        if let Some(&ty) = self.types.get(dst.0 as usize) {
-            self.expect_type(src, ty);
+    fn buffer_len(&mut self, buffer: Buffer) -> splice_core::Result<Reg> {
+        let dst = self.local(ValueType::Scalar(ScalarType::Index))?;
+        if self.reachable() {
+            let (_, len) = self.slice(buffer);
+            let v = self.extend_index(len);
+            self.bind(dst, v);
         }
-        let v = self.read(src);
-        self.immediate = None;
-        if let Some(b) = self.current {
-            self.blocks[b].defs.insert(dst, v);
+        Ok(dst)
+    }
+    fn load(&mut self, buffer: Buffer, index: Reg) -> splice_core::Result<Reg> {
+        let ty = ScalarType::of_element(self.kinds[buffer.index()].element())
+            .expect("validated scalar element");
+        let dst = self.local(ValueType::Scalar(ty))?;
+        if self.reachable() {
+            let index = self.read(index);
+            let index = self.index32(index);
+            self.define_load(dst, buffer, index);
         }
+        Ok(dst)
     }
-    fn label(&mut self) -> Label {
-        let l = Label(u32::try_from(self.labels.len()).expect("exhausted labels"));
-        self.labels.push(Destination::default());
-        l
-    }
-    fn mark(&mut self, label: Label) {
-        let block = self.target(label);
-        let Some(dest) = self.labels.get_mut(label.0 as usize) else {
-            return;
-        };
-        if std::mem::replace(&mut dest.marked, true) {
-            self.error
-                .get_or_insert_with(|| format!("duplicate label {label:?}"));
-            return;
-        }
-        self.end(Exit::Jump(block));
-        self.current = Some(block);
-    }
-    fn jump(&mut self, label: Label) {
-        let b = self.target(label);
-        self.end(Exit::Jump(b));
-    }
-    fn branch(&mut self, cond: Reg, yes: Label, no: Label) {
-        let cond = self.scalar(cond);
-        let (yes, no) = (self.target(yes), self.target(no));
-        self.end(Exit::Branch(cond, yes, no));
-    }
-    fn ret(&mut self, value: Reg) {
-        let v = self.scalar(value);
-        self.end(Exit::Return(v));
-    }
-    fn trap_bounds(&mut self) -> splice::Result<()> {
-        if let Some(block) = self.current {
-            let zero = self.graph.append(block, Op::Const(0)).unwrap();
-            self.graph.append(block, Op::BoundsCheck(zero, zero));
-            self.end(Exit::Return(zero));
+    fn store(&mut self, buffer: Buffer, index: Reg, value: Reg) -> splice_core::Result<()> {
+        if self.reachable() {
+            let (index, value) = (self.read(index), self.read(value));
+            let index = self.index32(index);
+            let addr = self.address(buffer, index);
+            self.effect(Op::Store(addr, value));
         }
         Ok(())
     }
-    fn rust_call(&mut self, import: RustCall, args: &[Reg]) -> splice::Result<Reg> {
-        let dst = self.local();
-        self.define_rust_call(dst, import, args)?;
+    fn binary(&mut self, op: Binary, a: Reg, b: Reg) -> splice_core::Result<Reg> {
+        let output = op.output(self.scalar(a)).expect("validated operation");
+        let dst = self.local(ValueType::Scalar(output))?;
+        if self.reachable() {
+            self.arithmetic(dst, op, a, b);
+        }
         Ok(dst)
     }
-    fn rust_packet_call(
-        &mut self,
-        import: &'static RustPacketSymbol,
-        args: &[Reg],
-    ) -> splice::Result<Reg> {
-        let dst = self.local();
-        self.define_packet_call(dst, import, args)?;
-        Ok(dst)
+    fn assign(&mut self, dst: Reg, src: Reg) -> splice_core::Result<()> {
+        if self.reachable() {
+            let v = self.read(src);
+            self.bind(dst, v);
+        }
+        Ok(())
     }
-    fn rust_context_call_with_slices(
+    fn label(&mut self) -> splice_core::Result<Label> {
+        let label = u32::try_from(self.labels.len())
+            .map(Label)
+            .map_err(|_| splice_core::BuildError::unsupported("too many labels"))?;
+        self.labels.push(None);
+        Ok(label)
+    }
+    fn mark(&mut self, label: Label) -> splice_core::Result<()> {
+        let block = self.target(label);
+        self.begin(block);
+        Ok(())
+    }
+    fn jump(&mut self, label: Label) -> splice_core::Result<()> {
+        let b = self.target(label);
+        self.end(Exit::Jump(b));
+        Ok(())
+    }
+    fn branch(&mut self, cond: Reg, yes: Label, no: Label) -> splice_core::Result<()> {
+        if self.reachable() {
+            let cond = self.read(cond);
+            let (yes, no) = (self.target(yes), self.target(no));
+            self.end(Exit::Branch(cond, yes, no));
+        }
+        Ok(())
+    }
+    fn ret(&mut self, value: Reg) -> splice_core::Result<()> {
+        if self.reachable() {
+            let mut v = self.read(value);
+            if self.root && self.result == ScalarType::Bool {
+                let one = self.value(Op::Const(1));
+                v = self.value(Op::Bin(hir::Binary::And, v, one));
+            }
+            self.end(Exit::Return(v));
+        }
+        Ok(())
+    }
+    fn trap_bounds(&mut self) -> splice_core::Result<()> {
+        if self.reachable() {
+            self.effect(Op::Trap(Trap::Bounds));
+            let result = self.zero(ValueType::Scalar(self.result));
+            self.end(Exit::Return(result));
+        }
+        Ok(())
+    }
+    /// A Rust call as [`RustTarget::plan`] lays it out: the operands go to
+    /// a call-scratch packet and the native entry receives its address.
+    fn rust_call(
         &mut self,
-        context: Buffer,
-        operation: u32,
+        target: RustTarget,
         args: &[Reg],
         slices: &[ContextSlice],
-    ) -> splice::Result<Reg> {
-        let dst = self.local();
-        self.define_context_call(
-            dst,
-            RustContextTarget::Borrowed { context, operation },
-            args,
-            slices,
-        )?;
-        Ok(dst)
-    }
-    fn rust_static_call(
-        &mut self,
-        symbol: &'static StaticRustSymbol,
-        args: &[Reg],
-        slices: &[ContextSlice],
-    ) -> splice::Result<Reg> {
-        let dst = self.local();
-        self.define_context_call(dst, RustContextTarget::Static(symbol), args, slices)?;
+        result: ScalarType,
+    ) -> splice_core::Result<Reg> {
+        let dst = self.local(ValueType::Scalar(result))?;
+        if !self.reachable() {
+            return Ok(dst);
+        }
+        let plan = target.plan(self.kinds, args.len(), slices);
+        let packet = self.value(Op::CallScratch {
+            offset: 0,
+            bytes: plan.bytes,
+        });
+        let store = |b: &mut Self, at: u32, value| {
+            let offset = b.value(Op::Const(at as i32));
+            let ptr = b.value(Op::PtrOffset(packet, offset, hir::Scale::One));
+            b.effect(Op::Store(ptr, value));
+        };
+        for PacketStore { at, value } in plan.stores {
+            match value {
+                PacketValue::Word(n) => {
+                    let word = self.word(args[n]);
+                    store(self, at, word);
+                }
+                PacketValue::Data(buffer) => {
+                    let ptr = self.slice(buffer).0;
+                    store(self, at, ptr);
+                }
+                PacketValue::Length(buffer) => {
+                    let len = self.slice(buffer).1;
+                    store(self, at, len);
+                }
+                PacketValue::Tag(tag) => {
+                    let tag = self.value(Op::Const(tag as i32));
+                    store(self, at, tag);
+                }
+                PacketValue::Symbol(address) => {
+                    let address = self.value(Op::Literal(hir::Lane::U64, address as u128));
+                    store(self, at, address);
+                }
+            }
+        }
+        let receiver = match plan.context {
+            Some(context) => self.slice(context).0,
+            None => packet,
+        };
+        let operation = self.value(Op::Const(plan.operation as i32));
+        let zero = self.value(Op::Const(0));
+        // The entry forwards a trap through its status and writes the result
+        // to the start of the packet.
+        self.effect(Op::RustCall(
+            plan.entry,
+            [receiver, operation, packet, zero],
+        ));
+        self.define(dst, Op::Load(scalar_type(result), packet));
         Ok(dst)
     }
     fn call_kernel(
         &mut self,
-        arity: usize,
-        kinds: &[BufferKind],
+        signature: Signature<'_>,
         args: &[Reg],
         buffers: &[Buffer],
         body: Body<'_>,
-    ) -> Result<Reg, String> {
-        self.staged_call(arity, kinds, args, buffers, None, body)
+    ) -> splice_core::Result<Reg> {
+        self.staged_call(signature, args, buffers, None, body)
     }
     fn call_specialized(
         &mut self,
@@ -690,8 +959,27 @@ impl KernelBuilder for Builder<'_> {
         args: &[Reg],
         buffers: &[Buffer],
         body: Body<'_>,
-    ) -> splice::Result<Reg> {
-        let (arity, kinds) = key.signature();
-        self.staged_call(arity, kinds, args, buffers, Some(key), body)
+    ) -> splice_core::Result<Reg> {
+        self.staged_call(key.signature(), args, buffers, Some(key), body)
+    }
+    fn call_function(
+        &mut self,
+        function: &Arc<splice_core::Function>,
+        args: &[Reg],
+        buffers: &[Buffer],
+    ) -> splice_core::Result<Reg> {
+        let key = Arc::as_ptr(function);
+        let callee = match self.functions.get(&key) {
+            Some((_, callee)) => callee.clone(),
+            None => {
+                let callee = self.nested(function.signature(), |b| {
+                    splice_core::hir::replay(function, b)
+                })?;
+                self.functions
+                    .insert(key, (Arc::clone(function), callee.clone()));
+                callee
+            }
+        };
+        self.call(callee, function.result(), args, buffers)
     }
 }

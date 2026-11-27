@@ -10,28 +10,43 @@ pub trait ComptimeKey {
 
 /// A cache key lives within one kernel build. Equality checks the full argument
 /// sequence even if two keys land in the same hash bucket.
-#[derive(Debug, Hash, PartialEq, Eq)]
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
 pub struct Specialization {
     declaration: TypeId,
-    arity: usize,
-    kinds: &'static [crate::BufferKind],
+    signature: super::Signature<'static>,
     types: Vec<TypeId>,
     values: Vec<u8>,
 }
 
 impl Specialization {
     #[doc(hidden)]
-    pub fn new<K: 'static>(arity: usize, kinds: &'static [crate::BufferKind]) -> Self {
+    pub fn new<K: 'static>(signature: super::Signature<'static>) -> Self {
         Self {
             declaration: TypeId::of::<K>(),
-            arity,
-            kinds,
+            signature,
             types: Vec::new(),
             values: Vec::new(),
         }
     }
-    pub fn signature(&self) -> (usize, &'static [crate::BufferKind]) {
-        (self.arity, self.kinds)
+    pub fn signature(&self) -> super::Signature<'static> {
+        self.signature
+    }
+
+    /// Also key on which runtime arguments are known constants, and their
+    /// values: an inlined body folds on them.
+    #[doc(hidden)]
+    pub fn with_known(mut self, known: &[Option<crate::hir::Constant>]) -> Self {
+        for constant in known {
+            match constant {
+                Some(constant) => {
+                    self.values.push(1);
+                    self.values.push(constant.ty() as u8);
+                    self.values.extend(constant.bits().to_le_bytes());
+                }
+                None => self.values.push(0),
+            }
+        }
+        self
     }
 }
 

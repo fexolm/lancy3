@@ -2,7 +2,7 @@ use super::*;
 
 pub(in crate::lir::x64) fn shift_dword_bits(
     a: &mut CodeAssembler,
-    cpu: Features,
+    cpu: Cpu,
     kind: B,
     lane: Lane,
     dst: usize,
@@ -14,7 +14,8 @@ pub(in crate::lir::x64) fn shift_dword_bits(
         a,
         width: cpu.bytes,
         cpu,
-        pool: None,
+        // Immediate shifts and rotates load no constants.
+        pool: &mut emit::Constants::default(),
     };
     match kind {
         B::Shl => immediate!(v, dst, src, count, pslld, vpslld),
@@ -221,7 +222,7 @@ fn compare(
             1 => cmp_short!(v, d, x, y, pcmpeqb, vpcmpeqb),
             2 => cmp_short!(v, d, x, y, pcmpeqw, vpcmpeqw),
             4 => cmp_short!(v, d, x, y, pcmpeqd, vpcmpeqd),
-            _ if v.cpu.sse41 || v.width == 32 => {
+            _ if v.cpu.isa.sse41 || v.width == 32 => {
                 if v.width == 32 {
                     v.a.vpcmpeqq(YMM[d], YMM[x], YMM[y])
                 } else {
@@ -243,7 +244,7 @@ fn compare(
     if matches!(op, B::Lt | B::Ge) {
         std::mem::swap(&mut x, &mut y);
     }
-    if n == 8 && v.width == 16 && !v.cpu.sse42 {
+    if n == 8 && v.width == 16 && !v.cpu.isa.sse42 {
         // Signed high dword, unsigned low dword. Equal high halves defer to the low half.
         let bias = if lane.signed() {
             0x0000_0000_8000_0000

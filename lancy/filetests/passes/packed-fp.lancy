@@ -1,51 +1,51 @@
 # Width comes from the host. ISel should consume each whole vector.
-fn main x:vec.f32 y:vec.f32 -> vec.f32
-  neg = simd.neg x
-  mag = simd.abs y
-  out = simd.copysign mag neg
+fn main(x:vec.f32 y:vec.f32) -> vec.f32
+  neg = neg x
+  mag = abs y
+  out = copysign mag neg
   ret out
-@isel check: native.Vector(F32).Unary(Neg)
-@isel check: native.Vector(F32).Unary(Abs)
-@isel check: native.Vector(F32).Binary(CopySign)
+@isel check: native.vec.f32.neg
+@isel check: native.vec.f32.abs
+@isel check: native.vec.f32.copysign
 ---
-fn main x:vec.f64 y:vec.f64 -> vec.i64
-  a = simd.ordered x y
-  b = simd.unordered y x
-  mask = simd.or a b
+fn main(x:vec.f64 y:vec.f64) -> vec.i64
+  a = ordered x y
+  b = unordered y x
+  mask = or a b
   ret mask
-@isel check: native.Vector(F64).Binary(Ordered)
-@isel check: native.Vector(F64).Binary(Unordered)
+@isel check: native.vec.f64.ordered
+@isel check: native.vec.f64.unordered
 ---
-fn main x:vec.f32 -> vec.i32
-  finite = simd.isfinite x
-  sub = simd.issubnormal x
-  sign = simd.signbit x
-  non_subnormal = simd.xor finite sub
-  result = simd.and sign non_subnormal
+fn main(x:vec.f32) -> vec.i32
+  finite = isfinite x
+  sub = issubnormal x
+  sign = signbit x
+  non_subnormal = xor finite sub
+  result = and sign non_subnormal
   ret result
-@isel check: native.Vector(F32).Unary(IsFinite)
-@isel check: native.Vector(F32).Unary(IsSubnormal)
-@isel check: native.Vector(F32).Unary(SignBit)
+@isel check: native.vec.f32.isfinite
+@isel check: native.vec.f32.issubnormal
+@isel check: native.vec.f32.signbit
 ---
-fn main x:vec.f32 -> vec.f32
-  i = simd.cast i32 x
-  y = simd.cast f32 i
+fn main(x:vec.f32) -> vec.f32
+  i = cast vec.i32 x
+  y = cast vec.f32 i
   ret y
-@isel check: native.Vector(F32).Cast
-@isel check: native.Vector(I32).Cast
+@isel check: native.vec.f32.cast
+@isel check: native.vec.i32.cast
 @asm regex: TO_INT=v?cvttps2dqs?
 @asm regex: TO_FLOAT=v?cvtdq2ps
 @asm check: $TO_INT
 @asm check: $TO_FLOAT
 ---
-fn main x:vec.f32 -> vec.f32
-  low = simd.widenlo f64 x
-  high = simd.widenhi f64 x
-  swapped = simd.narrow f32 high low
+fn main(x:vec.f32) -> vec.f32
+  low = widenlo f64 x
+  high = widenhi f64 x
+  swapped = narrow f32 high low
   ret swapped
-@isel check: native.Vector(F32).Widen(false)
-@isel check: native.Vector(F32).Widen(true)
-@isel check: native.Vector(F64).Narrow
+@isel check: native.vec.f32.widenlo
+@isel check: native.vec.f32.widenhi
+@isel check: native.vec.f64.narrow
 @asm regex: WIDEN=v?cvtps2pd
 @asm regex: NARROW=v?cvtpd2ps
 @asm check: $WIDEN

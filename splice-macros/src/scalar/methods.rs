@@ -1,6 +1,6 @@
 //! Lower published inherent methods with represented operands in the caller's
 //! builder. They use the same expression lowering as free functions.
-use super::{Binding, Lower, Scalar, abi, flow, parameter};
+use super::{Binding, Lower, Scalar, abi, parameter};
 use proc_macro2::{Ident, Span, TokenStream};
 use quote::format_ident;
 use std::collections::HashMap;
@@ -22,13 +22,17 @@ pub(crate) fn entry_name(kind: &str, name: &Ident) -> Ident {
     )
 }
 
+/// `intrinsic` is the name of a `#[intrinsic("name")]` method: its stage
+/// entry stages the registered operation when there is one for its
+/// operands, and its body otherwise.
 pub(crate) fn publish(
     root: &syn::Path,
     signature: &Signature,
     body: &Block,
     visibility: &Visibility,
     trait_impl: bool,
-) -> Vec<TokenStream> {
+    intrinsic: Option<&syn::LitStr>,
+) -> syn::Result<Vec<TokenStream>> {
     let runtime_receiver = !trait_impl
         && signature.receiver().is_some_and(|r| {
             r.reference.is_some()
@@ -62,25 +66,26 @@ pub(crate) fn publish(
     };
     let result_type = match &signature.output {
         ReturnType::Type(_, ty) if !unit_result => match Scalar::from_type(ty, &types) {
-            Some(result @ (Scalar::Int | Scalar::Bool)) => result,
-            _ if eval_only => Scalar::Int,
-            _ => return Vec::new(),
+            Some(result) if result.is_scalar() => result.base(),
+            _ if eval_only => Scalar::I32,
+            _ => {
+                return Err(syn::Error::new_spanned(
+                    ty,
+                    "a Splice method returns () or a kernel scalar; keep a Rust method in an ordinary impl",
+                ));
+            }
         },
-        _ => Scalar::Int,
+        _ => Scalar::I32,
     };
     let params = if eval_only {
         Vec::new()
     } else {
-        let Ok(params) = signature
+        signature
             .inputs
             .iter()
             .zip(abi::parameter_names(&signature))
             .map(|(argument, name)| parameter(argument, &types, name))
-            .collect::<syn::Result<Vec<_>>>()
-        else {
-            return Vec::new();
-        };
-        params
+            .collect::<syn::Result<Vec<_>>>()?
     };
 
     let mut formals = Vec::new();
@@ -94,26 +99,19 @@ pub(crate) fn publish(
     let support = emit!(#root::frontend::scalar);
     let hir = emit!(#root::hir);
     for param in &params {
-        let Ok(pat) = super::named(param.pattern) else {
-            return Vec::new();
-        };
+        let pat = super::named(param.pattern)?;
         let id = &pat.ident;
         let ty = param.ty;
         if matches!(param.binding, Binding::Host(_)) {
             debug_host_args.push(id);
         }
         let declaration = match param.binding {
-            Binding::Host(_)
-                if matches!(
-                    Scalar::from_type(ty, &types),
-                    Some(Scalar::Int | Scalar::Bool | Scalar::Index)
-                ) =>
-            {
+            Binding::Host(_) if Scalar::from_type(ty, &types).is_some_and(Scalar::is_scalar) => {
                 host_args.push(id);
                 emit!(#id: impl #support::KnownArg<#ty>)
             }
             Binding::Host(_) => emit!(#support::Host(#id): #support::Host<#ty>),
-            Binding::Reg(Scalar::Int | Scalar::Bool, write) => {
+            Binding::Reg(scalar, write) if scalar.is_scalar() => {
                 scalar_args.push(id);
                 if write {
                     mutable_args.push(id);
@@ -122,20 +120,40 @@ pub(crate) fn publish(
             }
             Binding::Buffer(_) => emit!(#id: #hir::Buffer),
             Binding::Context if runtime_receiver && context.is_none() => {
-                context = Some(super::lower::Context::new(id.clone()));
+                context = Some(super::lower::Context::new(id.clone(), ty));
                 emit!(#id: #hir::Buffer)
             }
-            _ => return Vec::new(),
+            _ => {
+                return Err(syn::Error::new_spanned(
+                    param.pattern,
+                    "a Splice method parameter is #[comptime], a kernel scalar, a slice, or the &mut self receiver",
+                ));
+            }
         };
         declarations.push(declaration);
+        bindings.insert(crate::kast::Body::param(formals.len()), param.binding);
         formals.push(param.binding);
-        bindings.insert(id.to_string(), param.binding);
     }
 
-    let analysis = flow::analyze(&body, &bindings);
+    // An evaluated-only method reads its parameters as evaluator inputs.
+    let stage_params = if eval_only {
+        abi::parameter_names(&signature)
+            .map(|name| (name, crate::kast::Param::Known))
+            .collect()
+    } else {
+        params
+            .iter()
+            .map(|param| {
+                super::named(param.pattern)
+                    .map(|pat| (pat.ident.clone(), super::stage_param(param.binding)))
+            })
+            .collect::<syn::Result<Vec<_>>>()?
+    };
+    let analysis = crate::kast::Body::new(&body, &stage_params)?;
     let debug_names = params
         .iter()
-        .map(|param| (param.name.to_string(), param.name.clone()))
+        .enumerate()
+        .map(|(index, param)| (param.name.to_string(), crate::kast::Body::param(index)))
         .collect();
     let lower = Lower {
         generics: &signature.generics,
@@ -147,13 +165,14 @@ pub(crate) fn publish(
         formals: &formals,
         bindings,
         aggregates: &Default::default(),
+        labels: &Default::default(),
         debug_names,
-        flow: &analysis,
+        body: &analysis,
         fish: TokenStream::new(),
-        loop_kind: None,
+        loops: Vec::new(),
         region_depth: 0,
         source_fault: None,
-        evaluator_return: None,
+        evaluation: None,
         context: context.as_ref(),
     };
     let eval_name = entry_name(
@@ -165,14 +184,13 @@ pub(crate) fn publish(
         name,
     );
     if eval_only {
-        return lower
-            .evaluator(&signature, &body, visibility, Some(&eval_name))
-            .into_iter()
-            .collect();
+        return Ok(vec![
+            lower
+                .evaluator(&signature, &body, visibility, Some(&eval_name))?
+                .0,
+        ]);
     }
-    let Ok(code) = lower.kernel_body(&body) else {
-        return Vec::new();
-    };
+    let code = lower.kernel_body(&body)?;
     let stage_name = entry_name(
         if runtime_receiver {
             "stage_context"
@@ -184,33 +202,46 @@ pub(crate) fn publish(
         name,
     );
     let witness = super::context_slice_types(root, &params, &types);
-    let frame =
-        runtime_receiver.then(|| emit!(_: #witness, __splice_context_frame: #root::ContextFrame,));
+    let frame = runtime_receiver
+        .then(|| emit!(_: #witness, __splice_context_frame: #root::__private::ContextFrame,));
     let generics = &signature.generics;
     let where_ = &generics.where_clause;
     let value_type = result_type.value_type(root, &types);
     let arity = scalar_args.len();
     let indices = 0..scalar_args.len();
     let debug_arguments = debug_host_args.iter().map(|id| lower.capture_constant(id));
+    let overflow = super::lower::overflow_prologue(root);
+    let intrinsic = intrinsic.map(|name| {
+        emit! {
+            if let ::core::option::Option::Some(result) =
+                #root::frontend::intrinsics::call(__splice_builder, #name, &[#(#scalar_args),*])?
+            {
+                return ::core::result::Result::Ok(result);
+            }
+        }
+    });
     let stage = emit! {
         #[doc(hidden)]
-        #[allow(unreachable_code, clippy::too_many_arguments)]
+        // A staging error replaces the operation that would read its operands.
+            #[allow(unreachable_code, unused_variables, clippy::too_many_arguments)]
         #visibility fn #stage_name #generics (#(#declarations,)* #frame __splice_builder: &mut dyn #root::frontend::KernelBuilder)
             -> #root::Result<#hir::Reg> #where_
         {
             let __splice_guard = #support::enter_expansion()?;
+            #overflow
             let __splice_wants_debug = __splice_builder.debug_enabled();
             #(let #host_args = #support::KnownArg::require(#host_args)?;)*
             #(#debug_arguments)*
-            let __splice_known: [Option<i32>; #arity] = [#(#support::RunArg::known(&#scalar_args)),*];
-            #(let #scalar_args = #support::RunArg::reg(#scalar_args, __splice_builder);)*
-            let __splice_inputs: &[(#hir::Reg, Option<i32>)] = &[#((#scalar_args, __splice_known[#indices])),*];
-            #(let #mutable_args = __splice_builder.copy(#mutable_args);)*
-            let __splice_result = __splice_builder.typed_local(#value_type);
-            let __splice_return_label = __splice_builder.label();
+            let __splice_known: [::core::option::Option<#hir::Constant>; #arity] = [#(#support::RunArg::known(&#scalar_args)),*];
+            #(let #scalar_args = #support::RunArg::reg(#scalar_args, __splice_builder)?;)*
+            let __splice_inputs: &[(#hir::Reg, ::core::option::Option<#hir::Constant>)] = &[#((#scalar_args, __splice_known[#indices])),*];
+            #intrinsic
+            #(let #mutable_args = __splice_builder.copy(#mutable_args)?;)*
+            let __splice_result = __splice_builder.local(#value_type)?;
+            let __splice_return_label = __splice_builder.label()?;
             #code
-            __splice_builder.mark(__splice_return_label);
-            Ok(__splice_result)
+            __splice_builder.mark(__splice_return_label)?;
+            ::core::result::Result::Ok(__splice_result)
         }
     };
 
@@ -224,26 +255,28 @@ pub(crate) fn publish(
         let dispatch = context.dispatcher(root, emit!(Self::#signature_name), &types);
         items.push(emit!(
             #[doc(hidden)] #[allow(non_upper_case_globals)]
-            #visibility const #signature_name: &'static #root::ContextSignature = &#signature;
+            #visibility const #signature_name: &'static #root::__private::ContextSignature = &#signature;
         ));
         items.push(emit!(
             #[doc(hidden)]
             #visibility fn #dispatch_name #generics (&mut self, __splice_operation:u32,
-                __splice_arguments:#root::ContextArguments<'_>, _: #witness) -> i32 #where_ {
+                __splice_arguments:#root::__private::ContextArguments<'_>, _: #witness) -> u64 #where_ {
                 let __splice_object = self;
                 #dispatch
             }
         ));
-        return items;
+        return Ok(items);
     }
     if !trait_impl {
         let marker = entry_name("published", name);
         items.push(emit!(#[doc(hidden)] #visibility fn #marker() -> bool { true }));
     }
-    if let Ok(eval) = lower.evaluator(&signature, &body, visibility, Some(&eval_name)) {
-        items.push(eval);
-    }
-    items
+    items.push(
+        lower
+            .evaluator(&signature, &body, visibility, Some(&eval_name))?
+            .0,
+    );
+    Ok(items)
 }
 
 fn normalize(signature: &Signature, body: Option<&mut Block>) -> Signature {
@@ -263,12 +296,50 @@ fn normalize(signature: &Signature, body: Option<&mut Block>) -> Signature {
                     syn::visit_mut::visit_expr_path_mut(self, path);
                 }
             }
+            // `comptime!`, `vec!` and other macro bodies are unparsed tokens.
+            fn visit_macro_mut(&mut self, mac: &mut syn::Macro) {
+                mac.tokens = rename_receiver(std::mem::take(&mut mac.tokens), self.0);
+            }
         }
         if let Some(body) = body {
             Receiver(&replacement).visit_block_mut(body);
         }
     }
     signature
+}
+
+/// Replace the `self` value in macro tokens; `self::` paths keep their meaning.
+fn rename_receiver(
+    tokens: proc_macro2::TokenStream,
+    replacement: &Ident,
+) -> proc_macro2::TokenStream {
+    use proc_macro2::{Group, TokenTree};
+    let mut tokens = tokens.into_iter().peekable();
+    let mut out = Vec::new();
+    while let Some(token) = tokens.next() {
+        out.push(match token {
+            TokenTree::Ident(ident) if ident == "self" => {
+                let path = matches!(tokens.peek(), Some(TokenTree::Punct(p)) if p.as_char() == ':');
+                if path {
+                    TokenTree::Ident(ident)
+                } else {
+                    let mut renamed = replacement.clone();
+                    renamed.set_span(replacement.span().located_at(ident.span()));
+                    TokenTree::Ident(renamed)
+                }
+            }
+            TokenTree::Group(group) => {
+                let mut renamed = Group::new(
+                    group.delimiter(),
+                    rename_receiver(group.stream(), replacement),
+                );
+                renamed.set_span(group.span());
+                TokenTree::Group(renamed)
+            }
+            token => token,
+        });
+    }
+    out.into_iter().collect()
 }
 
 pub(crate) fn method_path(path: &syn::ExprPath) -> bool {

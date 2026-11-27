@@ -1,6 +1,8 @@
 use super::*;
 use lancy::hir::Simd as V;
-use splice::{
+use splice_core::hir::{Constant, ScalarType};
+use splice_core::simd::Element;
+use splice_core::{
     BufferArg, Executable,
     hir::{Simd, SimdOp},
 };
@@ -8,12 +10,21 @@ use splice::{
 fn both(
     arity: usize,
     kinds: &[BufferKind],
-    stage: fn(&mut dyn KernelBuilder) -> splice::Result<()>,
+    stage: fn(&mut dyn KernelBuilder) -> splice_core::Result<()>,
 ) -> [hir::Function; 2] {
-    let ir = splice::frontend::materialize(arity, kinds, Box::new(stage)).unwrap();
+    let ir = splice_core::frontend::materialize(
+        Signature::new(&vec![ScalarType::I32; arity], ScalarType::I32, kinds),
+        Box::new(stage),
+        options(),
+    )
+    .unwrap();
     [
-        build(arity, kinds, Box::new(stage)).unwrap(),
-        lower(&ir).unwrap(),
+        build(
+            Signature::new(&vec![ScalarType::I32; arity], ScalarType::I32, kinds),
+            Box::new(stage),
+        )
+        .unwrap(),
+        lower(&ir, &options().target).unwrap(),
     ]
 }
 
@@ -36,15 +47,17 @@ fn signed_index_gathers_check_each_width_with_one_unsigned_comparison() {
             let ids = b.simd(simd(SimdOp::Iota), &[])?.unwrap();
             b.simd(simd(SimdOp::Gather(buffer)), &[ids])?;
         }
-        let zero = b.constant(0);
-        b.ret(zero);
+        let zero = b.constant(Constant::from(0))?;
+        b.ret(zero)?;
         Ok(())
     }) {
         let comparisons: Vec<_> = graph
             .blocks()
             .flat_map(|b| graph.instructions(b))
             .filter_map(|inst| match *graph.op(inst) {
-                Op::Simd(V::Bin(op @ (hir::Binary::Lt | hir::Binary::Ge), left, _)) => {
+                Op::Bin(op @ (hir::Binary::Lt | hir::Binary::Ge), left, _)
+                    if matches!(graph.value_type(left), hir::Type::Vector(_)) =>
+                {
                     Some((op, graph.value_type(left)))
                 }
                 _ => None,
@@ -67,12 +80,14 @@ fn packed_load_and_store_have_an_ordered_short_store_exit() {
         BufferKind::new(Element::U16, true),
     ];
     for graph in both(1, &kinds, |b| {
-        let zero = b.constant(0);
-        let a = b.simd(u16_op(SimdOp::Load(Buffer(0))), &[zero])?.unwrap();
+        let first = b.constant(Constant::from(0usize))?;
+        let a = b.simd(u16_op(SimdOp::Load(Buffer(0))), &[first])?.unwrap();
         let one = b.simd(u16_op(SimdOp::Splat(1)), &[])?.unwrap();
         let sum = b.simd(u16_op(SimdOp::Add), &[a, one])?.unwrap();
-        b.simd(u16_op(SimdOp::Store(Buffer(1))), &[b.arg(0), sum])?;
-        b.ret(zero);
+        let at = b.cast(b.arg(0)?, ScalarType::Index)?;
+        b.simd(u16_op(SimdOp::Store(Buffer(1))), &[at, sum])?;
+        let zero = b.constant(Constant::from(0))?;
+        b.ret(zero)?;
         Ok(())
     }) {
         let ops: Vec<_> = graph
@@ -80,15 +95,30 @@ fn packed_load_and_store_have_an_ordered_short_store_exit() {
             .flat_map(|block| graph.instructions(block))
             .map(|inst| graph.op(inst))
             .collect();
-        assert!(ops.iter().any(|op| matches!(op, Op::Simd(V::Load(..)))));
-        assert!(ops.iter().any(|op| matches!(op, Op::Simd(V::Store(..)))));
+        let vector = |v| matches!(graph.value_type(v), hir::Type::Vector(_));
+        assert!(
+            ops.iter()
+                .any(|op| matches!(op, Op::Load(hir::Type::Vector(_), _)))
+        );
+        assert!(
+            ops.iter()
+                .any(|op| matches!(op, Op::Store(_, v) if vector(*v)))
+        );
         assert!(
             ops.iter()
                 .any(|op| matches!(op, Op::Simd(V::MaskedStore { .. })))
         );
-        let kernel = crate::LancyKernel::new(graph, 1, &kinds, None).unwrap();
-        let lanes = Element::U16.lanes();
-        assert_eq!(lanes * 2, lancy::ScalarKernel::vector_bytes());
+        let kernel = crate::LancyKernel::compile(
+            Signature::new(&[ScalarType::I32; 1], ScalarType::I32, &kinds),
+            splice_core::BuildOptions::host(splice_core::Mode::Release).unwrap(),
+            |_, _| Ok((graph, None)),
+        )
+        .unwrap();
+        let lanes = Element::U16.lanes(options().target.vector_bytes());
+        assert_eq!(
+            lanes * 2,
+            splice_target::Target::host().unwrap().vector_bytes()
+        );
         let mut src: Vec<_> = (0..lanes as u16).collect();
         src[lanes - 1] = u16::MAX;
         for len in [lanes + 1, lanes, 2, 1, 0] {
@@ -96,8 +126,8 @@ fn packed_load_and_store_have_an_ordered_short_store_exit() {
             let result = kernel.call(
                 &[1],
                 &mut [
-                    BufferArg::ReadU16(&src),
-                    BufferArg::WriteU16(&mut dst[..len]),
+                    BufferArg::read::<u16>(&src),
+                    BufferArg::write::<u16>(&mut dst[..len]),
                 ],
             );
             assert_eq!(result.is_ok(), len > lanes, "len={len}");
@@ -117,21 +147,30 @@ fn scatter_addresses_unsigned_u16_and_stops_at_the_first_active_error() {
         BufferKind::new(Element::U16, true),
     ];
     for graph in both(0, &kinds, |b| {
-        let zero = b.constant(0);
-        let ids = b.simd(u16_op(SimdOp::Load(Buffer(0))), &[zero])?.unwrap();
+        let first = b.constant(Constant::from(0usize))?;
+        let ids = b.simd(u16_op(SimdOp::Load(Buffer(0))), &[first])?.unwrap();
+        let zero = b.constant(Constant::from(0))?;
         let values = b.simd(u16_op(SimdOp::Iota), &[])?.unwrap();
         b.simd(u16_op(SimdOp::Scatter(Buffer(1))), &[ids, values])?;
-        b.ret(zero);
+        b.ret(zero)?;
         Ok(())
     }) {
-        let kernel = crate::LancyKernel::new(graph, 0, &kinds, None).unwrap();
-        let mut indices = vec![0; Element::U16.lanes()];
+        let kernel = crate::LancyKernel::compile(
+            Signature::new(&[ScalarType::I32; 0], ScalarType::I32, &kinds),
+            splice_core::BuildOptions::host(splice_core::Mode::Release).unwrap(),
+            |_, _| Ok((graph, None)),
+        )
+        .unwrap();
+        let mut indices = vec![0; Element::U16.lanes(options().target.vector_bytes())];
         indices[..4].copy_from_slice(&[32768, 32768, 65535, 1]);
         for n in [65535, 65536] {
             let mut dst = vec![99; n];
             let result = kernel.call(
                 &[],
-                &mut [BufferArg::ReadU16(&indices), BufferArg::WriteU16(&mut dst)],
+                &mut [
+                    BufferArg::read::<u16>(&indices),
+                    BufferArg::write::<u16>(&mut dst),
+                ],
             );
             let mut expected = vec![99; n];
             let ok = indices.iter().enumerate().all(|(i, &idx)| {
@@ -155,17 +194,26 @@ fn masked_contiguous_store_never_wraps_an_invalid_offset_to_zero() {
         let i = b.simd(u16_op(SimdOp::Iota), &[])?.unwrap();
         let one = b.simd(u16_op(SimdOp::Splat(1)), &[])?.unwrap();
         let enabled = b.simd(u16_op(SimdOp::Eq), &[i, one])?.unwrap();
-        b.simd(
-            u16_op(SimdOp::StoreSelect(Buffer(0))),
-            &[b.arg(0), enabled, i],
-        )?;
-        b.ret(b.arg(0));
+        let at = b.cast(b.arg(0)?, ScalarType::Index)?;
+        b.simd(u16_op(SimdOp::StoreSelect(Buffer(0))), &[at, enabled, i])?;
+        b.ret(b.arg(0)?)?;
         Ok(())
     }) {
-        let kernel = crate::LancyKernel::new(graph, 1, &kinds, None).unwrap();
+        let kernel = crate::LancyKernel::compile(
+            Signature::new(&[ScalarType::I32; 1], ScalarType::I32, &kinds),
+            splice_core::BuildOptions::host(splice_core::Mode::Release).unwrap(),
+            |_, _| Ok((graph, None)),
+        )
+        .unwrap();
         let mut dst = [8, 9];
-        let result = kernel.call(&[-1], &mut [BufferArg::WriteU16(&mut dst)]);
-        assert_eq!(result.unwrap_err(), "kernel slice index out of bounds");
+        let result = kernel.call(
+            &[splice_core::KernelScalar::to_word(-1i32)],
+            &mut [BufferArg::write::<u16>(&mut dst)],
+        );
+        assert_eq!(
+            result.unwrap_err(),
+            splice_core::CallError::Trap(splice_core::Trap::Bounds)
+        );
         assert_eq!(dst, [8, 9]);
     }
 }
@@ -178,22 +226,24 @@ fn vectors_and_masks_keep_their_element_type_across_a_join() {
             element: Element::F64,
             op,
         };
-        let zero = b.constant(0);
-        let v = b.typed_local(ValueType::Vector(Element::F64));
-        let mask = b.typed_local(ValueType::Mask(Element::F64));
-        let (left, right, join) = (b.label(), b.label(), b.label());
-        b.branch(b.arg(0), left, right);
+        let zero = b.constant(Constant::from(0))?;
+        let first = b.constant(Constant::from(0usize))?;
+        let v = b.local(ValueType::Vector(Element::F64))?;
+        let mask = b.local(ValueType::Mask(Element::F64))?;
+        let (left, right, join) = (b.label()?, b.label()?, b.label()?);
+        let taken = b.binary(splice_core::hir::Binary::Ne, b.arg(0)?, zero)?;
+        b.branch(taken, left, right)?;
         for (block, lit, cmp) in [(left, 1.25_f64, SimdOp::Eq), (right, -2.0, SimdOp::Ne)] {
-            b.mark(block);
+            b.mark(block)?;
             let n = b.simd(inst(SimdOp::Splat(lit.to_bits())), &[])?.unwrap();
             let m = b.simd(inst(cmp), &[n, n])?.unwrap();
-            b.assign(v, n);
-            b.assign(mask, m);
-            b.jump(join);
+            b.assign(v, n)?;
+            b.assign(mask, m)?;
+            b.jump(join)?;
         }
-        b.mark(join);
-        b.simd(inst(SimdOp::StoreSelect(Buffer(0))), &[zero, mask, v])?;
-        b.ret(zero);
+        b.mark(join)?;
+        b.simd(inst(SimdOp::StoreSelect(Buffer(0))), &[first, mask, v])?;
+        b.ret(zero)?;
         Ok(())
     }) {
         let params: Vec<_> = graph
@@ -203,11 +253,16 @@ fn vectors_and_masks_keep_their_element_type_across_a_join() {
             .collect();
         assert!(params.contains(&hir::Type::Vector(hir::Lane::F64)));
         assert!(params.contains(&hir::Type::Vector(hir::Lane::I64)));
-        let kernel = crate::LancyKernel::new(graph, 1, &kinds, None).unwrap();
+        let kernel = crate::LancyKernel::compile(
+            Signature::new(&[ScalarType::I32; 1], ScalarType::I32, &kinds),
+            splice_core::BuildOptions::host(splice_core::Mode::Release).unwrap(),
+            |_, _| Ok((graph, None)),
+        )
+        .unwrap();
         for (input, expected) in [(1, 1.25), (0, 3.0)] {
-            let mut dst = vec![3.0; Element::F64.lanes()];
+            let mut dst = vec![3.0; Element::F64.lanes(options().target.vector_bytes())];
             assert_eq!(
-                kernel.call(&[input], &mut [BufferArg::WriteF64(&mut dst)]),
+                kernel.call(&[input], &mut [BufferArg::write::<f64>(&mut dst)]),
                 Ok(0)
             );
             assert!(dst.iter().all(|&x| x == expected));

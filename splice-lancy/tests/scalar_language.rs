@@ -1,8 +1,8 @@
-use splice::hir::{Function, Instr, Label};
-use splice::kernel;
+use splice_core::hir::{Function, Instr, Label};
+use splice_core::kernel;
 use splice_lancy::Lancy;
 
-#[kernel]
+#[kernel(crate = splice_core)]
 fn weighted(#[comptime] bias: i32, position: i32) -> i32 {
     if position == 5 {
         return -bias;
@@ -14,7 +14,7 @@ fn weighted(#[comptime] bias: i32, position: i32) -> i32 {
     }
 }
 
-#[kernel]
+#[kernel(crate = splice_core)]
 fn scan(#[comptime] bias: i32, start: i32, end: i32, stop_at: i32) -> i32 {
     let mut position = start;
     let mut total = 0;
@@ -31,7 +31,7 @@ fn scan(#[comptime] bias: i32, start: i32, end: i32, stop_at: i32) -> i32 {
     total
 }
 
-#[kernel]
+#[kernel(crate = splice_core)]
 fn two_scans(#[comptime] bias: i32, start: i32, end: i32, stop_at: i32) -> i32 {
     // Both callees create and mutate their own total and position.
     let left = scan(bias, start, end, stop_at);
@@ -76,7 +76,7 @@ fn nested_calls_keep_separate_loop_state_on_each_invocation() {
     }
 }
 
-#[kernel]
+#[kernel(crate = splice_core)]
 fn bounded_sum(length: i32) -> i32 {
     let mut i = 0;
     let mut sum = 0;
@@ -94,7 +94,7 @@ enum Gate {
     Bypass,
 }
 
-#[kernel]
+#[kernel(crate = splice_core)]
 fn gated(#[comptime] mode: Gate, enabled: i32, length: i32) -> i32 {
     match mode {
         Gate::And => {

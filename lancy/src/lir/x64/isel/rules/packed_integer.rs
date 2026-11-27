@@ -1,23 +1,19 @@
 use super::Rules;
+use crate::lir::x64::Cpu;
 use crate::{
-    hir::operation::Action,
     hir::{Binary as B, Lane, Op, Simd, Ternary, Type, Unary},
     lir::x64::inst::{Inst, simd::packed::integer::Rule},
+    support::numeric::Action,
 };
-use splice_target::Features;
 
 impl Rules<'_> {
     pub(super) fn immediate_vector_shift(&mut self, op: Op) -> Option<Inst> {
-        let Op::Simd(Simd::Bin(
-            kind @ (B::Shl | B::Shr | B::RotateLeft | B::RotateRight),
-            src,
-            count,
-        )) = op
+        let Op::Bin(kind @ (B::Shl | B::Shr | B::RotateLeft | B::RotateRight), src, count) = op
         else {
             return None;
         };
         let lane = self.ty(src).lane()?;
-        if !matches!(lane, Lane::I32 | Lane::U32) || (self.cpu.bytes == 32 && !self.cpu.avx2) {
+        if !matches!(lane, Lane::I32 | Lane::U32) {
             return None;
         }
         let Op::Simd(Simd::Splat(scalar)) = self.ctx.defining_op(count)? else {
@@ -35,26 +31,28 @@ impl Rules<'_> {
 }
 
 impl Rule {
-    pub(in crate::lir::x64) fn select(action: Action, input: Type, c: Features) -> Option<Self> {
+    pub(in crate::lir::x64) fn select(action: Action, input: Type, c: Cpu) -> Option<Self> {
         let lane = input.lane()?;
         let n = lane.bytes();
         if matches!(action, Action::Ternary(Ternary::BitSelect)) {
             return Some(Self::BitSelect);
         }
-        if lane.float() || n > 8 || c.bytes == 32 && !c.avx2 || c.bytes == 64 && n < 4 && !c.bw {
+        if lane.float() || n > 8 || c.bytes == 64 && n < 4 && !c.isa.bw {
             return None;
         }
         Some(match action {
             Action::Unary(Unary::Neg) => Self::Neg,
             Action::Unary(Unary::Abs)
-                if !lane.signed() || (n == 8 && c.bytes != 64) || (c.bytes == 16 && !c.ssse3) =>
+                if !lane.signed()
+                    || (n == 8 && c.bytes != 64)
+                    || (c.bytes == 16 && !c.isa.ssse3) =>
             {
                 Self::Abs
             }
             Action::Binary(B::Mul)
                 if n == 1
-                    || n == 8 && !(c.bytes == 64 && c.dq)
-                    || n == 4 && c.bytes == 16 && !c.sse41 =>
+                    || n == 8 && !(c.bytes == 64 && c.isa.dq)
+                    || n == 4 && c.bytes == 16 && !c.isa.sse41 =>
             {
                 Self::Mul
             }
@@ -71,7 +69,7 @@ impl Rule {
                 if c.bytes != 64
                     && (n == 8
                         || c.bytes == 16
-                            && !c.sse41
+                            && !c.isa.sse41
                             && !matches!((n, lane.signed()), (1, false) | (2, true))) =>
             {
                 Self::MinMax(op)
@@ -82,7 +80,7 @@ impl Rule {
                 Self::Shift(op)
             }
             Action::Unary(Unary::TrailingZeros)
-                if c.bytes == 64 && (n >= 4 && c.vpopcnt || n <= 2 && c.bitalg) =>
+                if c.bytes == 64 && (n >= 4 && c.isa.vpopcnt || n <= 2 && c.isa.bitalg) =>
             {
                 Self::Ctz
             }

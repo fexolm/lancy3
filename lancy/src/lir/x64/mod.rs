@@ -1,13 +1,15 @@
+mod abi;
 mod compile;
 mod emit;
 mod frame;
-pub(crate) use splice_target::Features;
 mod inst;
 mod isel;
 mod schedule;
 #[cfg(test)]
 mod tests;
+mod vex;
 
-pub(crate) use emit::{emit, emit_debug};
+pub(crate) use abi::{Cpu, Machine};
+pub(crate) use emit::emit;
 #[cfg(test)]
-pub(crate) use tests::filetests::check_machine;
+pub(crate) use tests::disassembly::disassemble;

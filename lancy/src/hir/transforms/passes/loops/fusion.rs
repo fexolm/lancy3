@@ -2,7 +2,7 @@
 use super::super::facts::flatten;
 use super::{Bounds, Count, CountedLoop, Facts, NaturalLoops};
 use crate::hir::{
-    Block, Function, Op, Scale, Simd, Terminator, Type, Unary, Value, VectorAddress,
+    Block, Function, Op, Scale, Simd, Terminator, Unary, Value,
     ssa::Edge,
     transforms::{ControlFlowGraph, DomTree},
 };
@@ -66,31 +66,11 @@ impl Body {
                     return None;
                 }
                 let op = *f.op(inst);
-                let (address, ty, writes) = match op {
-                    Op::Load(ty, address) => (address, ty, false),
-                    Op::Simd(Simd::Load(lane, address)) => (address, Type::Vector(lane), false),
-                    Op::Store(address, value) | Op::Simd(Simd::Store(address, value)) => {
-                        (address, f.value_type(value), true)
+                let (address, ty, writes) = match op.access(f) {
+                    Some(access) if access.indices.is_none() => {
+                        (access.address, access.ty, access.write)
                     }
-                    Op::Simd(Simd::MaskedLoad {
-                        address:
-                            VectorAddress {
-                                base,
-                                indices: None,
-                            },
-                        passthrough,
-                        ..
-                    }) => (base, f.value_type(passthrough), false),
-                    Op::Simd(Simd::MaskedStore {
-                        address:
-                            VectorAddress {
-                                base,
-                                indices: None,
-                            },
-                        value,
-                        ..
-                    }) => (base, f.value_type(value), true),
-                    _ if facts.is_total(f, inst) => continue,
+                    None if facts.is_total(f, inst) => continue,
                     _ => return None,
                 };
                 let Some(Op::PtrOffset(base, index, scale)) = facts.op(f, address) else {
@@ -107,9 +87,9 @@ impl Body {
                 if !width.at_most(counted.step) {
                     return None;
                 }
-                let in_slice = f.slice_param(base).is_some_and(|(len, element, _)| {
-                    stride <= usize::from(element)
-                        && bounds.loop_covers(f, facts, dom, counted, len, width)
+                let in_slice = f.slice_param(base).is_some_and(|slice| {
+                    stride <= usize::from(slice.element)
+                        && bounds.loop_covers(f, facts, dom, counted, slice.len, width)
                 });
                 if let Some(entry) = memory.iter_mut().find(|entry| entry.base == base) {
                     if entry.scale != scale {
@@ -120,7 +100,7 @@ impl Body {
                 } else {
                     // Keep the pairwise check bounded, including for unusual kernels
                     // with many distinct pointer sources.
-                    if memory.len() >= 8 {
+                    if memory.len() >= super::super::limits::FUSION_ACCESSES {
                         return None;
                     }
                     memory.push(Footprint {

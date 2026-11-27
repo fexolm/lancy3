@@ -1,47 +1,63 @@
-use crate::lir::x64::{Features, emit::bind, inst::simd};
+use crate::lir::x64::{Cpu, emit::bind, inst::simd};
 use iced_x86::{CpuidFeature as Isa, code_asm::*};
+use splice_target::X86Features;
 
-pub(super) fn profiles() -> [Features; 4] {
-    let sse2 = Features {
+pub(super) fn profiles() -> [Cpu; 4] {
+    let sse2 = Cpu {
         bytes: 16,
-        ssse3: false,
-        sse41: false,
-        sse42: false,
-        avx2: false,
-        avx10: 0,
-        bw: false,
-        dq: false,
-        cd: false,
-        bitalg: false,
-        vpopcnt: false,
-        vbmi2: false,
-        vbmi: false,
-        fp16: false,
-        f16c: false,
-        bf16: false,
-        fma: false,
+        isa: X86Features {
+            ssse3: false,
+            sse41: false,
+            sse42: false,
+            avx2: false,
+            avx10: 0,
+            bw: false,
+            dq: false,
+            cd: false,
+            bitalg: false,
+            vpopcnt: false,
+            vbmi2: false,
+            vbmi: false,
+            fp16: false,
+            f16c: false,
+            bf16: false,
+            fma: false,
+            ..X86Features::default()
+        },
     };
-    let avx2 = Features {
+    let avx2 = Cpu {
         bytes: 32,
-        avx2: true,
-        ssse3: true,
-        sse41: true,
-        sse42: true,
-        ..sse2
+        isa: X86Features {
+            avx: true,
+            avx2: true,
+            ssse3: true,
+            sse41: true,
+            sse42: true,
+            ..sse2.isa
+        },
     };
-    let foundation = Features { bytes: 64, ..avx2 };
-    let extended = Features {
-        bw: true,
-        dq: true,
-        cd: true,
-        vpopcnt: true,
-        bitalg: true,
+    let foundation = Cpu {
+        bytes: 64,
+        isa: X86Features {
+            avx512f: true,
+            ..avx2.isa
+        },
+    };
+    let extended = Cpu {
+        isa: X86Features {
+            bw: true,
+            dq: true,
+            cd: true,
+            vpopcnt: true,
+            bitalg: true,
+            ..foundation.isa
+        },
         ..foundation
     };
     [sse2, avx2, foundation, extended]
 }
 
-pub(super) fn supports(cpu: Features, feature: Isa) -> bool {
+pub(super) fn supports(cpu: Cpu, feature: Isa) -> bool {
     match feature {
         Isa::INTEL8086
         | Isa::INTEL186
@@ -52,24 +68,24 @@ pub(super) fn supports(cpu: Features, feature: Isa) -> bool {
         | Isa::CMOV
         | Isa::SSE
         | Isa::SSE2 => true,
-        Isa::SSE3 | Isa::SSSE3 => cpu.ssse3,
-        Isa::SSE4_1 => cpu.sse41,
-        Isa::SSE4_2 => cpu.sse42,
-        Isa::AVX => cpu.bytes >= 32 || cpu.avx10 >= 1,
-        Isa::AVX2 => cpu.avx2,
-        Isa::AVX512F => cpu.bytes == 64 || cpu.avx10 >= 1,
-        Isa::AVX512VL => cpu.avx10 >= 1,
-        Isa::AVX512DQ => cpu.dq,
-        Isa::AVX512BW => cpu.bw,
-        Isa::AVX512CD => cpu.cd,
-        Isa::AVX512_VBMI => cpu.vbmi,
-        Isa::AVX512_VBMI2 => cpu.vbmi2,
-        Isa::AVX512_BF16 => cpu.bf16,
-        Isa::AVX512_FP16 => cpu.fp16,
-        Isa::F16C => cpu.f16c,
-        Isa::FMA => cpu.fma,
-        Isa::AVX512_BITALG => cpu.bitalg,
-        Isa::AVX512_VPOPCNTDQ => cpu.vpopcnt,
+        Isa::SSE3 | Isa::SSSE3 => cpu.isa.ssse3,
+        Isa::SSE4_1 => cpu.isa.sse41,
+        Isa::SSE4_2 => cpu.isa.sse42,
+        Isa::AVX => cpu.bytes >= 32 || cpu.isa.avx10 >= 1,
+        Isa::AVX2 => cpu.isa.avx2,
+        Isa::AVX512F => cpu.bytes == 64 || cpu.isa.avx10 >= 1,
+        Isa::AVX512VL => cpu.isa.avx10 >= 1,
+        Isa::AVX512DQ => cpu.isa.dq,
+        Isa::AVX512BW => cpu.isa.bw,
+        Isa::AVX512CD => cpu.isa.cd,
+        Isa::AVX512_VBMI => cpu.isa.vbmi,
+        Isa::AVX512_VBMI2 => cpu.isa.vbmi2,
+        Isa::AVX512_BF16 => cpu.isa.bf16,
+        Isa::AVX512_FP16 => cpu.isa.fp16,
+        Isa::F16C => cpu.isa.f16c,
+        Isa::FMA => cpu.isa.fma,
+        Isa::AVX512_BITALG => cpu.isa.bitalg,
+        Isa::AVX512_VPOPCNTDQ => cpu.isa.vpopcnt,
         _ => false,
     }
 }
@@ -77,7 +93,7 @@ pub(super) fn supports(cpu: Features, feature: Isa) -> bool {
 pub(super) fn host_supports(feature: Isa) -> bool {
     // A real AVX-512 host can have VL without implementing AVX10. A synthetic
     // foundation-only target must not gain VL from the machine running the test.
-    supports(Features::host(), feature)
+    supports(Cpu::host(), feature)
         || feature == Isa::AVX512VL && is_x86_feature_detected!("avx512vl")
 }
 
@@ -85,22 +101,18 @@ pub(super) fn host_supports(feature: Isa) -> bool {
 // that pool lands at the wrapper's first store. Only the prefix is executable.
 pub(super) fn body(op: simd::Native, regs: &[usize]) -> (Vec<u8>, usize) {
     let mut a = CodeAssembler::new(64).unwrap();
-    let mut pool = Vec::new();
+    let mut pool = crate::lir::x64::emit::Constants::default();
     let temps: Vec<_> = (6..15)
         .filter(|r| !regs.contains(r))
         .take(op.temporaries())
         .collect();
     assert_eq!(temps.len(), op.temporaries());
-    op.emit_allocated(&mut a, regs, &temps, Some(&mut pool))
-        .unwrap();
-    let data_len: usize = pool.iter().map(|(_, _, n)| n).sum();
+    op.emit_allocated(&mut a, regs, &temps, &mut pool).unwrap();
+    let mut data_len = 0;
     if !pool.is_empty() {
         let done = a.create_label();
         a.jmp(done).unwrap();
-        for (label, bits, len) in pool {
-            bind(&mut a, label).unwrap();
-            a.db(&bits[..len]).unwrap();
-        }
+        data_len = pool.emit(&mut a).unwrap();
         bind(&mut a, done).unwrap();
     }
     let bytes = a.assemble(0).unwrap();

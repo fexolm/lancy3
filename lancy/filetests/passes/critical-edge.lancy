@@ -1,13 +1,13 @@
-fn main x:i32 y:i32 -> i32
+fn main(x:i32 y:i32) -> i32
   cond = lt x y
-  br cond join x y | join y x
-block join a:i32 b:i32
+  br cond join(x y) | join(y x)
+block join(a:i32 b:i32)
   diff = sub a b
   ret diff
 
 @cfg check: b0 preds=[] succs=[b1 b1] dom=[b0]
 @cfg nextln: b1 preds=[b0 b0] succs=[] dom=[b0 b1]
-@isel check: brcmp.Lt
+@isel check: brcmp.lt.32
 @isel nextln: -> b1()
 @isel nextln: -> b2()
 @isel check: b1()

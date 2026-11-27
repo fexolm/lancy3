@@ -1,28 +1,33 @@
 //! Lower staged branches, matches, and loops into scalar control flow.
-use super::{Binding, LoopKind, Lower, Scalar, Stage, Value, err};
+use super::{Binding, LoopFrame, LoopKind, Lower, Scalar, Stage, Value, err};
 use proc_macro2::TokenStream;
 use quote::ToTokens;
 use syn::spanned::Spanned;
 use syn::visit::Visit;
-use syn::{Block, Error, Expr, Lit, Pat, Result};
+use syn::{Block, Expr, Lit, Pat, Result};
 
 impl Lower<'_> {
     pub(super) fn staged_loop(
         &self,
         expr: &Expr,
-        body: &Block,
         runtime: impl FnOnce() -> Result<Value>,
     ) -> Result<Value> {
-        if let Some(code) = self.host_loop(expr, body)? {
-            return Ok(Value::unit(code));
+        if let Some(code) = self.host_loop(expr)? {
+            // A Rust `loop` has the value of its `break`.
+            let stage = if matches!(expr, Expr::Loop(_)) {
+                Stage::Host
+            } else {
+                Stage::Unit
+            };
+            return Ok(Value::new(stage, code));
         }
         runtime()
     }
-    pub(super) fn host_loop(&self, expr: &Expr, body: &Block) -> Result<Option<TokenStream>> {
-        if self.flow.loops.contains(&crate::scalar::flow::key(body)) {
+    pub(super) fn host_loop(&self, expr: &Expr) -> Result<Option<TokenStream>> {
+        if self.body.staged_loop(expr) {
             return Ok(None);
         }
-        self.host_code(expr, true).map(Some)
+        self.host_code(expr).map(Some)
     }
     // Join two generated Rust arms of a host conditional. A terminating arm
     // can hand back an unreachable register for the surrounding build code.
@@ -32,7 +37,7 @@ impl Lower<'_> {
             return match to {
                 Stage::Reg(t) => {
                     let ty = t.value_type(self.root, self.types);
-                    Ok(emit!({#code; __splice_builder.typed_local(#ty)}))
+                    Ok(emit!({#code; __splice_builder.local(#ty)?}))
                 }
                 Stage::Never | Stage::Unit => Ok(code),
                 _ => err(at, "an early kernel return must merge with a scalar result"),
@@ -106,13 +111,19 @@ impl Lower<'_> {
         }
         if let Stage::Reg(t) = stage {
             let value = self.reg(v, t, at)?;
+            let root = self.root;
+            let assign = if t == Scalar::Inferred {
+                emit!(#root::frontend::scalar::assign_inferred(&mut __splice_branch_result, __splice_value, __splice_builder)?;)
+            } else {
+                emit!(__splice_builder.assign(__splice_branch_result, __splice_value)?;)
+            };
             Ok(emit!({
                 let __splice_value = #value;
-                __splice_builder.assign(__splice_branch_result, __splice_value);
-                __splice_builder.jump(__splice_join);
+                #assign
+                __splice_builder.jump(__splice_join)?;
             }))
         } else {
-            Ok(emit!({#v; __splice_builder.jump(__splice_join);}))
+            Ok(emit!({#v; __splice_builder.jump(__splice_join)?;}))
         }
     }
     pub(super) fn choice(
@@ -123,14 +134,37 @@ impl Lower<'_> {
         at: impl ToTokens,
     ) -> Result<Value> {
         let host = matches!(cond.stage, Stage::Literal(Scalar::Bool) | Stage::Host);
-        let stage = self.join([&yes, &no], !host, &at)?;
+        let mut stage = self.join([&yes, &no], !host, &at)?;
         if host {
+            // A known condition selects one arm during specialization, so a
+            // scalar result is known exactly when that arm is: a Word.
+            if let Stage::Reg(t @ (Scalar::I32 | Scalar::Bool)) = stage
+                && yes.stage != Stage::Never
+                && no.stage != Stage::Never
+            {
+                stage = Stage::Word(t);
+            }
             let yes = self.host_arm(yes, stage, &at)?;
             let no = self.host_arm(no, stage, &at)?;
             return Ok(Value::new(stage, emit!(if #cond {#yes}else{#no})));
         }
 
-        let test = self.reg(cond, Scalar::Bool, &at)?;
+        // A mixed-stage condition is a Word: known when its declaration is
+        // resolved during specialization, otherwise a register to branch on.
+        let root = self.root;
+        let (word, known) = if matches!(cond.stage, Stage::Word(_)) {
+            let code = cond.code;
+            (
+                emit!(let __splice_word = #code;),
+                emit!(#root::frontend::scalar::RunArg::known(&__splice_word).map(|value| value.bits() != 0)),
+            )
+        } else {
+            let test = self.reg(cond, Scalar::Bool, &at)?;
+            (
+                emit!(let __splice_word = #test;),
+                emit!(::core::option::Option::<bool>::None),
+            )
+        };
         let inner = self.nested_region();
         let yes_code = inner.delimit(self.write_arm(yes, stage, &at)?);
         let no_code = inner.delimit(self.write_arm(no, stage, &at)?);
@@ -138,64 +172,109 @@ impl Lower<'_> {
         Ok(Value::new(
             stage,
             emit!({
-                let __splice_cond = #test;
+                #word
+                let __splice_known_condition: ::core::option::Option<bool> = #known;
                 #init
                 let (__splice_yes, __splice_no, __splice_join) =
-                    (__splice_builder.label(), __splice_builder.label(), __splice_builder.label());
-                let __splice_known_condition = __splice_builder.immediate_condition(__splice_cond);
-                if __splice_known_condition.is_none() { __splice_builder.branch(__splice_cond, __splice_yes, __splice_no); }
-                if __splice_known_condition != Some(false) { __splice_builder.mark(__splice_yes); #yes_code; }
-                if __splice_known_condition != Some(true) { __splice_builder.mark(__splice_no); #no_code; }
-                __splice_builder.mark(__splice_join); #result
+                    (__splice_builder.label()?, __splice_builder.label()?, __splice_builder.label()?);
+                if __splice_known_condition.is_none() {
+                    let __splice_cond = #root::frontend::scalar::RunArg::reg(__splice_word, __splice_builder)?;
+                    __splice_builder.branch(__splice_cond, __splice_yes, __splice_no)?;
+                }
+                if __splice_known_condition != ::core::option::Option::Some(false) { __splice_builder.mark(__splice_yes)?; #yes_code; }
+                if __splice_known_condition != ::core::option::Option::Some(true) { __splice_builder.mark(__splice_no)?; #no_code; }
+                __splice_builder.mark(__splice_join)?; #result
             }),
         ))
     }
-    pub(super) fn loop_jump(&self, e: &Expr, again: bool) -> Result<Value> {
-        let Some(kind) = self.loop_kind else {
-            return err(e, "break/continue outside a kernel loop");
+    /// `continue` (`exit` is `None`) or `break` with its value, if any.
+    pub(super) fn loop_jump(
+        &self,
+        e: &Expr,
+        label: Option<&syn::Lifetime>,
+        exit: Option<Option<&Expr>>,
+    ) -> Result<Value> {
+        let frame = &self.jump_target(e, label)?[0];
+        let (target, flag) = match exit {
+            None => (&frame.next, &frame.reaches_next),
+            Some(_) => (&frame.end, &frame.reaches_end),
         };
-        let (target, flag) = if again {
-            (emit!(__splice_loop_next), emit!(__splice_reaches_next))
-        } else {
-            (emit!(__splice_loop_end), emit!(__splice_reaches_end))
+        let record = (frame.kind == LoopKind::Unrolled).then(|| emit!(#flag = true;));
+        // rustc allows a value only on a `break` that leaves a `loop`, which
+        // stages as a runtime loop.
+        let value = match exit.flatten() {
+            Some(value) => {
+                let lowered = self.expr_with_hint(value, frame.value_type.get())?;
+                let t = match (frame.value_type.get(), lowered.stage) {
+                    (Some(t), _) => t,
+                    (None, Stage::Reg(t) | Stage::Word(t) | Stage::Literal(t)) => t.base(),
+                    (None, Stage::Host) => Scalar::Inferred,
+                    (None, _) => return err(value, "a loop value must be a scalar"),
+                };
+                frame.value_type.set(Some(t));
+                let register = self.reg(lowered, t, value)?;
+                let slot = &frame.value;
+                emit!(let __splice_value = #register; __splice_builder.assign(#slot, __splice_value)?;)
+            }
+            None => TokenStream::new(),
         };
-        let record = matches!(kind, LoopKind::Unrolled).then(|| emit!(#flag = true;));
         let region = self.region();
         Ok(Value::new(
             Stage::Never,
-            emit!({#record __splice_builder.jump(#target); break #region;}),
+            emit!({#value #record __splice_builder.jump(#target)?; break #region;}),
         ))
     }
-    pub(super) fn loop_expr(&self, cond: Option<&Expr>, body: &Block) -> Result<Value> {
+    pub(super) fn loop_expr(
+        &self,
+        label: Option<&syn::Label>,
+        cond: Option<&Expr>,
+        body: &Block,
+    ) -> Result<Value> {
         let mut scope = self.nested_region();
-        scope.loop_kind = Some(LoopKind::Runtime);
+        let LoopFrame {
+            next,
+            end,
+            value,
+            value_type,
+            ..
+        } = scope.enter_loop(label, LoopKind::Runtime);
         let test = if let Some(e) = cond {
             let reg = scope.operand(e, Scalar::Bool)?;
             let point = scope.debug_point(e.span());
-            emit!({#point let __splice_cond = #reg; __splice_builder.branch_if_false(__splice_cond, __splice_loop_end);})
+            emit!({#point let __splice_cond = #reg; __splice_builder.branch_if_false(__splice_cond, #end)?;})
         } else {
             emit!()
         };
         let body_code = scope.block(body)?.code;
-        let contents =
-            scope.delimit(emit!(#test #body_code; __splice_builder.jump(__splice_loop_next);));
-        let code = emit!({
-            let (__splice_loop_next, __splice_loop_end) = (__splice_builder.label(), __splice_builder.label());
-            __splice_builder.jump(__splice_loop_next);
-            __splice_builder.mark(__splice_loop_next);
-            #contents
-            __splice_builder.mark(__splice_loop_end);
-        });
-        let stage = if cond.is_none() && !contains_break(body) {
-            Stage::Never
-        } else {
-            Stage::Unit
+        let contents = scope.delimit(emit!(#test #body_code; __splice_builder.jump(#next)?;));
+        let (slot, result, stage) = match value_type.get() {
+            Some(t) => {
+                let ty = t.value_type(self.root, self.types);
+                (
+                    emit!(let #value = __splice_builder.local(#ty)?;),
+                    emit!(#value),
+                    Stage::Reg(t),
+                )
+            }
+            None if cond.is_none() && !contains_break(body, label) => {
+                (TokenStream::new(), TokenStream::new(), Stage::Never)
+            }
+            None => (TokenStream::new(), TokenStream::new(), Stage::Unit),
         };
+        let code = emit!({
+            #slot
+            let (#next, #end) = (__splice_builder.label()?, __splice_builder.label()?);
+            __splice_builder.jump(#next)?;
+            __splice_builder.mark(#next)?;
+            #contents
+            __splice_builder.mark(#end)?;
+            #result
+        });
         Ok(Value::new(stage, code))
     }
     pub(super) fn for_expr(&self, f: &syn::ExprForLoop) -> Result<Value> {
         let Expr::Range(range) = &*f.expr else {
-            let Some(slice) = self.iterated_buffer(&f.expr) else {
+            let Some((slice, element)) = self.iterated_buffer(&f.expr) else {
                 return self.unroll(f);
             };
             let Pat::Reference(pattern) = &*f.pat else {
@@ -210,11 +289,12 @@ impl Lower<'_> {
                 "__splice_element_index",
                 span = proc_macro2::Span::mixed_site()
             );
+            let (start, one) = (self.constant(emit!(0usize)), self.constant(emit!(1usize)));
             let setup = emit!(let buffer = #slice;
-                let __splice_start = __splice_builder.constant(0);
-                let __splice_limit = __splice_builder.buffer_len(buffer););
-            let read = emit!(let #id = __splice_builder.load(buffer, #index););
-            return self.counted_loop(f, binding, Scalar::Int, &index, setup, read);
+                let (__splice_start, __splice_one) = (#start, #one);
+                let __splice_limit = __splice_builder.buffer_len(buffer)?;);
+            let read = emit!(let #id = __splice_builder.load(buffer, #index)?;);
+            return self.counted_loop(f, binding, element, &index, setup, read);
         };
         let (Some(start), Some(stop)) = (&range.start, &range.end) else {
             return err(range, "expected start..end");
@@ -227,27 +307,32 @@ impl Lower<'_> {
             return err(pat, "expected an immutable loop variable");
         }
         let stop_value = self.expr(stop)?;
-        let kind = if matches!(stop_value.stage, Stage::Reg(Scalar::Index | Scalar::Length)) {
-            // This loop uses a signed i32 induction variable. Both endpoints must fit.
-            if stop_value.stage != Stage::Reg(Scalar::Length)
-                || !matches!(&**start, Expr::Lit(l) if matches!(&l.lit, Lit::Int(i) if i.base10_parse::<i32>().is_ok()))
-            {
-                return err(
-                    range,
-                    "use an i32 range or a literal start with a slice.len() or Lane::lanes() bound",
-                );
+        let (kind, one) = match stop_value.stage {
+            // A variable below a slice length or a lane count fits a nonnegative i32.
+            Stage::Reg(Scalar::Length) if matches!(&**start, Expr::Lit(l) if matches!(&l.lit, Lit::Int(i) if i.base10_parse::<i32>().is_ok())) => {
+                (Scalar::Length, emit!(1usize))
             }
-            Scalar::Length
-        } else {
-            Scalar::Int
+            Stage::Reg(Scalar::Index | Scalar::Length) => (Scalar::Index, emit!(1usize)),
+            Stage::Reg(t @ Scalar::Number(_)) if !t.is_float() => {
+                let ty = t.rust_type();
+                (t, emit!(1 as #ty))
+            }
+            _ => (Scalar::I32, emit!(1i32)),
         };
         let initial = self.operand(start, kind)?;
         let bound = self.reg(stop_value, kind, stop)?;
-        let setup = emit!(let (__splice_start, __splice_limit) = (#initial, #bound););
+        let one = self.constant(one);
+        let setup =
+            emit!(let (__splice_start, __splice_limit, __splice_one) = (#initial, #bound, #one););
         self.counted_loop(f, pat, kind, &pat.ident, setup, TokenStream::new())
     }
 
-    pub(super) fn iterated_buffer<'a>(&self, iterable: &'a Expr) -> Option<&'a syn::ExprPath> {
+    /// A runtime slice a `for` loop reads element by element, and the
+    /// element's register.
+    pub(super) fn iterated_buffer<'a>(
+        &self,
+        iterable: &'a Expr,
+    ) -> Option<(&'a syn::ExprPath, Scalar)> {
         let operand = match iterable {
             Expr::MethodCall(call) if call.method == "iter" && call.args.is_empty() => {
                 &*call.receiver
@@ -257,8 +342,10 @@ impl Lower<'_> {
         let Expr::Path(path) = operand else {
             return None;
         };
-        matches!(self.binding(path), Some(Binding::Buffer(ty)) if ty.elem == super::Elem::I32)
-            .then_some(path)
+        match self.binding(path) {
+            Some(Binding::Buffer(ty)) => Some((path, ty.elem.scalar()?)),
+            _ => None,
+        }
     }
 
     fn counted_loop(
@@ -271,35 +358,30 @@ impl Lower<'_> {
         read: TokenStream,
     ) -> Result<Value> {
         let mut scope = self.nested_region();
-        scope.loop_kind = Some(LoopKind::Runtime);
-        let id = &pat.ident;
-        scope
-            .bindings
-            .insert(id.to_string(), Binding::Reg(kind, false));
-        scope.debug_names.insert(id.to_string(), id.clone());
+        let LoopFrame { next, end, .. } = scope.enter_loop(f.label.as_ref(), LoopKind::Runtime);
+        scope.declare(pat, Binding::Reg(kind, false));
         let point = scope.debug_point(f.for_token.span);
         let body = scope.block(&f.body)?.code;
         let root = self.root;
-        let contents = scope.delimit(emit!(#body; __splice_builder.jump(__splice_loop_next);));
+        let contents = scope.delimit(emit!(#body; __splice_builder.jump(#next)?;));
         Ok(Value::unit(emit!({
             #setup
-            let #index = __splice_builder.copy(__splice_start);
-            let (__splice_for_head, __splice_for_body, __splice_loop_next, __splice_loop_end) =
-                (__splice_builder.label(), __splice_builder.label(), __splice_builder.label(), __splice_builder.label());
-            __splice_builder.jump(__splice_for_head);
-            __splice_builder.mark(__splice_for_head);
-            let __splice_cond = __splice_builder.binary(#root::hir::Binary::Lt, #index, __splice_limit);
-            __splice_builder.branch(__splice_cond, __splice_for_body, __splice_loop_end);
-            __splice_builder.mark(__splice_for_body);
+            let #index = __splice_builder.copy(__splice_start)?;
+            let (__splice_for_head, __splice_for_body, #next, #end) =
+                (__splice_builder.label()?, __splice_builder.label()?, __splice_builder.label()?, __splice_builder.label()?);
+            __splice_builder.jump(__splice_for_head)?;
+            __splice_builder.mark(__splice_for_head)?;
+            let __splice_cond = __splice_builder.binary(#root::hir::Binary::Lt, #index, __splice_limit)?;
+            __splice_builder.branch(__splice_cond, __splice_for_body, #end)?;
+            __splice_builder.mark(__splice_for_body)?;
             #read
             #point
             #contents
-            __splice_builder.mark(__splice_loop_next);
-            let __splice_one = __splice_builder.constant(1);
-            let __splice_next = __splice_builder.binary(#root::hir::Binary::Add, #index, __splice_one);
-            __splice_builder.assign(#index, __splice_next);
-            __splice_builder.jump(__splice_for_head);
-            __splice_builder.mark(__splice_loop_end);
+            __splice_builder.mark(#next)?;
+            let __splice_next = __splice_builder.binary(#root::hir::Binary::Add, #index, __splice_one)?;
+            __splice_builder.assign(#index, __splice_next)?;
+            __splice_builder.jump(__splice_for_head)?;
+            __splice_builder.mark(#end)?;
         })))
     }
     fn unroll(&self, f: &syn::ExprForLoop) -> Result<Value> {
@@ -320,85 +402,69 @@ impl Lower<'_> {
             ));
         }
         let mut scope = bindings.nested_region();
-        scope.loop_kind = Some(LoopKind::Unrolled);
+        let LoopFrame {
+            next,
+            end,
+            reaches_next,
+            reaches_end,
+            ..
+        } = scope.enter_loop(f.label.as_ref(), LoopKind::Unrolled);
         let body = scope.block(&f.body)?;
-        let fallthrough =
-            (body.stage != Stage::Never).then(|| emit!(__splice_reaches_next = true;));
+        let fallthrough = (body.stage != Stage::Never).then(|| emit!(#reaches_next = true;));
         let iteration = scope.delimit(emit!(#body; #fallthrough));
         let region = self.region();
+        // An iteration that leaves an outer loop reaches neither exit.
         Ok(Value::unit(emit!({
-            let __splice_loop_end = __splice_builder.label();
-            let mut __splice_reaches_end = false;
-            let mut __splice_reaches_next = true;
+            let #end = __splice_builder.label()?;
+            let mut #reaches_end = false;
+            let mut #reaches_next = true;
             for #pat in #iterable {
                 #step
-                let __splice_loop_next = __splice_builder.label();
-                __splice_reaches_next = false;
+                let #next = __splice_builder.label()?;
+                #reaches_next = false;
                 #captures
                 #iteration
-                __splice_builder.mark(__splice_loop_next);
-                if !__splice_reaches_next { break; }
+                __splice_builder.mark(#next)?;
+                if !#reaches_next { break; }
             }
-            __splice_builder.mark(__splice_loop_end);
-            if !__splice_reaches_next && !__splice_reaches_end { break #region; }
+            __splice_builder.mark(#end)?;
+            if !#reaches_next && !#reaches_end { break #region; }
         })))
     }
     pub(super) fn match_expr(&self, m: &syn::ExprMatch, hint: Option<Scalar>) -> Result<Value> {
         let test = self.expr(&m.expr)?;
-        let host = test.stage.is_host();
-        let scope = if host {
-            self.clone()
-        } else {
-            self.nested_region()
-        };
+        if test.stage.is_host() {
+            return self.known_match(m, test, hint);
+        }
+        let scope = self.nested_region();
         let mut arms = Vec::new();
         for arm in &m.arms {
-            let pattern = host.then(|| self.with_debug_pattern(&arm.pat));
-            let scope = pattern.as_ref().map_or(&scope, |(scope, _)| scope);
             let value = scope.expr_with_hint(&arm.body, hint)?;
-            let point = if matches!(&*arm.body, Expr::Block(_)) {
-                emit!()
-            } else {
-                scope.debug_point(arm.body.span())
-            };
+            let point = scope.arm_point(arm);
             let guard = match &arm.guard {
-                Some((_, g)) if host => {
-                    let test = scope.host_raw(g)?;
-                    emit!(if #test)
-                }
                 Some((_, g)) => {
                     let test = scope.operand(g, Scalar::Bool)?;
                     let point = scope.debug_point(g.span());
-                    emit!({#point let passed = #test; __splice_builder.branch_if_false(passed, __splice_next_arm);})
+                    emit!({#point let passed = #test; __splice_builder.branch_if_false(passed, __splice_next_arm)?;})
                 }
                 None => emit!(),
             };
-            let captures = pattern.map(|(_, captures)| captures);
-            arms.push((arm, guard, point, captures, value));
+            arms.push((arm, guard, point, value));
         }
-        let stage = self.join(arms.iter().map(|(_, _, _, _, v)| v), !host, &m)?;
-        if host {
-            let mut cases = TokenStream::new();
-            for (arm, guard, point, captures, value) in arms {
-                let attrs = &arm.attrs;
-                let pat = &arm.pat;
-                let body = self.host_arm(value, stage, &arm.body)?;
-                cases.extend(emit!(#(#attrs)* #pat #guard => {#captures #point #body},));
-            }
-            return Ok(Value::new(stage, emit!(match #test {#cases})));
-        }
+        let stage = self.join(arms.iter().map(|(_, _, _, v)| v), true, &m)?;
         let Stage::Reg(t) = test.stage else {
             return err(&m.expr, "expected a value in match");
         };
-        if !m
+        // rustc has checked that the arms are exhaustive (`true`/`false`,
+        // ranges covering the type): without a final `_`, falling past
+        // the last arm cannot happen.
+        let exhausted = (!m
             .arms
             .last()
-            .is_some_and(|a| matches!(a.pat, Pat::Wild(_)) && a.guard.is_none())
-        {
-            return err(m, "a runtime match requires a final unguarded _ arm");
-        }
+            .is_some_and(|a| matches!(a.pat, Pat::Wild(_)) && a.guard.is_none()))
+        .then(|| emit!(__splice_builder.trap_bounds()?;));
         let mut body = TokenStream::new();
-        for (arm, guard, point, _, value) in arms {
+        for (arm, guard, point, value) in arms {
             if !arm.attrs.is_empty() {
                 return err(arm, "attributes on runtime arms are unsupported");
             }
@@ -407,13 +473,13 @@ impl Lower<'_> {
                 emit!()
             } else {
                 let pred = self.pattern(&arm.pat, t)?;
-                emit!({let matched = #pred; __splice_builder.branch_if_false(matched, __splice_next_arm);})
+                emit!({let matched = #pred; __splice_builder.branch_if_false(matched, __splice_next_arm)?;})
             };
             let contents = scope.delimit(emit!(#guard #point #write;));
             body.extend(emit!({
-                let __splice_next_arm = __splice_builder.label();
+                let __splice_next_arm = __splice_builder.label()?;
                 #pattern #contents
-                __splice_builder.mark(__splice_next_arm);
+                __splice_builder.mark(__splice_next_arm)?;
             }));
         }
         let (init, result) = result_slot(stage, self);
@@ -422,23 +488,129 @@ impl Lower<'_> {
             emit!({
                 let __splice_subject = #test;
                 #init
-                let __splice_join = __splice_builder.label();
+                let __splice_join = __splice_builder.label()?;
                 #body
-                __splice_builder.mark(__splice_join);
+                #exhausted
+                __splice_builder.mark(__splice_join)?;
                 #result
             }),
         ))
     }
+    fn arm_point(&self, arm: &syn::Arm) -> TokenStream {
+        if matches!(&*arm.body, Expr::Block(_)) {
+            emit!()
+        } else {
+            self.debug_point(arm.body.span())
+        }
+    }
+
+    /// A `match` on a known value: the generator selects the arm. A guard
+    /// with a runtime condition makes the selection a chain: each arm whose
+    /// pattern matches tests its guard at run time and falls through to the
+    /// next matching arm, up to the first arm that is selected for certain.
+    fn known_match(&self, m: &syn::ExprMatch, test: Value, hint: Option<Scalar>) -> Result<Value> {
+        let mut guards = Vec::new();
+        for arm in &m.arms {
+            let (scope, captures) = self.with_debug_pattern(&arm.pat);
+            let guard = match &arm.guard {
+                Some((_, g)) => Some(scope.expr(g)?),
+                None => None,
+            };
+            guards.push((scope, captures, guard));
+        }
+        let runtime = guards
+            .iter()
+            .any(|(_, _, guard)| guard.as_ref().is_some_and(|g| !g.stage.is_host()));
+        let mut arms = Vec::new();
+        for (arm, (scope, captures, guard)) in m.arms.iter().zip(guards) {
+            let scope = if runtime {
+                scope.nested_region()
+            } else {
+                scope
+            };
+            let value = scope.expr_with_hint(&arm.body, hint)?;
+            arms.push((arm, scope.arm_point(arm), captures, guard, value));
+        }
+        let stage = self.join(arms.iter().map(|(.., v)| v), runtime, &m)?;
+        if !runtime {
+            let mut cases = TokenStream::new();
+            for (arm, point, captures, guard, value) in arms {
+                let attrs = &arm.attrs;
+                let pat = &arm.pat;
+                let guard = guard.map(|g| emit!(if #g));
+                let body = self.host_arm(value, stage, &arm.body)?;
+                cases.extend(emit!(#(#attrs)* #pat #guard => {#captures #point #body},));
+            }
+            return Ok(Value::new(stage, emit!(match #test {#cases})));
+        }
+        let selection = self.fresh_label("arms");
+        let mut chain = TokenStream::new();
+        for (arm, point, captures, guard, value) in arms {
+            let attrs = &arm.attrs;
+            let pat = &arm.pat;
+            let write = self.write_arm(value, stage, &arm.body)?;
+            let (host_guard, runtime_guard, selected) = match guard {
+                Some(g) if !g.stage.is_host() => {
+                    let test = self.reg(g, Scalar::Bool, &arm.guard.as_ref().unwrap().1)?;
+                    (
+                        TokenStream::new(),
+                        emit!(let passed = #test; __splice_builder.branch_if_false(passed, __splice_next_arm)?;),
+                        TokenStream::new(),
+                    )
+                }
+                Some(g) => (emit!(if #g), TokenStream::new(), emit!(break #selection;)),
+                None => (
+                    TokenStream::new(),
+                    TokenStream::new(),
+                    emit!(break #selection;),
+                ),
+            };
+            let contents = self
+                .nested_region()
+                .delimit(emit!(#runtime_guard #point #write;));
+            chain.extend(emit! {
+                #[allow(unreachable_patterns)]
+                match __splice_subject {
+                    #(#attrs)* #pat #host_guard => {
+                        #captures
+                        let __splice_next_arm = __splice_builder.label()?;
+                        #contents
+                        __splice_builder.mark(__splice_next_arm)?;
+                        #selected
+                    }
+                    _ => {}
+                }
+            });
+        }
+        let (init, result) = result_slot(stage, self);
+        Ok(Value::new(
+            stage,
+            emit!({
+                let __splice_subject = #test;
+                #init
+                let __splice_join = __splice_builder.label()?;
+                #[allow(unreachable_code)]
+                #selection: {
+                    #chain
+                    // rustc has checked that an arm without a runtime guard
+                    // matches when the guarded ones fail.
+                    __splice_builder.trap_bounds()?;
+                }
+                __splice_builder.mark(__splice_join)?;
+                #result
+            }),
+        ))
+    }
+
     fn pattern(&self, p: &Pat, t: Scalar) -> Result<TokenStream> {
         match p {
             Pat::Lit(l) => {
                 let lit = match (&l.lit, t) {
-                    (Lit::Int(_), Scalar::Int | Scalar::Inferred) => {
-                        emit!(__splice_builder.constant(#l))
+                    (Lit::Int(_), t) if t.is_number() || t == Scalar::Inferred => {
+                        let ty = t.rust_type().unwrap_or_else(|| quote::format_ident!("i32"));
+                        self.constant(emit!({let __splice_value: #ty = #l; __splice_value}))
                     }
-                    (Lit::Bool(_), Scalar::Bool | Scalar::Inferred) => {
-                        emit!(__splice_builder.constant(-i32::from(#l)))
-                    }
+                    (Lit::Bool(_), Scalar::Bool | Scalar::Inferred) => self.constant(emit!(#l)),
                     _ => return err(l, "pattern type differs from match subject"),
                 };
                 Ok(self.bin("Eq", emit!(__splice_subject), lit))
@@ -453,6 +625,7 @@ impl Lower<'_> {
                 Ok(pred)
             }
             Pat::Range(r) if t != Scalar::Bool => {
+                let ty = t.rust_type().unwrap_or_else(|| quote::format_ident!("i32"));
                 let cmp = if matches!(r.limits, syn::RangeLimits::Closed(_)) {
                     "Le"
                 } else {
@@ -460,26 +633,27 @@ impl Lower<'_> {
                 };
                 let mut pred = None;
                 if let Some(start) = &r.start {
-                    let v = self.host_raw(start)?;
+                    let v = self.host_code(start)?;
                     pred = Some(self.bin(
                         "Ge",
                         emit!(__splice_subject),
-                        emit!(__splice_builder.constant(#v)),
+                        self.constant(emit!({let __splice_value: #ty = #v; __splice_value})),
                     ));
                 }
                 if let Some(stop) = &r.end {
-                    let v = self.host_raw(stop)?;
+                    let v = self.host_code(stop)?;
                     let upper = self.bin(
                         cmp,
                         emit!(__splice_subject),
-                        emit!(__splice_builder.constant(#v)),
+                        self.constant(emit!({let __splice_value: #ty = #v; __splice_value})),
                     );
                     pred = Some(match pred {
                         Some(lower) => self.bin("And", lower, upper),
                         None => upper,
                     })
                 }
-                pred.ok_or_else(|| Error::new_spanned(r, "expected a range endpoint"))
+                // syn parses an endpoint-free `..` as `Pat::Rest`.
+                Ok(pred.expect("a range pattern has an endpoint"))
             }
             _ => err(
                 p,
@@ -490,10 +664,17 @@ impl Lower<'_> {
 }
 
 fn result_slot(stage: Stage, lower: &Lower<'_>) -> (TokenStream, TokenStream) {
-    if let Stage::Reg(t) = stage {
+    if let Stage::Reg(Scalar::Inferred) = stage {
+        // Only the builder knows the type: the first arm creates the local.
+        let root = lower.root;
+        (
+            emit!(let mut __splice_branch_result = ::core::option::Option::None;),
+            emit!(#root::frontend::scalar::inferred_result(__splice_branch_result, __splice_builder)?),
+        )
+    } else if let Stage::Reg(t) = stage {
         let ty = t.value_type(lower.root, lower.types);
         (
-            emit!(let __splice_branch_result = __splice_builder.typed_local(#ty);),
+            emit!(let __splice_branch_result = __splice_builder.local(#ty)?;),
             emit!(__splice_branch_result),
         )
     } else {
@@ -520,17 +701,35 @@ fn contains_transfer(body: &Block) -> bool {
     visitor.0
 }
 
-fn contains_break(body: &Block) -> bool {
-    struct Find(bool);
-    impl<'ast> Visit<'ast> for Find {
-        fn visit_expr_break(&mut self, _: &'ast syn::ExprBreak) {
-            self.0 = true;
-        }
-        fn visit_expr_while(&mut self, _: &'ast syn::ExprWhile) {}
-        fn visit_expr_for_loop(&mut self, _: &'ast syn::ExprForLoop) {}
-        fn visit_expr_loop(&mut self, _: &'ast syn::ExprLoop) {}
+/// Whether a `break` in `body` leaves the loop labeled `label`: an
+/// unlabeled one outside nested loops, or one naming the label anywhere.
+fn contains_break(body: &Block, label: Option<&syn::Label>) -> bool {
+    struct Find<'a> {
+        label: Option<&'a syn::Lifetime>,
+        nested: usize,
+        found: bool,
     }
-    let mut find = Find(false);
+    impl<'ast> Visit<'ast> for Find<'_> {
+        fn visit_expr_break(&mut self, exit: &'ast syn::ExprBreak) {
+            self.found |= match &exit.label {
+                None => self.nested == 0,
+                Some(label) => self.label == Some(label),
+            };
+            syn::visit::visit_expr_break(self, exit);
+        }
+        fn visit_expr(&mut self, expr: &'ast Expr) {
+            let nested = matches!(expr, Expr::While(_) | Expr::ForLoop(_) | Expr::Loop(_));
+            self.nested += usize::from(nested);
+            syn::visit::visit_expr(self, expr);
+            self.nested -= usize::from(nested);
+        }
+        fn visit_item(&mut self, _: &'ast syn::Item) {}
+    }
+    let mut find = Find {
+        label: label.map(|label| &label.name),
+        nested: 0,
+        found: false,
+    };
     find.visit_block(body);
-    find.0
+    find.found
 }

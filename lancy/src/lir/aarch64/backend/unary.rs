@@ -81,14 +81,18 @@ impl Emitter<'_> {
                 self.a.put(C::Clz_asimd, &[v(dst, arr), v(dst, arr)])
             }
             Form::NeonCountZeros64(op) => {
-                self.a
-                    .put(C::Mov_x_v_d1, &[O::reg(R::X9), O::reg(R::v(src).unwrap())])?;
+                self.a.put(
+                    C::Umov_lane,
+                    &[O::reg(R::X9), O::vec(R::v(src).unwrap(), A::D2), O::imm(1)],
+                )?;
                 self.float_move(Type::F64, false, src, 10)?;
                 self.int_unary(op, 8, 9, 9)?;
                 self.int_unary(op, 8, 10, 10)?;
                 self.float_move(Type::F64, true, dst, 10)?;
-                self.a
-                    .put(C::Mov_v_d1_x, &[O::reg(R::v(dst).unwrap()), O::reg(R::X9)])
+                self.a.put(
+                    C::Ins_lane,
+                    &[O::vec(R::v(dst).unwrap(), A::D2), O::reg(R::X9), O::imm(1)],
+                )
             }
             Form::HalfSign(op, packed, scalable) => self.half_sign(op, packed, scalable, src, dst),
             Form::Float(op, regs) => self.float_unary(op, regs, src, dst),

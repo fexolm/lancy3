@@ -56,7 +56,7 @@ pub(super) fn simplify_simd(
                 _ => op,
             }
         }
-        Op::Simd(Simd::Ternary(Ternary::Select, m, yes, no)) => match mask(m) {
+        Op::Ternary(Ternary::Select, m, yes, no) => match mask(m) {
             Some(true) => Op::Copy(yes),
             Some(false) => Op::Copy(no),
             None if aliases[yes] == aliases[no] => Op::Copy(yes),
@@ -68,9 +68,7 @@ pub(super) fn simplify_simd(
             passthrough,
         }) => match mask(m) {
             Some(false) => Op::Copy(passthrough),
-            Some(true) if address.indices.is_none() => {
-                Op::Simd(Simd::Load(types[passthrough].lane().unwrap(), address.base))
-            }
+            Some(true) if address.indices.is_none() => Op::Load(types[passthrough], address.base),
             _ => op,
         },
         Op::Simd(Simd::MaskedStore {
@@ -79,7 +77,7 @@ pub(super) fn simplify_simd(
             value,
         }) => match mask(m) {
             Some(false) => return None,
-            Some(true) if address.indices.is_none() => Op::Simd(Simd::Store(address.base, value)),
+            Some(true) if address.indices.is_none() => Op::Store(address.base, value),
             _ => op,
         },
         _ => op,

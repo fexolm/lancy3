@@ -4,16 +4,23 @@
 
 mod buffer;
 mod builder;
+pub mod memory;
+mod replay;
+mod rust_call;
 mod simd;
+mod types;
 mod verify;
-pub use simd::{Simd, SimdOp, ValueType};
+pub use simd::{Access, Elements, Memory, OpInfo, Simd, SimdOp, Slot, ValueType};
+pub use types::{Constant, ScalarType};
 
 pub use buffer::{
     Buffer, BufferArg, BufferElement, BufferKind, check_forwarding, validate_buffers,
 };
 pub use builder::FunctionBuilder;
+pub use replay::replay;
+pub use rust_call::{PacketStore, PacketValue, RustCallPlan, RustTarget};
 
-use std::collections::HashMap;
+use std::collections::HashSet;
 use std::sync::Arc;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -26,12 +33,6 @@ pub struct Label(pub u32);
 pub struct ContextSlice {
     pub buffer: Buffer,
     pub writable: bool,
-}
-
-#[derive(Clone, Copy, Debug)]
-pub enum RustContextTarget {
-    Borrowed { context: Buffer, operation: u32 },
-    Static(&'static crate::StaticRustSymbol),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -57,11 +58,45 @@ pub enum Binary {
     CheckedMul,
     CheckedShl,
     CheckedShr,
+    /// Integer `saturating_add`, `saturating_sub` and `saturating_mul`.
+    SaturatingAdd,
+    SaturatingSub,
+    SaturatingMul,
     Min,
     Max,
 }
 
 impl Binary {
+    /// Every operation, in declaration order.
+    pub const ALL: [Self; 26] = [
+        Self::Add,
+        Self::Sub,
+        Self::Mul,
+        Self::Div,
+        Self::Rem,
+        Self::And,
+        Self::Or,
+        Self::Xor,
+        Self::Eq,
+        Self::Ne,
+        Self::Lt,
+        Self::Le,
+        Self::Gt,
+        Self::Ge,
+        Self::Shl,
+        Self::Shr,
+        Self::CheckedAdd,
+        Self::CheckedSub,
+        Self::CheckedMul,
+        Self::CheckedShl,
+        Self::CheckedShr,
+        Self::SaturatingAdd,
+        Self::SaturatingSub,
+        Self::SaturatingMul,
+        Self::Min,
+        Self::Max,
+    ];
+
     pub fn may_trap(self) -> bool {
         matches!(
             self,
@@ -74,163 +109,6 @@ impl Binary {
                 | Self::CheckedShr
         )
     }
-
-    /// Scalar semantics shared by code generators. True comparisons produce
-    /// all bits set. Trapping arithmetic with invalid operands returns `None`.
-    pub fn checked_eval(self, a: i32, b: i32) -> Option<i32> {
-        Some(match self {
-            Self::Add => a.wrapping_add(b),
-            Self::Sub => a.wrapping_sub(b),
-            Self::Mul => a.wrapping_mul(b),
-            Self::Div => a.checked_div(b)?,
-            Self::Rem => a.checked_rem(b)?,
-            Self::And => a & b,
-            Self::Or => a | b,
-            Self::Xor => a ^ b,
-            Self::Eq => -i32::from(a == b),
-            Self::Ne => -i32::from(a != b),
-            Self::Lt => -i32::from(a < b),
-            Self::Le => -i32::from(a <= b),
-            Self::Gt => -i32::from(a > b),
-            Self::Ge => -i32::from(a >= b),
-            Self::Shl => a.wrapping_shl(b as u32),
-            Self::Shr => a.wrapping_shr(b as u32),
-            Self::CheckedAdd => a.checked_add(b)?,
-            Self::CheckedSub => a.checked_sub(b)?,
-            Self::CheckedMul => a.checked_mul(b)?,
-            Self::CheckedShl => a.checked_shl(b as u32)?,
-            Self::CheckedShr => a.checked_shr(b as u32)?,
-            Self::Min => a.min(b),
-            Self::Max => a.max(b),
-        })
-    }
-}
-
-pub use splice_target::abi::{RustPacketSymbol, RustSymbol};
-
-/// A scalar symbol and the number of its ABI words in use.
-#[derive(Clone, Copy, Debug)]
-pub struct RustCall {
-    pub symbol: &'static RustSymbol,
-    pub arity: u8,
-}
-impl RustCall {
-    pub fn validate(
-        &self,
-        args: impl ExactSizeIterator<Item = Option<ValueType>>,
-    ) -> crate::Result<()> {
-        if self.arity > 2 || args.len() != usize::from(self.arity) {
-            return Err(format!(
-                "incompatible arity for Rust import {}",
-                self.symbol.name
-            ));
-        }
-        if args.into_iter().any(|ty| ty != Some(ValueType::Scalar)) {
-            return Err(format!(
-                "expected scalar operands for Rust import {}",
-                self.symbol.name
-            ));
-        }
-        Ok(())
-    }
-}
-
-pub fn check_rust_packet_call(
-    symbol: &RustPacketSymbol,
-    args: impl ExactSizeIterator<Item = Option<ValueType>>,
-) -> crate::Result<()> {
-    if symbol.packet_bytes().is_none() || args.len() != symbol.arity as usize {
-        return Err(format!(
-            "incompatible arity for Rust import {}",
-            symbol.name
-        ));
-    }
-    if args.into_iter().any(|ty| ty != Some(ValueType::Scalar)) {
-        return Err(format!(
-            "expected scalar operands for Rust import {}",
-            symbol.name
-        ));
-    }
-    Ok(())
-}
-
-/// Reject invalid context metadata in the ABI before generating native code.
-pub fn check_context_layout(kinds: &[BufferKind]) -> crate::Result<()> {
-    for signature in kinds.iter().filter_map(|kind| kind.context_signature()) {
-        signature.validate()?;
-    }
-    Ok(())
-}
-
-/// Validate the descriptor and words of a borrowed Rust context call.
-pub fn check_context_call(
-    kinds: &[BufferKind],
-    context: Buffer,
-    operation: u32,
-    args: impl ExactSizeIterator<Item = Option<ValueType>>,
-    slices: &[ContextSlice],
-) -> crate::Result<()> {
-    check_rust_context_call(
-        kinds,
-        RustContextTarget::Borrowed { context, operation },
-        args,
-        slices,
-    )
-}
-
-#[doc(hidden)]
-pub fn check_rust_context_call(
-    kinds: &[BufferKind],
-    target: RustContextTarget,
-    args: impl ExactSizeIterator<Item = Option<ValueType>>,
-    slices: &[ContextSlice],
-) -> crate::Result<()> {
-    let (arity, borrows) = match target {
-        RustContextTarget::Borrowed { context, operation } => {
-            let signature = kinds
-                .get(context.index())
-                .and_then(|kind| kind.context_signature())
-                .ok_or("expected a Rust context descriptor")?;
-            signature.validate()?;
-            signature
-                .shape(operation)
-                .ok_or("unknown Rust context operation")?
-        }
-        RustContextTarget::Static(symbol) => {
-            let (words, borrows) = symbol.shape();
-            if crate::ContextArguments::packet_layout(words, borrows).is_none() {
-                return Err("invalid static Rust operation packet layout".into());
-            }
-            (words as usize, borrows)
-        }
-    };
-    if args.len() != arity {
-        return Err("incompatible Rust context operation arity".into());
-    }
-    if args.into_iter().any(|ty| ty != Some(ValueType::Scalar)) {
-        return Err("expected scalar operands for Rust context operation".into());
-    }
-    if slices.len() != borrows as usize {
-        return Err("incompatible Rust context operation slice arity".into());
-    }
-    let mut seen = HashMap::new();
-    for &ContextSlice { buffer, writable } in slices {
-        let kind = kinds
-            .get(buffer.index())
-            .filter(|kind| kind.context_signature().is_none())
-            .ok_or("expected slice operands for Rust context operation")?;
-        if writable && !kind.writable() {
-            return Err("Rust context operation requires a writable slice".into());
-        }
-        if slices.len() > 1
-            && seen
-                .insert(buffer, writable)
-                .is_some_and(|prior| prior || writable)
-        {
-            return Err("writable Rust slice operand aliases another operand".into());
-        }
-    }
-    Ok(())
 }
 
 #[derive(Clone, Debug)]
@@ -241,7 +119,12 @@ pub enum Instr {
         inst: Simd,
         args: Vec<Reg>,
     },
-    Const(Reg, i32),
+    Const(Reg, Constant),
+    /// Rust's `src as T`, where `T` is the type of `dst`.
+    Cast {
+        dst: Reg,
+        src: Reg,
+    },
     Copy(Reg, Reg),
     Bin(Reg, Binary, Reg, Reg),
     BufferLen {
@@ -267,21 +150,13 @@ pub enum Instr {
     },
     Return(Reg),
     TrapBounds,
+    /// Run Rust code on scalar `args` and `slices`; `dst` is its `result`.
     RustCall {
         dst: Reg,
-        import: RustCall,
-        args: Vec<Reg>,
-    },
-    RustPacketCall {
-        dst: Reg,
-        import: &'static RustPacketSymbol,
-        args: Vec<Reg>,
-    },
-    RustContextCall {
-        dst: Reg,
-        target: RustContextTarget,
+        target: RustTarget,
         args: Vec<Reg>,
         slices: Vec<ContextSlice>,
+        result: ScalarType,
     },
     Call {
         dst: Reg,
@@ -302,57 +177,26 @@ impl Instr {
     fn may_trap(&self) -> bool {
         match self {
             Self::Bin(_, op, ..) => op.may_trap(),
-            Self::Load { .. }
-            | Self::Store { .. }
-            | Self::RustCall { .. }
-            | Self::RustPacketCall { .. }
-            | Self::RustContextCall { .. }
-            | Self::TrapBounds => true,
+            Self::Load { .. } | Self::Store { .. } | Self::RustCall { .. } | Self::TrapBounds => {
+                true
+            }
             Self::Call { function, .. } => function.needs_status(),
+            Self::Simd { inst, .. } => inst.op.may_trap(),
             _ => false,
         }
-    }
-
-    fn reads(&self) -> impl Iterator<Item = Reg> + '_ {
-        use std::slice::from_ref;
-        let (first, rest): (_, &[Reg]) = match self {
-            Self::Copy(_, r)
-            | Self::Return(r)
-            | Self::Branch { cond: r, .. }
-            | Self::Load { index: r, .. } => (None, from_ref(r)),
-            Self::Bin(_, _, a, b)
-            | Self::Store {
-                index: a, value: b, ..
-            } => (Some(*a), from_ref(b)),
-            Self::Call { args, .. }
-            | Self::RustCall { args, .. }
-            | Self::RustPacketCall { args, .. }
-            | Self::RustContextCall { args, .. }
-            | Self::Simd { args, .. } => (None, args),
-            _ => (None, &[]),
-        };
-        let variables = match self {
-            Self::Debug(point) => point.variables.as_ref(),
-            _ => &[],
-        };
-        first
-            .into_iter()
-            .chain(rest.iter().copied())
-            .chain(variables.iter().filter_map(|var| var.value.register()))
     }
 
     fn written(&self) -> Option<Reg> {
         match self {
             Self::Simd { dst, .. } => *dst,
             Self::Const(dst, _)
+            | Self::Cast { dst, .. }
             | Self::Copy(dst, _)
             | Self::Bin(dst, ..)
             | Self::BufferLen { dst, .. }
             | Self::Load { dst, .. }
             | Self::Call { dst, .. }
-            | Self::RustCall { dst, .. }
-            | Self::RustPacketCall { dst, .. }
-            | Self::RustContextCall { dst, .. } => Some(*dst),
+            | Self::RustCall { dst, .. } => Some(*dst),
             _ => None,
         }
     }
@@ -362,7 +206,8 @@ impl Instr {
 pub struct Function {
     source: Option<&'static crate::frontend::KernelSource>,
     options: crate::BuildOptions,
-    arity: usize,
+    params: Vec<ScalarType>,
+    result: ScalarType,
     buffer_kinds: Vec<BufferKind>,
     needs_status: bool,
     locals: Vec<ValueType>,
@@ -372,26 +217,34 @@ pub struct Function {
 
 /// Validate a nested kernel's scalar and buffer arguments in its caller.
 pub fn check_call(
-    arity: usize,
-    kinds: &[BufferKind],
+    callee: crate::frontend::Signature<'_>,
     args: impl ExactSizeIterator<Item = Option<ValueType>>,
     caller_kinds: &[BufferKind],
     buffers: &[Buffer],
 ) -> crate::Result<()> {
-    if args.len() != arity {
-        return Err(format!(
-            "expected {arity} scalar arguments, got {}",
+    if args.len() != callee.params.len() {
+        return Err(crate::BuildError::verify(format!(
+            "expected {} scalar arguments, got {}",
+            callee.params.len(),
             args.len()
-        ));
+        )));
     }
-    for (i, ty) in args.enumerate() {
+    for (i, (ty, &param)) in args.zip(callee.params).enumerate() {
         match ty {
-            Some(ValueType::Scalar) => {}
-            Some(_) => return Err(format!("expected a scalar register for call argument {i}")),
-            None => return Err(format!("invalid register for call argument {i}")),
+            Some(ValueType::Scalar(ty)) if ty == param => {}
+            Some(ty) => {
+                return Err(crate::BuildError::verify(format!(
+                    "expected a register of type {param} for call argument {i}, got {ty:?}"
+                )));
+            }
+            None => {
+                return Err(crate::BuildError::verify(format!(
+                    "invalid register for call argument {i}"
+                )));
+            }
         }
     }
-    check_forwarding(caller_kinds, kinds, buffers)
+    check_forwarding(caller_kinds, callee.buffers, buffers)
 }
 
 impl Function {
@@ -404,7 +257,7 @@ impl Function {
     }
 
     pub fn register_count(&self) -> usize {
-        self.arity + self.locals.len()
+        self.params.len() + self.locals.len()
     }
 
     pub fn reg_type(&self, r: Reg) -> ValueType {
@@ -413,10 +266,9 @@ impl Function {
 
     fn checked_reg_type(&self, r: Reg) -> Option<ValueType> {
         let index = r.0 as usize;
-        if index < self.arity {
-            Some(ValueType::Scalar)
-        } else {
-            self.locals.get(index - self.arity).copied()
+        match self.params.get(index) {
+            Some(&ty) => Some(ValueType::Scalar(ty)),
+            None => self.locals.get(index - self.params.len()).copied(),
         }
     }
 
@@ -425,7 +277,13 @@ impl Function {
     }
 
     pub fn arity(&self) -> usize {
-        self.arity
+        self.params.len()
+    }
+    pub fn params(&self) -> &[ScalarType] {
+        &self.params
+    }
+    pub fn result(&self) -> ScalarType {
+        self.result
     }
     pub fn buffer_kinds(&self) -> &[BufferKind] {
         &self.buffer_kinds
@@ -437,25 +295,23 @@ impl Function {
         self.needs_status
     }
 
-    /// Number reachable bodies in first-use, breadth-first order, with the root at zero.
-    /// Multiple calls to the same shared body receive one number.
-    pub fn reachable_functions(&self) -> (Vec<&Self>, HashMap<*const Self, usize>) {
+    /// This function and the bodies it calls, directly or not, in first-use
+    /// breadth-first order. A body shared by several calls appears once.
+    pub fn reachable_functions(&self) -> Vec<&Self> {
         let mut functions = vec![self];
-        let mut ids = HashMap::from([(std::ptr::from_ref(self), 0)]);
+        let mut seen = HashSet::from([std::ptr::from_ref(self)]);
         let mut i = 0;
         while i < functions.len() {
             for inst in functions[i].instructions() {
-                if let Instr::Call { function, .. } = inst {
-                    ids.entry(Arc::as_ptr(function)).or_insert_with(|| {
-                        let id = functions.len();
-                        functions.push(function);
-                        id
-                    });
+                if let Instr::Call { function, .. } = inst
+                    && seen.insert(Arc::as_ptr(function))
+                {
+                    functions.push(function);
                 }
             }
             i += 1;
         }
-        (functions, ids)
+        functions
     }
 
     pub fn instructions(&self) -> &[Instr] {

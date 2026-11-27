@@ -4,6 +4,8 @@ use regalloc2::{Block, Function as _, Inst, Operand, OperandConstraint, OperandK
 use std::{cmp::Reverse, ops::Range};
 
 mod liveness;
+#[cfg(test)]
+mod tests;
 use liveness::Liveness;
 
 const WINDOW: usize = 64;
@@ -17,13 +19,17 @@ type Pressure = [u16; 3];
 #[derive(Clone, Copy)]
 pub(super) enum Scheduling {
     Compute(u8),
-    /// Memory accesses and checks share one order, independent of SSA uses.
+    /// A memory read: it stays after the previous `Ordered` instruction and
+    /// before the next one, but loads may pass each other.
+    Load(u8),
+    /// Stores and checks keep one order with each other and with every load,
+    /// independent of SSA uses.
     Ordered(u8),
     Barrier,
 }
 
-pub(super) trait Schedulable {
-    fn scheduling(&self) -> Scheduling;
+pub(super) trait Schedulable: TargetInst {
+    fn scheduling(&self, details: &Self::Details) -> Scheduling;
 }
 
 fn members(mut mask: u64) -> impl Iterator<Item = usize> {
@@ -51,7 +57,7 @@ struct Node {
     height: u16,
 }
 
-struct Region<'a, I> {
+struct Region<'a, I: TargetInst> {
     f: &'a Function<I>,
     start: usize,
     nodes: &'a [Node],
@@ -248,16 +254,26 @@ impl Workspace {
         nodes.fill(Node::default());
         self.registers.clear();
         let generation = range.start + 1;
-        let mut ordered: Option<usize> = None;
+        // The last store or check, and the loads after it.
+        let mut ordered: u64 = 0;
+        let mut loads: u64 = 0;
         for (n, i) in range.clone().enumerate() {
             let bit = 1 << n;
-            nodes[n].latency = u16::from(match f.insts()[i].scheduling() {
+            let follow = |nodes: &mut [Node], preds: u64| {
+                nodes[n].ordered_pred = preds;
+                for p in members(preds) {
+                    nodes[p].successors |= bit;
+                }
+            };
+            nodes[n].latency = u16::from(match f.insts()[i].scheduling(f.details()) {
+                Scheduling::Load(latency) => {
+                    follow(nodes, ordered);
+                    loads |= bit;
+                    latency
+                }
                 Scheduling::Ordered(latency) => {
-                    if let Some(p) = ordered {
-                        nodes[n].ordered_pred = 1 << p;
-                        nodes[p].successors |= bit;
-                    }
-                    ordered = Some(n);
+                    follow(nodes, ordered | loads);
+                    (ordered, loads) = (bit, 0);
                     latency
                 }
                 Scheduling::Compute(latency) => latency,
@@ -320,7 +336,7 @@ impl Workspace {
 }
 
 pub(super) fn run<I: TargetInst + Schedulable>(f: &mut Function<I>) {
-    let env = I::machine_env();
+    let env = I::machine_env(f.machine());
     let limit = std::array::from_fn(|c| {
         (env.preferred_regs_by_class[c] | env.non_preferred_regs_by_class[c]).len() as u16
     });
@@ -340,7 +356,7 @@ pub(super) fn run<I: TargetInst + Schedulable>(f: &mut Function<I>) {
             let kind = if i == end {
                 Scheduling::Barrier
             } else {
-                f.insts()[i].scheduling()
+                f.insts()[i].scheduling(f.details())
             };
             if matches!(kind, Scheduling::Barrier) || i - start == WINDOW {
                 if i - start >= MIN_REGION && total >= 4 {
@@ -359,7 +375,7 @@ pub(super) fn run<I: TargetInst + Schedulable>(f: &mut Function<I>) {
                 start = i + usize::from(matches!(kind, Scheduling::Barrier));
                 total = 0;
             }
-            total += usize::from(matches!(kind, Scheduling::Compute(_)));
+            total += usize::from(matches!(kind, Scheduling::Compute(_) | Scheduling::Load(_)));
         }
     }
 }

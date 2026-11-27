@@ -1,11 +1,17 @@
 [package]
 name = "splice-kernel"
-version = "0.1.0"
-edition = "2024"
-rust-version = "1.94"
-license = "MIT OR Apache-2.0"
-repository = "https://github.com/fexolm/lancy3"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
 description = "A staged Rust kernel language with a portable code generation interface"
+readme = "../README.md"
+keywords = ["jit","kernel","simd","codegen","staging"]
+categories = ["compilers","development-tools"]
+
+[package.metadata.docs.rs]
+features = ["lancy", "cranelift"]
 
 [lib]
 name = "splice"
@@ -15,27 +21,25 @@ default = ["lancy"]
 lancy = ["dep:splice-lancy"]
 cranelift = ["dep:splice-cranelift"]
 llvm = ["dep:splice-llvm"]
-text = ["dep:splice-text"]
 
 [dependencies]
-splice_core = { package = "splice-core", path = "../splice-core", version = "0.1.0" }
-splice-lancy = { path = "../splice-lancy", version = "0.1.0", optional = true }
-splice-cranelift = { path = "../splice-cranelift", version = "0.1.0", optional = true }
-splice-llvm = { path = "../splice-llvm", version = "0.1.0", optional = true }
-splice-text = { path = "../splice-text", version = "0.1.0", optional = true }
+splice-core.workspace = true
+splice-lancy = { workspace = true, optional = true }
+splice-cranelift = { workspace = true, optional = true }
+splice-llvm = { workspace = true, optional = true }
 [dev-dependencies]
 tracing.workspace = true
-tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt"] }
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "registry", "std"] }
 criterion = { version = "0.8", features = ["html_reports"] }
-splice-cranelift = { path = "../splice-cranelift" }
-splice-lancy = { path = "../splice-lancy" }
-splice-llvm = { path = "../splice-llvm" }
 splice-test-traits = { path = "../tests/fixtures/trait-provider" }
-splice-text = { path = "../splice-text" }
+splice-test-overflow = { path = "../tests/fixtures/overflow-provider" }
+splice-testkit = { path = "../splice-testkit", default-features = false }
+trybuild = "1"
 
 [[bench]]
 name = "backends"
 harness = false
+required-features = ["llvm"]
 
 [[example]]
 name = "sql_plan"
@@ -52,3 +56,6 @@ test = true
 [[example]]
 name = "simd_hash_lookup"
 test = true
+
+[lints]
+workspace = true

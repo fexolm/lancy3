@@ -1,123 +1,123 @@
 # A positive mask has no active lanes, even when it is nonzero.
-fn main p:ptr x:i32 -> i32
+fn main(p:ptr x:i32) -> i32
   one = const 1
-  mask = simd.splat one
-  values = simd.splat x
+  mask = splat one
+  values = splat x
   zero = const 0
-  other = simd.splat zero
-  simd.maskedstore p - mask values
-  loaded = simd.maskedload p - mask values
-  chosen = simd.select mask other loaded
-  answer = simd.extract chosen zero
+  other = splat zero
+  maskedstore p - mask values
+  loaded = maskedload p - mask values
+  chosen = select mask other loaded
+  answer = extract chosen zero
   ret answer
-@opt not: simd.
+@opt not: vec.
 @opt check: ret
 @run 42 -> 42 | ad de fe ca | ad de fe ca
 ---
 # Active scatter still writes repeated indices in lane order.
-fn main p:ptr -> i32
+fn main(p:ptr) -> i32
   negative = const -1
-  mask = simd.splat negative
+  mask = splat negative
   zero = const 0
-  indices = simd.splat zero
-  values = simd.iota i32
-  simd.maskedstore p indices mask values
+  indices = splat zero
+  values = iota i32
+  maskedstore p indices mask values
   ret zero
-@opt check: simd.maskedstore
+@opt check: maskedstore
 ---
-fn main x:i32 y:i32 -> i32
-  i = simd.iota i32
-  a = simd.splat x
-  b = simd.splat y
-  twice = simd.splat x
-  chosen = simd.shuffle a b i
-  merged = simd.add chosen twice
+fn main(x:i32 y:i32) -> i32
+  i = iota i32
+  a = splat x
+  b = splat y
+  twice = splat x
+  chosen = shuffle a b i
+  merged = add chosen twice
   zero = const 0
-  ret_value = simd.extract merged zero
+  ret_value = extract merged zero
   ret ret_value
-@opt check: Splat
-@opt not: Splat
-@opt not: Shuffle
+@opt check: = splat
+@opt not: = splat
+@opt not: = shuffle
 @opt check: ret
 @run 4 13 -> 8
 ---
 # Composing broadcasts preserves an inner out-of-range index's zeros.
-fn main x:i32 y:i32 i:i32 -> i32
-  a = simd.splat x
-  b = simd.splat y
-  indices = simd.splat i
-  first = simd.shuffle a b indices
+fn main(x:i32 y:i32 i:i32) -> i32
+  a = splat x
+  b = splat y
+  indices = splat i
+  first = shuffle a b indices
   zero = const 0
-  zeros = simd.splat zero
-  broadcast = simd.shuffle first b zeros
-  result = simd.extract broadcast zero
+  zeros = splat zero
+  broadcast = shuffle first b zeros
+  result = extract broadcast zero
   ret result
-@opt check: Shuffle
-@opt not: Shuffle
+@opt check: = shuffle
+@opt not: = shuffle
 @opt check: ret
 @run 3 7 0 -> 3
 @run 3 7 -1 -> 0
 ---
-fn main x:i32 -> i32
-  v = simd.splat x
+fn main(x:i32) -> i32
+  v = splat x
   zero = const 0
-  count = simd.lanes i32
-  changed = simd.insert v zero zero
-  first = simd.extract changed zero
-  invalid = simd.extract v count
+  count = lanes i32
+  changed = insert v zero zero
+  first = extract changed zero
+  invalid = extract v count
   ret first
-@opt not: simd.Insert
-@opt check: simd.Extract
-@opt not: simd.Extract
+@opt not: = insert
+@opt check: = extract
+@opt not: = extract
 @opt check: ret
 @run 77 -> !bounds
 ---
 # Only the splat of the invariant value can move before the loop.
-fn main n:i32 x:i32 -> i32
+fn main(n:i32 x:i32) -> i32
   zero = const 0
   one = const 1
-  jump head zero zero
-block head i:i32 acc:i32
+  jump head(zero zero)
+block head(i:i32 acc:i32)
   more = lt i n
-  br more body | done acc
-block body
-  fixed = simd.splat x
-  changing = simd.splat i
-  sum = simd.add fixed changing
-  first = simd.extract sum zero
+  br more body() | done(acc)
+block body()
+  fixed = splat x
+  changing = splat i
+  sum = add fixed changing
+  first = extract sum zero
   total = add first acc
   next = add i one
-  jump head next total
-block done output:i32
+  jump head(next total)
+block done(output:i32)
   ret output
-@opt check: Splat Vector(I32) v1
+@opt check: vec.i32 = splat v1
 @opt nextln: jump
 @opt check: br
-@opt check: Splat Vector(I32)
+@opt check: vec.i32 = splat
 @run 0 7 -> 0
 @run 3 7 -> 24
 ---
 # Only one scalar word is readable at the broadcast address.
-fn main p:ptr x:i32 -> i32
+fn main(p:ptr x:i32) -> i32
   zero = const 0
-  v = simd.splat x
+  v = splat x
   scalar = load i32 p
-  splat = simd.splat scalar
-  out = simd.and v splat
-  answer = simd.extract out zero
+  splat = splat scalar
+  out = and v splat
+  answer = extract out zero
   ret answer
 @run 127 -> 60 | bc 00 00 00 | bc 00 00 00
 ---
 # An intervening store aliases the vector load. The old bytes must be returned.
-fn main p:ptr x:i32 -> i32
+fn main(p:ptr x:i32) -> i32
   z = const 0
-  v = simd.splat x
-  old = simd.load i32 p
+  v = splat x
+  old = load vec.i32 p
   store p z
-  masked = simd.and old v
-  answer = simd.extract masked z
+  masked = and old v
+  answer = extract masked z
   ret answer
-@isel check: load.Vector(I32)
-@isel check: store.I32
-@isel not: packed.And.mem
+@isel check: load.vec.i32
+@isel check: store.i32
+@isel not: packed.and.mem
 @run 127 -> 60 | bc 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 | 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00

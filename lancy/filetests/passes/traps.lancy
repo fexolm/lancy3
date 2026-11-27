@@ -1,0 +1,67 @@
+# A trap keeps the stores before it and stops before the stores after it.
+fn write(out:ptr value:i32 overflow:i32) -> i32
+  store out value
+  trap_if overflow Overflow
+  one = const 1
+  next = offset out one 4
+  store next value
+  ret value
+
+fn main(out:ptr value:i32 overflow:i32) -> i32
+  result = call write(out value overflow)
+  ret result
+@policy never
+@opt check: store
+@opt nextln: trap_if v2 Overflow
+@opt check: store
+@isel check: store.i32
+@isel check: trap_if Overflow
+@isel check: store.i32
+@run 7 0 -> 7 | aa aa aa aa bb bb bb bb | 07 00 00 00 07 00 00 00
+@run 7 -1 -> !arithmetic_overflow | aa aa aa aa bb bb bb bb | 07 00 00 00 bb bb bb bb
+---
+# Each kernel trap keeps its own code. A known condition decides the trap
+# at compile time: false removes it, true makes it unconditional.
+fn main(out:ptr kind:i32) -> i32
+  zero = const 0
+  one = const 1
+  never = eq one zero
+  trap_if never Bounds
+  store out kind
+  bounds_case = eq kind zero
+  br bounds_case out_of_bounds() | other()
+block out_of_bounds()
+  always = eq zero zero
+  trap_if always Bounds
+  ret zero
+block other()
+  is_zero = eq kind one
+  br is_zero division() | rest()
+block division()
+  trap DivisionByZero
+  ret zero
+block rest()
+  trap_if kind DivisionOverflow
+  ret kind
+@opt check: store
+@opt not: Bounds
+@opt check: trap Bounds
+@opt check: trap DivisionByZero
+@opt check: DivisionOverflow
+@isel check: trap_if DivisionOverflow
+@isel check: trap DivisionByZero
+@isel check: trap Bounds
+@aarch64-isel check: trap_if DivisionOverflow | Use: v1i reg
+@aarch64-isel check: trap DivisionByZero
+@aarch64-isel check: trap Bounds
+@aarch64 all lacks blr
+@run 0 -> !bounds | aa aa aa aa | 00 00 00 00
+@run 1 -> !zero | aa aa aa aa | 01 00 00 00
+@run 2 -> !overflow | aa aa aa aa | 02 00 00 00
+---
+# Only a Rust entry reports a panic or an ABI defect.
+fn main() -> i32
+  trap RustPanic
+  zero = const 0
+  ret zero
+@reject which only a Rust entry reports

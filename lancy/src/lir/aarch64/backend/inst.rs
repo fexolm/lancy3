@@ -3,15 +3,17 @@ use super::reduce::Form as ReduceForm;
 use super::unary::Form as UnaryForm;
 use super::wide::MathForm as WideMath;
 use super::width::{Narrow, Widen};
-use super::{A, C, Cond};
+use super::{A, C, Cond, Config};
+use crate::lir::frame::FrameUse;
 use crate::{
-    hir::operation::Action,
-    hir::{Lane, RustContextImport, RustImport, RustPacketImport, Scale, Type, Unary},
+    hir::{Lane, RustFunction, Scale, Type, Unary},
     lir::{
         TargetInst,
+        inst::Temp,
         schedule::{Schedulable, Scheduling},
     },
     module::FunctionId,
+    support::numeric::Action,
 };
 use regalloc2::{MachineEnv, Operand, PReg, PRegSet, RegClass, VReg};
 use std::sync::OnceLock;
@@ -41,12 +43,31 @@ fn volatile() -> [PRegSet; 3] {
 }
 
 pub(super) fn call_clobbers() -> PRegSet {
-    let [ints, _, vectors] = Inst::machine_env().preferred_regs_by_class;
+    let [ints, _, vectors] = machine_env().preferred_regs_by_class;
     ints | vectors
 }
 
 pub(super) fn nonvolatile() -> PRegSet {
-    Inst::machine_env().non_preferred_regs_by_class[RegClass::Int as usize]
+    machine_env().non_preferred_regs_by_class[RegClass::Int as usize]
+}
+
+/// AAPCS64 is the only convention, whatever the vector width.
+fn machine_env() -> &'static MachineEnv {
+    static ENV: OnceLock<MachineEnv> = OnceLock::new();
+    ENV.get_or_init(|| MachineEnv {
+        preferred_regs_by_class: volatile(),
+        non_preferred_regs_by_class: [
+            registers(RegClass::Int, 23..=28),
+            PRegSet::empty(),
+            PRegSet::empty(),
+        ],
+        scratch_by_class: [
+            Some(PReg::new(9, RegClass::Int)),
+            None,
+            Some(PReg::new(16, RegClass::Vector)),
+        ],
+        fixed_stack_slots: vec![],
+    })
 }
 
 fn return_reg(ty: Type) -> PReg {
@@ -150,7 +171,6 @@ pub(super) enum Inst {
     Unary(UnaryForm, VReg, VReg),
     Half(HalfForm, VReg, VReg, [Option<VReg>; 2]),
     HalfCast(Lane, Lane, VReg, VReg),
-    IntegerFloatCast(super::integer_float::Form, VReg, VReg),
     IntCast(Type, Type, VReg, VReg),
     WideCast(Type, Type, VReg, VReg),
     FloatCast(C, Type, Type, VReg, VReg),
@@ -170,7 +190,6 @@ pub(super) enum Inst {
     Rotate(super::rotate::Form, VReg, VReg, VReg),
     ScalarSaturate(C, usize, VReg, VReg, VReg),
     NeonMul64(VReg, VReg, VReg),
-    FloatRemainder(super::remainder::Form, VReg, VReg, VReg),
     FloatSpecial(super::special::Form, VReg, VReg, Option<VReg>),
     Expand(Expand, VReg, VReg, VReg),
     Widen(Widen, VReg, VReg),
@@ -193,7 +212,8 @@ pub(super) enum Inst {
     Packed(Packed, VReg, VReg, VReg),
     PackedShiftImm(C, A, u8, VReg, VReg),
     Check(VReg, VReg),
-    CheckOverflow(VReg),
+    TrapIf(VReg, crate::Trap),
+    Trap(crate::Trap),
     Offset(Scale, VReg, VReg, VReg),
     Load(Type, VReg, VReg),
     Store(Type, VReg, VReg),
@@ -211,12 +231,11 @@ pub(super) enum Inst {
     StoreArg(Type, usize, VReg),
     Call(FunctionId, PRegSet, Type, VReg),
     LibArg(Type, usize, VReg),
-    Libcall(Action, Type, Type, [usize; 3]),
-    RustCall(&'static RustImport, VReg, VReg, VReg),
-    RustPacketCall(&'static RustPacketImport, VReg),
-    StorePacketWord(u32, VReg),
-    RustContextCall(RustContextImport, [VReg; 4], VReg),
-    CallScratch(u32, VReg),
+    Libcall(Action, Type, Type, [Option<Type>; 3]),
+    RustCall(&'static RustFunction, [VReg; 4], VReg),
+    /// Address of the frame's scratch memory at a byte offset, with the
+    /// region's size in bytes.
+    CallScratch(u32, u32, VReg),
     LibResult(Type, VReg),
     Jump,
     Branch(VReg),
@@ -224,7 +243,9 @@ pub(super) enum Inst {
 }
 
 impl TargetInst for Inst {
-    fn operands(&self, out: &mut Vec<Operand>) {
+    type Machine = Config;
+    type Details = ();
+    fn operands(&self, _: &Config, _: &(), out: &mut Vec<Operand>) {
         let input = Operand::reg_use;
         let output = Operand::reg_def;
         match *self {
@@ -252,13 +273,6 @@ impl TargetInst for Inst {
             | Self::Splat(_, _, _, d, v) => {
                 out.extend([input(v), output(d)]);
             }
-            Self::IntegerFloatCast(form, d, v) => {
-                if form.packed {
-                    out.extend([Operand::reg_use_at_end(v), Operand::reg_def_at_start(d)]);
-                } else {
-                    out.extend([input(v), output(d)]);
-                }
-            }
             Self::Widen(Widen::Convert(..), d, v) => {
                 out.extend([Operand::reg_use_at_end(v), Operand::reg_def_at_start(d)]);
             }
@@ -281,13 +295,13 @@ impl TargetInst for Inst {
                 out.extend([input(a), input(b), output(d)]);
             }
             Self::Check(a, b) | Self::Store(_, a, b) => out.extend([input(a), input(b)]),
-            Self::CheckOverflow(cond) => out.push(input(cond)),
+            Self::TrapIf(cond, _) => out.push(input(cond)),
             Self::Select(_, d, m, a, b) => out.extend([input(m), input(a), input(b), output(d)]),
             Self::Fma(_, _, d, args) | Self::Shuffle(Shuffle::Sve(_), d, args) => {
                 out.extend(args.map(input).into_iter().chain([output(d)]));
             }
             Self::Shuffle(Shuffle::Neon(..) | Shuffle::Wide(_), d, args) => {
-                // The emitter uses the output and, for wider lanes, V17 as scratch.
+                // The emitter writes the output before reading every input.
                 out.extend(args.map(Operand::reg_use_at_end));
                 out.push(Operand::reg_def_at_start(d));
             }
@@ -310,17 +324,6 @@ impl TargetInst for Inst {
                 ]);
             }
             Self::Rotate(_, d, a, b) => out.extend([input(a), input(b), output(d)]),
-            Self::FloatRemainder(form, d, a, b) => {
-                if form.packed {
-                    out.extend([
-                        Operand::reg_use_at_end(a),
-                        Operand::reg_use_at_end(b),
-                        Operand::reg_def_at_start(d),
-                    ]);
-                } else {
-                    out.extend([input(a), input(b), output(d)]);
-                }
-            }
             Self::FloatSpecial(form, d, a, b) => {
                 let used = if form.packed {
                     Operand::reg_use_at_end
@@ -415,7 +418,6 @@ impl TargetInst for Inst {
             }
             Self::StoreArg(_, _, v)
             | Self::DebugStore(_, _, v)
-            | Self::StorePacketWord(_, v)
             | Self::LibArg(_, _, v)
             | Self::Branch(v) => out.push(input(v)),
             Self::Return(ty, v, root) => {
@@ -425,15 +427,7 @@ impl TargetInst for Inst {
                     input(v)
                 });
             }
-            Self::RustCall(_, a, b, dst) => out.extend([
-                Operand::reg_fixed_use(a, PReg::new(0, RegClass::Int)),
-                Operand::reg_fixed_use(b, PReg::new(1, RegClass::Int)),
-                Operand::reg_fixed_def(dst, return_reg(Type::I32)),
-            ]),
-            Self::RustPacketCall(_, dst) => {
-                out.push(Operand::reg_fixed_def(dst, return_reg(Type::I32)))
-            }
-            Self::RustContextCall(_, args, dst) => {
+            Self::RustCall(_, args, dst) => {
                 out.extend(
                     args.into_iter().enumerate().map(|(reg, arg)| {
                         Operand::reg_fixed_use(arg, PReg::new(reg, RegClass::Int))
@@ -441,12 +435,12 @@ impl TargetInst for Inst {
                 );
                 out.push(Operand::reg_fixed_def(dst, return_reg(Type::I32)));
             }
-            Self::CallScratch(_, dst) => out.push(Operand::reg_def(dst)),
-            Self::Libcall(..) | Self::Jump | Self::DebugPoint(_) => {}
+            Self::CallScratch(_, _, dst) => out.push(Operand::reg_def(dst)),
+            Self::Libcall(..) | Self::Jump | Self::DebugPoint(_) | Self::Trap(_) => {}
         }
     }
 
-    fn clobbers(&self) -> PRegSet {
+    fn clobbers(&self, _: &Config, _: &()) -> PRegSet {
         match *self {
             Self::Call(_, written, ty, _) => {
                 let mut regs = call_clobbers() | written;
@@ -454,43 +448,44 @@ impl TargetInst for Inst {
                 regs
             }
             Self::Libcall(..) => call_clobbers(),
-            Self::RustCall(..) | Self::RustPacketCall(..) | Self::RustContextCall(..) => {
+            Self::RustCall(..) => {
                 let mut regs = call_clobbers();
                 regs.remove(return_reg(Type::I32));
                 regs
             }
-            Self::Half(form, ..) if matches!(form.action, super::half::Action::MulAdd) => {
-                registers(RegClass::Vector, 17..=19)
-            }
-            Self::Half(..) => registers(RegClass::Vector, [17]),
-            Self::ScalarSaturate(..)
-            | Self::Rotate(super::rotate::Form { packed: true, .. }, ..) => {
-                registers(RegClass::Vector, [17])
-            }
-            Self::FloatSpecial(
+            _ => PRegSet::empty(),
+        }
+    }
+
+    fn temps(&self, _: &Config) -> &'static [Temp] {
+        const VECTOR: Temp = Temp::Any(RegClass::Vector);
+        const ONE: &[Temp] = &[VECTOR];
+        const TWO: &[Temp] = &[VECTOR; 2];
+        const THREE: &[Temp] = &[VECTOR; 3];
+        // TBL2 reads the table {V16, V17}.
+        const TABLE: &[Temp] = &[Temp::Fixed(PReg::new(17, RegClass::Vector))];
+        // The root returns a float's bits in X0.
+        const RESULT: &[Temp] = &[Temp::Fixed(PReg::new(0, RegClass::Int))];
+        match *self {
+            Self::Return(Type::F32 | Type::F64, _, true) => RESULT,
+            Self::Half(form, ..) if matches!(form.action, super::half::Action::MulAdd) => THREE,
+            Self::Half(..)
+            | Self::ScalarSaturate(..)
+            | Self::Rotate(super::rotate::Form { packed: true, .. }, ..)
+            | Self::FloatSpecial(
                 super::special::Form {
                     action: super::special::Action::MinMax(_),
                     ..
                 },
                 ..,
-            ) => registers(RegClass::Vector, [17]),
-            Self::Reduce(ReduceForm::Ordered(_, Lane::F16 | Lane::BF16, _), ..) => {
-                registers(RegClass::Vector, [17])
-            }
-            Self::VectorDivide(
-                VectorDivide {
-                    size: 1 | 2,
-                    scalable: true,
-                    ..
-                },
-                ..,
-            ) => registers(RegClass::Vector, [17, 18]),
-            Self::Compact {
+            )
+            | Self::Reduce(ReduceForm::Ordered(_, Lane::F16 | Lane::BF16, _), ..)
+            | Self::Compact {
                 size: 1 | 2,
                 scalable: true,
                 ..
-            } => registers(RegClass::Vector, [17]),
-            Self::Masked {
+            }
+            | Self::Masked {
                 kind: Masked::SveNarrow(_),
                 ..
             }
@@ -498,10 +493,19 @@ impl TargetInst for Inst {
                 kind: Masked::SveWide(_),
                 indices: Some(_),
                 ..
-            } => registers(RegClass::Vector, [17]),
-            Self::Shuffle(Shuffle::Neon(_, 2..) | Shuffle::Wide(true), ..)
-            | Self::WideMaskTest(true, true, ..) => registers(RegClass::Vector, [17]),
-            _ => PRegSet::empty(),
+            }
+            | Self::Shuffle(Shuffle::Wide(true), ..)
+            | Self::WideMaskTest(true, true, ..) => ONE,
+            Self::VectorDivide(
+                VectorDivide {
+                    size: 1 | 2,
+                    scalable: true,
+                    ..
+                },
+                ..,
+            ) => TWO,
+            Self::Shuffle(Shuffle::Neon(_, 2..), ..) => TABLE,
+            _ => &[],
         }
     }
 
@@ -513,27 +517,28 @@ impl TargetInst for Inst {
         matches!(self, Self::Return(..))
     }
 
-    fn machine_env() -> &'static MachineEnv {
-        static ENV: OnceLock<MachineEnv> = OnceLock::new();
-        ENV.get_or_init(|| MachineEnv {
-            preferred_regs_by_class: volatile(),
-            non_preferred_regs_by_class: [
-                registers(RegClass::Int, 23..=28),
-                PRegSet::empty(),
-                PRegSet::empty(),
-            ],
-            scratch_by_class: [
-                Some(PReg::new(9, RegClass::Int)),
-                None,
-                Some(PReg::new(16, RegClass::Vector)),
-            ],
-            fixed_stack_slots: vec![],
-        })
+    fn machine_env(_: &Config) -> &'static MachineEnv {
+        machine_env()
     }
 
-    fn spillslot_size(class: RegClass) -> usize {
+    fn frame_use(&self, config: &Config) -> Option<FrameUse> {
+        Some(match *self {
+            Self::DebugStore(ty, offset, _) => {
+                FrameUse::Debug(offset as usize + ty.bytes(config.bytes))
+            }
+            Self::CallScratch(offset, bytes, _) => {
+                FrameUse::Scratch(offset as usize + bytes as usize)
+            }
+            Self::StoreArg(ty, offset, _) => {
+                FrameUse::Arguments(offset + ty.bytes(config.bytes).next_multiple_of(8))
+            }
+            Self::Libcall(..) | Self::LaneAccess { .. } => FrameUse::Fallback,
+            _ => return None,
+        })
+    }
+    fn spillslot_size(config: &Config, class: RegClass) -> usize {
         if class == RegClass::Vector {
-            splice_target::vector_bytes() / 8
+            config.register_bytes / 8
         } else {
             1
         }
@@ -541,18 +546,22 @@ impl TargetInst for Inst {
 }
 
 impl Schedulable for Inst {
-    fn scheduling(&self) -> Scheduling {
-        use Scheduling::{Barrier, Compute, Ordered};
+    fn scheduling(&self, _: &()) -> Scheduling {
+        use Scheduling::{Barrier, Compute, Load, Ordered};
         match *self {
-            Self::Load(..) => Ordered(5),
+            Self::Load(..) => Load(5),
             Self::Masked {
                 dst: Some(_),
                 indices,
                 ..
-            } => Ordered(if indices.is_some() { 9 } else { 5 }),
-            Self::Check(..) | Self::CheckOverflow(..) | Self::Store(..) | Self::Masked { .. } => {
-                Ordered(1)
-            }
+            } => Load(if indices.is_some() { 9 } else { 5 }),
+            Self::Check(..)
+            | Self::TrapIf(..)
+            | Self::Trap(_)
+            | Self::Store(..)
+            | Self::Masked { dst: None, .. }
+            | Self::StoreArg(..) => Ordered(1),
+            // Divisions and dynamic lane indices can trap.
             Self::Int(
                 IntBinary {
                     op: IntOp::Divide { .. },
@@ -560,6 +569,7 @@ impl Schedulable for Inst {
                 },
                 ..,
             )
+            | Self::WideMath(..)
             | Self::VectorDivide(..)
             | Self::LaneAccess { .. } => Ordered(12),
             Self::Int(
@@ -571,7 +581,30 @@ impl Schedulable for Inst {
             )
             | Self::Float(..)
             | Self::Fma(..)
+            | Self::Sve2Ternary(..)
+            | Self::NeonMul64(..)
             | Self::Packed(..) => Compute(4),
+            Self::Unary(..)
+            | Self::WideUnary(..)
+            | Self::WideAdd { .. }
+            | Self::Half(..)
+            | Self::HalfCast(..)
+            | Self::WideCast(..)
+            | Self::FloatCast(..)
+            | Self::PackedCast(..)
+            | Self::Shuffle(..)
+            | Self::Compact { .. }
+            | Self::Rotate(..)
+            | Self::ScalarSaturate(..)
+            | Self::FloatSpecial(..)
+            | Self::Expand(..)
+            | Self::Widen(..)
+            | Self::Narrow(..)
+            | Self::Reduce(..)
+            | Self::FloatCompare(..)
+            | Self::SveSplat128(..)
+            | Self::MaskTest(..)
+            | Self::WideMaskTest(..) => Compute(3),
             Self::Literal(..)
             | Self::Copy(..)
             | Self::BitMove(..)
@@ -582,8 +615,21 @@ impl Schedulable for Inst {
             | Self::Select(..)
             | Self::Splat(..)
             | Self::SveIota(..)
-            | Self::PackedShiftImm(..) => Compute(1),
-            _ => Barrier,
+            | Self::PackedShiftImm(..)
+            | Self::CallScratch(..) => Compute(1),
+            // Entry arguments, debug state, calls and the fallback's frame
+            // area protocol keep their place, as do terminators.
+            Self::Arg(..)
+            | Self::DebugStore(..)
+            | Self::DebugPoint(_)
+            | Self::Call(..)
+            | Self::LibArg(..)
+            | Self::Libcall(..)
+            | Self::LibResult(..)
+            | Self::RustCall(..)
+            | Self::Jump
+            | Self::Branch(_)
+            | Self::Return(..) => Barrier,
         }
     }
 }

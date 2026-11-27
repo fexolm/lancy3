@@ -11,9 +11,6 @@ impl Rules<'_> {
     pub(super) fn scalar_binary(&mut self, op: Binary, a: Value, b: Value) -> Option<Inst> {
         let ty = self.ty(a);
         let dst = self.dst();
-        if let Some(rem) = self.float_remainder(op, a, b) {
-            return Some(rem);
-        }
         if let Some(special) = self.float_binary_special(op, a, b) {
             return Some(special);
         }

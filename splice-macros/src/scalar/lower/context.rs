@@ -9,6 +9,8 @@ use syn::{Expr, ExprPath, Path, Result, UnOp};
 
 pub(in crate::scalar) struct Context {
     argument: Ident,
+    /// The Rust type of the object, with its lifetimes elided.
+    object: syn::Type,
     free_function: bool,
     hosts: Vec<(Ident, Scalar)>,
     operations: RefCell<Vec<Operation>>,
@@ -16,34 +18,86 @@ pub(in crate::scalar) struct Context {
 }
 
 struct Child {
-    key: usize,
+    key: crate::kast::NodeId,
     target: ExprPath,
     method: bool,
     witness: TokenStream,
 }
 
 struct Operation {
-    key: usize,
+    key: crate::kast::NodeId,
     expr: Expr,
     operands: Vec<Operand>,
     borrowed: Vec<SliceOperand>,
 }
 
+/// A captured slice or scalar: a path of the body and what it is bound to
+/// where the operation reads it.
 struct SliceOperand {
     path: ExprPath,
+    binding: Option<Binding>,
     element: Elem,
     writable: bool,
 }
 
 struct Operand {
     path: ExprPath,
+    binding: Option<Binding>,
     kind: Scalar,
 }
 
+impl Operand {
+    /// The Rust type of the word: a runtime scalar of unknown type is read
+    /// as an `i32`, and staging checks that it is one.
+    fn ty(&self) -> Ident {
+        self.kind
+            .rust_type()
+            .unwrap_or_else(|| Ident::new("i32", proc_macro2::Span::call_site()))
+    }
+}
+
+impl Operation {
+    /// The operation on `__splice_object` and `__splice_arguments`.
+    fn body(&self, root: &Path, types: &[&Ident]) -> TokenStream {
+        let word = emit!(#root::frontend::scalar::ImportWord);
+        let operands = self.operands.iter().enumerate().map(|(index, operand)| {
+            let name = operand.path.path.get_ident().expect("a captured binding");
+            let ty = operand.ty();
+            emit!(let #name: #ty = #word::decode(__splice_arguments.word(#index));)
+        });
+        let views = (!self.borrowed.is_empty())
+            .then(|| emit!(let mut __splice_arguments = __splice_arguments;));
+        let borrowed = self.borrowed.iter().map(|slice| {
+            let name = slice
+                .path
+                .path
+                .get_ident()
+                .expect("a captured slice binding");
+            let element = slice.element.ty(root, types);
+            if slice.writable {
+                emit!(let #name = __splice_arguments.write::<#element>();)
+            } else {
+                emit!(let #name = __splice_arguments.read::<#element>();)
+            }
+        });
+        let expr = &self.expr;
+        emit!({ #(#operands)* #views #(#borrowed)* #expr })
+    }
+}
+
 impl Context {
-    pub(in crate::scalar) fn new(argument: Ident) -> Self {
+    pub(in crate::scalar) fn new(argument: Ident, object: &syn::Type) -> Self {
+        struct Elide;
+        impl VisitMut for Elide {
+            fn visit_lifetime_mut(&mut self, lifetime: &mut syn::Lifetime) {
+                lifetime.ident = Ident::new("_", lifetime.ident.span());
+            }
+        }
+        let mut object = object.clone();
+        Elide.visit_type_mut(&mut object);
         Self {
             argument,
+            object,
             free_function: false,
             hosts: Vec::new(),
             operations: RefCell::new(Vec::new()),
@@ -51,10 +105,10 @@ impl Context {
         }
     }
 
-    pub(in crate::scalar) fn for_function(argument: Ident) -> Self {
+    pub(in crate::scalar) fn for_function(argument: Ident, object: &syn::Type) -> Self {
         Self {
             free_function: true,
-            ..Self::new(argument)
+            ..Self::new(argument, object)
         }
     }
 
@@ -62,25 +116,13 @@ impl Context {
         self.hosts.push((name, kind));
     }
 
-    fn host_kind(&self, name: &Ident, lower: &Lower<'_>) -> Option<Scalar> {
-        let current = lower.debug_names.get(&name.to_string())?;
-        self.hosts.iter().find_map(|(parameter, kind)| {
-            if parameter != current {
-                return None;
-            }
-            // A local can shadow the parameter name and carry a different
-            // Rust type. Use the binding declaration, not the use-site span.
-            if proc_macro::is_available() {
-                let parameter = parameter.span().unwrap();
-                let current = current.span().unwrap();
-                if (parameter.file(), parameter.line(), parameter.column())
-                    != (current.file(), current.line(), current.column())
-                {
-                    return None;
-                }
-            }
-            Some(*kind)
-        })
+    /// The scalar kind of the comptime parameter `path` names. A local
+    /// that shadows the parameter can carry another Rust type.
+    fn host_kind(&self, path: &ExprPath, lower: &Lower<'_>) -> Option<Scalar> {
+        let parameter = lower.body.parameter(path)?;
+        self.hosts
+            .iter()
+            .find_map(|(name, kind)| (name == parameter).then_some(*kind))
     }
 
     pub(in crate::scalar) fn signature(&self, root: &Path) -> TokenStream {
@@ -99,19 +141,19 @@ impl Context {
                 return super::calls::dispatch_free(
                     root, target,
                     emit!(&#item::__SPLICE_CONTEXT_SIGNATURE),
-                    emit!(&#root::ContextSignature::new(&[])),
+                    emit!(&#root::__private::ContextSignature::new(&[])),
                 );
             }
             let symbol = method_metadata(target, "context_signature");
             let name = &symbol.path.segments.last().unwrap().ident;
             emit!({
-                trait Missing { #[allow(non_upper_case_globals)] const #name: &'static #root::ContextSignature =
-                    &#root::ContextSignature::new(&[]); }
+                trait Missing { #[allow(non_upper_case_globals)] const #name: &'static #root::__private::ContextSignature =
+                    &#root::__private::ContextSignature::new(&[]); }
                 impl<T: ?Sized> Missing for T {}
                 #symbol
             })
         });
-        emit!(#root::ContextSignature::with_borrows(&[#(#arities),*], &[#(#borrows),*], &[#(#signatures),*]))
+        emit!(#root::__private::ContextSignature::with_borrows(&[#(#arities),*], &[#(#borrows),*], &[#(#signatures),*]))
     }
 
     pub(in crate::scalar) fn dispatcher(
@@ -123,7 +165,7 @@ impl Context {
         let local = self.arms(root, types);
         let children = self.children.borrow();
         if children.is_empty() {
-            return emit!(match __splice_operation { #local _ => unreachable!("verified Rust operation") });
+            return emit!(match __splice_operation { #local _ => ::core::unreachable!("verified Rust operation") });
         }
         let routes = children.iter().enumerate().map(|(index, child)| {
             let index = index as u32;
@@ -134,26 +176,26 @@ impl Context {
                 let dispatch = super::calls::dispatch_free(
                     root, target,
                     emit!(#item::__splice_dispatch_context #generics (__splice_object, operation, __splice_arguments, #witness)),
-                    emit!(unreachable!("an ordinary Rust function has no child context")),
+                    emit!(::core::unreachable!("an ordinary Rust function has no child context")),
                 );
                 return emit!(#index => #dispatch,);
             }
             let dispatch = crate::scalar::methods::rename_path(target, "dispatch_context");
             let name = &dispatch.path.segments.last().unwrap().ident;
             emit!(#index => {
-                trait Missing { fn #name<Elements>(&mut self, _:u32, _:#root::ContextArguments<'_>, _: ::core::marker::PhantomData<Elements>) -> i32 {
-                    unreachable!("unlinked method has no context operations")
+                trait Missing { fn #name<Elements>(&mut self, _:u32, _:#root::__private::ContextArguments<'_>, _: ::core::marker::PhantomData<Elements>) -> u64 {
+                    ::core::unreachable!("unlinked method has no context operations")
                 } }
                 impl<T: ?Sized> Missing for T {}
                 #dispatch(__splice_object, operation, __splice_arguments, #witness)
             },)
         });
         emit!(match (#signature).operation_at(__splice_operation) {
-            Some(#root::ContextOperation::Local(__splice_operation)) =>
-                match __splice_operation { #local _ => unreachable!("verified local operation") },
-            Some(#root::ContextOperation::Child{ index, operation }) =>
-                match index { #(#routes)* _ => unreachable!("verified child context") },
-            None => unreachable!("verified Rust operation"),
+            ::core::option::Option::Some(#root::__private::ContextOperation::Local(__splice_operation)) =>
+                match __splice_operation { #local _ => ::core::unreachable!("verified local operation") },
+            ::core::option::Option::Some(#root::__private::ContextOperation::Child{ index, operation }) =>
+                match index { #(#routes)* _ => ::core::unreachable!("verified child context") },
+            ::core::option::Option::None => ::core::unreachable!("verified Rust operation"),
         })
     }
 
@@ -165,37 +207,8 @@ impl Context {
             .enumerate()
             .map(|(ordinal, operation)| {
                 let ordinal = ordinal as u32;
-                let operands = operation
-                    .operands
-                    .iter()
-                    .enumerate()
-                    .map(|(index, operand)| {
-                        let slot = emit!(__splice_arguments.word(#index));
-                        let name = operand.path.path.get_ident().expect("a captured binding");
-                        // A native slice length is nonnegative and fits one word.
-                        match operand.kind {
-                            Scalar::Bool => emit!(let #name: bool = #word::decode(#slot);),
-                            Scalar::Length => emit!(let #name: usize = #slot as usize;),
-                            _ => emit!(let #name: i32 = #slot;),
-                        }
-                    });
-                let views = (!operation.borrowed.is_empty())
-                    .then(|| emit!(let mut __splice_arguments = __splice_arguments;));
-                let borrowed = operation.borrowed.iter().map(|slice| {
-                    let name = slice
-                        .path
-                        .path
-                        .get_ident()
-                        .expect("a captured slice binding");
-                    let element = slice.element.ty(root, types);
-                    if slice.writable {
-                        emit!(let #name = __splice_arguments.write::<#element>();)
-                    } else {
-                        emit!(let #name = __splice_arguments.read::<#element>();)
-                    }
-                });
-                let expr = &operation.expr;
-                emit!(#ordinal => { #(#operands)* #views #(#borrowed)* #word::encode(#expr) },)
+                let body = operation.body(root, types);
+                emit!(#ordinal => #word::encode(#body),)
             })
             .collect()
     }
@@ -261,7 +274,7 @@ impl Context {
         let mut code = self.opaque_operation(lower, expr)?;
         if let Some(target) = rust_callee {
             let unsupported = emit!({
-                Err::<#root::hir::Reg, String>("a nested kernel cannot take this runtime object".into())?
+                ::core::result::Result::Err::<#root::hir::Reg, #root::BuildError>(#root::BuildError::staging("a nested kernel cannot take this runtime object"))?
             });
             code = lower.dispatch_call(target, unsupported, code);
         }
@@ -283,39 +296,50 @@ impl Context {
         };
         captures.visit_expr(expr);
         if captures.rejected {
-            return Ok(emit!(Err::<#root::hir::Reg,String>(
-                "a Rust object operation requires materializable operands and cannot transfer control".into())?));
+            return Ok(
+                emit!(::core::result::Result::Err::<#root::hir::Reg,#root::BuildError>(
+                #root::BuildError::staging("a Rust object operation requires materializable operands and cannot transfer control"))?),
+            );
         }
         let operands = captures
             .operands
             .iter()
             .map(|operand| {
-                let value = lower.path(&operand.path);
-                lower.reg(value, operand.kind, &operand.path)
+                let value = lower.bound_path(&operand.path, operand.binding);
+                let reg = lower.reg(value, operand.kind, &operand.path)?;
+                let ty = lower
+                    .scalar_type(operand.kind)
+                    .unwrap_or_else(|| emit!(#root::hir::ScalarType::I32));
+                Ok(emit!({
+                    let __splice_operand = #reg;
+                    #root::frontend::scalar::context_operand(__splice_operand, #ty, __splice_builder)?
+                }))
             })
             .collect::<Result<Vec<_>>>()?;
         let slices = captures
             .borrowed
             .iter()
             .map(|slice| {
-                let buffer = lower.path(&slice.path).code;
+                let buffer = lower.bound_path(&slice.path, slice.binding).code;
                 let writable = slice.writable;
                 emit!(#root::hir::ContextSlice { buffer: #buffer, writable: #writable })
             })
             .collect::<Vec<_>>();
         let mut operations = self.operations.borrow_mut();
-        let key = crate::scalar::flow::key(expr);
+        let key = lower.body.expr(expr);
         let ordinal =
             if let Some(ordinal) = operations.iter().position(|operation| operation.key == key) {
                 ordinal as u32
             } else {
                 let ordinal = operations.len() as u32;
-                let mut expr = expr.clone();
-                ReplaceObject {
+                let mut objects = FindObjects {
                     lower,
                     name: &self.argument,
-                }
-                .visit_expr_mut(&mut expr);
+                    found: Vec::new(),
+                };
+                objects.visit_expr(expr);
+                let mut expr = expr.clone();
+                ReplaceObject(objects.found.into_iter()).visit_expr_mut(&mut expr);
                 operations.push(Operation {
                     key,
                     expr,
@@ -324,16 +348,20 @@ impl Context {
                 });
                 ordinal
             };
+        let body = operations[ordinal as usize].body(root, lower.types);
+        let object = &self.object;
         let buffer = &self.argument;
-        if slices.is_empty() {
-            return Ok(emit!({
-                let arguments = [#(#operands),*];
-                __splice_builder.rust_context_call(#buffer, __splice_context_frame.operation(#ordinal)?, &arguments)?
-            }));
-        }
         Ok(emit!({
             let arguments = [#(#operands),*];
-            __splice_builder.rust_context_call_with_slices(#buffer, __splice_context_frame.operation(#ordinal)?, &arguments, &[#(#slices),*])?
+            // The closure only names the operation's Rust result type.
+            #[allow(unreachable_code, unused_variables, unused_mut, clippy::diverging_sub_expression)]
+            let __splice_operation = || {
+                let __splice_object: #object = ::core::unreachable!();
+                let __splice_arguments: #root::__private::ContextArguments<'_> = ::core::unreachable!();
+                #body
+            };
+            let __splice_result = #root::frontend::scalar::result_type(__splice_operation);
+            __splice_builder.rust_call(#root::hir::RustTarget::Context { buffer: #buffer, operation: __splice_context_frame.operation(#ordinal)? }, &arguments, &[#(#slices),*], __splice_result)?
         }))
     }
 
@@ -366,11 +394,11 @@ impl Context {
         let frame = if recursive {
             emit!(__splice_context_frame)
         } else {
-            let child = self.child(call, target, true, &witness);
+            let child = self.child(lower, expr, target, true, &witness);
             emit!(__splice_context_frame.child(#child)?)
         };
         let fallback = if recursive {
-            emit!(unreachable!("the current method is published"))
+            emit!(::core::unreachable!("the current method is published"))
         } else {
             self.opaque_operation(lower, expr)?
         };
@@ -385,8 +413,8 @@ impl Context {
             trait Missing {
                 fn #marker() -> bool {false}
                 fn #name<Elements, #(#params),*>(_: #root::hir::Buffer, #(_: #params,)*
-                    _: ::core::marker::PhantomData<Elements>, _: #root::ContextFrame, _: &mut dyn #root::frontend::KernelBuilder) -> #root::Result<#root::hir::Reg> {
-                    Err("Rust method cannot be linked into the scalar kernel".into())
+                    _: ::core::marker::PhantomData<Elements>, _: #root::__private::ContextFrame, _: &mut dyn #root::frontend::KernelBuilder) -> #root::Result<#root::hir::Reg> {
+                    ::core::result::Result::Err(#root::BuildError::staging("Rust method cannot be linked into the scalar kernel"))
                 }
             }
             impl<T: ?Sized> Missing for T {}
@@ -429,14 +457,14 @@ impl Context {
                 let frame = if recursive {
                     emit!(__splice_context_frame)
                 } else {
-                    let child = self.child(call, target, false, &witness);
+                    let child = self.child(lower, expr, target, false, &witness);
                     emit!(__splice_context_frame.child(#child)?)
                 };
                 emit!(#item::__splice_stage_context #generics (#(#arguments,)* #witness, #frame, __splice_builder)?)
             }
             Err(error) => {
                 let error = error.to_string();
-                emit!(Err::<#root::hir::Reg, String>(#error.into())?)
+                emit!(::core::result::Result::Err::<#root::hir::Reg, #root::BuildError>(#root::BuildError::staging(#error))?)
             }
         };
         let code = if recursive {
@@ -453,13 +481,14 @@ impl Context {
 
     fn child(
         &self,
-        call: &syn::ExprCall,
+        lower: &Lower<'_>,
+        expr: &Expr,
         target: &ExprPath,
         method: bool,
         witness: &TokenStream,
     ) -> u32 {
         let mut children = self.children.borrow_mut();
-        let key = crate::scalar::flow::key(call);
+        let key = lower.body.expr(expr);
         children
             .iter()
             .position(|child| child.key == key)
@@ -513,7 +542,7 @@ fn direct_object(expr: &Expr, lower: &Lower<'_>, object: &Ident) -> bool {
     context_argument(expr).is_some_and(|path| is_object(path, lower, object))
 }
 
-pub(in crate::scalar) fn context_argument(expr: &Expr) -> Option<&ExprPath> {
+fn context_argument(expr: &Expr) -> Option<&ExprPath> {
     match ungroup(expr) {
         Expr::Path(path) => Some(path),
         _ => reborrow_argument(expr, true),
@@ -597,6 +626,7 @@ impl Captures<'_, '_> {
         } else {
             self.borrowed.push(SliceOperand {
                 path: path.clone(),
+                binding: self.lower.binding(path),
                 element,
                 writable,
             });
@@ -619,13 +649,11 @@ impl Visit<'_> for Captures<'_, '_> {
         }
         match self.lower.binding(path) {
             Some(Binding::Reg(kind, _) | Binding::Word(kind))
-                if matches!(
-                    kind,
-                    Scalar::Bool | Scalar::Int | Scalar::Inferred | Scalar::Length
-                ) =>
+                if kind.is_scalar() || kind == Scalar::Inferred =>
             {
                 self.operands.push(Operand {
                     path: path.clone(),
+                    binding: self.lower.binding(path),
                     kind,
                 });
             }
@@ -633,9 +661,10 @@ impl Visit<'_> for Captures<'_, '_> {
                 self.borrow(path, buffer.elem, buffer.write);
             }
             Some(Binding::Host(_)) => {
-                if let Some(kind) = self.context.host_kind(name, self.lower) {
+                if let Some(kind) = self.context.host_kind(path, self.lower) {
                     self.operands.push(Operand {
                         path: path.clone(),
+                        binding: self.lower.binding(path),
                         kind,
                     });
                 } else {
@@ -683,14 +712,30 @@ impl Visit<'_> for Captures<'_, '_> {
     }
 }
 
-struct ReplaceObject<'a, 'ast> {
+/// Whether each path of an expression, in walk order, names the context
+/// object.
+struct FindObjects<'a, 'ast> {
     lower: &'a Lower<'ast>,
     name: &'a Ident,
+    found: Vec<bool>,
 }
 
-impl VisitMut for ReplaceObject<'_, '_> {
+impl Visit<'_> for FindObjects<'_, '_> {
+    fn visit_expr_path(&mut self, path: &ExprPath) {
+        let object = is_object(path, self.lower, self.name);
+        self.found.push(object);
+        if !object {
+            visit::visit_expr_path(self, path);
+        }
+    }
+}
+
+/// Replace the paths [`FindObjects`] found in a copy of the expression.
+struct ReplaceObject(std::vec::IntoIter<bool>);
+
+impl VisitMut for ReplaceObject {
     fn visit_expr_path_mut(&mut self, path: &mut ExprPath) {
-        if is_object(path, self.lower, self.name) {
+        if self.0.next().expect("a path of the original expression") {
             *path = syn::parse2(emit!(__splice_object)).expect("a generated object binding");
         } else {
             visit_mut::visit_expr_path_mut(self, path);

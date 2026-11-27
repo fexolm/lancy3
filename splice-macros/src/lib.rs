@@ -1,17 +1,25 @@
 //! Rust attribute frontend for Splice kernels.
 use proc_macro::TokenStream;
 use syn::{
-    Data, DeriveInput, Error, Index, Member, Path, Token, parse_macro_input, parse_quote,
-    punctuated::Punctuated,
+    Data, DeriveInput, Error, Expr, Meta, MetaNameValue, Path, Token, parse_macro_input,
+    parse_quote, punctuated::Punctuated,
 };
 
+// Generated locals and labels share a hygiene context across fragments.
+// Tokens interpolated from the kernel keep their original spans and
+// lexical bindings.
+macro_rules! emit {
+    ($($tokens:tt)*) => { quote::quote_spanned!(proc_macro2::Span::mixed_site()=> $($tokens)*) };
+}
+
+mod api;
 mod comptime_key;
 mod declaration;
-mod import;
-mod overflow;
+mod kast;
 mod scalar;
 
 /// Derive a value key for a struct or enum used as a specialization parameter.
+/// `#[splice(crate = path)]` names the Splice crate when it is not `::splice`.
 #[proc_macro_derive(ComptimeKey, attributes(splice))]
 pub fn comptime_key(item: TokenStream) -> TokenStream {
     comptime_key::expand(parse_macro_input!(item as syn::DeriveInput))
@@ -20,9 +28,14 @@ pub fn comptime_key(item: TokenStream) -> TokenStream {
 }
 
 /// Describe the owned fields of a Rust structure for Splice's typed IR.
-#[proc_macro_derive(KernelType)]
+/// `#[splice(crate = path)]` names the Splice crate when it is not `::splice`.
+#[proc_macro_derive(KernelType, attributes(splice))]
 pub fn kernel_type(item: TokenStream) -> TokenStream {
     let item = parse_macro_input!(item as DeriveInput);
+    let root = match derive_root(&item.attrs) {
+        Ok(root) => root,
+        Err(error) => return error.into_compile_error().into(),
+    };
     let Data::Struct(data) = item.data else {
         return Error::new_spanned(item.ident, "KernelType can only be derived for structs")
             .into_compile_error()
@@ -30,47 +43,86 @@ pub fn kernel_type(item: TokenStream) -> TokenStream {
     };
     let name = item.ident;
     let (params, args, where_) = item.generics.split_for_impl();
-    let fields = data.fields.iter().enumerate().map(|(index, field)| {
-        let member = field
-            .ident
-            .clone()
-            .map_or_else(|| Member::Unnamed(Index::from(index)), Member::Named);
-        let label = match &member {
-            Member::Named(name) => name.to_string().trim_start_matches("r#").to_owned(),
-            Member::Unnamed(index) => index.index.to_string(),
-        };
-        let ty = &field.ty;
-        quote::quote!(::splice::KernelField {
-            name: #label,
-            offset: ::core::mem::offset_of!(Self, #member),
-            type_name: ::core::any::type_name::<#ty>,
-        })
-    });
+    let fields = data
+        .fields
+        .iter()
+        .enumerate()
+        .map(|(index, field)| match &field.ident {
+            Some(name) => name.to_string().trim_start_matches("r#").to_owned(),
+            None => index.to_string(),
+        });
     quote::quote! {
-        impl #params ::splice::KernelType for #name #args #where_ {
-            const FIELDS: &'static [::splice::KernelField] = &[#(#fields),*];
+        impl #params #root::KernelType for #name #args #where_ {
+            const FIELDS: &'static [&'static str] = &[#(#fields),*];
         }
     }
     .into()
 }
 
+/// The Splice crate path a derive names with `#[splice(crate = path)]`.
+fn derive_root(attrs: &[syn::Attribute]) -> syn::Result<Path> {
+    let mut root = None;
+    for attr in attrs.iter().filter(|a| a.path().is_ident("splice")) {
+        attr.parse_nested_meta(|meta| {
+            if !meta.path.is_ident("crate") || root.is_some() {
+                return Err(meta.error("expected `crate = path`, at most once"));
+            }
+            root = Some(meta.value()?.parse()?);
+            Ok(())
+        })?;
+    }
+    Ok(root.unwrap_or_else(|| parse_quote!(::splice)))
+}
+
 /// Publish a free function or all methods of an `impl` or `trait` block.
 /// For a free function, `name::build::<Backend>(...)` stages its comptime
 /// parameters into the selected backend. `name::ir(...)` builds portable IR.
-/// `name::print(...)` specializes the Rust source without building IR.
+/// `#[kernel(print)]` also publishes `name::print(...)`, which specializes
+/// the Rust source without building IR; a caller prints a call to a kernel
+/// without it as written.
+///
+/// A body Splice cannot lower to IR is a compile error; a kernel calls
+/// ordinary Rust functions and methods, which stay Rust.
+/// `#[kernel(crate = path)]` names the Splice crate when it is not
+/// reachable as `::splice`.
 #[proc_macro_attribute]
 pub fn kernel(options: TokenStream, item: TokenStream) -> TokenStream {
-    let paths = parse_macro_input!(options with Punctuated::<Path, Token![,]>::parse_terminated);
-    if paths.len() > 1 {
-        return Error::new_spanned(paths, "expected at most one crate path")
-            .into_compile_error()
-            .into();
-    }
-    let root = paths
-        .into_iter()
-        .next()
-        .unwrap_or_else(|| parse_quote!(::splice));
-    declaration::expand(root, item.into())
+    let options = parse_macro_input!(options with KernelOptions::parse);
+    declaration::expand(options.root, options.print, item.into())
         .unwrap_or_else(Error::into_compile_error)
         .into()
+}
+
+struct KernelOptions {
+    root: Path,
+    print: bool,
+}
+
+impl KernelOptions {
+    fn parse(input: syn::parse::ParseStream) -> syn::Result<Self> {
+        let mut root = None;
+        let mut print = false;
+        for option in Punctuated::<Meta, Token![,]>::parse_terminated(input)? {
+            match &option {
+                Meta::Path(path) if path.is_ident("print") && !print => print = true,
+                Meta::NameValue(MetaNameValue {
+                    path,
+                    value: Expr::Path(value),
+                    ..
+                }) if path.is_ident("crate") && root.is_none() && value.qself.is_none() => {
+                    root = Some(value.path.clone());
+                }
+                _ => {
+                    return Err(Error::new_spanned(
+                        option,
+                        "expected `print` or `crate = path`, each at most once",
+                    ));
+                }
+            }
+        }
+        Ok(Self {
+            root: root.unwrap_or_else(|| parse_quote!(::splice)),
+            print,
+        })
+    }
 }

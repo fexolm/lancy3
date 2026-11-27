@@ -1,7 +1,7 @@
-use splice::{BufferArg, Codegen, Executable, kernel};
+use splice_core::{BufferArg, Codegen, Executable, kernel};
 use splice_lancy::Lancy;
 
-#[kernel]
+#[kernel(crate = splice_core)]
 fn project(#[comptime] gain: i32, values: &[i32], second: &[i32], out: &mut [i32]) -> i32 {
     for i in 0..out.len() as i32 {
         let value = values[i as usize];
@@ -11,7 +11,7 @@ fn project(#[comptime] gain: i32, values: &[i32], second: &[i32], out: &mut [i32
     out.len() as i32
 }
 
-#[kernel]
+#[kernel(crate = splice_core)]
 fn reciprocal(values: &[i32], out: &mut [i32]) -> i32 {
     for i in 0..out.len() as i32 {
         out[i as usize] = 64 / values[i as usize];
@@ -19,7 +19,7 @@ fn reciprocal(values: &[i32], out: &mut [i32]) -> i32 {
     out.len() as i32
 }
 
-#[kernel]
+#[kernel(crate = splice_core)]
 fn constant(out: &mut [i32]) -> i32 {
     for i in 0..out.len() as i32 {
         out[i as usize] = 9;
@@ -40,15 +40,18 @@ fn partial_columns_have_the_same_store_order_through_both_splice_entry_points() 
             let result = code.as_inner().call(
                 &[],
                 &mut [
-                    BufferArg::Read(&values),
-                    BufferArg::Write(&mut unused),
-                    BufferArg::Write(&mut out),
+                    BufferArg::read(&values),
+                    BufferArg::write(&mut unused),
+                    BufferArg::write(&mut out),
                 ],
             );
             if short < n {
-                assert!(result.unwrap_err().contains("bounds"));
+                assert_eq!(
+                    result,
+                    Err(splice_core::CallError::Trap(splice_core::Trap::Bounds))
+                );
             } else {
-                assert_eq!(result.unwrap(), n as i32);
+                assert_eq!(result.unwrap(), n as u64);
             }
             for (i, &value) in out.iter().enumerate() {
                 assert_eq!(
@@ -71,14 +74,14 @@ fn checks_the_full_signature_before_the_first_store() {
         .into_inner();
     let value = [4; 8];
     let mut out = [17; 8];
-    assert!(code.call(&[], &mut [BufferArg::Write(&mut out)]).is_err());
+    assert!(code.call(&[], &mut [BufferArg::write(&mut out)]).is_err());
     assert!(
         code.call(
             &[],
             &mut [
-                BufferArg::Read(&value),
-                BufferArg::Read(&value),
-                BufferArg::Read(&out),
+                BufferArg::read(&value),
+                BufferArg::read(&value),
+                BufferArg::read(&out),
             ]
         )
         .is_err()
@@ -87,9 +90,9 @@ fn checks_the_full_signature_before_the_first_store() {
         code.call(
             &[0],
             &mut [
-                BufferArg::Read(&value),
-                BufferArg::Read(&value),
-                BufferArg::Write(&mut out),
+                BufferArg::read(&value),
+                BufferArg::read(&value),
+                BufferArg::write(&mut out),
             ]
         )
         .is_err()

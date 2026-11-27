@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
 # %overflow_rhs_const
-fn main v0:i32 -> i32
+fn main(v0:i32) -> i32
   v1 = const -64
   t0 = ge v0 v1
   t1 = const 1
@@ -14,7 +14,7 @@ fn main v0:i32 -> i32
 ---
 
 # %ugt_sub_swap
-fn main v0:i32 v1:i32 -> i32
+fn main(v0:i32 v1:i32) -> i32
   v2 = sub v0 v1
   t0 = const -2147483648
   t1 = xor v2 t0
@@ -30,7 +30,7 @@ fn main v0:i32 v1:i32 -> i32
 ---
 
 # %ule_sub_swap
-fn main v0:i32 v1:i32 -> i32
+fn main(v0:i32 v1:i32) -> i32
   v2 = sub v0 v1
   t0 = const -2147483648
   t1 = xor v2 t0
@@ -46,7 +46,7 @@ fn main v0:i32 v1:i32 -> i32
 ---
 
 # %test_bxor_slt_sgt
-fn main v0:i32 v1:i32 -> i32
+fn main(v0:i32 v1:i32) -> i32
   t0 = lt v0 v1
   t1 = const 1
   v2 = and t0 t1
@@ -61,7 +61,7 @@ fn main v0:i32 v1:i32 -> i32
 ---
 
 # %test_bxor_ult_ugt
-fn main v0:i32 v1:i32 -> i32
+fn main(v0:i32 v1:i32) -> i32
   t0 = const -2147483648
   t1 = xor v0 t0
   t2 = xor v1 t0
@@ -82,7 +82,7 @@ fn main v0:i32 v1:i32 -> i32
 ---
 
 # %test_slt_sgt
-fn main v0:i32 v1:i32 -> i32
+fn main(v0:i32 v1:i32) -> i32
   t0 = lt v0 v1
   t1 = const 1
   v2 = and t0 t1
@@ -96,7 +96,7 @@ fn main v0:i32 v1:i32 -> i32
 ---
 
 # %test_ult_ugt
-fn main v0:i32 v1:i32 -> i32
+fn main(v0:i32 v1:i32) -> i32
   t0 = const -2147483648
   t1 = xor v0 t0
   t2 = xor v1 t0
@@ -116,7 +116,7 @@ fn main v0:i32 v1:i32 -> i32
 ---
 
 # %test_slt_ugt_neg_const_y
-fn main v0:i32 -> i32
+fn main(v0:i32) -> i32
   v1 = const -10
   t0 = lt v0 v1
   t1 = const 1
@@ -134,7 +134,7 @@ fn main v0:i32 -> i32
 ---
 
 # %test_slt_ugt_pos_const_x
-fn main v0:i32 -> i32
+fn main(v0:i32) -> i32
   v1 = const 10
   t0 = lt v1 v0
   t1 = const 1
@@ -152,7 +152,7 @@ fn main v0:i32 -> i32
 ---
 
 # %test_ult_sgt_pos_const_y
-fn main v0:i32 -> i32
+fn main(v0:i32) -> i32
   v1 = const 10
   t0 = const -2147483648
   t1 = xor v0 t0
@@ -170,7 +170,7 @@ fn main v0:i32 -> i32
 ---
 
 # %test_ult_sgt_neg_const_x
-fn main v0:i32 -> i32
+fn main(v0:i32) -> i32
   v1 = const -10
   t0 = const -2147483648
   t1 = xor v1 t0
@@ -188,7 +188,7 @@ fn main v0:i32 -> i32
 ---
 
 # %test_ult_ne_minus_one
-fn main v0:i32 v1:i32 -> i32
+fn main(v0:i32 v1:i32) -> i32
   t0 = const -2147483648
   t1 = xor v0 t0
   t2 = xor v1 t0

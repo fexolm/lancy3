@@ -1,0 +1,44 @@
+# Narrow integers: only the low `size` bytes of a register are the value.
+# Sign- and zero-extending producers leave different upper bits, so every
+# consumer must read the low bytes only, and a root return delivers exactly
+# the narrow value.
+fn main(x:i8 y:i32) -> i32
+  a = cast i16 x
+  b = cast i16 y
+  c = eq a b
+  ret c
+@run -1 -1 -> -1
+@run -128 0xffff_ff80 -> -1
+@run -1 0xffff -> -1
+@run 1 0x10001 -> -1
+@run -1 0xfffe -> 0
+---
+fn main(x:i8 y:i8) -> i8
+  s = add x y
+  ret s
+@run 127 1 -> -128
+@run -128 -1 -> 127
+@run -1 -1 -> -2
+---
+fn main(x:u16 y:u16) -> u16
+  m = mul x y
+  ret m
+@run 65535 65535 -> 1
+@run 256 256 -> 0
+---
+fn main(x:i8 y:u8) -> i16
+  a = cast i16 x
+  b = cast i16 y
+  d = xor a b
+  ret d
+@run -1 255 -> -256
+@run -128 128 -> -256
+@run 5 3 -> 6
+---
+fn main(x:i8 y:i8) -> i32
+  a = cast i16 x
+  b = cast i16 y
+  l = lt a b
+  ret l
+@run -1 0 -> -1
+@run 0 -1 -> 0

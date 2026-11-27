@@ -1,11 +1,12 @@
 //! Native arithmetic and unaligned moves for each physical SIMD width.
+pub(in crate::lir::x64) mod lanewise;
 pub(in crate::lir::x64) mod opmask;
 pub(in crate::lir::x64) mod packed;
 use super::VectorMask;
-use crate::lir::x64::{Features, emit};
+use crate::lir::x64::{Cpu, emit};
 use crate::{
-    hir::operation::Action,
     hir::{Binary as B, Lane, Ternary, Type, Unary},
+    support::numeric::Action,
 };
 use iced_x86::{IcedError, code_asm::*};
 
@@ -38,20 +39,20 @@ macro_rules! predicated {
     };
 }
 
-pub(in crate::lir::x64) fn evex(cpu: Features) -> bool {
-    cpu.bytes == 64 || cpu.avx10 >= 1
+pub(in crate::lir::x64) fn evex(cpu: Cpu) -> bool {
+    cpu.bytes == 64 || cpu.isa.avx10 >= 1
 }
 
-pub(in crate::lir::x64) fn mask_lanes(cpu: Features, lane: Lane) -> bool {
+pub(in crate::lir::x64) fn mask_lanes(cpu: Cpu, lane: Lane) -> bool {
     match lane.bytes() {
-        1 | 2 => cpu.bw,
+        1 | 2 => cpu.isa.bw,
         4 | 8 => true,
         _ => false,
     }
 }
 
-pub(in crate::lir::x64) fn compact_lanes(cpu: Features, lane: Lane) -> bool {
-    evex(cpu) && mask_lanes(cpu, lane) && (lane.bytes() >= 4 || cpu.vbmi2)
+pub(in crate::lir::x64) fn compact_lanes(cpu: Cpu, lane: Lane) -> bool {
+    evex(cpu) && mask_lanes(cpu, lane) && (lane.bytes() >= 4 || cpu.isa.vbmi2)
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -60,20 +61,20 @@ pub(in crate::lir::x64) struct Native {
     pub input: Type,
     pub output: Type,
     pub(in crate::lir::x64) bytes: usize,
-    pub(in crate::lir::x64) cpu: Features,
+    pub(in crate::lir::x64) cpu: Cpu,
     pub(in crate::lir::x64) recipe: Option<packed::Recipe>,
 }
 
 impl Native {
-    pub fn temporaries(self) -> usize {
+    pub(crate) fn temporaries(self) -> usize {
         self.recipe.map_or(0, |r| {
             r.temporaries(self.action, self.input, self.output, self.cpu)
         })
     }
-    pub fn separate_output(self) -> bool {
+    pub(crate) fn separate_output(self) -> bool {
         self.recipe.is_some()
     }
-    pub fn tied(self) -> bool {
+    pub(crate) fn tied(self) -> bool {
         if self.recipe.is_some() {
             return false;
         }
@@ -83,37 +84,12 @@ impl Native {
                 && matches!(self.action, Action::Binary(_)))
     }
 
-    #[cfg(test)]
-    pub fn emit(self, a: &mut CodeAssembler, regs: &[usize]) -> Result<(), IcedError> {
-        let mut free = (0..16).filter(|r| *r != super::SCRATCH && !regs.contains(r));
-        let mut args = regs.to_vec();
-        let last = args.len() - 1;
-        // Standalone instruction tests can request an aliased output. Production
-        // allocation reserves a separate result throughout compound sequences.
-        let alias = self.separate_output() && regs[..last].contains(&regs[last]);
-        if alias {
-            args[last] = free.next().unwrap();
-        }
-        let temp: Vec<_> = free.take(self.temporaries()).collect();
-        self.emit_allocated(a, &args, &temp, None)?;
-        if alias {
-            if matches!(self.output, Type::Vector(_)) {
-                copy(a, regs[last], args[last], self.bytes)?;
-            } else if super::class(self.output) == regalloc2::RegClass::Vector {
-                a.movaps(XMM[regs[last]], XMM[args[last]])?;
-            } else {
-                a.mov(emit::R64[regs[last]], emit::R64[args[last]])?;
-            }
-        }
-        Ok(())
-    }
-
-    pub fn emit_allocated(
+    pub(crate) fn emit_allocated(
         self,
         a: &mut CodeAssembler,
         regs: &[usize],
         temp: &[usize],
-        pool: Option<&mut emit::Constants>,
+        pool: &mut emit::Constants,
     ) -> Result<(), IcedError> {
         if let Some(recipe) = self.recipe {
             return recipe.emit(a, self, regs, temp, pool);
@@ -122,26 +98,6 @@ impl Native {
         let src = regs[0];
         let rhs = regs[1];
         let dst = *regs.last().unwrap();
-        macro_rules! packed {
-            ($sse:ident,$avx:ident,$evex:ident) => {
-                match self.bytes {
-                    16 => a.$sse(XMM[dst], XMM[rhs]),
-                    32 => a.$avx(YMM[dst], YMM[src], YMM[rhs]),
-                    64 => a.$evex(ZMM[dst], ZMM[src], ZMM[rhs]),
-                    _ => unreachable!(),
-                }
-            };
-        }
-        macro_rules! float_bin {
-            ($ss:ident,$sd:ident,$ps:ident,$pd:ident,$vps:ident,$vpd:ident) => {
-                match self.input {
-                    Type::F32 => a.$ss(XMM[dst], XMM[rhs]),
-                    Type::F64 => a.$sd(XMM[dst], XMM[rhs]),
-                    Type::Vector(Lane::F32) => packed!($ps, $vps, $vps),
-                    _ => packed!($pd, $vpd, $vpd),
-                }
-            };
-        }
         let lane = self.input.lane().unwrap();
         let scratch = super::SCRATCH;
         match self.action {
@@ -162,9 +118,8 @@ impl Native {
                 return match self.bytes {
                     64 => a.vpternlogd(ZMM[dst], ZMM[src], ZMM[src], 0x33),
                     32 => {
-                        a.pcmpeqd(XMM[scratch], XMM[scratch])?;
-                        a.vinsertf128(YMM[scratch], YMM[scratch], XMM[scratch], 1)?;
-                        a.vxorps(YMM[dst], YMM[src], YMM[scratch])
+                        a.vpcmpeqd(YMM[scratch], YMM[scratch], YMM[scratch])?;
+                        a.vpxor(YMM[dst], YMM[src], YMM[scratch])
                     }
                     _ => {
                         a.pcmpeqd(XMM[scratch], XMM[scratch])?;
@@ -222,7 +177,7 @@ impl Native {
             }
             _ => {}
         }
-        if lane == Lane::F16 {
+        if lane == Lane::F16 && !matches!(self.action, Action::Splat) {
             macro_rules! ph {
                 ($op:ident,$($r:ident),+) => {
                     match self.bytes {
@@ -245,10 +200,17 @@ impl Native {
                 _ => unreachable!("selected FP16 operation"),
             };
         }
+        if let Action::Binary(op) = self.action
+            && let Some(form) = lanewise::Lanewise::of(op, lane)
+        {
+            return form.emit(a, self.bytes, [dst, src, rhs]);
+        }
         match self.action {
             Action::Splat => {
-                // The scalar lives either in a GPR or in the low lane of an XMM.
-                if !lane.float() && self.bytes == 64 {
+                // The scalar lives either in a GPR or in the low lane of an
+                // XMM; 16-bit floats live in GPRs.
+                let general = !matches!(lane, Lane::F32 | Lane::F64);
+                if general && self.bytes == 64 {
                     return match lane.bytes() {
                         1 => a.vpbroadcastb(ZMM[dst], emit::R32[src]),
                         2 => a.vpbroadcastw(ZMM[dst], emit::R32[src]),
@@ -256,14 +218,14 @@ impl Native {
                         _ => a.vpbroadcastq(ZMM[dst], emit::R64[src]),
                     };
                 }
-                if !lane.float() {
+                if general {
                     if lane.bytes() == 8 {
                         a.movq(XMM[dst], emit::R64[src])?;
                     } else {
                         a.movd(XMM[dst], emit::R32[src])?;
                     }
                 }
-                let x = if lane.float() { XMM[src] } else { XMM[dst] };
+                let x = if general { XMM[dst] } else { XMM[src] };
                 match (self.bytes, lane.bytes()) {
                     (16, 1) => {
                         a.punpcklbw(XMM[dst], x)?;
@@ -405,42 +367,6 @@ impl Native {
                     _ => unreachable!(),
                 }
             }
-            Action::Binary(B::SaturatingAdd) => match (lane.bytes(), lane.signed()) {
-                (1, false) => packed!(paddusb, vpaddusb, vpaddusb),
-                (1, true) => packed!(paddsb, vpaddsb, vpaddsb),
-                (2, false) => packed!(paddusw, vpaddusw, vpaddusw),
-                (2, true) => packed!(paddsw, vpaddsw, vpaddsw),
-                _ => unreachable!(),
-            },
-            Action::Binary(B::SaturatingSub) => match (lane.bytes(), lane.signed()) {
-                (1, false) => packed!(psubusb, vpsubusb, vpsubusb),
-                (1, true) => packed!(psubsb, vpsubsb, vpsubsb),
-                (2, false) => packed!(psubusw, vpsubusw, vpsubusw),
-                (2, true) => packed!(psubsw, vpsubsw, vpsubsw),
-                _ => unreachable!(),
-            },
-            Action::Binary(B::Min) => match (lane.bytes(), lane.signed()) {
-                (1, false) => packed!(pminub, vpminub, vpminub),
-                (1, true) => packed!(pminsb, vpminsb, vpminsb),
-                (2, false) => packed!(pminuw, vpminuw, vpminuw),
-                (2, true) => packed!(pminsw, vpminsw, vpminsw),
-                (4, false) => packed!(pminud, vpminud, vpminud),
-                (4, true) => packed!(pminsd, vpminsd, vpminsd),
-                (8, false) => a.vpminuq(ZMM[dst], ZMM[src], ZMM[rhs]),
-                (8, true) => a.vpminsq(ZMM[dst], ZMM[src], ZMM[rhs]),
-                _ => unreachable!(),
-            },
-            Action::Binary(B::Max) => match (lane.bytes(), lane.signed()) {
-                (1, false) => packed!(pmaxub, vpmaxub, vpmaxub),
-                (1, true) => packed!(pmaxsb, vpmaxsb, vpmaxsb),
-                (2, false) => packed!(pmaxuw, vpmaxuw, vpmaxuw),
-                (2, true) => packed!(pmaxsw, vpmaxsw, vpmaxsw),
-                (4, false) => packed!(pmaxud, vpmaxud, vpmaxud),
-                (4, true) => packed!(pmaxsd, vpmaxsd, vpmaxsd),
-                (8, false) => a.vpmaxuq(ZMM[dst], ZMM[src], ZMM[rhs]),
-                (8, true) => a.vpmaxsq(ZMM[dst], ZMM[src], ZMM[rhs]),
-                _ => unreachable!(),
-            },
             Action::Cast => {
                 if !matches!(self.input, Type::Vector(_)) {
                     let from = lane.bytes();
@@ -479,36 +405,6 @@ impl Native {
                     0xc0 | (dst as u8 & 7) << 3 | (src as u8 & 7),
                 ])
             }
-            Action::Binary(B::Add) if lane.float() => {
-                float_bin!(addss, addsd, addps, addpd, vaddps, vaddpd)
-            }
-            Action::Binary(B::Sub) if lane.float() => {
-                float_bin!(subss, subsd, subps, subpd, vsubps, vsubpd)
-            }
-            Action::Binary(B::Mul) if lane.float() => {
-                float_bin!(mulss, mulsd, mulps, mulpd, vmulps, vmulpd)
-            }
-            Action::Binary(B::Div) => float_bin!(divss, divsd, divps, divpd, vdivps, vdivpd),
-            Action::Binary(B::Add) => match lane.bytes() {
-                1 => packed!(paddb, vpaddb, vpaddb),
-                2 => packed!(paddw, vpaddw, vpaddw),
-                4 => packed!(paddd, vpaddd, vpaddd),
-                _ => packed!(paddq, vpaddq, vpaddq),
-            },
-            Action::Binary(B::Sub) => match lane.bytes() {
-                1 => packed!(psubb, vpsubb, vpsubb),
-                2 => packed!(psubw, vpsubw, vpsubw),
-                4 => packed!(psubd, vpsubd, vpsubd),
-                _ => packed!(psubq, vpsubq, vpsubq),
-            },
-            Action::Binary(B::Mul) => match lane.bytes() {
-                2 => packed!(pmullw, vpmullw, vpmullw),
-                4 => packed!(pmulld, vpmulld, vpmulld),
-                _ => a.vpmullq(ZMM[dst], ZMM[src], ZMM[rhs]),
-            },
-            Action::Binary(B::And) => packed!(andps, vandps, vpandd),
-            Action::Binary(B::Or) => packed!(orps, vorps, vpord),
-            Action::Binary(B::Xor) => packed!(xorps, vxorps, vpxord),
             Action::Unary(Unary::Sqrt) => match (lane, self.bytes) {
                 (Lane::F32, 4) => a.sqrtss(XMM[dst], XMM[src]),
                 (Lane::F64, 8) => a.sqrtsd(XMM[dst], XMM[src]),
@@ -584,7 +480,7 @@ pub(in crate::lir::x64) fn copy(
 /// Sets ZF when every lane is nonzero.
 pub(in crate::lir::x64) fn test_all(
     a: &mut CodeAssembler,
-    cpu: Features,
+    cpu: Cpu,
     lane: Lane,
     src: usize,
 ) -> Result<(), IcedError> {
@@ -632,7 +528,7 @@ pub(in crate::lir::x64) fn test_all(
             }
             8 => {
                 a.vptestmq(k1, ZMM[src], ZMM[src])?;
-                if cpu.dq {
+                if cpu.isa.dq {
                     a.knotb(k1, k1)?;
                     a.kortestb(k1, k1)
                 } else {
@@ -649,7 +545,7 @@ pub(in crate::lir::x64) fn test_all(
 /// Sets ZF when every bit of the vector is zero.
 pub(in crate::lir::x64) fn test_any(
     a: &mut CodeAssembler,
-    cpu: Features,
+    cpu: Cpu,
     src: usize,
 ) -> Result<(), IcedError> {
     match cpu.bytes {
@@ -658,7 +554,7 @@ pub(in crate::lir::x64) fn test_any(
             a.kortestw(k1, k1)
         }
         32 => a.vptest(YMM[src], YMM[src]),
-        _ if cpu.sse41 => a.ptest(XMM[src], XMM[src]),
+        _ if cpu.isa.sse41 => a.ptest(XMM[src], XMM[src]),
         _ => {
             let t = XMM[super::SCRATCH];
             a.pxor(t, t)?;
@@ -672,11 +568,11 @@ pub(in crate::lir::x64) fn test_any(
 // K1 is reserved inside masked pseudo-instructions and never holds a live SSA value.
 fn mask_from_signs(
     a: &mut CodeAssembler,
-    cpu: Features,
+    cpu: Cpu,
     size: usize,
     mask: usize,
 ) -> Result<(), IcedError> {
-    if !cpu.dq && size >= 4 {
+    if !cpu.isa.dq && size >= 4 {
         let z = ZMM[super::SCRATCH];
         a.vpxord(z, z, z)?;
         return if size == 4 {
@@ -768,7 +664,7 @@ enum MaskBits {
 
 fn emit_opmask(
     a: &mut CodeAssembler,
-    cpu: Features,
+    cpu: Cpu,
     size: usize,
     mask: VectorMask<usize>,
     bits: MaskBits,
@@ -808,7 +704,7 @@ fn emit_opmask(
 
 pub(in crate::lir::x64) fn test_vector_mask(
     a: &mut CodeAssembler,
-    cpu: Features,
+    cpu: Cpu,
     mask: VectorMask<usize>,
 ) -> Result<(), IcedError> {
     let lane = match mask {
@@ -850,7 +746,7 @@ fn blend(
 
 pub(in crate::lir::x64) fn blend_comparison(
     a: &mut CodeAssembler,
-    cpu: Features,
+    cpu: Cpu,
     lane: Lane,
     mask: VectorMask<usize>,
     dst: usize,
@@ -891,24 +787,40 @@ pub(in crate::lir::x64) fn compact(
     }
 }
 
-pub(in crate::lir::x64) fn evex_masked_memory(cpu: Features, size: usize, indexed: bool) -> bool {
-    evex(cpu) && (matches!(size, 4 | 8) || !indexed && size <= 2 && cpu.bw)
+pub(in crate::lir::x64) fn evex_masked_memory(cpu: Cpu, size: usize, indexed: bool) -> bool {
+    evex(cpu) && (matches!(size, 4 | 8) || !indexed && size <= 2 && cpu.isa.bw)
 }
 
-pub(in crate::lir::x64) struct MaskedMemory {
+/// A masked contiguous or indexed access through `base`: a load when it
+/// has `dst` (`value` fills the inactive lanes), otherwise a store of `value`.
+#[derive(Clone, Copy, Debug)]
+pub(in crate::lir::x64) struct MaskedMemory<R = usize> {
     pub ty: Type,
-    pub base: usize,
-    pub index: Option<usize>,
-    pub mask: VectorMask<usize>,
-    pub value: Option<usize>,
-    pub dst: Option<usize>,
-    pub temp: Option<usize>,
+    pub base: R,
+    pub index: Option<R>,
+    pub mask: VectorMask<R>,
+    pub value: Option<R>,
+    pub dst: Option<R>,
+    pub temp: Option<R>,
+}
+impl<R> MaskedMemory<R> {
+    pub(in crate::lir::x64) fn map<T>(self, mut reg: impl FnMut(R) -> T) -> MaskedMemory<T> {
+        MaskedMemory {
+            ty: self.ty,
+            base: reg(self.base),
+            index: self.index.map(&mut reg),
+            mask: self.mask.map(&mut reg),
+            value: self.value.map(&mut reg),
+            dst: self.dst.map(&mut reg),
+            temp: self.temp.map(reg),
+        }
+    }
 }
 impl MaskedMemory {
     pub(in crate::lir::x64) fn emit(
         self,
         a: &mut CodeAssembler,
-        cpu: Features,
+        cpu: Cpu,
     ) -> Result<(), IcedError> {
         use crate::lir::x64::emit::R64;
         let Self {
@@ -996,9 +908,7 @@ impl MaskedMemory {
             unreachable!("comparison masks require 512-bit EVEX memory instructions")
         };
         if width == 32 && matches!(size, 4 | 8) {
-            if let (Some(i), Some(d)) = (index, dst)
-                && cpu.avx2
-            {
+            if let (Some(i), Some(d)) = (index, dst) {
                 // AVX2 clears enabled mask lanes as the gather completes. Regalloc
                 // provides a distinct temporary for that destructive operand.
                 let m = temp.expect("AVX2 gather mask temporary");

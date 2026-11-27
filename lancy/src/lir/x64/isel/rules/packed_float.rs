@@ -1,16 +1,16 @@
+use crate::lir::x64::Cpu;
 use crate::{
-    hir::operation::Action,
     hir::{Binary as B, Type, Unary},
     lir::x64::inst::simd::packed::float::Rule,
+    support::numeric::Action,
 };
-use splice_target::Features;
 
 impl Rule {
     pub(in crate::lir::x64) fn select(
         action: Action,
         input: Type,
         output: Type,
-        c: Features,
+        c: Cpu,
     ) -> Option<Self> {
         let e = input.lane()?;
         let to = output.lane()?;
@@ -18,8 +18,9 @@ impl Rule {
             let int = if e.float() { to } else { e };
             let w = int.bytes();
             if matches!(w, 4 | 8)
-                && (w == 4 && int.signed() || (c.bytes == 64 || c.avx10 >= 1) && (w == 4 || c.dq))
-                && (!e.float() || c.avx10 < 2)
+                && (w == 4 && int.signed()
+                    || (c.bytes == 64 || c.isa.avx10 >= 1) && (w == 4 || c.isa.dq))
+                && (!e.float() || c.isa.avx10 < 2)
             {
                 return Some(Self::Convert);
             }
@@ -44,8 +45,8 @@ impl Rule {
                 | Unary::SignBit),
             ) => Self::Class(u),
             Action::Unary(Unary::Recip) => Self::Recip,
-            Action::Unary(Unary::Fract) if c.bytes >= 32 || c.sse41 => Self::Fract,
-            Action::Unary(Unary::Round) if c.bytes >= 32 || c.sse41 => Self::Round,
+            Action::Unary(Unary::Fract) if c.bytes >= 32 || c.isa.sse41 => Self::Fract,
+            Action::Unary(Unary::Round) if c.bytes >= 32 || c.isa.sse41 => Self::Round,
             Action::Binary(op @ (B::Min | B::Max)) => Self::MinMax(op),
             _ => return None,
         })

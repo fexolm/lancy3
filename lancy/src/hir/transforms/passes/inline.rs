@@ -1,11 +1,16 @@
 //! Expand the verified call DAG in callee-first order. A template is built once
 //! per distinct function, including when many call sites share its body.
+//!
+//! Scratch memory and the debugger workspace belong to a frame. An inlined
+//! callee's regions move above the caller's own, so caller data stored there
+//! survives the call exactly as it did with separate frames. Calls of one
+//! caller never overlap in time, so they share the region above it.
 use crate::CompileError;
+use crate::hir::Call;
 use crate::hir::transforms::ControlFlowGraph;
 use crate::hir::{Block, Edge, Function, Op, Terminator, Value, ssa::VerifiedBody};
-use crate::module::{FunctionId, FunctionIds, Module};
+use crate::module::{FunctionId, Module};
 use crate::support::slotmap::DenseMap;
-use std::sync::Arc;
 
 struct Template {
     body: Function,
@@ -13,11 +18,13 @@ struct Template {
     returns: usize,
 }
 
+/// Expand every call into its root. `max_values` is the backend's limit on
+/// values in one function (`lir::MAX_VALUES`).
 pub(crate) fn inline_all(
     module: &Module<VerifiedBody<'_>>,
-    ids: &FunctionIds<Function>,
+    max_values: usize,
 ) -> Result<Function, CompileError> {
-    check_expansion(module, ids)?;
+    check_expansion(module, max_values as u64)?;
     let mut uses = DenseMap::filled(module.functions.len(), 0usize);
     for id in module.functions.keys() {
         for &child in module.call_graph.callees(id) {
@@ -31,25 +38,22 @@ pub(crate) fn inline_all(
         body.copy_slice_params(src);
         let entry = body.entry();
         let args = body.params(entry).to_vec();
-        let mut copy = Copier::new(src, &source.cfg, &mut body, entry, &args);
-        copy.copy_blocks(
-            &mut body,
-            &source.cfg,
-            Exit::Root,
-            |out, at, callee, args| {
-                let id = ids[&std::ptr::from_ref(callee)];
-                let template = templates[id].as_ref().unwrap();
-                let result = template.expand(out, at, args);
-                uses[id] -= 1;
-                if uses[id] == 0 {
-                    templates[id] = None;
-                }
-                result
-            },
-        );
+        let mut copy = Copier::new(src, &source.cfg, &mut body, entry, &args, Shift::default());
+        let above = Shift::above(src);
+        copy.copy_blocks(&mut body, &source.cfg, Exit::Root, |out, at, site, args| {
+            let id = source.callee(site);
+            let template = templates[id].as_ref().unwrap();
+            let result = template.expand(out, at, args, above);
+            uses[id] -= 1;
+            if uses[id] == 0 {
+                templates[id] = None;
+            }
+            result
+        });
         // A callee can loop forever. Its call continuation, and even other
         // caller blocks dominated by the call, then become unreachable.
         body.prune_unreachable()?;
+        super::checkpoint(&body, "inline");
         if id == module.call_graph.root() {
             return Ok(body);
         }
@@ -103,30 +107,66 @@ impl Size {
         self.args += callee.args + join * callee.returns;
     }
 
-    fn check(self) -> Result<(), CompileError> {
+    fn check(self, max_values: u64) -> Result<(), CompileError> {
         if self.insts + self.blocks > i32::MAX as u64
-            || self.values > regalloc2::VReg::MAX as u64
+            || self.values > max_values
             || self.edges > u32::MAX as u64
             || self.args > u32::MAX as u64
         {
-            Err(CompileError::FunctionTooLarge)
+            Err(CompileError::Unsupported(crate::Limit::Registers))
         } else {
             Ok(())
         }
     }
 }
 
-fn check_expansion(
-    module: &Module<VerifiedBody<'_>>,
-    ids: &FunctionIds<Function>,
-) -> Result<(), CompileError> {
+/// Offsets added to an inlined callee's frame-local regions.
+#[derive(Clone, Copy, Default)]
+struct Shift {
+    scratch: u32,
+    debug: u32,
+}
+
+impl Shift {
+    /// Place callee regions above everything `caller` addresses itself.
+    /// `check_expansion` has bounded the nested sums by `u32::MAX`.
+    fn above(caller: &Function) -> Self {
+        Self {
+            scratch: caller.scratch_bytes() as u32,
+            debug: caller.debug_bytes() as u32,
+        }
+    }
+
+    fn apply(self, op: Op) -> Op {
+        match op {
+            Op::CallScratch { offset, bytes } => Op::CallScratch {
+                offset: offset + self.scratch,
+                bytes,
+            },
+            Op::DebugStore(offset, value) => Op::DebugStore(offset + self.debug, value),
+            op => op,
+        }
+    }
+}
+
+fn check_expansion(module: &Module<VerifiedBody<'_>>, max_values: u64) -> Result<(), CompileError> {
     let mut sizes: DenseMap<FunctionId, Size> = DenseMap::new();
+    // Frame-local bytes after inlining: own regions plus the largest callee.
+    let mut frames: DenseMap<FunctionId, [u64; 2]> = DenseMap::new();
     for (id, src) in module.functions.iter() {
         let f = src.function;
-        let callee = |site| {
-            let (target, _) = f.call(site);
-            (sizes[ids[&Arc::as_ptr(target)]], target.arity())
-        };
+        let own = [f.scratch_bytes(), f.debug_bytes()];
+        let mut frame = own;
+        for &child in module.call_graph.callees(id) {
+            for i in 0..2 {
+                frame[i] = frame[i].max(own[i] + frames[child][i]);
+            }
+        }
+        if frame.iter().any(|&bytes| bytes > u64::from(u32::MAX)) {
+            return Err(CompileError::Unsupported(crate::Limit::Frame));
+        }
+        frames.insert(frame);
+        let callee = |site| (sizes[src.callee(site)], f.call(site).0.arity());
         // The copier allocates even dead continuations in this body. Its
         // callers only copy the blocks reachable after pruning.
         let prunes = module
@@ -162,7 +202,7 @@ fn check_expansion(
                 if let Op::Call(site) = *f.op(i) {
                     let (callee, arity) = callee(site);
                     emitted.call(callee, arity, callee.returns != 1);
-                    emitted.check()?;
+                    emitted.check(max_values)?;
                     if live {
                         retained.call(callee, arity, callee.returns > 1);
                         live = callee.returns != 0;
@@ -181,7 +221,7 @@ fn check_expansion(
                 retained.terminator(f, term);
             }
         }
-        emitted.check()?;
+        emitted.check(max_values)?;
         sizes.insert(if prunes { retained } else { emitted });
     }
     Ok(())
@@ -194,8 +234,14 @@ enum Exit {
 }
 
 impl Template {
-    fn expand(&self, out: &mut Function, at: Block, args: &[Value]) -> (Block, Value) {
-        let mut copy = Copier::new(&self.body, &self.cfg, out, at, args);
+    fn expand(
+        &self,
+        out: &mut Function,
+        at: Block,
+        args: &[Value],
+        shift: Shift,
+    ) -> (Block, Value) {
+        let mut copy = Copier::new(&self.body, &self.cfg, out, at, args, shift);
         let join = (self.returns != 1).then(|| {
             let b = out.create_block();
             (b, out.append_typed_param(b, self.body.return_type()))
@@ -213,6 +259,7 @@ struct Copier<'a> {
     src: &'a Function,
     blocks: DenseMap<Block, Block>,
     values: DenseMap<Value, Value>,
+    shift: Shift,
 }
 
 impl<'a> Copier<'a> {
@@ -222,6 +269,7 @@ impl<'a> Copier<'a> {
         out: &mut Function,
         entry: Block,
         args: &[Value],
+        shift: Shift,
     ) -> Self {
         let mut blocks = DenseMap::filled(src.block_capacity(), Block::INVALID);
         let mut values = DenseMap::filled(src.value_count(), Value::INVALID);
@@ -240,6 +288,7 @@ impl<'a> Copier<'a> {
             src,
             blocks,
             values,
+            shift,
         }
     }
 
@@ -257,7 +306,7 @@ impl<'a> Copier<'a> {
         out: &mut Function,
         cfg: &ControlFlowGraph,
         exit: Exit,
-        mut call: impl FnMut(&mut Function, Block, &Function, &[Value]) -> (Block, Value),
+        mut call: impl FnMut(&mut Function, Block, Call, &[Value]) -> (Block, Value),
     ) -> Option<(Block, Value)> {
         let mut single = None;
         for &b in cfg.reverse_postorder() {
@@ -265,19 +314,16 @@ impl<'a> Copier<'a> {
             for i in self.src.instructions(b) {
                 let mut op = *self.src.op(i);
                 if let Op::Call(site) = op {
-                    let (callee, args) = self.src.call(site);
+                    let (_, args) = self.src.call(site);
                     let result = self.src.result(i).unwrap();
-                    (at, self.values[result]) = call(out, at, callee, &self.arguments(args));
+                    (at, self.values[result]) = call(out, at, site, &self.arguments(args));
                 } else {
-                    if let Op::RustPacketCall(site) = op {
-                        let (import, operands) = self.src.packet_call(site);
-                        op = Op::RustPacketCall(
-                            out.add_packet_call(import, &self.arguments(operands)),
-                        );
-                    } else {
-                        op.map_operands(|v| self.values[v]);
-                    }
-                    if let Some(result) = out.append(at, op) {
+                    op.map_operands(|v| self.values[v]);
+                    op = self.shift.apply(op);
+                    let copy = out
+                        .append_inst(at, op)
+                        .expect("a copy of a verified operation");
+                    if let Some(result) = out.result(copy) {
                         self.values[self.src.result(i).unwrap()] = result;
                     }
                 }

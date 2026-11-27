@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
 # %sdiv_i32
-fn main v0:i32 v1:i32 -> i32
+fn main(v0:i32 v1:i32) -> i32
   v2 = div v0 v1
   ret v2
 @run 0 100 -> 0
@@ -19,7 +19,7 @@ fn main v0:i32 v1:i32 -> i32
 ---
 
 # %sdiv_pow2_i32
-fn main v0:i32 -> i32
+fn main(v0:i32) -> i32
   v1 = const 8
   v2 = div v0 v1
   ret v2
@@ -36,7 +36,7 @@ fn main v0:i32 -> i32
 ---
 
 # %sdiv_neg_pow2_i32
-fn main v0:i32 -> i32
+fn main(v0:i32) -> i32
   v1 = const -4
   v2 = div v0 v1
   ret v2
@@ -53,7 +53,7 @@ fn main v0:i32 -> i32
 ---
 
 # %sdiv_by_const_1337_i32
-fn main v0:i32 -> i32
+fn main(v0:i32) -> i32
   v1 = const 1337
   v2 = div v0 v1
   ret v2
@@ -74,7 +74,7 @@ fn main v0:i32 -> i32
 ---
 
 # %sdiv_by_const_neg_1337_i32
-fn main v0:i32 -> i32
+fn main(v0:i32) -> i32
   v1 = const -1337
   v2 = div v0 v1
   ret v2
@@ -95,7 +95,7 @@ fn main v0:i32 -> i32
 ---
 
 # %sdiv_by_const_neg_i32min_i32
-fn main v0:i32 -> i32
+fn main(v0:i32) -> i32
   v1 = const -2147483648
   v2 = div v0 v1
   ret v2

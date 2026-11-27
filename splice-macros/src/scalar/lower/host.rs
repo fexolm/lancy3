@@ -1,33 +1,33 @@
 //! Prepare Rust expressions used during specialization and preserve the
 //! control-flow location of failures in residual code or printed source.
-use super::{Binding, Lower, vec_macro};
+use super::{Binding, Lower, Scalar, Stage, Value};
+use crate::kast::vec_macro;
 use proc_macro2::{Ident, TokenStream};
 use quote::ToTokens;
-use std::collections::HashMap;
 use syn::visit::Visit;
 use syn::visit_mut::VisitMut;
-use syn::{BinOp, Block, Error, Expr, Result, UnOp};
+use syn::{BinOp, Block, Error, Expr, Path, Result, UnOp};
 
 struct HostCheck<'a> {
-    names: &'a HashMap<String, Binding>,
+    lower: &'a Lower<'a>,
     region: usize,
     outer: Vec<Ident>,
     error: Option<Error>,
     rewrite: bool,
-    guarded_loop: bool,
 }
-impl<'ast> Visit<'ast> for HostCheck<'_> {
+impl<'ast, 'a: 'ast> Visit<'ast> for HostCheck<'a> {
     fn visit_expr(&mut self, expr: &'ast Expr) {
-        let loop_expr = matches!(expr, Expr::Loop(_) | Expr::While(_) | Expr::ForLoop(_));
-        self.rewrite |= loop_expr
-            || matches!(
-                expr,
-                Expr::Field(_) | Expr::Index(_) | Expr::Call(_) | Expr::MethodCall(_)
-            );
-        let previous = self.guarded_loop;
-        self.guarded_loop |= loop_expr;
+        self.rewrite |= matches!(
+            expr,
+            Expr::Loop(_)
+                | Expr::While(_)
+                | Expr::ForLoop(_)
+                | Expr::Field(_)
+                | Expr::Index(_)
+                | Expr::Call(_)
+                | Expr::MethodCall(_)
+        );
         syn::visit::visit_expr(self, expr);
-        self.guarded_loop = previous;
     }
     fn visit_expr_binary(&mut self, binary: &'ast syn::ExprBinary) {
         self.rewrite = true;
@@ -39,8 +39,8 @@ impl<'ast> Visit<'ast> for HostCheck<'_> {
     }
     fn visit_expr_path(&mut self, p: &'ast syn::ExprPath) {
         if let Some(id) = p.path.get_ident() {
-            match self.names.get(&id.to_string()) {
-                Some(Binding::Host(depth)) if *depth < self.region && !self.outer.contains(id) => {
+            match self.lower.binding(p) {
+                Some(Binding::Host(depth)) if depth < self.region && !self.outer.contains(id) => {
                     self.outer.push(id.clone());
                 }
                 Some(
@@ -62,16 +62,13 @@ impl<'ast> Visit<'ast> for HostCheck<'_> {
         syn::visit::visit_expr_path(self, p);
     }
     fn visit_macro(&mut self, m: &'ast syn::Macro) {
-        if self.guarded_loop && m.path.is_ident("comptime") {
+        if m.path.is_ident("comptime") {
             // The mandatory evaluator checks this expression when reached.
+            self.rewrite = true;
             return;
         }
         if vec_macro(&m.path) {
-            let tokens = &m.tokens;
-            match syn::parse2::<Expr>(emit!([#tokens])) {
-                Ok(elements) => self.visit_expr(&elements),
-                Err(error) => self.error = Some(error),
-            }
+            self.visit_expr(self.lower.body.vec_elements(m));
             return;
         }
         self.error = Some(Error::new_spanned(
@@ -94,31 +91,136 @@ pub(super) fn guarded_negation(unary: &syn::ExprUnary) -> bool {
     matches!(unary.op, UnOp::Neg(_)) && !matches!(operand, Expr::Lit(_))
 }
 
+/// Emit the Rust code of a host expression that the generator runs during
+/// specialization. It reads the nodes of the kernel body and never lowers a
+/// clone: every expression it hands to the lowering is a node of the body.
 struct PrepareHost<'a, 'ast> {
     lower: &'a Lower<'ast>,
-    guarded_loop: bool,
     error: Option<Error>,
 }
 
+/// The nearest expressions below a node, through its statements and
+/// patterns, and its `vec!` statements: the parts [`PrepareHost`] rewrites.
+#[derive(Default)]
+struct Children<'n>(Vec<Child<'n>>);
+
+enum Child<'n> {
+    Expr(&'n Expr),
+    Vec(&'n syn::Macro),
+}
+
+impl<'n> Visit<'n> for Children<'n> {
+    fn visit_expr(&mut self, expr: &'n Expr) {
+        self.0.push(Child::Expr(expr));
+    }
+    fn visit_macro(&mut self, m: &'n syn::Macro) {
+        if vec_macro(&m.path) {
+            self.0.push(Child::Vec(m));
+        }
+    }
+    fn visit_item(&mut self, _: &'n syn::Item) {}
+}
+
+/// Put the rewritten [`Children`] of a node into the printed copy of that
+/// node, in the same walk order.
+struct Replace(std::vec::IntoIter<TokenStream>);
+
+impl Replace {
+    fn next(&mut self) -> TokenStream {
+        self.0
+            .next()
+            .expect("internal error: a rewritten child for every child")
+    }
+}
+
+impl VisitMut for Replace {
+    fn visit_expr_mut(&mut self, expr: &mut Expr) {
+        // A parsed child lets the printer add the parentheses that keep the
+        // precedence of the original node (`(*field)[i]`).
+        let code = self.next();
+        *expr = syn::parse2(code.clone()).unwrap_or(Expr::Verbatim(code));
+    }
+    fn visit_macro_mut(&mut self, m: &mut syn::Macro) {
+        if vec_macro(&m.path) {
+            m.tokens = self.next();
+        }
+    }
+    fn visit_item_mut(&mut self, _: &mut syn::Item) {}
+}
+
 impl PrepareHost<'_, '_> {
+    fn attempt(&mut self, code: Result<TokenStream>) -> TokenStream {
+        code.unwrap_or_else(|error| {
+            self.error = Some(error);
+            TokenStream::new()
+        })
+    }
+
+    /// `node` with each of its children rewritten. The copy is only printed.
+    fn rebuild<'n, T: Clone + ToTokens>(
+        &mut self,
+        node: &'n T,
+        children: impl FnOnce(&mut Children<'n>, &'n T),
+        replace: impl FnOnce(&mut Replace, &mut T),
+    ) -> TokenStream {
+        let mut found = Children::default();
+        children(&mut found, node);
+        let rewritten = found
+            .0
+            .into_iter()
+            .map(|child| match child {
+                Child::Expr(expr) => self.expr(expr),
+                Child::Vec(m) => self.vec_elements(m),
+            })
+            .collect::<Vec<_>>();
+        let mut copy = node.clone();
+        replace(&mut Replace(rewritten.into_iter()), &mut copy);
+        copy.into_token_stream()
+    }
+
+    fn children(&mut self, expr: &Expr) -> TokenStream {
+        self.rebuild(expr, syn::visit::visit_expr, syn::visit_mut::visit_expr_mut)
+    }
+
+    fn stmt(&mut self, stmt: &syn::Stmt) -> TokenStream {
+        self.rebuild(stmt, syn::visit::visit_stmt, syn::visit_mut::visit_stmt_mut)
+    }
+
+    /// The rewritten arguments of a `vec!` invocation.
+    fn vec_elements(&mut self, m: &syn::Macro) -> TokenStream {
+        match self.lower.body.vec_elements(m) {
+            Expr::Array(array) => {
+                let values = array.elems.iter().map(|value| self.expr(value));
+                emit!(#(#values),*)
+            }
+            Expr::Repeat(repeat) => {
+                let (value, len) = (self.expr(&repeat.expr), self.expr(&repeat.len));
+                emit!(#value; #len)
+            }
+            _ => unreachable!("validated vec! arguments"),
+        }
+    }
+
     fn index_store(
         &mut self,
-        left: &mut Expr,
-        right: &mut Expr,
+        left: &Expr,
+        right: &Expr,
         op: Option<&BinOp>,
     ) -> Option<TokenStream> {
         let Expr::Index(index) = left else {
             return None;
         };
-        let Expr::Path(base) = &*index.expr else {
-            return Some(emit!(Err::<(), String>(
-                "specialization cannot write through an opaque place".into()
-            )?));
-        };
-        self.visit_expr_mut(right);
-        self.visit_expr_mut(&mut index.index);
-        let offset = &index.index;
         let root = self.lower.root;
+        let Expr::Path(base) = &*index.expr else {
+            return Some(emit!(::core::result::Result::Err::<
+                (),
+                #root::BuildError,
+            >(#root::BuildError::staging(
+                "specialization cannot write through an opaque place"
+            ))?));
+        };
+        let right = self.expr(right);
+        let offset = self.expr(&index.index);
         let place = emit!(#base[__splice_index]);
         let store = match op.and_then(|op| super::super::compound_op(op).map(|name| (op, name))) {
             Some((op, name)) => self
@@ -135,144 +237,116 @@ impl PrepareHost<'_, '_> {
         }))
     }
 
-    fn loop_body(&mut self, body: &mut Block) {
-        let guarded_loop = std::mem::replace(&mut self.guarded_loop, true);
-        self.visit_block_mut(body);
-        self.guarded_loop = guarded_loop;
+    fn loop_body(&mut self, body: &Block) -> TokenStream {
+        let stmts = body
+            .stmts
+            .iter()
+            .map(|stmt| self.stmt(stmt))
+            .collect::<Vec<_>>();
         let root = self.lower.root;
-        body.stmts.insert(
-            0,
-            syn::parse_quote!(#root::frontend::scalar::specialization_step()?;),
-        );
+        emit!({
+            #root::frontend::scalar::specialization_step()?;
+            #(#stmts)*
+        })
     }
-}
 
-impl VisitMut for PrepareHost<'_, '_> {
-    fn visit_macro_mut(&mut self, m: &mut syn::Macro) {
-        if vec_macro(&m.path) {
-            let tokens = &m.tokens;
-            let mut elements: Expr = syn::parse_quote!([#tokens]);
-            self.visit_expr_mut(&mut elements);
-            m.tokens = match elements {
-                Expr::Array(a) => a.elems.into_token_stream(),
-                Expr::Repeat(a) => {
-                    let (value, len) = (a.expr, a.len);
-                    emit!(#value; #len)
-                }
-                _ => unreachable!("validated vec! arguments"),
-            };
-        }
-    }
-    fn visit_expr_mut(&mut self, expr: &mut Expr) {
+    fn expr(&mut self, expr: &Expr) -> TokenStream {
         // These Rust bodies have their own execution context. A branch in the
         // surrounding JIT function cannot terminate inside one of them.
         if matches!(expr, Expr::Async(_) | Expr::Const(_) | Expr::Closure(_)) {
-            return;
+            return expr.to_token_stream();
         }
         let store = match expr {
-            Expr::Assign(assign) => self.index_store(&mut assign.left, &mut assign.right, None),
+            Expr::Assign(assign) => self.index_store(&assign.left, &assign.right, None),
             Expr::Binary(binary) if super::super::compound_op(&binary.op).is_some() => {
-                self.index_store(&mut binary.left, &mut binary.right, Some(&binary.op))
+                self.index_store(&binary.left, &binary.right, Some(&binary.op))
             }
             _ => None,
         };
         if let Some(store) = store {
-            *expr = syn::parse_quote!(#store);
-            return;
+            return store;
         }
         if let Expr::Reference(reference) = expr
             && reference.mutability.is_none()
-            && let Expr::Index(index) = &mut *reference.expr
+            && let Expr::Index(index) = &*reference.expr
         {
-            self.visit_expr_mut(&mut index.expr);
-            self.visit_expr_mut(&mut index.index);
-            let read = self
-                .lower
-                .known_index_reference(index.expr.to_token_stream(), index.index.to_token_stream());
+            let (receiver, offset) = (self.expr(&index.expr), self.expr(&index.index));
+            let read = self.lower.known_index_reference(receiver, offset);
             let fail = self.lower.bounds_failure();
-            *expr = syn::parse_quote!(match (#read)? { Some(value) => value, None => { #fail } });
-            return;
-        }
-        if matches!(expr, Expr::Call(_) | Expr::MethodCall(_)) {
-            match self.lower.required(expr, None).and_then(syn::parse2) {
-                Ok(code) => *expr = code,
-                Err(error) => self.error = Some(error),
-            }
-            return;
-        }
-        if self.guarded_loop
-            && let Expr::Macro(value) = expr
-            && value.mac.path.is_ident("comptime")
-        {
-            match value
-                .mac
-                .parse_body::<Expr>()
-                .and_then(|value| self.lower.required(&value, None))
-                .and_then(syn::parse2)
-            {
-                Ok(code) => *expr = code,
-                Err(error) => self.error = Some(error),
-            }
-            return;
+            return emit!(match (#read)? { Some(value) => value, None => { #fail } });
         }
         match expr {
+            Expr::Call(_) | Expr::MethodCall(_) => {
+                let code = self.lower.required(expr, None);
+                self.attempt(code)
+            }
+            Expr::Macro(value) if value.mac.path.is_ident("comptime") => {
+                let code = self
+                    .lower
+                    .required(self.lower.body.comptime(&value.mac), None);
+                self.attempt(code)
+            }
+            Expr::Macro(value) if vec_macro(&value.mac.path) => {
+                let mut mac = value.mac.clone();
+                mac.tokens = self.vec_elements(&value.mac);
+                let attrs = &value.attrs;
+                emit!(#(#attrs)* #mac)
+            }
             Expr::ForLoop(value) => {
-                match self.lower.plan_iterable(&value.expr).and_then(syn::parse2) {
-                    Ok(code) => *value.expr = code,
-                    Err(error) => self.error = Some(error),
-                }
-                self.loop_body(&mut value.body);
-                return;
+                let iterable = self.lower.plan_iterable(&value.expr);
+                let iterable = self.attempt(iterable);
+                let body = self.loop_body(&value.body);
+                let (attrs, label, pat) = (&value.attrs, &value.label, &value.pat);
+                emit!(#(#attrs)* #label for #pat in #iterable #body)
             }
             Expr::While(value) => {
-                let guarded_loop = std::mem::replace(&mut self.guarded_loop, true);
-                self.visit_expr_mut(&mut value.cond);
-                self.guarded_loop = guarded_loop;
-                self.loop_body(&mut value.body);
-                return;
+                let cond = self.expr(&value.cond);
+                let body = self.loop_body(&value.body);
+                let (attrs, label) = (&value.attrs, &value.label);
+                emit!(#(#attrs)* #label while #cond #body)
             }
             Expr::Loop(value) => {
-                self.loop_body(&mut value.body);
-                return;
+                let body = self.loop_body(&value.body);
+                let (attrs, label) = (&value.attrs, &value.label);
+                emit!(#(#attrs)* #label loop #body)
             }
-            _ => {}
-        }
-        syn::visit_mut::visit_expr_mut(self, expr);
-        let code = match expr {
-            Expr::Field(field) => self
-                .lower
-                .known_field(field.base.to_token_stream(), &field.member),
+            Expr::Field(field) => {
+                let base = self.expr(&field.base);
+                self.lower.known_field(base, &field.member)
+            }
             Expr::Binary(binary) => {
-                if let Some(kind) = super::super::compound_op(&binary.op) {
-                    self.lower
-                        .host_compound(&binary.left, &binary.right, &binary.op, kind)
-                } else {
-                    self.lower
-                        .host_binary(&binary.left, &binary.op, &binary.right)
+                let (left, right) = (self.expr(&binary.left), self.expr(&binary.right));
+                match super::super::compound_op(&binary.op) {
+                    Some(kind) => self.lower.host_compound(left, right, &binary.op, kind),
+                    None => self.lower.host_binary(left, &binary.op, right),
                 }
             }
             Expr::Unary(unary) if matches!(unary.op, UnOp::Deref(_)) => {
-                self.lower.known_deref(&unary.expr)
+                let operand = self.expr(&unary.expr);
+                self.lower.known_deref(operand)
             }
             Expr::Unary(unary) if matches!(unary.op, UnOp::Not(_)) => {
-                self.lower.host_not(&unary.expr)
+                let operand = self.expr(&unary.expr);
+                self.lower.host_not(operand)
             }
-            Expr::Unary(unary) if guarded_negation(unary) => self.lower.host_negation(&unary.expr),
-            _ => return,
-        };
-        *expr = syn::parse_quote!(#code);
+            Expr::Unary(unary) if guarded_negation(unary) => {
+                let operand = self.expr(&unary.expr);
+                self.lower.host_negation(operand)
+            }
+            _ => self.children(expr),
+        }
     }
-    fn visit_item_mut(&mut self, _: &mut syn::Item) {}
 }
+
 impl Lower<'_> {
     /// Validate a plan source before executing its constructor or next step.
     pub(super) fn plan_iterable(&self, expr: &Expr) -> Result<TokenStream> {
         let root = self.root;
         let support = emit!(#root::frontend::evaluation);
-        self.host_check(expr, false)?;
+        self.host_check(expr)?;
         let reject = || {
             emit!(if false { #expr } else {
-                return Err("opaque iterator constructor during specialization".into());
+                return ::core::result::Result::Err(#root::BuildError::staging("opaque iterator constructor during specialization"));
             })
         };
         match expr {
@@ -339,22 +413,54 @@ impl Lower<'_> {
         })
     }
 
+    /// The optional evaluator of a call with known arguments gives up on an
+    /// unsupported type and the call stages at run time; staging itself
+    /// rejects the kernel when it compiles.
+    pub(super) fn optional(&self) -> bool {
+        self.evaluation.is_some()
+    }
+
+    /// Require `operand` (a `&T`) to be a Rust primitive.
+    pub(super) fn primitive(&self, operand: impl ToTokens) -> TokenStream {
+        let root = self.root;
+        if self.optional() {
+            emit!({
+                use #root::frontend::evaluation::{CheckPrimitive as _, Operand};
+                (&Operand::of(#operand)).check()?;
+            })
+        } else {
+            emit!(#root::frontend::evaluation::primitive(#operand);)
+        }
+    }
+
+    /// Require a value constructed during specialization to have no drop glue.
+    pub(super) fn dropless(&self, value: impl ToTokens) -> TokenStream {
+        let root = self.root;
+        if self.optional() {
+            emit!(#root::frontend::evaluation::Dropless::check()?.bind(#value))
+        } else {
+            emit!(#root::frontend::evaluation::dropless(#value))
+        }
+    }
+
     pub(super) fn known_deref(&self, base: impl ToTokens) -> TokenStream {
         let root = self.root;
-        emit!(*{
-            use #root::frontend::evaluation::{CheckReference as _, Operand};
-            let receiver = &(#base);
-            (&Operand::of(receiver)).check_reference()?;
-            &**receiver
-        })
+        if self.optional() {
+            return emit!(*{
+                use #root::frontend::evaluation::{CheckReference as _, Operand};
+                let receiver = &(#base);
+                (&Operand::of(receiver)).check_reference()?;
+                &**receiver
+            });
+        }
+        emit!(*#root::frontend::evaluation::deref(&(#base)))
     }
 
     pub(super) fn host_not(&self, operand: impl ToTokens) -> TokenStream {
-        let root = self.root;
+        let check = self.primitive(emit!(&operand));
         emit!({
-            use #root::frontend::evaluation::{CheckPrimitive as _, Operand};
             let operand = #operand;
-            (&Operand::of(&operand)).check()?;
+            #check
             !operand
         })
     }
@@ -365,33 +471,153 @@ impl Lower<'_> {
             syn::Member::Named(id) => id.to_string().trim_start_matches("r#").to_owned(),
             syn::Member::Unnamed(index) => index.index.to_string(),
         };
-        emit!(*{
-            use #root::frontend::evaluation::{OwnField as _, ReferentField as _, Operand};
+        let check = if self.optional() {
+            emit!({
+                use #root::frontend::evaluation::Layout as _;
+                let owner = (&Operand::of(receiver)).owner();
+                let layout = (&owner).layout();
+                owner.declares(layout, #name)?;
+            })
+        } else {
+            emit!(#root::frontend::evaluation::field((&Operand::of(receiver)).owner(), #name)?;)
+        };
+        // The layout requirement is reported at the field the kernel reads.
+        let at = proc_macro2::Span::mixed_site().located_at(syn::spanned::Spanned::span(member));
+        quote::quote_spanned!(at=> *{
+            use #root::frontend::evaluation::{Operand, Projection as _};
             let receiver = &(#base);
-            let operand = Operand::of(receiver);
-            if !(&operand).own_field(#name) && !(&operand).referent_field(#name) {
-                return Err("field has no Splice layout description".into());
-            }
+            #check
             &receiver.#member
         })
     }
 
-    pub(super) fn host_raw(&self, e: &Expr) -> Result<TokenStream> {
-        self.host_code(e, false)
+    /// The value of an expression the generator knows
+    /// ([`crate::kast::Body::known`]): the Rust code that computes it while
+    /// the generator runs. The IR lowering and the printer both take a
+    /// known value from here. `None` for a block, branch, loop, assignment
+    /// or jump, whose parts the caller visits itself.
+    pub(super) fn known_value(&self, e: &Expr, hint: Option<Scalar>) -> Result<Option<Value>> {
+        let operand = |e: &Expr, hint: Option<Scalar>| self.known_operand(e, hint);
+        Ok(Some(match e {
+            Expr::Lit(l) => Value::new(
+                match &l.lit {
+                    syn::Lit::Int(int) => super::literal_stage(int.suffix(), false, hint),
+                    syn::Lit::Float(float) => super::literal_stage(float.suffix(), true, hint),
+                    syn::Lit::Bool(_) => Stage::Literal(Scalar::Bool),
+                    _ => Stage::Host,
+                },
+                e,
+            ),
+            Expr::Path(path) => Value::new(Stage::Host, path),
+            Expr::Paren(inner) => return self.known_value(&inner.expr, hint),
+            Expr::Group(inner) => return self.known_value(&inner.expr, hint),
+            Expr::Unary(unary) => {
+                let value = operand(&unary.expr, None)?;
+                let op = &unary.op;
+                match op {
+                    UnOp::Deref(_) => Value::new(Stage::Host, self.known_deref(value)),
+                    UnOp::Not(_) => Value::new(value.stage, self.host_not(value)),
+                    _ if guarded_negation(unary) => {
+                        Value::new(value.stage, self.host_negation(value))
+                    }
+                    _ => Value::new(value.stage, emit!(#op (#value))),
+                }
+            }
+            Expr::Binary(binary) if super::super::compound_op(&binary.op).is_none() => {
+                let (left, right) = (operand(&binary.left, hint)?, operand(&binary.right, hint)?);
+                Value::new(Stage::Host, self.host_binary(left, &binary.op, right))
+            }
+            Expr::Index(index) => {
+                let (receiver, offset) =
+                    (operand(&index.expr, None)?, operand(&index.index, None)?);
+                let read = self.known_index(receiver.code, offset.code);
+                let fail = self.bounds_failure();
+                Value::new(
+                    Stage::Host,
+                    emit!({
+                        let ::core::option::Option::Some(value) = (#read) else { #fail };
+                        value
+                    }),
+                )
+            }
+            Expr::MethodCall(method) => self.known_method(e, method, hint)?,
+            Expr::Cast(cast) => {
+                let (value, ty) = (operand(&cast.expr, None)?, &cast.ty);
+                Value::new(Stage::Host, emit!((#value) as #ty))
+            }
+            Expr::Macro(m) if m.mac.path.is_ident("comptime") => Value::new(
+                Stage::Host,
+                self.required(self.body.comptime(&m.mac), hint)?,
+            ),
+            Expr::Macro(_) | Expr::Field(_) | Expr::Reference(_) | Expr::Tuple(_) => {
+                Value::new(Stage::Host, self.host_code(e)?)
+            }
+            _ => return Ok(None),
+        }))
+    }
+
+    /// A known operand: a known value, or the Rust code of a known block,
+    /// branch or loop.
+    pub(super) fn known_operand(&self, e: &Expr, hint: Option<Scalar>) -> Result<Value> {
+        match self.known_value(e, hint)? {
+            Some(value) => Ok(value),
+            None => Ok(Value::new(Stage::Host, self.host_code(e)?)),
+        }
+    }
+
+    /// The method call `e` (`m`) on known operands.
+    fn known_method(
+        &self,
+        e: &Expr,
+        m: &syn::ExprMethodCall,
+        hint: Option<Scalar>,
+    ) -> Result<Value> {
+        let root = self.root;
+        let name = &m.method;
+        let raw_name = name.to_string();
+        if matches!(raw_name.as_str(), "len" | "is_empty") && m.args.is_empty() {
+            let receiver = self.known_operand(&m.receiver, None)?;
+            let empty = (name == "is_empty").then(|| emit!(== 0));
+            return Ok(Value::new(
+                Stage::Host,
+                emit!({
+                    use #root::frontend::evaluation::{ReadLength as _, Operand};
+                    let receiver = &(#receiver);
+                    (&Operand::of(receiver)).length(receiver)? #empty
+                }),
+            ));
+        }
+        if super::memory::primitive_method(&raw_name) {
+            let receiver = self.known_operand(&m.receiver, None)?;
+            let args = m
+                .args
+                .iter()
+                .map(|arg| self.known_operand(arg, None))
+                .collect::<Result<Vec<_>>>()?;
+            let (value, arg) = (self.primitive(emit!(&value)), self.primitive(emit!(&arg)));
+            return Ok(Value::new(
+                Stage::Host,
+                emit!({
+                    let value = #receiver;
+                    #value
+                    value.#name(#({let arg = #args; #arg arg}),*)
+                }),
+            ));
+        }
+        Ok(Value::new(Stage::Host, self.required(e, hint)?))
     }
 
     pub(super) fn host_only(&self, e: &Expr) -> bool {
-        self.host_check(e, false).is_ok()
+        self.host_check(e).is_ok()
     }
 
-    fn host_check(&self, e: &Expr, guarded_loop: bool) -> Result<HostCheck<'_>> {
+    fn host_check(&self, e: &Expr) -> Result<HostCheck<'_>> {
         let mut check = HostCheck {
-            names: &self.bindings,
+            lower: self,
             region: self.region_depth,
             outer: Vec::new(),
             error: None,
             rewrite: false,
-            guarded_loop,
         };
         check.visit_expr(e);
         if let Some(error) = check.error.take() {
@@ -400,20 +626,18 @@ impl Lower<'_> {
         Ok(check)
     }
 
-    pub(super) fn host_code(&self, e: &Expr, guarded_loop: bool) -> Result<TokenStream> {
-        let check = self.host_check(e, guarded_loop)?;
-        let code = if check.rewrite || guarded_loop {
-            let mut expr = e.clone();
+    pub(super) fn host_code(&self, e: &Expr) -> Result<TokenStream> {
+        let check = self.host_check(e)?;
+        let code = if check.rewrite {
             let mut prepare = PrepareHost {
                 lower: self,
-                guarded_loop,
                 error: None,
             };
-            prepare.visit_expr_mut(&mut expr);
+            let code = prepare.expr(e);
             if let Some(error) = prepare.error {
                 return Err(error);
             }
-            emit!(#expr)
+            code
         } else {
             emit!(#e)
         };
@@ -437,19 +661,17 @@ impl Lower<'_> {
         op: &BinOp,
         kind: &str,
     ) -> TokenStream {
-        let root = self.root;
-        let arithmetic = match kind {
-            "Div" | "Rem" => Some(kind),
-            _ => super::checked_operator(kind),
-        }
-        .map(|checked| self.host_arithmetic_check(checked, emit!(&(&*place, &operand))));
+        let check = self.host_operator_check(kind, emit!(&(&*place, &operand)));
+        let (place_check, operand_check) = (
+            self.primitive(emit!(place)),
+            self.primitive(emit!(&operand)),
+        );
         emit!({
-            use #root::frontend::evaluation::{CheckPrimitive as _, Operand};
             let operand = #right;
             let place = &mut #left;
-            (&Operand::of(place)).check()?;
-            (&Operand::of(&operand)).check()?;
-            #arithmetic
+            #place_check
+            #operand_check
+            #check
             *place #op operand;
         })
     }
@@ -460,8 +682,7 @@ impl Lower<'_> {
         op: &BinOp,
         rhs: impl ToTokens,
     ) -> TokenStream {
-        let root = self.root;
-        let operation = match op {
+        let kind = match op {
             BinOp::Eq(_)
             | BinOp::Ne(_)
             | BinOp::Lt(_)
@@ -469,81 +690,156 @@ impl Lower<'_> {
             | BinOp::Gt(_)
             | BinOp::Ge(_) => {
                 // Comparison operands are implicitly borrowed by Rust.
+                let (left, right) = (
+                    self.primitive(emit!(operands.0)),
+                    self.primitive(emit!(operands.1)),
+                );
                 return emit!({
                     let operands = (&(#lhs), &(#rhs));
-                    use #root::frontend::evaluation::{CheckPrimitive as _, Operand};
-                    (&Operand::of(operands.0)).check()?;
-                    (&Operand::of(operands.1)).check()?;
+                    #left
+                    #right
                     *operands.0 #op *operands.1
                 });
             }
             BinOp::And(_) | BinOp::Or(_) => return emit!((#lhs) #op (#rhs)),
-            BinOp::Add(_) => "CheckedAdd",
-            BinOp::Sub(_) => "CheckedSub",
-            BinOp::Mul(_) => "CheckedMul",
-            BinOp::Shl(_) => "CheckedShl",
-            BinOp::Shr(_) => "CheckedShr",
-            BinOp::Div(_) => "Div",
-            BinOp::Rem(_) => "Rem",
-            _ => "",
+            _ => operator_kind(op),
         };
-        let check = (!operation.is_empty())
-            .then(|| self.host_arithmetic_check(operation, emit!(&operands)));
+        let check = kind.and_then(|kind| self.host_operator_check(kind, emit!(&operands)));
+        let (left, right) = (
+            self.primitive(emit!(&operands.0)),
+            self.primitive(emit!(&operands.1)),
+        );
         emit!({
             let operands = (#lhs, #rhs);
-            use #root::frontend::evaluation::{CheckPrimitive as _, Operand};
-            (&Operand::of(&operands.0)).check()?;
-            (&Operand::of(&operands.1)).check()?;
+            #left
+            #right
             #check
             operands.0 #op operands.1
         })
     }
 
     pub(super) fn host_negation(&self, value: impl ToTokens) -> TokenStream {
-        let root = self.root;
-        let check = self.host_arithmetic_check("CheckedSub", emit!(&(0_i32, &operand)));
+        let check = self.host_fault_check(emit!((&(&operand,)).negation_fault()), false);
+        let primitive = self.primitive(emit!(&operand));
         emit!({
             let operand = #value;
-            use #root::frontend::evaluation::{CheckPrimitive as _, Operand};
-            (&Operand::of(&operand)).check()?;
+            #primitive
             #check
             -operand
         })
     }
 
-    pub(super) fn host_arithmetic_check(&self, op: &str, operands: TokenStream) -> TokenStream {
+    /// Defer the fault of host operator `kind` (`Add`, `Div`, `Shl`, ...) on
+    /// `operands`, a reference to the operand pair.
+    fn host_operator_check(&self, kind: &str, operands: TokenStream) -> Option<TokenStream> {
+        let (guard, division) = operator_fault(self.root, kind, operands)?;
+        Some(self.host_fault_check(guard, division))
+    }
+
+    /// Evaluate `guard`, an `Option<HostFault>`, and on a fault leave the
+    /// region so that the kernel traps when it reaches this point. Overflow
+    /// faults follow the crate's overflow-check mode; division always faults.
+    pub(super) fn host_fault_check(&self, guard: TokenStream, division: bool) -> TokenStream {
         let (root, region) = (self.root, self.region());
-        let operation = Ident::new(op, proc_macro2::Span::call_site());
-        let division = matches!(op, "Div" | "Rem");
-        let checks = if division {
-            emit!(true)
-        } else {
-            crate::overflow::enabled()
-        };
+        let checks = fault_checks(division);
         let fault = if let Some(label) = &self.source_fault {
-            let panic = if division {
-                emit!(#root::frontend::source::division_fault(z))
-            } else {
-                emit!(r#"panic!("kernel integer arithmetic overflow")"#.to_owned())
-            };
             emit! {
-                __splice_source.transfer = Some(#root::frontend::source::Transfer::Return);
-                break #label (#panic);
+                __splice_source.transfer = ::core::option::Option::Some(#root::frontend::source::Transfer::Return);
+                break #label (#root::frontend::source::fault_panic(fault));
             }
         } else {
             emit! {
-                let (a, z) = (__splice_builder.constant(a), __splice_builder.constant(z));
-                let fault = __splice_builder.binary(#root::hir::Binary::#operation, a, z);
-                __splice_builder.ret(fault);
+                let (operation, a, z) = fault.kernel_operation();
+                let (a, z) = (__splice_builder.constant(a)?, __splice_builder.constant(z)?);
+                // The operation traps; the explicit trap after it is unreachable.
+                __splice_builder.binary(operation, a, z)?;
+                __splice_builder.trap_bounds()?;
                 break #region;
             }
         };
         emit! {
-            use #root::frontend::scalar::ArithmeticGuard as _;
-            if #checks && let Some((a, z)) = (#operands).faulting_i32_arithmetic(#root::hir::Binary::#operation) {
-                let _ = (a, z);
+            use #root::frontend::scalar::{HostArithmetic as _, HostNegation as _, HostShift as _};
+            if #checks && let ::core::option::Option::Some(fault) = #guard {
                 #fault
             }
         }
     }
+}
+
+/// The name of a binary operator that can fault on host integers.
+pub(super) fn operator_kind(op: &BinOp) -> Option<&'static str> {
+    Some(match op {
+        BinOp::Add(_) => "Add",
+        BinOp::Sub(_) => "Sub",
+        BinOp::Mul(_) => "Mul",
+        BinOp::Div(_) => "Div",
+        BinOp::Rem(_) => "Rem",
+        BinOp::Shl(_) => "Shl",
+        BinOp::Shr(_) => "Shr",
+        _ => return None,
+    })
+}
+
+/// An `Option<HostFault>` expression for host operator `kind` (`Add`, `Div`,
+/// `Shl`, ...) on `operands`, a reference to the operand pair, and whether the
+/// operator divides. `None` when the operator cannot fault.
+pub(super) fn operator_fault(
+    root: &Path,
+    kind: &str,
+    operands: TokenStream,
+) -> Option<(TokenStream, bool)> {
+    let division = matches!(kind, "Div" | "Rem");
+    let op = if division {
+        kind
+    } else {
+        super::checked_operator(kind)?
+    };
+    let op = Ident::new(op, proc_macro2::Span::call_site());
+    let guard = if matches!(kind, "Shl" | "Shr") {
+        emit!((#operands).shift_fault(#root::hir::Binary::#op))
+    } else {
+        emit!((#operands).arithmetic_fault(#root::hir::Binary::#op))
+    };
+    Some((guard, division))
+}
+
+/// Whether to evaluate a fault guard: overflow follows the overflow-check
+/// mode of the kernel's crate (host code is native Rust there), while
+/// division faults in every mode.
+pub(super) fn fault_checks(division: bool) -> TokenStream {
+    if division {
+        emit!(true)
+    } else {
+        emit!(__splice_overflow)
+    }
+}
+
+/// Bind `__splice_overflow`, whether the kernel's crate compiles Rust
+/// arithmetic with overflow checks, at the start of a generated function.
+/// The probe is compiled in that crate, so it sees its real flags.
+pub(crate) fn overflow_prologue(root: &syn::Path) -> TokenStream {
+    emit! {
+        #[allow(unused_variables)]
+        let __splice_overflow: bool = {
+            fn probe(value: i32) -> i32 {
+                value + 1
+            }
+            #root::frontend::scalar::overflow_checks(
+                ::core::module_path!(),
+                probe,
+                ::core::cfg!(panic = "unwind"),
+                ::core::cfg!(debug_assertions),
+            )
+        };
+    }
+}
+
+/// Whether staged kernel arithmetic checks overflow: the build options'
+/// mode, or else the kernel crate's.
+pub(super) fn kernel_overflow_checks() -> TokenStream {
+    emit!(
+        __splice_builder
+            .overflow_checks()
+            .unwrap_or(__splice_overflow)
+    )
 }

@@ -1,24 +1,24 @@
-fn main x:i32 -> i32
+fn main(x:i32) -> i32
   zero = const 0
   one = const 1
-  n = simd.lanes i16
+  n = lanes i16
   half = shr n one
   start = cast i16 x
-  base = simd.splat start
-  lanes = simd.iota i16
-  values = simd.add lanes base
-  low = simd.widenlo i32 values
-  high = simd.widenhi i32 values
-  swapped = simd.narrow i16 high low
+  base = splat start
+  lanes = iota i16
+  values = add lanes base
+  low = widenlo i32 values
+  high = widenhi i32 values
+  swapped = narrow i16 high low
   mid = cast i16 half
-  offset = simd.splat mid
-  indices = simd.xor lanes offset
-  expected = simd.add indices base
-  diffs = simd.ne swapped expected
-  bad_order = simd.any diffs
-  lo_first = simd.extract low zero
-  hi_first = simd.extract high zero
-  source_first = simd.extract values half
+  offset = splat mid
+  indices = xor lanes offset
+  expected = add indices base
+  diffs = ne swapped expected
+  bad_order = any diffs
+  lo_first = extract low zero
+  hi_first = extract high zero
+  source_first = extract values half
   hi_expected = cast i32 source_first
   lo_expected = cast i32 start
   hi_error = xor hi_first hi_expected
@@ -26,35 +26,35 @@ fn main x:i32 -> i32
   bad_values = or hi_error lo_error
   result = or bad_order bad_values
   ret result
-@aarch64-isel check: Widen(
-@aarch64-isel check: Widen(
-@aarch64-isel check: Narrow(
-@aarch64 neon has 0xff3ffc00 0x4e212800
-@aarch64 sve has 0xff3ffc00 0x05303800
-@aarch64 sve2 has 0xff3fe000 0x052c8000
-@aarch64 all lacks 0xfffffc1f 0xd63f0000
+@aarch64-isel check: widen 
+@aarch64-isel check: widen 
+@aarch64-isel check: narrow 
+@aarch64 neon has v.xtn2
+@aarch64 sve has z.sunpklo
+@aarch64 sve2 has z.splice
+@aarch64 all lacks blr
 @run 32766 -> 0
 @run -15 -> 0
 ---
-fn main x:i32 -> i32
+fn main(x:i32) -> i32
   zero = const 0
   one = const 1
-  n = simd.lanes f64
+  n = lanes f64
   end = sub n one
   two = const 2
   final = mul n two
   last = sub final one
   half_low = literal f64 0x3ff0000010000000
   half_high = literal f64 0x3ff0000030000000
-  a = simd.splat half_low
-  b = simd.splat half_high
+  a = splat half_low
+  b = splat half_high
   raw = bitcast f32 x
-  singles = simd.splat raw
-  extension = simd.widenhi f64 singles
-  result = simd.narrow f32 a b
-  low = simd.extract result end
-  high = simd.extract result last
-  wide = simd.extract extension zero
+  singles = splat raw
+  extension = widenhi f64 singles
+  result = narrow f32 a b
+  low = extract result end
+  high = extract result last
+  wide = extract extension zero
   round_trip = cast f32 wide
   low_bits = bitcast i32 low
   high_bits = bitcast i32 high
@@ -67,43 +67,43 @@ fn main x:i32 -> i32
   ext_error = xor restored x
   r = or errors ext_error
   ret r
-@aarch64-isel check: Widen(
-@aarch64-isel check: Narrow(
-@aarch64 all lacks 0xfffffc1f 0xd63f0000
+@aarch64-isel check: widen 
+@aarch64-isel check: narrow 
+@aarch64 all lacks blr
 @run 0x00000001 -> 0
 @run 0x80000000 -> 0
 @run 0xbf800001 -> 0
 ---
-fn main x:i32 -> i32
+fn main(x:i32) -> i32
   s = cast i64 x
-  a = simd.splat s
-  hi = simd.widenhi i128 a
+  a = splat s
+  hi = widenhi i128 a
   zero = const 0
-  item = simd.extract hi zero
+  item = extract hi zero
   want = cast i128 x
   extension_ok = eq item want
-  b = simd.narrow i64 hi hi
-  first = simd.extract b zero
+  b = narrow i64 hi hi
+  first = extract b zero
   r = cast i32 first
   both = and extension_ok r
   ret both
-@aarch64-isel check: Widen(Wide
-@aarch64-isel check: Narrow(
-@aarch64 all lacks 0xfffffc1f 0xd63f0000
+@aarch64-isel check: widen wide
+@aarch64-isel check: narrow 
+@aarch64 all lacks blr
 @run -2147483647 -> -2147483647
 @run 2147483647 -> 2147483647
 ---
-fn main raw:i32 -> i32
+fn main(raw:i32) -> i32
   bits = cast u16 raw
   value = bitcast bf16 bits
-  a = simd.splat value
-  hi = simd.widenhi f32 a
+  a = splat value
+  hi = widenhi f32 a
   zero = const 0
-  f = simd.extract hi zero
+  f = extract hi zero
   r = bitcast i32 f
   ret r
-@aarch64-isel check: Widen(Convert
-@aarch64 all lacks 0xfffffc1f 0xd63f0000
+@aarch64-isel check: widen convert
+@aarch64 all lacks blr
 @run 1 -> 0x00010000
 @run 0x8000 -> 0x80000000
 @run 0xff81 -> 0xffc00000

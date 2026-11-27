@@ -1,4 +1,27 @@
 //! JIT compilation and warm execution on the same inputs for all three backends.
+
+/// One workload's builders with the arguments written once: `$b` names each
+/// benchmarked backend in turn.
+macro_rules! builders {
+    ($b:ident => $build:expr) => {
+        $crate::Builders {
+            lancy: &|| {
+                type $b = splice::lancy::Lancy;
+                $build
+            },
+            cranelift: &|| {
+                type $b = splice::cranelift::Cranelift;
+                $build
+            },
+            llvm: &|| {
+                type $b = splice::llvm::LlvmManualSimd;
+                $build
+            },
+        }
+    };
+}
+
+mod common;
 mod gaps;
 #[path = "large/mod.rs"]
 mod large;
@@ -14,10 +37,12 @@ use criterion::{
     measurement::WallTime,
 };
 use relational::{Catalog, pricing_plan, query};
-use splice::{BufferArg, BuildError, Codegen, Executable, TypedIr, TypedKernel, kernel};
-use splice_cranelift::{Cranelift, CraneliftKernel};
-use splice_lancy::{Lancy, LancyKernel};
-use splice_llvm::{LlvmKernel, LlvmManualSimd};
+use splice::cranelift::CraneliftKernel;
+use splice::lancy::LancyKernel;
+use splice::llvm::LlvmKernel;
+use splice::{
+    BufferArg, BuildError, Codegen, Executable, KernelScalar, TypedIr, TypedKernel, kernel,
+};
 use std::{cell::LazyCell, hint::black_box, ops::Not};
 
 #[kernel]
@@ -75,7 +100,7 @@ fn bench_compile<K, E: std::fmt::Debug>(
 
 impl<Run, T> Workload<'_, Run, T>
 where
-    Run: Fn(&dyn Executable, &mut [T]) -> splice::Result<usize>,
+    Run: Fn(&dyn Executable, &mut [T]) -> Result<usize, Box<dyn std::error::Error>>,
     T: Copy + Default + Not<Output = T>,
 {
     fn verify(&self, kernel: &dyn Executable, workspace: &mut [T], backend: &str) {
@@ -151,15 +176,7 @@ where
         });
         self.bench_route(c, "build", builds);
         let ir = stage().expect("stage shared IR");
-        self.bench_route(
-            c,
-            "from_ir",
-            Builders {
-                lancy: &|| Lancy::compile(black_box(&ir)),
-                cranelift: &|| Cranelift::compile(black_box(&ir)),
-                llvm: &|| LlvmManualSimd::compile(black_box(&ir)),
-            },
-        );
+        self.bench_route(c, "from_ir", builders!(B => B::compile(black_box(&ir))));
     }
 }
 
@@ -181,34 +198,20 @@ fn projection(c: &mut Criterion) {
             let count = kernel.call(
                 &[],
                 &mut [
-                    BufferArg::Read(&prices),
-                    BufferArg::Read(&quantities),
-                    BufferArg::Write(dst),
+                    BufferArg::read(&prices),
+                    BufferArg::read(&quantities),
+                    BufferArg::write(dst),
                 ],
             )?;
-            usize::try_from(count).map_err(|_| "negative projection length".into())
+            usize::try_from(i32::from_word(count)).map_err(|_| "negative projection length".into())
         },
     };
     workload.compare(
         c,
         || line_totals::ir(black_box(2)),
-        Builders {
-            lancy: &|| {
-                line_totals::build::<Lancy>(line_totals::BuildArgs {
-                    minimum: black_box(2),
-                })
-            },
-            cranelift: &|| {
-                line_totals::build::<Cranelift>(line_totals::BuildArgs {
-                    minimum: black_box(2),
-                })
-            },
-            llvm: &|| {
-                line_totals::build::<LlvmManualSimd>(line_totals::BuildArgs {
-                    minimum: black_box(2),
-                })
-            },
-        },
+        builders!(B => line_totals::build::<B>(line_totals::BuildArgs {
+            minimum: black_box(2),
+        })),
     );
 }
 
@@ -271,29 +274,15 @@ fn sql_plan(c: &mut Criterion) {
         },
         run: |kernel: &dyn Executable, arena: &mut [i32]| {
             let (arena, state) = arena.split_at_mut(workspace_words);
-            data.0.run(kernel, arena, state).map(<[i32]>::len)
+            Ok(data.0.run(kernel, arena, state)?.len())
         },
     };
     workload.compare(
         c,
         || query::ir(&plan.prepare()),
-        Builders {
-            lancy: &|| {
-                query::build::<Lancy>(query::BuildArgs {
-                    program: &plan.prepare(),
-                })
-            },
-            cranelift: &|| {
-                query::build::<Cranelift>(query::BuildArgs {
-                    program: &plan.prepare(),
-                })
-            },
-            llvm: &|| {
-                query::build::<LlvmManualSimd>(query::BuildArgs {
-                    program: &plan.prepare(),
-                })
-            },
-        },
+        builders!(B => query::build::<B>(query::BuildArgs {
+            program: &plan.prepare(),
+        })),
     );
 }
 
@@ -313,24 +302,20 @@ fn simd_matmul(c: &mut Criterion) {
         equal: <[i32]>::eq,
         run: |kernel: &dyn Executable, dst: &mut [i32]| {
             let written = kernel.call(
-                &[M as i32, K as i32, N as i32],
+                &[M as u64, K as u64, N as u64],
                 &mut [
-                    BufferArg::Read(&a),
-                    BufferArg::Read(&b),
-                    BufferArg::Write(dst),
+                    BufferArg::read(&a),
+                    BufferArg::read(&b),
+                    BufferArg::write(dst),
                 ],
             )?;
-            usize::try_from(written).map_err(|_| "invalid matrix dimensions".into())
+            usize::try_from(i32::from_word(written)).map_err(|_| "invalid matrix dimensions".into())
         },
     };
     workload.compare(
         c,
         multiply::ir,
-        Builders {
-            lancy: &|| multiply::build::<Lancy>(multiply::BuildArgs {}),
-            cranelift: &|| multiply::build::<Cranelift>(multiply::BuildArgs {}),
-            llvm: &|| multiply::build::<LlvmManualSimd>(multiply::BuildArgs {}),
-        },
+        builders!(B => multiply::build::<B>(multiply::BuildArgs {})),
     );
 }
 
@@ -348,22 +333,18 @@ fn simd_hash_lookup(c: &mut Criterion) {
             let written = kernel.call(
                 &[],
                 &mut [
-                    BufferArg::Read(&table),
-                    BufferArg::Read(&queries),
-                    BufferArg::Write(dst),
+                    BufferArg::read(&table),
+                    BufferArg::read(&queries),
+                    BufferArg::write(dst),
                 ],
             )?;
-            usize::try_from(written).map_err(|_| "invalid hash table".into())
+            usize::try_from(i32::from_word(written)).map_err(|_| "invalid hash table".into())
         },
     };
     workload.compare(
         c,
         lookup::ir,
-        Builders {
-            lancy: &|| lookup::build::<Lancy>(lookup::BuildArgs {}),
-            cranelift: &|| lookup::build::<Cranelift>(lookup::BuildArgs {}),
-            llvm: &|| lookup::build::<LlvmManualSimd>(lookup::BuildArgs {}),
-        },
+        builders!(B => lookup::build::<B>(lookup::BuildArgs {})),
     );
 }
 

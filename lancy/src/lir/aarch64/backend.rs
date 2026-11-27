@@ -5,19 +5,18 @@ mod divide;
 mod groups;
 mod half;
 mod inst;
-mod integer_float;
 mod isel;
 mod memory;
+mod names;
 mod operations;
 mod reduce;
-mod remainder;
 mod rotate;
 mod shuffle;
 mod special;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
-pub(crate) use tests::check_machine;
+pub(crate) use tests::encoding;
 mod unary;
 mod wide;
 mod width;
@@ -26,35 +25,72 @@ use super::{
     Arrangement as A, Code as C, ConditionCode as Cond, Operand as O, PredQual, Register as R,
     ShiftKind,
 };
+use crate::lir::{Code, Stage, Stages, regalloc::Allocations};
 use crate::{
-    CompileError,
-    hir::{Function, Type, ssa::VerifiedBody},
-    jit::{DebugFrame, DebugFunction},
+    CompileError, Trap,
+    debug::{FrameInfo, FunctionInfo, Point},
+    hir::{Type, ssa::VerifiedBody},
     lir::layout,
-    module::{FunctionId, FunctionIds, Module},
+    module::{FunctionId, Module},
     support::slotmap::DenseMap,
 };
-use compile::{Compiled, Frame, TEMP_WORD_BYTES, compile};
+use compile::{Compiled, Frame, compile};
 use inst::Inst;
-use regalloc2::{Allocation, Block, Edit, Function as _, InstOrEdit, PReg, RegClass};
-use splice_target::{Profile, Simd};
+use regalloc2::{Allocation, Block, Edit, Function as _, InstOrEdit, PReg, RegClass, VReg};
+use splice_target::Profile;
 
-pub(crate) use operations::Site;
-
-// Status pointer, eight result words, and the address of the immutable libcall table.
-pub(crate) const SITE_POINTER: usize = 9;
-const ROOT_BYTES: usize = (SITE_POINTER + 1) * 8;
-const ROOT_SAVES: [u8; 4] = [19, 20, 22, 30];
-const CHILD_SAVES: [u8; 3] = [19, 22, 30];
-const HOST_STACK_BYTES: u64 = 32;
-const RESULT: (R, usize) = (R::X20, 8);
-
-pub(crate) struct Code {
-    pub bytes: Vec<u8>,
-    pub words: usize,
-    pub sites: Box<[Site]>,
-    pub debug: Vec<DebugFunction>,
+/// The vector extension and width one compilation selects for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Config {
+    pub profile: Profile,
+    pub bytes: usize,
+    /// The widest value a vector register holds in the function: spills
+    /// and moves of the `Vector` class use this width (A64-10).
+    pub register_bytes: usize,
 }
+
+impl Config {
+    pub(super) fn new(target: &splice_target::Target) -> Self {
+        let features = target
+            .arm64()
+            .expect("AArch64 code generation for an AArch64 target");
+        let profile = if features.sve2 {
+            Profile::Sve2
+        } else if features.sve {
+            Profile::Sve
+        } else {
+            Profile::Neon
+        };
+        Self {
+            profile,
+            bytes: target.vector_bytes(),
+            register_bytes: target.vector_bytes(),
+        }
+    }
+}
+
+// The root ABI (A64-17). The host calls the root with AAPCS64:
+// `x0` points to the argument words, `x1` to the workspace. The workspace
+// starts with the root area of ROOT_BYTES: the status pointer, then the
+// result words. The root
+// - reserves HOST_STACK_BYTES on the host stack and stores ROOT_SAVES there,
+//   then points x29 at the saved x29/x30 pair (an AAPCS64 frame record);
+// - keeps the root area in x20, the first frame (`x1 + ROOT_BYTES`) in x19
+//   and the arguments in x22 for the whole call;
+// - saves every other callee-saved register the call graph writes in the
+//   first frame and restores it, with ROOT_SAVES, on return and on trap.
+// Children run on the workspace (their saves at `x1`), not the host stack,
+// except in debug builds, which give each function a host frame.
+// Status pointer and eight result words, padded to a cache line so that
+// every frame starts aligned (A64-10).
+const ROOT_BYTES: usize = 128;
+// X29 and X30 are adjacent so that they form the AAPCS64 frame record that
+// frame-pointer unwinders follow through the root (A64-17).
+const ROOT_SAVES: [u8; 5] = [19, 20, 22, 29, 30];
+const FRAME_RECORD: usize = 3 * 8;
+const CHILD_SAVES: [u8; 3] = [19, 22, 30];
+const HOST_STACK_BYTES: u64 = 48;
+const RESULT: (R, usize) = (R::X20, 8);
 
 type Result<T = ()> = std::result::Result<T, CompileError>;
 type Label = usize;
@@ -71,20 +107,86 @@ fn arrangements(bytes: usize) -> (A, A) {
     )
 }
 
-#[derive(Default)]
+/// The allocator's register for `reg`, if the allocator assigns it.
+fn allocatable(reg: R) -> Option<PReg> {
+    use super::operand::Bank;
+    let class = match reg.bank {
+        Bank::X | Bank::W if reg.number < 31 => RegClass::Int,
+        Bank::V | Bank::Z => RegClass::Vector,
+        _ => return None,
+    };
+    let preg = PReg::new(reg.number.into(), class);
+    (inst::call_clobbers() | inst::nonvolatile())
+        .contains(preg)
+        .then_some(preg)
+}
+
 struct Assembler {
     words: Vec<u32>,
     labels: Vec<Option<u64>>,
-    fixups: Vec<(usize, C, Label)>,
+    /// Branch word, its code, the operand before the target (a condition or
+    /// a register) and the target.
+    fixups: Vec<(usize, C, Option<O>, Label)>,
+    /// Conditional branches reach ±1 MiB. Code that is larger is emitted
+    /// again with each one as a short inverted branch over a `B` (A64-07).
+    long_branches: bool,
+    /// The extensions selection may use.
+    features: super::FeatureSet,
+    /// In debug builds, while one instruction is emitted: the allocatable
+    /// registers it may write, its outputs, temporaries and clobbers.
+    writable: Option<regalloc2::PRegSet>,
 }
 
 impl Assembler {
+    fn new(profile: Profile, long_branches: bool) -> Self {
+        use super::{Feature, FeatureSet};
+        let base = FeatureSet::NONE.with(Feature::Neon);
+        Self {
+            words: Vec::new(),
+            labels: Vec::new(),
+            fixups: Vec::new(),
+            long_branches,
+            writable: None,
+            features: match profile {
+                Profile::Sve2 => base.with(Feature::Sve2),
+                Profile::Sve => base.with(Feature::Sve),
+                _ => base,
+            },
+        }
+    }
+
     fn put(&mut self, code: C, operands: &[O]) -> Result {
-        self.words.push(
-            code.encode(0, operands, self.words.len() as u64 * 4)
-                .map_err(super::Error::from)?,
+        debug_assert!(
+            code.is_available(self.features),
+            "{code:?} needs {:?}",
+            code.required_feature()
         );
+        if let Some(writable) = self.writable
+            && let Some(reg) = code.written(operands)
+            && let Some(preg) = allocatable(reg)
+        {
+            assert!(
+                writable.contains(preg),
+                "{code:?} writes {reg:?}, which its instruction does not declare"
+            );
+        }
+        self.words
+            .push(code.encode(operands, self.words.len() as u64 * 4)?);
         Ok(())
+    }
+
+    /// Fill each NEON lane with its sign bit: `sshr` by the lane width less one.
+    fn sign_fill(&mut self, dst: O, src: O) -> Result {
+        let O::Vector(_, arr) = dst else {
+            unreachable!("a NEON vector operand")
+        };
+        let bits = match arr {
+            A::B8 | A::B16 => 8,
+            A::H4 | A::H8 => 16,
+            A::S2 | A::S4 => 32,
+            _ => 64,
+        };
+        self.put(C::Sshr_asimd_imm, &[dst, src, O::imm(bits - 1)])
     }
 
     fn label(&mut self) -> Label {
@@ -97,13 +199,30 @@ impl Assembler {
         self.labels[label] = Some(self.words.len() as u64 * 4);
     }
 
-    fn branch(&mut self, code: C, label: Label) {
-        self.fixups.push((self.words.len(), code, label));
+    fn branch(&mut self, code: C, operand: Option<O>, label: Label) {
+        self.fixups.push((self.words.len(), code, operand, label));
         self.words.push(0);
     }
 
     fn jump(&mut self, label: Label) {
-        self.branch(C::B_only_branch_imm, label);
+        self.branch(C::B_only_branch_imm, None, label);
+    }
+
+    /// Branch to `label` when the 32-bit register `reg` is zero, or nonzero.
+    fn jump_if_zero(&mut self, zero: bool, reg: R, label: Label) -> Result {
+        let (short, inverse) = if zero {
+            (C::Cbz_32_compbranch, C::Cbnz_32_compbranch)
+        } else {
+            (C::Cbnz_32_compbranch, C::Cbz_32_compbranch)
+        };
+        if self.long_branches {
+            let skip = O::label(self.words.len() as u64 * 4 + 8);
+            self.put(inverse, &[O::reg(reg), skip])?;
+            self.jump(label);
+        } else {
+            self.branch(short, Some(O::reg(reg)), label);
+        }
+        Ok(())
     }
 
     fn skip_if(&mut self, cond: Cond) -> Result {
@@ -114,27 +233,45 @@ impl Assembler {
     }
 
     fn jump_if(&mut self, cond: Cond, label: Label) -> Result {
-        self.skip_if(invert(cond))?;
-        self.jump(label);
+        if self.long_branches {
+            self.skip_if(invert(cond))?;
+            self.jump(label);
+        } else {
+            self.branch(C::B_only_condbranch, Some(O::cond(cond)), label);
+        }
         Ok(())
     }
 
-    fn finish(mut self) -> Result<Vec<u8>> {
-        for (at, code, label) in self.fixups {
+    /// The code, or `None` when a conditional branch is out of range and the
+    /// code needs `long_branches`.
+    fn finish(mut self) -> Result<Option<Vec<u8>>> {
+        for (at, code, operand, label) in self.fixups {
             let target = self.labels[label].expect("branch target emitted");
             let pc = at as u64 * 4;
-            self.words[at] = code.encode(0, &[O::label(target)], pc).map_err(|error| {
+            let operands: &[O] = match operand {
+                Some(operand) => &[operand, O::label(target)],
+                None => &[O::label(target)],
+            };
+            let encoded = code.encode(operands, pc);
+            if !matches!(code, C::B_only_branch_imm | C::Bl_only_branch_imm)
+                && matches!(encoded, Err(super::EncodeError::Branch { .. }))
+            {
+                return Ok(None);
+            }
+            self.words[at] = encoded.map_err(|error| {
                 if matches!(error, super::EncodeError::Branch { .. }) {
-                    CompileError::BranchOutOfRange {
+                    CompileError::from(crate::Limit::BranchRange {
                         offset: pc as usize,
                         target: target as usize,
-                    }
+                    })
                 } else {
-                    super::Error::from(error).into()
+                    error.into()
                 }
             })?;
         }
-        Ok(self.words.into_iter().flat_map(u32::to_le_bytes).collect())
+        Ok(Some(
+            self.words.into_iter().flat_map(u32::to_le_bytes).collect(),
+        ))
     }
 
     fn imm(&mut self, dst: R, value: u64) -> Result {
@@ -207,27 +344,21 @@ impl Assembler {
     }
 }
 
-fn number(a: Allocation) -> u8 {
-    a.as_reg().expect("register operand").hw_enc() as u8
-}
-
-fn x(a: Allocation) -> R {
-    R::x(number(a)).unwrap()
-}
-
-fn w(a: Allocation) -> R {
-    R::w(number(a)).unwrap()
-}
-
 struct Emitter<'a> {
     a: &'a mut Assembler,
     frame: &'a Frame,
-    sites: &'a mut Vec<Site>,
+    sites: &'a mut crate::lir::fallback::Sites,
     entries: &'a DenseMap<FunctionId, Label>,
-    config: Simd,
+    config: Config,
     epilogue: Label,
     byte_predicate: bool,
-    failures: [Option<Label>; 5],
+    /// Per-trap side exits, indexed by `Trap::code() - 1`.
+    failures: [Option<Label>; Trap::ALL.len()],
+    /// The shared tail of every side exit: report the trap code in W16.
+    report: Option<Label>,
+    /// The registers of the current instruction's temporaries.
+    temps: [u8; 3],
+    temp_count: usize,
 }
 
 impl Emitter<'_> {
@@ -246,31 +377,47 @@ impl Emitter<'_> {
     fn check_status(&mut self) -> Result {
         self.a.access(true, 8, 10, (R::X20, 0))?;
         self.a.access(true, 4, 9, (R::X10, 0))?;
-        self.a.put(
-            C::Subs_32_addsub_imm,
-            &[O::reg(R::WZR), O::reg(R::W9), O::imm(0)],
-        )?;
-        self.a.skip_if(Cond::Eq)?;
-        self.a.jump(self.epilogue);
-        Ok(())
+        self.a.jump_if_zero(false, R::W9, self.epilogue)
     }
 
-    fn trap_if(&mut self, cond: Cond, status: usize) -> Result {
-        let trap = *self.failures[status - 1].get_or_insert_with(|| self.a.label());
-        self.a.skip_if(invert(cond))?;
-        self.a.jump(trap);
-        Ok(())
+    fn trap_if(&mut self, cond: Cond, trap: Trap) -> Result {
+        let exit = self.trap_exit(trap);
+        self.a.jump_if(cond, exit)
+    }
+
+    fn trap(&mut self, trap: Trap) {
+        let exit = self.trap_exit(trap);
+        self.a.jump(exit);
+    }
+
+    fn trap_exit(&mut self, trap: Trap) -> Label {
+        *self.failures[trap.code() as usize - 1].get_or_insert_with(|| self.a.label())
+    }
+
+    /// Trap with the code a Rust entry or runtime helper left in W16.
+    fn report_if(&mut self, cond: Cond) -> Result {
+        let report = *self.report.get_or_insert_with(|| self.a.label());
+        self.a.jump_if(cond, report)
     }
 
     fn traps(&mut self) -> Result {
-        for (i, label) in self.failures.into_iter().enumerate() {
-            if let Some(label) = label {
-                self.a.bind(label);
-                self.a.access(true, 8, 10, (R::X20, 0))?;
-                self.a.imm(R::W9, (i + 1) as u64)?;
-                self.a.access(false, 4, 9, (R::X10, 0))?;
-                self.a.jump(self.epilogue);
+        let mut report = self.report;
+        for (trap, exit) in Trap::ALL.into_iter().zip(self.failures) {
+            if let Some(exit) = exit {
+                self.a.bind(exit);
+                self.a.imm(R::W16, trap.code().into())?;
+                let tail = match report {
+                    Some(tail) => tail,
+                    None => *report.insert(self.a.label()),
+                };
+                self.a.jump(tail);
             }
+        }
+        if let Some(report) = report {
+            self.a.bind(report);
+            self.a.access(true, 8, 10, (R::X20, 0))?;
+            self.a.access(false, 4, 16, (R::X10, 0))?;
+            self.a.jump(self.epilogue);
         }
         Ok(())
     }
@@ -321,7 +468,7 @@ impl Emitter<'_> {
             return Ok(());
         }
         if to.class() == RegClass::Vector {
-            self.copy_vec(d, s, self.config.bytes > 16)
+            self.copy_vec(d, s, self.config.register_bytes > 16)
         } else {
             self.a.put(
                 C::Orr_64_log_shift,
@@ -358,7 +505,7 @@ impl Emitter<'_> {
             (Some(s), Some(d)) => self.move_regs(s, d),
             (Some(s), None) => {
                 let size = if s.class() == RegClass::Vector {
-                    self.config.bytes
+                    self.config.register_bytes
                 } else {
                     8
                 };
@@ -366,7 +513,7 @@ impl Emitter<'_> {
             }
             (None, Some(d)) => {
                 let size = if d.class() == RegClass::Vector {
-                    self.config.bytes
+                    self.config.register_bytes
                 } else {
                     8
                 };
@@ -389,8 +536,10 @@ impl Emitter<'_> {
                 self.a.imm(R::X10, (bits >> 64) as u64)?;
                 self.a
                     .put(C::Fmov_d_x, &[O::reg(R::v(n).unwrap()), O::reg(R::X9)])?;
-                self.a
-                    .put(C::Mov_v_d1_x, &[O::reg(R::v(n).unwrap()), O::reg(R::X10)])
+                self.a.put(
+                    C::Ins_lane,
+                    &[O::vec(R::v(n).unwrap(), A::D2), O::reg(R::X10), O::imm(1)],
+                )
             }
             8 => self.a.imm(R::x(n).unwrap(), bits as u64),
             _ => self.a.imm(
@@ -403,98 +552,142 @@ impl Emitter<'_> {
     fn inst(
         &mut self,
         op: Inst,
-        allocs: &[Allocation],
+        allocs: Allocations,
         succs: &[Block],
         labels: &[Label],
         next: Option<Block>,
     ) -> Result {
-        let n = |i| number(allocs[i]);
-        let g = |i| x(allocs[i]);
-        let word = |i| w(allocs[i]);
+        use crate::lir::TargetInst;
+        self.temp_count = op.temps(&self.config).len();
+        for (i, temp) in self.temps[..self.temp_count].iter_mut().enumerate() {
+            *temp = allocs.temp(i) as u8;
+        }
+        if cfg!(debug_assertions) {
+            let mut writable = op.clobbers(&self.config, &());
+            for (operand, alloc) in allocs.iter() {
+                if operand.kind() == regalloc2::OperandKind::Def
+                    && let Some(reg) = alloc.as_reg()
+                {
+                    writable.add(reg);
+                }
+            }
+            self.a.writable = Some(writable);
+        }
+        let result = self.selected(op, allocs, succs, labels, next);
+        self.a.writable = None;
+        result
+    }
+
+    /// The `i`-th scratch register the instruction declares in
+    /// [`TargetInst::temps`](crate::lir::TargetInst::temps).
+    fn temp(&self, i: usize) -> u8 {
+        assert!(
+            i < self.temp_count,
+            "the instruction declares {} temporaries",
+            self.temp_count
+        );
+        self.temps[i]
+    }
+
+    fn selected(
+        &mut self,
+        op: Inst,
+        allocs: Allocations,
+        succs: &[Block],
+        labels: &[Label],
+        next: Option<Block>,
+    ) -> Result {
+        let n = |v: VReg| allocs.reg(v) as u8;
+        let g = |v: VReg| R::x(n(v)).unwrap();
+        let word = |v: VReg| R::w(n(v)).unwrap();
+        let preg = |v: VReg| allocs.get(v).as_reg().expect("register operand");
         let r = O::reg;
         let bytes = self.config.bytes;
         let size = |ty: Type| ty.bytes(bytes);
         match op {
-            Inst::Arg(ty, offset, _) => self.value_access(true, ty, n(0), (R::X22, offset)),
-            Inst::Literal(ty, bits, _) => self.literal(ty, n(0), bits),
-            Inst::Copy(..) => {
-                self.move_regs(allocs[0].as_reg().unwrap(), allocs[1].as_reg().unwrap())
-            }
-            Inst::BitMove(from, to, ..) => {
+            Inst::Arg(ty, offset, d) => self.value_access(true, ty, n(d), (R::X22, offset)),
+            Inst::Literal(ty, bits, d) => self.literal(ty, n(d), bits),
+            Inst::Copy(d, v) => self.move_regs(preg(v), preg(d)),
+            Inst::BitMove(from, to, d, v) => {
                 if matches!(to, Type::F32 | Type::F64) {
-                    self.float_move(to, true, n(1), n(0))
+                    self.float_move(to, true, n(d), n(v))
                 } else {
-                    self.float_move(from, false, n(0), n(1))
+                    self.float_move(from, false, n(v), n(d))
                 }
             }
-            Inst::Imm(code, bits, shift, ..) => self.a.put(
+            Inst::Imm(code, bits, shift, d, v) => self.a.put(
                 code,
-                &[r(word(1)), r(word(0)), O::imm_lsl(bits.into(), shift)],
+                &[r(word(d)), r(word(v)), O::imm_lsl(bits.into(), shift)],
             ),
-            Inst::Int(int, ..) => self.int_binary(int, n(0), n(1), n(2)),
+            Inst::Int(int, d, a, b) => self.int_binary(int, n(a), n(b), n(d)),
             Inst::WideAdd {
-                subtract, scalable, ..
-            } => self.wide_add(subtract, scalable, n(0), n(1), n(2)),
-            Inst::WideMath(form, ..) => self.wide_math(form, n(0), n(1), n(2)),
-            Inst::WideUnary(op, scalable, ..) => self.wide_unary(op, scalable, n(0), n(1)),
-            Inst::Unary(form, ..) => self.unary(form, n(0), n(1)),
-            Inst::Half(form, _, _, extra) => {
-                let extra = std::array::from_fn(|i| extra[i].map(|_| n(i + 1)));
-                self.half(form, n(0), extra, n(allocs.len() - 1))
+                subtract,
+                scalable,
+                dst,
+                a,
+                b,
+            } => self.wide_add(subtract, scalable, n(a), n(b), n(dst)),
+            Inst::WideMath(form, d, a, b) => self.wide_math(form, n(a), n(b), n(d)),
+            Inst::WideUnary(op, scalable, d, v) => self.wide_unary(op, scalable, n(v), n(d)),
+            Inst::Unary(form, d, v) => self.unary(form, n(v), n(d)),
+            Inst::Half(form, d, a, extra) => self.half(form, n(a), extra.map(|e| e.map(n)), n(d)),
+            Inst::HalfCast(from, to, d, v) => self.half_cast(from, to, n(v), n(d)),
+            Inst::IntCast(from, to, d, v) => self.int_cast(from, to, n(v), n(d)),
+            Inst::WideCast(from, to, d, v) => self.wide_cast(from, to, n(v), n(d)),
+            Inst::FloatCast(code, from, to, d, v) => self.float_cast(code, from, to, n(v), n(d)),
+            Inst::PackedCast(code, arr, d, v) => self.packed_cast(code, arr, n(v), n(d)),
+            Inst::Select(form, d, m, a, b) => self.select(form, n(m), n(a), n(b), n(d)),
+            Inst::Fma(code, arr, d, args) => self.fma(code, arr, args.map(n), n(d)),
+            Inst::Sve2Ternary(code, d, [x0, x1, x2]) => {
+                let z = |v| O::vec(R::z(n(v)).unwrap(), A::D);
+                self.a.put(code, &[z(d), z(x0), z(x1), z(x2)])
             }
-            Inst::HalfCast(from, to, ..) => self.half_cast(from, to, n(0), n(1)),
-            Inst::IntegerFloatCast(form, ..) => self.integer_float_cast(form, n(0), n(1)),
-            Inst::IntCast(from, to, ..) => self.int_cast(from, to, n(0), n(1)),
-            Inst::WideCast(from, to, ..) => self.wide_cast(from, to, n(0), n(1)),
-            Inst::FloatCast(code, from, to, ..) => self.float_cast(code, from, to, n(0), n(1)),
-            Inst::PackedCast(code, arr, ..) => self.packed_cast(code, arr, n(0), n(1)),
-            Inst::Select(form, ..) => self.select(form, n(0), n(1), n(2), n(3)),
-            Inst::Fma(code, arr, ..) => self.fma(code, arr, [n(0), n(1), n(2)], n(3)),
-            Inst::Sve2Ternary(code, ..) => {
-                let z = |i| O::vec(R::z(n(i)).unwrap(), A::D);
-                self.a.put(code, &[z(3), z(0), z(1), z(2)])
+            Inst::Shuffle(form, d, args) => self.shuffle(form, args.map(n), n(d)),
+            Inst::Compact {
+                size,
+                scalable,
+                dst,
+                value,
+                mask,
+            } => self.compact(size, scalable, n(value), n(mask), n(dst)),
+            Inst::VectorDivide(form, d, a, b) => self.vector_divide(form, n(a), n(b), n(d)),
+            Inst::Rotate(form, d, a, b) => self.rotate(form, n(a), n(b), n(d)),
+            Inst::ScalarSaturate(code, size, d, a, b) => {
+                self.scalar_saturate(code, size, n(a), n(b), n(d))
             }
-            Inst::Shuffle(form, ..) => self.shuffle(form, [n(0), n(1), n(2)], n(3)),
-            Inst::Compact { size, scalable, .. } => self.compact(size, scalable, n(0), n(1), n(2)),
-            Inst::VectorDivide(form, ..) => self.vector_divide(form, n(0), n(1), n(2)),
-            Inst::Rotate(form, ..) => self.rotate(form, n(0), n(1), n(2)),
-            Inst::ScalarSaturate(code, size, ..) => {
-                self.scalar_saturate(code, size, n(0), n(1), n(2))
+            Inst::NeonMul64(d, a, b) => self.neon_mul64(n(a), n(b), n(d)),
+            Inst::FloatSpecial(form, d, a, b) => self.float_special(form, n(a), b.map(n), n(d)),
+            Inst::WideMaskTest(all, scalable, d, v) => {
+                self.wide_mask_test(all, scalable, n(v), n(d))
             }
-            Inst::NeonMul64(..) => self.neon_mul64(n(0), n(1), n(2)),
-            Inst::FloatRemainder(form, ..) => self.float_remainder(form, n(0), n(1), n(2)),
-            Inst::FloatSpecial(form, _, _, b) => {
-                self.float_special(form, n(0), b.map(|_| n(1)), n(allocs.len() - 1))
+            Inst::Reduce(form, d, v) => self.reduce(form, n(v), n(d)),
+            Inst::Expand(form, d, data, mask) => self.expand(form, n(data), n(mask), n(d)),
+            Inst::Widen(form, d, v) => self.widen(form, n(v), n(d)),
+            Inst::Narrow(form, d, a, b) => self.narrow(form, n(a), n(b), n(d)),
+            Inst::Float(code, arr, d, a, b) => {
+                let op = |v| O::vec(R::v(n(v)).unwrap(), arr);
+                self.a.put(code, &[op(d), op(a), op(b)])
             }
-            Inst::WideMaskTest(all, scalable, ..) => self.wide_mask_test(all, scalable, n(0), n(1)),
-            Inst::Reduce(form, ..) => self.reduce(form, n(0), n(1)),
-            Inst::Expand(form, ..) => self.expand(form, n(0), n(1), n(2)),
-            Inst::Widen(form, ..) => self.widen(form, n(0), n(1)),
-            Inst::Narrow(form, ..) => self.narrow(form, n(0), n(1), n(2)),
-            Inst::Float(code, arr, ..) => {
-                let op = |i| O::vec(R::v(n(i)).unwrap(), arr);
-                self.a.put(code, &[op(2), op(0), op(1)])
+            Inst::FloatCompare(cond, arr, d, a, b) => {
+                let op = |v| O::vec(R::v(n(v)).unwrap(), arr);
+                self.a.put(C::Fcmp_scalar, &[op(a), op(b)])?;
+                self.bool_mask(cond, n(d))
             }
-            Inst::FloatCompare(cond, arr, ..) => {
-                let op = |i| O::vec(R::v(n(i)).unwrap(), arr);
-                self.a.put(C::Fcmp_scalar, &[op(0), op(1)])?;
-                self.bool_mask(cond, n(2))
-            }
-            Inst::SveIota(lane, _) => self.sve_iota(lane, n(0)),
-            Inst::MaskTest(all, arr, ..) => self.mask_test(all, arr, n(0), n(1)),
-            Inst::LaneAccess { lane, insert, .. } => self.lane_access(
+            Inst::SveIota(lane, d) => self.sve_iota(lane, n(d)),
+            Inst::MaskTest(all, arr, d, v) => self.mask_test(all, arr, n(v), n(d)),
+            Inst::LaneAccess {
                 lane,
-                n(0),
-                word(1),
-                insert.map(|_| n(2)),
-                n(allocs.len() - 1),
-            ),
-            Inst::Splat(code, arr, ty, ..) => {
+                src,
+                index,
+                insert,
+                dst,
+            } => self.lane_access(lane, n(src), word(index), insert.map(n), n(dst)),
+            Inst::Splat(code, arr, ty, d, v) => {
                 let input = if matches!(ty, Type::F32 | Type::F64) {
-                    self.float_move(ty, false, n(0), 9)?;
+                    self.float_move(ty, false, n(v), 9)?;
                     9
                 } else {
-                    n(0)
+                    n(v)
                 };
                 let src = if size(ty) == 8 {
                     R::x(input)
@@ -503,164 +696,181 @@ impl Emitter<'_> {
                 }
                 .unwrap();
                 let dst = if code == C::Dup_z_r {
-                    R::z(n(1))
+                    R::z(n(d))
                 } else {
-                    R::v(n(1))
+                    R::v(n(d))
                 }
                 .unwrap();
                 self.a.put(code, &[O::vec(dst, arr), r(src)])
             }
-            Inst::SveSplat128(..) => self.a.put(
-                C::Dup_q0_z,
-                &[r(R::z(n(1)).unwrap()), r(R::z(n(0)).unwrap())],
+            Inst::SveSplat128(d, v) => self.a.put(
+                C::Dup_z_zi,
+                &[
+                    O::vec(R::z(n(d)).unwrap(), A::Q),
+                    O::vec(R::z(n(v)).unwrap(), A::Q),
+                    O::imm(0),
+                ],
             ),
-            Inst::Packed(op, ..) => self.packed(op, n(0), n(1), n(2)),
-            Inst::PackedShiftImm(code, arr, count, ..) => {
+            Inst::Packed(op, d, a, b) => self.packed(op, n(a), n(b), n(d)),
+            Inst::PackedShiftImm(code, arr, count, d, v) => {
                 let reg = if matches!(arr, A::B | A::H | A::S | A::D) {
                     R::z
                 } else {
                     R::v
                 };
-                let operand = |i| O::vec(reg(n(i)).unwrap(), arr);
+                let operand = |v| O::vec(reg(n(v)).unwrap(), arr);
                 self.a
-                    .put(code, &[operand(1), operand(0), O::imm(count.into())])
+                    .put(code, &[operand(d), operand(v), O::imm(count.into())])
             }
-            Inst::Check(..) => {
+            Inst::Check(index, limit) => {
                 self.a.put(
                     C::Subs_32_addsub_shift,
-                    &[r(R::WZR), r(word(0)), r(word(1))],
+                    &[r(R::WZR), r(word(index)), r(word(limit))],
                 )?;
-                self.trap_if(Cond::Cs, 1)
+                self.trap_if(Cond::Cs, Trap::Bounds)
             }
-            Inst::CheckOverflow(..) => {
+            Inst::TrapIf(cond, trap) => {
+                self.a.put(
+                    C::Subs_32_addsub_shift,
+                    &[r(R::WZR), r(word(cond)), r(R::WZR)],
+                )?;
+                self.trap_if(Cond::Ne, trap)
+            }
+            Inst::Trap(trap) => {
+                self.trap(trap);
+                Ok(())
+            }
+            Inst::CallScratch(offset, _, d) => {
                 self.a
-                    .put(C::Subs_32_addsub_shift, &[r(R::WZR), r(word(0)), r(R::WZR)])?;
-                self.trap_if(Cond::Ne, 4)
+                    .addr(g(d), R::X19, self.frame.scratch_base + offset as usize)
             }
-            Inst::CallScratch(..) => self.a.addr(g(0), R::X19, self.frame.scratch_base),
-            Inst::StorePacketWord(offset, _) => self.value_access(
-                false,
-                Type::I32,
-                n(0),
-                (R::X19, self.frame.scratch_base + offset as usize),
-            ),
-            Inst::RustCall(..) | Inst::RustPacketCall(..) | Inst::RustContextCall(..) => {
-                let entry = match op {
-                    Inst::RustCall(import, ..) => (import.resolve)() as usize,
-                    Inst::RustPacketCall(import, _) => {
-                        self.a.imm(R::X0, std::ptr::from_ref(import) as u64)?;
-                        self.a.addr(R::X1, R::X19, self.frame.scratch_base)?;
-                        self.a.imm(R::X2, u64::from(import.arity))?;
-                        splice_target::abi::invoke_packet_import as *const () as usize
-                    }
-                    Inst::RustContextCall(import, ..) => import.address(),
-                    _ => unreachable!(),
-                };
+            Inst::RustCall(function, ..) => {
                 // The frame has already saved LR and keeps the workspace in
                 // callee-saved registers across this AAPCS64 call.
-                self.a.imm(R::X16, entry as u64)?;
+                self.a.imm(R::X16, function.entry as usize as u64)?;
                 self.a.put(C::Blr_64_branch_reg, &[r(R::X16)])?;
                 self.byte_predicate = false;
                 self.a.put(
                     C::Ubfm_64m_bitfield,
                     &[r(R::X16), r(R::X0), O::imm(32), O::imm(63)],
                 )?;
+                // The status's upper word is the entry's trap code.
                 self.a
                     .put(C::Subs_32_addsub_imm, &[r(R::WZR), r(R::W16), O::imm(0)])?;
-                self.trap_if(Cond::Ne, 5)
+                self.report_if(Cond::Ne)
             }
-            Inst::Offset(scale, ..) => self.a.put(
+            Inst::Offset(scale, d, base, index) => self.a.put(
                 C::Add_64_addsub_sxtw,
                 &[
-                    r(g(2)),
-                    r(g(0)),
-                    O::shifted(word(1), ShiftKind::Lsl, scale as u8),
+                    r(g(d)),
+                    r(g(base)),
+                    O::shifted(word(index), ShiftKind::Lsl, scale as u8),
                 ],
             ),
-            Inst::Load(ty, ..) => self.value_access(true, ty, n(1), (g(0), 0)),
-            Inst::Store(ty, ..) => self.value_access(false, ty, n(1), (g(0), 0)),
-            Inst::DebugStore(ty, offset, _) => self.value_access(
+            Inst::Load(ty, d, address) => self.value_access(true, ty, n(d), (g(address), 0)),
+            Inst::Store(ty, address, value) => {
+                self.value_access(false, ty, n(value), (g(address), 0))
+            }
+            Inst::DebugStore(ty, offset, v) => self.value_access(
                 false,
                 ty,
-                n(0),
+                n(v),
                 (R::X19, self.frame.debug_base + offset as usize),
             ),
             Inst::DebugPoint(_) => self.a.put(C::Nop_HI_hints, &[]),
             Inst::Masked {
                 kind,
                 ty,
+                base,
                 indices,
+                mask,
+                value,
                 dst,
-                ..
             } => {
-                let indices = indices.map(|_| n(3));
-                let dst = dst.map(|_| n(allocs.len() - 1));
+                let (base, mask, value) = (g(base), n(mask), n(value));
+                let (indices, dst) = (indices.map(n), dst.map(n));
                 match kind {
-                    inst::Masked::Neon => {
-                        self.neon_masked(ty.lane().unwrap().bytes(), g(0), n(1), n(2), indices, dst)
-                    }
+                    inst::Masked::Neon => self.neon_masked(
+                        ty.lane().unwrap().bytes(),
+                        base,
+                        mask,
+                        value,
+                        indices,
+                        dst,
+                    ),
                     inst::Masked::Sve { code, arrangement } => {
-                        self.sve_masked((code, arrangement), g(0), n(1), n(2), indices, dst)
+                        self.sve_masked((code, arrangement), base, mask, value, indices, dst)
                     }
                     inst::Masked::SveNarrow(code) => self.sve_narrow_masked(
                         (code, ty.lane().unwrap().bytes()),
-                        g(0),
-                        [n(1), n(2), indices.unwrap()],
+                        base,
+                        [mask, value, indices.unwrap()],
                         dst,
                     ),
                     inst::Masked::SveWide(code) => {
-                        self.sve_wide_masked(code, g(0), n(1), n(2), indices, dst)
+                        self.sve_wide_masked(code, base, mask, value, indices, dst)
                     }
                 }
             }
-            Inst::StoreArg(ty, offset, _) => {
-                self.value_access(false, ty, n(0), (R::X19, self.frame.outgoing + offset))
+            Inst::StoreArg(ty, offset, v) => {
+                self.value_access(false, ty, n(v), (R::X19, self.frame.outgoing + offset))
             }
             Inst::Call(target, ..) => {
                 self.a.addr(R::X0, R::X19, self.frame.outgoing)?;
                 self.a.addr(R::X1, R::X19, self.frame.bytes)?;
-                self.a.branch(C::Bl_only_branch_imm, self.entries[target]);
+                self.a
+                    .branch(C::Bl_only_branch_imm, None, self.entries[target]);
                 self.byte_predicate = false;
                 self.check_status()
             }
-            Inst::LibArg(ty, index, _) => self.value_access(false, ty, n(0), self.temp(index)),
-            Inst::Libcall(action, input, output, sizes) => {
-                self.primitive(action, input, output, sizes)
+            Inst::LibArg(ty, index, v) => {
+                self.value_access(false, ty, n(v), self.fallback_slot(index))
             }
-            Inst::LibResult(ty, _) => self.value_access(true, ty, n(0), self.temp(3)),
+            Inst::Libcall(action, input, output, args) => {
+                self.primitive(action, input, output, args)
+            }
+            Inst::LibResult(ty, d) => self.value_access(true, ty, n(d), self.fallback_slot(3)),
             Inst::Jump => {
                 if Some(succs[0]) != next {
                     self.a.jump(labels[succs[0].index()]);
                 }
                 Ok(())
             }
-            Inst::Branch(_) => {
-                self.a
-                    .put(C::Subs_32_addsub_imm, &[r(R::WZR), r(word(0)), O::imm(0)])?;
+            Inst::Branch(cond) => {
                 let [yes, no] = [succs[0], succs[1]];
                 if Some(yes) == next {
-                    self.a.jump_if(Cond::Eq, labels[no.index()])
+                    self.a.jump_if_zero(true, word(cond), labels[no.index()])
                 } else {
-                    self.a.jump_if(Cond::Ne, labels[yes.index()])?;
+                    self.a
+                        .jump_if_zero(false, word(cond), labels[yes.index()])?;
                     if Some(no) != next {
                         self.a.jump(labels[no.index()]);
                     }
                     Ok(())
                 }
             }
-            Inst::Return(ty, _, root) => {
+            Inst::Return(ty, v, root) => {
                 if root && size(ty) > 8 {
-                    self.value_access(false, ty, n(0), RESULT)?;
+                    self.value_access(false, ty, n(v), RESULT)?;
                 } else if root && matches!(ty, Type::F32 | Type::F64) {
-                    self.float_move(ty, false, n(0), 0)?;
+                    self.float_move(ty, false, n(v), 0)?;
                 }
-                self.a.jump(self.epilogue);
+                // The epilogue follows the last block unless trap exits
+                // come between them.
+                let exits = self.report.is_some() || self.failures.iter().any(Option::is_some);
+                if next.is_some() || exits {
+                    self.a.jump(self.epilogue);
+                }
                 Ok(())
             }
         }
     }
-    fn temp(&self, index: usize) -> (R, usize) {
-        (R::X19, self.frame.temporary + index * TEMP_WORD_BYTES)
+    /// The `index`-th 64-byte slot of the frame's fallback area.
+    fn fallback_slot(&self, index: usize) -> (R, usize) {
+        (
+            R::X19,
+            self.frame.temporary + index * crate::lir::fallback::SLOT_BYTES,
+        )
     }
 }
 
@@ -686,32 +896,34 @@ fn invert(c: Cond) -> Cond {
     }
 }
 
-pub(crate) fn emit(source: Module<VerifiedBody<'_>>, ids: &FunctionIds<Function>) -> Result<Code> {
-    emit_mode(source, ids, false)
-}
-
-pub(crate) fn emit_debug(
+pub(crate) fn emit(
+    target: &splice_target::Target,
     source: Module<VerifiedBody<'_>>,
-    ids: &FunctionIds<Function>,
-) -> Result<Code> {
-    emit_mode(source, ids, true)
-}
-
-fn emit_mode(
-    source: Module<VerifiedBody<'_>>,
-    ids: &FunctionIds<Function>,
     debug: bool,
+    stages: Stages<'_>,
 ) -> Result<Code> {
-    let config = splice_target::simd().map_err(CompileError::SimdProfile)?;
-    let module = compile(source, ids, config)?;
-    emit_compiled(&module, config, debug)
+    let config = Config::new(target);
+    let module = compile(source, config, stages)?;
+    let root = &module.functions[module.call_graph.root()].body;
+    stages(Stage::Layout(&|| crate::lir::layout::listing(root)));
+    let code = match emit_compiled(&module, config, debug, false)? {
+        Some(code) => code,
+        None => emit_compiled(&module, config, debug, true)?.expect("long branches reach"),
+    };
+    stages(Stage::Assemble(&code.bytes));
+    Ok(code)
 }
 
-fn emit_compiled(module: &Module<Compiled>, config: Simd, debug: bool) -> Result<Code> {
-    let _span = tracing::debug_span!(target: "splice::compile", "emit_machine_code").entered();
+fn emit_compiled(
+    module: &Module<Compiled>,
+    config: Config,
+    debug: bool,
+    long_branches: bool,
+) -> Result<Option<Code>> {
+    let _span = tracing::debug_span!(target: "lancy::compile", "emit_machine_code").entered();
     let root = module.call_graph.root();
-    let mut a = Assembler::default();
-    let mut sites = Vec::new();
+    let mut a = Assembler::new(config.profile, long_branches);
+    let mut sites = crate::lir::fallback::Sites::default();
     let mut debug_functions = Vec::new();
     let entries = DenseMap::from_fn(module.functions.len(), |_| a.label());
     for (id, machine) in module.functions.iter().rev() {
@@ -740,6 +952,7 @@ fn emit_compiled(module: &Module<Compiled>, config: Simd, debug: bool) -> Result
             a.access(false, 8, reg, (save_base, i * 8))?;
         }
         if entry {
+            a.addr(R::X29, R::SP, FRAME_RECORD)?;
             a.addr(R::X20, R::X1, 0)?;
             a.addr(R::X19, R::X1, ROOT_BYTES)?;
             for (i, reg) in machine.written.into_iter().enumerate() {
@@ -762,10 +975,13 @@ fn emit_compiled(module: &Module<Compiled>, config: Simd, debug: bool) -> Result
             frame: &machine.frame,
             sites: &mut sites,
             entries: &entries,
-            config,
+            config: *machine.body.machine(),
             epilogue,
             byte_predicate: false,
-            failures: [None; 5],
+            failures: [None; Trap::ALL.len()],
+            report: None,
+            temps: [0; 3],
+            temp_count: 0,
         };
         let order = layout::place(&machine.body);
         for (index, &block) in order.iter().enumerate() {
@@ -780,12 +996,20 @@ fn emit_compiled(module: &Module<Compiled>, config: Simd, debug: bool) -> Result
                     InstOrEdit::Edit(&Edit::Move { from, to }) => out.edit(from, to)?,
                     InstOrEdit::Inst(i) => {
                         let inst = machine.body.insts()[i.index()];
-                        if debug && let Inst::DebugPoint(id) = inst {
-                            points.push((id, out.a.words.len() as u64 * 4));
+                        // A debug point gets its own address for the line
+                        // table; release code emits nothing.
+                        if let Inst::DebugPoint(id) = inst {
+                            if !debug {
+                                continue;
+                            }
+                            points.push(Point {
+                                id,
+                                offset: out.a.words.len() as u64 * 4,
+                            });
                         }
                         out.inst(
                             inst,
-                            machine.allocation.inst_allocs(i),
+                            Allocations::of(&machine.body, &machine.allocation, i),
                             succs,
                             &labels,
                             order.get(index + 1).copied(),
@@ -827,14 +1051,12 @@ fn emit_compiled(module: &Module<Compiled>, config: Simd, debug: bool) -> Result
             } else {
                 Vec::new()
             };
-            debug_functions.push(DebugFunction {
-                start,
-                end: a.words.len() as u64 * 4,
-                workspace_offset: machine.frame.debug_base,
+            debug_functions.push(FunctionInfo {
+                code: start..a.words.len() as u64 * 4,
+                slots: machine.frame.debug_base,
                 points,
-                frame: DebugFrame {
-                    start: body_start,
-                    end: frame_end,
+                frame: FrameInfo {
+                    code: body_start..frame_end,
                     cfa_from_sp: HOST_STACK_BYTES as i32,
                     saved: saved
                         .iter()
@@ -848,11 +1070,14 @@ fn emit_compiled(module: &Module<Compiled>, config: Simd, debug: bool) -> Result
     }
     let bytes = ROOT_BYTES
         .checked_add(module.functions[root].peak)
-        .ok_or(CompileError::FrameOverflow)?;
-    Ok(Code {
-        bytes: a.finish()?,
+        .ok_or(CompileError::Unsupported(crate::Limit::Frame))?;
+    let Some(bytes_out) = a.finish()? else {
+        return Ok(None);
+    };
+    Ok(Some(Code {
+        bytes: bytes_out,
         words: bytes / 8,
-        sites: sites.into_boxed_slice(),
+        sites,
         debug: debug_functions,
-    })
+    }))
 }

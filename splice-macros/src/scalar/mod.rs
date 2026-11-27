@@ -1,17 +1,12 @@
 //! Staged scalar functions. Rust executes host code while symbolic runtime
 //! expressions append register operations and control-flow edges to the IR.
-// Generated locals and labels share a hygiene context across fragments. Tokens
-// interpolated from the kernel keep their original spans and lexical bindings.
-macro_rules! emit {
-    ($($tokens:tt)*) => { quote::quote_spanned!(proc_macro2::Span::mixed_site()=> $($tokens)*) };
-}
 
 pub(crate) mod abi;
-mod flow;
-mod lower;
+pub(crate) mod lower;
 pub(crate) mod methods;
+pub(crate) use lower::simd::constructor_arity;
 use lower::{Binding, BufferType, Lower, Scalar};
-pub(crate) use lower::{Elem, select_free, uses_stage_requirements};
+pub(crate) use lower::{Elem, uses_stage_requirements};
 use proc_macro2::{Ident, TokenStream};
 use std::collections::HashMap;
 use syn::visit::Visit;
@@ -41,7 +36,9 @@ pub(crate) fn configuration(meta: &Meta) -> Result<Option<TokenStream>> {
     Ok((!gates.is_empty()).then(|| emit!(cfg_attr(#condition, #(#gates),*))))
 }
 
-pub(super) fn expand(root: Path, native: &mut ItemFn) -> Result<TokenStream> {
+/// `print` (`#[kernel(print)]`) also publishes `print`, which renders the
+/// specialized kernel as Rust; without it the kernel prints as a call.
+pub(super) fn expand(root: Path, native: &mut ItemFn, print: bool) -> Result<TokenStream> {
     let mut generated_sig = native.sig.clone();
     crate::declaration::rebase_signature(&mut generated_sig);
     let sig = &generated_sig;
@@ -52,16 +49,8 @@ pub(super) fn expand(root: Path, native: &mut ItemFn) -> Result<TokenStream> {
         .iter()
         .filter_map(|a| configuration(&a.meta).transpose())
         .collect::<Result<Vec<_>>>()?;
-    if sig.asyncness.is_some()
-        || sig.unsafety.is_some()
-        || sig.abi.is_some()
-        || sig.variadic.is_some()
-    {
-        return Err(Error::new_spanned(
-            sig,
-            "expected an ordinary kernel function",
-        ));
-    }
+    // `declaration::signature` has rejected async, unsafe, extern and
+    // variadic signatures.
     let unit = syn::parse_quote!(());
     let ty = match &sig.output {
         ReturnType::Default => &unit,
@@ -70,16 +59,16 @@ pub(super) fn expand(root: Path, native: &mut ItemFn) -> Result<TokenStream> {
     let unit_result = matches!(ty, Type::Tuple(tuple) if tuple.elems.is_empty());
     let types: Vec<_> = sig.generics.type_params().map(|ty| &ty.ident).collect();
     let result_type = if unit_result {
-        Scalar::Int
+        Scalar::I32
     } else {
         Scalar::from_type(ty, &types)
-            .filter(|t| {
-                matches!(
-                    t,
-                    Scalar::Int | Scalar::Bool | Scalar::Vector(_) | Scalar::Mask(_)
+            .filter(|t| t.is_scalar() || matches!(t, Scalar::Vector(_) | Scalar::Mask(_)))
+            .ok_or_else(|| {
+                Error::new_spanned(
+                    ty,
+                    "expected (), bool, i32, u32, i64, u64, usize, f32, f64, Lane<T> or Mask<T>",
                 )
-            })
-            .ok_or_else(|| Error::new_spanned(ty, "expected (), i32, bool, Lane<T> or Mask<T>"))?
+            })?
     };
     if matches!(
         result_type,
@@ -164,10 +153,7 @@ pub(super) fn expand(root: Path, native: &mut ItemFn) -> Result<TokenStream> {
         }
         let source = emit!(#root::frontend::source);
         if matches!(formal, Binding::Host(_)) {
-            if matches!(
-                Scalar::from_type(ty, &types),
-                Some(Scalar::Int | Scalar::Bool | Scalar::Index)
-            ) {
+            if Scalar::from_type(ty, &types).is_some_and(Scalar::is_scalar) {
                 source_decls.push(emit!(#id:impl #support::KnownArg<#ty>));
                 extract_known.push(emit!(let #id=#support::KnownArg::require(#id)?;));
             } else {
@@ -179,12 +165,16 @@ pub(super) fn expand(root: Path, native: &mut ItemFn) -> Result<TokenStream> {
             let writable = matches!(formal, Binding::Reg(_, true));
             let prefix = if writable { "mut " } else { "" };
             let source_ty = if matches!(formal, Binding::Columns) {
-                emit!(concat!("&[", stringify!(#root::BufferArg), "<'_>]"))
+                emit!(::core::concat!(
+                    "&[",
+                    ::core::stringify!(#root::BufferArg),
+                    "<'_>]"
+                ))
             } else {
                 emit!(::core::any::type_name::<#ty>())
             };
             source_params.push(emit!(
-                format!("{}{}: {}", #prefix, stringify!(#id), #source_ty)
+                ::std::format!("{}{}: {}", #prefix, ::core::stringify!(#id), #source_ty)
             ));
         }
         if matches!(formal, Binding::Columns) {
@@ -247,7 +237,7 @@ pub(super) fn expand(root: Path, native: &mut ItemFn) -> Result<TokenStream> {
                     ));
                 }
                 let index = buffer_names.len() as u32;
-                context = Some(lower::Context::for_function(id.clone()));
+                context = Some(lower::Context::for_function(id.clone(), ty));
                 inline_args.push(emit!(#hir::Buffer(#index)));
                 buffer_names.push(id);
                 buffer_kinds.push(emit!(#hir::BufferKind::context(&__SPLICE_CONTEXT_SIGNATURE)));
@@ -255,10 +245,10 @@ pub(super) fn expand(root: Path, native: &mut ItemFn) -> Result<TokenStream> {
             }
             Binding::Reg(_, mutable) => {
                 let index = reg_names.len();
-                inline_args.push(emit!(__splice_builder.arg(#index)));
+                inline_args.push(emit!(__splice_builder.arg(#index)?));
                 reg_names.push(id);
                 if mutable {
-                    copy_mutable.push(emit!(let #id = __splice_builder.copy(#id);));
+                    copy_mutable.push(emit!(let #id = __splice_builder.copy(#id)?;));
                 }
                 emit!(#id: impl #support::RunArg)
             }
@@ -273,14 +263,15 @@ pub(super) fn expand(root: Path, native: &mut ItemFn) -> Result<TokenStream> {
         } else {
             decl.clone()
         });
-        bindings.insert(id.to_string(), formal);
-        debug_names.insert(id.to_string(), id.clone());
+        let decl = crate::kast::Body::param(formals.len());
+        bindings.insert(decl, formal);
+        debug_names.insert(id.to_string(), decl);
         formals.push(formal);
     }
     if let Some(context) = &mut context {
         for parameter in &parameters {
             if matches!(parameter.binding, Binding::Host(_))
-                && let Some(kind @ (Scalar::Int | Scalar::Bool)) =
+                && let Some(kind @ (Scalar::I32 | Scalar::Bool)) =
                     Scalar::from_type(parameter.ty, &types)
             {
                 context.register_host(parameter.name.clone(), kind);
@@ -288,12 +279,24 @@ pub(super) fn expand(root: Path, native: &mut ItemFn) -> Result<TokenStream> {
         }
     }
     let arity = reg_names.len();
+    // Only a scalar kernel has a Signature: a SIMD helper expands into its caller.
+    let scalar_signature =
+        |t| lower::scalar_type(&root, t).unwrap_or_else(|| emit!(#hir::ScalarType::I32));
+    let param_types: Vec<_> = formals
+        .iter()
+        .filter_map(|formal| match *formal {
+            Binding::Reg(t, _) => Some(scalar_signature(t)),
+            _ => None,
+        })
+        .collect();
+    let params = emit!(&[#(#param_types),*]);
+    let result = scalar_signature(result_type);
     let host_decls = emit!(#(#host_names: #host_types,)*);
     let outer_host_decls = emit!(#(#host_names: #outer_host_types,)*);
-    let unpack = emit!(#(let #reg_names = #support::RunArg::reg(#reg_names, __splice_builder);)*);
+    let unpack = emit!(#(let #reg_names = #support::RunArg::param(#reg_names, #param_types, __splice_builder)?;)*);
     let mut lowered_block = native.block.clone();
     lowered_block.stmts.splice(0..0, pattern_decls);
-    let flow = flow::analyze(&lowered_block, &bindings);
+    let body = crate::kast::Body::new(&lowered_block, &stage_params(&parameters))?;
     let lower = Lower {
         generics: generic,
         root: &root,
@@ -304,42 +307,55 @@ pub(super) fn expand(root: Path, native: &mut ItemFn) -> Result<TokenStream> {
         formals: &formals,
         bindings,
         aggregates: &Default::default(),
+        labels: &Default::default(),
         debug_names,
-        flow: &flow,
+        body: &body,
         fish: emit!(#fish),
-        loop_kind: None,
+        loops: Vec::new(),
         region_depth: 0,
         source_fault: None,
-        evaluator_return: None,
+        evaluation: None,
         context: context.as_ref(),
     };
-    let evaluator = lower.evaluator(&native.sig, &lowered_block, module_vis, None)?;
+    let (evaluator, evaluable) = lower.evaluator(&native.sig, &lowered_block, module_vis, None)?;
     let code = lower.kernel_body(&lowered_block)?;
-    let owned_scope = lower.owned_scope(native);
+    let dropless = lower.dropless_aggregates();
     let debug_arguments = host_names.iter().map(|id| lower.capture_constant(id));
     let source_support = emit!(#root::frontend::source);
-    let source_body = if context.is_some() {
-        emit!(return Err("Rust context kernels can be inspected through the Text backend".into());)
+    let overflow = lower::overflow_prologue(&root);
+    if print && context.is_some() {
+        return Err(Error::new_spanned(
+            sig,
+            "a Rust context kernel cannot be printed as Rust; inspect its portable IR with `ir()`",
+        ));
+    }
+    let source_body = if print {
+        let body = lower.source_body(&lowered_block)?;
+        emit!(let __splice_printed = #body;)
     } else {
-        match lower.source_body(&lowered_block) {
-            Ok(body) => emit!(let __splice_printed = #body;),
-            Err(error) => {
-                let error = error.to_string();
-                emit!(return Err(#error.to_owned());)
-            }
-        }
+        TokenStream::new()
     };
     let source_aliases = types.iter().map(|ty| {
         emit!((
-            stringify!(#ty).to_owned(),
-            format!("type {} = {};", stringify!(#ty), ::core::any::type_name::<#ty>())
+            ::std::borrow::ToOwned::to_owned(::core::stringify!(#ty)),
+            ::std::format!("type {} = {};", ::core::stringify!(#ty), ::core::any::type_name::<#ty>())
         ))
     }).chain(generic.const_params().map(|param| {
         let name = &param.ident;
         let ty = &param.ty;
-        emit!((stringify!(#name).to_owned(), format!("const {}: {} = {};", stringify!(#name), stringify!(#ty), #source_support::literal(#name))))
+        emit!((::std::borrow::ToOwned::to_owned(::core::stringify!(#name)), ::std::format!("const {}: {} = {};", ::core::stringify!(#name), ::core::stringify!(#ty), #source_support::literal(#name))))
     }));
-    let (source_entry, source_body_method) = {
+    let (source_entry, source_body_method) = if !print {
+        // A caller's `print` shows the call as written.
+        let nested_source = columns.is_none().then(|| emit! {
+            #[doc(hidden)]
+            #[allow(unused_variables, clippy::too_many_arguments)]
+            #vis fn __splice_source_call #generic (#(#source_decls,)* __splice_source: &mut #source_support::Source) -> #root::Result<::core::option::Option<::std::string::String>> #where_ {
+                ::core::result::Result::Ok(::core::option::Option::None)
+            }
+        });
+        (emit!(#nested_source), TokenStream::new())
+    } else {
         let source_layout = columns.as_ref().map(|layout| emit! {
             let __splice_layout = #layout;
             let __splice_column_layout: &[#root::BufferKind] = ::core::convert::AsRef::as_ref(&__splice_layout);
@@ -348,37 +364,38 @@ pub(super) fn expand(root: Path, native: &mut ItemFn) -> Result<TokenStream> {
             emit! {
                 #[doc(hidden)]
                 #[allow(clippy::too_many_arguments)]
-                #vis fn __splice_source_call #generic (#(#source_decls,)* __splice_source: &mut #source_support::Source) -> #root::Result<String> #where_ {
+                #vis fn __splice_source_call #generic (#(#source_decls,)* __splice_source: &mut #source_support::Source) -> #root::Result<::core::option::Option<::std::string::String>> #where_ {
                     #(#extract_known)*
                     let name = __SpliceDefinition::__splice_print #fish (#(#host_names,)* __splice_source)?;
-                    let arguments: &[String] = &[#(#source_args),*];
-                    Ok(format!("{}({})", name, arguments.join(", ")))
+                    let arguments: &[::std::string::String] = &[#(#source_args),*];
+                    ::core::result::Result::Ok(::core::option::Option::Some(::std::format!("{}({})", name, arguments.join(", "))))
                 }
             }
         } else {
             emit!()
         };
         let entry = emit! {
-            #vis fn print #generic (#host_decls) -> #root::Result<String> #where_ {
-                let mut source = #source_support::Source::default();
+            #vis fn print #generic (#host_decls) -> #root::Result<::std::string::String> #where_ {
+                let mut source = <#source_support::Source as ::core::default::Default>::default();
                 __SpliceDefinition::__splice_print #fish (#(#host_names,)* &mut source)?;
-                Ok(format!("#[allow(unused_imports)]\nuse {}::simd::{{Lane, Mask}};\n\n{}", stringify!(#root), source.functions.join("\n")))
+                ::core::result::Result::Ok(::std::format!("#[allow(unused_imports)]\nuse {}::simd::{{Lane, Mask}};\n\n{}", ::core::stringify!(#root), source.functions.join("\n")))
             }
             #nested_source
         };
         let body = emit! {
             #[allow(unused_variables, unreachable_code)]
-            fn __splice_print #outer_generic (#outer_host_decls __splice_source: &mut #source_support::Source) -> #root::Result<String> #outer_where {
+            fn __splice_print #outer_generic (#outer_host_decls __splice_source: &mut #source_support::Source) -> #root::Result<::std::string::String> #outer_where {
                 let _guard = #support::enter_expansion()?;
-                let (id, name) = __splice_source.function(stringify!(#name));
+                #overflow
+                let (id, name) = __splice_source.function(::core::stringify!(#name));
                 let transfer = __splice_source.transfer.take();
                 #source_layout
                 #(#mutable_host)*
-                let __splice_printed: String;
+                let __splice_printed: ::std::string::String;
                 #source_body
                 __splice_source.transfer = transfer;
                 __splice_source.functions[id] = #source_support::function(&name, &[#(#source_params),*], ::core::any::type_name::<#ty>(), &[#(#source_aliases),*], &__splice_printed);
-                Ok(name)
+                ::core::result::Result::Ok(name)
             }
         };
         (entry, body)
@@ -396,14 +413,14 @@ pub(super) fn expand(root: Path, native: &mut ItemFn) -> Result<TokenStream> {
     }
     let context_sign = context.as_ref().map(|context| {
         let signature = context.signature(&root);
-        emit!(#[doc(hidden)] #vis static __SPLICE_CONTEXT_SIGNATURE: #root::ContextSignature = #signature;)
+        emit!(#[doc(hidden)] #vis static __SPLICE_CONTEXT_SIGNATURE: #root::__private::ContextSignature = #signature;)
     });
     let root_context_args = context
         .as_ref()
-        .map(|_| emit!(#root::ContextFrame::root(&__SPLICE_CONTEXT_SIGNATURE)?,));
+        .map(|_| emit!(#root::__private::ContextFrame::root(&__SPLICE_CONTEXT_SIGNATURE),));
     let context_decls = context
         .as_ref()
-        .map(|_| emit!(__splice_context_frame: #root::ContextFrame,));
+        .map(|_| emit!(__splice_context_frame: #root::__private::ContextFrame,));
     let context_exports = context.as_ref().map(|context| {
         let dispatch = context.dispatcher(&root, emit!(&__SPLICE_CONTEXT_SIGNATURE), &types);
         let object = parameters.iter().find(|p| matches!(p.binding, Binding::Context)).expect("a context parameter").ty;
@@ -411,7 +428,7 @@ pub(super) fn expand(root: Path, native: &mut ItemFn) -> Result<TokenStream> {
         emit! {
             #[doc(hidden)]
             #[allow(clippy::too_many_arguments)]
-            #vis fn __splice_stage_context #generic (#(#nested_decls,)* _: #witness, __splice_context_frame: #root::ContextFrame,
+            #vis fn __splice_stage_context #generic (#(#nested_decls,)* _: #witness, __splice_context_frame: #root::__private::ContextFrame,
                 __splice_builder: &mut #factory) -> #root::Result<#hir::Reg> #where_ {
                 #(#extract_known)*
                 __SpliceDefinition::__splice_inline #fish (#(#helper_args,)* __splice_context_frame, __splice_builder)
@@ -419,20 +436,12 @@ pub(super) fn expand(root: Path, native: &mut ItemFn) -> Result<TokenStream> {
 
             #[doc(hidden)]
             #vis fn __splice_dispatch_context #generic (__splice_object: #object,
-                __splice_operation: u32, __splice_arguments: #root::ContextArguments<'_>, _: #witness) -> i32 #where_ {
+                __splice_operation: u32, __splice_arguments: #root::__private::ContextArguments<'_>, _: #witness) -> u64 #where_ {
                 #dispatch
             }
         }
     });
-    let public_abi = abi::generate(
-        &root,
-        vis,
-        sig,
-        &parameters,
-        result_type,
-        unit_result,
-        context.as_ref(),
-    );
+    let public_abi = abi::generate(&root, vis, sig, &parameters, unit_result, context.as_ref());
     // Rust requires lifetime parameters before the backend type; the backend
     // is still the first argument at the usual lifetime-elided turbofish.
     let mut compile_generics = public_abi.build_generics.clone();
@@ -452,22 +461,42 @@ pub(super) fn expand(root: Path, native: &mut ItemFn) -> Result<TokenStream> {
         #[allow(unused_imports)]
         use #frontend::MaybeKey as _;
         #[allow(unused_mut)]
-        let mut __splice_key = Some(#frontend::Specialization::new::<__SpliceIdentity>(#arity, #kinds));
+        let mut __splice_key = ::core::option::Option::Some(#frontend::Specialization::new::<__SpliceIdentity>(#frontend::Signature::new(#params, #result, #kinds)));
         #((&#frontend::KeyArgument::<#type_args>::for_type()).add_type(&mut __splice_key);)*
         #((&#frontend::KeyArgument::for_value(&#value_args)).add_value(&#value_args, &mut __splice_key);)*
     };
+    // A body that calls itself expands inline; the same specialization
+    // inside itself is unbounded recursion.
+    let recursion = calls_itself(&native.block, name).then(|| {
+        let type_args = generic.type_params().map(|p| &p.ident);
+        let value_args = host_names
+            .iter()
+            .copied()
+            .chain(generic.const_params().map(|p| &p.ident));
+        emit! {
+            #[allow(unused_mut)]
+            let mut __splice_key = ::core::option::Option::Some(#frontend::Specialization::new::<Self>(#frontend::Signature::new(#params, #result, #kinds)));
+            {
+                #[allow(unused_imports)]
+                use #frontend::MaybeKey as _;
+                #((&#frontend::KeyArgument::<#type_args>::for_type()).add_type(&mut __splice_key);)*
+                #((&#frontend::KeyArgument::for_value(&#value_args)).add_value(&#value_args, &mut __splice_key);)*
+            }
+            let __splice_recursion = #support::enter_inline(__splice_key.map(|key| key.with_known(&__splice_input_values)))?;
+        }
+    });
     let result_value_type = result_type.value_type(&root, &types);
     let source = emit! {
         __splice_builder.set_source(&#root::frontend::KernelSource {
-            name: stringify!(#name),
-            scalars: &[#(stringify!(#reg_names)),*],
-            buffers: &[#(stringify!(#buffer_names)),*],
+            name: ::core::stringify!(#name),
+            scalars: &[#(::core::stringify!(#reg_names)),*],
+            buffers: &[#(::core::stringify!(#buffer_names)),*],
         });
     };
     let nested_body = if context.is_some() {
-        emit!(Err(
-            "a runtime object requires a compatible enclosing Rust context".into()
-        ))
+        emit!(::core::result::Result::Err(#root::BuildError::staging(
+            "a runtime object requires a compatible enclosing Rust context"
+        )))
     } else {
         emit! {
             #(#extract_known)*
@@ -478,8 +507,8 @@ pub(super) fn expand(root: Path, native: &mut ItemFn) -> Result<TokenStream> {
             #specialize
             let __splice_body: #frontend::Body<'_> = #callback;
             match __splice_key {
-                Some(key) => __splice_builder.call_specialized(key, &[#(#reg_names),*], &[#(#buffer_names),*], __splice_body),
-                None => __splice_builder.call_kernel(#arity, #kinds, &[#(#reg_names),*], &[#(#buffer_names),*], __splice_body),
+                ::core::option::Option::Some(key) => __splice_builder.call_specialized(key, &[#(#reg_names),*], &[#(#buffer_names),*], __splice_body),
+                ::core::option::Option::None => __splice_builder.call_kernel(#frontend::Signature::new(#params, #result, #kinds), &[#(#reg_names),*], &[#(#buffer_names),*], __splice_body),
             }
         }
     };
@@ -488,8 +517,8 @@ pub(super) fn expand(root: Path, native: &mut ItemFn) -> Result<TokenStream> {
             fn __stage_body #generic (#host_decls __splice_builder: &mut #factory) -> #root::Result<()> #where_ {
                 #source
                 let output = __SpliceDefinition::__splice_inline #fish (#(#inline_args,)* #root_context_args __splice_builder)?;
-                __splice_builder.ret(output);
-                Ok(())
+                __splice_builder.ret(output)?;
+                ::core::result::Result::Ok(())
             }
             #[doc(hidden)]
             #[allow(clippy::too_many_arguments)]
@@ -509,13 +538,13 @@ pub(super) fn expand(root: Path, native: &mut ItemFn) -> Result<TokenStream> {
                 "a column-table entry point requires the scalar calling convention",
             ));
         }
-        crate::declaration::rebase_expression(&mut layout);
+        crate::declaration::rebase_expression(&mut layout, &sig.generics);
         let base = buffer_names.len() as u32;
         let setup = emit! {
             let __splice_layout = #layout;
             let __splice_columns: &[#hir::BufferKind] = ::core::convert::AsRef::as_ref(&__splice_layout);
             if __splice_columns.iter().any(|column| column.writable()) {
-                return Err("a shared column table cannot contain writable columns".into());
+                return ::core::result::Result::Err(#root::BuildError::staging("a shared column table cannot contain writable columns"));
             }
             let __splice_column_base = #base;
             let mut __splice_kinds = (#kinds).to_vec();
@@ -523,8 +552,8 @@ pub(super) fn expand(root: Path, native: &mut ItemFn) -> Result<TokenStream> {
             let __splice_body: #frontend::Body<'_> = ::std::boxed::Box::new(move |__splice_builder| {
                 #source
                 let output = __SpliceDefinition::__splice_inline #fish (#(#inline_args,)* #root_context_args __splice_builder)?;
-                __splice_builder.ret(output);
-                Ok(())
+                __splice_builder.ret(output)?;
+                ::core::result::Result::Ok(())
             });
             let __splice_kinds = &__splice_kinds;
         };
@@ -565,36 +594,40 @@ pub(super) fn expand(root: Path, native: &mut ItemFn) -> Result<TokenStream> {
             struct __SpliceIdentity;
 
             #vis fn build #compile_generics (__splice_args: #build_type)
-                -> ::core::result::Result<#root::TypedKernel<#signature, <#backend as #root::Codegen>::Output>, #root::BuildError> #where_
+                -> ::core::result::Result<#root::TypedKernel<#signature, <#backend as #root::Backend>::Output>, #root::BuildError> #where_
             {
                 build_with_options::<#backend #(, #args)*>(
-                    #root::BuildOptions::for_profile(cfg!(debug_assertions)), __splice_args,
+                    #root::BuildOptions::host(#root::Mode::for_profile(::core::cfg!(debug_assertions)))?,
+                    __splice_args,
                 )
             }
             #vis fn build_with_options #compile_generics (
                 __splice_options: #root::BuildOptions, __splice_args: #build_type,
-            ) -> ::core::result::Result<#root::TypedKernel<#signature, <#backend as #root::Codegen>::Output>, #root::BuildError> #where_ {
-                #root::build_boundary(move || {
+            ) -> ::core::result::Result<#root::TypedKernel<#signature, <#backend as #root::Backend>::Output>, #root::BuildError> #where_ {
+                #root::__private::build_boundary(move || {
                     let BuildArgs { #(#host_names,)* } = __splice_args;
                     #setup
                     <#backend as #root::Codegen>::build_with_options(
-                        #arity, __splice_kinds, __splice_body, __splice_options,
-                    ).map(#root::TypedKernel::new)
+                        #root::frontend::Signature::new(#params, #result, __splice_kinds), __splice_body, __splice_options,
+                    ).map(|output| #root::TypedKernel::new(output, Signature(::core::marker::PhantomData)))
                 })
             }
             #vis fn ir #generic (#host_decls)
                 -> ::core::result::Result<#root::TypedIr<#signature>, #root::BuildError> #where_
             {
-                ir_with_options #fish (#root::BuildOptions::for_profile(cfg!(debug_assertions)), #(#host_names,)*)
+                ir_with_options #fish (
+                    #root::BuildOptions::host(#root::Mode::for_profile(::core::cfg!(debug_assertions)))?,
+                    #(#host_names,)*
+                )
             }
             #vis fn ir_with_options #generic (__splice_options: #root::BuildOptions, #host_decls)
                 -> ::core::result::Result<#root::TypedIr<#signature>, #root::BuildError> #where_
             {
-                #root::build_boundary(move || {
+                #root::__private::build_boundary(move || {
                     #setup
-                    #root::frontend::materialize_with_options(
-                        #arity, __splice_kinds, __splice_body, __splice_options,
-                    ).map(#root::TypedIr::new)
+                    #root::frontend::materialize(
+                        #root::frontend::Signature::new(#params, #result, __splice_kinds), __splice_body, __splice_options,
+                    ).map(|function| #root::TypedIr::new(function, Signature(::core::marker::PhantomData)))
                 })
             }
             #inner_call
@@ -602,12 +635,11 @@ pub(super) fn expand(root: Path, native: &mut ItemFn) -> Result<TokenStream> {
     };
     let reg_indices = 0..reg_names.len();
     let needs_stages = uses_stage_requirements(&lowered_block);
-    let region_policy = crate::import::publication(&root, vis, sig, needs_stages);
-    let foldable = lower::can_fold(sig, &lowered_block);
+    let foldable = evaluable && lower::foldable_signature(sig);
     let fold_macro = if foldable {
-        emit!(#root::__splice_choose_kernel)
+        emit!(#root::__private::__splice_choose_kernel)
     } else {
-        emit!(#root::__splice_choose_rust)
+        emit!(#root::__private::__splice_choose_rust)
     };
     let generated = emit! {
         #(#[#gates])*
@@ -621,8 +653,7 @@ pub(super) fn expand(root: Path, native: &mut ItemFn) -> Result<TokenStream> {
             #[doc(hidden)] #vis use #fold_macro as __splice_fold;
             #vis const __SPLICE_RETURN: #hir::ValueType = #result_value_type;
             #[doc(hidden)]
-            #vis use #root::__splice_choose_kernel as __splice_dispatch;
-            #region_policy
+            #vis use #root::__private::__splice_choose_kernel as __splice_dispatch;
             #context_sign
             #context_exports
             #entry_points
@@ -633,23 +664,26 @@ pub(super) fn expand(root: Path, native: &mut ItemFn) -> Result<TokenStream> {
         impl #name::__SpliceDefinition {
             #evaluator
             #source_body_method
-            #[allow(unreachable_code, clippy::too_many_arguments)]
+            // A staging error replaces the operation that would read its operands.
+            #[allow(unreachable_code, unused_variables, clippy::too_many_arguments)]
             fn __splice_inline #outer_generic (#(#outer_call_decls,)* #context_decls __splice_builder:&mut #factory)
                 -> #root::Result<#hir::Reg> #outer_where {
                 let __splice_guard = #support::enter_expansion()?;
+                #overflow
                 let __splice_wants_debug = __splice_builder.debug_enabled();
-                let __splice_input_values: [Option<i32>; #arity] = [#(#support::RunArg::known(&#reg_names)),*];
+                let __splice_input_values: [::core::option::Option<#hir::Constant>; #arity] = [#(#support::RunArg::known_as(&#reg_names, #param_types)),*];
+                #recursion
                 #unpack
-                #owned_scope;
-                let __splice_inputs: &[(#hir::Reg, Option<i32>)] = &[#((#reg_names, __splice_input_values[#reg_indices])),*];
+                #dropless
+                let __splice_inputs: &[(#hir::Reg, ::core::option::Option<#hir::Constant>)] = &[#((#reg_names, __splice_input_values[#reg_indices])),*];
                 #(#copy_mutable)*
                 #(#mutable_host)*
                 #(#debug_arguments)*
-                let __splice_result = __splice_builder.typed_local(#result_value_type);
-                let __splice_return_label = __splice_builder.label();
+                let __splice_result = __splice_builder.local(#result_value_type)?;
+                let __splice_return_label = __splice_builder.label()?;
                 #code
-                __splice_builder.mark(__splice_return_label);
-                Ok(__splice_result)
+                __splice_builder.mark(__splice_return_label)?;
+                ::core::result::Result::Ok(__splice_result)
             }
         }
     };
@@ -669,6 +703,39 @@ pub(super) fn expand(root: Path, native: &mut ItemFn) -> Result<TokenStream> {
     Ok(emit!(#native #generated))
 }
 
+/// Whether `block` calls the function `name` by its bare name.
+fn calls_itself(block: &syn::Block, name: &Ident) -> bool {
+    struct Calls<'a>(&'a Ident, bool);
+    impl<'ast> Visit<'ast> for Calls<'_> {
+        fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
+            self.1 |= matches!(&*call.func, syn::Expr::Path(p) if p.qself.is_none() && p.path.is_ident(self.0));
+            syn::visit::visit_expr_call(self, call);
+        }
+        fn visit_item(&mut self, _: &'ast syn::Item) {}
+    }
+    let mut calls = Calls(name, false);
+    calls.visit_block(block);
+    calls.1
+}
+
+/// The parameters of a kernel as its body's staging analysis sees them.
+fn stage_params(parameters: &[abi::Parameter<'_>]) -> Vec<(Ident, crate::kast::Param)> {
+    parameters
+        .iter()
+        .map(|parameter| (parameter.name.clone(), stage_param(parameter.binding)))
+        .collect()
+}
+
+fn stage_param(binding: Binding) -> crate::kast::Param {
+    use crate::kast::Param;
+    match binding {
+        Binding::Host(_) => Param::Known,
+        Binding::Reg(t, _) | Binding::Word(t) => Param::Scalar(t.primitive()),
+        Binding::Buffer(buffer) => Param::Slice(buffer.elem.primitive()),
+        Binding::Columns | Binding::Context | Binding::Aggregate(_) => Param::Object,
+    }
+}
+
 fn context_slice_types(
     root: &Path,
     params: &[abi::Parameter<'_>],
@@ -681,49 +748,9 @@ fn context_slice_types(
     emit!(::core::marker::PhantomData<(#(#elements,)*)>)
 }
 
-pub(crate) fn supports_context_call(
-    sig: &syn::Signature,
-    types: &[&Ident],
-    arguments: &syn::punctuated::Punctuated<syn::Expr, syn::Token![,]>,
-) -> bool {
-    let mut has_context = false;
-    for (input, name) in sig.inputs.iter().zip(abi::parameter_names(sig)) {
-        let Ok(parameter) = parameter(input, types, name) else {
-            return false;
-        };
-        match parameter.binding {
-            Binding::Context if !has_context => {
-                let Pat::Ident(binding) = parameter.pattern else {
-                    return false;
-                };
-                if binding.by_ref.is_some()
-                    || binding.subpat.is_some()
-                    || !arguments.iter().any(|arg| {
-                        lower::context_argument(arg)
-                            .is_some_and(|path| path.path.is_ident(&binding.ident))
-                    })
-                {
-                    return false;
-                }
-                has_context = true;
-            }
-            Binding::Buffer(_) | Binding::Reg(Scalar::Int | Scalar::Bool, _) => {}
-            Binding::Host(_)
-                if matches!(
-                    Scalar::from_type(parameter.ty, types),
-                    Some(Scalar::Int | Scalar::Bool)
-                ) => {}
-            _ => return false,
-        }
-    }
-    // This singleton can also resolve to an ordinary Rust function. Keep the
-    // typed Rust entry when the contextual bridge cannot represent its inputs.
-    has_context
-}
-
 fn parameter<'a>(arg: &'a FnArg, types: &[&Ident], name: Ident) -> Result<abi::Parameter<'a>> {
     let FnArg::Typed(arg) = arg else {
-        return Err(Error::new_spanned(arg, "kernel methods are unsupported"));
+        unreachable!("callers pass a method receiver separately")
     };
     let mutable = matches!(&*arg.pat, Pat::Ident(pat) if pat.mutability.is_some());
     let binding = match arg.attrs.as_slice() {
@@ -746,10 +773,8 @@ fn parameter<'a>(arg: &'a FnArg, types: &[&Ident], name: Ident) -> Result<abi::P
             }
             Binding::Columns
         }
-        [] if matches!(
-            Scalar::from_type(&arg.ty, types),
-            Some(Scalar::Int | Scalar::Bool | Scalar::Vector(_) | Scalar::Mask(_))
-        ) =>
+        [] if Scalar::from_type(&arg.ty, types)
+            .is_some_and(|t| t.is_scalar() || matches!(t, Scalar::Vector(_) | Scalar::Mask(_))) =>
         {
             Binding::Reg(Scalar::from_type(&arg.ty, types).unwrap(), mutable)
         }
@@ -762,7 +787,7 @@ fn parameter<'a>(arg: &'a FnArg, types: &[&Ident], name: Ident) -> Result<abi::P
             let writable = slice_type(&arg.ty, types).ok_or_else(|| {
                 Error::new_spanned(
                     &arg.ty,
-                    "runtime parameters must be i32 or a slice of u16, u32, i32, i64, f32, or f64",
+                    "runtime parameters must be bool, i32, u32, i64, u64, usize, f32, f64 or a slice of u16, u32, i32, i64, f32, or f64",
                 )
             })?;
             if mutable {
@@ -803,12 +828,6 @@ pub(super) fn compound_op(op: &syn::BinOp) -> Option<&'static str> {
         ShrAssign(_) => Some("Shr"),
         _ => None,
     }
-}
-
-fn bind_pattern<T: Copy>(names: &mut HashMap<String, T>, pat: &Pat, binding: T) {
-    visit_bindings(pat, &mut |pat| {
-        names.insert(pat.ident.to_string(), binding);
-    });
 }
 
 fn visit_bindings(pat: &Pat, visit: &mut impl FnMut(&syn::PatIdent)) {
@@ -891,8 +910,8 @@ mod tests {
             ),
         ];
         for (item, diagnostic) in examples {
-            let error =
-                crate::declaration::expand(parse_quote!(::splice), emit!(#item)).unwrap_err();
+            let error = crate::declaration::expand(parse_quote!(::splice), false, emit!(#item))
+                .unwrap_err();
             assert!(error.to_string().contains(diagnostic), "{error}");
         }
     }
@@ -902,8 +921,12 @@ mod tests {
         let mut f = parse_quote! {
             fn edit(column: &[i32]) -> i32 { column[0] = 1; 0 }
         };
-        let error = expand(parse_quote!(::splice), &mut f).unwrap_err();
-        assert!(error.to_string().contains("requires &mut [i32]"));
+        let error = expand(parse_quote!(::splice), &mut f, false).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("requires a &mut slice parameter")
+        );
     }
 
     #[test]
@@ -913,7 +936,7 @@ mod tests {
             #[cfg_attr(all(), inline, cfg(target_arch = "x86_64"))]
             fn sum(x: i32, y: i32) -> i32 { x + y }
         };
-        let items = syn::parse2::<syn::File>(expand(parse_quote!(::splice), &mut f).unwrap())
+        let items = syn::parse2::<syn::File>(expand(parse_quote!(::splice), &mut f, true).unwrap())
             .unwrap()
             .items;
         assert_eq!(items.len(), 3);

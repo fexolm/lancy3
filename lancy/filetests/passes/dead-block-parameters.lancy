@@ -1,46 +1,46 @@
-fn main p:ptr n:i32 x:i32 y:i32 -> i32
+fn main(p:ptr n:i32 x:i32 y:i32) -> i32
   zero = const 0
   one = const 1
-  jump head zero x y
-block head i:i32 left:i32 right:i32
+  jump head(zero x y)
+block head(i:i32 left:i32 right:i32)
   more = lt i n
-  br more body | done
-block body
+  br more body() | done()
+block body()
   next = add i one
   flip = xor left one
   store p next
-  jump head next right flip
-block done
+  jump head(next right flip)
+block done()
   ret i
-@source check: b1(v4:I32 v5:I32 v6:I32)
-@source check: Xor
-@opt check: b1(v4:I32)
-@opt not: Xor
+@source check: block b1(v4:i32 v5:i32 v6:i32)
+@source check: = xor
+@opt check: block b1(v4:i32)
+@opt not: = xor
 @opt check: ret v4
 @run 0 7 9 -> 0 | aa aa aa aa | aa aa aa aa
 @run 3 7 9 -> 3 | aa aa aa aa | 03 00 00 00
 
 ---
 
-fn main p:ptr n:i32 first:i32 second:i32 -> i32
+fn main(p:ptr n:i32 first:i32 second:i32) -> i32
   zero = const 0
   one = const 1
-  jump head zero first second
-block head i:i32 divisor:i32 pending:i32
+  jump head(zero first second)
+block head(i:i32 divisor:i32 pending:i32)
   more = lt i n
-  br more body | done
-block body
+  br more body() | done()
+block body()
   next = add i one
   store p next
   unused = div n divisor
   depleted = sub pending one
-  jump head next pending depleted
-block done
+  jump head(next pending depleted)
+block done()
   ret i
-@opt check: b1(v4:I32 v5:I32 v6:I32)
+@opt check: block b1(v4:i32 v5:i32 v6:i32)
 @opt check: store
-@opt nextln: Div
-@opt nextln: Sub
+@opt nextln: = div
+@opt nextln: = sub
 @opt check: ret v4
 @run 0 0 0 -> 0 | aa aa aa aa | aa aa aa aa
 @run 2 2 1 -> 2 | aa aa aa aa | 02 00 00 00
@@ -49,23 +49,23 @@ block done
 ---
 
 # The self-edge makes a chain of already scanned definitions live.
-fn main p:ptr n:i32 a:i32 b:i32 c:i32 junk:i32 -> i32
+fn main(p:ptr n:i32 a:i32 b:i32 c:i32 junk:i32) -> i32
   zero = const 0
   one = const 1
-  jump head zero c b a junk
-block head i:i32 third:i32 second:i32 first:i32 spare:i32
+  jump head(zero c b a junk)
+block head(i:i32 third:i32 second:i32 first:i32 spare:i32)
   shifted = xor third one
   ignored = mul spare spare
   store p first
   next = add i one
   more = lt next n
-  br more head next shifted third second ignored | done
-block done
+  br more head(next shifted third second ignored) | done()
+block done()
   ret first
-@source check: b1(v6:I32 v7:I32 v8:I32 v9:I32 v10:I32)
-@opt check: b1(v6:I32 v7:I32 v8:I32 v9:I32)
-@opt check: Xor
-@opt not: Mul
+@source check: block b1(v6:i32 v7:i32 v8:i32 v9:i32 v10:i32)
+@opt check: block b1(v6:i32 v7:i32 v8:i32 v9:i32)
+@opt check: = xor
+@opt not: = mul
 @opt check: store
 @opt check: ret v9
 @run 1 7 9 12 13 -> 7 | aa aa aa aa | 07 00 00 00

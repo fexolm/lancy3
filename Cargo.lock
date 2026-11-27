@@ -462,6 +462,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "glob"
+version = "0.3.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e4eba85ea1d0a966a983acd07deee566e67395d2d96b6fb39e62b5a833f1eb0b"
+
+[[package]]
 name = "half"
 version = "2.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -521,8 +527,7 @@ dependencies = [
  "bitflags 2.13.2",
  "inkwell_internals",
  "libc",
- "llvm-sys 191.1.1",
- "llvm-sys 211.1.1",
+ "llvm-sys",
  "thiserror 2.0.21",
 ]
 
@@ -569,10 +574,12 @@ version = "0.1.0"
 dependencies = [
  "filecheck",
  "iced-x86",
+ "libc",
  "regalloc2",
  "splice-target",
  "thiserror 2.0.21",
  "tracing",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -598,20 +605,6 @@ name = "llvm-sys"
 version = "191.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "50201c30aee9d8176a1b1c3431f4b610333fe78d69474804e5f1d6d00d78681e"
-dependencies = [
- "anyhow",
- "cc",
- "lazy_static",
- "libc",
- "regex-lite",
- "semver",
-]
-
-[[package]]
-name = "llvm-sys"
-version = "211.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "aaee56c721bdfbf4adffffa0756a34bd65df4b0aaf65a2539082a5650e521028"
 dependencies = [
  "anyhow",
  "cc",
@@ -658,6 +651,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "071dfc062690e90b734c0b2273ce72ad0ffa95f0c74596bc250dcfd960262841"
 dependencies = [
  "autocfg",
+]
+
+[[package]]
+name = "object"
+version = "0.37.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ff76201f031d8863c38aa7f905eca4f53abbfa15f609db4277d44cd8938f33fe"
+dependencies = [
+ "memchr",
 ]
 
 [[package]]
@@ -886,6 +888,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "serde_spanned"
+version = "1.1.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9c187e0a369471c550af028cba56d4f4fa2a489ad28151ae95a4d340a2a8b782"
+dependencies = [
+ "serde_core",
+]
+
+[[package]]
 name = "sharded-slab"
 version = "0.1.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -918,6 +929,7 @@ version = "0.1.0"
 dependencies = [
  "splice-macros",
  "splice-target",
+ "thiserror 2.0.21",
  "tracing",
 ]
 
@@ -941,6 +953,8 @@ name = "splice-jit"
 version = "0.1.0"
 dependencies = [
  "gimli",
+ "libc",
+ "object",
  "splice-core",
  "tracing",
 ]
@@ -954,10 +968,12 @@ dependencies = [
  "splice-cranelift",
  "splice-lancy",
  "splice-llvm",
+ "splice-test-overflow",
  "splice-test-traits",
- "splice-text",
+ "splice-testkit",
  "tracing",
  "tracing-subscriber",
+ "trybuild",
 ]
 
 [[package]]
@@ -978,10 +994,11 @@ dependencies = [
  "cc",
  "inkwell",
  "libc",
- "llvm-sys 191.1.1",
+ "llvm-sys",
  "splice-core",
  "splice-jit",
  "splice-target",
+ "thiserror 2.0.21",
  "tracing",
 ]
 
@@ -999,6 +1016,13 @@ name = "splice-target"
 version = "0.1.0"
 
 [[package]]
+name = "splice-test-overflow"
+version = "0.0.0"
+dependencies = [
+ "splice-kernel",
+]
+
+[[package]]
 name = "splice-test-traits"
 version = "0.0.0"
 dependencies = [
@@ -1006,11 +1030,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "splice-text"
-version = "0.1.0"
+name = "splice-testkit"
+version = "0.0.0"
 dependencies = [
- "splice-core",
- "tracing",
+ "splice-kernel",
+ "splice-target",
 ]
 
 [[package]]
@@ -1046,6 +1070,21 @@ name = "target-lexicon"
 version = "0.13.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8c447be3a2abfa84b2d91680c56600bd6b2873866de27b36ec911be705e291da"
+
+[[package]]
+name = "target-tuple"
+version = "1.0.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "876fef147edbcbddc8ac5cbbba92c7b86519e314e86638596c09673b2ed01e7f"
+
+[[package]]
+name = "termcolor"
+version = "1.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "06794f8f6c5c898b3275aebefa6b8a1cb24cd2c6c79397ab15774837a0bc5755"
+dependencies = [
+ "winapi-util",
+]
 
 [[package]]
 name = "thiserror"
@@ -1107,6 +1146,45 @@ dependencies = [
 ]
 
 [[package]]
+name = "toml"
+version = "1.2.2+spec-1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5426cb1b964690d913f6c5c1a1ae0b42f428ec506bb4d452876d7a209c9bca3b"
+dependencies = [
+ "indexmap",
+ "serde_core",
+ "serde_spanned",
+ "toml_datetime",
+ "toml_parser",
+ "toml_writer",
+ "winnow",
+]
+
+[[package]]
+name = "toml_datetime"
+version = "1.1.3+spec-1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "173f25c883cd2176a2d8212155638c0a60d484a9d84546d270866f40f56b6e49"
+dependencies = [
+ "serde_core",
+]
+
+[[package]]
+name = "toml_parser"
+version = "1.1.6+spec-1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e6769c452d71ba30696c6b37770c439a9cc9110f47f7d5cdbeda79840ef5ea31"
+dependencies = [
+ "winnow",
+]
+
+[[package]]
+name = "toml_writer"
+version = "1.2.0+spec-1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "009dbb7700f11c55ef83aebbe4c0e9cf1f1ac0844bd8d6f00dc38f302026e13a"
+
+[[package]]
 name = "tracing"
 version = "0.1.44"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1134,6 +1212,21 @@ dependencies = [
  "sharded-slab",
  "thread_local",
  "tracing-core",
+]
+
+[[package]]
+name = "trybuild"
+version = "1.0.125"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9838b494ee14d28f1eeea490e8f4f10248fa6dd371d4bc874b635de499408245"
+dependencies = [
+ "glob",
+ "serde",
+ "serde_derive",
+ "serde_json",
+ "target-tuple",
+ "termcolor",
+ "toml",
 ]
 
 [[package]]
@@ -1346,6 +1439,16 @@ name = "windows_x86_64_msvc"
 version = "0.52.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "589f6da84c646204747d1270a2a5661ea66ed1cced2631d546fdfb155959f9ec"
+
+[[package]]
+name = "winnow"
+version = "1.0.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8c3b93199df0ab874cdf0c6a94f0a0dc3423fe41f1cafb62b8bd7b1deb277aef"
+
+[[package]]
+name = "xtask"
+version = "0.0.0"
 
 [[package]]
 name = "zerocopy"

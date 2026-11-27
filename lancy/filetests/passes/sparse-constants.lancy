@@ -1,60 +1,60 @@
 # Keep only the live incoming constant, including a checked op in the dead arm.
-fn main x:i32 -> i32
+fn main(x:i32) -> i32
   one = const 1
-  br one live | dead
-block live
+  br one live() | dead()
+block live()
   d = const 123
-  jump join d
-block dead
+  jump join(d)
+block dead()
   zero = const 0
   trap = div x zero
-  jump join trap
-block join divisor:i32
+  jump join(trap)
+block join(divisor:i32)
   copied = copy divisor
   answer = div x copied
   ret answer
 @opt not: br
 @opt not: copy
-@opt check: Div
-@isel check: idiv.imm=123 Reciprocal
+@opt check: = div
+@isel check: idiv.imm=123 reciprocal
 @run 246 -> 2
 @run -246 -> -2
 
 ---
 
 # The two incoming edges have the same target but different operands.
-fn main x:i32 -> i32
+fn main(x:i32) -> i32
   zero = const 0
   a = const 7
   b = const 123
-  br zero join a | join b
-block join d:i32
+  br zero join(a) | join(b)
+block join(d:i32)
   v = div x d
   ret v
-@isel check: idiv.imm=123 Reciprocal
+@isel check: idiv.imm=123 reciprocal
 @run 246 -> 2
 
 ---
 
 # A reachable backedge revises the optimistic provisional constant.
-fn main x:i32 n:i32 -> i32
+fn main(x:i32 n:i32) -> i32
   zero = const 0
   seven = const 7
   three = const 3
   one = const 1
-  jump head zero seven
-block head i:i32 d:i32
+  jump head(zero seven)
+block head(i:i32 d:i32)
   c = lt i n
-  br c step | exit d
-block step
+  br c step() | exit(d)
+block step()
   next = add i one
-  jump head next three
-block exit divisor:i32
+  jump head(next three)
+block exit(divisor:i32)
   q = div x divisor
   ret q
 @opt check: br
 @isel not: idiv.imm
-@isel check: idiv
+@isel check: div.i32
 @run 21 0 -> 3
 @run 21 1 -> 7
 @run 21 3 -> 7
@@ -62,39 +62,39 @@ block exit divisor:i32
 ---
 
 # A loop-carried copy of the same scalar stays constant.
-fn main x:i32 n:i32 -> i32
+fn main(x:i32 n:i32) -> i32
   zero = const 0
   seven = const 7
   one = const 1
-  jump head zero seven
-block head i:i32 d:i32
+  jump head(zero seven)
+block head(i:i32 d:i32)
   c = lt i n
-  br c step | exit d
-block step
+  br c step() | exit(d)
+block step()
   next = add i one
   forwarded = copy d
-  jump head next forwarded
-block exit divisor:i32
+  jump head(next forwarded)
+block exit(divisor:i32)
   q = div x divisor
   ret q
 @opt not: br
-@isel check: idiv.imm=7 Reciprocal
+@isel check: idiv.imm=7 reciprocal
 @run 21 0 -> 3
 @run -21 3 -> -3
 
 ---
 
 # A branch can become executable after the first visit to the loop body.
-fn main -> i32
+fn main() -> i32
   zero = const 0
   one = const 1
-  jump head zero
-block head i:i32
+  jump head(zero)
+block head(i:i32)
   c = eq i zero
-  br c step | exit
-block step
-  jump head one
-block exit
+  br c step() | exit()
+block step()
+  jump head(one)
+block exit()
   ret i
 @opt check: br
 @run -> 1

@@ -1,12 +1,12 @@
+use crate::lir::x64::Cpu;
 use crate::{
-    hir::operation::Action,
     hir::{Binary as B, Lane, Ternary, Type, Unary},
-    lir::x64::inst::simd::{Native, packed::Recipe},
+    lir::x64::inst::simd::{Native, lanewise::Lanewise, packed::Recipe},
+    support::numeric::Action,
 };
-use splice_target::Features;
 
 impl Native {
-    pub fn select(action: Action, input: Type, output: Type, cpu: Features) -> Option<Self> {
+    pub(crate) fn select(action: Action, input: Type, output: Type, cpu: Cpu) -> Option<Self> {
         let lane = input.lane()?;
         let packed = matches!(input, Type::Vector(_));
         let bytes = if packed || matches!(action, Action::Splat) {
@@ -37,10 +37,10 @@ impl Native {
         if packed && supports_mask_op(action, lane.bytes(), cpu) {
             return Some(direct);
         }
-        if matches!(lane, Lane::F16 | Lane::BF16) {
+        if matches!(lane, Lane::F16 | Lane::BF16) && !matches!(action, Action::Splat) {
             let supported = lane == Lane::F16
                 && packed
-                && cpu.fp16
+                && cpu.isa.fp16
                 && crate::lir::x64::inst::simd::evex(cpu)
                 && matches!(
                     action,
@@ -50,15 +50,18 @@ impl Native {
                 );
             return supported.then_some(direct);
         }
-        let int =
-            packed && (bytes != 32 || cpu.avx2) && (bytes != 64 || lane.bytes() >= 4 || cpu.bw);
+        if let Action::Binary(op) = action
+            && let Some(form) = Lanewise::of(op, lane)
+        {
+            return form.supports(bytes, cpu).then_some(direct);
+        }
+        let int = packed && (bytes != 64 || lane.bytes() >= 4 || cpu.isa.bw);
         let supported = match action {
             Action::Splat => {
                 lane.bytes() <= 8
                     && match bytes {
-                        16 => true,
-                        32 => cpu.avx2,
-                        64 => lane.bytes() >= 4 || cpu.bw,
+                        16 | 32 => true,
+                        64 => lane.bytes() >= 4 || cpu.isa.bw,
                         _ => false,
                     }
             }
@@ -67,7 +70,7 @@ impl Native {
             }
             Action::Unary(Unary::Abs) if lane.signed() => {
                 int && match lane.bytes() {
-                    1 | 2 | 4 => bytes != 16 || cpu.ssse3,
+                    1 | 2 | 4 => bytes != 16 || cpu.isa.ssse3,
                     8 => bytes == 64,
                     _ => false,
                 }
@@ -78,9 +81,9 @@ impl Native {
                 int && lane.bytes() <= 8
                     && (bytes == 64
                         || match op {
-                            B::Eq => lane.bytes() != 8 || bytes == 32 || cpu.sse41,
+                            B::Eq => lane.bytes() != 8 || bytes == 32 || cpu.isa.sse41,
                             B::Gt => {
-                                lane.signed() && (lane.bytes() != 8 || bytes == 32 || cpu.sse42)
+                                lane.signed() && (lane.bytes() != 8 || bytes == 32 || cpu.isa.sse42)
                             }
                             _ => false,
                         })
@@ -89,27 +92,16 @@ impl Native {
                 packed
                     && bytes == 64
                     && match lane.bytes() {
-                        1 | 2 => cpu.bitalg,
-                        4 | 8 => cpu.vpopcnt,
+                        1 | 2 => cpu.isa.bitalg,
+                        4 | 8 => cpu.isa.vpopcnt,
                         _ => false,
                     }
             }
             Action::Unary(Unary::LeadingZeros) => {
-                packed && bytes == 64 && cpu.cd && matches!(lane.bytes(), 4 | 8)
+                packed && bytes == 64 && cpu.isa.cd && matches!(lane.bytes(), 4 | 8)
             }
             Action::Unary(Unary::Floor | Unary::Ceil | Unary::Trunc | Unary::Nearest) => {
-                lane.float() && (cpu.sse41 || bytes >= 32)
-            }
-            Action::Binary(B::SaturatingAdd | B::SaturatingSub) => int && lane.bytes() <= 2,
-            Action::Binary(B::Min | B::Max) => {
-                int && !lane.float()
-                    && match lane.bytes() {
-                        1 => !lane.signed() || bytes != 16 || cpu.sse41,
-                        2 => lane.signed() || bytes != 16 || cpu.sse41,
-                        4 => bytes != 16 || cpu.sse41,
-                        8 => bytes == 64,
-                        _ => false,
-                    }
+                lane.float() && (cpu.isa.sse41 || bytes >= 32)
             }
             Action::Binary(op @ (B::Eq | B::Ne | B::Lt | B::Le | B::Gt | B::Ge))
                 if packed && lane.float() =>
@@ -117,7 +109,7 @@ impl Native {
                 bytes != 16 || !matches!(op, B::Gt | B::Ge)
             }
             Action::Cast => {
-                cpu.avx10 >= 2
+                cpu.isa.avx10 >= 2
                     && matches!(
                         (input, output),
                         (Type::Vector(Lane::F32), Type::Vector(Lane::I32 | Lane::U32))
@@ -127,39 +119,32 @@ impl Native {
                             )
                     )
             }
-            Action::Binary(B::Add | B::Sub) => lane.float() || (int && lane.bytes() <= 8),
-            Action::Binary(B::Mul) => {
-                lane.float()
-                    || (int
-                        && match lane.bytes() {
-                            2 => true,
-                            4 => bytes != 16 || cpu.sse41,
-                            8 => bytes == 64 && cpu.dq,
-                            _ => false,
-                        })
-            }
-            Action::Binary(B::Div) | Action::Unary(Unary::Sqrt) => lane.float(),
-            Action::Binary(B::And | B::Or | B::Xor) => packed,
-            Action::Ternary(Ternary::MulAdd) => lane.float() && (cpu.fma || bytes == 64),
+            Action::Unary(Unary::Sqrt) => lane.float(),
+            Action::Ternary(Ternary::MulAdd) => lane.float() && (cpu.isa.fma || bytes == 64),
             _ => false,
         };
         supported.then_some(direct)
     }
 }
 
-fn supports_mask_op(action: Action, lane_bytes: usize, cpu: Features) -> bool {
+fn supports_mask_op(action: Action, lane_bytes: usize, cpu: Cpu) -> bool {
     let signs = match lane_bytes {
-        1 | 2 => cpu.bw,
+        1 | 2 => cpu.isa.bw,
         4 | 8 => true,
         _ => false,
     };
     match action {
         Action::AnyTrue | Action::Unary(Unary::Not) => true,
         // VPTESTMD and the 16-bit KNOTW/KORTESTW forms need only AVX-512F.
-        Action::AllTrue => cpu.bytes == 64 && (lane_bytes == 4 || signs),
+        // Narrower vectors compare with zero; PCMPEQQ needs SSE4.1.
+        Action::AllTrue => match cpu.bytes {
+            16 => lane_bytes < 8 || (lane_bytes == 8 && cpu.isa.sse41),
+            32 => lane_bytes <= 8,
+            _ => lane_bytes == 4 || signs,
+        },
         Action::Ternary(Ternary::Select) => match cpu.bytes {
             16 => lane_bytes <= 8,
-            32 => lane_bytes <= 8 && (cpu.avx2 || lane_bytes >= 4),
+            32 => lane_bytes <= 8,
             _ => signs,
         },
         _ => false,

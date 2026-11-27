@@ -1,9 +1,6 @@
 use super::{Builders, Workload};
 use criterion::Criterion;
-use splice::{BufferArg, Executable, kernel};
-use splice_cranelift::Cranelift;
-use splice_lancy::Lancy;
-use splice_llvm::LlvmManualSimd;
+use splice::{BufferArg, Executable, KernelScalar, kernel};
 use std::hint::black_box;
 
 // Transform one stream of samples, with a different format for negative values.
@@ -74,27 +71,23 @@ fn compare_kernel<S>(
             let count = kernel.call(
                 &[],
                 &mut [
-                    BufferArg::Read(src),
-                    BufferArg::Read(rows),
-                    BufferArg::Read(cols),
-                    BufferArg::Write(out),
+                    BufferArg::read(src),
+                    BufferArg::read(rows),
+                    BufferArg::read(cols),
+                    BufferArg::write(out),
                 ],
             )?;
-            usize::try_from(count).map_err(|_| "invalid loop benchmark buffers".into())
+            usize::try_from(i32::from_word(count))
+                .map_err(|_| "invalid loop benchmark buffers".into())
         },
     }
     .compare(c, stage, builds);
 }
 
 pub(super) fn compare(c: &mut Criterion) {
-    let mut state = 0xd73a_fb45u32;
-    let src: Vec<i32> = (0..65_539)
-        .map(|_| {
-            state ^= state << 13;
-            state ^= state >> 17;
-            state ^= state << 5;
-            state as i32
-        })
+    let src: Vec<i32> = crate::common::xorshift(0xd73a_fb45)
+        .take(65_539)
+        .map(|x| x as i32)
         .collect();
     let rows = [0; 37];
     let cols = [0; 59];
@@ -117,11 +110,7 @@ pub(super) fn compare(c: &mut Criterion) {
         inputs,
         &expected,
         conditional_scale::ir,
-        Builders {
-            lancy: &|| conditional_scale::build::<Lancy>(conditional_scale::BuildArgs {}),
-            cranelift: &|| conditional_scale::build::<Cranelift>(conditional_scale::BuildArgs {}),
-            llvm: &|| conditional_scale::build::<LlvmManualSimd>(conditional_scale::BuildArgs {}),
-        },
+        builders!(B => conditional_scale::build::<B>(conditional_scale::BuildArgs {})),
     );
     compare_kernel(
         c,
@@ -129,22 +118,8 @@ pub(super) fn compare(c: &mut Criterion) {
         inputs,
         &src,
         || optional_checksum::ir(black_box(false)),
-        Builders {
-            lancy: &|| {
-                optional_checksum::build::<Lancy>(optional_checksum::BuildArgs {
-                    include_checksum: black_box(false),
-                })
-            },
-            cranelift: &|| {
-                optional_checksum::build::<Cranelift>(optional_checksum::BuildArgs {
-                    include_checksum: black_box(false),
-                })
-            },
-            llvm: &|| {
-                optional_checksum::build::<LlvmManualSimd>(optional_checksum::BuildArgs {
-                    include_checksum: black_box(false),
-                })
-            },
-        },
+        builders!(B => optional_checksum::build::<B>(optional_checksum::BuildArgs {
+            include_checksum: black_box(false),
+        })),
     );
 }

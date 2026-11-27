@@ -1,12 +1,13 @@
 #[path = "workloads/matmul.rs"]
 mod matrix;
 use matrix::{matmul, reference};
+use splice::cranelift::Cranelift;
+use splice::lancy::Lancy;
+#[cfg(feature = "llvm")]
+use splice::llvm::Llvm;
 use splice::{BufferArg, Executable};
-use splice_cranelift::Cranelift;
-use splice_lancy::Lancy;
-use splice_llvm::Llvm;
 
-fn main() -> splice::Result<()> {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     let kernel: Box<dyn Executable> = match std::env::args().nth(1).as_deref() {
         None | Some("lancy") => {
             Box::new(matmul::build::<Lancy>(matmul::BuildArgs {})?.into_inner())
@@ -14,11 +15,10 @@ fn main() -> splice::Result<()> {
         Some("cranelift") => {
             Box::new(matmul::build::<Cranelift>(matmul::BuildArgs {})?.into_inner())
         }
+        #[cfg(feature = "llvm")]
         Some("llvm") => Box::new(matmul::build::<Llvm>(matmul::BuildArgs {})?.into_inner()),
         Some(other) => {
-            return Err(format!(
-                "unknown backend {other}, choose lancy, cranelift or llvm"
-            ));
+            return Err(format!("unknown backend {other}, choose lancy, cranelift or llvm").into());
         }
     };
     let a = [1, 2, 3, 4, 5, 6];
@@ -27,9 +27,9 @@ fn main() -> splice::Result<()> {
     let count = kernel.call(
         &[2, 3, 4],
         &mut [
-            BufferArg::Read(&a),
-            BufferArg::Read(&b),
-            BufferArg::Write(&mut c),
+            BufferArg::read(&a),
+            BufferArg::read(&b),
+            BufferArg::write(&mut c),
         ],
     )?;
     assert_eq!(count, 8);
@@ -44,7 +44,7 @@ fn main() -> splice::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use splice::{Codegen, simd::Lane};
+    use splice::{Codegen, KernelScalar, simd::Lane};
 
     fn kernels() -> Vec<(&'static str, Box<dyn Executable>)> {
         let ir = matmul::ir().unwrap();
@@ -73,6 +73,7 @@ mod tests {
                 "Cranelift/ir",
                 Box::new(Cranelift::compile(&ir).unwrap().into_inner()),
             ),
+            #[cfg(feature = "llvm")]
             (
                 "LLVM/direct",
                 Box::new(
@@ -81,6 +82,7 @@ mod tests {
                         .into_inner(),
                 ),
             ),
+            #[cfg(feature = "llvm")]
             (
                 "LLVM/ir",
                 Box::new(Llvm::compile(&ir).unwrap().into_inner()),
@@ -127,15 +129,15 @@ mod tests {
                 dst.fill(SENTINEL);
                 let actual = kernel
                     .call(
-                        &dims,
+                        &dims.map(i32::to_word),
                         &mut [
-                            BufferArg::Read(&a),
-                            BufferArg::Read(&b),
-                            BufferArg::Write(&mut dst),
+                            BufferArg::read(&a),
+                            BufferArg::read(&b),
+                            BufferArg::write(&mut dst),
                         ],
                     )
                     .unwrap();
-                assert_eq!(actual, count as i32, "{name} {dims:?}");
+                assert_eq!(actual, count as u64, "{name} {dims:?}");
                 assert_eq!(dst, expected, "{name} {dims:?}");
             }
         }
@@ -152,15 +154,15 @@ mod tests {
             for (name, kernel) in &kernels {
                 let result = kernel
                     .call(
-                        &dims,
+                        &dims.map(i32::to_word),
                         &mut [
-                            BufferArg::Read(&[3]),
-                            BufferArg::Read(&[4]),
-                            BufferArg::Write(&mut out),
+                            BufferArg::read::<i32>(&[3]),
+                            BufferArg::read::<i32>(&[4]),
+                            BufferArg::write(&mut out),
                         ],
                     )
                     .unwrap();
-                assert_eq!(result, -1, "{name} {dims:?}");
+                assert_eq!(result, (-1i32).to_word(), "{name} {dims:?}");
                 assert_eq!(out, [SENTINEL; 3], "{name} {dims:?}");
             }
         }

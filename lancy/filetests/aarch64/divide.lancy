@@ -1,4 +1,4 @@
-fn main p:ptr first:i32 second:i32 -> i32
+fn main(p:ptr first:i32 second:i32) -> i32
   one = const 1
   zero = const 0
   two = const 2
@@ -6,25 +6,25 @@ fn main p:ptr first:i32 second:i32 -> i32
   after = const 99
   min = const 0x80000000
   store p before
-  dividend = simd.splat min
-  good = simd.splat two
-  rhs0 = simd.insert good zero first
-  rhs = simd.insert rhs0 one second
-  value = simd.div dividend rhs
+  dividend = splat min
+  good = splat two
+  rhs0 = insert good zero first
+  rhs = insert rhs0 one second
+  value = div dividend rhs
   next = offset p one 4
   store next after
-  result = simd.extract value zero
+  result = extract value zero
   ret result
-@aarch64-isel check: VectorDivide(
-@aarch64 neon has 0x7fe0fc00 0x1ac00c00
-@aarch64 sve has 0xff3fe000 0x04140000
-@aarch64 sve2 has 0xff3fe000 0x04140000
-@aarch64 all lacks 0xfffffc1f 0xd63f0000
+@aarch64-isel check: vector.
+@aarch64 neon has sdiv
+@aarch64 sve has z.sdiv
+@aarch64 sve2 has z.sdiv
+@aarch64 all lacks blr
 @run 0 -1 -> !zero | 00 00 00 00 00 00 00 00 | 4d 00 00 00 00 00 00 00
 @run -1 0 -> !overflow | 00 00 00 00 00 00 00 00 | 4d 00 00 00 00 00 00 00
 @run 2 3 -> -1073741824 | 00 00 00 00 00 00 00 00 | 4d 00 00 00 63 00 00 00
 ---
-fn main p:ptr first:i32 second:i32 -> i32
+fn main(p:ptr first:i32 second:i32) -> i32
   one = const 1
   zero = const 0
   two = const 2
@@ -32,55 +32,55 @@ fn main p:ptr first:i32 second:i32 -> i32
   after = const 99
   min = const 0x80000000
   store p before
-  dividend = simd.splat min
-  good = simd.splat two
-  rhs0 = simd.insert good zero first
-  rhs = simd.insert rhs0 one second
-  value = simd.rem dividend rhs
+  dividend = splat min
+  good = splat two
+  rhs0 = insert good zero first
+  rhs = insert rhs0 one second
+  value = rem dividend rhs
   next = offset p one 4
   store next after
-  result = simd.extract value zero
+  result = extract value zero
   ret result
-@aarch64-isel check: VectorDivide(
-@aarch64 neon has 0x7fe0fc00 0x1ac00c00
-@aarch64 sve has 0xff3fe000 0x04140000
-@aarch64 sve2 has 0xff3fe000 0x04140000
-@aarch64 neon has 0x7fe08000 0x1b008000
-@aarch64 sve has 0xff20e000 0x04006000
-@aarch64 sve2 has 0xff20e000 0x04006000
-@aarch64 all lacks 0xfffffc1f 0xd63f0000
+@aarch64-isel check: vector.
+@aarch64 neon has sdiv
+@aarch64 sve has z.sdiv
+@aarch64 sve2 has z.sdiv
+@aarch64 neon has msub
+@aarch64 sve has z.mls
+@aarch64 sve2 has z.mls
+@aarch64 all lacks blr
 @run 0 -1 -> !zero | 00 00 00 00 00 00 00 00 | 4d 00 00 00 00 00 00 00
 @run -1 0 -> !overflow | 00 00 00 00 00 00 00 00 | 4d 00 00 00 00 00 00 00
 @run 2 3 -> 0 | 00 00 00 00 00 00 00 00 | 4d 00 00 00 63 00 00 00
 ---
-fn main x:i32 y:i32 -> i32
+fn main(x:i32 y:i32) -> i32
   a = cast i8 x
   b = cast i8 y
-  all_a = simd.splat a
-  all_b = simd.splat b
-  value = simd.rem all_a all_b
-  n = simd.lanes i8
+  all_a = splat a
+  all_b = splat b
+  value = rem all_a all_b
+  n = lanes i8
   one = const 1
   last = sub n one
-  lane = simd.extract value last
+  lane = extract value last
   result = cast i32 lane
   ret result
-@aarch64-isel check: VectorDivide(
-@aarch64 all lacks 0xfffffc1f 0xd63f0000
+@aarch64-isel check: vector.
+@aarch64 all lacks blr
 @run -7 3 -> -1
 @run 7 -3 -> 1
 @run -128 -1 -> !overflow
 @run -128 2 -> 0
 @run 1 0 -> !zero
 ---
-fn main x:i32 -> i32
+fn main(x:i32) -> i32
   zero = const 0
   one = const 1
-  a = simd.splat one
-  b = simd.splat x
-  unused = simd.div a b
+  a = splat one
+  b = splat x
+  unused = div a b
   ret zero
-@aarch64-isel check: VectorDivide(
-@aarch64 all lacks 0xfffffc1f 0xd63f0000
+@aarch64-isel check: vector.
+@aarch64 all lacks blr
 @run 0 -> !zero
 @run 1 -> 0

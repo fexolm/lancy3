@@ -1,0 +1,115 @@
+error: expected a safe synchronous kernel with Rust ABI and fixed arity
+ --> tests/ui/signatures.rs:7:1
+  |
+7 | async fn asynchronous() {}
+  | ^^^^^^^^^^^^^^^^^^^^^^^
+
+error: expected (), bool, i32, u32, i64, u64, usize, f32, f64, Lane<T> or Mask<T>
+  --> tests/ui/signatures.rs:10:21
+   |
+10 | fn wide_result() -> i128 {
+   |                     ^^^^
+
+error: a kernel cannot return vectors or masks with generic elements
+  --> tests/ui/signatures.rs:15:36
+   |
+15 | fn generic_vector<T: Element>() -> Lane<T> {
+   |                                    ^^^^^^^
+
+error: use &mut [i32] to write to a slice
+  --> tests/ui/signatures.rs:20:18
+   |
+20 | fn mutable_slice(mut out: &[i32]) -> i32 {
+   |                  ^^^^^^^
+
+error: expected #[comptime], #[columns(layout)], or an unannotated runtime argument
+  --> tests/ui/signatures.rs:25:19
+   |
+25 | fn unknown_marker(#[inline] x: i32) -> i32 {
+   |                   ^^^^^^^^^^^^^^^^
+
+error: a kernel accepts one column table
+  --> tests/ui/signatures.rs:32:5
+   |
+32 |     #[columns(4)] b: &[BufferArg<'_>],
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: declare the column table after other buffers
+  --> tests/ui/signatures.rs:38:62
+   |
+38 | fn table_before_buffer(#[columns(4)] cols: &[BufferArg<'_>], xs: &[i32]) -> i32 {
+   |                                                              ^^^^^^^^^^
+
+error: expected columns: &[BufferArg<'_>]
+  --> tests/ui/signatures.rs:43:15
+   |
+43 | fn table_type(#[columns(4)] cols: &[i32]) -> i32 {
+   |               ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: declare one Rust context before any column table
+  --> tests/ui/signatures.rs:50:32
+   |
+50 | fn two_contexts(a: &mut State, b: &mut State) -> i32 {
+   |                                ^^^^^^^^^^^^^
+
+error: the Rust context parameter requires a named binding
+  --> tests/ui/signatures.rs:55:20
+   |
+55 | fn context_pattern(ref a: &mut State) -> i32 {
+   |                    ^^^^^
+
+error: a Rust context requires the scalar entry ABI
+  --> tests/ui/signatures.rs:60:1
+   |
+60 | fn context_vector(a: &mut State) -> Lane<i32> {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: a column-table entry point requires the scalar calling convention
+  --> tests/ui/signatures.rs:65:1
+   |
+65 | fn table_vector(#[columns(4)] cols: &[BufferArg<'_>]) -> Lane<i32> {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: an explicit trait object is unsupported in a kernel signature
+  --> tests/ui/signatures.rs:70:33
+   |
+70 | fn trait_object(#[comptime] f: &dyn Fn(i32) -> i32) -> i32 {
+   |                                 ^^^^^^^^^^^^^^^^^^
+
+error: duplicate #[kernel] attribute
+  --> tests/ui/signatures.rs:75:1
+   |
+75 | #[kernel]
+   | ^^^^^^^^^
+
+error: #[comptime] belongs on a kernel parameter
+  --> tests/ui/signatures.rs:81:1
+   |
+81 | #[comptime]
+   | ^^^^^^^^^^^
+
+error: expected #[comptime], #[columns(layout)], or an unannotated runtime argument
+  --> tests/ui/signatures.rs:87:19
+   |
+87 | fn twice_comptime(#[comptime] #[comptime] n: i32, x: i32) -> i32 {
+   |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: missing aggregate field
+  --> tests/ui/signatures.rs:99:15
+   |
+99 |     comptime!(pair.second)
+   |               ^^^^^^^^^^^
+
+warning: unused imports: `Element` and `Lane`
+ --> tests/ui/signatures.rs:3:20
+  |
+3 | use splice::simd::{Element, Lane};
+  |                    ^^^^^^^  ^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `splice::BufferArg`
+ --> tests/ui/signatures.rs:4:5
+  |
+4 | use splice::BufferArg;
+  |     ^^^^^^^^^^^^^^^^^

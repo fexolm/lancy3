@@ -2,16 +2,16 @@ mod relational;
 
 use relational::{Catalog, Plan, pricing_plan, query};
 use splice::Executable;
-use splice_cranelift::Cranelift;
-use splice_lancy::Lancy;
-use splice_llvm::Llvm;
-use splice_text::Text;
+use splice::cranelift::Cranelift;
+use splice::lancy::Lancy;
+#[cfg(feature = "llvm")]
+use splice::llvm::Llvm;
 
 #[cfg(test)]
 #[path = "relational/tests.rs"]
 mod tests;
 
-fn main() -> Result<(), String> {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     let plan = pricing_plan();
     match std::env::args().nth(1).as_deref() {
         None | Some("lancy") => run(
@@ -28,6 +28,7 @@ fn main() -> Result<(), String> {
             })?
             .into_inner(),
         ),
+        #[cfg(feature = "llvm")]
         Some("llvm") => run(
             &plan,
             query::build::<Llvm>(query::BuildArgs {
@@ -35,26 +36,17 @@ fn main() -> Result<(), String> {
             })?
             .into_inner(),
         ),
-        Some("text") => {
-            print!(
-                "{}",
-                query::build::<Text>(query::BuildArgs {
-                    program: &plan.prepare()
-                })?
-            );
-            Ok(())
-        }
         Some("rust") => {
             print!("{}", query::print(&plan.prepare())?);
             Ok(())
         }
-        Some(other) => Err(format!(
-            "unknown backend {other}; choose lancy, cranelift, llvm, text or rust"
-        )),
+        Some(other) => {
+            Err(format!("unknown backend {other}; choose lancy, cranelift, llvm or rust").into())
+        }
     }
 }
 
-fn run(plan: &Plan, code: impl Executable) -> Result<(), String> {
+fn run(plan: &Plan, code: impl Executable) -> Result<(), Box<dyn std::error::Error>> {
     let catalog = Catalog::new(&[
         &[(7, 3), (8, 1), (7, 4)],
         &[(7, 10), (8, 2)],

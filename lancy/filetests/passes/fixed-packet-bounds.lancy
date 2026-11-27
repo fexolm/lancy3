@@ -1,0 +1,68 @@
+# A guard `remaining >= k` with a constant k proves the checks of the first k
+# elements, like a guard on a lane count. Counterexamples: a different
+# remaining length, and a constant that is not a full packet at every width.
+fn main(n:i32 i:i32) -> i32
+  four = const 4
+  last = const 3
+  zero = const 0
+  remaining = sub n i
+  short = gt four remaining
+  br short done() | full()
+block full()
+  available = sub n i
+  bounds last available
+  ret available
+block done()
+  ret zero
+@source check: bounds
+@opt not: bounds
+@opt check: br
+@opt not: bounds
+@opt check: ret
+@opt not: bounds
+@run 9 5 -> 4
+@run 9 6 -> 0
+@run -2147483648 1 -> 2147483647
+@run -1 0 -> 0
+
+---
+
+# The two subtractions can yield different remaining lengths.
+fn main(p:ptr n:i32 i:i32 j:i32) -> i32
+  four = const 4
+  last = const 3
+  marker = const 7
+  remaining = sub n i
+  enough = ge remaining four
+  br enough full() | done()
+block full()
+  store p marker
+  available = sub n j
+  bounds last available
+  ret available
+block done()
+  ret remaining
+@opt check: store
+@opt check: bounds
+@run 4 0 1 -> !bounds | aa aa aa aa | 07 00 00 00
+@run 4 0 0 -> 4 | aa aa aa aa | 07 00 00 00
+@run 4 1 0 -> 3 | aa aa aa aa | aa aa aa aa
+
+---
+
+# Eight lanes do not suffice on a 64-byte target.
+fn main(n:i32) -> i32
+  eight = const 8
+  one = const 1
+  width = lanes i32
+  last = sub width one
+  full = ge n eight
+  br full check() | short()
+block check()
+  bounds last n
+  ret one
+block short()
+  ret n
+@opt check: bounds
+@run 7 -> 7
+@run 32 -> 1

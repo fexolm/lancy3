@@ -3,6 +3,7 @@ use super::{
     groups::z,
     inst::{IntBinary, IntOp, VectorDivide},
 };
+use crate::Trap;
 
 impl Emitter<'_> {
     pub(super) fn vector_divide(&mut self, form: VectorDivide, a: u8, b: u8, dst: u8) -> Result {
@@ -33,11 +34,12 @@ impl Emitter<'_> {
         let arr = arrangements(form.size).1;
         let lanes = self.config.bytes / 4;
         self.predicate(R::P4, A::S, lanes)?;
+        let (divisor, quotient) = (self.temp(0), self.temp(1));
         // The groups execute in increasing lane order, including their trap checks.
         for offset in (0..self.config.bytes).step_by(lanes * form.size) {
             self.sve_widen_group(a, 16, form.size, offset, form.signed)?;
-            self.sve_widen_group(b, 17, form.size, offset, form.signed)?;
-            self.sve_divide_group(form, A::S, [16, 17], 16, 18)?;
+            self.sve_widen_group(b, divisor, form.size, offset, form.signed)?;
+            self.sve_divide_group(form, A::S, [16, divisor], 16, quotient)?;
             self.sve_narrow_group(16, form.size)?;
             if offset == 0 {
                 self.copy_vec(dst, 16, true)?;
@@ -61,8 +63,10 @@ impl Emitter<'_> {
         let p = |n| O::vec(n, arr);
         let zero = |n| O::pred(n, PredQual::Zero);
         let active = |n| O::pred(n, PredQual::None);
-        self.a
-            .put(C::Cmpeq_p_p_zi0, &[p(R::P1), zero(R::P4), z(b, arr)])?;
+        self.a.put(
+            C::Cmpeq_p_p_zi,
+            &[p(R::P1), zero(R::P4), z(b, arr), O::imm(0)],
+        )?;
         let zero_divisor_prefix = if form.signed {
             let min = i64::MIN >> (64 - 8 * form.size);
             let bits = if arr == A::S {
@@ -71,8 +75,10 @@ impl Emitter<'_> {
                 min as u64
             };
             self.a.put(C::Dupm_z, &[z(scratch, arr), O::imm(bits)])?;
-            self.a
-                .put(C::Cmpeq_minus1_p_p_z, &[p(R::P2), zero(R::P4), z(b, arr)])?;
+            self.a.put(
+                C::Cmpeq_p_p_zi,
+                &[p(R::P2), zero(R::P4), z(b, arr), O::simm(-1)],
+            )?;
             self.a.put(
                 C::Cmpeq_p_p_zz,
                 &[p(R::P2), zero(R::P2), z(a, arr), z(scratch, arr)],
@@ -90,11 +96,11 @@ impl Emitter<'_> {
             C::Ptest_p_p,
             &[active(zero_divisor_prefix), O::vec(R::P1, A::B)],
         )?;
-        self.trap_if(Cond::Ne, 2)?;
+        self.trap_if(Cond::Ne, Trap::DivisionByZero)?;
         if form.signed {
             self.a
                 .put(C::Ptest_p_p, &[active(R::P4), O::vec(R::P2, A::B)])?;
-            self.trap_if(Cond::Ne, 3)?;
+            self.trap_if(Cond::Ne, Trap::DivisionOverflow)?;
         }
 
         let div = if form.signed {

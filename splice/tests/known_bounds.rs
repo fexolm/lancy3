@@ -1,14 +1,12 @@
-use splice::{BuildOptions, Codegen, Executable, hir::Instr, kernel};
-use splice_cranelift::Cranelift;
-use splice_lancy::Lancy;
-use splice_llvm::Llvm;
-use splice_text::Text;
+use splice::{
+    BuildError, BuildOptions, CallError, Codegen, Executable, Mode, Trap, hir::Instr, kernel,
+};
 use std::{
     ops::Index,
     sync::atomic::{AtomicUsize, Ordering},
 };
 
-#[kernel]
+#[kernel(print)]
 fn chosen(#[comptime] table: &[u16], flag: i32) -> i32 {
     if flag != 0 { table[0] as i32 } else { 0 }
 }
@@ -73,7 +71,7 @@ fn check<B: Codegen<Output: Executable>>() {
     assert!(write_borrowed_plan::ir(&mut borrowed).is_err());
     assert_eq!(borrowed, [7]);
 
-    let options = BuildOptions::Release;
+    let options = BuildOptions::host(Mode::Release).unwrap();
     let ir = chosen::ir_with_options(options, &[]).expect("construct IR without a plan address");
     assert!(
         ir.instructions()
@@ -86,10 +84,8 @@ fn check<B: Codegen<Output: Executable>>() {
     for code in [direct, portable] {
         assert_eq!(code.call(chosen::CallArgs { flag: 0 }).unwrap(), 0);
         assert_eq!(
-            code.call(chosen::CallArgs { flag: 1 })
-                .unwrap_err()
-                .to_string(),
-            "kernel slice index out of bounds"
+            code.call(chosen::CallArgs { flag: 1 }).unwrap_err(),
+            CallError::Trap(Trap::Bounds)
         );
         assert_eq!(code.call(chosen::CallArgs { flag: 0 }).unwrap(), 0);
     }
@@ -120,8 +116,13 @@ fn check<B: Codegen<Output: Executable>>() {
         assert_eq!(out, [7, 21]);
     }
 
-    assert!(mandatory::ir(&[]).is_err());
-    assert!(mandatory::build::<B>(mandatory::BuildArgs { table: &[] }).is_err());
+    let bounds = |error: BuildError| matches!(error, BuildError::Comptime(Trap::Bounds));
+    assert!(mandatory::ir(&[]).err().is_some_and(bounds));
+    assert!(
+        mandatory::build::<B>(mandatory::BuildArgs { table: &[] })
+            .err()
+            .is_some_and(bounds)
+    );
     assert!(runtime_offset::ir(&[3]).is_err());
     assert!(runtime_offset::build::<B>(runtime_offset::BuildArgs { table: &[3] }).is_err());
     let plan = Indexed {
@@ -141,15 +142,11 @@ fn check<B: Codegen<Output: Executable>>() {
 
 #[test]
 fn known_indices_only_fault_on_the_reached_execution_path() {
-    check::<Lancy>();
-    check::<Llvm>();
-    check::<Cranelift>();
+    splice_testkit::each_backend!(B => check::<B>());
     let ir = chosen::ir(&[]).unwrap();
     assert!(
-        Text::compile(&ir)
-            .unwrap()
-            .as_inner()
-            .contains("trap bounds")
+        splice_testkit::instructions(&ir)
+            .any(|instruction| matches!(instruction, Instr::TrapBounds))
     );
     let source = chosen::print(&[]).unwrap();
     assert!(

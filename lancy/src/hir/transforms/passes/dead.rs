@@ -54,7 +54,7 @@ pub(super) fn eliminate(f: &mut Function, cfg: &ControlFlowGraph, facts: &Facts)
         if def.inst != Inst::INVALID {
             f.visit_operands(def.inst, mark);
         } else if def.block != f.entry() {
-            let column = f.params(def.block).binary_search(&value).unwrap();
+            let column = f.param_index(def.block, value).unwrap();
             for (_, edge) in cfg.incoming_edges(def.block) {
                 mark(f.edge(edge).1[column]);
             }

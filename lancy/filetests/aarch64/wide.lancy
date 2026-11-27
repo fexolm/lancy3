@@ -1,4 +1,4 @@
-fn main p:ptr -> i32
+fn main(p:ptr) -> i32
   zero = const 0
   two = const 2
   second = offset p two 8
@@ -9,78 +9,78 @@ fn main p:ptr -> i32
   store p sum
   store second difference
   ret zero
-@aarch64-isel check: WideAdd
-@aarch64-isel check: WideAdd
-@aarch64 all has 0xffe0fc00 0xab000000
-@aarch64 all has 0xffe0fc00 0x9a000000
-@aarch64 all has 0xffe0fc00 0xeb000000
-@aarch64 all has 0xffe0fc00 0xda000000
-@aarch64 all lacks 0xfffffc1f 0xd63f0000
+@aarch64-isel check: wide add
+@aarch64-isel check: wide sub
+@aarch64 all has adds.x
+@aarch64 all has adc.x
+@aarch64 all has subs.x
+@aarch64 all has sbc.x
+@aarch64 all lacks blr
 @run -> 0 | ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff 01 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 | 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 fe ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff
 @run -> 0 | 00 00 00 00 00 00 00 00 05 00 00 00 00 00 00 00 01 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 | 01 00 00 00 00 00 00 00 05 00 00 00 00 00 00 00 ff ff ff ff ff ff ff ff 04 00 00 00 00 00 00 00
 ---
-fn main p:ptr -> i32
+fn main(p:ptr) -> i32
   zero = const 0
   one = const 1
   mask = load i128 p
   yes = literal i128 0x11111111111111112222222222222222
   no = literal i128 0x33333333333333334444444444444444
-  flags = simd.splat mask
-  a = simd.splat yes
-  b = simd.splat no
-  selected = simd.select flags a b
-  lanes = simd.lanes i128
+  flags = splat mask
+  a = splat yes
+  b = splat no
+  selected = select flags a b
+  lanes = lanes i128
   last = sub lanes one
-  r = simd.extract selected last
+  r = extract selected last
   store p r
   ret zero
-@aarch64-isel check: Select(Wide(
-@aarch64 sve has 0xfffffc00 0x05302000
-@aarch64 sve2 has 0xfffffc00 0x05302000
-@aarch64 all lacks 0xfffffc1f 0xd63f0000
+@aarch64-isel check: select wide
+@aarch64 sve has z.dup.q
+@aarch64 sve2 has z.dup.q
+@aarch64 all lacks blr
 @run -> 0 | 00 00 00 00 00 00 00 80 01 00 00 00 00 00 00 00 | 44 44 44 44 44 44 44 44 33 33 33 33 33 33 33 33
 @run -> 0 | 01 00 00 00 00 00 00 00 00 00 00 00 00 00 00 80 | 22 22 22 22 22 22 22 22 11 11 11 11 11 11 11 11
 ---
-fn main -> i32
+fn main() -> i32
   one = const 1
-  n = simd.lanes u128
+  n = lanes u128
   last = sub n one
-  indices = simd.iota u128
-  sample = simd.extract indices last
+  indices = iota u128
+  sample = extract indices last
   r = cast i32 sample
   error = xor r last
   ret error
-@aarch64 all lacks 0xfffffc1f 0xd63f0000
+@aarch64 all lacks blr
 @run -> 0
 ---
-fn main p:ptr x:i32 -> i32
+fn main(p:ptr x:i32) -> i32
   wide = cast u128 x
   narrowed = cast i32 wide
   store p wide
   ret narrowed
-@aarch64-isel check: WideCast(
-@aarch64 all lacks 0xfffffc1f 0xd63f0000
+@aarch64-isel check: cast.wide
+@aarch64 all lacks blr
 @run -128 -> -128 | 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 | 80 ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff
 @run 255 -> 255 | 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 | ff 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
 ---
-fn main p:ptr -> i32
+fn main(p:ptr) -> i32
   zero = const 0
   raw = load u64 p
   wide = cast i128 raw
   store p wide
   ret zero
-@aarch64 all lacks 0xfffffc1f 0xd63f0000
+@aarch64 all lacks blr
 @run -> 0 | 01 00 00 00 00 00 00 80 ff ff ff ff ff ff ff ff | 01 00 00 00 00 00 00 80 00 00 00 00 00 00 00 00
 ---
-fn main p:ptr -> i32
+fn main(p:ptr) -> i32
   raw = load u128 p
   byte = cast i8 raw
   result = cast i32 byte
   ret result
-@aarch64 all lacks 0xfffffc1f 0xd63f0000
+@aarch64 all lacks blr
 @run -> -17 | ef cd ab 89 67 45 23 01 be ba fe ca ef be ad de | ef cd ab 89 67 45 23 01 be ba fe ca ef be ad de
 ---
-fn main p:ptr x:i32 -> i32
+fn main(p:ptr x:i32) -> i32
   a = load i128 p
   b = cast i128 x
   q = div a b
@@ -90,14 +90,14 @@ fn main p:ptr x:i32 -> i32
   store p sum
   result = cast i32 r
   ret result
-@aarch64-isel check: WideMath(
-@aarch64 all has 0xffe0fc00 0x9bc07c00
-@aarch64 all lacks 0xfffffc1f 0xd63f0000
+@aarch64-isel check: wide div
+@aarch64 all has umulh
+@aarch64 all lacks blr
 @run -1 -> !overflow | 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 80 | 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 80
 @run 0 -> !zero | 07 00 00 00 00 00 00 00 05 00 00 00 00 00 00 00 | 07 00 00 00 00 00 00 00 05 00 00 00 00 00 00 00
 @run 3 -> -2 | 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 80 | 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 80
 ---
-fn main p:ptr x:i32 -> i32
+fn main(p:ptr x:i32) -> i32
   a = load u128 p
   b = cast u128 x
   rotated = rotateleft a b
@@ -105,8 +105,8 @@ fn main p:ptr x:i32 -> i32
   bits = popcnt rotated
   result = cast i32 bits
   ret result
-@aarch64-isel check: WideMath(
-@aarch64-isel check: WideUnary(
-@aarch64 all lacks 0xfffffc1f 0xd63f0000
+@aarch64-isel check: wide rotateleft
+@aarch64-isel check: wide popcnt
+@aarch64 all lacks blr
 @run 1 -> 5 | 06 00 00 00 00 00 00 00 03 00 00 00 00 00 00 80 | 0d 00 00 00 00 00 00 00 06 00 00 00 00 00 00 00
 @run 65 -> 5 | 06 00 00 00 00 00 00 00 03 00 00 00 00 00 00 80 | 06 00 00 00 00 00 00 00 0d 00 00 00 00 00 00 00

@@ -1,127 +1,58 @@
-//! Lower a verified Splice call graph using Inkwell's typed builder.
+//! Lower Splice kernels using Inkwell's typed builder.
 mod body;
 mod direct;
-pub(crate) use direct::populate_direct;
+pub(crate) use direct::{Staged, populate, populate_function};
 
-use body::Body;
 use inkwell::AddressSpace;
 use inkwell::attributes::{Attribute, AttributeLoc};
 use inkwell::builder::{Builder, BuilderError};
 use inkwell::context::Context;
 use inkwell::module::{Linkage, Module};
-use inkwell::values::{BasicMetadataValueEnum, FunctionValue, IntValue};
-use splice::Function;
-use splice::hir::BufferKind;
+use inkwell::types::{BasicMetadataTypeEnum, BasicType};
+use inkwell::values::{BasicMetadataValueEnum, BasicValueEnum, FunctionValue, IntValue};
+use splice_core::frontend::Signature;
+use splice_core::hir::ScalarType;
 
 // Only internal kernel functions use the fast calling convention.
 const FAST_CALL: u32 = inkwell::llvm_sys::LLVMCallConv::LLVMFastCallConv as u32;
 
-pub(crate) fn populate<'ctx>(
-    ctx: &'ctx Context,
-    module: &Module<'ctx>,
-    root: &Function,
-) -> Result<(), String> {
-    populate_mode(ctx, module, root, false)
-}
-
-pub(crate) fn populate_mode<'ctx>(
-    ctx: &'ctx Context,
-    module: &Module<'ctx>,
-    root: &Function,
-    debug: bool,
-) -> Result<(), String> {
-    let (functions, ids) = root.reachable_functions();
-    if debug
-        && (u32::try_from(functions.len()).is_err()
-            || functions
-                .iter()
-                .any(|f| u32::try_from(f.instructions().len()).is_err()))
-    {
-        return Err("too many LLVM source points".into());
-    }
-
-    let mut declarations = Vec::with_capacity(functions.len());
-    for (id, f) in functions.iter().enumerate() {
-        let function = declare(ctx, module, f.arity(), f.buffer_kinds(), id)?;
-        if debug {
-            function.set_linkage(Linkage::External);
-        }
-        declarations.push(function);
-    }
-    let builder = ctx.create_builder();
-    let callees = body::Callees {
-        ids: &ids,
-        declarations: &declarations,
-    };
-    emit_entry(
-        ctx,
-        module,
-        &builder,
-        root.arity(),
-        root.buffer_kinds().len(),
-        declarations[0],
-    )
-    .map_err(|e| e.to_string())?;
-    let mut static_rust_slice_operands = false;
-    for (id, f) in functions.into_iter().enumerate() {
-        static_rust_slice_operands |= Body::emit(
-            ctx,
-            &builder,
-            module,
-            f,
-            declarations[id],
-            &callees,
-            debug.then_some(id),
-        )
-        .map_err(|e| e.to_string())?;
-    }
-    if static_rust_slice_operands {
-        permit_buffer_capture(module);
-    }
-    if debug {
-        let preserve_frame = ctx.create_string_attribute("frame-pointer", "all");
-        for f in module.get_functions() {
-            f.add_attribute(AttributeLoc::Function, preserve_frame);
-            #[cfg(target_os = "linux")]
-            f.add_attribute(
-                AttributeLoc::Function,
-                ctx.create_enum_attribute(Attribute::get_named_enum_kind_id("uwtable"), 2),
-            );
-        }
-    }
-    Ok(())
-}
-
 fn declare<'ctx>(
     ctx: &'ctx Context,
     module: &Module<'ctx>,
-    arity: usize,
-    buffers: &[BufferKind],
+    signature: Signature<'_>,
     id: usize,
-) -> Result<FunctionValue<'ctx>, String> {
+) -> splice_core::Result<FunctionValue<'ctx>> {
+    let (arity, buffers) = (signature.params.len(), signature.buffers);
     let n = buffers
         .len()
         .checked_mul(2)
         .and_then(|n| n.checked_add(arity))
         .and_then(|n| n.checked_add(1))
-        .ok_or("LLVM kernel signature too large")?;
-    u32::try_from(n).map_err(|_| "kernel signature exceeds LLVM's parameter count")?;
+        .ok_or_else(|| splice_core::BuildError::unsupported("LLVM kernel signature too large"))?;
+    u32::try_from(n).map_err(|_| {
+        splice_core::BuildError::unsupported("kernel signature exceeds LLVM's parameter count")
+    })?;
     let mut params = Vec::with_capacity(n);
     let pointer = ctx.ptr_type(AddressSpace::default());
     params.push(pointer.into()); // status
-    params.resize(1 + arity, ctx.i32_type().into());
+    params.extend(
+        signature
+            .params
+            .iter()
+            .map(|&ty| BasicMetadataTypeEnum::from(body::scalar_type(ctx, ty))),
+    );
     for _ in buffers {
         params.push(pointer.into());
         params.push(ctx.i64_type().into());
     }
-    let ty = ctx.i32_type().fn_type(&params, false);
+    let ty = body::scalar_type(ctx, signature.result).fn_type(&params, false);
     let callee = module.add_function(&format!("kernel{id}"), ty, Some(Linkage::Internal));
     callee.set_call_conventions(FAST_CALL);
 
     let attr = |name: &str| Attribute::get_named_enum_kind_id(name);
     let noalias = ctx.create_enum_attribute(attr("noalias"), 0);
     let readonly = ctx.create_enum_attribute(attr("readonly"), 0);
-    let capture = capture_attribute_kind().map(|id| ctx.create_enum_attribute(id, 0));
+    let nocapture = ctx.create_enum_attribute(attr("nocapture"), 0);
     // An opaque Rust operation may observe a borrowed slice's address and
     // record it in the caller's object. Preserve that possibility in LLVM IR.
     let exposes_slice_addresses = buffers
@@ -131,27 +62,15 @@ fn declare<'ctx>(
     for (i, kind) in buffers.iter().enumerate() {
         let slot = AttributeLoc::Param((1 + arity + i * 2) as u32);
         callee.add_attribute(slot, if kind.writable() { noalias } else { readonly });
-        if let Some(a) = capture
-            && !exposes_slice_addresses
-        {
-            callee.add_attribute(slot, a);
+        if !exposes_slice_addresses {
+            callee.add_attribute(slot, nocapture);
         }
     }
     Ok(callee)
 }
 
-fn capture_attribute_kind() -> Option<u32> {
-    // LLVM 21 replaced nocapture with captures(none), encoded as zero bits.
-    ["nocapture", "captures"]
-        .into_iter()
-        .map(Attribute::get_named_enum_kind_id)
-        .find(|&id| id != 0)
-}
-
 fn permit_buffer_capture(module: &Module<'_>) {
-    let Some(kind) = capture_attribute_kind() else {
-        return;
-    };
+    let kind = Attribute::get_named_enum_kind_id("nocapture");
     // A Rust operation can record a slice address even when the slice was
     // originally borrowed by an ancestor kernel. Remove the assumptions
     // from the whole generated call graph before running LLVM passes.
@@ -168,29 +87,32 @@ fn emit_entry<'ctx>(
     ctx: &'ctx Context,
     module: &Module<'ctx>,
     b: &Builder<'ctx>,
-    arity: usize,
-    buffer_count: usize,
+    signature: Signature<'_>,
     root: FunctionValue<'ctx>,
 ) -> Result<(), BuilderError> {
     let ptr = ctx.ptr_type(AddressSpace::default());
-    let i32_ty = ctx.i32_type();
     let i64_ty = ctx.i64_type();
-    let ty = i32_ty.fn_type(&[ptr.into(); 3], false);
+    let ty = i64_ty.fn_type(&[ptr.into(); 3], false);
     let entry = module.add_function("splice_entry", ty, None);
     b.position_at_end(ctx.append_basic_block(entry, "entry"));
     let mut params = entry.get_param_iter();
     let scalars = params.next().unwrap().into_pointer_value();
     let descriptors = params.next().unwrap().into_pointer_value();
-    let status = params.next().unwrap();
+    let result_word = params.next().unwrap().into_pointer_value();
+    // Kernel functions store a trap code through the status pointer.
+    let i32_ty = ctx.i32_type();
+    let status = b.build_alloca(i32_ty, "status")?;
+    b.build_store(status, i32_ty.const_zero())?;
     let mut args = vec![status.into()];
-    for i in 0..arity {
+    for (i, &ty) in signature.params.iter().enumerate() {
         let index = i64_ty.const_int(i as u64, false);
         // SAFETY: Executable::call verifies the length of the scalar array.
-        let address = unsafe { b.build_in_bounds_gep(i32_ty, scalars, &[index], "")? };
-        args.push(b.build_load(i32_ty, address, "")?.into());
+        let address = unsafe { b.build_in_bounds_gep(i64_ty, scalars, &[index], "")? };
+        let word = b.build_load(i64_ty, address, "")?.into_int_value();
+        args.push(from_word(ctx, b, word, ty)?.into());
     }
     let desc = ctx.struct_type(&[ptr.into(), i64_ty.into()], false);
-    for i in 0..buffer_count {
+    for i in 0..signature.buffers.len() {
         let index = i64_ty.const_int(i as u64, false);
         // SAFETY: Executable::call validates one (data, length) descriptor per slice.
         let slot = unsafe { b.build_in_bounds_gep(desc, descriptors, &[index], "")? };
@@ -200,17 +122,65 @@ fn emit_entry<'ctx>(
         args.push(b.build_load(i64_ty, len, "")?.into());
     }
     let result = call(b, root, &args)?;
-    b.build_return(Some(&result))?;
+    b.build_store(result_word, to_word(ctx, b, result, signature.result)?)?;
+    // The status of `splice_core::call::Entry`: the trap code in the upper
+    // word (see `Trap::status`).
+    let code = b.build_load(i32_ty, status, "")?.into_int_value();
+    let code = b.build_int_z_extend(code, i64_ty, "")?;
+    let status = b.build_left_shift(code, i64_ty.const_int(32, false), "")?;
+    b.build_return(Some(&status))?;
     Ok(())
+}
+
+/// A scalar parameter from its 64-bit ABI word, which holds the value's
+/// bits in the low bits (see `splice_core::KernelScalar`).
+fn from_word<'ctx>(
+    ctx: &'ctx Context,
+    b: &Builder<'ctx>,
+    word: IntValue<'ctx>,
+    ty: ScalarType,
+) -> Result<BasicValueEnum<'ctx>, BuilderError> {
+    Ok(match ty {
+        ScalarType::Bool => b.build_int_truncate(word, ctx.bool_type(), "")?.into(),
+        ScalarType::I32 | ScalarType::U32 => b.build_int_truncate(word, ctx.i32_type(), "")?.into(),
+        ScalarType::I64 | ScalarType::U64 | ScalarType::Index => word.into(),
+        ScalarType::F32 => {
+            let bits = b.build_int_truncate(word, ctx.i32_type(), "")?;
+            b.build_bit_cast(bits, ctx.f32_type(), "")?
+        }
+        ScalarType::F64 => b.build_bit_cast(word, ctx.f64_type(), "")?,
+    })
+}
+
+/// The 64-bit ABI word of a scalar result: its bits, zero-extended.
+fn to_word<'ctx>(
+    ctx: &'ctx Context,
+    b: &Builder<'ctx>,
+    value: BasicValueEnum<'ctx>,
+    ty: ScalarType,
+) -> Result<IntValue<'ctx>, BuilderError> {
+    let i64_ty = ctx.i64_type();
+    let bits = match ty {
+        ScalarType::F32 => b
+            .build_bit_cast(value, ctx.i32_type(), "")?
+            .into_int_value(),
+        ScalarType::F64 => b.build_bit_cast(value, i64_ty, "")?.into_int_value(),
+        _ => value.into_int_value(),
+    };
+    if bits.get_type() == i64_ty {
+        Ok(bits)
+    } else {
+        b.build_int_z_extend(bits, i64_ty, "")
+    }
 }
 
 fn call<'ctx>(
     b: &Builder<'ctx>,
     function: FunctionValue<'ctx>,
     args: &[BasicMetadataValueEnum<'ctx>],
-) -> Result<IntValue<'ctx>, BuilderError> {
+) -> Result<BasicValueEnum<'ctx>, BuilderError> {
     let call = b.build_call(function, args, "")?;
     call.set_call_convention(FAST_CALL);
-    // All Splice functions have an i32 result by construction.
-    Ok(call.try_as_basic_value().unwrap_basic().into_int_value())
+    // Every Splice function returns a scalar.
+    Ok(call.try_as_basic_value().unwrap_basic())
 }

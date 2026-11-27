@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
 # %bnot_band
-fn main -> i32
+fn main() -> i32
   v1 = const 0
   v2 = const 1
   t0 = const -1
@@ -14,7 +14,7 @@ fn main -> i32
 ---
 
 # %a64_extr_i32_12
-fn main v0:i32 v1:i32 -> i32
+fn main(v0:i32 v1:i32) -> i32
   t0 = const 12
   t1 = shr v0 t0
   t2 = const 1048575
@@ -29,7 +29,7 @@ fn main v0:i32 v1:i32 -> i32
 ---
 
 # %a64_extr_i32_12_swap
-fn main v0:i32 v1:i32 -> i32
+fn main(v0:i32 v1:i32) -> i32
   t0 = const 20
   v2 = shl v0 t0
   t1 = const 12
@@ -44,7 +44,7 @@ fn main v0:i32 v1:i32 -> i32
 ---
 
 # %a64_extr_i32_28
-fn main v0:i32 v1:i32 -> i32
+fn main(v0:i32 v1:i32) -> i32
   t0 = const 4
   t1 = shr v0 t0
   t2 = const 268435455
@@ -59,7 +59,7 @@ fn main v0:i32 v1:i32 -> i32
 ---
 
 # %a64_extr_i32_28_swap
-fn main v0:i32 v1:i32 -> i32
+fn main(v0:i32 v1:i32) -> i32
   t0 = const 4
   v2 = shl v0 t0
   t1 = const 28
@@ -74,7 +74,7 @@ fn main v0:i32 v1:i32 -> i32
 ---
 
 # %test_bxor_bor_band_i64 (low 32 bits)
-fn main v0:i32 v1:i32 -> i32
+fn main(v0:i32 v1:i32) -> i32
   v2 = or v0 v1
   v3 = and v0 v1
   v4 = xor v2 v3
@@ -88,7 +88,7 @@ fn main v0:i32 v1:i32 -> i32
 ---
 
 # %test_and_and1
-fn main v0:i32 v1:i32 -> i32
+fn main(v0:i32 v1:i32) -> i32
   v2 = and v0 v1
   v3 = and v2 v0
   ret v3
@@ -97,7 +97,7 @@ fn main v0:i32 v1:i32 -> i32
 ---
 
 # %test_and_and2
-fn main v0:i32 v1:i32 -> i32
+fn main(v0:i32 v1:i32) -> i32
   v2 = and v0 v1
   v3 = and v0 v2
   ret v3
@@ -106,7 +106,7 @@ fn main v0:i32 v1:i32 -> i32
 ---
 
 # %test_and_and3
-fn main v0:i32 v1:i32 -> i32
+fn main(v0:i32 v1:i32) -> i32
   v2 = and v1 v0
   v3 = and v0 v2
   ret v3
@@ -115,7 +115,7 @@ fn main v0:i32 v1:i32 -> i32
 ---
 
 # %test_and_and4
-fn main v0:i32 v1:i32 -> i32
+fn main(v0:i32 v1:i32) -> i32
   v2 = and v1 v0
   v3 = and v2 v0
   ret v3
@@ -124,7 +124,7 @@ fn main v0:i32 v1:i32 -> i32
 ---
 
 # %fold_and_xor_not
-fn main v0:i32 v1:i32 -> i32
+fn main(v0:i32 v1:i32) -> i32
   t0 = const -1
   v2 = xor v1 t0
   v3 = xor v0 v2
@@ -135,7 +135,7 @@ fn main v0:i32 v1:i32 -> i32
 ---
 
 # %fold_add_or_and3
-fn main v0:i32 v1:i32 -> i32
+fn main(v0:i32 v1:i32) -> i32
   v2 = or v0 v1
   v3 = and v0 v1
   v4 = add v2 v3
@@ -145,7 +145,7 @@ fn main v0:i32 v1:i32 -> i32
 ---
 
 # %fold_add_and_xor4 (low 32 bits)
-fn main v0:i32 v1:i32 -> i32
+fn main(v0:i32 v1:i32) -> i32
   v2 = and v0 v1
   v3 = xor v0 v1
   v4 = add v2 v3
@@ -155,7 +155,7 @@ fn main v0:i32 v1:i32 -> i32
 ---
 
 # %fold_or_and14 (low 32 bits)
-fn main v0:i32 v1:i32 -> i32
+fn main(v0:i32 v1:i32) -> i32
   v2 = and v0 v1
   v3 = or v2 v0
   ret v3
@@ -164,7 +164,7 @@ fn main v0:i32 v1:i32 -> i32
 ---
 
 # %fold_xor_xor15 (low 32 bits)
-fn main v0:i32 v1:i32 -> i32
+fn main(v0:i32 v1:i32) -> i32
   v2 = xor v0 v1
   v3 = xor v1 v2
   ret v3
@@ -173,7 +173,7 @@ fn main v0:i32 v1:i32 -> i32
 ---
 
 # %fold_or_and_not
-fn main v0:i32 v1:i32 -> i32
+fn main(v0:i32 v1:i32) -> i32
   v2 = and v0 v1
   t0 = const -1
   v3 = xor v0 t0
@@ -184,7 +184,7 @@ fn main v0:i32 v1:i32 -> i32
 ---
 
 # %test_bxor_band_band
-fn main v0:i32 v1:i32 v2:i32 -> i32
+fn main(v0:i32 v1:i32 v2:i32) -> i32
   v3 = and v0 v1
   v4 = and v0 v2
   v5 = xor v3 v4
@@ -194,7 +194,7 @@ fn main v0:i32 v1:i32 v2:i32 -> i32
 ---
 
 # %test_bor_band_bnot_bxor
-fn main v0:i32 v1:i32 -> i32
+fn main(v0:i32 v1:i32) -> i32
   v2 = and v0 v1
   v3 = xor v0 v1
   t0 = const -1
@@ -209,7 +209,7 @@ fn main v0:i32 v1:i32 -> i32
 ---
 
 # %test_iadd_bor_ineg
-fn main v0:i32 v1:i32 -> i32
+fn main(v0:i32 v1:i32) -> i32
   v2 = or v0 v1
   t0 = const 0
   v3 = sub t0 v1
@@ -223,7 +223,7 @@ fn main v0:i32 v1:i32 -> i32
 ---
 
 # %test_band_bor_absorb_x
-fn main v0:i32 v1:i32 -> i32
+fn main(v0:i32 v1:i32) -> i32
   v2 = or v0 v1
   v3 = and v2 v0
   ret v3
@@ -236,7 +236,7 @@ fn main v0:i32 v1:i32 -> i32
 ---
 
 # %test_band_bor_bor
-fn main v0:i32 v1:i32 v2:i32 -> i32
+fn main(v0:i32 v1:i32 v2:i32) -> i32
   v3 = or v0 v2
   v4 = or v1 v2
   v5 = and v3 v4
@@ -248,7 +248,7 @@ fn main v0:i32 v1:i32 v2:i32 -> i32
 ---
 
 # %test_bor_band_band
-fn main v0:i32 v1:i32 v2:i32 -> i32
+fn main(v0:i32 v1:i32 v2:i32) -> i32
   v3 = and v0 v2
   v4 = and v1 v2
   v5 = or v3 v4
@@ -262,7 +262,7 @@ fn main v0:i32 v1:i32 v2:i32 -> i32
 ---
 
 # %test_bxor_bor_bor_bnot
-fn main v0:i32 v1:i32 -> i32
+fn main(v0:i32 v1:i32) -> i32
   v2 = or v0 v1
   t0 = const -1
   v3 = xor v1 t0
@@ -278,7 +278,7 @@ fn main v0:i32 v1:i32 -> i32
 ---
 
 # %test_band_bnot_bnot
-fn main v0:i32 v1:i32 -> i32
+fn main(v0:i32 v1:i32) -> i32
   t0 = const -1
   v2 = xor v0 t0
   t1 = const -1
@@ -292,7 +292,7 @@ fn main v0:i32 v1:i32 -> i32
 ---
 
 # %test_bor_bnot_bnot
-fn main v0:i32 v1:i32 -> i32
+fn main(v0:i32 v1:i32) -> i32
   t0 = const -1
   v2 = xor v0 t0
   t1 = const -1
@@ -306,7 +306,7 @@ fn main v0:i32 v1:i32 -> i32
 ---
 
 # %test_bor_bxor_bxor_x
-fn main v0:i32 v1:i32 v2:i32 -> i32
+fn main(v0:i32 v1:i32 v2:i32) -> i32
   v3 = xor v0 v1
   v4 = xor v3 v2
   v5 = or v4 v0
@@ -318,7 +318,7 @@ fn main v0:i32 v1:i32 v2:i32 -> i32
 ---
 
 # %simplify_icmp_eq_bxor_shared_rhs
-fn main v0:i32 v1:i32 v2:i32 -> i32
+fn main(v0:i32 v1:i32 v2:i32) -> i32
   v3 = xor v0 v2
   v4 = xor v1 v2
   t0 = eq v3 v4
@@ -332,7 +332,7 @@ fn main v0:i32 v1:i32 v2:i32 -> i32
 ---
 
 # %test_bor_bnot_bor_absorb
-fn main v0:i32 v1:i32 -> i32
+fn main(v0:i32 v1:i32) -> i32
   v2 = or v0 v1
   t0 = const -1
   v3 = xor v2 t0
@@ -344,7 +344,7 @@ fn main v0:i32 v1:i32 -> i32
 ---
 
 # %test_band_bnot_band_absorb
-fn main v0:i32 v1:i32 -> i32
+fn main(v0:i32 v1:i32) -> i32
   v2 = and v0 v1
   t0 = const -1
   v3 = xor v2 t0
@@ -357,7 +357,7 @@ fn main v0:i32 v1:i32 -> i32
 ---
 
 # %test_bxor_bnot_bor
-fn main v0:i32 v1:i32 -> i32
+fn main(v0:i32 v1:i32) -> i32
   t0 = const -1
   v2 = xor v0 t0
   v3 = or v0 v1
@@ -369,7 +369,7 @@ fn main v0:i32 v1:i32 -> i32
 ---
 
 # %test_bor_slt_sgt
-fn main v0:i32 v1:i32 -> i32
+fn main(v0:i32 v1:i32) -> i32
   t0 = lt v0 v1
   t1 = const 1
   v2 = and t0 t1
@@ -385,7 +385,7 @@ fn main v0:i32 v1:i32 -> i32
 ---
 
 # %test_bor_ult_ugt
-fn main v0:i32 v1:i32 -> i32
+fn main(v0:i32 v1:i32) -> i32
   t0 = const -2147483648
   t1 = xor v0 t0
   t2 = xor v1 t0
@@ -407,7 +407,7 @@ fn main v0:i32 v1:i32 -> i32
 ---
 
 # %test_bnot_band_bnot
-fn main v0:i32 v1:i32 -> i32
+fn main(v0:i32 v1:i32) -> i32
   t0 = const -1
   v2 = xor v0 t0
   v3 = and v2 v1
@@ -421,7 +421,7 @@ fn main v0:i32 v1:i32 -> i32
 ---
 
 # %test_bnot_bor_bnot
-fn main v0:i32 v1:i32 -> i32
+fn main(v0:i32 v1:i32) -> i32
   t0 = const -1
   v2 = xor v0 t0
   v3 = or v2 v1
@@ -435,7 +435,7 @@ fn main v0:i32 v1:i32 -> i32
 ---
 
 # %test_bor_bxor_bxor_chain
-fn main v0:i32 v1:i32 v2:i32 -> i32
+fn main(v0:i32 v1:i32 v2:i32) -> i32
   v3 = xor v0 v1
   v4 = xor v3 v2
   v5 = or v3 v4
@@ -447,7 +447,7 @@ fn main v0:i32 v1:i32 v2:i32 -> i32
 ---
 
 # %test_bor_bxor_self
-fn main v0:i32 v1:i32 -> i32
+fn main(v0:i32 v1:i32) -> i32
   v2 = xor v0 v1
   v3 = or v0 v2
   ret v3
@@ -459,7 +459,7 @@ fn main v0:i32 v1:i32 -> i32
 ---
 
 # %test_bnot_iadd_bnot_to_isub_rt
-fn main v0:i32 v1:i32 -> i32
+fn main(v0:i32 v1:i32) -> i32
   t0 = const -1
   v2 = xor v0 t0
   v3 = add v2 v1
@@ -473,7 +473,7 @@ fn main v0:i32 v1:i32 -> i32
 ---
 
 # %test_bor_bxor_bor
-fn main v0:i32 v1:i32 v2:i32 -> i32
+fn main(v0:i32 v1:i32 v2:i32) -> i32
   v3 = xor v0 v2
   v4 = or v1 v0
   v5 = or v3 v4
@@ -485,7 +485,7 @@ fn main v0:i32 v1:i32 v2:i32 -> i32
 ---
 
 # %test_bxor_bor_bxor
-fn main v0:i32 v1:i32 -> i32
+fn main(v0:i32 v1:i32) -> i32
   v2 = or v0 v1
   v3 = xor v0 v1
   v4 = xor v2 v3
@@ -497,7 +497,7 @@ fn main v0:i32 v1:i32 -> i32
 ---
 
 # %test_bor_band_bxor
-fn main v0:i32 v1:i32 v2:i32 -> i32
+fn main(v0:i32 v1:i32 v2:i32) -> i32
   v3 = xor v0 v1
   v4 = and v3 v2
   v5 = or v4 v0
@@ -511,7 +511,7 @@ fn main v0:i32 v1:i32 v2:i32 -> i32
 ---
 
 # %test_bor_bor_bxor
-fn main v0:i32 v1:i32 v2:i32 -> i32
+fn main(v0:i32 v1:i32 v2:i32) -> i32
   v3 = or v0 v1
   v4 = xor v0 v2
   v5 = or v3 v4
@@ -525,7 +525,7 @@ fn main v0:i32 v1:i32 v2:i32 -> i32
 ---
 
 # %simplify_icmp_ne_bxor_shared_rhs
-fn main v0:i32 v1:i32 v2:i32 -> i32
+fn main(v0:i32 v1:i32 v2:i32) -> i32
   v3 = xor v0 v2
   v4 = xor v1 v2
   t0 = ne v3 v4
@@ -539,7 +539,7 @@ fn main v0:i32 v1:i32 v2:i32 -> i32
 ---
 
 # %test_bor_band_band_bnot
-fn main v0:i32 v1:i32 -> i32
+fn main(v0:i32 v1:i32) -> i32
   v2 = and v0 v1
   t0 = const -1
   v3 = xor v1 t0
@@ -553,7 +553,7 @@ fn main v0:i32 v1:i32 -> i32
 ---
 
 # %test_band_bor_bor_bnot
-fn main v0:i32 v1:i32 -> i32
+fn main(v0:i32 v1:i32) -> i32
   v2 = or v0 v1
   t0 = const -1
   v3 = xor v1 t0
@@ -567,7 +567,7 @@ fn main v0:i32 v1:i32 -> i32
 ---
 
 # %test_bor_bxor_bnot
-fn main v0:i32 v1:i32 -> i32
+fn main(v0:i32 v1:i32) -> i32
   v2 = xor v0 v1
   t0 = const -1
   v3 = xor v0 t0
@@ -580,7 +580,7 @@ fn main v0:i32 v1:i32 -> i32
 ---
 
 # %test_bxor_bxor_x
-fn main v0:i32 v1:i32 -> i32
+fn main(v0:i32 v1:i32) -> i32
   v2 = xor v0 v1
   v3 = xor v2 v0
   ret v3
@@ -591,7 +591,7 @@ fn main v0:i32 v1:i32 -> i32
 ---
 
 # %test_bor_band_bor
-fn main v0:i32 v1:i32 v2:i32 -> i32
+fn main(v0:i32 v1:i32 v2:i32) -> i32
   v3 = or v1 v2
   v4 = and v0 v3
   v5 = or v4 v1
@@ -605,7 +605,7 @@ fn main v0:i32 v1:i32 v2:i32 -> i32
 ---
 
 # %test_band_bor_band
-fn main v0:i32 v1:i32 v2:i32 -> i32
+fn main(v0:i32 v1:i32 v2:i32) -> i32
   v3 = and v1 v2
   v4 = or v0 v3
   v5 = and v4 v1
@@ -619,7 +619,7 @@ fn main v0:i32 v1:i32 v2:i32 -> i32
 ---
 
 # %test_bor_bxor_band
-fn main v0:i32 v1:i32 v2:i32 -> i32
+fn main(v0:i32 v1:i32 v2:i32) -> i32
   v3 = and v1 v2
   v4 = xor v0 v3
   v5 = or v4 v1
@@ -632,7 +632,7 @@ fn main v0:i32 v1:i32 v2:i32 -> i32
 ---
 
 # %test_iadd_bxor_band_to_isub_rt
-fn main v0:i32 v1:i32 v2:i32 -> i32
+fn main(v0:i32 v1:i32 v2:i32) -> i32
   v3 = and v0 v1
   v4 = xor v3 v1
   v5 = add v4 v2
@@ -644,7 +644,7 @@ fn main v0:i32 v1:i32 v2:i32 -> i32
 ---
 
 # %test_band_bor_bnot
-fn main v0:i32 v1:i32 -> i32
+fn main(v0:i32 v1:i32) -> i32
   t0 = const -1
   v2 = xor v1 t0
   v3 = or v2 v0
@@ -657,7 +657,7 @@ fn main v0:i32 v1:i32 -> i32
 ---
 
 # %test_bor_band_bnot
-fn main v0:i32 v1:i32 -> i32
+fn main(v0:i32 v1:i32) -> i32
   t0 = const -1
   v2 = xor v1 t0
   v3 = and v2 v0
@@ -670,7 +670,7 @@ fn main v0:i32 v1:i32 -> i32
 ---
 
 # %test_aarch64_extr
-fn main v0:i32 v1:i32 -> i32
+fn main(v0:i32 v1:i32) -> i32
   t0 = const 32
   v2 = shl v0 t0
   t1 = const 0
@@ -685,7 +685,7 @@ fn main v0:i32 v1:i32 -> i32
 ---
 
 # %test_eq_band_bnot_fullmask
-fn main v0:i32 v1:i32 -> i32
+fn main(v0:i32 v1:i32) -> i32
   t0 = const -1
   v2 = xor v1 t0
   v3 = and v0 v2
@@ -699,7 +699,7 @@ fn main v0:i32 v1:i32 -> i32
 ---
 
 # %test_uge_x_band
-fn main v0:i32 v1:i32 -> i32
+fn main(v0:i32 v1:i32) -> i32
   v2 = and v0 v1
   t0 = const -2147483648
   t1 = xor v0 t0
@@ -714,7 +714,7 @@ fn main v0:i32 v1:i32 -> i32
 ---
 
 # %test_ule_band_x
-fn main v0:i32 v1:i32 -> i32
+fn main(v0:i32 v1:i32) -> i32
   v2 = and v0 v1
   t0 = const -2147483648
   t1 = xor v2 t0
@@ -729,7 +729,7 @@ fn main v0:i32 v1:i32 -> i32
 ---
 
 # %test_uge_bor_x
-fn main v0:i32 v1:i32 -> i32
+fn main(v0:i32 v1:i32) -> i32
   v2 = or v0 v1
   t0 = const -2147483648
   t1 = xor v2 t0
@@ -744,7 +744,7 @@ fn main v0:i32 v1:i32 -> i32
 ---
 
 # %test_ule_x_bor
-fn main v0:i32 v1:i32 -> i32
+fn main(v0:i32 v1:i32) -> i32
   v2 = or v0 v1
   t0 = const -2147483648
   t1 = xor v0 t0

@@ -1,4 +1,4 @@
-fn main x:i32 y:i32 -> i32
+fn main(x:i32 y:i32) -> i32
   xb = cast u16 x
   yb = cast u16 y
   a = bitcast f16 xb
@@ -7,8 +7,8 @@ fn main x:i32 y:i32 -> i32
   bits = bitcast u16 c
   r = cast i32 bits
   ret r
-@aarch64-isel check: FloatRemainder(
-@aarch64 all lacks 0xfffffc1f 0xd63f0000
+@aarch64-isel check: libcall 
+@aarch64 all has blr
 @run 0x4580 0x4200 -> 0x4100
 @run 0xc580 0xc200 -> 0xc100
 @run 0xc600 0x4200 -> 0x8000
@@ -20,23 +20,23 @@ fn main x:i32 y:i32 -> i32
 @run 0x0400 0x03ff -> 1
 @run 0x7bff 11 -> 6
 ---
-fn main x:i32 y:i32 -> i32
+fn main(x:i32 y:i32) -> i32
   xb = cast u16 x
   yb = cast u16 y
   a = bitcast bf16 xb
   b = bitcast bf16 yb
-  av = simd.splat a
-  bv = simd.splat b
-  c = simd.rem av bv
-  n = simd.lanes bf16
+  av = splat a
+  bv = splat b
+  c = rem av bv
+  n = lanes bf16
   one = const 1
   last = sub n one
-  v = simd.extract c last
+  v = extract c last
   bits = bitcast u16 v
   r = cast i32 bits
   ret r
-@aarch64-isel check: FloatRemainder(
-@aarch64 all lacks 0xfffffc1f 0xd63f0000
+@aarch64-isel check: libcall 
+@aarch64 all has blr
 @run 0x40b0 0x4040 -> 0x4020
 @run 0xc0c0 0x4040 -> 0x8000
 @run 0x0081 5 -> 4
@@ -45,19 +45,19 @@ fn main x:i32 y:i32 -> i32
 @run 0x7f7f 11 -> 5
 @run 0x5f80 0x3fc0 -> 0x3f80
 ---
-fn main x:i32 y:i32 -> i32
+fn main(x:i32 y:i32) -> i32
   a = bitcast f32 x
   b = bitcast f32 y
   c = rem a b
   r = bitcast i32 c
   ret r
-@aarch64-isel check: FloatRemainder(
-@aarch64 all lacks 0xfffffc1f 0xd63f0000
+@aarch64-isel check: libcall 
+@aarch64 all has blr
 @run 0x7f7fffff 11 -> 10
 @run 0x00800001 0x00800000 -> 1
 @run 0x80000000 0x7f800000 -> 0x80000000
 ---
-fn main p:ptr -> i32
+fn main(p:ptr) -> i32
   i = const 1
   q = offset p i 8
   a = load f64 p
@@ -66,17 +66,17 @@ fn main p:ptr -> i32
   bits = bitcast u64 c
   r = cast i32 bits
   ret r
-@aarch64-isel check: FloatRemainder(
-@aarch64 all lacks 0xfffffc1f 0xd63f0000
+@aarch64-isel check: libcall 
+@aarch64 all has blr
 @run -> 4 | ff ff ff ff ff ff ef 7f 0b 00 00 00 00 00 00 00 | ff ff ff ff ff ff ef 7f 0b 00 00 00 00 00 00 00
 ---
-fn main x:i32 y:i32 -> i32
+fn main(x:i32 y:i32) -> i32
   a = bitcast f32 x
   b = bitcast f32 y
   c = rem a b
   r = isnan c
   ret r
-@aarch64 all lacks 0xfffffc1f 0xd63f0000
+@aarch64 all has blr
 @run 0x7f800000 0x3f800000 -> -1
 @run 0x3f800000 0x80000000 -> -1
 @run 0x7f800000 0xffc00042 -> -1

@@ -1,7 +1,14 @@
-use splice::hir::{Binary, Buffer, BufferKind, FunctionBuilder};
-use splice::{BufferArg, Codegen, Executable};
+use splice_core::frontend::{KernelBuilder, Signature};
+use splice_core::hir::{Binary, Buffer, BufferKind, FunctionBuilder};
+use splice_core::hir::{Constant, ScalarType};
+use splice_core::{BufferArg, CallError, Codegen, Executable, KernelScalar, Trap};
 use splice_llvm::Llvm;
 use std::sync::Arc;
+
+/// This machine's `SPLICE_SIMD` target in the mode of this test build.
+fn options() -> splice_core::BuildOptions {
+    splice_core::BuildOptions::host(splice_core::Mode::for_profile(cfg!(debug_assertions))).unwrap()
+}
 
 #[test]
 fn all_binary_ops_match_splice_at_signed_boundaries() {
@@ -9,27 +16,36 @@ fn all_binary_ops_match_splice_at_signed_boundaries() {
     let ops = [
         Add, Sub, Mul, And, Or, Xor, Eq, Ne, Lt, Le, Gt, Ge, Shl, Shr, Min, Max, Div, Rem,
     ];
-    let mut b = FunctionBuilder::new(3);
-    let (kind, left, right) = (b.arg(0), b.arg(1), b.arg(2));
+    let mut b = FunctionBuilder::new(
+        options(),
+        Signature::new(&[ScalarType::I32; 3], ScalarType::I32, &[]),
+    );
+    let (kind, left, right) = (b.arg(0).unwrap(), b.arg(1).unwrap(), b.arg(2).unwrap());
     for (i, &op) in ops.iter().enumerate() {
-        let id = b.constant(i as i32);
-        let chosen = b.binary(Eq, kind, id);
-        let (yes, next) = (b.label(), b.label());
-        b.branch(chosen, yes, next);
-        b.mark(yes);
-        let result = b.binary(op, left, right);
-        b.ret(result);
-        b.mark(next);
+        let id = b.constant(Constant::from(i as i32)).unwrap();
+        let chosen = b.binary(Eq, kind, id).unwrap();
+        let (yes, next) = (b.label().unwrap(), b.label().unwrap());
+        b.branch(chosen, yes, next).unwrap();
+        b.mark(yes).unwrap();
+        let mut result = b.binary(op, left, right).unwrap();
+        if op.is_comparison() {
+            result = b.cast(result, ScalarType::I32).unwrap();
+        }
+        b.ret(result).unwrap();
+        b.mark(next).unwrap();
     }
-    b.ret(kind);
+    b.ret(kind).unwrap();
     let code = Llvm::compile(&b.finish().unwrap()).unwrap();
     let cases = [i32::MIN, -35, -1, 0, 1, 31, 32, i32::MAX];
     for (i, &op) in ops.iter().enumerate() {
         for &a in &cases {
             for &b in &cases {
-                let expected = op.checked_eval(a, b);
+                let expected = op
+                    .checked_eval(a.into(), b.into())
+                    .map(|c| c.bits())
+                    .map_err(CallError::from);
                 assert_eq!(
-                    code.call(&[i as i32, a, b], &mut []).ok(),
+                    code.call(&[i as i32, a, b].map(i32::to_word), &mut []),
                     expected,
                     "{a} {op:?} {b}"
                 );
@@ -40,28 +56,49 @@ fn all_binary_ops_match_splice_at_signed_boundaries() {
 
 #[test]
 fn checked_calls_remap_buffers_and_stop_after_the_first_fault() {
-    let mut child = FunctionBuilder::with_buffers(2, vec![BufferKind::Write, BufferKind::Read]);
-    let zero = child.constant(0);
-    let one = child.constant(1);
-    let mark = child.constant(42);
-    child.store(Buffer(0), zero, mark);
-    let value = child.load(Buffer(1), child.arg(0));
-    let quotient = child.binary(Binary::Div, value, child.arg(1));
-    child.store(Buffer(0), one, quotient);
-    let length = child.buffer_len(Buffer(1));
-    child.ret(length);
+    let mut child = FunctionBuilder::new(
+        options(),
+        Signature::new(
+            &[ScalarType::I32; 2],
+            ScalarType::I32,
+            &[BufferKind::WRITE_I32, BufferKind::READ_I32],
+        ),
+    );
+    let zero = child.constant(Constant::from(0usize)).unwrap();
+    let one = child.constant(Constant::from(1usize)).unwrap();
+    let mark = child.constant(Constant::from(42)).unwrap();
+    child.store(Buffer(0), zero, mark).unwrap();
+    let at = child
+        .cast(child.arg(0).unwrap(), ScalarType::Index)
+        .unwrap();
+    let value = child.load(Buffer(1), at).unwrap();
+    let quotient = child
+        .binary(Binary::Div, value, child.arg(1).unwrap())
+        .unwrap();
+    child.store(Buffer(0), one, quotient).unwrap();
+    let length = child.buffer_len(Buffer(1)).unwrap();
+    let length = child.cast(length, ScalarType::I32).unwrap();
+    child.ret(length).unwrap();
 
-    let mut parent = FunctionBuilder::with_buffers(2, vec![BufferKind::Read, BufferKind::Write]);
+    let mut parent = FunctionBuilder::new(
+        options(),
+        Signature::new(
+            &[ScalarType::I32; 2],
+            ScalarType::I32,
+            &[BufferKind::READ_I32, BufferKind::WRITE_I32],
+        ),
+    );
+    let child = Arc::new(child.finish().unwrap());
     let length = parent
-        .call_with_buffers(
-            child.finish().unwrap(),
-            &[parent.arg(0), parent.arg(1)],
+        .call_function(
+            &child,
+            &[parent.arg(0).unwrap(), parent.arg(1).unwrap()],
             &[Buffer(1), Buffer(0)],
         )
         .unwrap();
-    let two = parent.constant(2);
-    parent.store(Buffer(1), two, length);
-    parent.ret(length);
+    let two = parent.constant(Constant::from(2usize)).unwrap();
+    parent.store(Buffer(1), two, length).unwrap();
+    parent.ret(length).unwrap();
     let code = Llvm::compile(&parent.finish().unwrap()).unwrap();
 
     for (index, divisor, expected) in [
@@ -73,10 +110,10 @@ fn checked_calls_remap_buffers_and_stop_after_the_first_fault() {
     ] {
         let mut output = [0; 3];
         let mut buffers = [
-            BufferArg::Read(&[8, i32::MIN]),
-            BufferArg::Write(&mut output),
+            BufferArg::read::<i32>(&[8, i32::MIN]),
+            BufferArg::write(&mut output),
         ];
-        let result = code.call(&[index, divisor], &mut buffers);
+        let result = code.call(&[index, divisor].map(i32::to_word), &mut buffers);
         match expected {
             Some(value) => {
                 assert_eq!(result.unwrap(), 2);
@@ -92,44 +129,56 @@ fn checked_calls_remap_buffers_and_stop_after_the_first_fault() {
 
 #[test]
 fn shared_callees_loops_and_unreachable_tails_form_valid_llvm_blocks() {
-    let mut step = FunctionBuilder::new(1);
-    let one = step.constant(1);
-    let next = step.binary(Binary::Add, step.arg(0), one);
-    step.ret(next);
+    let mut step = FunctionBuilder::new(
+        options(),
+        Signature::new(&[ScalarType::I32; 1], ScalarType::I32, &[]),
+    );
+    let one = step.constant(Constant::from(1)).unwrap();
+    let next = step.binary(Binary::Add, step.arg(0).unwrap(), one).unwrap();
+    step.ret(next).unwrap();
     let step = Arc::new(step.finish().unwrap());
 
-    let mut b = FunctionBuilder::new(1);
-    let i = b.constant(0);
-    let (head, body, done, orphan) = (b.label(), b.label(), b.label(), b.label());
-    b.mark(head);
-    let more = b.binary(Binary::Lt, i, b.arg(0));
-    b.branch(more, body, done);
-    b.mark(body);
-    let a = b.call_shared(Arc::clone(&step), &[i]);
-    let z = b.call_shared(step, &[a]);
-    b.assign(i, z);
-    b.jump(head);
-    b.mark(done);
-    b.ret(i);
+    let mut b = FunctionBuilder::new(
+        options(),
+        Signature::new(&[ScalarType::I32; 1], ScalarType::I32, &[]),
+    );
+    let i = b.constant(Constant::from(0)).unwrap();
+    let (head, body, done, orphan) = (
+        b.label().unwrap(),
+        b.label().unwrap(),
+        b.label().unwrap(),
+        b.label().unwrap(),
+    );
+    b.mark(head).unwrap();
+    let more = b.binary(Binary::Lt, i, b.arg(0).unwrap()).unwrap();
+    b.branch(more, body, done).unwrap();
+    b.mark(body).unwrap();
+    let a = b.call_function(&step, &[i], &[]).unwrap();
+    let z = b.call_function(&step, &[a], &[]).unwrap();
+    b.assign(i, z).unwrap();
+    b.jump(head).unwrap();
+    b.mark(done).unwrap();
+    b.ret(i).unwrap();
     // A verified function may have unreachable operations after a terminator,
     // adjacent labels and a dead tail without an explicit return.
-    b.constant(33);
-    b.mark(orphan);
-    let tail = b.label();
-    b.mark(tail);
-    b.constant(11);
+    b.constant(Constant::from(33)).unwrap();
+    b.mark(orphan).unwrap();
+    let tail = b.label().unwrap();
+    b.mark(tail).unwrap();
+    b.constant(Constant::from(11)).unwrap();
     let f = b.finish().unwrap();
-    let ir = splice_llvm::to_llvm_ir(&f).unwrap();
+    let ir = splice_llvm::to_llvm_ir(&f, &f.options().target).unwrap();
     assert_eq!(ir.matches("define internal fastcc i32 @kernel").count(), 2);
     let code = Llvm::compile(&f).unwrap();
     for (limit, result) in [(-2, 0), (0, 0), (1, 2), (17, 18), (72, 72)] {
-        assert_eq!(code.call(&[limit], &mut []).unwrap(), result);
+        let word = code.call(&[limit.to_word()], &mut []).unwrap();
+        assert_eq!(i32::from_word(word), result);
     }
 }
 
 #[test]
 fn masked_f64_gather_checks_active_indices_at_full_i64_width() {
-    use splice::{
+    use splice_core::{
         frontend::{self, KernelBuilder},
         hir::{Simd, SimdOp},
         simd::Element,
@@ -139,8 +188,8 @@ fn masked_f64_gather_checks_active_indices_at_full_i64_width() {
         BufferKind::new(Element::F64, false),
         BufferKind::new(Element::F64, true),
     ];
-    fn stage(b: &mut dyn KernelBuilder) -> splice::Result<()> {
-        let zero = b.constant(0);
+    fn stage(b: &mut dyn KernelBuilder) -> splice_core::Result<()> {
+        let zero = b.constant(Constant::from(0usize))?;
         let i64op = |op| Simd {
             element: Element::I64,
             op,
@@ -162,13 +211,24 @@ fn masked_f64_gather_checks_active_indices_at_full_i64_width() {
             )?
             .unwrap();
         b.simd(f64op(SimdOp::Store(Buffer(2))), &[zero, selected])?;
-        b.ret(zero);
+        let result = b.constant(Constant::from(0))?;
+        b.ret(result)?;
         Ok(())
     }
-    let ir = frontend::materialize(0, &kinds, Box::new(stage)).unwrap();
-    let n = Element::F64.lanes();
+    let ir = frontend::materialize(
+        Signature::new(&[ScalarType::I32; 0], ScalarType::I32, &kinds),
+        Box::new(stage),
+        options(),
+    )
+    .unwrap();
+    let n = Element::F64.lanes(options().target.vector_bytes());
     for kernel in [
-        Llvm::build(0, &kinds, Box::new(stage)).unwrap(),
+        Llvm::build_with_options(
+            Signature::new(&[ScalarType::I32; 0], ScalarType::I32, &kinds),
+            Box::new(stage),
+            options(),
+        )
+        .unwrap(),
         Llvm::compile(&ir).unwrap(),
     ] {
         let src = [-17.0];
@@ -190,7 +250,7 @@ fn masked_f64_gather_checks_active_indices_at_full_i64_width() {
                 expected[0] = src[0];
                 assert_eq!(out, expected);
             } else {
-                assert!(result.unwrap_err().contains("bounds"));
+                assert_eq!(result, Err(CallError::Trap(Trap::Bounds)));
                 assert_eq!(out, vec![777.0; n]);
             }
         }
@@ -199,8 +259,8 @@ fn masked_f64_gather_checks_active_indices_at_full_i64_width() {
 
 #[test]
 fn i32_gather_keeps_dword_indices_and_native_compaction() {
-    use splice::{kernel, simd::Lane};
-    #[kernel]
+    use splice_core::{kernel, simd::Lane};
+    #[kernel(crate = splice_core)]
     fn compact(src: &[i32], ids: &[i32], out: &mut [i32]) -> i32 {
         let positions = Lane::<i32>::load(ids, 0);
         let words = Lane::<i32>::gather(src, positions);
@@ -208,27 +268,32 @@ fn i32_gather_keeps_dword_indices_and_native_compaction() {
         words.compress(keep).store(out, 0);
         keep.count()
     }
-    let ir = splice_llvm::to_llvm_ir(&compact::ir().unwrap()).unwrap();
-    let width = Lane::<i32>::lanes();
-    assert!(
-        ir.lines()
-            .any(|line| line.contains("getelementptr i32, ptr")
-                && line.contains(&format!("<{width} x i32>")))
-    );
-    #[cfg(target_arch = "x86_64")]
-    let native = match splice_target::simd().unwrap().profile {
-        splice_target::Profile::Auto => {
-            is_x86_feature_detected!("avx512f")
-                && (width == 16 || is_x86_feature_detected!("avx512vl"))
-        }
-        splice_target::Profile::Avx512 | splice_target::Profile::Avx10 => true,
-        _ => false,
-    };
-    #[cfg(not(target_arch = "x86_64"))]
-    let native = false;
-    if native {
-        assert!(ir.contains("@llvm.x86.avx512.mask.compress"));
-    } else {
-        assert!(ir.contains("@llvm.experimental.vector.compress"));
+    // One portable function, listed for several targets in one process.
+    let ir = compact::ir().unwrap();
+    let targets: Vec<_> = splice_core::target::Profile::ALL
+        .iter()
+        .filter_map(|&profile| splice_core::Target::from_profile(profile).ok())
+        .filter(|target| target.arch() == splice_core::Target::host().unwrap().arch())
+        .collect();
+    assert!(targets.len() > 1);
+    for target in targets {
+        let listing = splice_llvm::to_llvm_ir(&ir, &target).unwrap();
+        let width = target.vector_bytes() / 4;
+        assert!(
+            listing
+                .lines()
+                .any(|line| line.contains("getelementptr i32, ptr")
+                    && line.contains(&format!("<{width} x i32>"))),
+            "{target:?}"
+        );
+        let native = target
+            .x86()
+            .is_some_and(|isa| isa.avx10 > 0 || isa.avx512f && (width == 16 || isa.vl));
+        let intrinsic = if native {
+            "@llvm.x86.avx512.mask.compress"
+        } else {
+            "@llvm.experimental.vector.compress"
+        };
+        assert!(listing.contains(intrinsic), "{target:?}");
     }
 }

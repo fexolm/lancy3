@@ -1,31 +1,28 @@
 use super::Rules;
+use crate::lir::x64::Cpu;
 use crate::{
     hir::Value,
-    hir::operation::Action,
     hir::{Binary as B, Lane, Op, Simd, Type},
     lir::x64::inst::{
         Inst,
         simd::packed::rearrange::{PairedShuffle, Rule},
     },
+    support::numeric::Action,
 };
 use regalloc2::RegClass;
-use splice_target::Features;
 
 impl Rules<'_> {
-    pub(super) fn dynamic_dword_lane(
-        &mut self,
-        op: Op,
-    ) -> Result<Option<Inst>, crate::CompileError> {
+    pub(super) fn dynamic_lane(&mut self, op: Op) -> Result<Option<Inst>, crate::CompileError> {
         let (value, index, replacement) = match op {
             Op::Simd(Simd::ExtractLane(x, i)) => (x, i, None),
             Op::Simd(Simd::InsertLane(x, i, y)) => (x, i, Some(y)),
             _ => return Ok(None),
         };
         let lane = self.ty(value).lane().unwrap();
-        if lane.bytes() != 4 || self.cpu.bytes == 16 || self.cpu.bytes == 32 && !self.cpu.avx2 {
+        if lane.bytes() > 8 {
             return Ok(None);
         }
-        let count = self.cpu.bytes as u32 / 4;
+        let count = (self.cpu.bytes / lane.bytes()) as u32;
         let constant = self.dword_constant(index);
         if constant.is_some_and(|n| n >= count) {
             return Ok(None);
@@ -33,12 +30,15 @@ impl Rules<'_> {
         let masked = matches!(self.ctx.defining_op(index), Some(Op::Bin(B::And, a, b))
             if [a, b].into_iter().any(|v| self.dword_constant(v).is_some_and(|n| n < count)));
         let checked = !masked && constant.is_none();
-        let temp = if replacement.is_some() && self.cpu.bytes == 32 {
-            Some(self.body.temp(RegClass::Vector)?)
-        } else {
-            None
-        };
-        Ok(Some(Inst::DwordLane {
+        // SSE2 selects the lane by an equality mask and folds it in a temporary.
+        let dword = lane.bytes() == 4;
+        let temp =
+            if dword && (self.cpu.bytes == 16 || replacement.is_some() && self.cpu.bytes == 32) {
+                Some(self.body.temp(RegClass::Vector)?)
+            } else {
+                None
+            };
+        Ok(Some(Inst::DynamicLane {
             lane,
             checked,
             dst: self.dst(),
@@ -53,7 +53,7 @@ impl Rules<'_> {
         let Op::Simd(Simd::Shuffle(lhs, rhs, index)) = op else {
             return None;
         };
-        if self.ty(lhs).lane()?.bytes() != 4 || self.cpu.bytes == 32 && !self.cpu.avx2 {
+        if self.ty(lhs).lane()?.bytes() != 4 {
             return None;
         }
         let n = self.cpu.bytes / 4;
@@ -83,7 +83,7 @@ impl Rules<'_> {
         match self.ctx.defining_op(value)? {
             Op::Simd(Simd::Iota(Lane::I32 | Lane::U32)) => Some(std::array::from_fn(|i| i as u32)),
             Op::Simd(Simd::Splat(value)) => Some([self.dword_constant(value)?; 16]),
-            Op::Simd(Simd::Bin(op, a, b)) if depth != 0 => {
+            Op::Bin(op, a, b) if depth != 0 => {
                 let left = self.constant_indices(a, depth - 1)?;
                 let right = self.constant_indices(b, depth - 1)?;
                 let combine = match op {
@@ -111,13 +111,8 @@ impl Rules<'_> {
                 ((index as usize) < self.cpu.bytes / lane.bytes())
                     .then(|| Inst::ExtractLane(lane, self.dst(), self.input(vector), index as u8))
             }
-            Op::Simd(Simd::Shuffle(vector, _, indices))
-                if self.ty(vector).lane()?.bytes() == 4
-                    && (self.cpu.bytes != 32 || self.cpu.avx2) =>
-            {
-                let Op::Simd(Simd::Bin(B::Sub, sequence, offset)) =
-                    self.ctx.defining_op(indices)?
-                else {
+            Op::Simd(Simd::Shuffle(vector, _, indices)) if self.ty(vector).lane()?.bytes() == 4 => {
+                let Op::Bin(B::Sub, sequence, offset) = self.ctx.defining_op(indices)? else {
                     return None;
                 };
                 if !matches!(
@@ -145,7 +140,7 @@ impl Rule {
         action: Action,
         input: Type,
         output: Type,
-        c: Features,
+        c: Cpu,
     ) -> Option<Self> {
         let e = input.lane()?;
         let to = output.lane()?;
@@ -154,16 +149,17 @@ impl Rule {
             Action::Widen(_) | Action::Narrow
                 if matches!((e, to), (Lane::F32, Lane::F64) | (Lane::F64, Lane::F32))
                     || matches!((e, to), (Lane::F32, Lane::F16) | (Lane::F16, Lane::F32))
-                        && (c.bytes == 64 || c.f16c)
-                    || matches!((e, to), (Lane::F32, Lane::BF16) | (Lane::BF16, Lane::F32))
-                        && (c.bytes == 16 || c.avx2) =>
+                        && (c.bytes == 64 || c.isa.f16c)
+                    || matches!((e, to), (Lane::F32, Lane::BF16) | (Lane::BF16, Lane::F32)) =>
             {
                 Self::FloatWidth
             }
             Action::Shuffle
                 if crate::lir::x64::inst::simd::evex(c)
-                    && (matches!(n, 4 | 8) || n == 2 && c.bw || n == 1 && c.bw && c.vbmi)
-                    || c.bytes == 32 && c.avx2 && n == 4 =>
+                    && (matches!(n, 4 | 8)
+                        || n == 2 && c.isa.bw
+                        || n == 1 && c.isa.bw && c.isa.vbmi)
+                    || c.bytes <= 32 && n == 4 =>
             {
                 Self::Shuffle
             }
@@ -172,9 +168,7 @@ impl Rule {
                     && !to.float()
                     && to.bytes() == 2 * n
                     && to.bytes() <= 8
-                    && (c.bytes == 16
-                        || c.bytes == 32 && c.avx2
-                        || c.bytes == 64 && (n >= 2 || c.bw)) =>
+                    && (c.bytes != 64 || n >= 2 || c.isa.bw) =>
             {
                 Self::Widen(high)
             }
@@ -183,23 +177,23 @@ impl Rule {
                     && !to.float()
                     && n == 2 * to.bytes()
                     && n <= 8
-                    && (c.bytes == 16
-                        || c.bytes == 32 && c.avx2
-                        || c.bytes == 64 && (n >= 4 || c.bw)) =>
+                    && (c.bytes != 64 || n >= 4 || c.isa.bw) =>
             {
                 Self::Narrow
+            }
+            Action::Reduce(op @ (B::Add | B::Mul)) if matches!(e, Lane::F32 | Lane::F64) => {
+                Self::Reduce(op)
             }
             Action::Reduce(op)
                 if !e.float()
                     && n <= 8
-                    && (c.bytes == 16
-                        || c.avx2
-                        || cfg!(feature = "experimental-simd") && c.bytes == 32)
                     && match op {
                         B::Add | B::And | B::Or | B::Xor => true,
-                        B::Mul => n == 2 || n == 4 && c.sse41,
+                        B::Mul => n == 2 || n == 4 && c.isa.sse41,
                         B::Min | B::Max => {
-                            n <= 4 && (c.sse41 || matches!((n, e.signed()), (1, false) | (2, true)))
+                            n <= 4
+                                && (c.isa.sse41
+                                    || matches!((n, e.signed()), (1, false) | (2, true)))
                         }
                         _ => false,
                     } =>

@@ -13,17 +13,19 @@ mod module;
 
 use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{Module, default_libcall_names};
-use splice::{BufferArg, BufferKind, BuildOptions, Codegen, Executable, Function, Result};
-use std::sync::Mutex;
+use splice_core::call::{Entry, Interface, SliceDescriptor, enter_native};
+use splice_core::{Backend, BuildOptions, CallError, Executable, Function, Result};
 
 /// Compile a specialized kernel or a portable Splice function with Cranelift.
 pub struct Cranelift;
 
-fn builder(debug: bool) -> Result<JITBuilder> {
+/// Cranelift settings for the build target. Every ISA extension comes from
+/// the target, so a profile selects the same instructions on every machine.
+fn builder(target: &splice_core::Target, debug: bool) -> Result<JITBuilder> {
     use cranelift_codegen::settings::{self, Configurable};
-    use splice_target::Profile;
 
-    let simd = splice_target::simd()?;
+    target.check_execution()?;
+    target.check_native_convention()?;
     let mut flags = settings::builder();
     for (name, value) in [
         ("opt_level", if debug { "none" } else { "speed" }),
@@ -37,58 +39,94 @@ fn builder(debug: bool) -> Result<JITBuilder> {
         ("use_colocated_libcalls", "false"),
         ("is_pic", "false"),
     ] {
-        flags.set(name, value).map_err(|e| e.to_string())?;
+        flags
+            .set(name, value)
+            .map_err(|e| splice_core::BuildError::backend("cranelift", e))?;
     }
-    let auto = simd.profile == Profile::Auto;
-    let isa = cranelift_native::builder_with_options(auto)?;
-    #[cfg(target_arch = "x86_64")]
-    let isa = {
-        let mut isa = isa;
-        let profile = simd.profile;
-        // Cranelift has no AVX10 setting. Enable only instructions that it
-        // models and the OS reports under their legacy feature names.
-        for (enabled, flag) in [
-            (is_x86_feature_detected!("ssse3"), "has_ssse3"),
-            (is_x86_feature_detected!("sse4.1"), "has_sse41"),
-            (is_x86_feature_detected!("sse4.2"), "has_sse42"),
-            (
-                profile != Profile::Sse && is_x86_feature_detected!("avx"),
-                "has_avx",
-            ),
-            (
-                profile != Profile::Sse && is_x86_feature_detected!("avx2"),
-                "has_avx2",
-            ),
-            (profile == Profile::Avx512, "has_avx512f"),
-        ] {
-            if !auto && enabled {
-                isa.enable(flag).map_err(|e| e.to_string())?;
-            }
+    let mut isa = cranelift_native::builder_with_options(false)
+        .map_err(splice_core::BuildError::unsupported)?;
+    for (flag, enabled) in isa_flags(target) {
+        if enabled {
+            isa.enable(flag)
+                .map_err(|e| splice_core::BuildError::backend("cranelift", e))?;
         }
-        isa
-    };
+    }
     let isa = isa
         .finish(settings::Flags::new(flags))
-        .map_err(|e| e.to_string())?;
-    Ok(JITBuilder::with_isa(isa, default_libcall_names()))
+        .map_err(|e| splice_core::BuildError::backend("cranelift", e))?;
+    let builder = JITBuilder::with_isa(isa, default_libcall_names());
+    // Without SSSE3, Cranelift lowers byte shuffles to this libcall.
+    #[cfg(target_arch = "x86_64")]
+    let builder = {
+        let mut builder = builder;
+        builder.symbol("__cranelift_x86_pshufb", x86_pshufb as *const u8);
+        builder
+    };
+    Ok(builder)
 }
 
-#[repr(C)]
-struct Descriptor {
-    data: *mut u8,
-    len: i32,
+/// `pshufb` for SSE2 targets: a control byte with its high bit set selects
+/// zero, otherwise its low four bits select a source byte. Cranelift passes
+/// 128-bit vectors like the C convention of this OS.
+#[cfg(target_arch = "x86_64")]
+#[expect(
+    improper_ctypes_definitions,
+    reason = "Cranelift passes I8X16 libcall operands as the C ABI passes __m128i"
+)]
+extern "C" fn x86_pshufb(
+    bytes: std::arch::x86_64::__m128i,
+    control: std::arch::x86_64::__m128i,
+) -> std::arch::x86_64::__m128i {
+    // SAFETY: both types are 16 plain bytes.
+    let (bytes, control) = unsafe {
+        (
+            std::mem::transmute::<std::arch::x86_64::__m128i, [u8; 16]>(bytes),
+            std::mem::transmute::<std::arch::x86_64::__m128i, [u8; 16]>(control),
+        )
+    };
+    let shuffled = control.map(|c| {
+        if c & 0x80 == 0 {
+            bytes[usize::from(c & 15)]
+        } else {
+            0
+        }
+    });
+    // SAFETY: as above.
+    unsafe { std::mem::transmute::<[u8; 16], std::arch::x86_64::__m128i>(shuffled) }
 }
 
-// A successful i32 is zero-extended. Negative i64s can therefore carry
-// faults through any number of calls without losing a valid i32 result.
-const BOUNDS: i64 = -1;
-const DIV_ZERO: i64 = -2;
-const OVERFLOW: i64 = -3;
-const RUST_PANIC: i64 = -5;
-const INTEGER_OVERFLOW: i64 = -4;
-type Entry = unsafe extern "C" fn(*const i32, *const Descriptor) -> i64;
+/// The Cranelift ISA settings for a target. Cranelift has no AVX10 or SVE
+/// settings; it uses 128-bit vectors on AArch64.
+fn isa_flags(target: &splice_core::Target) -> Vec<(&'static str, bool)> {
+    let Some(isa) = target.x86() else {
+        return Vec::new();
+    };
+    vec![
+        ("has_sse3", isa.sse3),
+        ("has_ssse3", isa.ssse3),
+        ("has_sse41", isa.sse41),
+        ("has_sse42", isa.sse42),
+        ("has_popcnt", isa.popcnt),
+        ("has_lzcnt", isa.lzcnt),
+        ("has_bmi1", isa.bmi1),
+        ("has_bmi2", isa.bmi2),
+        ("has_avx", isa.avx),
+        ("has_avx2", isa.avx2),
+        ("has_fma", isa.fma),
+        ("has_avx512f", isa.avx512f),
+        ("has_avx512vl", isa.vl),
+        ("has_avx512dq", isa.dq),
+        ("has_avx512bitalg", isa.bitalg),
+        ("has_avx512vbmi", isa.vbmi),
+    ]
+}
 
 struct CodeMemory(Option<JITModule>);
+
+// SAFETY: a shared `CodeMemory` is never used: the module is only touched
+// while compiling, before the kernel exists, and by `Drop`, which has
+// exclusive access. Calls run the finalized code without the module.
+unsafe impl Sync for CodeMemory {}
 
 impl Drop for CodeMemory {
     fn drop(&mut self) {
@@ -102,100 +140,112 @@ impl Drop for CodeMemory {
 
 /// Owns the executable code of the entry point and all its callees.
 pub struct CraneliftKernel {
-    _debug: Option<splice_jit::Registration>,
-    // The module is Send. Only its owner needs exclusive access on drop.
-    // Concurrent calls use the immutable machine code without taking a lock.
-    _memory: Mutex<CodeMemory>,
+    // Concurrent calls use the immutable machine code, never the module.
+    _memory: splice_jit::Published<CodeMemory>,
     entry: Entry,
-    arity: usize,
-    buffers: Box<[BufferKind]>,
+    interface: Interface,
 }
 
-impl Codegen for Cranelift {
+impl Backend for Cranelift {
     type Output = CraneliftKernel;
 
-    fn compile_raw(function: &Function) -> Result<CraneliftKernel> {
-        Self::compile_with_options(function, function.options())
-    }
-
-    fn build_with_options(
-        arity: usize,
-        kinds: &[BufferKind],
-        body: splice::frontend::Body<'_>,
-        options: BuildOptions,
-    ) -> Result<CraneliftKernel> {
-        Self::compile(&splice::frontend::materialize_with_options(
-            arity, kinds, body, options,
-        )?)
-    }
-
-    fn compile_raw_with_options(
-        function: &Function,
-        options: BuildOptions,
-    ) -> Result<CraneliftKernel> {
-        let _span = tracing::debug_span!(target: "splice::compile", "compile", backend = "cranelift", input = "portable").entered();
-        let debug = options == BuildOptions::Debug;
+    fn compile_function(function: &Function, options: BuildOptions) -> Result<CraneliftKernel> {
+        let _span = tracing::debug_span!(target: "splice_core::compile", "compile", backend = "cranelift", input = "portable").entered();
+        let debug = options.debug();
+        let target = options.target;
         splice_jit::prepare_perf_map();
-        let mut memory = CodeMemory(Some(JITModule::new(builder(debug)?)));
+        let mut memory = CodeMemory(Some(JITModule::new(builder(&target, debug)?)));
         let module = memory.0.as_mut().unwrap();
-        let mut kernel = module::KernelModule::lower(module, function, debug)?;
+        let mut kernel = module::KernelModule::lower(module, function, &target, debug)?;
         let id = kernel.entry;
         let sources = std::mem::take(&mut kernel.functions);
         let mut symbols = Vec::new();
         kernel.emit(&mut module.make_context(), debug, |id, ctx| {
-            tracing::debug_span!(target: "splice::compile", "emit_cranelift_code")
-                .in_scope(|| module.define_function(id, ctx).map_err(|e| e.to_string()))?;
+            tracing::debug_span!(target: "splice_core::compile", "emit_cranelift_code").in_scope(
+                || {
+                    module
+                        .define_function(id, ctx)
+                        .map_err(|e| splice_core::BuildError::backend("cranelift", e))
+                },
+            )?;
             if let Some(source) = sources.get(&id) {
                 symbols.push((id, debug_info::Pending::new(module, ctx, source, debug)?));
             }
             Ok(())
         })?;
-        tracing::debug_span!(target: "splice::compile", "finalize_cranelift_code")
-            .in_scope(|| module.finalize_definitions().map_err(|e| e.to_string()))?;
+        tracing::debug_span!(target: "splice_core::compile", "finalize_cranelift_code").in_scope(
+            || {
+                module
+                    .finalize_definitions()
+                    .map_err(|e| splice_core::BuildError::backend("cranelift", e))
+            },
+        )?;
         let address = module.get_finalized_function(id);
-        let registration = debug_info::publish(module, symbols, debug)?;
-        // SAFETY: KernelModule declares the entry with the host C calling convention,
-        // two pointer parameters and an i64 return. The kernel owns its module.
+        let publish = debug_info::describe(module, symbols, target.vector_bytes(), debug);
+        // SAFETY: KernelModule declares the entry with the host C calling
+        // convention, three pointer parameters and an i64 status return
+        // (`splice_core::call::Entry`). The kernel owns its module.
         let entry = unsafe { std::mem::transmute::<*const u8, Entry>(address) };
         Ok(CraneliftKernel {
-            _debug: registration,
-            _memory: Mutex::new(memory),
+            _memory: publish.finish(debug_info::profile_here(), memory)?,
             entry,
-            arity: function.arity(),
-            buffers: function.buffer_kinds().into(),
+            interface: Interface::new(function.signature()),
         })
     }
 }
 
-impl Executable for CraneliftKernel {
-    fn call(&self, args: &[i32], buffers: &mut [BufferArg<'_>]) -> Result<i32> {
-        if args.len() != self.arity {
-            return Err(format!(
-                "expected {} scalar arguments, got {}",
-                self.arity,
-                args.len()
-            ));
-        }
-        splice::validate_buffers(&self.buffers, buffers)?;
-        let descriptors: Vec<_> = buffers
-            .iter_mut()
-            .map(|buffer| Descriptor {
-                len: buffer.len() as i32,
-                data: buffer.data(),
-            })
-            .collect();
-        // SAFETY: The signature check covers both input arrays, and their
-        // buffers and Rust contexts stay borrowed throughout the call. Verified
-        // HIR checks descriptor kinds and permissions, and lowering guards indices.
-        let result = unsafe { (self.entry)(args.as_ptr(), descriptors.as_ptr()) };
-        match result {
-            BOUNDS => Err("kernel slice index out of bounds".into()),
-            DIV_ZERO => Err("kernel integer division by zero".into()),
-            OVERFLOW => Err("kernel signed division overflow".into()),
-            RUST_PANIC => Err("Rust import panicked".into()),
-            INTEGER_OVERFLOW => Err("kernel integer arithmetic overflow".into()),
-            0..=0xffff_ffff => Ok(result as i32),
-            _ => Err(format!("unexpected Cranelift kernel result {result}")),
-        }
+// SAFETY: `entry` is the code compiled for `interface`, alive as long as
+// `_memory`. Every function returns a status (see `Trap::status`), so a
+// callee's status forwards through any number of calls.
+unsafe impl Executable for CraneliftKernel {
+    fn interface(&self) -> &Interface {
+        &self.interface
+    }
+
+    unsafe fn enter(
+        &self,
+        words: &[u64],
+        slices: &[SliceDescriptor],
+    ) -> std::result::Result<u64, CallError> {
+        // SAFETY: the caller's contract covers both arrays; the entry writes
+        // at most the result word.
+        unsafe { enter_native(self.entry, words, slices) }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::isa_flags;
+    use splice_core::{Target, target::Profile};
+
+    fn enabled(profile: Profile) -> Vec<&'static str> {
+        let target = Target::from_profile(profile).unwrap();
+        isa_flags(&target)
+            .into_iter()
+            .filter_map(|(flag, on)| on.then_some(flag))
+            .collect()
+    }
+
+    #[test]
+    fn fixed_profiles_select_the_same_cranelift_isa_on_every_machine() {
+        assert!(enabled(Profile::Sse).is_empty());
+        let v3 = [
+            "has_sse3",
+            "has_ssse3",
+            "has_sse41",
+            "has_sse42",
+            "has_popcnt",
+            "has_lzcnt",
+            "has_bmi1",
+            "has_bmi2",
+            "has_avx",
+            "has_avx2",
+            "has_fma",
+        ];
+        assert_eq!(enabled(Profile::Avx2), v3);
+        let mut v4 = v3.to_vec();
+        v4.extend(["has_avx512f", "has_avx512vl", "has_avx512dq"]);
+        assert_eq!(enabled(Profile::Avx512), v4);
+        assert!(enabled(Profile::Neon).is_empty());
     }
 }

@@ -1,29 +1,29 @@
 # Two independent reductions with live, non-affine carries share one counter.
-fn main n:i32 x:i32 y:i32 -> i32
+fn main(n:i32 x:i32 y:i32) -> i32
   zero = const 0
   one = const 1
   a_factor = const 31
   b_factor = const 7
-  jump first zero x
-block first i:i32 a:i32
+  jump first(zero x)
+block first(i:i32 a:i32)
   more = lt i n
-  br more first_body | bridge
-block first_body
+  br more first_body() | bridge()
+block first_body()
   mixed_a = xor a i
   next_a = mul mixed_a a_factor
   next_i = add i one
-  jump first next_i next_a
-block bridge
-  jump second zero y
-block second j:i32 b:i32
+  jump first(next_i next_a)
+block bridge()
+  jump second(zero y)
+block second(j:i32 b:i32)
   more_b = lt j n
-  br more_b second_body | done
-block second_body
+  br more_b second_body() | done()
+block second_body()
   mixed_b = xor b j
   next_b = mul mixed_b b_factor
   next_j = add j one
-  jump second next_j next_b
-block done
+  jump second(next_j next_b)
+block done()
   total = add a b
   ret total
 @source check: br
@@ -38,32 +38,32 @@ block done
 ---
 
 # A pointwise producer and consumer of the same storage preserve ordering.
-fn main p:ptr n:i32 -> i32
+fn main(p:ptr n:i32) -> i32
   zero = const 0
   one = const 1
   six = const 6
-  jump first zero
-block first i:i32
+  jump first(zero)
+block first(i:i32)
   more = lt i n
-  br more first_body | bridge
-block first_body
+  br more first_body() | bridge()
+block first_body()
   addr_a = offset p i 4
   next_i = add i one
   store addr_a next_i
-  jump first next_i
-block bridge
-  jump second zero
-block second j:i32
+  jump first(next_i)
+block bridge()
+  jump second(zero)
+block second(j:i32)
   more_b = lt j n
-  br more_b second_body | done
-block second_body
+  br more_b second_body() | done()
+block second_body()
   addr_b = offset p j 4
   input = load i32 addr_b
   result = add input six
   store addr_b result
   next_j = add j one
-  jump second next_j
-block done
+  jump second(next_j)
+block done()
   ret n
 @opt check: br
 @opt not: br
@@ -77,31 +77,31 @@ block done
 ---
 
 # The next element is produced by a later iteration of the first loop.
-fn main p:ptr n:i32 -> i32
+fn main(p:ptr n:i32) -> i32
   zero = const 0
   one = const 1
-  jump first zero
-block first i:i32
+  jump first(zero)
+block first(i:i32)
   more = lt i n
-  br more first_body | bridge
-block first_body
+  br more first_body() | bridge()
+block first_body()
   addr_a = offset p i 4
   next_i = add i one
   store addr_a next_i
-  jump first next_i
-block bridge
-  jump second zero
-block second j:i32
+  jump first(next_i)
+block bridge()
+  jump second(zero)
+block second(j:i32)
   more_b = lt j n
-  br more_b second_body | done
-block second_body
+  br more_b second_body() | done()
+block second_body()
   next_j = add j one
   later = offset p next_j 4
   input = load i32 later
   output = offset p j 4
   store output input
-  jump second next_j
-block done
+  jump second(next_j)
+block done()
   ret n
 @opt check: br
 @opt check: br
@@ -110,33 +110,33 @@ block done
 ---
 
 # A remaining bounds check may fail and must retain all first-loop stores.
-fn main p:ptr n:i32 len:i32 -> i32
+fn main(p:ptr n:i32 len:i32) -> i32
   zero = const 0
   one = const 1
   ten = const 10
-  jump first zero
-block first i:i32
+  jump first(zero)
+block first(i:i32)
   more = lt i n
-  br more first_body | bridge
-block first_body
+  br more first_body() | bridge()
+block first_body()
   addr_a = offset p i 4
   next_i = add i one
   store addr_a next_i
-  jump first next_i
-block bridge
-  jump second zero
-block second j:i32
+  jump first(next_i)
+block bridge()
+  jump second(zero)
+block second(j:i32)
   more_b = lt j n
-  br more_b second_body | done
-block second_body
+  br more_b second_body() | done()
+block second_body()
   bounds j len
   addr_b = offset p j 4
   input = load i32 addr_b
   result = add input ten
   store addr_b result
   next_j = add j one
-  jump second next_j
-block done
+  jump second(next_j)
+block done()
   ret n
 @opt check: br
 @opt check: br
@@ -147,31 +147,31 @@ block done
 ---
 
 # The second loop consumes the final first-loop carry through its body edge.
-fn main n:i32 x:i32 y:i32 -> i32
+fn main(n:i32 x:i32 y:i32) -> i32
   zero = const 0
   one = const 1
   a_factor = const 31
   b_factor = const 7
-  jump first zero x
-block first i:i32 a:i32
+  jump first(zero x)
+block first(i:i32 a:i32)
   more = lt i n
-  br more first_body | bridge
-block first_body
+  br more first_body() | bridge()
+block first_body()
   mixed_a = xor a i
   next_a = mul mixed_a a_factor
   next_i = add i one
-  jump first next_i next_a
-block bridge
-  jump second zero y
-block second j:i32 b:i32
+  jump first(next_i next_a)
+block bridge()
+  jump second(zero y)
+block second(j:i32 b:i32)
   more_b = lt j n
-  br more_b second_body a | done
-block second_body final_a:i32
+  br more_b second_body(a) | done()
+block second_body(final_a:i32)
   mixed_b = xor b final_a
   next_b = mul mixed_b b_factor
   next_j = add j one
-  jump second next_j next_b
-block done
+  jump second(next_j next_b)
+block done()
   ret b
 @opt check: br
 @opt check: br
@@ -180,29 +180,29 @@ block done
 ---
 
 # Two arbitrary raw pointer arguments have no disjointness contract.
-fn main src:ptr dst:ptr n:i32 -> i32
+fn main(src:ptr dst:ptr n:i32) -> i32
   zero = const 0
   one = const 1
-  jump first zero
-block first i:i32
+  jump first(zero)
+block first(i:i32)
   more = lt i n
-  br more first_body | bridge
-block first_body
+  br more first_body() | bridge()
+block first_body()
   addr_a = offset src i 4
   next_i = add i one
   store addr_a next_i
-  jump first next_i
-block bridge
-  jump second zero
-block second j:i32
+  jump first(next_i)
+block bridge()
+  jump second(zero)
+block second(j:i32)
   more_b = lt j n
-  br more_b second_body | done
-block second_body
+  br more_b second_body() | done()
+block second_body()
   addr_b = offset dst j 4
   store addr_b zero
   next_j = add j one
-  jump second next_j
-block done
+  jump second(next_j)
+block done()
   ret n
 @opt check: br
 @opt check: br
@@ -211,17 +211,17 @@ block done
 
 # A read through a possibly aliasing pointer can observe a store before overwrite.
 # The second loop is independent, so fusion remains legal.
-fn main p:ptr n:i32 delta:i32 -> i32
+fn main(p:ptr n:i32 delta:i32) -> i32
   zero = const 0
   one = const 1
   two = const 2
   factor = const 31
   q = offset p delta 4
-  jump first zero zero
-block first i:i32 a:i32
+  jump first(zero zero)
+block first(i:i32 a:i32)
   more = lt i n
-  br more first_body | bridge
-block first_body
+  br more first_body() | bridge()
+block first_body()
   direct = offset p i 4
   indirect = offset q i 4
   store direct one
@@ -229,18 +229,18 @@ block first_body
   store direct two
   next_a = add a sample
   next_i = add i one
-  jump first next_i next_a
-block bridge
-  jump second zero zero
-block second j:i32 b:i32
+  jump first(next_i next_a)
+block bridge()
+  jump second(zero zero)
+block second(j:i32 b:i32)
   more_b = lt j n
-  br more_b second_body | done
-block second_body
+  br more_b second_body() | done()
+block second_body()
   mix = xor b j
   next_b = mul mix factor
   next_j = add j one
-  jump second next_j next_b
-block done
+  jump second(next_j next_b)
+block done()
   answer = add a b
   ret answer
 @opt check: br
@@ -255,18 +255,18 @@ block done
 ---
 
 # A possibly aliasing store can invalidate an otherwise known exact value.
-fn main p:ptr n:i32 delta:i32 -> i32
+fn main(p:ptr n:i32 delta:i32) -> i32
   zero = const 0
   one = const 1
   seven = const 7
   nineteen = const 19
   factor = const 31
   q = offset p delta 4
-  jump first zero zero
-block first i:i32 a:i32
+  jump first(zero zero)
+block first(i:i32 a:i32)
   more = lt i n
-  br more first_body | bridge
-block first_body
+  br more first_body() | bridge()
+block first_body()
   direct = offset p i 4
   indirect = offset q i 4
   store direct seven
@@ -274,18 +274,18 @@ block first_body
   sample = load i32 direct
   next_a = add a sample
   next_i = add i one
-  jump first next_i next_a
-block bridge
-  jump second zero zero
-block second j:i32 b:i32
+  jump first(next_i next_a)
+block bridge()
+  jump second(zero zero)
+block second(j:i32 b:i32)
   more_b = lt j n
-  br more_b second_body | done
-block second_body
+  br more_b second_body() | done()
+block second_body()
   mix = xor b j
   next_b = mul mix factor
   next_j = add j one
-  jump second next_j next_b
-block done
+  jump second(next_j next_b)
+block done()
   answer = add a b
   ret answer
 @opt check: br
@@ -299,29 +299,29 @@ block done
 ---
 
 # The second loop uses the complementary mask for the same iteration space.
-fn main p:ptr n:i32 -> i32
+fn main(p:ptr n:i32) -> i32
   zero = const 0
   one = const 1
-  jump first zero
-block first i:i32
+  jump first(zero)
+block first(i:i32)
   more = gt n i
-  br more store_it | bridge
-block store_it
+  br more store_it() | bridge()
+block store_it()
   at = offset p i 4
   store at i
   next = add i one
-  jump first next
-block bridge
-  jump second zero
-block second j:i32
+  jump first(next)
+block bridge()
+  jump second(zero)
+block second(j:i32)
   done = le n j
-  br done exit | step
-block step
+  br done exit() | step()
+block step()
   later = add j one
-  jump second later
-block exit
+  jump second(later)
+block exit()
   ret done
-@opt check: Not
+@opt check: = not
 @opt check: br
 @opt not: br
 @opt check: ret

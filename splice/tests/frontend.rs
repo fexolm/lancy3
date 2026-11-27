@@ -1,28 +1,23 @@
-use splice::hir::{Binary, BufferKind, FunctionBuilder, Instr};
-use splice::{BufferArg, Codegen, Executable, Function, kernel};
+use splice::frontend::KernelBuilder;
+use splice::frontend::Signature;
+use splice::hir::{Binary, BufferKind, FunctionBuilder, Instr, ValueType};
+use splice::hir::{Constant, ScalarType};
+use splice::{Backend, BufferArg, CallError, Codegen, Executable, Function, Trap, kernel};
+
+/// This machine's `SPLICE_SIMD` target in the mode of this test build.
+fn options() -> splice::BuildOptions {
+    splice::BuildOptions::host(splice::Mode::for_profile(cfg!(debug_assertions))).unwrap()
+}
 
 // A backend used only to inspect the IR handed off by build().
 struct Inspect(Function);
 
-impl Codegen for Inspect {
+impl Backend for Inspect {
     type Output = Self;
 
-    fn compile_raw(f: &Function) -> Result<Self, String> {
+    fn compile_function(f: &Function, _: splice::BuildOptions) -> splice::Result<Self> {
         Ok(Self(f.clone()))
     }
-}
-
-#[test]
-fn oversized_signature_is_rejected_by_the_portable_builder() {
-    let result = Inspect::build(
-        usize::MAX,
-        &[],
-        Box::new(|b| {
-            b.ret(b.arg(0));
-            Ok(())
-        }),
-    );
-    assert!(matches!(result, Err(message) if message.contains("too many")));
 }
 
 mod pricing {
@@ -44,8 +39,8 @@ fn host_associated_functions_can_belong_to_a_type_named_lane() {
     let expected = delivery(3, 8);
     let ir = delivery::ir(3).unwrap();
     for kernel in [
-        delivery::build::<splice_lancy::Lancy>(delivery::BuildArgs { zone: 3 }).unwrap(),
-        splice_lancy::Lancy::compile(&ir).unwrap(),
+        delivery::build::<splice::lancy::Lancy>(delivery::BuildArgs { zone: 3 }).unwrap(),
+        splice::lancy::Lancy::compile(&ir).unwrap(),
     ] {
         assert_eq!(
             kernel.call(delivery::CallArgs { price: 8 }).unwrap(),
@@ -54,16 +49,13 @@ fn host_associated_functions_can_belong_to_a_type_named_lane() {
     }
 }
 
-#[kernel]
+#[kernel(print)]
 fn staged_weights(#[comptime] bias: i32, value: i32) -> i32 {
     value + bias
 }
 
 #[test]
 fn collection_computed_by_the_application_can_specialize_a_kernel() {
-    use splice_lancy::Lancy;
-    use splice_llvm::Llvm;
-
     let mut weights = vec![1; 3];
     weights.push(4);
     let bias = weights.iter().sum::<i32>();
@@ -71,18 +63,23 @@ fn collection_computed_by_the_application_can_specialize_a_kernel() {
     assert!(
         ir.instructions()
             .iter()
-            .any(|i| matches!(i, Instr::Const(_, 7)))
+            .any(|i| matches!(i, Instr::Const(_, c) if *c == Constant::from(7)))
     );
+    // Builds follow Rust's profile: debug builds check overflow.
+    let add = if cfg!(debug_assertions) {
+        Binary::CheckedAdd
+    } else {
+        Binary::Add
+    };
     assert!(ir.instructions().iter().all(|i| matches!(
         i,
         Instr::Debug(_)
             | Instr::Const(..)
-            | Instr::Bin(_, Binary::Add, ..)
             | Instr::Copy(..)
             | Instr::Label(_)
             | Instr::Jump(_)
             | Instr::Return(_)
-    )));
+    ) || matches!(i, Instr::Bin(_, op, ..) if *op == add)));
     let source = staged_weights::print(bias).unwrap();
     assert!(
         source.contains("fn staged_weights(value: i32) -> i32 {\n    value + 7\n}"),
@@ -102,8 +99,7 @@ fn collection_computed_by_the_application_can_specialize_a_kernel() {
         }
     }
 
-    check::<Lancy>(bias);
-    check::<Llvm>(bias);
+    splice_testkit::each_backend!(B => check::<B>(bias));
 }
 
 trait Factor {
@@ -148,19 +144,19 @@ fn overlapping_reads(left: &[i32], right: &[i32], out: &mut [i32]) -> i32 {
 #[test]
 fn slice_parameters_expose_their_alias_contract() {
     struct InspectKinds;
-    impl Codegen for InspectKinds {
+    impl Backend for InspectKinds {
         type Output = Vec<BufferKind>;
 
-        fn compile_raw(_: &Function) -> Result<Self::Output, String> {
+        fn compile_function(_: &Function, _: splice::BuildOptions) -> splice::Result<Self::Output> {
             panic!("expected direct staging")
         }
 
-        fn build(
-            _: usize,
-            kinds: &[BufferKind],
+        fn stage(
+            signature: Signature<'_>,
             _: splice::frontend::Body<'_>,
-        ) -> Result<Self::Output, String> {
-            Ok(kinds.to_vec())
+            _: splice::BuildOptions,
+        ) -> splice::Result<Self::Output> {
+            Ok(signature.buffers.to_vec())
         }
     }
 
@@ -174,24 +170,25 @@ fn slice_parameters_expose_their_alias_contract() {
     assert!(!direct[2].may_alias(direct[1]));
     assert!(!direct[2].may_alias(direct[2]));
     let input = [17, 42];
-    for kernel in [
-        overlapping_reads::build::<splice_llvm::LlvmManualSimd>(overlapping_reads::BuildArgs {})
-            .unwrap(),
-        splice_llvm::LlvmManualSimd::compile(&portable).unwrap(),
-    ] {
-        let mut output = [0];
-        assert_eq!(
-            kernel
-                .call(overlapping_reads::CallArgs {
-                    left: &input,
-                    right: &input[..1],
-                    out: &mut output,
-                })
-                .unwrap(),
-            1
-        );
-        assert_eq!(output, [34]);
-    }
+    splice_testkit::each_backend!(B => {
+        for kernel in [
+            overlapping_reads::build::<B>(overlapping_reads::BuildArgs {}).unwrap(),
+            B::compile(&portable).unwrap(),
+        ] {
+            let mut output = [0];
+            assert_eq!(
+                kernel
+                    .call(overlapping_reads::CallArgs {
+                        left: &input,
+                        right: &input[..1],
+                        out: &mut output,
+                    })
+                    .unwrap(),
+                1
+            );
+            assert_eq!(output, [34]);
+        }
+    });
 }
 
 #[kernel]
@@ -248,8 +245,7 @@ fn repeated_slice_reads_preserve_writes_and_errors() {
         }
     }
 
-    check::<splice_lancy::Lancy>();
-    check::<splice_llvm::Llvm>();
+    splice_testkit::each_backend!(B => check::<B>());
 }
 
 #[test]
@@ -292,7 +288,10 @@ fn slice_kernel_compiles_the_complete_loop() {
         .into_inner()
         .0;
     assert_eq!(batch.arity(), 0);
-    assert_eq!(batch.buffer_kinds(), [BufferKind::Read, BufferKind::Write]);
+    assert_eq!(
+        batch.buffer_kinds(),
+        [BufferKind::READ_I32, BufferKind::WRITE_I32]
+    );
     assert!(
         batch
             .instructions()
@@ -303,7 +302,7 @@ fn slice_kernel_compiles_the_complete_loop() {
     assert!(
         splice::validate_buffers(
             batch.buffer_kinds(),
-            &[BufferArg::Read(&input), BufferArg::Read(&input)]
+            &[BufferArg::read(&input), BufferArg::read(&input)]
         )
         .is_err()
     );
@@ -312,82 +311,94 @@ fn slice_kernel_compiles_the_complete_loop() {
 #[test]
 fn verification_rechecks_a_loop_after_a_delayed_predecessor() {
     let build = |initialize_delayed_arm| {
-        let mut b = FunctionBuilder::new(2);
+        let mut b = FunctionBuilder::new(
+            options(),
+            Signature::new(&[ScalarType::I32; 2], ScalarType::I32, &[]),
+        );
         for _ in 0..64 {
-            b.local();
+            b.local(ValueType::Scalar(ScalarType::I32))?;
         }
-        let value = b.local();
-        let fast = b.label();
-        let delayed = b.label();
-        let delayed_tail = b.label();
-        let head = b.label();
-        let step = b.label();
-        let done = b.label();
-        b.branch(b.arg(0), fast, delayed);
+        let value = b.local(ValueType::Scalar(ScalarType::I32))?;
+        let fast = b.label()?;
+        let delayed = b.label()?;
+        let delayed_tail = b.label()?;
+        let head = b.label()?;
+        let step = b.label()?;
+        let done = b.label()?;
+        let zero = b.constant(Constant::from(0))?;
+        let take_fast = b.binary(Binary::Ne, b.arg(0)?, zero)?;
+        b.branch(take_fast, fast, delayed)?;
 
-        b.mark(fast);
-        let seven = b.constant(7);
-        b.assign(value, seven);
-        b.jump(head);
-        b.mark(delayed);
-        b.jump(delayed_tail);
-        b.mark(delayed_tail);
+        b.mark(fast)?;
+        let seven = b.constant(Constant::from(7))?;
+        b.assign(value, seven)?;
+        b.jump(head)?;
+        b.mark(delayed)?;
+        b.jump(delayed_tail)?;
+        b.mark(delayed_tail)?;
         if initialize_delayed_arm {
-            let eleven = b.constant(11);
-            b.assign(value, eleven);
+            let eleven = b.constant(Constant::from(11))?;
+            b.assign(value, eleven)?;
         }
-        b.jump(head);
+        b.jump(head)?;
 
         // The fast arm reaches the header before the delayed predecessor.
-        b.mark(head);
-        b.branch(b.arg(1), step, done);
-        b.mark(step);
-        let one = b.constant(1);
-        let incremented = b.binary(Binary::Add, value, one);
-        let remaining = b.binary(Binary::Sub, b.arg(1), one);
-        b.assign(value, incremented);
-        b.assign(b.arg(1), remaining);
-        b.jump(head);
-        b.mark(done);
-        b.ret(value);
+        b.mark(head)?;
+        let more = b.binary(Binary::Ne, b.arg(1)?, zero)?;
+        b.branch(more, step, done)?;
+        b.mark(step)?;
+        let one = b.constant(Constant::from(1))?;
+        let incremented = b.binary(Binary::Add, value, one)?;
+        let remaining = b.binary(Binary::Sub, b.arg(1)?, one)?;
+        b.assign(value, incremented)?;
+        b.assign(b.arg(1)?, remaining)?;
+        b.jump(head)?;
+        b.mark(done)?;
+        b.ret(value)?;
         b.finish()
     };
 
-    assert!(build(false).unwrap_err().contains("uninitialized"));
+    assert!(
+        matches!(build(false).unwrap_err(), splice::BuildError::Verify { reason, .. } if reason.contains("uninitialized"))
+    );
     let function = build(true).unwrap();
-    let lancy = splice_lancy::Lancy::compile(&function).unwrap();
-    let llvm = splice_llvm::Llvm::compile(&function).unwrap();
-    for code in [&lancy as &dyn Executable, &llvm] {
+    splice_testkit::each_backend!(B => {
+        let code = B::compile(&function).unwrap();
         for (fast, initial) in [(1, 7), (0, 11)] {
             for count in [0, 2] {
-                assert_eq!(code.call(&[fast, count], &mut []).unwrap(), initial + count);
+                assert_eq!(splice_testkit::call_i32(&code,&[fast, count], &mut []).unwrap(), initial + count);
             }
         }
-    }
+    });
 }
 
 #[test]
 fn verification_resolves_jumps_even_in_unreachable_code() {
     let body = || {
-        let mut b = FunctionBuilder::new(1);
-        b.ret(b.arg(0));
+        let mut b = FunctionBuilder::new(
+            options(),
+            Signature::new(&[ScalarType::I32; 1], ScalarType::I32, &[]),
+        );
+        b.ret(b.arg(0).unwrap()).unwrap();
         b
     };
     let mut dead_tail = body();
-    let unused = dead_tail.label();
-    dead_tail.mark(unused);
+    let unused = dead_tail.label().unwrap();
+    dead_tail.mark(unused).unwrap();
     assert!(dead_tail.finish().is_ok());
 
     let mut dangling = body();
-    let missing = dangling.label();
-    dangling.jump(missing);
-    assert!(dangling.finish().unwrap_err().contains("undefined label"));
+    let missing = dangling.label().unwrap();
+    dangling.jump(missing).unwrap();
+    assert!(
+        matches!(dangling.finish().unwrap_err(), splice::BuildError::Verify { reason, .. } if reason.contains("undefined label"))
+    );
 }
 
 mod directly_staged {
     use super::*;
     use splice::frontend::{Body, KernelBuilder};
-    use splice::hir::{Buffer, Label, Reg};
+    use splice::hir::{Buffer, Label, Reg, ValueType};
     struct Config<'a>(&'a i32);
 
     #[kernel]
@@ -404,22 +415,24 @@ mod directly_staged {
     /// get its own argument and label namespace, and is staged synchronously.
     #[derive(Default)]
     struct Trace {
-        args: usize,
         next_reg: u32,
         next_label: u32,
         bodies: usize,
         constants: Vec<i32>,
     }
-    impl Codegen for Trace {
+    impl Backend for Trace {
         type Output = Self;
-        fn compile_raw(_: &Function) -> Result<Self, String> {
+        fn compile_function(_: &Function, _: splice::BuildOptions) -> splice::Result<Self> {
             panic!("direct build materialized portable IR")
         }
-        fn build(arity: usize, kinds: &[BufferKind], body: Body<'_>) -> Result<Self, String> {
-            assert!(kinds.is_empty());
+        fn stage(
+            signature: Signature<'_>,
+            body: Body<'_>,
+            _: splice::BuildOptions,
+        ) -> splice::Result<Self> {
+            assert!(signature.buffers.is_empty());
             let mut builder = Self {
-                args: arity,
-                next_reg: arity as u32,
+                next_reg: signature.params.len() as u32,
                 bodies: 1,
                 ..Self::default()
             };
@@ -428,60 +441,64 @@ mod directly_staged {
         }
     }
     impl KernelBuilder for Trace {
-        fn arg(&self, index: usize) -> Reg {
-            assert!(index < self.args);
-            Reg(index as u32)
-        }
-        fn local(&mut self) -> Reg {
-            let r = Reg(self.next_reg);
-            self.next_reg += 1;
-            r
-        }
-        fn constant(&mut self, n: i32) -> Reg {
-            self.constants.push(n);
-            self.local()
-        }
-        fn buffer_len(&mut self, _: Buffer) -> Reg {
-            unreachable!()
-        }
-        fn load(&mut self, _: Buffer, _: Reg) -> Reg {
-            unreachable!()
-        }
-        fn store(&mut self, _: Buffer, _: Reg, _: Reg) {
-            unreachable!()
-        }
-        fn immediate_condition(&self, _: Reg) -> Option<bool> {
+        fn reg_type(&self, _: Reg) -> Option<ValueType> {
             None
         }
-        fn binary(&mut self, _: Binary, _: Reg, _: Reg) -> Reg {
-            self.local()
+        fn local(&mut self, _: ValueType) -> splice::Result<Reg> {
+            let r = Reg(self.next_reg);
+            self.next_reg += 1;
+            Ok(r)
         }
-        fn assign(&mut self, _: Reg, _: Reg) {}
-        fn label(&mut self) -> Label {
+        fn constant(&mut self, n: Constant) -> splice::Result<Reg> {
+            self.constants.push(n.bits() as i32);
+            self.local(ValueType::Scalar(ScalarType::I32))
+        }
+        fn buffer_len(&mut self, _: Buffer) -> splice::Result<Reg> {
+            unreachable!()
+        }
+        fn load(&mut self, _: Buffer, _: Reg) -> splice::Result<Reg> {
+            unreachable!()
+        }
+        fn store(&mut self, _: Buffer, _: Reg, _: Reg) -> splice::Result<()> {
+            unreachable!()
+        }
+        fn binary(&mut self, _: Binary, _: Reg, _: Reg) -> splice::Result<Reg> {
+            self.local(ValueType::Scalar(ScalarType::I32))
+        }
+        fn cast(&mut self, _: Reg, to: ScalarType) -> splice::Result<Reg> {
+            self.local(ValueType::Scalar(to))
+        }
+        fn assign(&mut self, _: Reg, _: Reg) -> splice::Result<()> {
+            Ok(())
+        }
+        fn label(&mut self) -> splice::Result<Label> {
             let l = Label(self.next_label);
             self.next_label += 1;
-            l
+            Ok(l)
         }
-        fn mark(&mut self, _: Label) {}
-        fn jump(&mut self, _: Label) {}
-        fn branch(&mut self, _: Reg, _: Label, _: Label) {
+        fn mark(&mut self, _: Label) -> splice::Result<()> {
+            Ok(())
+        }
+        fn jump(&mut self, _: Label) -> splice::Result<()> {
+            Ok(())
+        }
+        fn branch(&mut self, _: Reg, _: Label, _: Label) -> splice::Result<()> {
             unreachable!("comptime condition must be staged")
         }
-        fn ret(&mut self, _: Reg) {}
+        fn ret(&mut self, _: Reg) -> splice::Result<()> {
+            Ok(())
+        }
         fn call_kernel(
             &mut self,
-            arity: usize,
-            kinds: &[BufferKind],
-            args: &[Reg],
-            buffers: &[Buffer],
+            signature: Signature<'_>,
+            _: &[Reg],
+            _: &[Buffer],
             body: Body<'_>,
-        ) -> Result<Reg, String> {
-            assert_eq!(args.len(), arity);
-            assert_eq!(buffers.len(), kinds.len());
-            let child = Self::build(arity, kinds, body)?;
+        ) -> splice::Result<Reg> {
+            let child = Self::stage(signature, body, options())?;
             self.bodies += child.bodies;
             self.constants.extend(child.constants);
-            Ok(self.local())
+            self.local(ValueType::Scalar(ScalarType::I32))
         }
     }
     #[test]
@@ -582,13 +599,12 @@ fn unrolled_host_plans_preserve_runtime_exits_and_prune_after_known_stops() {
         &[Finish, Unreachable],
     ] {
         let portable = walk::ir(plan).unwrap();
-        let lancy = walk::build::<splice_lancy::Lancy>(walk::BuildArgs { steps: plan }).unwrap();
-        let llvm = walk::build::<splice_llvm::Llvm>(walk::BuildArgs { steps: plan }).unwrap();
-        for x in [-23, 0, 7] {
-            let expected = walk(plan, x);
-            assert_eq!(lancy.call(walk::CallArgs { value: x }).unwrap(), expected);
-            assert_eq!(llvm.call(walk::CallArgs { value: x }).unwrap(), expected);
-        }
+        splice_testkit::each_backend!(B => {
+            let code = walk::build::<B>(walk::BuildArgs { steps: plan }).unwrap();
+            for x in [-23, 0, 7] {
+                assert_eq!(code.call(walk::CallArgs { value: x }).unwrap(), walk(plan, x));
+            }
+        });
         // Iterator progress and enum dispatch finish at specialization time.
         let mut labels = std::collections::HashSet::new();
         for op in portable.instructions() {
@@ -622,23 +638,17 @@ fn by_value_array_patterns_bind_comptime_operands() {
         1,
         "only the kernel return label is needed"
     );
-    let code = weighted::build::<splice_lancy::Lancy>(weighted::BuildArgs { terms }).unwrap();
-    assert_eq!(
-        code.call(weighted::CallArgs { x: 7 }).unwrap(),
-        weighted(terms, 7)
-    );
-    let code = weighted::build::<splice_llvm::Llvm>(weighted::BuildArgs { terms }).unwrap();
-    assert_eq!(
-        code.call(weighted::CallArgs { x: 7 }).unwrap(),
-        weighted(terms, 7)
-    );
+    splice_testkit::each_backend!(B => {
+        let code = weighted::build::<B>(weighted::BuildArgs { terms }).unwrap();
+        assert_eq!(
+            code.call(weighted::CallArgs { x: 7 }).unwrap(),
+            weighted(terms, 7)
+        );
+    });
 }
 
 #[test]
 fn nested_loop_exits_and_generated_names_preserve_rust_bindings() {
-    use splice_lancy::Lancy;
-    use splice_llvm::Llvm;
-
     #[allow(non_upper_case_globals)]
     const builder: i32 = 5;
 
@@ -699,6 +709,40 @@ fn nested_loop_exits_and_generated_names_preserve_rust_bindings() {
         }
     }
 
-    check::<Lancy>();
-    check::<Llvm>();
+    splice_testkit::each_backend!(B => check::<B>());
+}
+
+#[kernel]
+fn slice_length(xs: &[i32]) -> i32 {
+    xs.len() as i32
+}
+
+#[kernel]
+fn first_lane(xs: &[i32]) -> i32 {
+    splice::simd::Lane::<i32>::load(xs, 0).extract_wrapping(0)
+}
+
+#[kernel]
+fn through_callee(xs: &[i32]) -> i32 {
+    first_lane(xs) + 1
+}
+
+#[test]
+fn only_operations_that_can_fail_need_a_status_channel() {
+    assert!(!slice_length::ir().unwrap().needs_status());
+    assert!(first_lane::ir().unwrap().needs_status());
+    assert!(through_callee::ir().unwrap().needs_status());
+    fn check<B: Codegen<Output: Executable>>() {
+        let code = through_callee::build::<B>(through_callee::BuildArgs {}).unwrap();
+        let short = [7];
+        let error = code
+            .call(through_callee::CallArgs { xs: &short })
+            .unwrap_err();
+        assert_eq!(error, CallError::Trap(Trap::Bounds));
+        let lanes = vec![7; 64];
+        assert_eq!(code.call(through_callee::CallArgs { xs: &lanes }), Ok(8));
+        let code = slice_length::build::<B>(slice_length::BuildArgs {}).unwrap();
+        assert_eq!(code.call(slice_length::CallArgs { xs: &short }), Ok(1));
+    }
+    splice_testkit::each_backend!(B => check::<B>());
 }

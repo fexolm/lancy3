@@ -1,2 +1,3 @@
 pub(crate) mod float16;
-pub mod slotmap;
+pub(crate) mod numeric;
+pub(crate) mod slotmap;

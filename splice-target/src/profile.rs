@@ -1,159 +1,132 @@
-use std::sync::OnceLock;
+use crate::{Arch, CallingConvention};
+use std::fmt;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// A named instruction set level. [`crate::Target::from_profile`] turns it
+/// into a target.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Profile {
+    /// The best vector extensions of this machine.
     Auto,
+    /// x86-64 SSE2 baseline, 16-byte vectors.
     Sse,
+    /// x86-64-v3, 32-byte vectors.
     Avx2,
+    /// x86-64-v4, 64-byte vectors.
     Avx512,
+    /// This CPU's AVX10 at its widest vector.
     Avx10,
+    /// AArch64 NEON, 16-byte vectors.
     Neon,
+    /// SVE at the calling thread's vector length.
     Sve,
+    /// SVE2 at the calling thread's vector length.
     Sve2,
 }
 
-#[derive(Clone, Copy, Debug)]
-pub struct Simd {
-    pub profile: Profile,
-    pub bytes: usize,
-}
+impl Profile {
+    pub const ALL: [Self; 8] = [
+        Self::Auto,
+        Self::Sse,
+        Self::Avx2,
+        Self::Avx512,
+        Self::Avx10,
+        Self::Neon,
+        Self::Sve,
+        Self::Sve2,
+    ];
 
-/// Read SPLICE_SIMD once so that staging, listings and executable kernels
-/// agree on the logical vector width throughout the process.
-pub fn simd() -> Result<Simd, String> {
-    static CONFIG: OnceLock<Result<Simd, String>> = OnceLock::new();
-    CONFIG
-        .get_or_init(select)
-        .as_ref()
-        .copied()
-        .map_err(Clone::clone)
-}
-
-fn select() -> Result<Simd, String> {
-    use Profile::*;
-    let name = match std::env::var("SPLICE_SIMD") {
-        Ok(name) => name,
-        Err(std::env::VarError::NotPresent) => String::from("auto"),
-        Err(error) => return Err(format!("invalid SPLICE_SIMD: {error}")),
-    };
-    let profile = match name.as_str() {
-        "auto" => Auto,
-        "sse" => Sse,
-        "avx2" => Avx2,
-        "avx512" => Avx512,
-        "avx10" => Avx10,
-        "neon" => Neon,
-        "sve" => Sve,
-        "sve2" => Sve2,
-        _ => return Err(format!("unknown SPLICE_SIMD profile {name:?}")),
-    };
-    // On Linux AArch64 Auto picks the best ISA exposed to userspace.
-    #[cfg(all(target_arch = "aarch64", target_os = "linux"))]
-    let profile = if profile == Auto {
-        if width(Sve2).is_some() {
-            Sve2
-        } else if width(Sve).is_some() {
-            Sve
-        } else {
-            Neon
-        }
-    } else {
-        profile
-    };
-    let bytes = width(profile)
-        .ok_or_else(|| format!("SPLICE_SIMD={name} is unavailable on this CPU/OS"))?;
-    Ok(Simd { profile, bytes })
-}
-
-fn width(profile: Profile) -> Option<usize> {
-    use Profile::*;
-    #[cfg(target_arch = "x86_64")]
-    {
-        let cpu = super::Features::detected();
-        match profile {
-            Auto => Some(cpu.bytes),
-            Sse => Some(16),
-            Avx2 if is_x86_feature_detected!("avx2") => Some(32),
-            Avx512 if is_x86_feature_detected!("avx512f") => Some(64),
-            Avx10 if cpu.avx10 != 0 => Some(cpu.bytes),
-            _ => None,
+    /// The `SPLICE_SIMD` spelling.
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Sse => "sse",
+            Self::Avx2 => "avx2",
+            Self::Avx512 => "avx512",
+            Self::Avx10 => "avx10",
+            Self::Neon => "neon",
+            Self::Sve => "sve",
+            Self::Sve2 => "sve2",
         }
     }
-    #[cfg(all(target_arch = "aarch64", target_os = "linux"))]
-    match profile {
-        Neon if std::arch::is_aarch64_feature_detected!("neon") => Some(16),
-        Sve | Sve2 => sve_bytes(profile),
-        _ => None,
-    }
-    #[cfg(not(any(
-        target_arch = "x86_64",
-        all(target_arch = "aarch64", target_os = "linux")
-    )))]
-    {
-        (profile == Auto).then_some(16)
-    }
-}
 
-#[cfg(all(target_arch = "aarch64", target_os = "linux"))]
-fn thread_sve_bytes(profile: Profile) -> Option<usize> {
-    let available = match profile {
-        Profile::Sve => std::arch::is_aarch64_feature_detected!("sve"),
-        Profile::Sve2 => std::arch::is_aarch64_feature_detected!("sve2"),
-        _ => false,
-    };
-    // SAFETY: either Linux HWCAP above guarantees SVE in userspace.
-    available.then(|| unsafe { current_sve_bytes() })
-}
-
-#[cfg(all(target_arch = "aarch64", target_os = "linux"))]
-#[target_feature(enable = "sve")]
-unsafe fn current_sve_bytes() -> usize {
-    let bytes;
-    // SAFETY: the caller checks SVE. CNTB reads the calling thread's current
-    // vector length and writes only its destination register.
-    unsafe {
-        std::arch::asm!("cntb {bytes}", bytes = out(reg) bytes, options(nomem, nostack, preserves_flags));
+    pub fn from_name(name: &str) -> Result<Self, TargetError> {
+        Self::ALL
+            .into_iter()
+            .find(|profile| profile.name() == name)
+            .ok_or_else(|| TargetError::UnknownProfile(name.to_owned()))
     }
-    bytes
-}
 
-#[cfg(all(test, target_arch = "aarch64", target_os = "linux"))]
-#[test]
-fn execution_checks_user_constructed_sve_config() {
-    for (profile, present) in [
-        (Profile::Sve, std::arch::is_aarch64_feature_detected!("sve")),
-        (
-            Profile::Sve2,
-            std::arch::is_aarch64_feature_detected!("sve2"),
-        ),
-    ] {
-        let simd = Simd { profile, bytes: 16 };
-        assert_eq!(simd.check_execution().is_ok(), present);
+    /// The profile `SPLICE_SIMD` names, or `Auto` when it is unset.
+    pub fn from_env() -> Result<Self, TargetError> {
+        match std::env::var("SPLICE_SIMD") {
+            Ok(name) => Self::from_name(&name),
+            Err(std::env::VarError::NotPresent) => Ok(Self::Auto),
+            Err(std::env::VarError::NotUnicode(_)) => Err(TargetError::InvalidVariable),
+        }
     }
 }
 
-#[cfg(all(target_arch = "aarch64", target_os = "linux"))]
-fn sve_bytes(profile: Profile) -> Option<usize> {
-    let vl = thread_sve_bytes(profile)?;
-    // Lane storage and alignment support power-of-two widths through 64 bytes.
-    [64, 32, 16].into_iter().find(|&bytes| bytes <= vl)
+/// A target cannot be described or cannot run here.
+#[non_exhaustive]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TargetError {
+    /// `SPLICE_SIMD` is not valid Unicode.
+    InvalidVariable,
+    /// `SPLICE_SIMD` names no profile.
+    UnknownProfile(String),
+    /// The CPU or OS does not provide this profile.
+    Unavailable(Profile),
+    /// The CPU or OS lacks an extension the target uses.
+    Missing(&'static str),
+    /// Code for this architecture cannot run on this machine.
+    Foreign(Arch),
+    /// The extensions cannot operate on vectors of this many bytes.
+    VectorBytes(usize),
+    /// The architecture has no such calling convention.
+    CallingConvention(CallingConvention),
+    /// Code with this calling convention cannot call Rust functions of this
+    /// process, which use the OS's C convention.
+    HostCalls(CallingConvention),
+    /// The calling thread's SVE vector length is shorter than the code needs.
+    VectorLength { required: usize, available: usize },
+    /// The code was generated for scalable vectors, which need a power-of-two
+    /// SVE vector length on the calling thread.
+    VectorLengthNotPowerOfTwo,
 }
 
-impl Simd {
-    /// Verify the current thread can execute code generated for this width.
-    /// Linux lets each thread change its SVE length independently.
-    pub fn check_execution(self) -> Result<(), String> {
-        #[cfg(all(target_arch = "aarch64", target_os = "linux"))]
-        if matches!(self.profile, Profile::Sve | Profile::Sve2) {
-            let vl = thread_sve_bytes(self.profile)
-                .ok_or_else(|| format!("{:?} is unavailable on this CPU/OS", self.profile))?;
-            if vl < self.bytes {
-                return Err(format!(
-                    "kernel requires an SVE vector length of at least {} bytes",
-                    self.bytes
-                ));
+impl fmt::Display for TargetError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidVariable => f.write_str("SPLICE_SIMD is not valid Unicode"),
+            Self::UnknownProfile(name) => write!(f, "unknown SPLICE_SIMD profile {name:?}"),
+            Self::Unavailable(profile) => write!(f, "{profile:?} is unavailable on this CPU/OS"),
+            Self::Missing(feature) => write!(f, "this CPU/OS lacks {feature}"),
+            Self::Foreign(arch) => write!(f, "{arch:?} code cannot run on this machine"),
+            Self::VectorBytes(bytes) => {
+                write!(f, "the target's extensions have no {bytes}-byte vectors")
+            }
+            Self::CallingConvention(convention) => {
+                write!(
+                    f,
+                    "{convention:?} is not a calling convention of this architecture"
+                )
+            }
+            Self::HostCalls(convention) => write!(
+                f,
+                "{convention:?} code cannot call this process's Rust functions"
+            ),
+            Self::VectorLength {
+                required,
+                available,
+            } => write!(
+                f,
+                "kernel requires an SVE vector length of at least {required} bytes, the thread has {available}"
+            ),
+            Self::VectorLengthNotPowerOfTwo => {
+                f.write_str("scalable code requires a power-of-two SVE vector length")
             }
         }
-        Ok(())
     }
 }
+
+impl std::error::Error for TargetError {}

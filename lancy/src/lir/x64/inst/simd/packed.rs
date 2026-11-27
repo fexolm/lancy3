@@ -10,13 +10,14 @@ pub(in crate::lir::x64) mod rearrange;
 type Result = std::result::Result<(), IcedError>;
 #[derive(Clone, Copy, Debug)]
 pub(in crate::lir::x64) enum Recipe {
+    /// AVX-512F without BW: small-lane integer operations run as two AVX2 halves.
     Halves,
     Int(integer::Rule),
     Float(float::Rule),
     Rearrange(rearrange::Rule),
 }
 impl Recipe {
-    pub fn temporaries(self, action: Action, input: Type, output: Type, c: Features) -> usize {
+    pub(crate) fn temporaries(self, action: Action, input: Type, output: Type, c: Cpu) -> usize {
         match self {
             Self::Halves => {
                 packed_half(action, input, output, c).unwrap().temporaries()
@@ -30,13 +31,13 @@ impl Recipe {
             Self::Rearrange(r) => r.temps(action, input, c),
         }
     }
-    pub fn emit(
+    pub(crate) fn emit(
         self,
         a: &mut CodeAssembler,
         native: Native,
         regs: &[usize],
         temps: &[usize],
-        pool: Option<&mut emit::Constants>,
+        pool: &mut emit::Constants,
     ) -> Result {
         let Native {
             action,
@@ -74,29 +75,21 @@ fn emit_halves(v: &mut Vector, native: Native, r: &[usize], temps: &[usize]) -> 
             regs[0] = dest;
         }
         regs[inputs.len()] = dest;
-        half.emit_allocated(v.a, &regs[..inputs.len() + 1], inner, v.pool.as_deref_mut())
+        half.emit_allocated(v.a, &regs[..inputs.len() + 1], inner, v.pool)
     };
     for (&src, &tmp) in inputs.iter().zip(held) {
-        if v.width == 32 {
-            v.a.vextractf128(XMM[tmp], YMM[src], 1)?;
-        } else {
-            v.a.vextracti64x4(YMM[tmp], ZMM[src], 1)?;
-        }
+        v.a.vextracti64x4(YMM[tmp], ZMM[src], 1)?;
     }
     emit_part(v, &held[..inputs.len()], high)?;
     emit_part(v, inputs, *d)?;
-    if v.width == 32 {
-        v.a.vinsertf128(YMM[*d], YMM[*d], XMM[high], 1)
-    } else {
-        v.a.vinserti64x4(ZMM[*d], ZMM[*d], YMM[high], 1)
-    }
+    v.a.vinserti64x4(ZMM[*d], ZMM[*d], YMM[high], 1)
 }
 
 struct Vector<'a> {
     a: &'a mut CodeAssembler,
     width: usize,
-    cpu: Features,
-    pool: Option<&'a mut emit::Constants>,
+    cpu: Cpu,
+    pool: &'a mut emit::Constants,
 }
 
 // SSE2 encodes a destructive first operand. Preserve any live second operand
@@ -160,11 +153,7 @@ impl Vector<'_> {
     fn ones(&mut self, d: usize) -> Result {
         match self.width {
             64 => self.a.vpternlogd(ZMM[d], ZMM[d], ZMM[d], 0xff),
-            32 if self.cpu.avx2 => self.a.vpcmpeqd(YMM[d], YMM[d], YMM[d]),
-            32 => {
-                self.a.pcmpeqd(XMM[d], XMM[d])?;
-                self.a.vinsertf128(YMM[d], YMM[d], XMM[d], 1)
-            }
+            32 => self.a.vpcmpeqd(YMM[d], YMM[d], YMM[d]),
             _ => self.a.pcmpeqd(XMM[d], XMM[d]),
         }
     }
@@ -188,30 +177,8 @@ impl Vector<'_> {
         if word == u64::MAX {
             return self.ones(d);
         }
-        if let Some(pool) = self.pool.as_deref_mut() {
-            let label = if let Some((label, ..)) = pool
-                .iter()
-                .find(|(_, b, n)| *n == self.width && *b == bytes)
-            {
-                *label
-            } else {
-                let label = self.a.create_label();
-                pool.push((label, bytes, self.width));
-                label
-            };
-            return load(self.a, d, ptr(label), self.width);
-        }
-        self.a.mov(r10, word)?;
-        self.a.movq(XMM[d], r10)?;
-        match self.width {
-            64 => self.a.vpbroadcastq(ZMM[d], XMM[d]),
-            32 if self.cpu.avx2 => self.a.vpbroadcastq(YMM[d], XMM[d]),
-            32 => {
-                self.a.punpcklqdq(XMM[d], XMM[d])?;
-                self.a.vinsertf128(YMM[d], YMM[d], XMM[d], 1)
-            }
-            _ => self.a.punpcklqdq(XMM[d], XMM[d]),
-        }
+        let label = self.pool.label(self.a, bytes, self.width);
+        load(self.a, d, ptr(label), self.width)
     }
     fn sign_mask(&mut self, size: usize, src: usize) -> Result {
         mask_from_signs(self.a, self.cpu, size, src)

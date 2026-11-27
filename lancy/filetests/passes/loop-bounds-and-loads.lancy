@@ -1,23 +1,23 @@
 # The selected guard guarantees that all checked indices fit.
-fn main p:ptr n:i32 len:i32 -> i32
+fn main(p:ptr n:i32 len:i32) -> i32
   zero = const 0
   one = const 1
   safe = le n len
-  br safe init | reject
-block reject
+  br safe init() | reject()
+block reject()
   ret zero
-block init
-  jump head zero
-block head i:i32
+block init()
+  jump head(zero)
+block head(i:i32)
   more = lt i n
-  br more body i | exit
-block body j:i32
+  br more body(i) | exit()
+block body(j:i32)
   bounds j len
   addr = offset p j 4
   next = add j one
   store addr next
-  jump head next
-block exit
+  jump head(next)
+block exit()
   ret n
 @source check: bounds
 @opt not: bounds
@@ -28,25 +28,25 @@ block exit
 ---
 
 # A final inclusive iteration can trap after the first store.
-fn main p:ptr n:i32 len:i32 -> i32
+fn main(p:ptr n:i32 len:i32) -> i32
   zero = const 0
   one = const 1
   safe = le n len
-  br safe init | reject
-block reject
+  br safe init() | reject()
+block reject()
   ret zero
-block init
-  jump head zero
-block head i:i32
+block init()
+  jump head(zero)
+block head(i:i32)
   more = le i n
-  br more body | exit
-block body
+  br more body() | exit()
+block body()
   bounds i len
   addr = offset p i 4
   next = add i one
   store addr next
-  jump head next
-block exit
+  jump head(next)
+block exit()
   ret n
 @opt check: bounds
 @opt check: store
@@ -55,22 +55,22 @@ block exit
 ---
 
 # Proof of a valid shared slice at the preheader licenses a speculative load.
-fn main p:ptr len:i32 n:i32 -> i32
-  slices 0 read4
+fn main(p:ptr len:i32 n:i32) -> i32
+  slice p len read4
   zero = const 0
   one = const 1
   bounds zero len
-  jump head zero zero
-block head i:i32 acc:i32
+  jump head(zero zero)
+block head(i:i32 acc:i32)
   more = lt i n
-  br more body | exit
-block body
+  br more body() | exit()
+block body()
   addr = offset p zero 4
   x = load i32 addr
   sum = add acc x
   next = add i one
-  jump head next sum
-block exit
+  jump head(next sum)
+block exit()
   ret acc
 @source check: jump
 @source check: load
@@ -84,22 +84,22 @@ block exit
 ---
 
 # Without the proof, a zero-trip loop cannot read the empty shared slice.
-fn main p:ptr len:i32 n:i32 -> i32
-  slices 0 read4
+fn main(p:ptr len:i32 n:i32) -> i32
+  slice p len read4
   zero = const 0
   one = const 1
-  jump head zero zero
-block head i:i32 acc:i32
+  jump head(zero zero)
+block head(i:i32 acc:i32)
   more = lt i n
-  br more body | exit
-block body
+  br more body() | exit()
+block body()
   bounds zero len
   addr = offset p zero 4
   x = load i32 addr
   sum = add acc x
   next = add i one
-  jump head next sum
-block exit
+  jump head(next sum)
+block exit()
   ret acc
 @opt check: br
 @opt check: bounds
@@ -110,21 +110,21 @@ block exit
 ---
 
 # A raw pointer with a claimed length need only be valid for executed accesses.
-fn main p:ptr len:i32 n:i32 -> i32
+fn main(p:ptr len:i32 n:i32) -> i32
   zero = const 0
   one = const 1
   bounds zero len
-  jump head zero zero
-block head i:i32 acc:i32
+  jump head(zero zero)
+block head(i:i32 acc:i32)
   more = lt i n
-  br more body | exit
-block body
+  br more body() | exit()
+block body()
   addr = offset p zero 4
   x = load i32 addr
   sum = add acc x
   next = add i one
-  jump head next sum
-block exit
+  jump head(next sum)
+block exit()
   ret acc
 @opt check: br
 @opt check: load
@@ -134,36 +134,37 @@ block exit
 ---
 
 # Splice's usize length guard compares sign-bit-biased values.
-fn main p:ptr len:i32 n:i32 -> i32
-  slices 0 read4
+fn main(p:ptr len:i32 n:i32) -> i32
+  slice p len read4
   zero = const 0
   one = const 1
   sign = const 0x80000000
   min_len = const 0x80000002
   biased = xor len sign
   short = lt biased min_len
-  br short reject | init
-block reject
+  br short reject() | init()
+block reject()
   ret zero
-block init
-  jump head zero zero
-block head i:i32 acc:i32
+block init()
+  jump head(zero zero)
+block head(i:i32 acc:i32)
   more = lt i n
-  br more body | exit
-block body
+  br more body() | exit()
+block body()
   bounds one len
   addr = offset p one 4
   x = load i32 addr
   sum = add acc x
   next = add i one
-  jump head next sum
-block exit
+  jump head(next sum)
+block exit()
   ret acc
 @opt not: bounds
 @opt check: br
 @opt check: load
-@opt nextln: jump
-@opt check: br
+@opt nextln: max
+@opt nextln: mul
+@opt not: br
 @opt not: load
 @run 2 3 -> 21 | 05 00 00 00 07 00 00 00 | 05 00 00 00 07 00 00 00
 @run 1 3 -> 0 | 05 00 00 00 | 05 00 00 00

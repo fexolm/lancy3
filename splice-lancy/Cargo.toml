@@ -1,15 +1,21 @@
 [package]
 name = "splice-lancy"
-version = "0.1.0"
-edition = "2024"
-rust-version = "1.94"
-license = "MIT OR Apache-2.0"
-repository = "https://github.com/fexolm/lancy3"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
 description = "Lancy native code generation for Splice kernels"
+readme = "../README.md"
+keywords = ["jit","kernel","codegen"]
+categories = ["compilers"]
 
 [dependencies]
 tracing.workspace = true
-splice = { package = "splice-core", path = "../splice-core", version = "0.1.0" }
-splice-jit = { path = "../splice-jit", version = "0.1.0" }
-splice-target = { path = "../splice-target", version = "0.1.0" }
-lancy = { path = "../lancy", version = "0.1.0" }
+splice-core.workspace = true
+splice-jit.workspace = true
+splice-target.workspace = true
+lancy.workspace = true
+
+[lints]
+workspace = true

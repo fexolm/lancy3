@@ -16,16 +16,14 @@ mod requantize;
 mod yuv;
 
 use splice::{BufferArg, Codegen, Executable, TypedIr};
-use splice_cranelift::Cranelift;
-use splice_lancy::Lancy;
-use splice_llvm::Llvm;
 
 const SENTINEL: i32 = -123_456_789;
 
 fn check_backends<S>(ir: TypedIr<S>, check: impl Fn(&str, &dyn Executable)) {
-    check("Lancy", Lancy::compile(&ir).unwrap().as_inner());
-    check("Cranelift", Cranelift::compile(&ir).unwrap().as_inner());
-    check("LLVM", Llvm::compile(&ir).unwrap().as_inner());
+    splice_testkit::each_backend!(B => check(
+        std::any::type_name::<B>(),
+        B::compile(&ir).unwrap().as_inner()
+    ));
 }
 
 #[test]
@@ -35,16 +33,16 @@ fn delta_handles_first_value_and_rejects_a_truncated_block_before_writing() {
         let mut out = [SENTINEL; BLOCK_VALUES as usize + 1];
         let packed = [0; BLOCK_WORDS as usize];
         let decode = |minima: &[i32], packed: &[i32], out: &mut [i32]| {
-            kernel
-                .call(
-                    &[i32::MIN],
-                    &mut [
-                        BufferArg::Read(minima),
-                        BufferArg::Read(packed),
-                        BufferArg::Write(out),
-                    ],
-                )
-                .unwrap()
+            splice_testkit::call_i32(
+                &kernel,
+                &[i32::MIN],
+                &mut [
+                    BufferArg::read(minima),
+                    BufferArg::read(packed),
+                    BufferArg::write(out),
+                ],
+            )
+            .unwrap()
         };
         let count = decode(&[], &[], &mut out[..1]);
         assert_eq!((count, out[0], out[1]), (1, i32::MIN, SENTINEL), "{name}");
@@ -76,15 +74,15 @@ fn csv_preserves_the_written_prefix_on_invalid_value() {
         let mut out = [SENTINEL; FIELDS * FIELD_WORDS];
         let short = out.len() - 1;
         let mut export = |capacity: usize| {
-            let count = kernel
-                .call(
-                    &[],
-                    &mut [
-                        BufferArg::Read(&records),
-                        BufferArg::Write(&mut out[..capacity]),
-                    ],
-                )
-                .unwrap();
+            let count = splice_testkit::call_i32(
+                &kernel,
+                &[],
+                &mut [
+                    BufferArg::read(&records),
+                    BufferArg::write(&mut out[..capacity]),
+                ],
+            )
+            .unwrap();
             (count, out)
         };
         assert_eq!(
@@ -114,16 +112,16 @@ fn requantize_rounds_signed_ties_and_clips_per_channel() {
         let residual = [0, 127, 0, -129, 2048, -8, -2048, 8];
         let mut out = [SENTINEL; 9];
         let mut run = |residual: &[i32]| {
-            let count = kernel
-                .call(
-                    &[],
-                    &mut [
-                        BufferArg::Read(&accum),
-                        BufferArg::Read(residual),
-                        BufferArg::Write(&mut out),
-                    ],
-                )
-                .unwrap();
+            let count = splice_testkit::call_i32(
+                &kernel,
+                &[],
+                &mut [
+                    BufferArg::read(&accum),
+                    BufferArg::read(residual),
+                    BufferArg::write(&mut out),
+                ],
+            )
+            .unwrap();
             (count, out)
         };
         assert_eq!(run(&residual[..7]), (-1, [SENTINEL; 9]), "{name}");
@@ -144,12 +142,13 @@ fn biquad_starts_with_zero_state_on_every_call() {
         let mut out = [SENTINEL; 7];
         let mut state = [SENTINEL; 2];
         assert_eq!(
-            kernel.call(
+            splice_testkit::call_i32(
+                &kernel,
                 &[],
                 &mut [
-                    BufferArg::Read(&pcm),
-                    BufferArg::Write(&mut out),
-                    BufferArg::Write(&mut state[..1]),
+                    BufferArg::read(&pcm),
+                    BufferArg::write(&mut out),
+                    BufferArg::write(&mut state[..1]),
                 ]
             ),
             Ok(-1),
@@ -158,16 +157,16 @@ fn biquad_starts_with_zero_state_on_every_call() {
         assert_eq!(out, [SENTINEL; 7], "{name}");
         assert_eq!(state, [SENTINEL; 2], "{name}");
         let mut run = |capacity: usize| {
-            let count = kernel
-                .call(
-                    &[],
-                    &mut [
-                        BufferArg::Read(&pcm),
-                        BufferArg::Write(&mut out[..capacity]),
-                        BufferArg::Write(&mut state),
-                    ],
-                )
-                .unwrap();
+            let count = splice_testkit::call_i32(
+                &kernel,
+                &[],
+                &mut [
+                    BufferArg::read(&pcm),
+                    BufferArg::write(&mut out[..capacity]),
+                    BufferArg::write(&mut state),
+                ],
+            )
+            .unwrap();
             (count, out)
         };
         assert_eq!(run(5), (-1, [SENTINEL; 7]), "{name}");
@@ -200,44 +199,36 @@ fn yuv_converts_known_colors_across_packets_and_tail() {
         .collect();
     let check = |name: &str, kernel: &dyn Executable| {
         let mut out = vec![SENTINEL; count + 1];
-        let short = kernel
-            .call(
-                &[],
-                &mut [
-                    BufferArg::Read(&pixels),
-                    BufferArg::Write(&mut out[..count - 1]),
-                ],
-            )
-            .unwrap();
+        let short = splice_testkit::call_i32(
+            &kernel,
+            &[],
+            &mut [
+                BufferArg::read(&pixels),
+                BufferArg::write(&mut out[..count - 1]),
+            ],
+        )
+        .unwrap();
         assert_eq!(short, -1, "{name}");
         assert!(out.iter().all(|&pixel| pixel == SENTINEL), "{name}");
         let width = Lane::<i32>::lanes();
         for len in [0, width - 1, width, width + 1, count] {
             out.fill(SENTINEL);
-            let written = kernel
-                .call(
-                    &[],
-                    &mut [BufferArg::Read(&pixels[..len]), BufferArg::Write(&mut out)],
-                )
-                .unwrap();
+            let written = splice_testkit::call_i32(
+                &kernel,
+                &[],
+                &mut [BufferArg::read(&pixels[..len]), BufferArg::write(&mut out)],
+            )
+            .unwrap();
             assert_eq!(written, len as i32, "{name} at {len}");
             assert_eq!(out[..len], expected[..len], "{name} at {len}");
             assert!(out[len..].iter().all(|&x| x == SENTINEL), "{name} at {len}");
         }
     };
     check_backends(yuv::yuv_to_rgba::ir().unwrap(), check);
-    check(
-        "direct Lancy",
-        yuv::yuv_to_rgba::build::<Lancy>(yuv::yuv_to_rgba::BuildArgs {})
-            .unwrap()
-            .as_inner(),
-    );
-    check(
-        "direct LLVM",
-        yuv::yuv_to_rgba::build::<Llvm>(yuv::yuv_to_rgba::BuildArgs {})
-            .unwrap()
-            .as_inner(),
-    );
+    splice_testkit::each_backend!(B => check(
+        std::any::type_name::<B>(),
+        yuv::yuv_to_rgba::build::<B>(yuv::yuv_to_rgba::BuildArgs {}).unwrap().as_inner()
+    ));
 }
 
 #[test]
@@ -245,19 +236,19 @@ fn integral_image_keeps_both_planes_separate_and_checks_capacity() {
     check_backends(integral::integral_moments::ir().unwrap(), |name, kernel| {
         let pixels = [1, 2, 3, 4, 5, 6];
         let mut out = [SENTINEL; 13];
-        let short = kernel
-            .call(
-                &[3, 2],
-                &mut [BufferArg::Read(&pixels), BufferArg::Write(&mut out[..11])],
-            )
-            .unwrap();
+        let short = splice_testkit::call_i32(
+            &kernel,
+            &[3, 2],
+            &mut [BufferArg::read(&pixels), BufferArg::write(&mut out[..11])],
+        )
+        .unwrap();
         assert_eq!((short, out), (-1, [SENTINEL; 13]), "{name}");
-        let written = kernel
-            .call(
-                &[3, 2],
-                &mut [BufferArg::Read(&pixels), BufferArg::Write(&mut out)],
-            )
-            .unwrap();
+        let written = splice_testkit::call_i32(
+            &kernel,
+            &[3, 2],
+            &mut [BufferArg::read(&pixels), BufferArg::write(&mut out)],
+        )
+        .unwrap();
         assert_eq!(
             (written, out),
             (12, [1, 3, 6, 5, 12, 21, 1, 5, 14, 17, 46, 91, SENTINEL]),
@@ -274,19 +265,19 @@ fn murmur_hash_matches_a_known_key_and_rejects_incomplete_columns() {
     });
     check_backends(hash::hash_keys::ir().unwrap(), |name, kernel| {
         let mut out = [SENTINEL; 2];
-        let short = kernel
-            .call(
-                &[0],
-                &mut [BufferArg::Read(&key[..7]), BufferArg::Write(&mut out)],
-            )
-            .unwrap();
+        let short = splice_testkit::call_i32(
+            &kernel,
+            &[0],
+            &mut [BufferArg::read(&key[..7]), BufferArg::write(&mut out)],
+        )
+        .unwrap();
         assert_eq!((short, out), (-1, [SENTINEL; 2]), "{name}");
-        let written = kernel
-            .call(
-                &[0],
-                &mut [BufferArg::Read(&key), BufferArg::Write(&mut out)],
-            )
-            .unwrap();
+        let written = splice_testkit::call_i32(
+            &kernel,
+            &[0],
+            &mut [BufferArg::read(&key), BufferArg::write(&mut out)],
+        )
+        .unwrap();
         assert_eq!(
             (written, out),
             (1, [0xcac3_7638_u32 as i32, SENTINEL]),
@@ -304,26 +295,27 @@ fn rgb16_remap_supports_unsigned_indices_and_stops_on_an_invalid_plane() {
         src[65535] = 500;
         let mut out = [u16::MAX; 4];
         let map = [65535, 32768, 1];
-        let written = kernel
-            .call(
-                &[],
-                &mut [
-                    BufferArg::ReadU16(&src),
-                    BufferArg::ReadU16(&map),
-                    BufferArg::WriteU16(&mut out),
-                ],
-            )
-            .unwrap();
+        let written = splice_testkit::call_i32(
+            &kernel,
+            &[],
+            &mut [
+                BufferArg::read::<u16>(&src),
+                BufferArg::read::<u16>(&map),
+                BufferArg::write::<u16>(&mut out),
+            ],
+        )
+        .unwrap();
         assert_eq!((written, out), (3, [500, 300, 200, u16::MAX]), "{name}");
 
         out.fill(u16::MAX);
         let map = [32768, 65535, 1];
-        let result = kernel.call(
+        let result = splice_testkit::call_i32(
+            &kernel,
             &[],
             &mut [
-                BufferArg::ReadU16(&src[..65535]),
-                BufferArg::ReadU16(&map),
-                BufferArg::WriteU16(&mut out),
+                BufferArg::read::<u16>(&src[..65535]),
+                BufferArg::read::<u16>(&map),
+                BufferArg::write::<u16>(&mut out),
             ],
         );
         assert!(result.is_err(), "{name}");
@@ -333,12 +325,13 @@ fn rgb16_remap_supports_unsigned_indices_and_stops_on_an_invalid_plane() {
         let mut map = vec![1u16; 6 * width];
         map[width + 1] = u16::MAX;
         let mut out = vec![u16::MAX; map.len()];
-        let result = kernel.call(
+        let result = splice_testkit::call_i32(
+            &kernel,
             &[],
             &mut [
-                BufferArg::ReadU16(&src[..65535]),
-                BufferArg::ReadU16(&map),
-                BufferArg::WriteU16(&mut out),
+                BufferArg::read::<u16>(&src[..65535]),
+                BufferArg::read::<u16>(&map),
+                BufferArg::write::<u16>(&mut out),
             ],
         );
         assert!(result.is_err(), "{name}");
@@ -348,16 +341,8 @@ fn rgb16_remap_supports_unsigned_indices_and_stops_on_an_invalid_plane() {
         }
     };
     check_backends(remap::remap_rgb16::ir().unwrap(), check);
-    check(
-        "direct Lancy",
-        remap::remap_rgb16::build::<Lancy>(remap::remap_rgb16::BuildArgs {})
-            .unwrap()
-            .as_inner(),
-    );
-    check(
-        "direct LLVM",
-        remap::remap_rgb16::build::<Llvm>(remap::remap_rgb16::BuildArgs {})
-            .unwrap()
-            .as_inner(),
-    );
+    splice_testkit::each_backend!(B => check(
+        std::any::type_name::<B>(),
+        remap::remap_rgb16::build::<B>(remap::remap_rgb16::BuildArgs {}).unwrap().as_inner()
+    ));
 }

@@ -1,14 +1,18 @@
 //! LLVM vectors have a concrete width once the JIT target is known. Mask values
 //! use one i1 per data lane, so they feed LLVM comparisons and selects directly.
-use super::{Body, Built, Failure, Slice};
+use super::{Body, Built, Error, Failure};
 use inkwell::{
     FloatPredicate, IntPredicate,
     context::Context,
+    types::IntType,
     types::{BasicTypeEnum, VectorType},
-    values::{BasicValueEnum, VectorValue},
+    values::{BasicMetadataValueEnum, BasicValueEnum, IntValue, VectorValue},
 };
-use splice::{
-    hir::{Reg, Simd, SimdOp, ValueType},
+use splice_core::{
+    hir::{
+        Buffer, Reg, ScalarType, Simd, SimdOp, ValueType,
+        memory::{self, Address, BeforeTrap, Masked, Slice},
+    },
     simd::Element,
 };
 
@@ -22,8 +26,8 @@ fn element_type(ctx: &Context, e: Element) -> BasicTypeEnum<'_> {
     }
 }
 
-fn vector_type(ctx: &Context, e: Element) -> VectorType<'_> {
-    vector_type_with_lanes(ctx, e, e.lanes() as u32)
+fn vector_type(ctx: &Context, bytes: usize, e: Element) -> VectorType<'_> {
+    vector_type_with_lanes(ctx, e, e.lanes(bytes) as u32)
 }
 
 fn vector_type_with_lanes(ctx: &Context, e: Element, lanes: u32) -> VectorType<'_> {
@@ -34,11 +38,22 @@ fn vector_type_with_lanes(ctx: &Context, e: Element, lanes: u32) -> VectorType<'
     }
 }
 
-pub(super) fn llvm_type(ctx: &Context, ty: ValueType) -> BasicTypeEnum<'_> {
+/// The LLVM type of a scalar register: a `bool` is an `i1`.
+pub(in crate::lower) fn scalar_type(ctx: &Context, ty: ScalarType) -> BasicTypeEnum<'_> {
     match ty {
-        ValueType::Scalar => ctx.i32_type().into(),
-        ValueType::Vector(e) => vector_type(ctx, e).into(),
-        ValueType::Mask(e) => ctx.bool_type().vec_type(e.lanes() as u32).into(),
+        ScalarType::Bool => ctx.bool_type().into(),
+        ScalarType::I32 | ScalarType::U32 => ctx.i32_type().into(),
+        ScalarType::I64 | ScalarType::U64 | ScalarType::Index => ctx.i64_type().into(),
+        ScalarType::F32 => ctx.f32_type().into(),
+        ScalarType::F64 => ctx.f64_type().into(),
+    }
+}
+
+pub(super) fn llvm_type(ctx: &Context, bytes: usize, ty: ValueType) -> BasicTypeEnum<'_> {
+    match ty {
+        ValueType::Scalar(ty) => scalar_type(ctx, ty),
+        ValueType::Vector(e) => vector_type(ctx, bytes, e).into(),
+        ValueType::Mask(e) => ctx.bool_type().vec_type(e.lanes(bytes) as u32).into(),
     }
 }
 
@@ -66,10 +81,7 @@ impl<'ctx> Body<'_, 'ctx> {
                 } else {
                     "llvm.fptosi.sat"
                 };
-                let function = inkwell::intrinsics::Intrinsic::find(name)
-                    .unwrap()
-                    .get_declaration(self.module, &[ty.into(), x.get_type().into()])
-                    .unwrap();
+                let function = self.intrinsic(name, &[ty.into(), x.get_type().into()])?;
                 ir.build_call(function, &[x.into()], "")?
                     .try_as_basic_value()
                     .unwrap_basic()
@@ -82,7 +94,7 @@ impl<'ctx> Body<'_, 'ctx> {
         let (ty, ptr) = self.registers[reg.0 as usize];
         Ok(self
             .builder
-            .build_load(llvm_type(self.ctx, ty), ptr, "")?
+            .build_load(llvm_type(self.ctx, self.machine.vector_bytes, ty), ptr, "")?
             .into_vector_value())
     }
 
@@ -98,11 +110,25 @@ impl<'ctx> Body<'_, 'ctx> {
         let arg = |n: usize| self.vector(args[n]);
         let float = e.is_float();
         let value: BasicValueEnum<'ctx> = match inst.op {
-            Lanes => self.int(e.lanes() as i32).into(),
+            Lanes => self
+                .ctx
+                .i64_type()
+                .const_int(e.lanes(self.machine.vector_bytes) as u64, false)
+                .into(),
             SplatScalar | FirstN => {
-                let ty = self.ctx.i32_type().vec_type(e.lanes() as u32);
-                let first =
-                    ir.build_insert_element(ty.get_undef(), self.load(args[0])?, self.int(0), "")?;
+                let lanes = e.lanes(self.machine.vector_bytes) as u32;
+                let ty = self.ctx.i32_type().vec_type(lanes);
+                let scalar = if inst.op == FirstN {
+                    // Clamp the usize count to the lane count before narrowing it.
+                    let count = self.offset(args[0])?;
+                    let lanes = self.ctx.i64_type().const_int(u64::from(lanes), false);
+                    let fits = ir.build_int_compare(IntPredicate::ULT, count, lanes, "")?;
+                    let count = ir.build_select(fits, count, lanes, "")?.into_int_value();
+                    ir.build_int_truncate(count, self.ctx.i32_type(), "")?
+                } else {
+                    self.load(args[0])?
+                };
+                let first = ir.build_insert_element(ty.get_undef(), scalar, self.int(0), "")?;
                 let splat = ir.build_shuffle_vector(first, ty.get_undef(), ty.const_zero(), "")?;
                 if inst.op == FirstN {
                     // Compare at the full index width even when the data lanes are narrower.
@@ -121,8 +147,8 @@ impl<'ctx> Body<'_, 'ctx> {
             }
             Splat(_) | Iota => {
                 let int = element_type(self.ctx, e.index()).into_int_type();
-                let mut lanes = Vec::with_capacity(e.lanes());
-                for i in 0..e.lanes() {
+                let mut lanes = Vec::with_capacity(e.lanes(self.machine.vector_bytes));
+                for i in 0..e.lanes(self.machine.vector_bytes) {
                     let val = match inst.op {
                         Splat(bits) => ir.build_bit_cast(
                             int.const_int(bits, false),
@@ -140,9 +166,9 @@ impl<'ctx> Body<'_, 'ctx> {
                 }
                 VectorType::const_vector(&lanes).into()
             }
-            Load(b) | Store(b) | LoadSelect(b) | StoreSelect(b) | Gather(b) | Scatter(b)
-            | GatherSelect(b) | ScatterSelect(b) => {
-                let Some(loaded) = self.vector_memory(self.slices[b.index()], inst, args)? else {
+            Load(_) | Store(_) | LoadSelect(_) | StoreSelect(_) | Gather(_) | Scatter(_)
+            | GatherSelect(_) | ScatterSelect(_) | CompressStore(_) => {
+                let Some(loaded) = memory::lower(self, inst, args)? else {
                     return Ok(());
                 };
                 loaded.into()
@@ -150,17 +176,20 @@ impl<'ctx> Body<'_, 'ctx> {
             AlignmentPrefix(b) => {
                 let slice = self.slices[b.index()];
                 let base = ir.build_ptr_to_int(slice.data, self.ctx.i32_type(), "address.low")?;
-                let scaled = ir.build_left_shift(self.load(args[0])?, self.int(2), "")?;
+                // Only the low bits of the address decide the alignment.
+                let offset = ir.build_int_truncate(self.load(args[0])?, self.ctx.i32_type(), "")?;
+                let scaled = ir.build_left_shift(offset, self.int(2), "")?;
                 let addr = ir.build_int_add(base, scaled, "")?;
                 let bytes = ir.build_and(
                     ir.build_int_neg(addr, "")?,
-                    self.int((splice::simd::vector_bytes() - 1) as i32),
+                    self.int((self.machine.vector_bytes - 1) as i32),
                     "",
                 )?;
-                ir.build_right_shift(bytes, self.int(2), false, "prefix")?
+                let prefix = ir.build_right_shift(bytes, self.int(2), false, "prefix")?;
+                ir.build_int_z_extend(prefix, self.ctx.i64_type(), "")?
                     .into()
             }
-            Compress | Expand if crate::target::x86_compress(e.lanes()) => {
+            Compress | Expand if self.machine.x86_compress => {
                 let data = arg(0)?;
                 let (name, fallback) = if inst.op == Compress {
                     (
@@ -170,10 +199,7 @@ impl<'ctx> Body<'_, 'ctx> {
                 } else {
                     ("llvm.x86.avx512.mask.expand", arg(2)?)
                 };
-                let intrinsic = inkwell::intrinsics::Intrinsic::find(name)
-                    .unwrap()
-                    .get_declaration(self.module, &[data.get_type().into()])
-                    .unwrap();
+                let intrinsic = self.intrinsic(name, &[data.get_type().into()])?;
                 ir.build_call(
                     intrinsic,
                     &[data.into(), fallback.into(), arg(1)?.into()],
@@ -185,11 +211,7 @@ impl<'ctx> Body<'_, 'ctx> {
             Compress => {
                 let data = arg(0)?;
                 let ty = data.get_type();
-                let compress =
-                    inkwell::intrinsics::Intrinsic::find("llvm.experimental.vector.compress")
-                        .unwrap()
-                        .get_declaration(self.module, &[ty.into()])
-                        .unwrap();
+                let compress = self.intrinsic("llvm.experimental.vector.compress", &[ty.into()])?;
                 ir.build_call(
                     compress,
                     &[data.into(), arg(1)?.into(), ty.const_zero().into()],
@@ -204,7 +226,7 @@ impl<'ctx> Body<'_, 'ctx> {
                 let fallback = arg(2)?;
                 let mut src = self.int(0);
                 let mut out = fallback;
-                for i in 0..e.lanes() as i32 {
+                for i in 0..e.lanes(self.machine.vector_bytes) as i32 {
                     let pos = self.int(i);
                     let active = ir.build_extract_element(mask, pos, "")?.into_int_value();
                     let fresh = ir.build_extract_element(data, src, "")?.into_int_value();
@@ -221,7 +243,7 @@ impl<'ctx> Body<'_, 'ctx> {
             Swizzle => {
                 let data = arg(0)?;
                 let indices = arg(1)?;
-                let width = e.lanes() as i32;
+                let width = e.lanes(self.machine.vector_bytes) as i32;
                 let mut output = data.get_type().get_undef();
                 for i in 0..width {
                     let pos = self.int(i);
@@ -235,19 +257,13 @@ impl<'ctx> Body<'_, 'ctx> {
                 }
                 output.into()
             }
-            CompressStore(b) => {
-                self.compress_store(
-                    self.slices[b.index()],
-                    self.load(args[0])?,
-                    arg(1)?,
-                    arg(2)?,
-                )?;
-                return Ok(());
-            }
             Shr(n) => ir
                 .build_right_shift(
                     arg(0)?,
-                    self.splat(self.int((n & 31) as i32), e.lanes() as u32)?,
+                    self.splat(
+                        self.int((n & 31) as i32),
+                        e.lanes(self.machine.vector_bytes) as u32,
+                    )?,
                     !e.is_unsigned(),
                     "",
                 )?
@@ -260,10 +276,7 @@ impl<'ctx> Body<'_, 'ctx> {
                     MulAdd => "llvm.fma",
                     _ => "llvm.vector.reduce.add",
                 };
-                let function = inkwell::intrinsics::Intrinsic::find(name)
-                    .unwrap()
-                    .get_declaration(self.module, &[x.get_type().into()])
-                    .unwrap();
+                let function = self.intrinsic(name, &[x.get_type().into()])?;
                 let operands = if inst.op == MulAdd {
                     vec![x.into(), arg(1)?.into(), arg(2)?.into()]
                 } else {
@@ -276,8 +289,8 @@ impl<'ctx> Body<'_, 'ctx> {
             Cast(to) => self.convert_lanes(arg(0)?, e, to)?.into(),
             Widen { to, high } => {
                 let x = arg(0)?;
-                let start = usize::from(high) * to.lanes();
-                let mask: Vec<_> = (start..start + to.lanes())
+                let start = usize::from(high) * to.lanes(self.machine.vector_bytes);
+                let mask: Vec<_> = (start..start + to.lanes(self.machine.vector_bytes))
                     .map(|i| self.int(i as i32))
                     .collect();
                 let half = ir.build_shuffle_vector(x, x, VectorType::const_vector(&mask), "")?;
@@ -286,17 +299,19 @@ impl<'ctx> Body<'_, 'ctx> {
             Narrow(to) => {
                 let a = self.convert_lanes(arg(0)?, e, to)?;
                 let b = self.convert_lanes(arg(1)?, e, to)?;
-                let mask: Vec<_> = (0..to.lanes()).map(|i| self.int(i as i32)).collect();
+                let mask: Vec<_> = (0..to.lanes(self.machine.vector_bytes))
+                    .map(|i| self.int(i as i32))
+                    .collect();
                 ir.build_shuffle_vector(a, b, VectorType::const_vector(&mask), "")?
                     .into()
             }
             RotateLeft(n) => {
                 let value = arg(0)?;
-                let count = self.splat(self.int((n & 31) as i32), e.lanes() as u32)?;
-                let intrinsic = inkwell::intrinsics::Intrinsic::find("llvm.fshl")
-                    .unwrap()
-                    .get_declaration(self.module, &[value.get_type().into()])
-                    .unwrap();
+                let count = self.splat(
+                    self.int((n & 31) as i32),
+                    e.lanes(self.machine.vector_bytes) as u32,
+                )?;
+                let intrinsic = self.intrinsic("llvm.fshl", &[value.get_type().into()])?;
                 ir.build_call(intrinsic, &[value.into(), value.into(), count.into()], "")?
                     .try_as_basic_value()
                     .unwrap_basic()
@@ -323,10 +338,7 @@ impl<'ctx> Body<'_, 'ctx> {
                     (Min, false) => "llvm.smin",
                     _ => "llvm.smax",
                 };
-                let intrinsic = inkwell::intrinsics::Intrinsic::find(name)
-                    .unwrap()
-                    .get_declaration(self.module, &[a.get_type().into()])
-                    .unwrap();
+                let intrinsic = self.intrinsic(name, &[a.get_type().into()])?;
                 ir.build_call(intrinsic, &[a.into(), b.into()], "")?
                     .try_as_basic_value()
                     .unwrap_basic()
@@ -368,19 +380,23 @@ impl<'ctx> Body<'_, 'ctx> {
             Not | MaskNot => ir.build_not(arg(0)?, "")?.into(),
             Select => ir.build_select(arg(0)?, arg(1)?, arg(2)?, "")?,
             Shuffle(order) => {
-                let mask: Vec<_> = (0..e.lanes())
+                let mask: Vec<_> = (0..e.lanes(self.machine.vector_bytes))
                     .map(|i| {
-                        self.ctx
-                            .i32_type()
-                            .const_int(order.index(i, e.lanes()) as u64, false)
+                        self.ctx.i32_type().const_int(
+                            order.index(i, e.lanes(self.machine.vector_bytes)) as u64,
+                            false,
+                        )
                     })
                     .collect();
                 ir.build_shuffle_vector(arg(0)?, arg(1)?, VectorType::const_vector(&mask), "")?
                     .into()
             }
             ExtractWrapping | ReplaceWrapping => {
-                let index =
-                    ir.build_and(self.load(args[1])?, self.int(e.lanes() as i32 - 1), "")?;
+                let index = ir.build_and(
+                    self.load(args[1])?,
+                    self.int(e.lanes(self.machine.vector_bytes) as i32 - 1),
+                    "",
+                )?;
                 if inst.op == ExtractWrapping {
                     ir.build_extract_element(arg(0)?, index, "")?
                 } else {
@@ -390,19 +406,24 @@ impl<'ctx> Body<'_, 'ctx> {
             }
             Last => ir.build_extract_element(
                 arg(0)?,
-                self.ctx.i32_type().const_int((e.lanes() - 1) as u64, false),
+                self.ctx
+                    .i32_type()
+                    .const_int((e.lanes(self.machine.vector_bytes) - 1) as u64, false),
                 "",
             )?,
             PrefixSum => {
                 let mut sums = arg(0)?;
                 let zero = sums.get_type().const_zero();
                 let mut shift = 1;
-                while shift < e.lanes() {
-                    let indices: Vec<_> = (0..e.lanes())
+                while shift < e.lanes(self.machine.vector_bytes) {
+                    let indices: Vec<_> = (0..e.lanes(self.machine.vector_bytes))
                         .map(|i| {
-                            self.ctx
-                                .i32_type()
-                                .const_int(i.checked_sub(shift).unwrap_or(e.lanes()) as u64, false)
+                            self.ctx.i32_type().const_int(
+                                i.checked_sub(shift)
+                                    .unwrap_or(e.lanes(self.machine.vector_bytes))
+                                    as u64,
+                                false,
+                            )
                         })
                         .collect();
                     let low = ir.build_shuffle_vector(
@@ -419,15 +440,19 @@ impl<'ctx> Body<'_, 'ctx> {
             Any | All => {
                 let bits = self
                     .ctx
-                    .custom_width_int_type((e.lanes() as u32).try_into().unwrap())
+                    .custom_width_int_type(
+                        (e.lanes(self.machine.vector_bytes) as u32)
+                            .try_into()
+                            .unwrap(),
+                    )
                     .unwrap();
                 let mask = ir.build_bit_cast(arg(0)?, bits, "")?.into_int_value();
-                let flag = if inst.op == Any {
+                if inst.op == Any {
                     ir.build_int_compare(IntPredicate::NE, mask, bits.const_zero(), "")?
                 } else {
                     ir.build_int_compare(IntPredicate::EQ, mask, bits.const_all_ones(), "")?
-                };
-                ir.build_int_s_extend(flag, self.ctx.i32_type(), "")?.into()
+                }
+                .into()
             }
         };
         ir.build_store(
@@ -437,81 +462,18 @@ impl<'ctx> Body<'_, 'ctx> {
         Ok(())
     }
 
-    fn mask_count(&self, mask: VectorValue<'ctx>) -> Built<inkwell::values::IntValue<'ctx>> {
-        let ty = self
-            .ctx
-            .custom_width_int_type(mask.get_type().get_size().try_into().unwrap())
-            .unwrap();
-        let bits = self.builder.build_bit_cast(mask, ty, "mask.bits")?;
-        let pop = inkwell::intrinsics::Intrinsic::find("llvm.ctpop")
-            .unwrap()
-            .get_declaration(self.module, &[ty.into()])
-            .unwrap();
+    fn mask_count(&self, mask: VectorValue<'ctx>) -> Built<IntValue<'ctx>> {
+        let bits = self.mask_bits(mask)?;
+        let pop = self.intrinsic("llvm.ctpop", &[bits.get_type().into()])?;
         let count = self
             .builder
             .build_call(pop, &[bits.into()], "selected")?
             .try_as_basic_value()
             .unwrap_basic()
             .into_int_value();
-        self.builder
-            .build_int_z_extend(count, self.ctx.i32_type(), "")
-    }
-
-    fn compress_store(
-        &mut self,
-        slice: Slice<'ctx>,
-        offset: inkwell::values::IntValue<'ctx>,
-        mask: VectorValue<'ctx>,
-        data: VectorValue<'ctx>,
-    ) -> Built<()> {
-        let ir = self.builder;
-        let wide = self.ctx.i64_type();
-        let offset = ir.build_int_z_extend(offset, wide, "")?;
-        // SAFETY: plain GEP is valid for inactive, out-of-slice offsets. The mask
-        // passed to compressstore enables at most the available number of words.
-        let ptr = unsafe { ir.build_gep(self.ctx.i32_type(), slice.data, &[offset], "")? };
-        let fits_offset = ir.build_int_compare(IntPredicate::ULT, offset, slice.len, "")?;
-        let available = ir
-            .build_select(
-                fits_offset,
-                ir.build_int_sub(slice.len, offset, "")?,
-                wide.const_zero(),
-                "available",
-            )?
-            .into_int_value();
-        let count = ir.build_int_z_extend(self.mask_count(mask)?, wide, "")?;
-        let short = ir.build_int_compare(IntPredicate::UGT, count, available, "")?;
-        let full = ir.get_insert_block().unwrap();
-        let partial = self
-            .ctx
-            .append_basic_block(self.function, "compact.partial");
-        let write = self.ctx.append_basic_block(self.function, "compact.store");
-        ir.build_conditional_branch(short, partial, write)?;
-        ir.position_at_end(partial);
-        // Keep exactly the first 'available' set bits on the bounds-error path.
-        let mut prefix = mask.get_type().const_zero();
-        let mut rank = wide.const_zero();
-        for i in 0..mask.get_type().get_size() {
-            let index = self.int(i as i32);
-            let on = ir.build_extract_element(mask, index, "")?.into_int_value();
-            let room = ir.build_int_compare(IntPredicate::ULT, rank, available, "")?;
-            prefix = ir.build_insert_element(prefix, ir.build_and(on, room, "")?, index, "")?;
-            rank = ir.build_int_add(rank, ir.build_int_z_extend(on, wide, "")?, "")?;
-        }
-        ir.build_unconditional_branch(write)?;
-        ir.position_at_end(write);
-        let enabled = ir.build_phi(mask.get_type(), "enabled")?;
-        enabled.add_incoming(&[(&mask, full), (&prefix, partial)]);
-        let store = inkwell::intrinsics::Intrinsic::find("llvm.masked.compressstore")
-            .unwrap()
-            .get_declaration(self.module, &[data.get_type().into()])
-            .unwrap();
-        ir.build_call(
-            store,
-            &[data.into(), ptr.into(), enabled.as_basic_value().into()],
-            "",
-        )?;
-        self.exit_if(short, Failure::Bounds)
+        Ok(self
+            .builder
+            .build_int_z_extend(count, self.ctx.i32_type(), "")?)
     }
 
     fn splat(
@@ -523,190 +485,345 @@ impl<'ctx> Body<'_, 'ctx> {
         let one = self
             .builder
             .build_insert_element(ty.get_undef(), value, self.int(0), "")?;
-        self.builder.build_shuffle_vector(
+        Ok(self.builder.build_shuffle_vector(
             one,
             ty.get_undef(),
             self.ctx.i32_type().vec_type(lanes).const_zero(),
             "",
-        )
+        )?)
+    }
+}
+
+impl<'ctx> Body<'_, 'ctx> {
+    fn lanes(&self, e: Element) -> u32 {
+        e.lanes(self.machine.vector_bytes) as u32
     }
 
-    fn vector_memory(
-        &mut self,
-        slice: Slice<'ctx>,
-        inst: Simd,
-        args: &[Reg],
-    ) -> Built<Option<VectorValue<'ctx>>> {
-        use SimdOp::*;
-        use inkwell::{intrinsics::Intrinsic, values::BasicMetadataValueEnum};
-        let e = inst.element;
+    /// The address of each lane at `at`: one pointer, or a vector of them.
+    fn lane_address(
+        &self,
+        s: Slice,
+        at: Address<IntValue<'ctx>, VectorValue<'ctx>>,
+    ) -> Built<BasicValueEnum<'ctx>> {
         let ir = self.builder;
-        let el = element_type(self.ctx, e);
-        let ty = vector_type(self.ctx, e);
-        let count = ty.get_size();
-        let wide = self.ctx.i64_type();
-        let indexed = matches!(
-            inst.op,
-            Gather(_) | GatherSelect(_) | Scatter(_) | ScatterSelect(_)
-        );
-        let masked = matches!(
-            inst.op,
-            LoadSelect(_) | StoreSelect(_) | GatherSelect(_) | ScatterSelect(_)
-        );
-        let store = matches!(
-            inst.op,
-            Store(_) | StoreSelect(_) | Scatter(_) | ScatterSelect(_)
-        );
-        let active = if masked {
-            self.vector(args[1])?
-        } else {
-            VectorType::const_vector(&vec![self.ctx.bool_type().const_all_ones(); count as usize])
-        };
-        let values = if store || masked {
-            self.vector(*args.last().unwrap())?
-        } else {
-            ty.const_zero()
-        };
-        let mut full_store_exit = None;
-        let (outside, address) = if indexed {
-            let input = self.vector(args[0])?;
-            // Valid slice indices fit in a signed i32. Keep 32-bit VSIB offsets
-            // for x86 gather/scatter. A disabled negative GEP is never dereferenced.
-            let index_type = if e.index() == Element::I64 {
-                wide
-            } else {
-                self.ctx.i32_type()
-            };
-            let offsets =
-                ir.build_int_z_extend_or_bit_cast(input, index_type.vec_type(count), "offsets")?;
-            let len = ir.build_int_truncate_or_bit_cast(slice.len, index_type, "length")?;
-            let outside = ir.build_int_compare(
-                IntPredicate::UGE,
-                offsets,
-                self.splat(len, count)?,
-                "outside",
-            )?;
-            // Inkwell's build_gep accepts scalar indices. LLVM GEP also accepts a
-            // vector of integer indices and yields a vector of pointers. Plain GEP
-            // permits inactive out-of-range offsets; the intrinsic masks all accesses.
-            use inkwell::{llvm_sys::core::LLVMBuildGEP2, types::AsTypeRef, values::AsValueRef};
-            // SAFETY: the positioned builder, scalar pointer, vector index and element
-            // type share a context. LLVM consumes this one-index array during the call.
-            let addr = unsafe {
-                VectorValue::new(LLVMBuildGEP2(
-                    ir.as_mut_ptr(),
-                    el.as_type_ref(),
-                    slice.data.as_value_ref(),
-                    &mut offsets.as_value_ref(),
-                    1,
-                    c"addresses".as_ptr(),
-                ))
-            };
-            (outside, BasicValueEnum::from(addr))
-        } else {
-            let start = ir.build_int_z_extend(self.load(args[0])?, wide, "")?;
-            // SAFETY: plain GEP computes the address without accessing memory or
-            // asserting in-bounds. The full interval or per-lane mask guards each use.
-            let addr = unsafe { ir.build_gep(el, slice.data, &[start], "")? };
-            if !masked {
-                let end = ir.build_int_add(start, wide.const_int(u64::from(count), false), "")?;
-                let outside = ir.build_int_compare(IntPredicate::UGT, end, slice.len, "")?;
-                if !store {
-                    self.exit_if(outside, Failure::Bounds)?;
-                    let val = ir.build_load(ty, addr, "")?.into_vector_value();
-                    val.as_instruction()
-                        .unwrap()
-                        .set_alignment(e.bytes() as u32)
-                        .expect("element alignment");
-                    return Ok(Some(val));
+        let el = element_type(self.ctx, s.element);
+        let data = self.slices[s.buffer.index()].data;
+        Ok(match at {
+            // SAFETY: plain GEP computes the address without accessing
+            // memory or asserting in-bounds; `memory::lower` checks each use.
+            Address::Offset(offset) => unsafe { ir.build_gep(el, data, &[offset], "")? }.into(),
+            Address::Indices(indices) => {
+                // Valid slice indices fit in a signed i32. Keep 32-bit VSIB
+                // offsets for x86 gather/scatter. A disabled negative GEP is
+                // never dereferenced.
+                let offsets = ir.build_int_z_extend_or_bit_cast(
+                    indices,
+                    self.index_type(s.element).vec_type(self.lanes(s.element)),
+                    "offsets",
+                )?;
+                // Inkwell's build_gep accepts scalar indices. LLVM GEP also
+                // accepts a vector of integer indices and yields a vector of
+                // pointers; the masked intrinsics guard every access.
+                use inkwell::{
+                    llvm_sys::core::LLVMBuildGEP2, types::AsTypeRef, values::AsValueRef,
+                };
+                // SAFETY: the positioned builder, scalar pointer, vector index
+                // and element type share a context. LLVM consumes this
+                // one-index array during the call. GEP sign-extends the
+                // 32-bit offsets; an active lane's index is below the slice
+                // length, which `validate_buffers` bounds by `i32::MAX`, so
+                // the extended offset is the index itself.
+                unsafe {
+                    VectorValue::new(LLVMBuildGEP2(
+                        ir.as_mut_ptr(),
+                        el.as_type_ref(),
+                        data.as_value_ref(),
+                        &mut offsets.as_value_ref(),
+                        1,
+                        c"addresses".as_ptr(),
+                    ))
                 }
-                let fast = self.ctx.append_basic_block(self.function, "full.store");
-                let partial = self.ctx.append_basic_block(self.function, "partial.store");
-                let done = self.ctx.append_basic_block(self.function, "stored");
-                ir.build_conditional_branch(outside, partial, fast)?;
-                ir.position_at_end(fast);
-                ir.build_store(addr, values)?
-                    .set_alignment(e.bytes() as u32)
-                    .expect("element alignment");
-                ir.build_unconditional_branch(done)?;
-                ir.position_at_end(partial);
-                full_store_exit = Some(done);
+                .into()
             }
-            // Compare lane ordinals with the remaining element count. Slice lengths
-            // fit i32, while the subtraction is widened to handle an invalid start.
-            let room = ir
-                .build_select(
-                    ir.build_int_compare(IntPredicate::ULT, start, slice.len, "")?,
-                    ir.build_int_sub(slice.len, start, "")?,
-                    wide.const_zero(),
-                    "remaining",
-                )?
-                .into_int_value();
-            let room = ir.build_int_truncate(room, self.ctx.i32_type(), "")?;
-            let seq: Vec<_> = (0..count).map(|i| self.int(i as i32)).collect();
-            let outside = ir.build_int_compare(
-                IntPredicate::UGE,
-                VectorType::const_vector(&seq),
-                self.splat(room, count)?,
-                "outside",
-            )?;
-            (outside, addr.into())
-        };
-        let bad = ir.build_and(active, outside, "bad.lanes")?;
-        let mask_word = self
-            .ctx
-            .custom_width_int_type(count.try_into().unwrap())
-            .unwrap();
-        // x64 is little endian, so bit i corresponds to lane i.
-        let bits = ir
-            .build_bit_cast(bad, mask_word, "bad.bits")?
-            .into_int_value();
-        let failed = ir.build_int_compare(IntPredicate::NE, bits, mask_word.const_zero(), "")?;
-        let enabled = if store {
-            // (lowbit(bad) - 1) includes every lane strictly before the first
-            // fault, and all lanes if bad == 0. This preserves visible partial stores.
-            let low = ir.build_and(bits, ir.build_int_neg(bits, "")?, "first.bad")?;
-            let prefix = ir.build_int_sub(low, mask_word.const_int(1, false), "prefix")?;
-            let prefix = ir
-                .build_bit_cast(prefix, active.get_type(), "")?
-                .into_vector_value();
-            ir.build_and(active, prefix, "enabled")?
+        })
+    }
+
+    /// The integer type of the offsets of an indexed access.
+    fn index_type(&self, e: Element) -> IntType<'ctx> {
+        if e.index() == Element::I64 {
+            self.ctx.i64_type()
         } else {
-            self.exit_if(failed, Failure::Bounds)?;
-            active
-        };
-        let name = match (indexed, store) {
-            (true, true) => "llvm.masked.scatter",
-            (true, false) => "llvm.masked.gather",
-            (false, true) => "llvm.masked.store",
-            (false, false) => "llvm.masked.load",
-        };
-        let decl = Intrinsic::find(name)
-            .unwrap()
-            .get_declaration(self.module, &[ty.into(), address.get_type()])
-            .unwrap();
-        let align = BasicMetadataValueEnum::from(self.int(e.bytes() as i32));
-        if store {
-            ir.build_call(
-                decl,
-                &[values.into(), address.into(), align, enabled.into()],
-                "",
-            )?;
-            self.exit_if(failed, Failure::Bounds)?;
-            if let Some(done) = full_store_exit {
-                ir.build_unconditional_branch(done)?;
-                ir.position_at_end(done);
-            }
-            Ok(None)
-        } else {
-            let call = ir.build_call(
-                decl,
-                &[address.into(), align, enabled.into(), values.into()],
-                "",
-            )?;
-            Ok(Some(
-                call.try_as_basic_value().unwrap_basic().into_vector_value(),
-            ))
+            self.ctx.i32_type()
         }
+    }
+
+    /// A mask as an integer with bit `i` for lane `i` (x64 is little endian).
+    fn mask_bits(&self, mask: VectorValue<'ctx>) -> Built<IntValue<'ctx>> {
+        let word = self
+            .ctx
+            .custom_width_int_type(mask.get_type().get_size().try_into().unwrap())
+            .unwrap();
+        Ok(self
+            .builder
+            .build_bit_cast(mask, word, "mask.bits")?
+            .into_int_value())
+    }
+
+    fn all_lanes(&self, e: Element) -> VectorValue<'ctx> {
+        VectorType::const_vector(&vec![
+            self.ctx.bool_type().const_all_ones();
+            self.lanes(e) as usize
+        ])
+    }
+
+    fn masked_intrinsic(
+        &self,
+        name: &'static str,
+        s: Slice,
+        address: BasicValueEnum<'ctx>,
+    ) -> Built<(
+        inkwell::values::FunctionValue<'ctx>,
+        BasicMetadataValueEnum<'ctx>,
+    )> {
+        let ty = vector_type(self.ctx, self.machine.vector_bytes, s.element);
+        let decl = self.intrinsic(name, &[ty.into(), address.get_type()])?;
+        Ok((decl, self.int(s.element.bytes() as i32).into()))
+    }
+}
+
+impl<'ctx> memory::Primitives for Body<'_, 'ctx> {
+    type Scalar = IntValue<'ctx>;
+    type Vector = VectorValue<'ctx>;
+    type Error = Error;
+
+    fn read_offset(&mut self, r: Reg) -> Built<Self::Scalar> {
+        self.offset(r)
+    }
+    fn read_vector(&mut self, r: Reg) -> Built<Self::Vector> {
+        self.vector(r)
+    }
+    fn require_full(
+        &mut self,
+        s: Slice,
+        offset: Self::Scalar,
+        before_trap: BeforeTrap<'_, Self>,
+    ) -> Built<()> {
+        // `offset` is clamped to i32::MAX, so the end does not wrap.
+        let lanes = self
+            .ctx
+            .i64_type()
+            .const_int(u64::from(self.lanes(s.element)), false);
+        let end = self.builder.build_int_add(offset, lanes, "")?;
+        let len = self.slices[s.buffer.index()].len;
+        let outside = self
+            .builder
+            .build_int_compare(IntPredicate::UGT, end, len, "")?;
+        self.trap_if(outside, before_trap)
+    }
+    fn room(&mut self, s: Slice, offset: Self::Scalar) -> Built<Self::Scalar> {
+        // Slice lengths fit i32; the subtraction is guarded for an invalid offset.
+        let ir = self.builder;
+        let len = self.slices[s.buffer.index()].len;
+        let room = ir
+            .build_select(
+                ir.build_int_compare(IntPredicate::ULT, offset, len, "")?,
+                ir.build_int_sub(len, offset, "")?,
+                self.ctx.i64_type().const_zero(),
+                "remaining",
+            )?
+            .into_int_value();
+        Ok(ir.build_int_truncate(room, self.ctx.i32_type(), "")?)
+    }
+    fn first_lanes(&mut self, e: Element, count: Self::Scalar) -> Built<Self::Vector> {
+        let lanes = self.lanes(e);
+        let seq: Vec<_> = (0..lanes).map(|i| self.int(i as i32)).collect();
+        Ok(self.builder.build_int_compare(
+            IntPredicate::ULT,
+            VectorType::const_vector(&seq),
+            self.splat(count, lanes)?,
+            "inside",
+        )?)
+    }
+    fn outside(&mut self, s: Slice, indices: Self::Vector) -> Built<Self::Vector> {
+        let ir = self.builder;
+        let ty = self.index_type(s.element);
+        let lanes = self.lanes(s.element);
+        let offsets = ir.build_int_z_extend_or_bit_cast(indices, ty.vec_type(lanes), "")?;
+        let len =
+            ir.build_int_truncate_or_bit_cast(self.slices[s.buffer.index()].len, ty, "length")?;
+        Ok(ir.build_int_compare(
+            IntPredicate::UGE,
+            offsets,
+            self.splat(len, lanes)?,
+            "outside",
+        )?)
+    }
+    fn length_at_most(&mut self, buffer: Buffer, n: u64) -> Built<Self::Scalar> {
+        let n = self.ctx.i64_type().const_int(n, false);
+        Ok(self.builder.build_int_compare(
+            IntPredicate::ULE,
+            self.slices[buffer.index()].len,
+            n,
+            "",
+        )?)
+    }
+    fn and(&mut self, a: Self::Scalar, b: Self::Scalar) -> Built<Self::Scalar> {
+        Ok(self.builder.build_and(a, b, "")?)
+    }
+    fn mask_and(&mut self, a: Self::Vector, b: Self::Vector) -> Built<Self::Vector> {
+        Ok(self.builder.build_and(a, b, "")?)
+    }
+    fn mask_xor(&mut self, a: Self::Vector, b: Self::Vector) -> Built<Self::Vector> {
+        Ok(self.builder.build_xor(a, b, "")?)
+    }
+    fn any(&mut self, mask: Self::Vector) -> Built<Self::Scalar> {
+        let bits = self.mask_bits(mask)?;
+        Ok(self.builder.build_int_compare(
+            IntPredicate::NE,
+            bits,
+            bits.get_type().const_zero(),
+            "",
+        )?)
+    }
+    fn before_first(&mut self, _: Element, mask: Self::Vector) -> Built<Self::Vector> {
+        // lowbit(mask) - 1 has every bit below the first lane, and all bits
+        // when the mask is empty.
+        let ir = self.builder;
+        let bits = self.mask_bits(mask)?;
+        let low = ir.build_and(bits, ir.build_int_neg(bits, "")?, "first")?;
+        let before = ir.build_int_sub(low, bits.get_type().const_int(1, false), "before")?;
+        Ok(ir
+            .build_bit_cast(before, mask.get_type(), "")?
+            .into_vector_value())
+    }
+    fn exceeds(&mut self, mask: Self::Vector, count: Self::Scalar) -> Built<Self::Scalar> {
+        let lanes = self.mask_count(mask)?;
+        Ok(self
+            .builder
+            .build_int_compare(IntPredicate::UGT, lanes, count, "")?)
+    }
+    fn trap_if(&mut self, condition: Self::Scalar, before_trap: BeforeTrap<'_, Self>) -> Built<()> {
+        let fault = Failure::Trap(splice_core::Trap::Bounds);
+        let Some(before_trap) = before_trap else {
+            return self.exit_if(condition, fault);
+        };
+        let fail = self.ctx.append_basic_block(self.function, "before.trap");
+        let next = self.ctx.append_basic_block(self.function, "");
+        self.builder
+            .build_conditional_branch(condition, fail, next)?;
+        self.builder.position_at_end(fail);
+        before_trap(self)?;
+        let exit = self.exit(fault)?;
+        self.builder.build_unconditional_branch(exit)?;
+        self.builder.position_at_end(next);
+        Ok(())
+    }
+    fn load(
+        &mut self,
+        s: Slice,
+        at: Address<Self::Scalar, Self::Vector>,
+        masked: Option<Masked<Self::Vector>>,
+    ) -> Built<Self::Vector> {
+        let ty = vector_type(self.ctx, self.machine.vector_bytes, s.element);
+        let address = self.lane_address(s, at)?;
+        if let (Address::Offset(_), None) = (at, masked) {
+            let value = self
+                .builder
+                .build_load(ty, address.into_pointer_value(), "")?
+                .into_vector_value();
+            value
+                .as_instruction()
+                .unwrap()
+                .set_alignment(s.element.bytes() as u32)
+                .expect("element alignment");
+            return Ok(value);
+        }
+        let (mask, passthrough) = match masked {
+            Some(Masked { mask, passthrough }) => (mask, passthrough),
+            None => (self.all_lanes(s.element), ty.const_zero()),
+        };
+        let name = match at {
+            Address::Offset(_) => "llvm.masked.load",
+            Address::Indices(_) => "llvm.masked.gather",
+        };
+        let (decl, align) = self.masked_intrinsic(name, s, address)?;
+        let call = self.builder.build_call(
+            decl,
+            &[address.into(), align, mask.into(), passthrough.into()],
+            "",
+        )?;
+        Ok(call.try_as_basic_value().unwrap_basic().into_vector_value())
+    }
+    fn store(
+        &mut self,
+        s: Slice,
+        at: Address<Self::Scalar, Self::Vector>,
+        mask: Option<Self::Vector>,
+        value: Self::Vector,
+    ) -> Built<()> {
+        let address = self.lane_address(s, at)?;
+        if let (Address::Offset(_), None) = (at, mask) {
+            self.builder
+                .build_store(address.into_pointer_value(), value)?
+                .set_alignment(s.element.bytes() as u32)
+                .expect("element alignment");
+            return Ok(());
+        }
+        let mask = mask.unwrap_or_else(|| self.all_lanes(s.element));
+        let name = match at {
+            Address::Offset(_) => "llvm.masked.store",
+            Address::Indices(_) => "llvm.masked.scatter",
+        };
+        let (decl, align) = self.masked_intrinsic(name, s, address)?;
+        self.builder.build_call(
+            decl,
+            &[value.into(), address.into(), align, mask.into()],
+            "",
+        )?;
+        Ok(())
+    }
+    fn compress_store(
+        &mut self,
+        s: Slice,
+        offset: Self::Scalar,
+        mask: Self::Vector,
+        value: Self::Vector,
+        room: Self::Scalar,
+    ) -> Built<()> {
+        let ir = self.builder;
+        let ptr = self.lane_address(s, Address::Offset(offset))?;
+        let short = self.exceeds(mask, room)?;
+        let full = ir.get_insert_block().unwrap();
+        let partial = self
+            .ctx
+            .append_basic_block(self.function, "compact.partial");
+        let write = self.ctx.append_basic_block(self.function, "compact.store");
+        ir.build_conditional_branch(short, partial, write)?;
+        ir.position_at_end(partial);
+        // Keep exactly the first `room` set bits when they do not all fit.
+        let mut prefix = mask.get_type().const_zero();
+        let mut rank = self.int(0);
+        for i in 0..mask.get_type().get_size() {
+            let index = self.int(i as i32);
+            let on = ir.build_extract_element(mask, index, "")?.into_int_value();
+            let fits = ir.build_int_compare(IntPredicate::ULT, rank, room, "")?;
+            prefix = ir.build_insert_element(prefix, ir.build_and(on, fits, "")?, index, "")?;
+            rank = ir.build_int_add(
+                rank,
+                ir.build_int_z_extend(on, self.ctx.i32_type(), "")?,
+                "",
+            )?;
+        }
+        ir.build_unconditional_branch(write)?;
+        ir.position_at_end(write);
+        let enabled = ir.build_phi(mask.get_type(), "enabled")?;
+        enabled.add_incoming(&[(&mask, full), (&prefix, partial)]);
+        let store = self.intrinsic("llvm.masked.compressstore", &[value.get_type().into()])?;
+        ir.build_call(
+            store,
+            &[value.into(), ptr.into(), enabled.as_basic_value().into()],
+            "",
+        )?;
+        Ok(())
     }
 }
