@@ -149,6 +149,9 @@ pub(super) enum Inst {
     Fallback(ExpansionId),
     Literal(Lane, u128, VReg),
     Iota(Lane, VReg),
+    /// Every lane holds the low `lane.bytes()` bytes of the bits: a load
+    /// from the constant pool, or a zeroing idiom.
+    SplatLiteral(Lane, u64, VReg),
     BitMove(Type, Type, VReg, VReg),
     Imm(VReg, i32),
     Copy(VReg, VReg),
@@ -388,7 +391,9 @@ impl TargetInst for Inst {
                 out.extend(args.into_iter().flatten().map(|(_, reg)| O::reg_use(reg)));
                 out.push(O::reg_fixed_def(dst, return_reg(dst)));
             }
-            Self::Literal(_, _, d) | Self::Iota(_, d) => out.push(O::reg_def(d)),
+            Self::Literal(_, _, d) | Self::Iota(_, d) | Self::SplatLiteral(_, _, d) => {
+                out.push(O::reg_def(d))
+            }
             Self::BitMove(_, _, d, a) => out.extend([O::reg_use(a), O::reg_def(d)]),
             Self::Imm(d, _) => out.push(O::reg_def(d)),
             Self::Copy(d, a) => out.extend([O::reg_use(a), O::reg_reuse_def(d, 0)]),

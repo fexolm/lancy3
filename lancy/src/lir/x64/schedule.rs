@@ -55,6 +55,7 @@ impl Schedulable for Inst {
             Self::BroadcastLane(..)
             | Self::ExtractLane(..)
             | Self::Iota(..)
+            | Self::SplatLiteral(..)
             | Self::Select { .. }
             | Self::SelectVector { .. } => Compute(3),
             Self::Imm(..)

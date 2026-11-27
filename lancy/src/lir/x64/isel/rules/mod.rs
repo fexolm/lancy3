@@ -94,6 +94,11 @@ impl Rules<'_> {
         op: Op,
         callee: impl Fn(Call) -> (FunctionId, PRegSet),
     ) -> Result<Inst, CompileError> {
+        if let Op::Simd(Simd::Splat(x)) = op
+            && let Some((lane, bits)) = self.splat_literal(x)
+        {
+            return Ok(Inst::SplatLiteral(lane, bits, self.dst()));
+        }
         Ok(match op {
             Op::Const(n) => Inst::Imm(self.dst(), n),
             Op::CallScratch { offset, bytes } => Inst::CallScratch(offset, bytes, self.dst()),
@@ -187,6 +192,22 @@ impl Rules<'_> {
         // Only the selected form should mark its register operands live.
         self.ctx.require(v);
         self.masks.reg(self.f, v)
+    }
+
+    /// The lane and bits of a vector splat of a constant scalar `x`. One load
+    /// from the constant pool replaces moving the scalar into a register and
+    /// broadcasting it, which costs two shuffle-port operations.
+    fn splat_literal(&self, x: Value) -> Option<(Lane, u64)> {
+        let result = self.result?;
+        if self.masks.contains(result) {
+            return None;
+        }
+        let (lane, bits) = match self.ctx.defining_op(x)? {
+            Op::Const(n) => (Lane::I32, u64::from(n as u32)),
+            Op::Literal(lane, bits) if lane.bytes() <= 8 => (lane, bits as u64),
+            _ => return None,
+        };
+        (self.ty(result) == Type::Vector(lane)).then_some((lane, bits))
     }
 
     fn dword_constant(&self, value: Value) -> Option<u32> {

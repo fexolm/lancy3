@@ -1,0 +1,71 @@
+# A splat of a constant is one load from the constant pool. Moving the
+# scalar to a register and broadcasting it costs two shuffle-port
+# operations, on every iteration of a loop that recomputes it.
+fn main(x:vec.f32 n:i32) -> vec.f32
+  zero = const 0
+  jump head(zero x)
+block head(i:i32 acc:vec.f32)
+  more = lt i n
+  br more body(i acc) | done(acc)
+block body(j:i32 v:vec.f32)
+  c = literal f32 0x3fa00000
+  s = splat c
+  w = mul v s
+  one = const 1
+  next = add j one
+  jump head(next w)
+block done(r:vec.f32)
+  ret r
+@isel check: splat.literal.f32 0x3fa00000
+@isel not: native.f32.splat
+@isel not: literal.f32
+@asm regex: LOAD=(vpbroadcastd [yz]mm[0-9]+,\[|movdqu xmm[0-9]+,\[)
+@asm check: $LOAD
+@asm not: vmovd
+@run vec.f32[0x3f800000 0xc0000000] 2 -> vec.f32[0x3fc80000 0xc0480000]
+@run vec.f32[0x3f800000] 0 -> vec.f32[0x3f800000]
+
+---
+
+# Zero needs no memory: a zeroing idiom. Integer and 64-bit lanes load too.
+fn main(x:vec.i32 y:vec.i64) -> i64
+  zero = const 0
+  z = splat zero
+  m = max x z
+  k = literal i64 0x700000001
+  ks = splat k
+  t = add y ks
+  i = const 1
+  a = extract m i
+  b = extract t i
+  wide = cast i64 a
+  r = add wide b
+  ret r
+@isel check: splat.literal.i32 0x0
+@isel check: splat.literal.i64 0x700000001
+@isel not: native.i64.splat
+@asm regex: ZERO=v?pxor
+@asm check: $ZERO
+@run vec.i32[-5 9] vec.i64[1 -1] -> 30064771081
+@run vec.i32[5 -9] vec.i64[1 2] -> 30064771075
+
+---
+
+# A splat of a runtime scalar still broadcasts the register.
+fn main(x:vec.i32 k:i32) -> vec.i32
+  s = splat k
+  y = add x s
+  ret y
+@isel check: native.i32.splat
+@isel not: splat.literal
+@run vec.i32[1 2] 3 -> vec.i32[4 5]
+
+---
+
+# A constant splat used as a select predicate stays a mask constant.
+fn main(x:vec.i32 y:vec.i32) -> vec.i32
+  all = const -1
+  m = splat all
+  r = select m x y
+  ret r
+@run vec.i32[1 2] vec.i32[3 4] -> vec.i32[1 2]
