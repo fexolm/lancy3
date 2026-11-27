@@ -167,33 +167,42 @@ struct SimdCall<'a> {
 type SimdLowering = fn(&mut SimdCall<'_>) -> crate::Result<Option<Reg>>;
 
 /// The lowering of each intrinsic that `splice::simd` declares for `Lane`,
-/// by method: the portable SIMD operations it stages. An operator trait's
+/// by method in name order: the portable SIMD operations it stages. An operator trait's
 /// method (`add`) also lowers its compound assignment (`add_assign`).
 const LANE: [(&str, SimdLowering); 51] = [
-    ("lanes", |c| c.op(SimdOp::Lanes, &[])),
-    ("iota", |c| c.op(SimdOp::Iota, &[])),
-    ("first_n", |c| {
-        let count = c.scalar(0, ScalarType::Index)?;
-        c.op(SimdOp::FirstN, &[count])
-    }),
-    ("splat", |c| match c.arg(0)? {
-        // `Lane::splat` of a known value carries its bit pattern.
-        Operand::Known(value) => c.op(SimdOp::Splat(value.bits()), &[]),
-        Operand::Reg(value) if c.element == Element::I32 => c.op(SimdOp::SplatScalar, &[value]),
-        _ => Err(c.error("splats a known value or a runtime i32")),
+    ("add", |c| c.with_args(SimdOp::Add, 1)),
+    ("add_masked", |c| {
+        let (mask, rhs, fallback) = (c.value(0)?, c.value(1)?, c.value(2)?);
+        let sum = c.op(SimdOp::Add, &[c.this()?, rhs])?;
+        let sum = sum.ok_or_else(|| crate::BuildError::staging("missing SIMD result"))?;
+        c.op(SimdOp::Select, &[mask, sum, fallback])
     }),
     ("alignment_prefix", |c| {
         let (buffer, offset) = (c.buffer(0)?, c.scalar(1, ScalarType::Index)?);
         c.op(SimdOp::AlignmentPrefix(buffer), &[offset])
     }),
-    ("load", |c| {
-        let (buffer, offset) = (c.buffer(0)?, c.scalar(1, ScalarType::Index)?);
-        c.op(SimdOp::Load(buffer), &[offset])
+    ("bitand", |c| c.with_args(SimdOp::And, 1)),
+    ("bitor", |c| c.with_args(SimdOp::Or, 1)),
+    ("bitxor", |c| c.with_args(SimdOp::Xor, 1)),
+    ("cast", |c| {
+        let to = c.output()?;
+        c.with_args(SimdOp::Cast(to), 0)
     }),
-    ("load_select", |c| {
-        let (buffer, offset) = (c.buffer(0)?, c.scalar(1, ScalarType::Index)?);
-        let (mask, fallback) = (c.value(2)?, c.value(3)?);
-        c.op(SimdOp::LoadSelect(buffer), &[offset, mask, fallback])
+    ("compress", |c| c.with_args(SimdOp::Compress, 1)),
+    ("compress_store", |c| c.store(SimdOp::CompressStore, true)),
+    ("deinterleave_even", |c| {
+        c.shuffle(Shuffle::DeinterleaveEven)
+    }),
+    ("deinterleave_odd", |c| c.shuffle(Shuffle::DeinterleaveOdd)),
+    ("div", |c| c.with_args(SimdOp::Div, 1)),
+    ("expand", |c| c.with_args(SimdOp::Expand, 2)),
+    ("extract_wrapping", |c| {
+        let index = c.scalar(0, ScalarType::I32)?;
+        c.op(SimdOp::ExtractWrapping, &[c.this()?, index])
+    }),
+    ("first_n", |c| {
+        let count = c.scalar(0, ScalarType::Index)?;
+        c.op(SimdOp::FirstN, &[count])
     }),
     ("gather", |c| {
         let (buffer, indices) = (c.buffer(0)?, c.value(1)?);
@@ -204,92 +213,84 @@ const LANE: [(&str, SimdLowering); 51] = [
             (c.buffer(0)?, c.value(1)?, c.value(2)?, c.value(3)?);
         c.op(SimdOp::GatherSelect(buffer), &[indices, mask, fallback])
     }),
-    ("store", |c| c.store(SimdOp::Store, false)),
-    ("store_select", |c| c.store(SimdOp::StoreSelect, true)),
-    ("compress_store", |c| c.store(SimdOp::CompressStore, true)),
-    ("scatter", |c| c.scatter(SimdOp::Scatter, false)),
-    ("scatter_select", |c| c.scatter(SimdOp::ScatterSelect, true)),
-    ("add_masked", |c| {
-        let (mask, rhs, fallback) = (c.value(0)?, c.value(1)?, c.value(2)?);
-        let sum = c.op(SimdOp::Add, &[c.this()?, rhs])?;
-        let sum = sum.ok_or_else(|| crate::BuildError::staging("missing SIMD result"))?;
-        c.op(SimdOp::Select, &[mask, sum, fallback])
+    ("interleave_high", |c| c.shuffle(Shuffle::InterleaveHigh)),
+    ("interleave_low", |c| c.shuffle(Shuffle::InterleaveLow)),
+    ("iota", |c| c.op(SimdOp::Iota, &[])),
+    ("lanes", |c| c.op(SimdOp::Lanes, &[])),
+    ("last", |c| c.with_args(SimdOp::Last, 0)),
+    ("load", |c| {
+        let (buffer, offset) = (c.buffer(0)?, c.scalar(1, ScalarType::Index)?);
+        c.op(SimdOp::Load(buffer), &[offset])
     }),
-    ("simd_eq", |c| c.with_args(SimdOp::Eq, 1)),
-    ("simd_ne", |c| c.with_args(SimdOp::Ne, 1)),
-    ("simd_lt", |c| c.with_args(SimdOp::Lt, 1)),
-    ("simd_le", |c| c.with_args(SimdOp::Le, 1)),
-    ("simd_gt", |c| c.with_args(SimdOp::Gt, 1)),
-    ("simd_ge", |c| c.with_args(SimdOp::Ge, 1)),
-    ("cast", |c| {
-        let to = c.output()?;
-        c.with_args(SimdOp::Cast(to), 0)
+    ("load_select", |c| {
+        let (buffer, offset) = (c.buffer(0)?, c.scalar(1, ScalarType::Index)?);
+        let (mask, fallback) = (c.value(2)?, c.value(3)?);
+        c.op(SimdOp::LoadSelect(buffer), &[offset, mask, fallback])
     }),
-    ("widen_low", |c| {
-        let to = c.output()?;
-        c.with_args(SimdOp::Widen { to, high: false }, 0)
-    }),
-    ("widen_high", |c| {
-        let to = c.output()?;
-        c.with_args(SimdOp::Widen { to, high: true }, 0)
-    }),
+    ("mul", |c| c.with_args(SimdOp::Mul, 1)),
+    ("mul_add", |c| c.with_args(SimdOp::MulAdd, 2)),
     ("narrow", |c| {
         let to = c.output()?;
         c.with_args(SimdOp::Narrow(to), 1)
     }),
-    ("rotate_left", |c| {
-        let count = c.count(0)?;
-        c.with_args(SimdOp::RotateLeft(count), 0)
-    }),
-    ("simd_min", |c| c.with_args(SimdOp::Min, 1)),
-    ("simd_max", |c| c.with_args(SimdOp::Max, 1)),
-    ("reduce_sum", |c| c.with_args(SimdOp::ReduceSum, 0)),
-    ("compress", |c| c.with_args(SimdOp::Compress, 1)),
-    ("expand", |c| c.with_args(SimdOp::Expand, 2)),
-    ("swizzle", |c| c.with_args(SimdOp::Swizzle, 1)),
-    ("interleave_low", |c| c.shuffle(Shuffle::InterleaveLow)),
-    ("interleave_high", |c| c.shuffle(Shuffle::InterleaveHigh)),
-    ("deinterleave_even", |c| {
-        c.shuffle(Shuffle::DeinterleaveEven)
-    }),
-    ("deinterleave_odd", |c| c.shuffle(Shuffle::DeinterleaveOdd)),
+    ("not", |c| c.with_args(SimdOp::Not, 0)),
     ("prefix_sum", |c| c.with_args(SimdOp::PrefixSum, 0)),
-    ("extract_wrapping", |c| {
-        let index = c.scalar(0, ScalarType::I32)?;
-        c.op(SimdOp::ExtractWrapping, &[c.this()?, index])
-    }),
+    ("reduce_sum", |c| c.with_args(SimdOp::ReduceSum, 0)),
     ("replace_wrapping", |c| {
         let index = c.scalar(0, ScalarType::I32)?;
         let value = c.scalar(1, ScalarType::I32)?;
         c.op(SimdOp::ReplaceWrapping, &[c.this()?, index, value])
     }),
-    ("last", |c| c.with_args(SimdOp::Last, 0)),
-    ("sqrt", |c| c.with_args(SimdOp::Sqrt, 0)),
-    ("mul_add", |c| c.with_args(SimdOp::MulAdd, 2)),
-    ("add", |c| c.with_args(SimdOp::Add, 1)),
-    ("sub", |c| c.with_args(SimdOp::Sub, 1)),
-    ("mul", |c| c.with_args(SimdOp::Mul, 1)),
-    ("div", |c| c.with_args(SimdOp::Div, 1)),
-    ("bitand", |c| c.with_args(SimdOp::And, 1)),
-    ("bitor", |c| c.with_args(SimdOp::Or, 1)),
-    ("bitxor", |c| c.with_args(SimdOp::Xor, 1)),
-    ("not", |c| c.with_args(SimdOp::Not, 0)),
+    ("rotate_left", |c| {
+        let count = c.count(0)?;
+        c.with_args(SimdOp::RotateLeft(count), 0)
+    }),
+    ("scatter", |c| c.scatter(SimdOp::Scatter, false)),
+    ("scatter_select", |c| c.scatter(SimdOp::ScatterSelect, true)),
     ("shr", |c| {
         let count = c.count(0)?;
         c.with_args(SimdOp::Shr(count), 0)
     }),
+    ("simd_eq", |c| c.with_args(SimdOp::Eq, 1)),
+    ("simd_ge", |c| c.with_args(SimdOp::Ge, 1)),
+    ("simd_gt", |c| c.with_args(SimdOp::Gt, 1)),
+    ("simd_le", |c| c.with_args(SimdOp::Le, 1)),
+    ("simd_lt", |c| c.with_args(SimdOp::Lt, 1)),
+    ("simd_max", |c| c.with_args(SimdOp::Max, 1)),
+    ("simd_min", |c| c.with_args(SimdOp::Min, 1)),
+    ("simd_ne", |c| c.with_args(SimdOp::Ne, 1)),
+    ("splat", |c| match c.arg(0)? {
+        // `Lane::splat` of a known value carries its bit pattern.
+        Operand::Known(value) => c.op(SimdOp::Splat(value.bits()), &[]),
+        Operand::Reg(value) if c.element == Element::I32 => c.op(SimdOp::SplatScalar, &[value]),
+        _ => Err(c.error("splats a known value or a runtime i32")),
+    }),
+    ("sqrt", |c| c.with_args(SimdOp::Sqrt, 0)),
+    ("store", |c| c.store(SimdOp::Store, false)),
+    ("store_select", |c| c.store(SimdOp::StoreSelect, true)),
+    ("sub", |c| c.with_args(SimdOp::Sub, 1)),
+    ("swizzle", |c| c.with_args(SimdOp::Swizzle, 1)),
+    ("widen_high", |c| {
+        let to = c.output()?;
+        c.with_args(SimdOp::Widen { to, high: true }, 0)
+    }),
+    ("widen_low", |c| {
+        let to = c.output()?;
+        c.with_args(SimdOp::Widen { to, high: false }, 0)
+    }),
 ];
 
 /// The lowering of each intrinsic that `splice::simd` declares for `Mask`,
-/// but `select` ([`select`]), whose element is the selected data's.
+/// but `select` ([`select`]), whose element is the selected data's; in
+/// name order.
 const MASK: [(&str, SimdLowering); 7] = [
-    ("any", |c| c.with_args(SimdOp::Any, 0)),
     ("all", |c| c.with_args(SimdOp::All, 0)),
-    ("count", |c| c.with_args(SimdOp::Count, 0)),
-    ("not", |c| c.with_args(SimdOp::MaskNot, 0)),
+    ("any", |c| c.with_args(SimdOp::Any, 0)),
     ("bitand", |c| c.with_args(SimdOp::MaskAnd, 1)),
     ("bitor", |c| c.with_args(SimdOp::MaskOr, 1)),
     ("bitxor", |c| c.with_args(SimdOp::MaskXor, 1)),
+    ("count", |c| c.with_args(SimdOp::Count, 0)),
+    ("not", |c| c.with_args(SimdOp::MaskNot, 0)),
 ];
 
 /// The lowering of `method` of `Lane` (`mask` false) or `Mask`.
@@ -299,10 +300,11 @@ fn simd_lowering(mask: bool, method: &str) -> Option<SimdLowering> {
     }
     let method = method.strip_suffix("_assign").unwrap_or(method);
     let table: &[(&str, SimdLowering)] = if mask { &MASK } else { &LANE };
+    // Staging looks up every SIMD call of a kernel.
     table
-        .iter()
-        .find(|(name, _)| *name == method)
-        .map(|&(_, lowering)| lowering)
+        .binary_search_by(|(name, _)| name.cmp(&method))
+        .ok()
+        .map(|index| table[index].1)
 }
 
 /// `mask.select(yes, no)`: a selection of the data's element.
@@ -430,11 +432,12 @@ impl SimdCall<'_> {
 
     /// `op` on the receiver and its first `count` arguments, all vectors or masks.
     fn with_args(&mut self, op: SimdOp, count: usize) -> crate::Result<Option<Reg>> {
-        let mut operands = vec![self.this()?];
+        // At most two arguments; no allocation on this path of every call.
+        let mut operands = [self.this()?; 3];
         for index in 0..count {
-            operands.push(self.value(index)?);
+            operands[1 + index] = self.value(index)?;
         }
-        self.op(op, &operands)
+        self.op(op, &operands[..=count])
     }
 
     fn shuffle(&mut self, order: Shuffle) -> crate::Result<Option<Reg>> {
@@ -444,25 +447,30 @@ impl SimdCall<'_> {
     /// `receiver.store(buffer, offset)` and the forms with a mask after
     /// the offset (`store_select`, `compress_store`).
     fn store(&mut self, op: fn(Buffer) -> SimdOp, masked: bool) -> crate::Result<Option<Reg>> {
-        let buffer = self.buffer(0)?;
-        let mut operands = vec![self.scalar(1, ScalarType::Index)?];
+        let (buffer, offset, this) = (
+            self.buffer(0)?,
+            self.scalar(1, ScalarType::Index)?,
+            self.this()?,
+        );
         if masked {
-            operands.push(self.value(2)?);
+            let mask = self.value(2)?;
+            self.op(op(buffer), &[offset, mask, this])
+        } else {
+            self.op(op(buffer), &[offset, this])
         }
-        operands.push(self.this()?);
-        self.op(op(buffer), &operands)
     }
 
     /// `receiver.scatter(buffer, indices)` and
     /// `receiver.scatter_select(buffer, mask, indices)`.
     fn scatter(&mut self, op: fn(Buffer) -> SimdOp, masked: bool) -> crate::Result<Option<Reg>> {
-        let buffer = self.buffer(0)?;
-        let operands = if masked {
-            vec![self.value(2)?, self.value(1)?, self.this()?]
+        let (buffer, this) = (self.buffer(0)?, self.this()?);
+        if masked {
+            let (mask, indices) = (self.value(1)?, self.value(2)?);
+            self.op(op(buffer), &[indices, mask, this])
         } else {
-            vec![self.value(1)?, self.this()?]
-        };
-        self.op(op(buffer), &operands)
+            let indices = self.value(1)?;
+            self.op(op(buffer), &[indices, this])
+        }
     }
 }
 
@@ -515,7 +523,7 @@ mod tests {
                     declared.iter().any(|(m, d)| *m == mask && d == name),
                     "{name} is not declared"
                 );
-                assert!(!table[..i].iter().any(|(n, _)| n == name), "{name} twice");
+                assert!(i == 0 || table[i - 1].0 < *name, "{name} out of order");
             }
         }
         assert!(declared.contains(&(true, "select".into())));
