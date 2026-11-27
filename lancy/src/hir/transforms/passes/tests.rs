@@ -233,10 +233,13 @@ block done()
     simplify(&mut optimized, Arch::X86_64).unwrap();
     let (arena, live) = optimized.operand_arena();
     assert_eq!(arena, live);
-    assert!(
-        optimized.blocks().count() > f.blocks().count(),
-        "unswitched"
-    );
+    let branches = |f: &Function| {
+        f.blocks()
+            .filter(|&b| matches!(f.terminator(b), Terminator::Branch { .. }))
+            .count()
+    };
+    // One loop per value of `mode`, and the branch on `mode` before them.
+    assert!(branches(&optimized) > branches(&f), "unswitched");
     let kernel = Kernel::compile(&f, &crate::test_target::options()).unwrap();
     for (n, mode) in [(0, 0), (3, 1), (3, 0), (-2, 1)] {
         let expected = if mode != 0 { n.max(0) } else { -n.max(0) };

@@ -182,6 +182,19 @@ const PIPELINE: &[Pass] = &[
             Ok(Preserved::All)
         },
     },
+    // Last: earlier passes leave chains of straight-line blocks (inlined
+    // calls, removed checks). One block lets instruction selection share
+    // values across them, such as the extension of an index.
+    Pass {
+        name: "merge jump chains",
+        run: |f, _| {
+            Ok(if f.merge_jump_chains() {
+                Preserved::Nothing
+            } else {
+                Preserved::All
+            })
+        },
+    },
 ];
 
 /// Run every pass in order. In test and debug builds each pass's output is

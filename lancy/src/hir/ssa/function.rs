@@ -645,6 +645,66 @@ impl Function {
         Ok(())
     }
 
+    /// Splice every block whose only incoming edge is a jump into the
+    /// jumping block, as [`Self::merge_blocks`] does, in one pass: chains of
+    /// straight-line blocks become one block. Returns whether any merged.
+    pub(in crate::hir) fn merge_jump_chains(&mut self) -> bool {
+        let entry = self.entry();
+        let mut incoming = DenseMap::filled(self.block_capacity(), 0u32);
+        let mut merged = false;
+        for data in self.blocks.values() {
+            if let Some(term) = &data.term {
+                for e in term.edges() {
+                    incoming[self.edges[e].0] += 1;
+                }
+            }
+        }
+        let mut aliases: Option<DenseMap<Value, Value>> = None;
+        let blocks: Vec<Block> = self.blocks().collect();
+        for pred in blocks {
+            while let Some(Some(Terminator::Jump(edge))) =
+                self.blocks.get(pred).map(|data| data.term)
+            {
+                let (succ, args) = self.edges[edge];
+                if succ == pred || succ == entry || incoming[succ] != 1 {
+                    break;
+                }
+                let succ = self.blocks.remove(succ).unwrap();
+                merged = true;
+                let last = self.blocks[pred].last;
+                if succ.first != Inst::INVALID {
+                    if last == Inst::INVALID {
+                        self.blocks[pred].first = succ.first;
+                    } else {
+                        self.insts[last].next = succ.first;
+                    }
+                    self.blocks[pred].last = succ.last;
+                }
+                self.blocks[pred].term = succ.term;
+                if !succ.params.is_empty() {
+                    let types = self.types.len();
+                    let aliases = aliases.get_or_insert_with(|| DenseMap::from_fn(types, |v| v));
+                    for (&param, &actual) in succ.params.iter().zip(&self.operands[args.range()]) {
+                        aliases[param] = actual;
+                    }
+                }
+            }
+        }
+        if let Some(mut aliases) = aliases {
+            // An argument can be a parameter of a block merged before or
+            // after: follow each chain to a value that stays.
+            for v in aliases.keys() {
+                let mut root = aliases[v];
+                while aliases[root] != root {
+                    root = aliases[root];
+                }
+                aliases[v] = root;
+            }
+            self.substitute_values(&aliases);
+        }
+        merged
+    }
+
     pub(in crate::hir) fn substitute_values(&mut self, aliases: &DenseMap<Value, Value>) {
         let map = |v: Value| aliases[v];
         for inst in self.insts.values_mut() {

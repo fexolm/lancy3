@@ -1,0 +1,61 @@
+# A block whose only incoming edge is a jump joins the jumping block, so a
+# chain of straight-line blocks becomes one. A parameter becomes its
+# argument, also when the argument is a parameter of a block merged before.
+fn main(x:i32 y:i32) -> i32
+  jump a(x)
+block a(p:i32)
+  s = add p y
+  jump b(s p)
+block b(q:i32 r:i32)
+  t = mul q r
+  jump c(t)
+block c(u:i32)
+  v = sub u y
+  ret v
+@source check: block b3(
+@opt not: block
+@opt not: jump
+@opt check: = add v0 v1
+@opt nextln: = mul
+@opt nextln: = sub
+@opt nextln: ret
+@run 3 4 -> 17
+@run -2 5 -> -11
+
+---
+
+# Counterexample: a join with two incoming edges and a loop header keep
+# their blocks; merging either would run a block on a path that skips it.
+# The block after the loop has one incoming edge, but from a branch.
+fn main(n:i32 c:i32) -> i32
+  zero = const 0
+  br c left() | right()
+block left()
+  one = const 1
+  jump join(one)
+block right()
+  two = const 2
+  jump join(two)
+block join(step:i32)
+  jump head(zero zero)
+block head(i:i32 acc:i32)
+  more = lt i n
+  br more body() | done()
+block body()
+  sum = add acc step
+  next = add i step
+  jump head(next sum)
+block done()
+  ret acc
+@opt check: block b3(v2:i32)
+@opt nextln: jump b4(
+@opt nextln: block b4(
+@opt nextln: = lt
+@opt nextln: br
+@opt nextln: block b5()
+@opt check: jump b4(
+@opt nextln: block b6()
+@run 4 1 -> 4
+@run 4 0 -> 4
+@run 5 0 -> 6
+@run 0 1 -> 0
