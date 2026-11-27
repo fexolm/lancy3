@@ -261,9 +261,9 @@ pub fn stage(
 /// The check that keeps `#[intrinsic] struct` values out of an exported
 /// kernel's `BuildArgs` and `CallArgs`: generated code calls
 /// `crossing((&Probe::<T>::new()).__splice_boundary())` for each field
-/// type `T` (references peeled). Method resolution picks [`Opaque`] when
-/// `T` is an intrinsic struct and [`Plain`] otherwise; only [`Plain`]'s
-/// result is [`Crossing`].
+/// type `T` (references peeled). Method resolution picks [`Opaque`](boundary::Opaque) when
+/// `T` is an intrinsic struct and [`Plain`](boundary::Plain) otherwise; only [`Plain`](boundary::Plain)'s
+/// result is [`Crossing`](boundary::Crossing).
 #[doc(hidden)]
 pub mod boundary {
     use super::IntrinsicType;
