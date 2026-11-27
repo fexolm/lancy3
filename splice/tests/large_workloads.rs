@@ -178,13 +178,12 @@ fn biquad_starts_with_zero_state_on_every_call() {
 
 #[test]
 fn yuv_converts_known_colors_across_packets_and_tail() {
-    use splice::simd::Lane;
     let colors = [
         ([16, 128, 128, 0], [0, 0, 0, 255]),
         ([235, 128, 128, 17], [255, 255, 255, 255]),
         ([81, 90, 240, 255], [255, 0, 0, 255]),
     ];
-    let count = 2 * Lane::<i32>::lanes() + 3;
+    let count = 2 * splice::simd::lanes::<i32>() + 3;
     let pixels: Vec<_> = colors
         .iter()
         .cycle()
@@ -210,7 +209,7 @@ fn yuv_converts_known_colors_across_packets_and_tail() {
         .unwrap();
         assert_eq!(short, -1, "{name}");
         assert!(out.iter().all(|&pixel| pixel == SENTINEL), "{name}");
-        let width = Lane::<i32>::lanes();
+        let width = splice::simd::lanes::<i32>();
         for len in [0, width - 1, width, width + 1, count] {
             out.fill(SENTINEL);
             let written = splice_testkit::call_i32(
@@ -321,7 +320,7 @@ fn rgb16_remap_supports_unsigned_indices_and_stops_on_an_invalid_plane() {
         assert!(result.is_err(), "{name}");
         assert_eq!(out, [300, u16::MAX, u16::MAX, u16::MAX], "{name}");
 
-        let width = splice::simd::Lane::<u16>::lanes();
+        let width = splice::simd::lanes::<u16>();
         let mut map = vec![1u16; 6 * width];
         map[width + 1] = u16::MAX;
         let mut out = vec![u16::MAX; map.len()];

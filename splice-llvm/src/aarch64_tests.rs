@@ -46,7 +46,7 @@ fn emits_aarch64_simd_and_preserves_the_logical_width() {
         assert!(!assembly.contains("eor3\tz"), "{assembly}");
     }
 
-    let n = Lane::<i32>::lanes();
+    let n = splice_core::simd::lanes::<i32>();
     // Leave enough space for a whole architectural SVE register so the
     // canary detects a full-register store at a VL above the logical width.
     let a: Vec<_> = (0..64).collect();

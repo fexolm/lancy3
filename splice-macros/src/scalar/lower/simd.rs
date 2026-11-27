@@ -148,25 +148,220 @@ pub(super) fn vector_type(t: &Type, types: &[&Ident]) -> Option<Scalar> {
         None
     }
 }
-pub(crate) fn constructor_arity(p: &Path) -> Option<usize> {
+/// The declarations of `splice::simd` (`splice_core::simd` expands them).
+const API: &str = include_str!("../../simd_api.rs");
+
+/// The items of `simd_api.rs`.
+pub(crate) fn simd_api_tokens() -> TokenStream {
+    API.parse().expect("simd_api.rs is Rust")
+}
+
+/// The type that declares a SIMD intrinsic.
+#[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
+pub(crate) enum Owner {
+    Lane,
+    Mask,
+}
+
+/// An element in a declared type.
+#[derive(Copy, Clone, PartialEq, Eq)]
+enum Declared {
+    /// The element of `Self`.
+    Own,
+    /// `T::Index`.
+    Index,
+    /// A type parameter of the method (`U` of `cast::<U>`).
+    Method,
+}
+
+/// A parameter or result type of a SIMD intrinsic.
+#[derive(Copy, Clone, PartialEq, Eq)]
+enum DeclaredType {
+    /// `Self`: the vector or mask of the call.
+    Own,
+    Lane(Declared),
+    Mask(Declared),
+    /// `&[T]` or `&mut [T]`.
+    Slice,
+    /// `T`, the element.
+    Element,
+    Scalar(Scalar),
+    Unit,
+}
+
+/// The signature of a SIMD intrinsic: `receiver` is false for an
+/// associated function (`Lane::load`).
+pub(crate) struct Signature {
+    receiver: bool,
+    params: Vec<DeclaredType>,
+    result: DeclaredType,
+}
+
+/// The SIMD intrinsics `simd_api.rs` declares, by owner and method. A
+/// method declared in several impls (`rotate_left` of `Lane<i32>` and
+/// `Lane<u32>`) has one signature in terms of `Self`.
+fn declared() -> &'static std::collections::HashMap<(Owner, String), Signature> {
+    static DECLARED: std::sync::OnceLock<std::collections::HashMap<(Owner, String), Signature>> =
+        std::sync::OnceLock::new();
+    DECLARED.get_or_init(|| {
+        let file = syn::parse_file(API).expect("simd_api.rs is Rust");
+        let mut declared = std::collections::HashMap::new();
+        for item in file.items {
+            let syn::Item::Impl(implementation) = item else {
+                continue;
+            };
+            let Type::Path(owner) = &*implementation.self_ty else {
+                panic!("a SIMD impl is for Lane or Mask");
+            };
+            let owner = owner.path.segments.last().unwrap();
+            let own = match &owner.arguments {
+                PathArguments::AngleBracketed(a) => {
+                    a.args.first().map(|a| a.to_token_stream().to_string())
+                }
+                _ => None,
+            };
+            let owner = match owner.ident.to_string().as_str() {
+                "Lane" => Owner::Lane,
+                "Mask" => Owner::Mask,
+                other => panic!("a SIMD impl for `{other}`"),
+            };
+            for item in implementation.items {
+                let syn::ImplItem::Verbatim(tokens) = item else {
+                    continue;
+                };
+                let method: syn::TraitItemFn = syn::parse::Parser::parse2(
+                    |input: syn::parse::ParseStream| {
+                        let _ = input.call(syn::Attribute::parse_outer)?;
+                        let _: syn::Visibility = input.parse()?;
+                        input.parse()
+                    },
+                    tokens,
+                )
+                .expect("a body-less SIMD intrinsic");
+                let sig = &method.sig;
+                let generic: Vec<_> = sig
+                    .generics
+                    .type_params()
+                    .map(|t| t.ident.to_string())
+                    .collect();
+                let ty = |t: &Type| declared_type(t, own.as_deref(), &generic);
+                let receiver = matches!(sig.inputs.first(), Some(syn::FnArg::Receiver(_)));
+                let params = sig
+                    .inputs
+                    .iter()
+                    .filter_map(|input| match input {
+                        syn::FnArg::Typed(t) => Some(ty(&t.ty)),
+                        syn::FnArg::Receiver(_) => None,
+                    })
+                    .collect();
+                let result = match &sig.output {
+                    syn::ReturnType::Default => DeclaredType::Unit,
+                    syn::ReturnType::Type(_, t) => match ty(t) {
+                        DeclaredType::Scalar(Scalar::Index) => DeclaredType::Scalar(Scalar::Length),
+                        t => t,
+                    },
+                };
+                declared
+                    .entry((owner, sig.ident.to_string()))
+                    .or_insert(Signature {
+                        receiver,
+                        params,
+                        result,
+                    });
+            }
+        }
+        declared
+    })
+}
+
+/// A type of a declaration in an impl whose `Self` element is `own` (`T`
+/// or a primitive) and whose method has the type parameters `generic`.
+fn declared_type(t: &Type, own: Option<&str>, generic: &[String]) -> DeclaredType {
+    let element = |t: &Type| {
+        let name = t.to_token_stream().to_string().replace(' ', "");
+        if Some(name.as_str()) == own {
+            Declared::Own
+        } else if name == "T::Index" {
+            Declared::Index
+        } else if generic.contains(&name) {
+            Declared::Method
+        } else {
+            panic!("SIMD declaration element `{name}`")
+        }
+    };
+    match t {
+        Type::Reference(r) if matches!(&*r.elem, Type::Slice(_)) => DeclaredType::Slice,
+        Type::Path(p) if p.path.is_ident("Self") => DeclaredType::Own,
+        Type::Path(p) if own == Some("T") && p.path.is_ident("T") => DeclaredType::Element,
+        Type::Path(p) if matches!(p.path.segments.last(), Some(s) if s.ident == "Lane" || s.ident == "Mask") =>
+        {
+            let s = p.path.segments.last().unwrap();
+            let PathArguments::AngleBracketed(a) = &s.arguments else {
+                panic!("SIMD declaration `{}` without an element", s.ident)
+            };
+            let Some(GenericArgument::Type(e)) = a.args.first() else {
+                panic!("SIMD declaration `{}` without an element", s.ident)
+            };
+            if s.ident == "Lane" {
+                DeclaredType::Lane(element(e))
+            } else {
+                DeclaredType::Mask(element(e))
+            }
+        }
+        t => DeclaredType::Scalar(
+            Scalar::from_type(t, &[])
+                .unwrap_or_else(|| panic!("SIMD declaration type `{}`", t.to_token_stream())),
+        ),
+    }
+}
+
+impl Signature {
+    /// The kernel type of `t` in a call on `owner` of element `own`, whose
+    /// method type parameter is `generic`; `None` for a unit result, an
+    /// error for an unknown type parameter.
+    fn resolve(
+        t: DeclaredType,
+        owner: Owner,
+        own: Elem,
+        generic: Option<Elem>,
+    ) -> std::result::Result<Option<Scalar>, ()> {
+        let element = |d| match d {
+            Declared::Own => Ok(own),
+            Declared::Index => Ok(own.index()),
+            Declared::Method => generic.ok_or(()),
+        };
+        Ok(Some(match t {
+            DeclaredType::Own if owner == Owner::Mask => Scalar::Mask(own),
+            DeclaredType::Own => Scalar::Vector(own),
+            DeclaredType::Lane(d) => Scalar::Vector(element(d)?),
+            DeclaredType::Mask(d) => Scalar::Mask(element(d)?),
+            DeclaredType::Element => own.scalar().ok_or(())?,
+            DeclaredType::Scalar(s) => s,
+            DeclaredType::Slice | DeclaredType::Unit => return Ok(None),
+        }))
+    }
+}
+
+/// The signature of `Lane::<T>::name` that `p` names, an associated
+/// function of `Lane`.
+fn constructor(p: &Path) -> Option<&'static Signature> {
     let mut segments = p.segments.iter().rev();
     let member = &segments.next()?.ident;
     if segments.next()?.ident != "Lane" {
         return None;
     }
-    match member.to_string().as_str() {
-        "lanes" | "iota" => Some(0),
-        "splat" | "first_n" => Some(1),
-        "alignment_prefix" | "load" | "gather" => Some(2),
-        "load_select" | "gather_select" => Some(4),
-        _ => None,
-    }
+    declared()
+        .get(&(Owner::Lane, member.to_string()))
+        .filter(|s| !s.receiver)
+}
+pub(crate) fn constructor_arity(p: &Path) -> Option<usize> {
+    constructor(p).map(|s| s.params.len())
 }
 pub(super) fn uses_lane(e: &Expr) -> bool {
     struct Find(bool);
     impl<'a> Visit<'a> for Find {
         fn visit_expr_path(&mut self, p: &'a syn::ExprPath) {
-            self.0 |= constructor_arity(&p.path).is_some();
+            self.0 |= constructor(&p.path).is_some();
         }
     }
     let mut f = Find(false);
@@ -193,43 +388,89 @@ impl Scalar {
     }
 }
 impl Lower<'_> {
-    fn vector_op(
+    /// Stage the SIMD intrinsic `method` of `this` (`SimdSelf` tokens) on
+    /// `operands` (`Operand` tokens); `result` types the value.
+    fn simd_call(
         &self,
-        e: Elem,
-        op: TokenStream,
-        inputs: Vec<TokenStream>,
-        output: Option<Scalar>,
+        method: &str,
+        this: TokenStream,
+        operands: Vec<TokenStream>,
+        output: Option<Elem>,
+        result: Option<Scalar>,
     ) -> Value {
         let root = self.root;
-        let elem = e.tokens(root, self.types);
-        let res = emit!(__splice_builder.simd(#root::hir::Simd{element:#elem,op:#root::hir::SimdOp::#op},&__splice_operands)?);
-        let args = emit!(let __splice_operands=[#(#inputs),*];);
-        match output {
+        let output = match output {
+            Some(to) => {
+                let to = to.tokens(root, self.types);
+                emit!(::core::option::Option::Some(#to))
+            }
+            None => emit!(::core::option::Option::None),
+        };
+        let call = emit!({
+            let __splice_this = #this;
+            let __splice_operands = [#(#operands),*];
+            #root::frontend::methods::simd(__splice_builder, #method, __splice_this, &__splice_operands, #output)?
+        });
+        match result {
             Some(ty) => Value::new(
                 Stage::Reg(ty),
-                emit!({#args #res.ok_or_else(|| #root::BuildError::staging("missing SIMD result"))?}),
+                emit!(#call.ok_or_else(|| #root::BuildError::staging("missing SIMD result"))?),
             ),
-            None => Value::unit(emit!({#args #res;})),
+            None => Value::unit(emit!({ #call; })),
         }
     }
-    fn simd_operand(&self, expr: &Expr, ty: Scalar) -> Result<TokenStream> {
-        if let Scalar::Mask(want) = ty {
-            let actual = self.expr_with_hint(expr, Some(ty))?;
-            if let Stage::Reg(Scalar::Mask(have)) = actual.stage
-                && have.index() == want.index()
-            {
-                return Ok(actual.code);
+    /// The operand of the declared parameter `param` of a call on `owner`
+    /// of element `own`.
+    fn declared_operand(
+        &self,
+        arg: &Expr,
+        param: DeclaredType,
+        owner: Owner,
+        own: Elem,
+        generic: Option<Elem>,
+    ) -> Result<TokenStream> {
+        let root = self.root;
+        let operand = emit!(#root::frontend::methods::Operand);
+        Ok(match param {
+            DeclaredType::Slice => {
+                let v = self.expr(arg)?;
+                let Stage::Buffer(b) = v.stage else {
+                    return err(arg, "expected a runtime buffer");
+                };
+                if b.elem != own {
+                    return err(arg, "SIMD buffer element type mismatch");
+                }
+                emit!(#operand::Buffer(#v))
             }
-            return err(expr, "expected a mask with one predicate per data lane");
-        }
-        self.operand(expr, ty)
+            DeclaredType::Element => {
+                let v = self.expr(arg)?;
+                if own == Elem::I32 && matches!(v.stage, Stage::Reg(_)) {
+                    let reg = self.reg(v, Scalar::I32, arg)?;
+                    emit!(#operand::Reg(#reg))
+                } else {
+                    // A known element is staged as its bit pattern.
+                    let value = self.host(v, arg)?;
+                    let ty = own.ty(root, self.types);
+                    emit!(#operand::Known(#root::hir::Constant::from(#root::simd::LaneElement::bits({let scalar: #ty = #value; scalar}))))
+                }
+            }
+            DeclaredType::Own | DeclaredType::Mask(_) | DeclaredType::Lane(_) => {
+                let ty = Signature::resolve(param, owner, own, generic.or(Some(own)))
+                    .ok()
+                    .flatten()
+                    .expect("a vector or mask parameter");
+                self.simd_argument(arg, ty)?.1
+            }
+            DeclaredType::Scalar(ty) => self.simd_argument(arg, ty)?.1,
+            DeclaredType::Unit => unreachable!("a unit parameter"),
+        })
     }
     pub(super) fn simd_constructor(&self, e: &Expr, hint: Option<Scalar>) -> Result<Option<Value>> {
         let Expr::Call(c) = e else { return Ok(None) };
         let Expr::Path(p) = c.func.as_ref() else {
             return Ok(None);
         };
-        let Some(n) = constructor_arity(&p.path) else {
+        let Some(sig) = constructor(&p.path) else {
             return Ok(None);
         };
         let lane = p.path.segments.iter().rev().nth(1).unwrap();
@@ -241,49 +482,39 @@ impl Lower<'_> {
             );
         }
         let name = p.path.segments.last().unwrap().ident.to_string();
-        if c.args.len() != n {
+        if c.args.len() != sig.params.len() {
             return err(c, "wrong number of SIMD arguments");
         }
-        let buffer = if matches!(
-            name.as_str(),
-            "alignment_prefix" | "load" | "gather" | "load_select" | "gather_select"
-        ) {
-            let v = self.expr(&c.args[0])?;
-            let Stage::Buffer(b) = v.stage else {
-                return err(c, "expected a runtime buffer");
-            };
-            Some((b.elem, v.code))
-        } else {
-            None
-        };
+        // The element: explicit, else a slice argument's, else a typed
+        // splatted value's, else the type the use expects.
+        let mut buffer = None;
+        let mut splat = None;
+        for (arg, param) in c.args.iter().zip(&sig.params) {
+            match param {
+                DeclaredType::Slice if buffer.is_none() => {
+                    let Stage::Buffer(b) = self.expr(arg)?.stage else {
+                        return err(c, "expected a runtime buffer");
+                    };
+                    buffer = Some(b.elem);
+                }
+                DeclaredType::Element => {
+                    let v = self.expr(arg)?;
+                    splat = splat_element(arg).or(matches!(
+                        v.stage,
+                        Stage::Reg(Scalar::I32 | Scalar::Inferred)
+                    )
+                    .then_some(Elem::I32));
+                }
+                _ => {}
+            }
+        }
         let hinted = match hint {
             Some(Scalar::Vector(e) | Scalar::Mask(e)) => Some(e),
             _ => None,
         };
-        let runtime_splat = if name == "splat" {
-            Some(self.expr(&c.args[0])?)
-        } else {
-            None
-        };
-        let runtime_i32 = runtime_splat
-            .as_ref()
-            .filter(|v| matches!(v.stage, Stage::Reg(Scalar::I32 | Scalar::Inferred)))
-            .map(|_| Elem::I32);
-        let elem = explicit
-            .or_else(|| buffer.as_ref().map(|b| b.0))
-            .or_else(|| {
-                runtime_splat
-                    .as_ref()
-                    .and_then(|_| splat_element(&c.args[0]))
-            })
-            .or(runtime_i32)
-            .or(hinted)
-            .ok_or_else(|| {
-                syn::Error::new_spanned(c, "specify Lane::<T> or annotate the vector binding")
-            })?;
-        let v = Scalar::Vector(elem);
-        let mask = Scalar::Mask(elem);
-        let idx = Scalar::Vector(elem.index());
+        let elem = explicit.or(buffer).or(splat).or(hinted).ok_or_else(|| {
+            syn::Error::new_spanned(c, "specify Lane::<T> or annotate the vector binding")
+        })?;
         let root = self.root;
         let ty = elem.ty(root, self.types);
         let mut lane_path = p.path.clone();
@@ -291,107 +522,67 @@ impl Lower<'_> {
         lane_path.segments.pop_punct();
         lane_path.segments.last_mut().unwrap().arguments = PathArguments::None;
         let witness = emit!(let _: ::core::marker::PhantomData<#root::simd::Lane<#ty>>=::core::marker::PhantomData::<#lane_path<#ty>>;);
-        let get = |j: usize, t| self.simd_operand(&c.args[j], t);
-        let mut pre = TokenStream::new();
-        let mut result = match name.as_str() {
-            "first_n" => self.vector_op(
-                elem,
-                emit!(FirstN),
-                vec![self.operand(&c.args[0], Scalar::Index)?],
-                Some(mask),
-            ),
-            "lanes" => self.vector_op(elem, emit!(Lanes), vec![], Some(Scalar::Length)),
-            "iota" => self.vector_op(elem, emit!(Iota), vec![], Some(v)),
-            "splat" => {
-                let arg = runtime_splat.unwrap();
-                if elem == Elem::I32 && matches!(arg.stage, Stage::Reg(_)) {
-                    let reg = self.reg(arg, Scalar::I32, &c.args[0])?;
-                    self.vector_op(elem, emit!(SplatScalar), vec![reg], Some(v))
-                } else {
-                    let val = self.host(arg, &c.args[0])?;
-                    pre.extend(emit!(let scalar:#ty=#val;));
-                    self.vector_op(
-                        elem,
-                        emit!(Splat(#root::simd::LaneElement::bits(scalar))),
-                        vec![],
-                        Some(v),
-                    )
+        let operands = c
+            .args
+            .iter()
+            .zip(&sig.params)
+            .map(|(arg, &param)| match param {
+                // An offset or count stages before the other operands.
+                DeclaredType::Scalar(Scalar::Index) => {
+                    let reg = self.operand(arg, Scalar::Index)?;
+                    Ok(emit!(#root::frontend::methods::Operand::Reg(#reg)))
                 }
-            }
-            _ => {
-                let (b, buf) = buffer.unwrap();
-                if b != elem {
-                    return err(c, "SIMD buffer element type mismatch");
-                }
-                pre.extend(emit!(let buffer=#buf;));
-                match name.as_str() {
-                    "alignment_prefix" if elem == Elem::I32 => {
-                        let index = self.expr(&c.args[1])?;
-                        let offset = self.reg(index, Scalar::Index, &c.args[1])?;
-                        self.vector_op(
-                            elem,
-                            emit!(AlignmentPrefix(buffer)),
-                            vec![offset],
-                            Some(Scalar::Length),
-                        )
-                    }
-                    "alignment_prefix" => return err(c, "alignment_prefix expects i32 lanes"),
-                    "load" | "load_select" => {
-                        let mut a = vec![self.operand(&c.args[1], Scalar::Index)?];
-                        let op = if n == 4 {
-                            a.extend([get(2, mask)?, get(3, v)?]);
-                            emit!(LoadSelect(buffer))
-                        } else {
-                            emit!(Load(buffer))
-                        };
-                        self.vector_op(elem, op, a, Some(v))
-                    }
-                    "gather" => {
-                        self.vector_op(elem, emit!(Gather(buffer)), vec![get(1, idx)?], Some(v))
-                    }
-                    _ => {
-                        let m = get(1, mask)?;
-                        pre.extend(emit!(let mask=#m;));
-                        self.vector_op(
-                            elem,
-                            emit!(GatherSelect(buffer)),
-                            vec![get(2, idx)?, emit!(mask), get(3, v)?],
-                            Some(v),
-                        )
-                    }
-                }
-            }
+                param => self.declared_operand(arg, param, Owner::Lane, elem, None),
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let Ok(result) = Signature::resolve(sig.result, Owner::Lane, elem, None) else {
+            return err(c, "unsupported SIMD element");
         };
-        let code = result.code;
-        result.code = emit!({#witness #pre #code});
-        Ok(Some(result))
+        let element = elem.tokens(root, self.types);
+        let mut value = self.simd_call(
+            &name,
+            emit!(#root::frontend::methods::SimdSelf::Lane(#element)),
+            operands,
+            None,
+            result,
+        );
+        let code = value.code;
+        value.code = emit!({#witness #code});
+        Ok(Some(value))
     }
+    /// The operator trait method `method` (`add`, `not`) of the vector or
+    /// mask `t`, on the registers `args`, the receiver first.
     pub(super) fn simd_operator(
         &self,
         t: Scalar,
-        op: &str,
+        method: &str,
         args: Vec<TokenStream>,
         at: impl ToTokens,
     ) -> Result<Value> {
-        let (e, name, out) = match t {
-            Scalar::Mask(e) => match op {
-                "And" => (e, "MaskAnd", t),
-                "Or" => (e, "MaskOr", t),
-                "Xor" => (e, "MaskXor", t),
-                "Not" => (e, "MaskNot", t),
-                _ => return err(at, "unsupported SIMD mask operator"),
-            },
-            Scalar::Vector(e) => match op {
-                "Add" | "Sub" | "Mul" => (e, op, t),
-                "Div" if matches!(e, Elem::F32 | Elem::F64) => (e, op, t),
-                "And" | "Or" | "Xor" | "Not" if !matches!(e, Elem::F32 | Elem::F64) => (e, op, t),
-                "Eq" | "Ne" | "Lt" | "Le" | "Gt" | "Ge" => (e, op, Scalar::Mask(e)),
-                _ => return err(at, "unsupported SIMD vector operator"),
-            },
+        let owner = match t {
+            Scalar::Vector(_) => Owner::Lane,
+            Scalar::Mask(_) => Owner::Mask,
             _ => unreachable!(),
         };
-        let name = format_ident!("{name}");
-        Ok(self.vector_op(e, emit!(#name), args, Some(out)))
+        if !declared().contains_key(&(owner, method.to_string())) {
+            return err(
+                at,
+                &format!("{owner:?} has no `{method}` operator in a kernel"),
+            );
+        }
+        let root = self.root;
+        let mut args = args.into_iter();
+        let receiver = args.next().expect("a receiver");
+        let operands = args
+            .map(|a| emit!(#root::frontend::methods::Operand::Reg(#a)))
+            .collect();
+        Ok(self.simd_call(
+            method,
+            emit!(#root::frontend::methods::SimdSelf::Value(#receiver)),
+            operands,
+            None,
+            Some(t),
+        ))
     }
     pub(super) fn simd_binary(
         &self,
@@ -401,25 +592,15 @@ impl Lower<'_> {
         r: Value,
         at: &syn::ExprBinary,
     ) -> Result<Value> {
-        if let Scalar::Vector(elem @ (Elem::I32 | Elem::U32)) = t
-            && matches!(op, syn::BinOp::Shr(_))
-        {
-            let shift = self.host(r, &at.right)?;
-            return Ok(self.vector_op(
-                elem,
-                emit!(Shr({let shift:u32=#shift;shift & 31})),
-                vec![self.reg(l, t, at)?],
-                Some(t),
-            ));
-        }
-        let name = match op {
-            syn::BinOp::Add(_) => "Add",
-            syn::BinOp::Sub(_) => "Sub",
-            syn::BinOp::Mul(_) => "Mul",
-            syn::BinOp::Div(_) => "Div",
-            syn::BinOp::BitAnd(_) => "And",
-            syn::BinOp::BitOr(_) => "Or",
-            syn::BinOp::BitXor(_) => "Xor",
+        let method = match op {
+            syn::BinOp::Add(_) => "add",
+            syn::BinOp::Sub(_) => "sub",
+            syn::BinOp::Mul(_) => "mul",
+            syn::BinOp::Div(_) => "div",
+            syn::BinOp::BitAnd(_) => "bitand",
+            syn::BinOp::BitOr(_) => "bitor",
+            syn::BinOp::BitXor(_) => "bitxor",
+            syn::BinOp::Shr(_) => "shr",
             syn::BinOp::Eq(_)
             | syn::BinOp::Ne(_)
             | syn::BinOp::Lt(_)
@@ -434,11 +615,29 @@ impl Lower<'_> {
             _ => {
                 return err(
                     op,
-                    "a kernel supports +, -, *, /, &, | and ^ on SIMD vectors",
+                    "a kernel supports +, -, *, /, &, |, ^ and >> on SIMD vectors",
                 );
             }
         };
-        self.simd_operator(t, name, vec![self.reg(l, t, at)?, self.reg(r, t, at)?], at)
+        if method == "shr" {
+            // The shift count is known when the kernel is built.
+            let root = self.root;
+            let shift = self.host(r, &at.right)?;
+            let receiver = self.reg(l, t, at)?;
+            return Ok(self.simd_call(
+                method,
+                emit!(#root::frontend::methods::SimdSelf::Value(#receiver)),
+                vec![emit!(#root::frontend::methods::Operand::Known(#root::hir::Constant::from({let shift: u32 = #shift; shift})))],
+                None,
+                Some(t),
+            ));
+        }
+        self.simd_operator(
+            t,
+            method,
+            vec![self.reg(l, t, at)?, self.reg(r, t, at)?],
+            at,
+        )
     }
     pub(super) fn simd_unary(
         &self,
@@ -450,11 +649,24 @@ impl Lower<'_> {
         if !matches!(op, syn::UnOp::Not(_)) {
             return err(op, "unsupported SIMD unary operator");
         }
-        self.simd_operator(t, "Not", vec![v.code], at)
+        self.simd_operator(t, "not", vec![v.code], at)
     }
-    /// A method of the vector or mask `receiver`: the registry
-    /// (`frontend::methods::simd_method`) stages it on the operands,
-    /// typed by the builder. The macro gives the result its stage.
+    /// The receiver type that a SIMD method writing the slice `dst` (its
+    /// first parameter) gives its receiver: a vector of the slice's element.
+    pub(super) fn simd_store_receiver(&self, m: &syn::ExprMethodCall) -> Result<Option<Scalar>> {
+        let writes = declared()
+            .get(&(Owner::Lane, m.method.to_string()))
+            .is_some_and(|s| s.receiver && s.params.first() == Some(&DeclaredType::Slice));
+        if writes
+            && let Some(dst) = m.args.first()
+            && let Stage::Buffer(buffer) = self.expr(dst)?.stage
+        {
+            return Ok(Some(Scalar::Vector(buffer.elem)));
+        }
+        Ok(None)
+    }
+    /// A method of the vector or mask `receiver`, typed by its declaration;
+    /// `frontend::methods::simd` stages it on the operands.
     pub(super) fn simd_method(
         &self,
         t: Scalar,
@@ -462,80 +674,72 @@ impl Lower<'_> {
         m: &syn::ExprMethodCall,
         hint: Option<Scalar>,
     ) -> Result<Value> {
-        let (Scalar::Mask(e) | Scalar::Vector(e)) = t else {
-            unreachable!()
+        let (owner, e) = match t {
+            Scalar::Vector(e) => (Owner::Lane, e),
+            Scalar::Mask(e) => (Owner::Mask, e),
+            _ => unreachable!(),
         };
         let root = self.root;
         let method = m.method.to_string();
-        // The element of a conversion's result or of the selected data.
-        let data = m
+        let Some(sig) = declared()
+            .get(&(owner, method.clone()))
+            .filter(|s| s.receiver)
+        else {
+            return err(
+                &m.method,
+                &format!("`{method}` is not a kernel SIMD operation"),
+            );
+        };
+        if m.args.len() != sig.params.len() {
+            return err(m, "wrong number of SIMD arguments");
+        }
+        // The method's element parameter: explicit, else the element of
+        // the result the use expects.
+        let mut generic = m
             .turbofish
             .as_ref()
             .and_then(|args| element_argument(args, self.types))
-            .map(Scalar::Vector)
-            .or(hint.filter(|t| matches!(t, Scalar::Vector(_))));
-        let mut stages = Vec::new();
+            .or(match hint {
+                Some(Scalar::Vector(e)) => Some(e),
+                _ => None,
+            });
+        let method_data = DeclaredType::Lane(Declared::Method);
         let mut operands = Vec::new();
-        if method == "select" && m.args.len() == 2 {
-            // Either data operand can type an unqualified Lane constructor.
-            let (yes, no) =
-                self.paired_operands(&m.args[0], &m.args[1], data, Some(Scalar::Vector(e)))?;
-            let Stage::Reg(ty @ Scalar::Vector(_)) = yes.stage else {
-                return err(m, "mask.select requires two vectors");
+        if sig.params == [method_data, method_data] {
+            // `mask.select(yes, no)`: either data operand can type an
+            // unqualified Lane constructor, and they give the element.
+            let (yes, no) = self.paired_operands(
+                &m.args[0],
+                &m.args[1],
+                generic.map(Scalar::Vector),
+                Some(Scalar::Vector(e)),
+            )?;
+            let Stage::Reg(ty @ Scalar::Vector(data)) = yes.stage else {
+                return err(m, &format!("{method} requires two vectors"));
             };
             let no = self.reg(no, ty, &m.args[1])?;
             let operand = emit!(#root::frontend::methods::Operand::Reg);
-            stages.push(yes.stage);
+            generic = Some(data);
             operands.extend([emit!(#operand(#yes)), emit!(#operand(#no))]);
         } else {
-            let hint = data.unwrap_or(Scalar::Vector(e));
-            for arg in &m.args {
-                let (stage, operand) = self.simd_argument(arg, hint)?;
-                stages.push(stage);
-                operands.push(operand);
+            for (arg, &param) in m.args.iter().zip(&sig.params) {
+                operands.push(self.declared_operand(arg, param, owner, e, generic)?);
             }
         }
-        let result = match method.as_str() {
-            "simd_eq" | "simd_ne" | "simd_lt" | "simd_le" | "simd_gt" | "simd_ge" => {
-                Some(Scalar::Mask(e))
-            }
-            "any" | "all" => Some(Scalar::Bool),
-            "count" | "reduce_sum" | "extract_wrapping" | "last" => Some(Scalar::I32),
-            "cast" | "widen_low" | "widen_high" | "narrow" => match data {
-                Some(to) => Some(to),
-                None => return err(m, "specify the output lane type"),
-            },
-            "select" => match stages.first() {
-                Some(Stage::Reg(ty @ Scalar::Vector(_))) => Some(*ty),
-                _ => return err(m, "mask.select requires two vectors"),
-            },
-            "store" | "store_select" | "scatter" | "scatter_select" | "compress_store" => None,
-            _ => Some(Scalar::Vector(e)),
+        let Ok(result) = Signature::resolve(sig.result, owner, e, generic) else {
+            return err(m, "specify the output lane type");
         };
-        let output = match data {
-            Some(Scalar::Vector(to)) => {
-                let to = to.tokens(root, self.types);
-                emit!(::core::option::Option::Some(#to))
-            }
-            _ => emit!(::core::option::Option::None),
-        };
-        // rustc checks that `Lane`/`Mask` has the method; the registry
-        // stages it or reports a method it does not have.
-        let call = emit!({
-            let receiver = #receiver;
-            let operands = [#(#operands),*];
-            #root::frontend::methods::simd_method(__splice_builder, #method, receiver, &operands, #output)?
-        });
-        Ok(match result {
-            Some(ty) => Value::new(
-                Stage::Reg(ty),
-                emit!(#call.ok_or_else(|| #root::BuildError::staging("missing SIMD result"))?),
-            ),
-            None => Value::unit(emit!({ #call; })),
-        })
+        let output = generic.filter(|_| matches!(sig.result, DeclaredType::Lane(Declared::Method)));
+        Ok(self.simd_call(
+            &method,
+            emit!(#root::frontend::methods::SimdSelf::Value(#receiver)),
+            operands,
+            output,
+            result,
+        ))
     }
 
-    /// An argument of a SIMD method: its stage and its registry operand.
+    /// An argument of a SIMD method: its stage and its operand.
     pub(super) fn simd_argument(&self, arg: &Expr, hint: Scalar) -> Result<(Stage, TokenStream)> {
         let root = self.root;
         let operand = emit!(#root::frontend::methods::Operand);

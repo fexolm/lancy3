@@ -1,10 +1,10 @@
 //! The Rust methods of runtime kernel values that are core operations:
 //! `x.saturating_add(y)` on a runtime integer stages one portable
 //! [`Binary`] operation, which every backend implements. These are not
-//! intrinsics (see [`crate::intrinsic`]): no backend chooses them.
+//! intrinsics (see [`mod@crate::intrinsic`]): no backend chooses them.
 //!
-//! The methods of [`Lane`](crate::simd::Lane) and [`Mask`](crate::simd::Mask)
-//! are the SIMD part ([`simd_method`]): each one stages [`SimdOp`]s on the
+//! The intrinsics of [`Lane`](crate::simd::Lane) and [`Mask`](crate::simd::Mask)
+//! are the SIMD part ([`simd`]): each declared one stages [`SimdOp`]s on the
 //! operands the kernel passes, typed by the builder.
 use super::KernelBuilder;
 use crate::hir::{Binary, Buffer, Constant, Reg, ScalarType, Simd, SimdOp, ValueType};
@@ -144,139 +144,208 @@ pub enum Operand {
     Buffer(Buffer),
 }
 
-/// The SIMD method being staged: its receiver, its element and its operands.
+/// The `self` of a SIMD intrinsic call: a runtime vector or mask, or the
+/// `Lane<element>` of an associated function (`Lane::<T>::load`).
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug)]
+pub enum SimdSelf {
+    Value(Reg),
+    Lane(Element),
+}
+
+/// The SIMD intrinsic being staged: its receiver, its element and its operands.
 struct SimdCall<'a> {
     builder: &'a mut dyn KernelBuilder,
     method: &'a str,
-    receiver: Reg,
+    receiver: Option<Reg>,
     element: Element,
-    mask: bool,
     args: &'a [Operand],
-    /// The output element of a conversion (`cast::<U>()`, `widen_low`).
+    /// The element of the result, for a method generic over it (`cast::<U>()`).
     output: Option<Element>,
 }
 
 type SimdLowering = fn(&mut SimdCall<'_>) -> crate::Result<Option<Reg>>;
 
-/// The SIMD methods: the Rust method of `Lane` or `Mask` and the operations
-/// it stages.
-const SIMD_METHODS: [(&str, SimdLowering); 33] = [
-    ("interleave_low", |c| c.shuffle(Shuffle::InterleaveLow)),
-    ("interleave_high", |c| c.shuffle(Shuffle::InterleaveHigh)),
+/// The lowering of each intrinsic that `splice::simd` declares for `Lane`,
+/// by method in name order: the portable SIMD operations it stages. An operator trait's
+/// method (`add`) also lowers its compound assignment (`add_assign`).
+const LANE: [(&str, SimdLowering); 51] = [
+    ("add", |c| c.with_args(SimdOp::Add, 1)),
+    ("add_masked", |c| {
+        let (mask, rhs, fallback) = (c.value(0)?, c.value(1)?, c.value(2)?);
+        let sum = c.op(SimdOp::Add, &[c.this()?, rhs])?;
+        let sum = sum.ok_or_else(|| crate::BuildError::staging("missing SIMD result"))?;
+        c.op(SimdOp::Select, &[mask, sum, fallback])
+    }),
+    ("alignment_prefix", |c| {
+        let (buffer, offset) = (c.buffer(0)?, c.scalar(1, ScalarType::Index)?);
+        c.op(SimdOp::AlignmentPrefix(buffer), &[offset])
+    }),
+    ("bitand", |c| c.with_args(SimdOp::And, 1)),
+    ("bitor", |c| c.with_args(SimdOp::Or, 1)),
+    ("bitxor", |c| c.with_args(SimdOp::Xor, 1)),
+    ("cast", |c| {
+        let to = c.output()?;
+        c.with_args(SimdOp::Cast(to), 0)
+    }),
+    ("compress", |c| c.with_args(SimdOp::Compress, 1)),
+    ("compress_store", |c| c.store(SimdOp::CompressStore, true)),
     ("deinterleave_even", |c| {
         c.shuffle(Shuffle::DeinterleaveEven)
     }),
     ("deinterleave_odd", |c| c.shuffle(Shuffle::DeinterleaveOdd)),
-    ("compress", |c| c.with_args(SimdOp::Compress, 1)),
+    ("div", |c| c.with_args(SimdOp::Div, 1)),
     ("expand", |c| c.with_args(SimdOp::Expand, 2)),
-    ("swizzle", |c| c.with_args(SimdOp::Swizzle, 1)),
+    ("extract_wrapping", |c| {
+        let index = c.scalar(0, ScalarType::I32)?;
+        c.op(SimdOp::ExtractWrapping, &[c.this()?, index])
+    }),
+    ("first_n", |c| {
+        let count = c.scalar(0, ScalarType::Index)?;
+        c.op(SimdOp::FirstN, &[count])
+    }),
+    ("gather", |c| {
+        let (buffer, indices) = (c.buffer(0)?, c.value(1)?);
+        c.op(SimdOp::Gather(buffer), &[indices])
+    }),
+    ("gather_select", |c| {
+        let (buffer, mask, indices, fallback) =
+            (c.buffer(0)?, c.value(1)?, c.value(2)?, c.value(3)?);
+        c.op(SimdOp::GatherSelect(buffer), &[indices, mask, fallback])
+    }),
+    ("interleave_high", |c| c.shuffle(Shuffle::InterleaveHigh)),
+    ("interleave_low", |c| c.shuffle(Shuffle::InterleaveLow)),
+    ("iota", |c| c.op(SimdOp::Iota, &[])),
+    ("lanes", |c| c.op(SimdOp::Lanes, &[])),
+    ("last", |c| c.with_args(SimdOp::Last, 0)),
+    ("load", |c| {
+        let (buffer, offset) = (c.buffer(0)?, c.scalar(1, ScalarType::Index)?);
+        c.op(SimdOp::Load(buffer), &[offset])
+    }),
+    ("load_select", |c| {
+        let (buffer, offset) = (c.buffer(0)?, c.scalar(1, ScalarType::Index)?);
+        let (mask, fallback) = (c.value(2)?, c.value(3)?);
+        c.op(SimdOp::LoadSelect(buffer), &[offset, mask, fallback])
+    }),
+    ("mul", |c| c.with_args(SimdOp::Mul, 1)),
+    ("mul_add", |c| c.with_args(SimdOp::MulAdd, 2)),
+    ("narrow", |c| {
+        let to = c.output()?;
+        c.with_args(SimdOp::Narrow(to), 1)
+    }),
+    ("not", |c| c.with_args(SimdOp::Not, 0)),
+    ("prefix_sum", |c| c.with_args(SimdOp::PrefixSum, 0)),
+    ("reduce_sum", |c| c.with_args(SimdOp::ReduceSum, 0)),
+    ("replace_wrapping", |c| {
+        let index = c.scalar(0, ScalarType::I32)?;
+        let value = c.scalar(1, ScalarType::I32)?;
+        c.op(SimdOp::ReplaceWrapping, &[c.this()?, index, value])
+    }),
     ("rotate_left", |c| {
         let count = c.count(0)?;
         c.with_args(SimdOp::RotateLeft(count), 0)
     }),
-    ("simd_min", |c| c.with_args(SimdOp::Min, 1)),
+    ("scatter", |c| c.scatter(SimdOp::Scatter, false)),
+    ("scatter_select", |c| c.scatter(SimdOp::ScatterSelect, true)),
+    ("shr", |c| {
+        let count = c.count(0)?;
+        c.with_args(SimdOp::Shr(count), 0)
+    }),
+    ("simd_eq", |c| c.with_args(SimdOp::Eq, 1)),
+    ("simd_ge", |c| c.with_args(SimdOp::Ge, 1)),
+    ("simd_gt", |c| c.with_args(SimdOp::Gt, 1)),
+    ("simd_le", |c| c.with_args(SimdOp::Le, 1)),
+    ("simd_lt", |c| c.with_args(SimdOp::Lt, 1)),
     ("simd_max", |c| c.with_args(SimdOp::Max, 1)),
+    ("simd_min", |c| c.with_args(SimdOp::Min, 1)),
+    ("simd_ne", |c| c.with_args(SimdOp::Ne, 1)),
+    ("splat", |c| match c.arg(0)? {
+        // `Lane::splat` of a known value carries its bit pattern.
+        Operand::Known(value) => c.op(SimdOp::Splat(value.bits()), &[]),
+        Operand::Reg(value) if c.element == Element::I32 => c.op(SimdOp::SplatScalar, &[value]),
+        _ => Err(c.error("splats a known value or a runtime i32")),
+    }),
     ("sqrt", |c| c.with_args(SimdOp::Sqrt, 0)),
-    ("mul_add", |c| c.with_args(SimdOp::MulAdd, 2)),
-    ("reduce_sum", |c| c.with_args(SimdOp::ReduceSum, 0)),
-    ("prefix_sum", |c| c.with_args(SimdOp::PrefixSum, 0)),
-    ("last", |c| c.with_args(SimdOp::Last, 0)),
-    ("cast", |c| {
+    ("store", |c| c.store(SimdOp::Store, false)),
+    ("store_select", |c| c.store(SimdOp::StoreSelect, true)),
+    ("sub", |c| c.with_args(SimdOp::Sub, 1)),
+    ("swizzle", |c| c.with_args(SimdOp::Swizzle, 1)),
+    ("widen_high", |c| {
         let to = c.output()?;
-        c.with_args(SimdOp::Cast(to), 0)
+        c.with_args(SimdOp::Widen { to, high: true }, 0)
     }),
     ("widen_low", |c| {
         let to = c.output()?;
         c.with_args(SimdOp::Widen { to, high: false }, 0)
     }),
-    ("widen_high", |c| {
-        let to = c.output()?;
-        c.with_args(SimdOp::Widen { to, high: true }, 0)
-    }),
-    ("narrow", |c| {
-        let to = c.output()?;
-        c.with_args(SimdOp::Narrow(to), 1)
-    }),
-    ("extract_wrapping", |c| {
-        let index = c.lane(0)?;
-        c.vector_op(SimdOp::ExtractWrapping, &[c.receiver, index])
-    }),
-    ("replace_wrapping", |c| {
-        let (index, value) = (c.lane(0)?, c.lane(1)?);
-        c.vector_op(SimdOp::ReplaceWrapping, &[c.receiver, index, value])
-    }),
-    ("simd_eq", |c| c.with_args(SimdOp::Eq, 1)),
-    ("simd_ne", |c| c.with_args(SimdOp::Ne, 1)),
-    ("simd_lt", |c| c.with_args(SimdOp::Lt, 1)),
-    ("simd_le", |c| c.with_args(SimdOp::Le, 1)),
-    ("simd_gt", |c| c.with_args(SimdOp::Gt, 1)),
-    ("simd_ge", |c| c.with_args(SimdOp::Ge, 1)),
-    ("add_masked", |c| {
-        let (mask, rhs, fallback) = (c.value(0)?, c.value(1)?, c.value(2)?);
-        let sum = c.vector_op(SimdOp::Add, &[c.receiver, rhs])?;
-        let sum = sum.ok_or_else(|| crate::BuildError::staging("missing SIMD result"))?;
-        c.vector_op(SimdOp::Select, &[mask, sum, fallback])
-    }),
-    ("store", |c| c.store(SimdOp::Store, false)),
-    ("store_select", |c| c.store(SimdOp::StoreSelect, true)),
-    ("compress_store", |c| c.store(SimdOp::CompressStore, true)),
-    ("scatter", |c| c.scatter(SimdOp::Scatter, false)),
-    ("scatter_select", |c| c.scatter(SimdOp::ScatterSelect, true)),
 ];
 
-/// The methods of a mask receiver.
-const MASK_METHODS: [(&str, SimdLowering); 4] = [
-    ("any", |c| c.mask_op(SimdOp::Any)),
-    ("all", |c| c.mask_op(SimdOp::All)),
-    ("count", |c| c.mask_op(SimdOp::Count)),
-    ("select", |c| {
-        let (yes, no) = (c.value(0)?, c.value(1)?);
-        // The data operands give the element of the selection.
-        let Some(ValueType::Vector(element)) = c.builder.reg_type(yes) else {
-            return Err(crate::BuildError::staging(
-                "mask.select requires two vectors",
-            ));
-        };
-        c.require_mask()?;
-        let simd = Simd {
-            element,
-            op: SimdOp::Select,
-        };
-        c.builder.simd(simd, &[c.receiver, yes, no])
-    }),
+/// The lowering of each intrinsic that `splice::simd` declares for `Mask`,
+/// but `select` ([`select`]), whose element is the selected data's; in
+/// name order.
+const MASK: [(&str, SimdLowering); 7] = [
+    ("all", |c| c.with_args(SimdOp::All, 0)),
+    ("any", |c| c.with_args(SimdOp::Any, 0)),
+    ("bitand", |c| c.with_args(SimdOp::MaskAnd, 1)),
+    ("bitor", |c| c.with_args(SimdOp::MaskOr, 1)),
+    ("bitxor", |c| c.with_args(SimdOp::MaskXor, 1)),
+    ("count", |c| c.with_args(SimdOp::Count, 0)),
+    ("not", |c| c.with_args(SimdOp::MaskNot, 0)),
 ];
 
-/// The lowering of the SIMD method `method`, if registered.
-fn simd_lowering(method: &str) -> Option<SimdLowering> {
-    SIMD_METHODS
-        .iter()
-        .chain(&MASK_METHODS)
-        .find(|(name, _)| *name == method)
-        .map(|&(_, lowering)| lowering)
+/// The lowering of `method` of `Lane` (`mask` false) or `Mask`.
+fn simd_lowering(mask: bool, method: &str) -> Option<SimdLowering> {
+    if mask && method == "select" {
+        return Some(select);
+    }
+    let method = method.strip_suffix("_assign").unwrap_or(method);
+    let table: &[(&str, SimdLowering)] = if mask { &MASK } else { &LANE };
+    // Staging looks up every SIMD call of a kernel.
+    table
+        .binary_search_by(|(name, _)| name.cmp(&method))
+        .ok()
+        .map(|index| table[index].1)
 }
 
-/// Stage the SIMD method `method` on the vector or mask `receiver` with
-/// `args` (the method's arguments in order); `output` is the element a
-/// conversion produces. The result is `None` for a method that only
-/// writes memory.
+/// `mask.select(yes, no)`: a selection of the data's element.
+fn select(c: &mut SimdCall<'_>) -> crate::Result<Option<Reg>> {
+    let (yes, no) = (c.value(0)?, c.value(1)?);
+    let Some(ValueType::Vector(element)) = c.builder.reg_type(yes) else {
+        return Err(c.error("requires two vectors"));
+    };
+    let simd = Simd {
+        element,
+        op: SimdOp::Select,
+    };
+    c.builder.simd(simd, &[c.this()?, yes, no])
+}
+
+/// Stage the SIMD intrinsic `method` of `this` with `args` (the method's
+/// arguments in order); `output` is the element of a result generic over
+/// it (`cast::<U>()`). The result is `None` for a method that only writes
+/// memory. Generated code calls it for each `Lane`/`Mask` method,
+/// associated function and operator of a kernel.
 #[doc(hidden)]
-pub fn simd_method(
+pub fn simd(
     builder: &mut dyn KernelBuilder,
     method: &str,
-    receiver: Reg,
+    this: SimdSelf,
     args: &[Operand],
     output: Option<Element>,
 ) -> crate::Result<Option<Reg>> {
-    let (element, mask) = match builder.reg_type(receiver) {
-        Some(ValueType::Vector(element)) => (element, false),
-        Some(ValueType::Mask(element)) => (element, true),
-        _ => {
-            return Err(crate::BuildError::staging(format!(
-                "`{method}` requires a runtime vector or mask receiver"
-            )));
-        }
+    let (receiver, element, mask) = match this {
+        SimdSelf::Lane(element) => (None, element, false),
+        SimdSelf::Value(receiver) => match builder.reg_type(receiver) {
+            Some(ValueType::Vector(element)) => (Some(receiver), element, false),
+            Some(ValueType::Mask(element)) => (Some(receiver), element, true),
+            _ => {
+                return Err(crate::BuildError::staging(format!(
+                    "`{method}` requires a runtime vector or mask receiver"
+                )));
+            }
+        },
     };
-    let lowering = simd_lowering(method).ok_or_else(|| {
+    let lowering = simd_lowering(mask, method).ok_or_else(|| {
         crate::BuildError::staging(format!("`{method}` is not a kernel SIMD operation"))
     })?;
     lowering(&mut SimdCall {
@@ -284,7 +353,6 @@ pub fn simd_method(
         method,
         receiver,
         element,
-        mask,
         args,
         output,
     })
@@ -293,6 +361,11 @@ pub fn simd_method(
 impl SimdCall<'_> {
     fn error(&self, message: &str) -> crate::BuildError {
         crate::BuildError::staging(format!("`{}`: {message}", self.method))
+    }
+
+    fn this(&self) -> crate::Result<Reg> {
+        self.receiver
+            .ok_or_else(|| self.error("requires a vector or mask receiver"))
     }
 
     fn arg(&self, index: usize) -> crate::Result<Operand> {
@@ -324,11 +397,6 @@ impl SimdCall<'_> {
         }
     }
 
-    /// Argument `index`, a lane index (`i32`).
-    fn lane(&mut self, index: usize) -> crate::Result<Reg> {
-        self.scalar(index, ScalarType::I32)
-    }
-
     /// Argument `index`, a known shift or rotation count, modulo 32.
     fn count(&self, index: usize) -> crate::Result<u32> {
         match self.arg(index)? {
@@ -353,19 +421,8 @@ impl SimdCall<'_> {
             .ok_or_else(|| self.error("specify the output lane type"))
     }
 
-    fn require_mask(&self) -> crate::Result<()> {
-        if self.mask {
-            Ok(())
-        } else {
-            Err(self.error("requires a mask receiver"))
-        }
-    }
-
-    /// `op` on the receiver's element; the receiver is a vector.
-    fn vector_op(&mut self, op: SimdOp, operands: &[Reg]) -> crate::Result<Option<Reg>> {
-        if self.mask {
-            return Err(self.error("requires a vector receiver"));
-        }
+    /// `op` on the element of `self`.
+    fn op(&mut self, op: SimdOp, operands: &[Reg]) -> crate::Result<Option<Reg>> {
         let simd = Simd {
             element: self.element,
             op,
@@ -373,23 +430,14 @@ impl SimdCall<'_> {
         self.builder.simd(simd, operands)
     }
 
-    /// `op` on the receiver, a mask.
-    fn mask_op(&mut self, op: SimdOp) -> crate::Result<Option<Reg>> {
-        self.require_mask()?;
-        let simd = Simd {
-            element: self.element,
-            op,
-        };
-        self.builder.simd(simd, &[self.receiver])
-    }
-
     /// `op` on the receiver and its first `count` arguments, all vectors or masks.
     fn with_args(&mut self, op: SimdOp, count: usize) -> crate::Result<Option<Reg>> {
-        let mut operands = vec![self.receiver];
+        // At most two arguments; no allocation on this path of every call.
+        let mut operands = [self.this()?; 3];
         for index in 0..count {
-            operands.push(self.value(index)?);
+            operands[1 + index] = self.value(index)?;
         }
-        self.vector_op(op, &operands)
+        self.op(op, &operands[..=count])
     }
 
     fn shuffle(&mut self, order: Shuffle) -> crate::Result<Option<Reg>> {
@@ -399,25 +447,30 @@ impl SimdCall<'_> {
     /// `receiver.store(buffer, offset)` and the forms with a mask after
     /// the offset (`store_select`, `compress_store`).
     fn store(&mut self, op: fn(Buffer) -> SimdOp, masked: bool) -> crate::Result<Option<Reg>> {
-        let buffer = self.buffer(0)?;
-        let mut operands = vec![self.scalar(1, ScalarType::Index)?];
+        let (buffer, offset, this) = (
+            self.buffer(0)?,
+            self.scalar(1, ScalarType::Index)?,
+            self.this()?,
+        );
         if masked {
-            operands.push(self.value(2)?);
+            let mask = self.value(2)?;
+            self.op(op(buffer), &[offset, mask, this])
+        } else {
+            self.op(op(buffer), &[offset, this])
         }
-        operands.push(self.receiver);
-        self.vector_op(op(buffer), &operands)
     }
 
     /// `receiver.scatter(buffer, indices)` and
     /// `receiver.scatter_select(buffer, mask, indices)`.
     fn scatter(&mut self, op: fn(Buffer) -> SimdOp, masked: bool) -> crate::Result<Option<Reg>> {
-        let buffer = self.buffer(0)?;
-        let operands = if masked {
-            vec![self.value(2)?, self.value(1)?, self.receiver]
+        let (buffer, this) = (self.buffer(0)?, self.this()?);
+        if masked {
+            let (mask, indices) = (self.value(1)?, self.value(2)?);
+            self.op(op(buffer), &[indices, mask, this])
         } else {
-            vec![self.value(1)?, self.receiver]
-        };
-        self.vector_op(op(buffer), &operands)
+            let indices = self.value(1)?;
+            self.op(op(buffer), &[indices, this])
+        }
     }
 }
 
@@ -425,17 +478,55 @@ impl SimdCall<'_> {
 mod tests {
     use super::*;
 
-    #[test]
-    fn every_simd_method_has_one_lowering() {
-        let names: Vec<_> = SIMD_METHODS
-            .iter()
-            .chain(&MASK_METHODS)
-            .map(|(name, _)| *name)
-            .collect();
-        for (i, name) in names.iter().enumerate() {
-            assert!(simd_lowering(name).is_some(), "{name}");
-            assert!(!names[..i].contains(name), "{name} is registered twice");
+    /// The `#[intrinsic(simd)]` methods of `splice::simd`, by owner: the
+    /// declarations the kernel macro reads.
+    fn declared() -> Vec<(bool, String)> {
+        let file = syn::parse_file(include_str!("../../../splice-macros/src/simd_api.rs"))
+            .expect("simd_api.rs parses");
+        let mut methods = Vec::new();
+        for item in file.items {
+            let syn::Item::Impl(implementation) = item else {
+                continue;
+            };
+            let syn::Type::Path(owner) = &*implementation.self_ty else {
+                continue;
+            };
+            let mask = owner.path.segments.last().unwrap().ident == "Mask";
+            for item in implementation.items {
+                if let syn::ImplItem::Verbatim(tokens) = item {
+                    let method: syn::TraitItemFn = syn::parse::Parser::parse2(
+                        |input: syn::parse::ParseStream| {
+                            input.call(syn::Attribute::parse_outer)?;
+                            input.parse::<syn::Visibility>()?;
+                            input.parse()
+                        },
+                        tokens,
+                    )
+                    .expect("a body-less method");
+                    methods.push((mask, method.sig.ident.to_string()));
+                }
+            }
         }
-        assert!(simd_lowering("saturating_add").is_none());
+        methods
+    }
+
+    #[test]
+    fn every_declared_simd_intrinsic_has_one_lowering() {
+        let declared = declared();
+        assert!(declared.len() > 60, "{declared:?}");
+        for (mask, method) in &declared {
+            assert!(simd_lowering(*mask, method).is_some(), "{method}");
+        }
+        for (mask, table) in [(false, &LANE[..]), (true, &MASK[..])] {
+            for (i, (name, _)) in table.iter().enumerate() {
+                assert!(
+                    declared.iter().any(|(m, d)| *m == mask && d == name),
+                    "{name} is not declared"
+                );
+                assert!(i == 0 || table[i - 1].0 < *name, "{name} out of order");
+            }
+        }
+        assert!(declared.contains(&(true, "select".into())));
+        assert!(simd_lowering(false, "saturating_add").is_none());
     }
 }

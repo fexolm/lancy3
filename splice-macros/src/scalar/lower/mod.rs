@@ -946,7 +946,14 @@ impl Lower<'_> {
 
         let code = if let Some((op, _)) = op {
             if matches!(t, Scalar::Vector(_) | Scalar::Mask(_)) {
-                self.simd_operator(t, op, vec![emit!(#left), rhs], left)?
+                // `x op= y` stages the declared `op_assign` intrinsic.
+                let method = match op {
+                    "And" => "bitand_assign".to_string(),
+                    "Or" => "bitor_assign".to_string(),
+                    "Xor" => "bitxor_assign".to_string(),
+                    op => format!("{}_assign", op.to_lowercase()),
+                };
+                self.simd_operator(t, &method, vec![emit!(#left), rhs], left)?
                     .code
             } else {
                 self.operator_bin(op, emit!(#left), rhs)
