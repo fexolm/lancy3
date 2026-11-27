@@ -1,87 +1,163 @@
-//! Kernel intrinsics: functions and methods marked `#[intrinsic("name")]`.
+//! Kernel intrinsics: methods declared without a body by `#[intrinsic]`,
+//! whose calls reach the backend as one operation.
 //!
-//! An intrinsic is an ordinary kernel function whose call reaches the
-//! backend as the named operation. A backend that implements the name for
-//! the call's signature emits its own code and the body is not staged.
-//! Otherwise [`BuildOptions::unsupported_intrinsic`](crate::BuildOptions)
-//! decides: [`IntrinsicPolicy::Fallback`] logs the intrinsic and the
-//! backend and compiles the body, [`IntrinsicPolicy::Error`] fails the
-//! build. The name is the user's string; the operand and result types come
-//! from the Rust signature.
-use crate::frontend::{Body, Signature, Specialization};
-use crate::hir::Function;
-use std::sync::Arc;
+//! An intrinsic is a method of an `#[intrinsic] trait`, implemented for a
+//! kernel type by an `#[intrinsic] impl` (`<i32 as splice::Math>::count_ones`).
+//! Its identity is structural, an [`IntrinsicId`]: the declaring trait, the
+//! generic arguments (the implementing type first), the method and the
+//! signature. There is no fallback: every backend implements every
+//! intrinsic Splice declares, and a call of an intrinsic that the build's
+//! backend does not implement fails the build with an error that names
+//! both ([`unsupported`]).
+use crate::hir::{ScalarType, ValueType};
+use crate::simd::Element;
 
-/// What a build does with an intrinsic its backend does not implement.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
-pub enum IntrinsicPolicy {
-    /// Compile the intrinsic's body and log a warning with target
-    /// `splice::intrinsic`.
-    #[default]
-    Fallback,
-    /// Fail the build with [`BuildError::Unsupported`](crate::BuildError).
-    Error,
-}
-
-/// A call of an intrinsic: its name and the signature of the called
-/// function. An intrinsic takes scalar operands and has no buffers.
+/// The item that declares an intrinsic: the path of an `#[intrinsic]`
+/// trait, as `module_path!()` spells the module that declares it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct Intrinsic<'a> {
-    pub name: &'a str,
-    pub signature: Signature<'a>,
+pub enum Owner {
+    Trait(&'static str),
 }
 
-impl<'a> Intrinsic<'a> {
-    pub const fn new(name: &'a str, signature: Signature<'a>) -> Self {
-        Self { name, signature }
+impl Owner {
+    pub const fn path(self) -> &'static str {
+        match self {
+            Self::Trait(path) => path,
+        }
     }
 }
 
-impl std::fmt::Display for Intrinsic<'_> {
+/// A generic argument of an intrinsic's owner.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum GenericArg {
+    Type(ValueType),
+}
+
+/// The structural identity of an intrinsic: `<i32 as splice::Math>::count_ones`
+/// with signature `(i32) -> u32`. Backends match on it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct IntrinsicId {
+    pub owner: Owner,
+    /// The owner's generic arguments; for a trait, the implementing type
+    /// comes first.
+    pub generics: &'static [GenericArg],
+    pub method: &'static str,
+    /// The operand types, the receiver first.
+    pub params: &'static [ValueType],
+    pub result: ValueType,
+}
+
+impl IntrinsicId {
+    /// The implementing type of a trait intrinsic.
+    pub const fn self_type(&self) -> Option<ValueType> {
+        match self.generics.first() {
+            Some(GenericArg::Type(ty)) => Some(*ty),
+            None => None,
+        }
+    }
+
+    /// Whether this is `method` of `owner` for the implementing type `ty`.
+    pub fn is(&self, owner: Owner, method: &str, ty: ScalarType) -> bool {
+        self.owner == owner
+            && self.method == method
+            && self.self_type() == Some(ValueType::Scalar(ty))
+    }
+}
+
+/// A kernel type an intrinsic takes or returns.
+#[diagnostic::on_unimplemented(
+    message = "`{Self}` is not a kernel type an intrinsic can take or return"
+)]
+pub trait IntrinsicValue {
+    const TYPE: ValueType;
+}
+
+macro_rules! scalar_value {
+    ($($ty:ty => $scalar:ident),*) => {$(
+        impl IntrinsicValue for $ty {
+            const TYPE: ValueType = ValueType::Scalar(ScalarType::$scalar);
+        }
+    )*};
+}
+scalar_value!(bool => Bool, i32 => I32, u32 => U32, i64 => I64, u64 => U64, usize => Index, f32 => F32, f64 => F64);
+
+/// Every intrinsic Splice declares. Every backend implements all of them.
+pub fn declared() -> Vec<IntrinsicId> {
+    crate::math::INTRINSICS.concat()
+}
+
+/// The build error for a call of `id`, which `backend` does not implement.
+pub fn unsupported(backend: &str, id: &IntrinsicId) -> crate::BuildError {
+    crate::BuildError::unsupported(format!(
+        "intrinsic {id} is not implemented by backend `{backend}`"
+    ))
+}
+
+fn value_type(f: &mut std::fmt::Formatter<'_>, ty: ValueType) -> std::fmt::Result {
+    let element = |e: Element| format!("{e:?}").to_lowercase();
+    match ty {
+        ValueType::Scalar(ty) => write!(f, "{ty}"),
+        ValueType::Vector(e) => write!(f, "Lane<{}>", element(e)),
+        ValueType::Mask(e) => write!(f, "Mask<{}>", element(e)),
+    }
+}
+
+impl std::fmt::Display for IntrinsicId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "`{}`(", self.name)?;
-        for (i, ty) in self.signature.params.iter().enumerate() {
+        let Owner::Trait(path) = self.owner;
+        f.write_str("`<")?;
+        match self.generics.first() {
+            Some(GenericArg::Type(ty)) => value_type(f, *ty)?,
+            None => f.write_str("_")?,
+        }
+        write!(f, " as {path}>::{}(", self.method)?;
+        for (i, ty) in self.params.iter().enumerate() {
             if i > 0 {
                 f.write_str(", ")?;
             }
-            write!(f, "{ty}")?;
+            value_type(f, *ty)?;
         }
-        write!(f, ") -> {}", self.signature.result)
+        f.write_str(") -> ")?;
+        value_type(f, self.result)?;
+        f.write_str("`")
     }
 }
 
-/// The body of an intrinsic, staged when the backend does not implement it.
-pub enum Fallback<'a> {
-    /// The body as the kernel stages it. Calls with the same `key` share
-    /// one staged function.
-    Staged {
-        key: Option<Specialization>,
-        body: Body<'a>,
-    },
-    /// The body recorded in portable IR.
-    Function(&'a Arc<Function>),
-}
-
-/// Apply `policy` to `intrinsic`, which `backend` does not implement:
-/// `Ok` after logging under [`IntrinsicPolicy::Fallback`], an error naming
-/// both under [`IntrinsicPolicy::Error`].
-pub fn unsupported(
-    policy: IntrinsicPolicy,
-    backend: &str,
-    intrinsic: &Intrinsic<'_>,
-) -> crate::Result<()> {
-    match policy {
-        IntrinsicPolicy::Fallback => {
-            tracing::warn!(
-                target: "splice::intrinsic",
-                intrinsic = intrinsic.name,
-                backend,
-                "unsupported intrinsic {intrinsic} on backend `{backend}`; compiling its body"
-            );
-            Ok(())
-        }
-        IntrinsicPolicy::Error => Err(crate::BuildError::unsupported(format!(
-            "intrinsic {intrinsic} on backend `{backend}`"
-        ))),
+/// Stage the intrinsic `id` on the operands a kernel passes: a known
+/// operand becomes a constant of its parameter's type. Generated code
+/// calls it.
+#[doc(hidden)]
+pub fn stage(
+    builder: &mut dyn crate::frontend::KernelBuilder,
+    id: &IntrinsicId,
+    operands: &[crate::frontend::methods::Operand],
+) -> crate::Result<crate::hir::Reg> {
+    use crate::frontend::methods::Operand;
+    if operands.len() != id.params.len() {
+        return Err(crate::BuildError::staging(format!(
+            "intrinsic {id} takes {} operand(s), got {}",
+            id.params.len(),
+            operands.len()
+        )));
     }
+    let mut args = Vec::with_capacity(operands.len());
+    for (&operand, &ty) in operands.iter().zip(id.params) {
+        args.push(match (operand, ty) {
+            (Operand::Reg(reg), _) => reg,
+            (Operand::Known(value), ValueType::Scalar(ty)) => {
+                let value = value.cast(ty).ok_or_else(|| {
+                    crate::BuildError::staging(format!(
+                        "intrinsic {id}: a known operand does not convert to {ty}"
+                    ))
+                })?;
+                builder.constant(value)?
+            }
+            _ => {
+                return Err(crate::BuildError::staging(format!(
+                    "intrinsic {id} takes runtime values of its parameter types"
+                )));
+            }
+        });
+    }
+    builder.intrinsic(id, &args)
 }

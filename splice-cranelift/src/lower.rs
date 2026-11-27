@@ -11,7 +11,6 @@ use splice_core::call::SliceDescriptor;
 use splice_core::hir::{
     Binary, Constant, Instr, PacketStore, PacketValue, Reg, ScalarType, ValueType,
 };
-use splice_core::intrinsic::Intrinsic;
 use std::collections::HashMap;
 use std::mem::{offset_of, size_of};
 use std::sync::Arc;
@@ -331,35 +330,20 @@ pub(super) fn emit(
             }
             Instr::Intrinsic {
                 dst,
-                ref name,
+                ref id,
                 ref args,
-                ref fallback,
-            } if crate::intrinsic::native(&Intrinsic::new(name, fallback.signature()))
-                .is_some() =>
-            {
-                let native = crate::intrinsic::native(&Intrinsic::new(name, fallback.signature()))
-                    .expect("a supported intrinsic");
+            } => {
+                let op = crate::intrinsic::native(id).expect("the module checked its intrinsics");
                 let args: Vec<_> = args.iter().map(|&r| b.use_var(var(r))).collect();
-                let value = crate::intrinsic::emit(&mut b, native, &args);
+                let value = crate::intrinsic::emit(&mut b, op, &args);
                 b.def_var(var(dst), value);
             }
-            // An intrinsic Cranelift does not implement calls its body.
-            Instr::Call { .. } | Instr::Intrinsic { .. } => {
-                let (dst, function, args, forwarded) = match op {
-                    Instr::Call {
-                        dst,
-                        function,
-                        args,
-                        buffers,
-                    } => (*dst, function, args, &buffers[..]),
-                    Instr::Intrinsic {
-                        dst,
-                        args,
-                        fallback,
-                        ..
-                    } => (*dst, fallback, args, &[][..]),
-                    _ => unreachable!(),
-                };
+            Instr::Call {
+                dst,
+                ref function,
+                ref args,
+                buffers: ref forwarded,
+            } => {
                 let result = function.result();
                 let slot = returns_in_memory(result).then(|| {
                     b.create_sized_stack_slot(StackSlotData::new(

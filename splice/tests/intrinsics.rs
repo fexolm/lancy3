@@ -1,466 +1,164 @@
-//! `#[intrinsic("name")]` functions and methods: a backend that implements
-//! the name emits its own code, any other compiles the body or, under
-//! `IntrinsicPolicy::Error`, fails the build. Every backend, both build
-//! paths and both modes.
-use splice::frontend::Signature;
-use splice::hir::{Instr, ScalarType};
-use splice::intrinsic::Intrinsic;
-use splice::{BuildOptions, Codegen, Executable, IntrinsicPolicy, Mode, kernel};
-use std::cell::RefCell;
-use std::fmt::Debug;
-use std::sync::{Arc, Once};
-use tracing::field::{Field, Visit};
-use tracing_subscriber::layer::{Context, Layer, SubscriberExt};
+//! Kernel intrinsics: body-less methods of `#[intrinsic]` traits that every
+//! backend implements. `splice::Math` on every integer type, every backend,
+//! both build paths and both modes; a user's intrinsic that no backend
+//! implements fails the build and names the intrinsic and the backend.
+use splice::hir::Instr;
+use splice::intrinsic::IntrinsicId;
+use splice::{BuildOptions, Codegen, Executable, Math, Mode, kernel};
 
-mod ops {
-    use splice::kernel;
-
-    /// Implemented by every backend.
-    #[kernel]
-    #[intrinsic("count_ones")]
-    pub fn popcount(x: u64) -> u32 {
-        let mut v = x;
-        let mut count = 0u32;
-        while v != 0 {
-            count += (v & 1) as u32;
-            v >>= 1;
+macro_rules! math_kernels {
+    ($($name:ident: $ty:ident, $unsigned:ident;)*) => {$(
+        /// Every `Math` operation on `x`, packed into one word.
+        #[kernel]
+        fn $name(x: $ty, n: u32) -> u64 {
+            let ones: u32 = x.count_ones();
+            let leading: u32 = x.leading_zeros();
+            let trailing: u32 = x.trailing_zeros();
+            let rotated: $ty = x.rotate_left(n);
+            ((ones as u64) | (leading as u64) << 8 | (trailing as u64) << 16)
+                ^ (rotated as $unsigned as u64) << 24
         }
-        count
-    }
-
-    /// Implemented by Cranelift and LLVM, not by Lancy.
-    #[allow(clippy::manual_rotate)]
-    #[kernel]
-    #[intrinsic("rotate_left")]
-    pub fn rotl(x: i32, n: u32) -> i32 {
-        let v = x as u32;
-        let s = n % 32;
-        if s == 0 {
-            x
-        } else {
-            ((v << s) | (v >> (32 - s))) as i32
-        }
-    }
-
-    /// Rust's fused multiply-add, called from the body of [`fma`].
-    pub fn fused_rust(a: f64, b: f64, c: f64) -> f64 {
-        a.mul_add(b, c)
-    }
-
-    /// Implemented by LLVM where the target fuses it. The body rounds once,
-    /// as the native fused instruction does.
-    #[kernel]
-    #[intrinsic("mul_add")]
-    pub fn fma(a: f64, b: f64, c: f64) -> f64 {
-        fused_rust(a, b, c)
-    }
-
-    pub struct Bits;
-
-    #[kernel]
-    impl Bits {
-        /// Implemented by every backend.
-        #[intrinsic("leading_zeros")]
-        pub fn leading_zeros(x: i32) -> u32 {
-            let v = x as u32;
-            let mut n = 0u32;
-            while n < 32 && (v & (0x8000_0000u32 >> n)) == 0 {
-                n += 1;
-            }
-            n
-        }
-
-        /// Implemented by no backend.
-        #[intrinsic("acme.low_bit")]
-        pub fn low_bit(x: u32) -> u32 {
-            x & 1
-        }
-    }
+    )*};
+}
+math_kernels! {
+    math_i32: i32, u32;
+    math_u32: u32, u32;
+    math_i64: i64, u64;
+    math_u64: u64, u64;
 }
 
-#[kernel]
-fn count(x: u64) -> u32 {
-    ops::popcount(x)
+fn modes() -> [BuildOptions; 2] {
+    [Mode::Release, Mode::Debug].map(|mode| BuildOptions::host(mode).unwrap())
 }
 
-#[kernel]
-fn rotate(x: i32, n: u32) -> i32 {
-    ops::rotl(x, n)
+const COUNTS: [u32; 6] = [0, 1, 7, 31, 32, 100];
+
+/// The last segment of the backend's type name, as its errors spell it.
+fn backend_name<B>() -> &'static str {
+    std::any::type_name::<B>().rsplit("::").next().unwrap()
 }
 
-#[kernel]
-fn fused(a: f64, b: f64, c: f64) -> f64 {
-    ops::fma(a, b, c)
-}
-
-#[kernel]
-fn leading(x: i32) -> u32 {
-    ops::Bits::leading_zeros(x)
-}
-
-/// Two calls with one signature share one staged fallback.
-#[kernel]
-fn low_bits(x: u32, y: u32) -> u32 {
-    ops::Bits::low_bit(x) + ops::Bits::low_bit(y)
-}
-
-thread_local! {
-    /// The events logged with target `splice::intrinsic` on this thread
-    /// while [`logged`] runs.
-    static LOG: RefCell<Option<Vec<String>>> = const { RefCell::new(None) };
-}
-
-struct Message(String);
-
-impl Visit for Message {
-    fn record_debug(&mut self, field: &Field, value: &dyn Debug) {
-        use std::fmt::Write;
-        write!(self.0, " {}={value:?}", field.name()).unwrap();
-    }
-}
-
-/// Keeps the intrinsic events of each thread in [`LOG`].
-struct Log;
-
-impl<S: tracing::Subscriber> Layer<S> for Log {
-    fn on_event(&self, event: &tracing::Event<'_>, _: Context<'_, S>) {
-        if event.metadata().target() == "splice::intrinsic" {
-            let mut message = Message(String::new());
-            event.record(&mut message);
-            LOG.with_borrow_mut(|log| log.as_mut().map(|log| log.push(message.0)));
-        }
-    }
-}
-
-/// `build` with the intrinsic log of this thread recorded.
-///
-/// The subscriber is global and installed once: a scoped
-/// `with_default` subscriber races with tests on other threads that build
-/// without one, and tracing can then cache the warning's callsite as never
-/// enabled, which dropped the log under parallel tests.
-fn logged<T>(build: impl FnOnce() -> T) -> (T, Vec<String>) {
-    static INSTALL: Once = Once::new();
-    INSTALL.call_once(|| {
-        tracing::subscriber::set_global_default(tracing_subscriber::registry().with(Log))
-            .expect("no other global subscriber in this test binary");
-    });
-    LOG.set(Some(Vec::new()));
-    let result = build();
-    let events = LOG.take().unwrap_or_default();
-    (result, events)
-}
-
-/// The name a backend gives itself in diagnostics.
-fn backend<B>() -> &'static str {
-    let name = std::any::type_name::<B>();
-    if name.ends_with("::Lancy") {
-        "lancy"
-    } else if name.ends_with("::Cranelift") {
-        "cranelift"
-    } else if name.ends_with("::LlvmManualSimd") {
-        "llvm-manual-simd"
-    } else {
-        assert!(name.ends_with("::Llvm"), "{name}");
-        "llvm"
-    }
-}
-
-fn host_fuses() -> bool {
-    let target = splice::Target::host().unwrap();
-    target.x86().is_none_or(|isa| isa.fma)
-}
-
-#[derive(Clone, Copy, Debug)]
-enum Path {
-    /// `build::<B>`.
-    Direct,
-    /// `ir()` and `B::compile`.
-    Portable,
-}
-
-/// Build with `build` on both paths in both modes under both policies:
-/// a supported intrinsic builds without a log; an unsupported one builds
-/// its body with a log naming it and the backend, or fails under `Error`.
-/// Each built kernel goes to `check`.
-fn matrix<B: Codegen, K>(
-    intrinsic: Intrinsic<'_>,
-    supported: bool,
-    build: impl Fn(BuildOptions, Path) -> splice::Result<K>,
-    check: impl Fn(&K),
-) {
-    let name = backend::<B>();
-    let target = splice::Target::host().unwrap();
-    assert_eq!(
-        B::supports_intrinsic(&intrinsic, &target),
-        supported,
-        "{name} {intrinsic}"
-    );
-    for mode in [Mode::Release, Mode::Debug] {
-        for policy in [IntrinsicPolicy::Fallback, IntrinsicPolicy::Error] {
-            let options = BuildOptions::new(mode, target).with_unsupported_intrinsic(policy);
-            for path in [Path::Direct, Path::Portable] {
-                let context = format!("{name} {path:?} {mode:?} {policy:?} {intrinsic}");
-                let (built, log) = logged(|| build(options, path));
-                match (supported, policy) {
-                    (true, _) => {
-                        assert!(log.is_empty(), "{context}: {log:?}");
-                        check(&built.expect(&context));
-                    }
-                    (false, IntrinsicPolicy::Fallback) => {
-                        assert!(!log.is_empty(), "{context}: no log");
-                        for event in &log {
-                            assert!(
-                                event.contains(intrinsic.name) && event.contains(name),
-                                "{context}: {event}"
-                            );
+#[test]
+fn math_intrinsics_match_rust_on_every_backend_path_and_mode() {
+    fn check<B: Codegen<Output: Executable>>() {
+        macro_rules! run {
+            ($name:ident, $values:expr) => {
+                for options in modes() {
+                    let direct =
+                        $name::build_with_options::<B>(options, $name::BuildArgs {}).unwrap();
+                    let portable = B::compile(&$name::ir_with_options(options).unwrap()).unwrap();
+                    for x in $values {
+                        for n in COUNTS {
+                            for code in [&direct, &portable] {
+                                assert_eq!(
+                                    code.call($name::CallArgs { x, n }),
+                                    Ok($name(x, n)),
+                                    "{} {} {x} {n}",
+                                    backend_name::<B>(),
+                                    stringify!($name)
+                                );
+                            }
                         }
-                        check(&built.expect(&context));
-                    }
-                    (false, IntrinsicPolicy::Error) => {
-                        let Err(error) = built else {
-                            panic!("{context}: built");
-                        };
-                        let message = error.to_string();
-                        assert!(
-                            message.contains(intrinsic.name)
-                                && message.contains(&format!("`{name}`")),
-                            "{context}: {message}"
-                        );
                     }
                 }
-            }
+            };
         }
-    }
-}
-
-fn signature(params: &'static [ScalarType], result: ScalarType) -> Signature<'static> {
-    Signature::new(params, result, &[])
-}
-
-#[test]
-fn every_backend_implements_count_ones() {
-    fn check<B: Codegen<Output: Executable>>() {
-        let intrinsic =
-            Intrinsic::new("count_ones", signature(&[ScalarType::U64], ScalarType::U32));
-        matrix::<B, _>(
-            intrinsic,
-            true,
-            |options, path| match path {
-                Path::Direct => count::build_with_options::<B>(options, count::BuildArgs {}),
-                Path::Portable => B::compile(&count::ir_with_options(options)?),
-            },
-            |code| {
-                for x in [0, 1, u64::MAX, 1 << 63, 0x5555_5555_5555_5555, 0xf0] {
-                    assert_eq!(
-                        code.call(count::CallArgs { x }),
-                        Ok(ops::popcount(x)),
-                        "{x}"
-                    );
-                    assert_eq!(ops::popcount(x), x.count_ones());
-                }
-            },
-        );
+        run!(math_i32, [0, 1, -1, 0x00f0_0000, i32::MIN, i32::MAX]);
+        run!(math_u32, [0, 1, u32::MAX, 0x8000_0001, 12]);
+        run!(math_i64, [0, 1, -1, 1 << 40, i64::MIN, i64::MAX]);
+        run!(math_u64, [0, 1, u64::MAX, 1 << 63, 0x0f00]);
     }
     splice_testkit::each_backend!(B => check::<B>());
 }
 
+/// A call reaches the portable IR as one intrinsic, named structurally.
 #[test]
-fn every_backend_implements_leading_zeros_of_a_method() {
-    fn check<B: Codegen<Output: Executable>>() {
-        let intrinsic = Intrinsic::new(
-            "leading_zeros",
-            signature(&[ScalarType::I32], ScalarType::U32),
-        );
-        matrix::<B, _>(
-            intrinsic,
-            true,
-            |options, path| match path {
-                Path::Direct => leading::build_with_options::<B>(options, leading::BuildArgs {}),
-                Path::Portable => B::compile(&leading::ir_with_options(options)?),
-            },
-            |code| {
-                for x in [0, 1, -1, i32::MIN, i32::MAX, 0x00f0_0000] {
-                    let expected = ops::Bits::leading_zeros(x);
-                    assert_eq!(expected, x.leading_zeros());
-                    assert_eq!(code.call(leading::CallArgs { x }), Ok(expected), "{x}");
-                }
-            },
-        );
-    }
-    splice_testkit::each_backend!(B => check::<B>());
-}
-
-#[test]
-fn rotate_left_is_native_except_on_lancy() {
-    fn check<B: Codegen<Output: Executable>>() {
-        let intrinsic = Intrinsic::new(
-            "rotate_left",
-            signature(&[ScalarType::I32, ScalarType::U32], ScalarType::I32),
-        );
-        matrix::<B, _>(
-            intrinsic,
-            backend::<B>() != "lancy",
-            |options, path| match path {
-                Path::Direct => rotate::build_with_options::<B>(options, rotate::BuildArgs {}),
-                Path::Portable => B::compile(&rotate::ir_with_options(options)?),
-            },
-            |code| {
-                for (x, n) in [
-                    (0, 0),
-                    (1, 31),
-                    (i32::MIN, 1),
-                    (-1, 7),
-                    (0x1234_5678, 32),
-                    (0x1234_5678, u32::MAX),
-                    (i32::MAX, 33),
-                ] {
-                    let expected = ops::rotl(x, n);
-                    assert_eq!(expected, x.rotate_left(n));
-                    assert_eq!(
-                        code.call(rotate::CallArgs { x, n }),
-                        Ok(expected),
-                        "{x} {n}"
-                    );
-                }
-            },
-        );
-    }
-    splice_testkit::each_backend!(B => check::<B>());
-}
-
-#[test]
-fn mul_add_is_native_on_llvm_with_fused_multiply_add() {
-    fn check<B: Codegen<Output: Executable>>() {
-        let intrinsic =
-            Intrinsic::new("mul_add", signature(&[ScalarType::F64; 3], ScalarType::F64));
-        matrix::<B, _>(
-            intrinsic,
-            backend::<B>().starts_with("llvm") && host_fuses(),
-            |options, path| match path {
-                Path::Direct => fused::build_with_options::<B>(options, fused::BuildArgs {}),
-                Path::Portable => B::compile(&fused::ir_with_options(options)?),
-            },
-            |code| {
-                // Native and fallback both round once, as Rust's `mul_add`.
-                for (a, b, c) in [
-                    (0.0, 0.0, 0.0),
-                    (-0.0, 1.0, 0.0),
-                    (1.5, 2.0, -3.0),
-                    (f64::NAN, 1.0, 1.0),
-                    (f64::INFINITY, 0.0, 1.0),
-                    (f64::MAX, 1.0, f64::MAX),
-                    (f64::MIN_POSITIVE, 0.5, 0.0),
-                    // The product rounds to 1, so an unfused body gives 0;
-                    // the fused result is -2^-54.
-                    (1.0 + 2f64.powi(-27), 1.0 - 2f64.powi(-27), -1.0),
-                ] {
-                    let expected = ops::fma(a, b, c);
-                    assert!(expected.to_bits() == a.mul_add(b, c).to_bits() || expected.is_nan());
-                    let actual = code.call(fused::CallArgs { a, b, c }).unwrap();
-                    if expected.is_nan() {
-                        assert!(actual.is_nan(), "{a} {b} {c}: {actual}");
-                    } else {
-                        assert_eq!(actual.to_bits(), expected.to_bits(), "{a} {b} {c}");
-                    }
-                }
-            },
-        );
-    }
-    splice_testkit::each_backend!(B => check::<B>());
-}
-
-#[test]
-fn an_unknown_intrinsic_compiles_its_body_or_fails() {
-    fn check<B: Codegen<Output: Executable>>() {
-        let intrinsic = Intrinsic::new(
-            "acme.low_bit",
-            signature(&[ScalarType::U32], ScalarType::U32),
-        );
-        matrix::<B, _>(
-            intrinsic,
-            false,
-            |options, path| match path {
-                Path::Direct => low_bits::build_with_options::<B>(options, low_bits::BuildArgs {}),
-                Path::Portable => B::compile(&low_bits::ir_with_options(options)?),
-            },
-            |code| {
-                for (x, y) in [(0, 0), (1, u32::MAX), (2, 3)] {
-                    assert_eq!(code.call(low_bits::CallArgs { x, y }), Ok(low_bits(x, y)));
-                }
-            },
-        );
-    }
-    splice_testkit::each_backend!(B => check::<B>());
-}
-
-/// The portable IR records each call as an intrinsic with the body as its
-/// fallback, staged once for calls with one signature.
-#[test]
-fn portable_ir_records_the_intrinsic_and_one_fallback() {
-    let ir = low_bits::ir().unwrap();
-    let fallbacks: Vec<_> = ir
-        .instructions()
-        .iter()
+fn math_calls_record_structural_intrinsic_ids() {
+    let ir = math_i64::ir().unwrap();
+    let ids: Vec<String> = splice_testkit::instructions(&ir)
         .filter_map(|op| match op {
-            Instr::Intrinsic { name, fallback, .. } => {
-                assert_eq!(&**name, "acme.low_bit");
-                Some(fallback)
-            }
+            Instr::Intrinsic { id, .. } => Some(id.to_string()),
             _ => None,
         })
         .collect();
-    assert_eq!(fallbacks.len(), 2);
-    assert!(Arc::ptr_eq(fallbacks[0], fallbacks[1]));
-    assert!(
-        !ir.instructions()
-            .iter()
-            .any(|op| matches!(op, Instr::Call { .. }))
+    let math = "splice_core::math::Math";
+    assert_eq!(
+        ids,
+        [
+            format!("`<i64 as {math}>::count_ones(i64) -> u32`"),
+            format!("`<i64 as {math}>::leading_zeros(i64) -> u32`"),
+            format!("`<i64 as {math}>::trailing_zeros(i64) -> u32`"),
+            format!("`<i64 as {math}>::rotate_left(i64, u32) -> i64`"),
+        ]
     );
 }
 
-/// A supported intrinsic compiles to the backend's instruction, without
-/// the body; an unsupported one calls its body.
+/// Every backend implements every intrinsic Splice declares.
 #[test]
-fn a_supported_intrinsic_lowers_without_its_body() {
+fn every_backend_implements_every_declared_intrinsic() {
+    let declared = splice::intrinsic::declared();
+    assert_eq!(declared.len(), 16, "{declared:?}");
     let target = splice::Target::host().unwrap();
-    let lancy = |ir: &splice::Function| splice::lancy::lower(ir, &target).unwrap().to_string();
-    let listing = lancy(&count::ir().unwrap());
-    assert!(
-        listing.contains("popcnt") && !listing.contains("call "),
-        "{listing}"
-    );
-    let listing = lancy(&rotate::ir().unwrap());
-    assert!(listing.contains("call "), "{listing}");
-    #[cfg(feature = "llvm")]
-    {
-        let llvm = |ir: &splice::Function| splice::llvm::to_llvm_ir(ir, &target).unwrap();
-        // The kernel and its public entry point, and a function per body.
-        let functions = |listing: &str| listing.matches("\ndefine ").count();
-        let listing = llvm(&rotate::ir().unwrap());
-        assert!(
-            listing.contains("@llvm.fshl") && functions(&listing) == 2,
-            "{listing}"
-        );
-        let listing = llvm(&low_bits::ir().unwrap());
-        assert_eq!(functions(&listing), 3, "{listing}");
+    fn check<B: Codegen>(declared: &[IntrinsicId], target: &splice::Target) {
+        for id in declared {
+            assert!(
+                B::supports_intrinsic(id, target),
+                "{} does not implement {id}",
+                backend_name::<B>()
+            );
+        }
+        assert!(!B::supports_intrinsic(
+            &<u32 as acme::LowBit>::__SPLICE_INTRINSICS[0],
+            target
+        ));
+    }
+    splice_testkit::each_backend!(B => check::<B>(&declared, &target));
+}
+
+mod acme {
+    /// An intrinsic no backend implements.
+    #[splice::intrinsic]
+    pub trait LowBit {
+        fn low_bit(self) -> u32;
+    }
+
+    #[splice::intrinsic]
+    impl LowBit for u32 {
+        fn low_bit(self) -> u32;
     }
 }
 
-/// An intrinsic function built as a kernel itself is its body.
+#[kernel]
+fn low_bit(x: u32) -> u32 {
+    use acme::LowBit;
+    x.low_bit() + 1
+}
+
+/// An intrinsic the backend does not implement fails the build on both
+/// paths, in both modes, naming the intrinsic and the backend.
 #[test]
-fn an_intrinsic_built_as_a_kernel_is_its_body() {
+fn an_unimplemented_intrinsic_fails_the_build_naming_it_and_the_backend() {
     fn check<B: Codegen<Output: Executable>>() {
-        let options = BuildOptions::host(Mode::Release)
-            .unwrap()
-            .with_unsupported_intrinsic(IntrinsicPolicy::Error);
-        let code = ops::rotl::build_with_options::<B>(options, ops::rotl::BuildArgs {}).unwrap();
-        assert_eq!(code.call(ops::rotl::CallArgs { x: -1, n: 3 }), Ok(-1));
+        let expected = format!(
+            "intrinsic `<u32 as {}::acme::LowBit>::low_bit(u32) -> u32` is not implemented by backend `{}`",
+            module_path!(),
+            backend_name::<B>()
+        );
+        for options in modes() {
+            let direct = low_bit::build_with_options::<B>(options, low_bit::BuildArgs {});
+            let ir = low_bit::ir_with_options(options).unwrap();
+            for error in [direct.err(), B::compile(&ir).err()] {
+                let error = error.expect("the build fails").to_string();
+                assert!(error.contains(&expected), "{error}");
+            }
+        }
     }
     splice_testkit::each_backend!(B => check::<B>());
 }
 
+/// Outside a kernel an intrinsic panics: only a kernel calls it.
 #[test]
-fn the_default_policy_compiles_the_body() {
-    let options = BuildOptions::host(Mode::Release).unwrap();
-    assert_eq!(options.unsupported_intrinsic, IntrinsicPolicy::Fallback);
+#[should_panic(expected = "is a kernel intrinsic")]
+fn an_intrinsic_called_from_rust_panics() {
+    let _ = Math::count_ones(std::hint::black_box(3u64));
 }

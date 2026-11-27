@@ -59,9 +59,9 @@
 
 pub use splice_core::{
     Backend, BufferArg, BufferElement, BufferKind, BuildError, BuildOptions, CallArgs, CallError,
-    Codegen, CompileInput, ComptimeKey, Executable, Function, IntrinsicPolicy, KernelScalar,
-    KernelType, Mode, Result, SignatureError, Target, TargetError, Trap, TypedIr, TypedKernel,
-    debug, frontend, hir, intrinsic, kernel, simd, target, validate_buffers,
+    Codegen, CompileInput, ComptimeKey, Executable, Function, KernelScalar, KernelType, Math, Mode,
+    Result, SignatureError, Target, TargetError, Trap, TypedIr, TypedKernel, debug, frontend, hir,
+    intrinsic, kernel, math, simd, target, validate_buffers,
 };
 
 /// Items that generated code names. Not a stable API.
@@ -71,7 +71,7 @@ pub use splice_core::__private;
 /// Lancy, Splice's own JIT (feature `lancy`, on by default).
 #[cfg(feature = "lancy")]
 pub mod lancy {
-    pub use splice_lancy::{Lancy, LancyKernel, lower};
+    pub use splice_lancy::{Lancy, LancyKernel};
 }
 
 /// Cranelift (feature `cranelift`).

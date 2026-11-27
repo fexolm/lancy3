@@ -11,7 +11,7 @@ pub mod debug;
 pub mod frontend;
 pub mod hir;
 pub mod intrinsic;
-pub use intrinsic::IntrinsicPolicy;
+pub mod math;
 #[allow(unsafe_code)]
 mod runtime_context;
 pub mod simd;
@@ -49,7 +49,8 @@ pub use typed::{CallArgs, CompileInput, TypedIr, TypedKernel};
 pub use frontend::ComptimeKey;
 pub use hir::{BufferArg, BufferElement, BufferKind, Function, validate_buffers};
 use hir::{Constant, ScalarType};
-pub use splice_macros::{ComptimeKey, KernelType, kernel};
+pub use math::Math;
+pub use splice_macros::{ComptimeKey, KernelType, intrinsic, kernel};
 
 /// Result of staging or compiling a kernel.
 pub type Result<T> = std::result::Result<T, BuildError>;
@@ -85,9 +86,6 @@ pub struct BuildOptions {
     /// Arithmetic the kernel performs while staging is native Rust and
     /// always follows its crate.
     pub overflow_checks: Option<bool>,
-    /// What the build does with an `#[intrinsic]` its backend does not
-    /// implement; see [`intrinsic`].
-    pub unsupported_intrinsic: IntrinsicPolicy,
 }
 
 impl BuildOptions {
@@ -96,7 +94,6 @@ impl BuildOptions {
             mode,
             target,
             overflow_checks: None,
-            unsupported_intrinsic: IntrinsicPolicy::Fallback,
         }
     }
 
@@ -122,14 +119,6 @@ impl BuildOptions {
         }
     }
 
-    /// Compile the body of an unsupported intrinsic or fail the build.
-    pub fn with_unsupported_intrinsic(self, unsupported_intrinsic: IntrinsicPolicy) -> Self {
-        Self {
-            unsupported_intrinsic,
-            ..self
-        }
-    }
-
     pub fn debug(&self) -> bool {
         self.mode == Mode::Debug
     }
@@ -141,15 +130,13 @@ impl BuildOptions {
 pub trait Backend: Sized {
     /// The value produced by a successful build.
     type Output;
+    /// Whether this backend implements the intrinsic `id` on `target`, on
+    /// both build paths. A build that calls an intrinsic its backend does
+    /// not implement fails with [`intrinsic::unsupported`].
+    fn supports_intrinsic(id: &intrinsic::IntrinsicId, target: &Target) -> bool;
     /// Compile a verified portable function. Source points are available
     /// when the function was staged in debug mode.
     fn compile_function(function: &Function, options: BuildOptions) -> Result<Self::Output>;
-    /// Whether this backend emits its own code for `intrinsic` on `target`
-    /// instead of compiling the intrinsic's body. A backend that answers
-    /// `true` must implement it on both build paths.
-    fn supports_intrinsic(_intrinsic: &intrinsic::Intrinsic<'_>, _target: &Target) -> bool {
-        false
-    }
     /// Stage `body` with `options`. The body checks its own operations
     /// (see [`validate::Validating`]), so the backend's builder receives
     /// only valid ones. By default the body is recorded as a portable

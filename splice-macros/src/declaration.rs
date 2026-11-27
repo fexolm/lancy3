@@ -33,35 +33,28 @@ pub(crate) fn expand(root: Path, print: bool, tokens: TokenStream) -> Result<Tok
             }
             hoist_lint_attributes(&mut function.attrs, &mut function.sig);
             signature(&function.sig)?;
-            let intrinsic = intrinsic_name(&function.attrs)?;
-            item_markers(&mut function.attrs, true)?;
-            crate::scalar::expand(root, &mut function, print, intrinsic.as_ref())
+            item_markers(&function.attrs)?;
+            crate::scalar::expand(root, &mut function, print)
         }
         Item::Impl(_) | Item::Trait(_) if print => Err(Error::new_spanned(
             tokens,
             "#[kernel(print)] publishes `print` for a free function",
         )),
         Item::Impl(mut implementation) => {
-            item_markers(&mut implementation.attrs, false)?;
+            item_markers(&implementation.attrs)?;
             let mut specialized = Vec::new();
             let mut errors = Errors::default();
             let trait_path = implementation.trait_.as_ref().map(|(_, path, _)| path);
             for member in &mut implementation.items {
                 if let syn::ImplItem::Fn(method) = member {
                     method_markers(&method.attrs)?;
-                    if trait_path.is_some() {
-                        no_trait_intrinsic(&method.attrs)?;
-                    }
                     let gates = configuration(&method.attrs)?;
-                    let intrinsic = intrinsic_name(&method.attrs)?;
                     let generated = crate::scalar::methods::publish(
                         &root,
                         &method.sig,
                         &method.block,
                         &method.vis,
                         trait_path.is_some(),
-                        intrinsic.as_ref(),
-                        implementation.generics.params.is_empty(),
                     )
                     .unwrap_or_else(|error| {
                         errors.push(error);
@@ -111,7 +104,7 @@ pub(crate) fn expand(root: Path, print: bool, tokens: TokenStream) -> Result<Tok
             Ok(implementation.into_token_stream())
         }
         Item::Trait(mut declaration) => {
-            item_markers(&mut declaration.attrs, false)?;
+            item_markers(&declaration.attrs)?;
             let name = &declaration.ident;
             let (_, arguments, _) = declaration.generics.split_for_impl();
             let trait_owner = quote!(#name #arguments);
@@ -121,7 +114,6 @@ pub(crate) fn expand(root: Path, print: bool, tokens: TokenStream) -> Result<Tok
             for member in &mut declaration.items {
                 if let syn::TraitItem::Fn(method) = member {
                     method_markers(&method.attrs)?;
-                    no_trait_intrinsic(&method.attrs)?;
                     let gates = configuration(&method.attrs)?;
                     let (kind, defaults) =
                         crate::scalar::methods::trait_defaults(&root, &method.sig, &trait_owner)
@@ -362,18 +354,6 @@ impl Errors {
 
 /// Every method of a `#[kernel]` block is lowered with the block. A plain
 /// Rust method that kernels call belongs in an ordinary `impl`.
-/// Trait methods dispatch by `Self`; an intrinsic is a free function or a
-/// method of an inherent `#[kernel] impl`.
-fn no_trait_intrinsic(attrs: &[Attribute]) -> Result<()> {
-    match attrs.iter().find(|attr| marker(attr, "intrinsic")) {
-        Some(attr) => Err(Error::new_spanned(
-            attr,
-            "#[intrinsic] is not supported on a trait method; put it on a free #[kernel] function or a method of an inherent #[kernel] impl",
-        )),
-        None => Ok(()),
-    }
-}
-
 fn method_markers(attrs: &[Attribute]) -> Result<()> {
     match attrs.iter().find(|attr| marker(attr, "kernel")) {
         Some(attr) => Err(Error::new_spanned(
@@ -391,7 +371,7 @@ fn prepare_method(
 ) -> Result<()> {
     hoist_lint_attributes(attrs, sig);
     signature(sig)?;
-    item_markers(attrs, body.is_some())?;
+    item_markers(attrs)?;
     for arg in &mut sig.inputs {
         let attrs = match arg {
             FnArg::Typed(arg) => &mut arg.attrs,
@@ -609,8 +589,8 @@ fn hoist_lint_attributes(attrs: &mut Vec<Attribute>, sig: &mut Signature) {
     }
 }
 
-/// Whether `attr` is the Splice marker `name`. `comptime`, `columns` and
-/// `intrinsic` are inert names only a `#[kernel]` item reads; `kernel` is
+/// Whether `attr` is the Splice marker `name`. `comptime` and `columns`
+/// are inert names only a `#[kernel]` item reads; `kernel` is
 /// also the attribute macro, which a method can name by its path in Splice.
 /// `#[cuda::kernel]` or `#[x::comptime]` is someone else's attribute.
 fn marker(attr: &Attribute, name: &str) -> bool {
@@ -622,18 +602,7 @@ fn marker(attr: &Attribute, name: &str) -> bool {
             && path.segments[1].ident == name)
 }
 
-/// The name of the function's or method's `#[intrinsic("name")]`, validated by
-/// [`item_markers`].
-fn intrinsic_name(attrs: &[Attribute]) -> Result<Option<syn::LitStr>> {
-    attrs
-        .iter()
-        .find(|attr| marker(attr, "intrinsic"))
-        .map(Attribute::parse_args)
-        .transpose()
-}
-
-fn item_markers(attrs: &mut Vec<Attribute>, intrinsic_body: bool) -> Result<()> {
-    let mut intrinsic = false;
+fn item_markers(attrs: &[Attribute]) -> Result<()> {
     for attr in attrs.iter() {
         if marker(attr, "kernel") {
             return Err(Error::new_spanned(attr, "duplicate #[kernel] attribute"));
@@ -642,24 +611,8 @@ fn item_markers(attrs: &mut Vec<Attribute>, intrinsic_body: bool) -> Result<()> 
                 attr,
                 "#[comptime] belongs on a kernel parameter",
             ));
-        } else if marker(attr, "intrinsic") {
-            if !intrinsic_body || intrinsic {
-                return Err(Error::new_spanned(
-                    attr,
-                    "one #[intrinsic(\"name\")] is allowed on a kernel function or method with a body",
-                ));
-            }
-            let name: syn::LitStr = attr.parse_args()?;
-            if name.value().is_empty() {
-                return Err(Error::new_spanned(
-                    name,
-                    "expected a nonempty intrinsic name",
-                ));
-            }
-            intrinsic = true;
         }
     }
-    attrs.retain(|attr| !marker(attr, "intrinsic"));
     Ok(())
 }
 

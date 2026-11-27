@@ -151,10 +151,10 @@ impl Backend for Cranelift {
     type Output = CraneliftKernel;
 
     fn supports_intrinsic(
-        intrinsic: &splice_core::intrinsic::Intrinsic<'_>,
+        id: &splice_core::intrinsic::IntrinsicId,
         _target: &splice_core::Target,
     ) -> bool {
-        intrinsic::native(intrinsic).is_some()
+        intrinsic::native(id).is_some()
     }
 
     fn compile_function(function: &Function, options: BuildOptions) -> Result<CraneliftKernel> {
@@ -164,13 +164,7 @@ impl Backend for Cranelift {
         splice_jit::prepare_perf_map();
         let mut memory = CodeMemory(Some(JITModule::new(builder(&target, debug)?)));
         let module = memory.0.as_mut().unwrap();
-        let mut kernel = module::KernelModule::lower(
-            module,
-            function,
-            &target,
-            debug,
-            options.unsupported_intrinsic,
-        )?;
+        let mut kernel = module::KernelModule::lower(module, function, &target, debug)?;
         let id = kernel.entry;
         let sources = std::mem::take(&mut kernel.functions);
         let mut symbols = Vec::new();

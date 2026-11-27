@@ -22,18 +22,12 @@ pub(crate) fn entry_name(kind: &str, name: &Ident) -> Ident {
     )
 }
 
-/// `intrinsic` is the name of a `#[intrinsic("name")]` method: its stage
-/// entry calls the intrinsic, and the method's body is the intrinsic's
-/// fallback. `cacheable` holds when the impl is not generic, so calls with
-/// one signature share one staged fallback.
 pub(crate) fn publish(
     root: &syn::Path,
     signature: &Signature,
     body: &Block,
     visibility: &Visibility,
     trait_impl: bool,
-    intrinsic: Option<&syn::LitStr>,
-    cacheable: bool,
 ) -> syn::Result<Vec<TokenStream>> {
     let runtime_receiver = !trait_impl
         && signature.receiver().is_some_and(|r| {
@@ -213,28 +207,6 @@ pub(crate) fn publish(
     let indices = 0..scalar_args.len();
     let debug_arguments = debug_host_args.iter().map(|id| lower.capture_constant(id));
     let overflow = super::lower::overflow_prologue(root);
-    let (stage_name, dispatch) = match intrinsic {
-        Some(intrinsic) => {
-            let body_name = entry_name("intrinsic_body", name);
-            let dispatch = intrinsic_dispatch(
-                root,
-                IntrinsicEntry {
-                    name: intrinsic,
-                    signature: &signature,
-                    params: &params,
-                    result_type,
-                    unit_result,
-                    runtime_receiver,
-                    cacheable,
-                    visibility,
-                    stage_name: &stage_name,
-                    body_name: &body_name,
-                },
-            )?;
-            (body_name, Some(dispatch))
-        }
-        None => (stage_name, None),
-    };
     let stage = emit! {
         #[doc(hidden)]
         // A staging error replaces the operation that would read its operands.
@@ -260,7 +232,6 @@ pub(crate) fn publish(
     };
 
     let mut items = vec![stage];
-    items.extend(dispatch);
     if let Some(context) = context.as_ref() {
         let marker = entry_name("has_context", name);
         items.push(emit!(#[doc(hidden)] #visibility fn #marker() -> bool { true }));
@@ -292,84 +263,6 @@ pub(crate) fn publish(
             .0,
     );
     Ok(items)
-}
-
-struct IntrinsicEntry<'a> {
-    name: &'a syn::LitStr,
-    signature: &'a Signature,
-    params: &'a [abi::Parameter<'a>],
-    result_type: Scalar,
-    unit_result: bool,
-    runtime_receiver: bool,
-    cacheable: bool,
-    visibility: &'a Visibility,
-    stage_name: &'a Ident,
-    body_name: &'a Ident,
-}
-
-/// The stage entry of an intrinsic method: it calls the intrinsic, whose
-/// fallback stages the method's body (`body_name`) as a nested function.
-/// An intrinsic takes and returns concrete kernel scalars.
-fn intrinsic_dispatch(root: &syn::Path, entry: IntrinsicEntry<'_>) -> syn::Result<TokenStream> {
-    let IntrinsicEntry {
-        name,
-        signature,
-        params,
-        result_type,
-        unit_result,
-        runtime_receiver,
-        cacheable,
-        visibility,
-        stage_name,
-        body_name,
-    } = entry;
-    let shape = "an #[intrinsic] takes and returns concrete kernel scalars";
-    if runtime_receiver || unit_result || !signature.generics.params.is_empty() {
-        return Err(syn::Error::new_spanned(signature, shape));
-    }
-    let scalar = |t: Scalar| super::lower::scalar_type(root, t).filter(|_| t.is_scalar());
-    let result =
-        scalar(result_type).ok_or_else(|| syn::Error::new_spanned(&signature.output, shape))?;
-    let mut args = Vec::new();
-    let mut types = Vec::new();
-    for param in params {
-        let ty = match param.binding {
-            Binding::Reg(t, _) => scalar(t),
-            _ => None,
-        }
-        .ok_or_else(|| syn::Error::new_spanned(param.pattern, shape))?;
-        args.push(super::named(param.pattern)?.ident.clone());
-        types.push(ty);
-    }
-    let support = emit!(#root::frontend::scalar);
-    let frontend = emit!(#root::frontend);
-    let intrinsic = emit!(#root::intrinsic);
-    let indices = 0..args.len();
-    let key = if cacheable {
-        emit!(::core::option::Option::Some(#frontend::Specialization::new::<__SpliceIntrinsic>(__SPLICE_SIGNATURE)))
-    } else {
-        emit!(::core::option::Option::None)
-    };
-    Ok(emit! {
-        #[doc(hidden)]
-        #visibility fn #stage_name (#(#args: impl #support::RunArg,)* __splice_builder: &mut dyn #frontend::KernelBuilder)
-            -> #root::Result<#root::hir::Reg>
-        {
-            struct __SpliceIntrinsic;
-            const __SPLICE_SIGNATURE: #frontend::Signature<'static> =
-                #frontend::Signature::new(&[#(#types),*], #result, &[]);
-            #(let #args = #support::RunArg::reg(#args, __splice_builder)?;)*
-            let __splice_body: #frontend::Body<'_> = ::std::boxed::Box::new(|__splice_builder| {
-                let __splice_result = Self::#body_name(#(__splice_builder.arg(#indices)?,)* __splice_builder)?;
-                __splice_builder.ret(__splice_result)
-            });
-            __splice_builder.intrinsic(
-                &#intrinsic::Intrinsic::new(#name, __SPLICE_SIGNATURE),
-                &[#(#args),*],
-                #intrinsic::Fallback::Staged { key: #key, body: __splice_body },
-            )
-        }
-    })
 }
 
 fn normalize(signature: &Signature, body: Option<&mut Block>) -> Signature {

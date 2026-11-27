@@ -1,15 +1,8 @@
 //! Lower Splice kernels using Inkwell's typed builder.
 mod body;
 mod direct;
-/// Whether LLVM emits `intrinsic` itself on `machine`.
-pub(crate) fn native_intrinsic(
-    intrinsic: &splice_core::intrinsic::Intrinsic<'_>,
-    machine: &crate::target::Machine,
-) -> bool {
-    body::native(intrinsic, machine).is_some()
-}
-
-pub(crate) use direct::{Lowering, Staged, populate, populate_function};
+pub(crate) use body::native as native_intrinsic;
+pub(crate) use direct::{Staged, populate, populate_function};
 
 use inkwell::AddressSpace;
 use inkwell::attributes::{Attribute, AttributeLoc};
