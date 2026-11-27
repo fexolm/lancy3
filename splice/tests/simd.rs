@@ -446,6 +446,62 @@ fn choose_lanes(a: Lane<i32>, b: Lane<i32>, keep_a: Mask<i32>) -> Lane<i32> {
 }
 
 #[kernel]
+fn clamp_lanes(x: Lane<i32>, lo: Lane<i32>, hi: Lane<i32>) -> Lane<i32> {
+    x.simd_max(lo).simd_min(hi)
+}
+
+#[kernel]
+fn negative_lanes(x: Lane<i32>) -> Mask<i32> {
+    x.simd_lt(Lane::splat(0))
+}
+
+#[kernel]
+fn clamp_negative(x: Lane<i32>, negative: Mask<i32>) -> Lane<i32> {
+    let clamped: Lane<i32> = clamp_lanes(x, Lane::<i32>::splat(-5), Lane::<i32>::splat(5));
+    negative.select(clamped, x)
+}
+
+#[kernel]
+fn nested_lanes(src: &[i32], out: &mut [i32]) -> i32 {
+    let x = Lane::load(src, 0);
+    let negative: Mask<i32> = negative_lanes(x);
+    let result: Lane<i32> = clamp_negative(x, negative);
+    result.store(out, 0);
+    let still: Mask<i32> = negative_lanes(result);
+    (still & negative).count()
+}
+
+#[test]
+fn lane_values_cross_nested_kernel_calls_as_parameters_and_results() {
+    let width = splice::simd::lanes::<i32>();
+    let src: Vec<i32> = (0..width as i32).map(|i| (i - 3) * 3).collect();
+    // Per lane: negative values clamp to -5, the others pass through.
+    let want: Vec<i32> = src
+        .iter()
+        .map(|&x| if x < 0 { x.max(-5) } else { x })
+        .collect();
+    let count = want.iter().filter(|&&x| x < 0).count() as i32;
+    let kernels = compile_all!(nested_lanes);
+    assert!(kernels.len() >= 4, "both build paths of every backend");
+    for kernel in &kernels {
+        let mut out = vec![77; width];
+        let result = splice_testkit::call_i32(
+            &kernel,
+            &[],
+            &mut [(&src[..]).into(), (&mut out[..]).into()],
+        );
+        assert_eq!(result, Ok(count));
+        assert_eq!(out, want);
+    }
+}
+
+#[test]
+#[should_panic(expected = "is a kernel SIMD operation: only a #[kernel] calls it")]
+fn lane_operations_do_not_run_outside_a_kernel() {
+    let _ = Lane::<i32>::splat(1);
+}
+
+#[kernel]
 fn column_batches(left: &[i32], right: &[i32], out: &mut [i32]) -> i32 {
     let a = Lane::load(left, 0);
     let b = Lane::load(right, 0);
