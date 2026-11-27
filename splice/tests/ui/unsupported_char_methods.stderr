@@ -1,0 +1,21 @@
+error[E0080]: evaluation panicked: `to_ascii_uppercase` is not a kernel operation on runtime scalars
+ --> tests/ui/unsupported_char_methods.rs:4:1
+  |
+4 | #[kernel]
+  | ^^^^^^^^^ evaluation of `<impl upper::__SpliceDefinition>::__splice_inline::<splice::hir::Reg>::{constant#1}` failed here
+
+note: erroneous constant encountered
+ --> tests/ui/unsupported_char_methods.rs:4:1
+  |
+4 | #[kernel]
+  | ^^^^^^^^^
+  |
+  = note: this note originates in the attribute macro `kernel` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+note: the above error was encountered while instantiating `fn <impl __SpliceDefinition>::__splice_inline::<splice::hir::Reg>`
+ --> tests/ui/unsupported_char_methods.rs:4:1
+  |
+4 | #[kernel]
+  | ^^^^^^^^^
+  |
+  = note: this note originates in the attribute macro `kernel` (in Nightly builds, run with -Z macro-backtrace for more info)

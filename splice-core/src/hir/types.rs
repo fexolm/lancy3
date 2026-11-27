@@ -350,7 +350,7 @@ impl Binary {
 
     /// The result type of this operation on two operands of type `ty`, or
     /// `None` if it does not apply to them. Comparisons produce `Bool`.
-    /// `Char` supports only comparisons; `Bool` supports `Eq`, `Ne`, `And`, `Or` and `Xor`; floats support
+    /// `Char` supports comparisons, `Min` and `Max`; `Bool` supports `Eq`, `Ne`, `And`, `Or` and `Xor`; floats support
     /// `Add`, `Sub`, `Mul`, `Div`, `Min`, `Max` and comparisons; integers
     /// support every operation, including the `Saturating` forms.
     pub const fn output(self, ty: ScalarType) -> Option<ScalarType> {
@@ -358,7 +358,7 @@ impl Binary {
             ScalarKind::Bool => {
                 matches!(self, Self::Eq | Self::Ne | Self::And | Self::Or | Self::Xor)
             }
-            ScalarKind::Char => self.is_comparison(),
+            ScalarKind::Char => self.is_comparison() || matches!(self, Self::Min | Self::Max),
             ScalarKind::Float => {
                 self.is_comparison()
                     || matches!(

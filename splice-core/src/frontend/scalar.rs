@@ -20,7 +20,7 @@ macro_rules! scalar_constant {
         }
     )*};
 }
-scalar_constant!(bool i32 u32 i64 u64 usize f32 f64);
+scalar_constant!(bool char i8 u8 i16 u16 i32 u32 i64 u64 usize f32 f64);
 impl<T: ScalarConstant + Copy> ScalarConstant for &T {
     fn constant(self) -> Constant {
         (*self).constant()

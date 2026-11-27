@@ -85,7 +85,13 @@ impl Lower<'_> {
             });
         }
         let kind = match receiver.stage {
-            Stage::Reg(t) | Stage::Word(t) if t.is_number() || t == Scalar::Inferred => t.base(),
+            Stage::Reg(t) | Stage::Word(t)
+                if t.is_number()
+                    || t == Scalar::Inferred
+                    || t == Scalar::Number(crate::kast::types::Primitive::Char) =>
+            {
+                t.base()
+            }
             // A host receiver with runtime arguments, such as `k.min(x)`,
             // takes the arguments' type.
             stage if stage.is_host() => {
@@ -111,7 +117,7 @@ impl Lower<'_> {
             .iter()
             .map(|arg| self.operand(arg, kind))
             .collect::<Result<Vec<_>>>()?;
-        let message = format!("`{name}` is not a kernel operation on runtime integers");
+        let message = format!("`{name}` is not a kernel operation on runtime scalars");
         Ok(Value::new(
             Stage::Reg(kind),
             emit!({
@@ -124,8 +130,11 @@ impl Lower<'_> {
 
     pub(super) fn cast(&self, cast: &ExprCast) -> Result<Value> {
         let value = self.expr(&cast.expr)?;
-        let Some(kind) = Scalar::from_type(&cast.ty, self.types).filter(|t| t.is_number()) else {
-            return err(&cast.ty, "a runtime cast converts to a number type");
+        // rustc checked the cast: to a number, or `u8` to `char`.
+        let Some(kind) = Scalar::from_type(&cast.ty, self.types)
+            .filter(|t| t.is_number() || *t == Scalar::Number(crate::kast::types::Primitive::Char))
+        else {
+            return err(&cast.ty, "a runtime cast converts to a number type or char");
         };
         let (Stage::Reg(scalar) | Stage::Word(scalar)) = value.stage else {
             return err(cast, "expected a runtime scalar to cast");

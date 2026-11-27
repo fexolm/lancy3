@@ -236,10 +236,12 @@ impl Lower<'_> {
         } else {
             None
         };
-        let runtime_i32 = runtime_splat
-            .as_ref()
-            .filter(|v| matches!(v.stage, Stage::Reg(Scalar::I32 | Scalar::Inferred)))
-            .map(|_| Elem::I32);
+        // A runtime scalar splats to lanes of its type.
+        let runtime_lane = runtime_splat.as_ref().and_then(|v| match v.stage {
+            Stage::Reg(Scalar::Inferred) => Some(Elem::I32),
+            Stage::Reg(Scalar::Number(p)) => Elem::of(p),
+            _ => None,
+        });
         let elem = explicit
             .or_else(|| buffer.as_ref().map(|b| b.0))
             .or_else(|| {
@@ -247,7 +249,7 @@ impl Lower<'_> {
                     .as_ref()
                     .and_then(|_| splat_element(&c.args[0]))
             })
-            .or(runtime_i32)
+            .or(runtime_lane)
             .or(hinted)
             .ok_or_else(|| {
                 syn::Error::new_spanned(c, "specify Lane::<T> or annotate the vector binding")
@@ -275,8 +277,9 @@ impl Lower<'_> {
             "iota" => self.vector_op(elem, emit!(Iota), vec![], Some(v)),
             "splat" => {
                 let arg = runtime_splat.unwrap();
-                if elem == Elem::I32 && matches!(arg.stage, Stage::Reg(_)) {
-                    let reg = self.reg(arg, Scalar::I32, &c.args[0])?;
+                if matches!(arg.stage, Stage::Reg(_)) {
+                    let lane = elem.scalar().unwrap_or(Scalar::Inferred);
+                    let reg = self.reg(arg, lane, &c.args[0])?;
                     self.vector_op(elem, emit!(SplatScalar), vec![reg], Some(v))
                 } else {
                     let val = self.host(arg, &c.args[0])?;
