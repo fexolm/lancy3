@@ -1664,3 +1664,63 @@ fn i64_multiply_keeps_the_low_word_of_every_product() {
         }
     }
 }
+
+/// A masked access with a prefix mask, as a vector loop's tail writes it.
+#[kernel]
+fn prefix_tail(src: &[i32], out: &mut [i32], at: i32, count: i32) -> i32 {
+    let active = Lane::<i32>::first_n(count as usize);
+    let v = Lane::load_select(src, at as usize, active, Lane::<i32>::splat(-1));
+    v.store_select(out, at as usize, active);
+    0
+}
+
+#[test]
+fn prefix_masks_trap_exactly_when_an_active_lane_is_outside() {
+    // Lancy checks a prefix mask against the room as lane counts; every
+    // backend agrees with these element-by-element rules.
+    let w = Lane::<i32>::lanes();
+    let kernels = compile_all!(prefix_tail);
+    let src: Vec<i32> = (0..2 * w as i32 + 3).map(|x| 10 + x).collect();
+    for src_len in [w - 1, w, w + 2] {
+        for out_len in [w - 2, w + 1] {
+            for at in [0, 1, 2, w - 1, w, w + 1] {
+                for count in [-1, 0, 1, 2, w as i32 - 1, w as i32, w as i32 + 1] {
+                    let active = if count < 0 {
+                        w
+                    } else {
+                        (count as usize).min(w)
+                    };
+                    let src_room = src_len.saturating_sub(at);
+                    let out_room = out_len.saturating_sub(at);
+                    let mut want = vec![7; out_len];
+                    let expected = if active > src_room {
+                        Err(CallError::Trap(Trap::Bounds))
+                    } else {
+                        for k in 0..active.min(out_room) {
+                            want[at + k] = src[at + k];
+                        }
+                        if active > out_room {
+                            Err(CallError::Trap(Trap::Bounds))
+                        } else {
+                            Ok(0)
+                        }
+                    };
+                    for kernel in &kernels {
+                        let mut out = vec![7; out_len];
+                        let actual = splice_testkit::call_i32(
+                            kernel,
+                            &[at as i32, count],
+                            &mut [
+                                BufferArg::from(&src[..src_len]),
+                                BufferArg::from(out.as_mut_slice()),
+                            ],
+                        );
+                        let case = (src_len, out_len, at, count);
+                        assert_eq!(actual, expected, "{case:?}");
+                        assert_eq!(out, want, "{case:?}");
+                    }
+                }
+            }
+        }
+    }
+}
