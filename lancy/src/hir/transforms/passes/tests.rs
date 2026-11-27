@@ -1,6 +1,7 @@
 use super::{inline_all, simplify};
 use crate::hir::{Binary, Function, Op, Terminator};
 use crate::{CallError, Inlining, Kernel, Trap};
+use splice_target::Arch;
 use std::sync::Arc;
 
 #[test]
@@ -134,7 +135,7 @@ fn remove_dominated_checks_but_keep_sibling_checks_and_unused_trapping_math() {
     let zero = f.append(end, Op::Const(0)).unwrap();
     f.append_inst(end, Op::Bin(Binary::Div, n, zero)).unwrap();
     f.set_terminator(end, Terminator::Return(zero));
-    simplify(&mut f).unwrap();
+    simplify(&mut f, Arch::X86_64).unwrap();
     f.verify().unwrap();
     assert_eq!(f.instructions(a).count(), 1);
     assert_eq!(
@@ -175,7 +176,7 @@ block done(out:i32)
   ret out";
     let f = crate::hir::text::parse(text, &[]).unwrap();
     let mut optimized = f.clone();
-    simplify(&mut optimized).unwrap();
+    simplify(&mut optimized, Arch::X86_64).unwrap();
     assert!(
         optimized
             .blocks()
@@ -229,7 +230,7 @@ block done()
   ret acc";
     let f = crate::hir::text::parse(text, &[]).unwrap();
     let mut optimized = f.clone();
-    simplify(&mut optimized).unwrap();
+    simplify(&mut optimized, Arch::X86_64).unwrap();
     let (arena, live) = optimized.operand_arena();
     assert_eq!(arena, live);
     assert!(

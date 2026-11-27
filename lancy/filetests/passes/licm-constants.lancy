@@ -1,0 +1,106 @@
+# A literal and its splat in a loop body move to the preheader. Two splats
+# of the same constant there become one, so the loop keeps one register
+# for it. Literals and their splats do not count against the vector budget.
+fn main(x:vec.f32 n:i32) -> vec.f32
+  zero = const 0
+  jump head(zero x)
+block head(i:i32 acc:vec.f32)
+  more = lt i n
+  br more body(i acc) | done(acc)
+block body(j:i32 v:vec.f32)
+  c = literal f32 0x3fa00000
+  s = splat c
+  w = mul v s
+  d = literal f32 0x3fa00000
+  t = splat d
+  u = add w t
+  one = const 1
+  next = add j one
+  jump head(next u)
+block done(r:vec.f32)
+  ret r
+@source check: br
+@source check: = splat
+@opt check: = literal f32 0x3fa00000
+@opt check: = splat
+@opt not: = literal
+@opt not: = splat
+@opt check: br
+@opt not: = literal
+@opt not: = splat
+@opt check: = mul
+@opt check: = add
+@isel check: splat.literal.f32 0x3fa00000
+@isel not: splat.literal
+@run vec.f32[0x3f800000 0xc0000000] 2 -> vec.f32[0x408c0000 0xbea00000]
+@run vec.f32[0x3f800000] 0 -> vec.f32[0x3f800000]
+
+---
+
+# Counterexample: the same bits in another lane type are another constant.
+# Both splats move out of the loop, and neither replaces the other. An
+# `i32` constant moves too when a splat uses it.
+fn main(x:vec.f32 y:vec.i32 n:i32) -> i32
+  zero = const 0
+  jump head(zero x y)
+block head(i:i32 a:vec.f32 b:vec.i32)
+  more = lt i n
+  br more body(i a b) | done(a b)
+block body(j:i32 v:vec.f32 w:vec.i32)
+  c = literal f32 0x40000000
+  s = splat c
+  p = mul v s
+  d = literal i32 0x40000000
+  t = splat d
+  q = add w t
+  one = const 1
+  next = add j one
+  jump head(next p q)
+block done(ra:vec.f32 rb:vec.i32)
+  k = const 0
+  fa = extract ra k
+  ia = cast i32 fa
+  ib = extract rb k
+  r = add ia ib
+  ret r
+@opt check: = literal f32 0x40000000
+@opt check: = splat
+@opt check: = const 1073741824
+@opt check: = splat
+@opt check: br
+@opt not: = splat
+@opt not: = const 1073741824
+@run vec.f32[0x40400000] vec.i32[5] 1 -> 1073741835
+@run vec.f32[0x40400000] vec.i32[5] 0 -> 8
+
+---
+
+# Counterexample: a splat of the loop counter changes every iteration. It
+# stays in the loop beside the constant splat that moves out.
+fn main(n:i32) -> i32
+  zero = const 0
+  zv = splat zero
+  jump head(zero zv)
+block head(i:i32 acc:vec.i32)
+  more = lt i n
+  br more body(i acc) | done(acc)
+block body(j:i32 v:vec.i32)
+  c = literal i32 0x3
+  s = splat c
+  e = splat j
+  m = mul e s
+  w = add v m
+  one = const 1
+  next = add j one
+  jump head(next w)
+block done(r:vec.i32)
+  k = const 0
+  x = extract r k
+  ret x
+@opt check: = const 3
+@opt check: = splat
+@opt check: br
+@opt check: = splat
+@opt check: = mul
+@run 4 -> 18
+@run 0 -> 0

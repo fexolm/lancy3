@@ -1,15 +1,26 @@
 //! Budgets that keep each pass linear in the size of a function. They were
 //! set by hand when each pass was written; no recorded measurement backs the
-//! exact values and they are the same for every target. A budget only stops
+//! exact values and only `hoist_vector_values` depends on the target. A budget only stops
 //! an optimization early: it never changes what a program computes. Change
 //! one together with `cargo xtask bench` (build and call time).
+
+use splice_target::Arch;
 
 /// Vector-valued definitions (and scalar floats or 128-bit integers, which
 /// also live in vector registers) in a linear loop body up to which loop
 /// invariant code motion hoists more than `i32` arithmetic. Past it, values
-/// hoisted across the backedge would compete with the loop for the 16
-/// vector registers of x86-64 and spill.
-pub(super) const HOIST_VECTOR_VALUES: usize = 12;
+/// hoisted across the backedge would compete with the loop for the vector
+/// registers the allocator has: 15 on x86-64 (`xmm0..15` without the move
+/// scratch, also with AVX-512) and 23 on AArch64 (the caller-saved
+/// `v0..7`, `v17..31`). Each budget leaves three for the loop's
+/// temporaries. Literals and their splats are not counted: a spilled one
+/// reloads with one load, which is what rematerializing it costs.
+pub(super) fn hoist_vector_values(arch: Arch) -> usize {
+    match arch {
+        Arch::X86_64 => 12,
+        Arch::Aarch64 => 20,
+    }
+}
 
 /// Memory accesses remembered per block by load forwarding and dead store
 /// removal. The oldest is forgotten first.

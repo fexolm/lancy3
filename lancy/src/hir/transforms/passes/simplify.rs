@@ -6,6 +6,7 @@ use crate::hir::{
 };
 use crate::module::{FunctionId, Module};
 use crate::support::slotmap::DenseMap;
+use splice_target::Arch;
 use std::{collections::HashMap, sync::Arc};
 
 use super::pipeline::{self, Analyses, Held, Preserved};
@@ -38,10 +39,10 @@ fn constant_op(ty: Type, bits: u128, literals: &HashMap<(Lane, u128), Value>) ->
     }
 }
 
-/// Canonicalize dataflow before instruction selection.
-pub(crate) fn simplify(f: &mut Function) -> Result<(), IrError> {
+/// Canonicalize dataflow before instruction selection for `arch`.
+pub(crate) fn simplify(f: &mut Function, arch: Arch) -> Result<(), IrError> {
     let cfg = ControlFlowGraph::compute(f)?;
-    pipeline::optimize(f, Analyses::new(Held::Owned(cfg), None))
+    pipeline::optimize(f, Analyses::new(Held::Owned(cfg), None, arch))
 }
 
 /// What a rule does with an instruction.
@@ -308,7 +309,10 @@ pub(super) fn propagate(
 
 /// Optimize every body of the module, callees first, and rebind the calls
 /// of each caller to its optimized callees.
-pub(crate) fn simplify_bodies(module: &Module<VerifiedBody<'_>>) -> Result<Function, IrError> {
+pub(crate) fn simplify_bodies(
+    module: &Module<VerifiedBody<'_>>,
+    arch: Arch,
+) -> Result<Function, IrError> {
     let mut bodies: DenseMap<FunctionId, Arc<Function>> =
         DenseMap::with_capacity(module.functions.len());
     for (id, source) in module.functions.iter() {
@@ -321,7 +325,7 @@ pub(crate) fn simplify_bodies(module: &Module<VerifiedBody<'_>>) -> Result<Funct
         }
         pipeline::optimize(
             &mut body,
-            Analyses::new(Held::Borrowed(&source.cfg), Some(&source.dom)),
+            Analyses::new(Held::Borrowed(&source.cfg), Some(&source.dom), arch),
         )?;
         if id == module.call_graph.root() {
             return Ok(body);

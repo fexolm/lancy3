@@ -148,7 +148,7 @@ impl Kernel {
         let code = if options.debug {
             crate::lir::emit(&target, source, true, &mut crate::lir::trace)?
         } else {
-            super::optimize_and_lower(&source, options.inlining, |module| {
+            super::optimize_and_lower(&source, options.inlining, target.arch(), |module| {
                 crate::lir::emit(&target, module, false, &mut crate::lir::trace)
             })?
         };

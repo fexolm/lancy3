@@ -12,8 +12,8 @@ pub(crate) mod tests;
 use crate::CompileError;
 use crate::hir::{Function, ssa::VerifiedBody, transforms::passes};
 use crate::module::Module;
-use splice_target::Target;
 use splice_target::TargetError;
+use splice_target::{Arch, Target};
 
 /// What to compile for and how.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -77,6 +77,7 @@ impl Inlining {
 pub(crate) fn optimize_and_lower<T>(
     source: &Module<VerifiedBody<'_>>,
     inlining: Inlining,
+    arch: Arch,
     mut lower: impl FnMut(Module<VerifiedBody<'_>>) -> Result<T, CompileError>,
 ) -> Result<T, CompileError> {
     let _span =
@@ -90,7 +91,7 @@ pub(crate) fn optimize_and_lower<T>(
             .in_scope(|| passes::inline_all(source, crate::lir::MAX_VALUES))
             .and_then(|mut body| {
                 tracing::debug_span!(target: "lancy::compile", "optimize_lancy_hir")
-                    .in_scope(|| passes::simplify(&mut body))?;
+                    .in_scope(|| passes::simplify(&mut body, arch))?;
                 emit(body)
             });
         match expanded {
@@ -100,6 +101,6 @@ pub(crate) fn optimize_and_lower<T>(
         }
     }
     let body = tracing::debug_span!(target: "lancy::compile", "optimize_lancy_hir")
-        .in_scope(|| passes::simplify_bodies(source))?;
+        .in_scope(|| passes::simplify_bodies(source, arch))?;
     emit(body)
 }
