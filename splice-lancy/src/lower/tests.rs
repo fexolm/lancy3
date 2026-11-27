@@ -270,8 +270,7 @@ fn portable_calls_share_one_lowered_body_and_preserve_argument_reassignment() {
     assert_eq!(calls.len(), 2);
     assert!(Arc::ptr_eq(calls[0], calls[1]));
     let kernel =
-        lancy::ScalarKernel::compile(&graph, &lancy::CompileOptions::new(options().target))
-            .unwrap();
+        lancy::Kernel::compile(&graph, &lancy::CompileOptions::new(options().target)).unwrap();
     assert_eq!(kernel.call(&[22]), Ok(24));
 }
 
@@ -302,8 +301,7 @@ fn backedge_swaps_live_names_on_the_selected_edge() {
     )
     .unwrap();
     let kernel =
-        lancy::ScalarKernel::compile(&graph, &lancy::CompileOptions::new(options().target))
-            .unwrap();
+        lancy::Kernel::compile(&graph, &lancy::CompileOptions::new(options().target)).unwrap();
     for n in 0..10 {
         assert_eq!(
             kernel.call(&[n, 20, 91]),
@@ -334,7 +332,7 @@ fn backward_jump_into_previously_unreferenced_label_is_reachable() {
     )
     .unwrap();
     assert_eq!(
-        lancy::ScalarKernel::compile(&f, &lancy::CompileOptions::new(options().target))
+        lancy::Kernel::compile(&f, &lancy::CompileOptions::new(options().target))
             .unwrap()
             .call(&[41]),
         Ok(42)
@@ -421,7 +419,7 @@ fn checked_nested_call_preserves_writes_before_failure() {
 
 #[test]
 fn lowered_call_graphs_retain_slice_contracts_for_out_of_line_calls() {
-    use lancy::{Inlining, ScalarKernel};
+    use lancy::{Inlining, Kernel};
     use splice_core::{BufferArg, Executable, kernel};
 
     #[kernel(crate = splice_core)]
@@ -482,7 +480,7 @@ fn lowered_call_graphs_retain_slice_contracts_for_out_of_line_calls() {
                 })
             );
         }
-        let code = ScalarKernel::compile(
+        let code = Kernel::compile(
             &root,
             &lancy::CompileOptions::host()
                 .unwrap()

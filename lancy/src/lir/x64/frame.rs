@@ -11,7 +11,7 @@ pub(super) struct Frame {
 }
 
 impl Frame {
-    pub fn new(root: bool, arity: usize, spills: usize) -> Self {
+    pub(super) fn new(root: bool, arity: usize, spills: usize) -> Self {
         let spill_base = if root { 1 } else { CHILD_ARGS + arity };
         Self {
             spill_base,

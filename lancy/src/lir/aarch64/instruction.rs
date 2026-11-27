@@ -1,19 +1,18 @@
 use super::operand::{Arrangement as A, Bank, Operand as O, PredQual, ShiftKind};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Feature {
+pub(crate) enum Feature {
     Neon,
     Sve,
     Sve2,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct FeatureSet(u8);
+pub(crate) struct FeatureSet(u8);
 
 impl FeatureSet {
-    pub const NONE: Self = Self(0);
-    pub const ALL: Self = Self(7);
-    pub const fn with(self, feature: Feature) -> Self {
+    pub(crate) const NONE: Self = Self(0);
+    pub(crate) const fn with(self, feature: Feature) -> Self {
         Self(
             self.0
                 | match feature {
@@ -23,7 +22,7 @@ impl FeatureSet {
                 },
         )
     }
-    pub const fn contains(self, feature: Feature) -> bool {
+    pub(crate) const fn contains(self, feature: Feature) -> bool {
         self.0 & Self::NONE.with(feature).0 == Self::NONE.with(feature).0
     }
 }
@@ -40,19 +39,19 @@ macro_rules! codes {
         /// Exact instruction forms supported by the Lancy encoder.
         #[allow(non_camel_case_types)]
         #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-        pub enum Code {
+        pub(crate) enum Code {
             $($code,)*
         }
 
         impl Code {
             /// The encoding's name in the Arm architecture description.
-            pub const fn name(self) -> &'static str {
+            pub(crate) const fn name(self) -> &'static str {
                 match self {
                     $(Self::$code => stringify!($code),)*
                 }
             }
 
-            pub const fn required_feature(self) -> Option<Feature> {
+            pub(crate) const fn required_feature(self) -> Option<Feature> {
                 match self {
                     $(Self::$code => codes!(@feature $feature),)*
                 }
@@ -220,7 +219,6 @@ codes! {
     Orn_32_log_shift =     0x2a200000, Base, w, Shift(true);
     Orn_64_log_shift =     0xaa200000, Base, x, Shift(true);
     Orr_32_log_imm =       0x32000000, Base, w, LogicalImmediate;
-    Orr_64_log_imm =       0xb2000000, Base, x, LogicalImmediate;
     Eor_32_log_imm =       0x52000000, Base, w, LogicalImmediate;
     Clz_32 =               0x5ac01000, Base, _, RegPair(Bank::W, Bank::W);
     Clz_64 =               0xdac01000, Base, _, RegPair(Bank::X, Bank::X);
@@ -366,10 +364,7 @@ codes! {
     Bl_only_branch_imm =   0x94000000, Base, _, Branch(BranchKind::Direct);
     B_only_condbranch =    0x54000000, Base, _, Branch(BranchKind::Condition);
     Cbz_32_compbranch =    0x34000000, Base, w, Branch(BranchKind::Compare);
-    Cbz_64_compbranch =    0xb4000000, Base, x, Branch(BranchKind::Compare);
     Cbnz_32_compbranch =   0x35000000, Base, w, Branch(BranchKind::Compare);
-    Cbnz_64_compbranch =   0xb5000000, Base, x, Branch(BranchKind::Compare);
-    Br_64_branch_reg =     0xd61f0000, Base, _, Indirect;
     Blr_64_branch_reg =    0xd63f0000, Base, _, Indirect;
     Ret_64r_branch_reg =   0xd65f0000, Base, _, Indirect;
     Add_asimdsame_only =   0x0e208400, Neon, _, Neon(false);
@@ -385,8 +380,6 @@ codes! {
     Fmul_asimdsame =       0x2e20dc00, Neon, _, FloatNeon;
     Fdiv_asimdsame =       0x2e20fc00, Neon, _, FloatNeon;
     Dup_asimdgen =         0x4e000c00, Neon, _, Dup(false);
-    Saddl_asimd =          0x0e200000, Neon, _, Widen(false);
-    Saddl2_asimd =         0x4e200000, Neon, _, Widen(true);
     Ptrue_p_s_ =           0x2518e000, Sve,  _, Ptrue;
     Add_z_zz_ =            0x04200000, Sve,  _, SveArithmetic;
     Sub_z_zz_ =            0x04200400, Sve,  _, SveArithmetic;
@@ -452,46 +445,6 @@ impl Branch {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
-pub struct Instruction {
-    code: Code,
-    pc: u64,
-    word: u32,
-    branch: Option<Branch>,
-}
-
-impl Instruction {
-    pub fn with(code: Code, operands: &[O], pc: u64) -> Result<Self, EncodeError> {
-        aligned(pc)?;
-        let (word, branch) = code.lower(operands)?;
-        let instruction = Self {
-            code,
-            pc,
-            word,
-            branch,
-        };
-        instruction.encode()?;
-        Ok(instruction)
-    }
-
-    pub fn code(&self) -> Code {
-        self.code
-    }
-    pub fn pc(&self) -> u64 {
-        self.pc
-    }
-    pub fn label_target(&self) -> Option<u64> {
-        self.branch.map(|branch| branch.target)
-    }
-    pub fn encode(&self) -> Result<u32, EncodeError> {
-        self.encode_at(self.pc)
-    }
-    pub fn encode_at(&self, pc: u64) -> Result<u32, EncodeError> {
-        aligned(pc)?;
-        Ok(self.word | self.branch.map_or(Ok(0), |branch| branch.field(pc))?)
-    }
-}
-
 fn aligned(pc: u64) -> Result<(), EncodeError> {
     if pc.is_multiple_of(4) {
         Ok(())
@@ -503,7 +456,7 @@ fn aligned(pc: u64) -> Result<(), EncodeError> {
 type Encoded = (u32, Option<Branch>);
 
 impl Code {
-    pub(super) fn encode(self, operands: &[O], pc: u64) -> Result<u32, EncodeError> {
+    pub(crate) fn encode(self, operands: &[O], pc: u64) -> Result<u32, EncodeError> {
         aligned(pc)?;
         let (word, branch) = self.lower(operands)?;
         Ok(word | branch.map_or(Ok(0), |branch| branch.field(pc))?)
@@ -520,7 +473,7 @@ impl Code {
         }
     }
 
-    pub fn is_available(self, features: FeatureSet) -> bool {
+    pub(crate) fn is_available(self, features: FeatureSet) -> bool {
         self.required_feature().is_none_or(|f| features.contains(f))
     }
 
@@ -605,7 +558,6 @@ enum Form {
     Neon(bool),
     NeonBits,
     NeonTable,
-    Widen(bool),
     Ptrue,
     PredFalse,
     PredPermute,
@@ -1417,19 +1369,6 @@ impl Form {
                     | arranged(o[1], Bank::V, A::B16, 1)? << 5
                     | arranged(o[2], Bank::V, arr, 2)? << 16
             }
-            Self::Widen(high) => {
-                let (vd, dst) = vector(o[0], Bank::V, 0)?;
-                let (s, low, upper) = match dst {
-                    A::H8 => (0, A::B8, A::B16),
-                    A::S4 => (1, A::H4, A::H8),
-                    A::D2 => (2, A::S2, A::S4),
-                    _ => return Err(EncodeError::Operand(0)),
-                };
-                let src = if high { upper } else { low };
-                vd | arranged(o[1], Bank::V, src, 1)? << 5
-                    | arranged(o[2], Bank::V, src, 2)? << 16
-                    | s << 22
-            }
             Self::Ptrue => {
                 let (p, a) = vector(o[0], Bank::P, 0)?;
                 let s = size(a).ok_or(EncodeError::Operand(0))?;
@@ -1509,15 +1448,12 @@ impl Form {
                 if actual != qualifier || p.bank != Bank::P || p.number > 7 {
                     return Err(EncodeError::Operand(1));
                 }
-                let (base, offset) = match o[2] {
-                    O::Memory(base, 0) => (base, 0),
-                    O::MemoryVl(base, offset @ -8..=7) => (base, offset),
-                    _ => return Err(EncodeError::Operand(2)),
+                let O::Memory(base, 0) = o[2] else {
+                    return Err(EncodeError::Operand(2));
                 };
                 arranged(o[0], Bank::Z, a, 0)?
                     | reg(O::reg(base), Bank::X, true, 2)? << 5
                     | u32::from(p.number) << 10
-                    | ((offset as u32) & 15) << 16
             }
             Self::SveTiedTernary => {
                 let z = |i| arranged(o[i], Bank::Z, A::D, i);

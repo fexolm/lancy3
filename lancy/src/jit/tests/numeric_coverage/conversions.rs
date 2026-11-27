@@ -1,4 +1,4 @@
-use super::{Function, LANES, Lane, Op, ScalarKernel, Terminator, Ternary};
+use super::{Function, Kernel, LANES, Lane, Op, Terminator, Ternary};
 use crate::support::numeric::{Action, evaluate};
 
 pub(crate) fn scalar_cast(from: Lane, to: Lane) -> Function {
@@ -89,8 +89,7 @@ fn scalar_casts_match_reference_across_ieee_and_word_boundaries() {
         let cases = inputs(from);
         for to in LANES {
             let kernel =
-                ScalarKernel::compile(&scalar_cast(from, to), &crate::test_target::options())
-                    .unwrap();
+                Kernel::compile(&scalar_cast(from, to), &crate::test_target::options()).unwrap();
             for &bits in &cases {
                 let mut args = [[0; 64]; 3];
                 args[0][..16].copy_from_slice(&bits.to_le_bytes());
@@ -106,7 +105,7 @@ fn scalar_casts_match_reference_across_ieee_and_word_boundaries() {
                 let reference = u128::from_le_bytes(reference[..16].try_into().unwrap()) & mask;
                 let mut out = [0u64; 2];
                 kernel
-                    .call_words(
+                    .call_packed(
                         &words(bits)[..from.bytes().div_ceil(8)],
                         &mut out[..to.bytes().div_ceil(8)],
                     )
@@ -129,8 +128,7 @@ fn half_cast_rounds_both_sides_of_normal_subnormal_and_infinity_midpoints() {
         (Lane::BF16, -133, -126, 7, 0x7f80),
     ] {
         let kernel =
-            ScalarKernel::compile(&scalar_cast(Lane::F64, to), &crate::test_target::options())
-                .unwrap();
+            Kernel::compile(&scalar_cast(Lane::F64, to), &crate::test_target::options()).unwrap();
         let bias = 1 - min_normal;
         let half_sub = 2f64.powi(min_sub - 1);
         for (center, lower, tied, upper) in [
@@ -157,7 +155,7 @@ fn half_cast_rounds_both_sides_of_normal_subnormal_and_infinity_midpoints() {
                 for sign in [false, true] {
                     let bits = if sign { (-x).to_bits() } else { x.to_bits() };
                     let mut out = [0];
-                    kernel.call_words(&[bits], &mut out).unwrap();
+                    kernel.call_packed(&[bits], &mut out).unwrap();
                     assert_eq!(
                         out[0] & 0xffff,
                         val | (u64::from(sign) << 15),
@@ -203,7 +201,7 @@ fn half_fma_preserves_guard_bits_and_signed_zero() {
             .append(block, Op::Ternary(Ternary::MulAdd, a, b, c))
             .unwrap();
         f.set_terminator(block, Terminator::Return(v));
-        let kernel = ScalarKernel::compile(&f, &crate::test_target::options()).unwrap();
+        let kernel = Kernel::compile(&f, &crate::test_target::options()).unwrap();
         // The exact product lies on a target midpoint. A minimum subnormal
         // addend changes its rounding direction, even if f64 addition loses it.
         for (a, b, c, expected) in [
@@ -218,7 +216,7 @@ fn half_fma_preserves_guard_bits_and_signed_zero() {
             (inf | 1, one, one, inf | 1),
         ] {
             let mut out = [0];
-            kernel.call_words(&[a, b, c], &mut out).unwrap();
+            kernel.call_packed(&[a, b, c], &mut out).unwrap();
             let actual = out[0] & 0xffff;
             assert!(
                 actual == expected || is_nan(lane, actual.into()) && is_nan(lane, expected.into()),

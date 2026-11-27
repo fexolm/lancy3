@@ -1,6 +1,6 @@
+use super::BlockMap;
 use super::{Builder, Exit};
 use lancy::hir::{Block, Function, Terminator, Value};
-use lancy::support::slotmap::DenseMap;
 use splice_core::hir::Reg;
 
 impl Builder<'_> {
@@ -14,7 +14,7 @@ impl Builder<'_> {
         start: Block,
         r: Reg,
         required: bool,
-        preds: &DenseMap<Block, Vec<Block>>,
+        preds: &BlockMap<Vec<Block>>,
     ) -> Value {
         let mut path = Vec::new();
         let mut b = start;
@@ -53,8 +53,8 @@ impl Builder<'_> {
 
     pub(super) fn seal(mut self) -> splice_core::Result<Function> {
         let mut pending = vec![self.graph.entry()];
-        let mut live = DenseMap::filled(self.blocks.len(), false);
-        let mut preds = DenseMap::from_fn(self.blocks.len(), |_| Vec::new());
+        let mut live = BlockMap::filled(self.blocks.len(), false);
+        let mut preds = BlockMap::from_fn(self.blocks.len(), |_| Vec::new());
         while let Some(b) = pending.pop() {
             if std::mem::replace(&mut live[b], true) {
                 continue;

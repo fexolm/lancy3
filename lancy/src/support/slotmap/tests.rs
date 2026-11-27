@@ -1,5 +1,4 @@
-use lancy::slot_key;
-use lancy::support::slotmap::{DenseMap, SlotMap};
+use super::{DenseMap, SlotMap, slot_key};
 
 slot_key!(Block);
 
@@ -17,7 +16,7 @@ fn removing_entities_preserves_keys_and_side_table_alignment() {
     assert_eq!(blocks.get(dead), None);
     assert_eq!(blocks.get(Block::INVALID), None);
     assert_eq!(blocks.keys().collect::<Vec<_>>(), [entry, exit, extra]);
-    assert_eq!(blocks.len(), 3);
+    assert_eq!(blocks.keys().count(), 3);
 
     let mut reachable = DenseMap::filled(blocks.slot_count(), false);
     for key in blocks.keys() {

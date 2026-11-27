@@ -1,4 +1,4 @@
-use crate::ScalarKernel;
+use crate::Kernel;
 use crate::hir::{
     Binary, Function, Lane, Op, Simd, Terminator, Ternary, Type, Value, VectorAddress,
 };
@@ -42,9 +42,9 @@ fn words(lane: Lane, values: &[u128]) -> Vec<u64> {
         .collect()
 }
 
-fn check(k: &ScalarKernel, args: &[u64], expected: &[u64]) {
+fn check(k: &Kernel, args: &[u64], expected: &[u64]) {
     let mut result = vec![0; expected.len()];
-    k.call_words(args, &mut result).unwrap();
+    k.call_packed(args, &mut result).unwrap();
     assert_eq!(result, expected);
 }
 
@@ -76,11 +76,11 @@ fn zero_masked_load_has_no_merge_and_negative_zero_keeps_its_bits() {
             )
             .unwrap();
         f.set_terminator(b, Terminator::Return(out));
-        let kernel = ScalarKernel::compile(&f, &crate::test_target::options()).unwrap();
+        let kernel = Kernel::compile(&f, &crate::test_target::options()).unwrap();
         let mem = [7.0f32];
         let mut out = vec![0; cpu.bytes / 8];
         // SAFETY: the active lane reads the one initialized word in mem.
-        unsafe { kernel.call_words_raw(&[mem.as_ptr() as u64, 1], &mut out) }.unwrap();
+        unsafe { kernel.call_packed_unchecked(&[mem.as_ptr() as u64, 1], &mut out) }.unwrap();
         let mut expected = vec![fallback; n];
         expected[0] = u128::from(mem[0].to_bits());
         assert_eq!(out, words(Lane::F32, &expected));
@@ -116,7 +116,7 @@ fn pack_and_expand_preserve_lane_order_for_all_byte_masks() {
                 Simd::Compress(args[0], args[1])
             }
         });
-        let kernel = ScalarKernel::compile(&f, &crate::test_target::options()).unwrap();
+        let kernel = Kernel::compile(&f, &crate::test_target::options()).unwrap();
         for bits in 0..(1usize << mask_width) {
             let active = |i: usize| bits & (1 << (i % mask_width)) != 0;
             let mask: Vec<_> = (0..n)
@@ -271,7 +271,7 @@ fn live_predicates_spill_safely_across_an_outlined_call() {
         bits = f.append(b, Op::Bin(Binary::Or, bits, bit)).unwrap();
     }
     f.set_terminator(b, Terminator::Return(bits));
-    let k = ScalarKernel::compile(
+    let k = Kernel::compile(
         &f,
         &crate::test_target::options().with_inlining(crate::Inlining::Never),
     )
@@ -298,7 +298,7 @@ fn adjacent_vector_load_can_be_a_packed_memory_operand() {
     let v = f.append(b, Op::Load(Type::Vector(Lane::I32), p)).unwrap();
     let r = f.append(b, Op::Bin(Binary::And, v, mask)).unwrap();
     f.set_terminator(b, Terminator::Return(r));
-    let k = ScalarKernel::compile(&f, &crate::test_target::options()).unwrap();
+    let k = Kernel::compile(&f, &crate::test_target::options()).unwrap();
     let n = crate::test_target::width();
     let mem = [0xbcu8; 65];
     // Use an address with an odd low bit regardless of the stack layout.
@@ -308,7 +308,7 @@ fn adjacent_vector_load_can_be_a_packed_memory_operand() {
     args.extend(vec![0x7f7f_7f7f_7f7f_7f7f; n / 8]);
     let mut out = vec![0; n / 8];
     // SAFETY: p addresses at least n readable bytes in the live array.
-    unsafe { k.call_words_raw(&args, &mut out) }.unwrap();
+    unsafe { k.call_packed_unchecked(&args, &mut out) }.unwrap();
     assert_eq!(out, vec![0x3c3c_3c3c_3c3c_3c3c; n / 8]);
     let cpu = Cpu::host();
     if cpu.bytes == 64 || cpu.bytes == 32 && cpu.isa.avx2 {
@@ -340,7 +340,7 @@ fn constant_shuffle_broadcasts_the_selected_table_lane() {
         let i = f.append(b, Op::Simd(Simd::Splat(i))).unwrap();
         let out = f.append(b, Op::Simd(Simd::Shuffle(x, y, i))).unwrap();
         f.set_terminator(b, Terminator::Return(out));
-        let k = ScalarKernel::compile(&f, &crate::test_target::options()).unwrap();
+        let k = Kernel::compile(&f, &crate::test_target::options()).unwrap();
         let value = values.get(index).copied().unwrap_or(0);
         check(&k, &args, &words(Lane::I32, &vec![value; n]));
         let cpu = Cpu::host();
@@ -390,9 +390,9 @@ fn masked_load_uses_the_comparison_mask_directly_on_avx512() {
             .into_iter()
             .map(|x| if lane.signed() || x == 0 { 42 } else { x })
             .collect();
-        let k = ScalarKernel::compile(&f, &crate::test_target::options()).unwrap();
+        let k = Kernel::compile(&f, &crate::test_target::options()).unwrap();
         // SAFETY: the live memory buffer contains a full vector of initialized lanes.
-        unsafe { k.call_words_raw(&args, &mut out) }.unwrap();
+        unsafe { k.call_packed_unchecked(&args, &mut out) }.unwrap();
         assert_eq!(out, words(lane, &expected));
         if Cpu::host().bytes == 64 {
             let ops = instructions(&f);
@@ -425,7 +425,7 @@ fn comparison_and_any_test_every_lane_and_every_bit() {
         let mask = f.append(b, Op::Bin(Binary::And, enabled, less)).unwrap();
         let any = f.append(b, Op::Simd(Simd::AnyTrue(mask))).unwrap();
         f.set_terminator(b, Terminator::Return(any));
-        let k = ScalarKernel::compile(&f, &crate::test_target::options()).unwrap();
+        let k = Kernel::compile(&f, &crate::test_target::options()).unwrap();
         let mut rhs = vec![0; n];
         rhs[n - 1] = 1;
         let mut gate = vec![0; n];
@@ -506,7 +506,7 @@ fn comparing_float_lanes_for_select_preserves_nan_and_zero_bits() {
             })
             .collect();
         check(
-            &ScalarKernel::compile(&f, &crate::test_target::options()).unwrap(),
+            &Kernel::compile(&f, &crate::test_target::options()).unwrap(),
             &args,
             &pack(&expected),
         );
@@ -539,7 +539,7 @@ fn dword_shifts_carry_lanes_across_register_chunks() {
         let mut expected = vec![0; n];
         expected[shift..].copy_from_slice(&table[..n - shift]);
         check(
-            &ScalarKernel::compile(&f, &crate::test_target::options()).unwrap(),
+            &Kernel::compile(&f, &crate::test_target::options()).unwrap(),
             &args,
             &words(Lane::I32, &expected),
         );
@@ -595,7 +595,7 @@ fn broadcast_shift_counts_become_immediates_with_wrapping_and_signedness() {
                     x ^ y
                 });
                 check(
-                    &ScalarKernel::compile(&f, &crate::test_target::options()).unwrap(),
+                    &Kernel::compile(&f, &crate::test_target::options()).unwrap(),
                     &pack(&values),
                     &pack(&expected),
                 );
@@ -647,7 +647,7 @@ fn constant_extract_reads_low_and_high_chunks_without_changing_lane_bits() {
             let i = f.append(b, Op::Const(index as i32)).unwrap();
             let y = f.append(b, Op::Simd(Simd::ExtractLane(x, i))).unwrap();
             f.set_terminator(b, Terminator::Return(y));
-            let k = ScalarKernel::compile(&f, &crate::test_target::options()).unwrap();
+            let k = Kernel::compile(&f, &crate::test_target::options()).unwrap();
             check(&k, &args, &words(lane, &values[index..index + 1]));
             if index * size >= 16 {
                 assert!(instructions(&f).contains(&if cpu.bytes == 32 {
@@ -673,7 +673,7 @@ fn two_table_shuffle_checks_the_entire_unsigned_index() {
         let f = function(&[ty, ty, Type::Vector(idx)], ty, |v| {
             Simd::Shuffle(v[0], v[1], v[2])
         });
-        let k = ScalarKernel::compile(&f, &crate::test_target::options()).unwrap();
+        let k = Kernel::compile(&f, &crate::test_target::options()).unwrap();
         let n = crate::test_target::width() / lane.bytes();
         let tables: Vec<_> = (0..2 * n)
             .map(|i| (i + 1) as u128 * 0x01_01_01_01u128)
@@ -709,7 +709,7 @@ fn ordered_fp_reduce_preserves_rounding_and_the_first_lanes_sign() {
     for lane in [Lane::F32, Lane::F64] {
         let ty = Type::Vector(lane);
         let f = function(&[ty], lane.scalar(), |v| Simd::Reduce(Binary::Add, v[0]));
-        let kernel = ScalarKernel::compile(&f, &crate::test_target::options()).unwrap();
+        let kernel = Kernel::compile(&f, &crate::test_target::options()).unwrap();
         let n = crate::test_target::width() / lane.bytes();
         let bits = |x: f64| {
             if lane == Lane::F32 {
@@ -753,7 +753,7 @@ fn integer_reductions_include_every_chunk_and_wrap_at_lane_width() {
             Binary::Max,
         ] {
             let f = function(&[ty], lane.scalar(), |v| Simd::Reduce(op, v[0]));
-            let k = ScalarKernel::compile(&f, &crate::test_target::options()).unwrap();
+            let k = Kernel::compile(&f, &crate::test_target::options()).unwrap();
             let answer = numbers
                 .iter()
                 .copied()
@@ -796,7 +796,7 @@ fn widen_uses_source_signedness_and_narrow_concatenates_truncated_lanes() {
                 high,
                 value: v[0],
             });
-            let k = ScalarKernel::compile(&f, &crate::test_target::options()).unwrap();
+            let k = Kernel::compile(&f, &crate::test_target::options()).unwrap();
             let start = if high { n / 2 } else { 0 };
             let expected: Vec<_> = a[start..start + n / 2]
                 .iter()
@@ -813,7 +813,7 @@ fn widen_uses_source_signedness_and_narrow_concatenates_truncated_lanes() {
         let f = function(&[Type::Vector(to); 2], Type::Vector(from), |v| {
             Simd::Narrow(from, v[0], v[1])
         });
-        let k = ScalarKernel::compile(&f, &crate::test_target::options()).unwrap();
+        let k = Kernel::compile(&f, &crate::test_target::options()).unwrap();
         let wide: Vec<_> = (0..n)
             .map(|i| {
                 let low = (i as u128 * 17 + 3) & mask;
@@ -861,7 +861,7 @@ fn indexed_memory_can_reuse_the_mask_as_indices_and_passthrough() {
         .unwrap();
         let r = f.append(b, Op::Bin(Binary::Xor, loaded, both)).unwrap();
         f.set_terminator(b, Terminator::Return(r));
-        let k = ScalarKernel::compile(&f, &crate::test_target::options()).unwrap();
+        let k = Kernel::compile(&f, &crate::test_target::options()).unwrap();
         let bytes = lane.bytes();
         let n = crate::test_target::width() / bytes;
         // Only negative indices are active. All active lanes address one of
@@ -895,7 +895,7 @@ fn indexed_memory_can_reuse_the_mask_as_indices_and_passthrough() {
         let mut out = vec![0; crate::test_target::width() / 8];
         // SAFETY: the kernel and allocation remain live. All active accesses target
         // the first two elements of this exclusively borrowed allocation.
-        unsafe { k.call_words_raw(&args, &mut out) }.unwrap();
+        unsafe { k.call_packed_unchecked(&args, &mut out) }.unwrap();
         assert_eq!(out, words(lane, &expected_output));
         assert_eq!(memory, words(lane, &expected));
 

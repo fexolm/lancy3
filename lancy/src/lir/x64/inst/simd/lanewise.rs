@@ -79,7 +79,7 @@ macro_rules! float {
 
 impl Lanewise {
     /// The instructions of `op` on `lane` lanes, if the backend has them.
-    pub fn of(op: B, lane: Lane) -> Option<Self> {
+    pub(crate) fn of(op: B, lane: Lane) -> Option<Self> {
         let (size, signed) = (lane.bytes(), lane.signed());
         if lane.float() {
             let f64 = match lane {
@@ -143,7 +143,7 @@ impl Lanewise {
 
     /// The operation has an instruction for `bytes` (a scalar float's lane
     /// size, or the vector width) on `cpu`.
-    pub fn supports(self, bytes: usize, cpu: Cpu) -> bool {
+    pub(crate) fn supports(self, bytes: usize, cpu: Cpu) -> bool {
         match bytes {
             4 | 8 => self.scalar.is_some(),
             16 => self.sse.is_some_and(|(_, needs)| needs.met(cpu)),
@@ -153,7 +153,7 @@ impl Lanewise {
         }
     }
 
-    pub fn emit(
+    pub(crate) fn emit(
         self,
         a: &mut CodeAssembler,
         bytes: usize,

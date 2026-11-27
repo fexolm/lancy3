@@ -97,25 +97,40 @@ impl Entry {
     }
 }
 
-/// Owns the executable memory backing a compiled function and its callees.
-pub struct ScalarKernel {
+/// A compiled function and its callees, installed as executable code.
+///
+/// Arguments and results travel *packed*: each value occupies consecutive
+/// little-endian `u64` words starting at a word boundary, narrow scalars in
+/// the low bits, a vector in [`Target::vector_bytes`] of the kernel's target.
+/// [`Kernel::call`] covers the common all-`i32` signature.
+///
+/// Stores the kernel made before a trap stay visible in its memory.
+pub struct Kernel {
     memory: Executable,
     entry: Entry,
     target: Target,
     arity: usize,
-    scalar_signature: bool,
+    i32_signature: bool,
     words: usize,
     arg_words: usize,
     result_words: usize,
     pointer_signature: bool,
-    debug: Vec<super::DebugFunction>,
+    debug: Vec<crate::debug::FunctionInfo>,
     /// The fallback sites whose addresses the code embeds.
     _sites: crate::lir::Sites,
 }
 
-impl ScalarKernel {
+impl Kernel {
     /// Verify the reachable functions, generate machine code for
     /// `options.target` and install it for execution on this machine.
+    ///
+    /// # Errors
+    ///
+    /// [`CompileError::InvalidIr`] if `function` or a callee fails
+    /// verification, [`CompileError::Target`] if this machine cannot run
+    /// code for the target, [`CompileError::Unsupported`] past a code
+    /// generation limit, and [`CompileError::Os`] if code memory cannot be
+    /// mapped.
     pub fn compile(function: &Function, options: &CompileOptions) -> Result<Self, CompileError> {
         let _span = tracing::debug_span!(
             target: "lancy::compile",
@@ -148,7 +163,7 @@ impl ScalarKernel {
             entry,
             target,
             arity: function.arity(),
-            scalar_signature: !has_scratch
+            i32_signature: !has_scratch
                 && function.return_type() == Type::I32
                 && function.param_types().iter().all(|&ty| ty == Type::I32),
             words: code.words,
@@ -172,6 +187,7 @@ impl ScalarKernel {
         &self.target
     }
 
+    /// Bytes of installed code, constant pools included.
     pub fn code_size(&self) -> usize {
         self.memory.len
     }
@@ -181,28 +197,34 @@ impl ScalarKernel {
         self.memory.address.as_ptr() as usize
     }
 
-    pub fn debug_functions(&self) -> &[super::DebugFunction] {
+    /// The layout of each compiled body; empty unless compiled with
+    /// [`CompileOptions::with_debug`].
+    pub fn debug_functions(&self) -> &[crate::debug::FunctionInfo] {
         &self.debug
     }
-    /// Workspace size in 32-bit words.
-    pub fn workspace_words(&self) -> usize {
-        self.words * 2
+
+    /// The workspace in 64-bit words.
+    #[cfg(all(test, target_arch = "x86_64"))]
+    pub(crate) fn workspace_words(&self) -> usize {
+        self.words
     }
 
-    /// Whether external pointers or native call scratch require the raw ABI.
-    pub fn requires_raw_call(&self) -> bool {
-        self.pointer_signature
-    }
-
+    /// Call a function of `i32` parameters and an `i32` result.
+    ///
+    /// # Errors
+    ///
+    /// [`SignatureError::NotI32`] for any other signature,
+    /// [`SignatureError::Arity`] for the wrong argument count, and
+    /// [`CallError::Trap`] if the kernel traps.
     pub fn call(&self, args: &[i32]) -> Result<i32, CallError> {
-        if !self.scalar_signature {
-            return Err(CallError::Signature(SignatureError::PointerSignature));
+        if !self.i32_signature {
+            return Err(CallError::Signature(SignatureError::NotI32));
         }
         self.check_arity(args.len())?;
         super::workspace::with(self.words + args.len(), |scratch| {
             let (workspace, packed) = scratch.split_at_mut(self.words);
             for (slot, &arg) in packed.iter_mut().zip(args) {
-                slot.write(arg as u32 as u64);
+                slot.write(u64::from(arg as u32));
             }
             // SAFETY: all ABI arguments are initialized integers. HIR has no
             // integer-to-pointer casts.
@@ -211,10 +233,32 @@ impl ScalarKernel {
         .map(|value| value as i32)
     }
 
-    /// Invoke the typed kernel with one native word per argument. I32 uses the low 32 bits.
-    /// Earlier stores remain visible if a later check traps.
+    /// Call a signature without pointers, with packed arguments and result.
+    ///
+    /// # Errors
+    ///
+    /// [`SignatureError::PointerSignature`] if the signature passes pointers
+    /// or the code uses call scratch, [`SignatureError::ArgumentWords`] and
+    /// [`SignatureError::ResultWords`] for buffers of the wrong size, and
+    /// [`CallError::Trap`] if the kernel traps.
+    pub fn call_packed(&self, args: &[u64], result: &mut [u64]) -> Result<(), CallError> {
+        if self.pointer_signature {
+            return Err(CallError::Signature(SignatureError::PointerSignature));
+        }
+        // SAFETY: verification prevents constructing pointers from numeric
+        // values, so the code touches only its own workspace.
+        unsafe { self.call_packed_unchecked(args, result) }
+    }
+
+    /// Call any signature, with packed arguments and result as
+    /// [`Kernel::call_packed`].
+    ///
+    /// # Errors
+    ///
+    /// As [`Kernel::call_packed`], except that pointers are accepted.
     ///
     /// # Safety
+    ///
     /// Each pointer must be valid for every executed access, including addresses
     /// derived from it or loaded transitively. The caller must uphold lifetimes,
     /// initialization and Rust aliasing rules for the duration of the call.
@@ -223,33 +267,13 @@ impl ScalarKernel {
     /// Writable slices must be exclusive and shared slices remain immutable.
     /// A Rust context dispatcher must receive a live, exclusive context token
     /// of the exact type expected by that dispatcher.
-    pub unsafe fn call_raw(&self, args: &[u64]) -> Result<u64, CallError> {
-        if self.result_words != 1 || self.arity != self.arg_words {
-            return Err(CallError::Signature(SignatureError::WideSignature));
-        }
-        self.check_arity(args.len())?;
-        // SAFETY: the caller supplies valid memory for every external access.
-        super::workspace::with(self.words, |workspace| unsafe {
-            self.invoke(args.as_ptr(), workspace)
-        })
-    }
-
-    /// Invoke a numeric signature. Values occupy consecutive little-endian words,
-    /// each starting at a word boundary. Narrow scalars use the low bits.
-    pub fn call_words(&self, args: &[u64], result: &mut [u64]) -> Result<(), CallError> {
-        if self.requires_raw_call() {
-            return Err(CallError::Signature(SignatureError::PointerSignature));
-        }
-        // SAFETY: verification prevents constructing pointers from numeric values.
-        unsafe { self.call_words_raw(args, result) }
-    }
-
-    /// Invoke any signature with the same packed representation as `call_words`.
-    /// # Safety
-    /// Pointer values must satisfy the memory and lifetime contract of `call_raw`.
-    pub unsafe fn call_words_raw(&self, args: &[u64], result: &mut [u64]) -> Result<(), CallError> {
+    pub unsafe fn call_packed_unchecked(
+        &self,
+        args: &[u64],
+        result: &mut [u64],
+    ) -> Result<(), CallError> {
         if args.len() != self.arg_words {
-            return Err(CallError::Signature(SignatureError::Arity {
+            return Err(CallError::Signature(SignatureError::ArgumentWords {
                 expected: self.arg_words,
                 actual: args.len(),
             }));
@@ -275,6 +299,19 @@ impl ScalarKernel {
             }
             Ok(())
         })
+    }
+
+    /// [`Kernel::call_packed_unchecked`] with a one-word result.
+    ///
+    /// # Safety
+    ///
+    /// As for [`Kernel::call_packed_unchecked`].
+    #[cfg(test)]
+    pub(crate) unsafe fn call_word(&self, args: &[u64]) -> Result<u64, CallError> {
+        let mut word = [0];
+        // SAFETY: forwarded from the caller.
+        unsafe { self.call_packed_unchecked(args, &mut word) }?;
+        Ok(word[0])
     }
 
     fn check_arity(&self, count: usize) -> Result<(), CallError> {

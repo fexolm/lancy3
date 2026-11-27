@@ -1,4 +1,4 @@
-use super::{Binary, Function, Lane, Op, ScalarKernel, Terminator, Unary};
+use super::{Binary, Function, Kernel, Lane, Op, Terminator, Unary};
 use crate::support::numeric::{Action, evaluate};
 
 fn layout(lane: Lane) -> (u32, u64) {
@@ -45,7 +45,7 @@ fn rounded_values_at_halfway_and_signed_zero_match_ieee_reference() {
             let b = f.entry();
             let v = f.append(b, Op::Unary(op, f.params(b)[0])).unwrap();
             f.set_terminator(b, Terminator::Return(v));
-            let k = ScalarKernel::compile(&f, &crate::test_target::options()).unwrap();
+            let k = Kernel::compile(&f, &crate::test_target::options()).unwrap();
             for &input in &inputs {
                 for raw in [input, input | sign] {
                     let mut args = [[0u8; 64]; 3];
@@ -60,7 +60,7 @@ fn rounded_values_at_halfway_and_signed_zero_match_ieee_reference() {
                     .unwrap();
                     let expected = u64::from_le_bytes(expected[..8].try_into().unwrap());
                     let mut out = [0];
-                    k.call_words(&[raw], &mut out).unwrap();
+                    k.call_packed(&[raw], &mut out).unwrap();
                     let actual = out[0];
                     assert!(
                         actual == expected
@@ -88,10 +88,10 @@ fn min_max_preserve_numeric_operand_with_nan_on_either_side() {
             let [a, c] = f.params(b).try_into().unwrap();
             let v = f.append(b, Op::Bin(op, a, c)).unwrap();
             f.set_terminator(b, Terminator::Return(v));
-            let k = ScalarKernel::compile(&f, &crate::test_target::options()).unwrap();
+            let k = Kernel::compile(&f, &crate::test_target::options()).unwrap();
             let run = |x: u64, y: u64| {
                 let mut out = [0];
-                k.call_words(&[x, y], &mut out).unwrap();
+                k.call_packed(&[x, y], &mut out).unwrap();
                 out[0]
             };
             for x in [0, sign, 1, one, one | sign, inf, inf | sign] {

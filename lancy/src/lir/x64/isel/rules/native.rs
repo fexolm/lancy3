@@ -6,7 +6,7 @@ use crate::{
 };
 
 impl Native {
-    pub fn select(action: Action, input: Type, output: Type, cpu: Cpu) -> Option<Self> {
+    pub(crate) fn select(action: Action, input: Type, output: Type, cpu: Cpu) -> Option<Self> {
         let lane = input.lane()?;
         let packed = matches!(input, Type::Vector(_));
         let bytes = if packed || matches!(action, Action::Splat) {

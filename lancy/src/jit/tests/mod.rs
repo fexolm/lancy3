@@ -1,5 +1,5 @@
 //! JIT tests that hold on every supported architecture: they exercise
-//! `ScalarKernel` against the interpreter, the evaluator or Rust.
+//! `Kernel` against the interpreter, the evaluator or Rust.
 mod control_flow;
 mod generated;
 mod integer_runtests;
@@ -7,7 +7,7 @@ pub(crate) mod numeric_coverage;
 mod pointers;
 mod traps;
 
-use super::{Inlining, ScalarKernel, passes};
+use super::{Inlining, Kernel, passes};
 use crate::CompileError;
 use crate::hir::{Binary, Function, Op, Terminator};
 use std::sync::Arc;
@@ -41,7 +41,7 @@ fn an_unrepresentable_expansion_keeps_the_shared_graph_executable() {
         passes::inline_all(&m, crate::lir::MAX_VALUES),
         Err(crate::CompileError::Unsupported(crate::Limit::Registers))
     ));
-    let code = ScalarKernel::compile(&f, &crate::test_target::options()).unwrap();
+    let code = Kernel::compile(&f, &crate::test_target::options()).unwrap();
     assert_eq!(code.call(&[0]), Ok(1));
     assert_eq!(code.call(&[1]), Ok(2));
 }

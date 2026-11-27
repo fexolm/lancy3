@@ -129,10 +129,9 @@ fn rust_calls_verify_operand_types() {
             function.set_terminator(entry, Terminator::Return(result));
             function.verify().unwrap();
             assert_eq!(function.interpret(&[3, 4]), Ok(7));
-            let kernel =
-                crate::ScalarKernel::compile(&function, &crate::test_target::options()).unwrap();
+            let kernel = crate::Kernel::compile(&function, &crate::test_target::options()).unwrap();
             // SAFETY: the only pointer is the kernel's own call scratch.
-            assert_eq!(unsafe { kernel.call_raw(&[3, 4]) }, Ok(7));
+            assert_eq!(unsafe { kernel.call_word(&[3, 4]) }, Ok(7));
         }
     }
 }

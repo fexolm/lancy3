@@ -5,7 +5,7 @@ use std::ops::Range;
 /// Edges and reverse postorder of a function's reachable blocks.
 /// Rebuild after changing blocks or terminators.
 #[derive(Clone)]
-pub struct ControlFlowGraph {
+pub(crate) struct ControlFlowGraph {
     successors: DenseMap<Block, [Option<Block>; 2]>,
     incoming: DenseMap<Block, Range<usize>>,
     predecessors: Vec<Block>,
@@ -23,7 +23,7 @@ enum Visit {
 
 impl ControlFlowGraph {
     /// Check the terminators, destinations and argument counts while building the graph.
-    pub fn compute(function: &Function) -> Result<Self, IrError> {
+    pub(crate) fn compute(function: &Function) -> Result<Self, IrError> {
         let capacity = function.block_capacity();
         let mut incoming = DenseMap::filled(capacity, 0..0);
         let mut successors = DenseMap::filled(capacity, [None; 2]);
@@ -72,11 +72,11 @@ impl ControlFlowGraph {
         })
     }
 
-    pub fn successors(&self, block: Block) -> impl Iterator<Item = Block> {
+    pub(crate) fn successors(&self, block: Block) -> impl Iterator<Item = Block> {
         self.successors[block].into_iter().flatten()
     }
 
-    pub fn predecessors(&self, block: Block) -> &[Block] {
+    pub(crate) fn predecessors(&self, block: Block) -> &[Block] {
         &self.predecessors[self.incoming[block].clone()]
     }
 
@@ -87,7 +87,7 @@ impl ControlFlowGraph {
             .zip(self.edges[self.incoming[block].clone()].iter().copied())
     }
 
-    pub fn reverse_postorder(&self) -> &[Block] {
+    pub(crate) fn reverse_postorder(&self) -> &[Block] {
         &self.reverse_postorder
     }
 

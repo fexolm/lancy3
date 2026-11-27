@@ -3,7 +3,7 @@
 use splice_target::X86Features;
 mod conversions;
 use super::packed_code::{body, executable, host_supports, profiles, supports};
-use crate::ScalarKernel;
+use crate::Kernel;
 use crate::hir::{Binary, Function, Lane, Op, Simd, Terminator, Type, Unary};
 use crate::{
     lir::x64::{Cpu, inst::simd::Native},
@@ -120,7 +120,7 @@ fn avx10_1_profiles() -> [Cpu; 2] {
 fn run_profiles(from: Lane, to: Lane, op: Action, run_cases: impl Fn(usize, &dyn Fn(&mut Slots))) {
     let host = Cpu::host();
     let arity = arity(op);
-    let k = ScalarKernel::compile(&function(from, to, op), &crate::test_target::options()).unwrap();
+    let k = Kernel::compile(&function(from, to, op), &crate::test_target::options()).unwrap();
     run_cases(host.bytes, &|slots| {
         let args: Vec<_> = slots[..arity]
             .iter()
@@ -128,7 +128,7 @@ fn run_profiles(from: Lane, to: Lane, op: Action, run_cases: impl Fn(usize, &dyn
             .map(|b| u64::from_le_bytes(b.try_into().unwrap()))
             .collect();
         let mut out = vec![0; host.bytes / 8];
-        k.call_words(&args, &mut out).unwrap();
+        k.call_packed(&args, &mut out).unwrap();
         for (p, word) in slots[2].chunks_exact_mut(8).zip(out) {
             p.copy_from_slice(&word.to_le_bytes());
         }

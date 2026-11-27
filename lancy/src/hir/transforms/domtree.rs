@@ -5,14 +5,14 @@ use std::ops::Range;
 
 /// Block dominance for a snapshot of the control-flow graph.
 #[derive(Clone)]
-pub struct DomTree {
+pub(crate) struct DomTree {
     // Each interval covers the block and all its descendants in preorder.
     intervals: DenseMap<Block, Range<usize>>,
     preorder: Vec<Block>,
 }
 
 impl DomTree {
-    pub fn compute(cfg: &ControlFlowGraph) -> Self {
+    pub(crate) fn compute(cfg: &ControlFlowGraph) -> Self {
         let order = cfg.reverse_postorder();
         let parent = immediate_dominators(cfg);
         let mut children = DenseMap::from_fn(cfg.block_capacity(), |_| Vec::new());
@@ -49,7 +49,7 @@ impl DomTree {
 
     /// Whether every path from the entry to `block` passes through `dominator`.
     /// Returns false for IDs outside the captured graph or retired before capture.
-    pub fn dominates(&self, dominator: Block, block: Block) -> bool {
+    pub(crate) fn dominates(&self, dominator: Block, block: Block) -> bool {
         match (self.intervals.get(dominator), self.intervals.get(block)) {
             (Some(parent), Some(child)) => !child.is_empty() && parent.contains(&child.start),
             _ => false,

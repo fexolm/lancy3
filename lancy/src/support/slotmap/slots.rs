@@ -2,73 +2,51 @@ use super::{DenseMap, SlotKey};
 use std::ops::{Index, IndexMut};
 
 /// Stable keys for entities that can be removed. Removed slots are never reused.
-///
-/// ```compile_fail
-/// use lancy::{slot_key, support::slotmap::SlotMap};
-/// slot_key!(Block);
-/// slot_key!(Inst);
-/// let mut blocks = SlotMap::<Block, ()>::new();
-/// let mut insts = SlotMap::<Inst, ()>::new();
-/// let inst = insts.insert(());
-/// blocks.remove(inst);
-/// ```
 #[derive(Clone, Debug)]
-pub struct SlotMap<K, V> {
+pub(crate) struct SlotMap<K, V> {
     slots: DenseMap<K, Option<V>>,
-    live: usize,
 }
 
 impl<K: SlotKey, V> SlotMap<K, V> {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
-    pub fn insert(&mut self, value: V) -> K {
-        let key = self.slots.insert(Some(value));
-        self.live += 1;
-        key
+    pub(crate) fn insert(&mut self, value: V) -> K {
+        self.slots.insert(Some(value))
     }
 
-    pub fn remove(&mut self, key: K) -> Option<V> {
-        let value = self.slots.get_mut(key)?.take()?;
-        self.live -= 1;
-        Some(value)
-    }
-
-    pub fn len(&self) -> usize {
-        self.live
-    }
-    pub fn is_empty(&self) -> bool {
-        self.live == 0
+    pub(crate) fn remove(&mut self, key: K) -> Option<V> {
+        self.slots.get_mut(key)?.take()
     }
 
     /// Number of entries a dense side table needs to cover every allocated key.
-    pub fn slot_count(&self) -> usize {
+    pub(crate) fn slot_count(&self) -> usize {
         self.slots.len()
     }
 
-    pub fn get(&self, key: K) -> Option<&V> {
+    pub(crate) fn get(&self, key: K) -> Option<&V> {
         self.slots.get(key)?.as_ref()
     }
-    pub fn get_mut(&mut self, key: K) -> Option<&mut V> {
+    pub(crate) fn get_mut(&mut self, key: K) -> Option<&mut V> {
         self.slots.get_mut(key)?.as_mut()
     }
 
-    pub fn iter(&self) -> impl DoubleEndedIterator<Item = (K, &V)> {
+    pub(crate) fn iter(&self) -> impl DoubleEndedIterator<Item = (K, &V)> {
         self.slots
             .iter()
             .filter_map(|(key, slot)| Some((key, slot.as_ref()?)))
     }
 
-    pub fn keys(&self) -> impl DoubleEndedIterator<Item = K> {
+    pub(crate) fn keys(&self) -> impl DoubleEndedIterator<Item = K> {
         self.iter().map(|(key, _)| key)
     }
 
-    pub fn values(&self) -> impl DoubleEndedIterator<Item = &V> {
+    pub(crate) fn values(&self) -> impl DoubleEndedIterator<Item = &V> {
         self.slots.values().flatten()
     }
 
-    pub fn values_mut(&mut self) -> impl DoubleEndedIterator<Item = &mut V> {
+    pub(crate) fn values_mut(&mut self) -> impl DoubleEndedIterator<Item = &mut V> {
         self.slots.values_mut().flatten()
     }
 }
@@ -77,7 +55,6 @@ impl<K, V> Default for SlotMap<K, V> {
     fn default() -> Self {
         Self {
             slots: DenseMap::default(),
-            live: 0,
         }
     }
 }

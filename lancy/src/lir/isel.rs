@@ -23,7 +23,7 @@ pub(super) struct Edges<'a> {
 }
 
 impl<'a> Edges<'a> {
-    pub fn new(source: &'a VerifiedBody<'_>) -> Self {
+    pub(super) fn new(source: &'a VerifiedBody<'_>) -> Self {
         let VerifiedBody {
             function: f,
             cfg,
@@ -54,14 +54,14 @@ impl<'a> Edges<'a> {
             && self.cfg.predecessors(target).len() > 1
     }
 
-    pub fn function<I: TargetInst>(
+    pub(super) fn function<I: TargetInst>(
         &self,
         machine: I::Machine,
     ) -> Result<super::Function<I>, CompileError> {
         super::Function::new(machine, self.count, self.f.value_count())
     }
 
-    pub fn finish<I: TargetInst>(
+    pub(super) fn finish<I: TargetInst>(
         &self,
         body: &mut super::Function<I>,
         b: Block,
@@ -137,22 +137,22 @@ pub(super) struct Context {
 }
 
 impl Context {
-    pub fn require(&mut self, v: Value) {
+    pub(super) fn require(&mut self, v: Value) {
         self.defs[v].register = true;
     }
-    pub fn constant(&self, v: Value) -> Option<i32> {
+    pub(super) fn constant(&self, v: Value) -> Option<i32> {
         match self.defining_op(v) {
             Some(Op::Const(n)) => Some(n),
             _ => None,
         }
     }
 
-    pub fn defining_op(&self, v: Value) -> Option<Op> {
+    pub(super) fn defining_op(&self, v: Value) -> Option<Op> {
         self.defs[v].source.map(|(_, op)| op)
     }
     /// Only sink total computations. Memory accesses, checks and division
     /// keep their original execution point, including when their result is dead.
-    pub fn single_use(&self, v: Value) -> Option<Op> {
+    pub(super) fn single_use(&self, v: Value) -> Option<Op> {
         let def = &self.defs[v];
         let (b, op) = def.source?;
         (b == self.current && def.uses == 1 && def.pure).then_some(op)
@@ -161,14 +161,14 @@ impl Context {
     /// The definition of `v` if it is the instruction right before the
     /// root and the root is its only use: nothing executes between them, so
     /// the root may perform it, even a memory access, after [`Self::cover`].
-    pub fn adjacent_single_use(&self, v: Value) -> Option<Op> {
+    pub(super) fn adjacent_single_use(&self, v: Value) -> Option<Op> {
         let (previous, op) = self.previous?;
         (previous == v && self.defs[v].uses == 1).then_some(op)
     }
 
     /// The root performs the adjacent definition of `v` itself; selection
     /// skips that instruction.
-    pub fn cover(&mut self, v: Value) {
+    pub(super) fn cover(&mut self, v: Value) {
         debug_assert!(self.adjacent_single_use(v).is_some());
         self.covered = Some(v);
     }

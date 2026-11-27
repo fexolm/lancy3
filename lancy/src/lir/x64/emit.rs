@@ -11,8 +11,8 @@ use super::{
 use crate::lir::regalloc::Allocations;
 use crate::{
     CompileError, Limit, Trap,
+    debug::{FrameInfo, FunctionInfo, Point},
     hir::{Binary, Type, ssa::VerifiedBody},
-    jit::{DebugFrame, DebugFunction},
     lir::{Stage, Stages, layout},
     module::{FunctionId, Module},
     support::slotmap::DenseMap,
@@ -34,7 +34,12 @@ pub(super) struct Constants {
 
 impl Constants {
     /// The label of the first `size` bytes of `bits`.
-    pub fn label(&mut self, a: &mut CodeAssembler, bits: [u8; 64], size: usize) -> CodeLabel {
+    pub(super) fn label(
+        &mut self,
+        a: &mut CodeAssembler,
+        bits: [u8; 64],
+        size: usize,
+    ) -> CodeLabel {
         let mut key = [0; 64];
         key[..size].copy_from_slice(&bits[..size]);
         *self.labels.entry((key, size)).or_insert_with(|| {
@@ -45,12 +50,12 @@ impl Constants {
     }
 
     #[cfg(all(test, target_arch = "x86_64"))]
-    pub fn is_empty(&self) -> bool {
+    pub(super) fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
 
     /// Write the pool; its size in bytes.
-    pub fn emit(mut self, a: &mut CodeAssembler) -> Result<usize, IcedError> {
+    pub(super) fn emit(mut self, a: &mut CodeAssembler) -> Result<usize, IcedError> {
         self.entries
             .sort_by_key(|&(_, _, size)| std::cmp::Reverse(size));
         let mut bytes = 0;
@@ -164,7 +169,7 @@ pub(crate) struct Code {
     /// The instructions end here; the constant pool follows.
     pub text_len: usize,
     pub words: usize,
-    pub debug: Vec<DebugFunction>,
+    pub debug: Vec<FunctionInfo>,
     pub sites: crate::lir::Sites,
 }
 
@@ -308,14 +313,12 @@ fn assemble(module: &Module<CompiledFunction>, debug: bool) -> Result<Code, Fail
             } else {
                 (16, vec![(16, -16), (11, -8)], Vec::new())
             };
-            debug_functions.push(DebugFunction {
-                start,
-                end,
-                workspace_offset: machine.frame.debug_base * 8,
+            debug_functions.push(FunctionInfo {
+                code: start..end,
+                slots: machine.frame.debug_base * 8,
                 points,
-                frame: DebugFrame {
-                    start,
-                    end: frame_end,
+                frame: FrameInfo {
+                    code: start..frame_end,
                     cfa_from_sp: cfa,
                     saved,
                     workspace_saved,
@@ -344,12 +347,11 @@ fn assemble(module: &Module<CompiledFunction>, debug: bool) -> Result<Code, Fail
     if debug {
         let offset = |index: u64| u64::from(assembly.new_instruction_offsets[index as usize]);
         for (i, f) in debug_functions.iter_mut().enumerate() {
-            f.start = if i == 0 { 0 } else { offset(f.start) };
-            f.end = offset(f.end);
-            f.frame.start = offset(f.frame.start);
-            f.frame.end = offset(f.frame.end);
-            for (_, at) in &mut f.points {
-                *at = offset(*at);
+            let start = if i == 0 { 0 } else { offset(f.code.start) };
+            f.code = start..offset(f.code.end);
+            f.frame.code = offset(f.frame.code.start)..offset(f.frame.code.end);
+            for point in &mut f.points {
+                point.offset = offset(point.offset);
             }
         }
     }
@@ -398,7 +400,7 @@ struct Emitter<'a> {
     epilogue: CodeLabel,
     exits: Exits,
     debug: bool,
-    points: &'a mut Vec<(u32, u64)>,
+    points: &'a mut Vec<Point>,
     sites: &'a mut crate::lir::Sites,
 }
 
@@ -494,7 +496,7 @@ impl Emitter<'_> {
             bind(self.a, report)?;
             // A trap can bypass every internal continuation. Recover the
             // root workspace, report the code in R10D through the live status
-            // pointer supplied by ScalarKernel::invoke, and restore the host ABI.
+            // pointer supplied by Kernel::invoke, and restore the host ABI.
             if !self.root {
                 if self.debug {
                     self.a.mov(rax, slot(1))?;
@@ -1003,7 +1005,10 @@ impl Emitter<'_> {
             // A debug point gets its own address for the line table; release
             // code emits nothing.
             Inst::DebugPoint(id) if self.debug => {
-                self.points.push((id, position(a)?));
+                self.points.push(Point {
+                    id,
+                    offset: position(a)?,
+                });
                 a.nop()
             }
             Inst::DebugPoint(_) => Ok(()),

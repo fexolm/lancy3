@@ -1,5 +1,5 @@
 //! Generated AArch64 code run against independently computed results.
-use crate::{CallError, Inlining, ScalarKernel, hir::Function};
+use crate::{CallError, Inlining, Kernel, hir::Function};
 
 fn parse(text: &str) -> Function {
     crate::hir::text::parse(text, &[]).unwrap()
@@ -45,13 +45,13 @@ fn packed_ordered_comparisons_evaluate_both_operands() {
             let f = parse(&format!(
                 "fn main(a:vec.{float} b:vec.{float}) -> vec.{mask}\n r = {op} a b\n ret r"
             ));
-            let kernel = ScalarKernel::compile(&f, &crate::test_target::options()).unwrap();
+            let kernel = Kernel::compile(&f, &crate::test_target::options()).unwrap();
             for start in 0..rows.len() {
                 let lanes = rows.into_iter().cycle().skip(start).take(count);
                 let mut args = lane_words(lanes.clone().map(|(x, _, _)| x), size);
                 args.extend(lane_words(lanes.clone().map(|(_, y, _)| y), size));
                 let mut out = vec![0; width / 8];
-                kernel.call_words(&args, &mut out).unwrap();
+                kernel.call_packed(&args, &mut out).unwrap();
                 let expected =
                     lanes.map(|(_, _, ordered)| if ordered ^ invert { u128::MAX } else { 0 });
                 assert_eq!(out, lane_words(expected, size), "{float} {op}");
@@ -87,19 +87,19 @@ fn rotations_wrap_counts_within_each_integer_lane() {
             let f = parse(&format!(
                 "fn main(a:{ty} b:{ty}) -> {ty}\n r = {op} a b\n ret r"
             ));
-            let kernel = ScalarKernel::compile(&f, &crate::test_target::options()).unwrap();
+            let kernel = Kernel::compile(&f, &crate::test_target::options()).unwrap();
             let data = high | 1;
             for c in counts {
                 let mut out = [0];
                 kernel
-                    .call_words(&[data as u64, c as u64], &mut out)
+                    .call_packed(&[data as u64, c as u64], &mut out)
                     .unwrap();
                 assert_eq!(u128::from(out[0]) & mask, expected(data, c), "{op} {ty}");
             }
             let f = parse(&format!(
                 "fn main(a:vec.{ty} b:vec.{ty}) -> vec.{ty}\n r = {op} a b\n ret r"
             ));
-            let kernel = ScalarKernel::compile(&f, &crate::test_target::options()).unwrap();
+            let kernel = Kernel::compile(&f, &crate::test_target::options()).unwrap();
             let n = width / size as usize;
             for offset in 0..counts.len() {
                 let counts = counts.into_iter().cycle().skip(offset).take(n);
@@ -107,7 +107,7 @@ fn rotations_wrap_counts_within_each_integer_lane() {
                 let mut args = lane_words(vals.clone(), size as usize);
                 args.extend(lane_words(counts.clone(), size as usize));
                 let mut out = vec![0; width / 8];
-                kernel.call_words(&args, &mut out).unwrap();
+                kernel.call_packed(&args, &mut out).unwrap();
                 let want = vals.zip(counts).map(|(a, b)| expected(a, b));
                 assert_eq!(out, lane_words(want, size as usize), "{op} {ty}");
             }
@@ -143,11 +143,11 @@ fn packed_float_specials_preserve_payloads_and_form_whole_lane_masks() {
         let f = parse(&format!(
             "fn main(a:vec.f64) -> vec.{result}\n r = {op} a\n ret r"
         ));
-        let kernel = ScalarKernel::compile(&f, &crate::test_target::options()).unwrap();
+        let kernel = Kernel::compile(&f, &crate::test_target::options()).unwrap();
         for offset in [0, 3, 7] {
             let args: Vec<_> = patterns.into_iter().cycle().skip(offset).take(n).collect();
             let mut out = vec![0; n];
-            kernel.call_words(&args, &mut out).unwrap();
+            kernel.call_packed(&args, &mut out).unwrap();
             let want = args
                 .into_iter()
                 .map(|bits| {
@@ -169,7 +169,7 @@ fn packed_float_specials_preserve_payloads_and_form_whole_lane_masks() {
     }
 
     let f = parse("fn main(m:u128 a:u128 b:u128) -> u128\n r = bitselect m a b\n ret r");
-    let kernel = ScalarKernel::compile(&f, &crate::test_target::options()).unwrap();
+    let kernel = Kernel::compile(&f, &crate::test_target::options()).unwrap();
     let args = [
         0x00ff00ffff00ff00,
         0xf0f00f0faa55aa55,
@@ -179,7 +179,7 @@ fn packed_float_specials_preserve_payloads_and_form_whole_lane_masks() {
         0x123456789abcdef0,
     ];
     let mut out = [0; 2];
-    kernel.call_words(&args, &mut out).unwrap();
+    kernel.call_packed(&args, &mut out).unwrap();
     assert_eq!(out, [0x0f233c6789aacd66, 0xf2d45a7832fc76b0]);
 }
 
@@ -220,9 +220,9 @@ fn width_changing_float_conversions_use_distinct_lane_cursors() {
             let f = parse(&format!(
                 "fn main(a:vec.{ty}) -> vec.f32\n r = {op} f32 a\n ret r"
             ));
-            let kernel = ScalarKernel::compile(&f, &crate::test_target::options()).unwrap();
+            let kernel = Kernel::compile(&f, &crate::test_target::options()).unwrap();
             let mut out = vec![0; width / 8];
-            kernel.call_words(&args, &mut out).unwrap();
+            kernel.call_packed(&args, &mut out).unwrap();
             let want = cases
                 .iter()
                 .skip(start)
@@ -233,7 +233,7 @@ fn width_changing_float_conversions_use_distinct_lane_cursors() {
     }
 
     let f = parse("fn main(a:vec.f32 b:vec.f32) -> vec.bf16\n r = narrow bf16 a b\n ret r");
-    let kernel = ScalarKernel::compile(&f, &crate::test_target::options()).unwrap();
+    let kernel = Kernel::compile(&f, &crate::test_target::options()).unwrap();
     let cases = [
         (0x3f807fff, 0x3f80),
         (0x3f808000, 0x3f80),
@@ -252,14 +252,14 @@ fn width_changing_float_conversions_use_distinct_lane_cursors() {
         .collect::<Vec<_>>();
     let args = lane_words(cases.iter().map(|&(bits, _)| bits), 4);
     let mut out = vec![0; width / 8];
-    kernel.call_words(&args, &mut out).unwrap();
+    kernel.call_packed(&args, &mut out).unwrap();
     assert_eq!(
         out,
         lane_words(cases.iter().map(|&(_, expected)| expected), 2)
     );
 
     let f = parse("fn main(a:vec.f16 b:vec.f16) -> vec.i8\n r = narrow i8 a b\n ret r");
-    let kernel = ScalarKernel::compile(&f, &crate::test_target::options()).unwrap();
+    let kernel = Kernel::compile(&f, &crate::test_target::options()).unwrap();
     let cases = [
         (0xbe00, 255),
         (0x3e00, 1),
@@ -272,14 +272,14 @@ fn width_changing_float_conversions_use_distinct_lane_cursors() {
     ];
     let cases = cases.into_iter().cycle().take(width).collect::<Vec<_>>();
     let args = lane_words(cases.iter().map(|&(bits, _)| bits), 2);
-    kernel.call_words(&args, &mut out).unwrap();
+    kernel.call_packed(&args, &mut out).unwrap();
     assert_eq!(
         out,
         lane_words(cases.iter().map(|&(_, expected)| expected), 1)
     );
 
     let f = parse("fn main(a:vec.f64) -> vec.i128\n r = widenhi i128 a\n ret r");
-    let kernel = ScalarKernel::compile(&f, &crate::test_target::options()).unwrap();
+    let kernel = Kernel::compile(&f, &crate::test_target::options()).unwrap();
     let fp = [
         1.875,
         -18_446_744_073_709_555_712.0,
@@ -294,7 +294,7 @@ fn width_changing_float_conversions_use_distinct_lane_cursors() {
         .iter()
         .map(|x| x.to_bits())
         .collect::<Vec<_>>();
-    kernel.call_words(&args, &mut out).unwrap();
+    kernel.call_packed(&args, &mut out).unwrap();
     assert_eq!(
         out,
         lane_words(
@@ -304,7 +304,7 @@ fn width_changing_float_conversions_use_distinct_lane_cursors() {
     );
 
     let f = parse("fn main(a:vec.u128 b:vec.u128) -> vec.f64\n r = narrow f64 a b\n ret r");
-    let kernel = ScalarKernel::compile(&f, &crate::test_target::options()).unwrap();
+    let kernel = Kernel::compile(&f, &crate::test_target::options()).unwrap();
     let mid = (1_u128 << 100) + (1 << 63) + (1 << 47);
     let vals = [
         mid - 1,
@@ -318,7 +318,7 @@ fn width_changing_float_conversions_use_distinct_lane_cursors() {
     ];
     let vals = &vals[..width / 8];
     kernel
-        .call_words(&lane_words(vals.iter().copied(), 16), &mut out)
+        .call_packed(&lane_words(vals.iter().copied(), 16), &mut out)
         .unwrap();
     assert_eq!(
         out,
@@ -346,9 +346,9 @@ fn wide_width_changes_use_logical_halves() {
             let f = parse(&format!(
                 "fn main(a:vec.{ty}) -> vec.u128\n r = {op} u128 a\n ret r"
             ));
-            let kernel = ScalarKernel::compile(&f, &crate::test_target::options()).unwrap();
+            let kernel = Kernel::compile(&f, &crate::test_target::options()).unwrap();
             let mut out = vec![0; n];
-            kernel.call_words(&source[..n], &mut out).unwrap();
+            kernel.call_packed(&source[..n], &mut out).unwrap();
             let expected = source[half..half + n / 2]
                 .iter()
                 .flat_map(|&x| {
@@ -366,14 +366,14 @@ fn wide_width_changes_use_logical_halves() {
         }
     }
     let f = parse("fn main(a:vec.i128 b:vec.i128) -> vec.u64\n r = narrow u64 a b\n ret r");
-    let kernel = ScalarKernel::compile(&f, &crate::test_target::options()).unwrap();
+    let kernel = Kernel::compile(&f, &crate::test_target::options()).unwrap();
     let args: Vec<_> = source[..n]
         .iter()
         .enumerate()
         .flat_map(|(i, &x)| [x, u64::MAX - i as u64])
         .collect();
     let mut out = vec![0; n];
-    kernel.call_words(&args, &mut out).unwrap();
+    kernel.call_packed(&args, &mut out).unwrap();
     assert_eq!(out, source[..n]);
 }
 
@@ -381,9 +381,9 @@ fn wide_width_changes_use_logical_halves() {
 fn physical_sve_tail_does_not_extend_iota_or_reductions() {
     let width = crate::test_target::width();
     let f = parse("fn main() -> vec.bf16\n r = iota bf16\n ret r");
-    let kernel = ScalarKernel::compile(&f, &crate::test_target::options()).unwrap();
+    let kernel = Kernel::compile(&f, &crate::test_target::options()).unwrap();
     let mut out = vec![0; width / 8];
-    kernel.call_words(&[], &mut out).unwrap();
+    kernel.call_packed(&[], &mut out).unwrap();
     assert_eq!(
         out,
         lane_words(
@@ -399,22 +399,22 @@ fn physical_sve_tail_does_not_extend_iota_or_reductions() {
         let f = parse(&format!(
             "fn main(a:{ty}) -> {ty}\n v = splat a\n r = reduce mul v\n ret r"
         ));
-        let kernel = ScalarKernel::compile(&f, &crate::test_target::options()).unwrap();
+        let kernel = Kernel::compile(&f, &crate::test_target::options()).unwrap();
         let mut out = [0];
-        kernel.call_words(&[input], &mut out).unwrap();
+        kernel.call_packed(&[input], &mut out).unwrap();
         assert_eq!(out[0], expect[(width / 16).trailing_zeros() as usize]);
     }
 
     let f = parse("fn main(a:vec.f32) -> f32\n r = reduce min a\n ret r");
-    let kernel = ScalarKernel::compile(&f, &crate::test_target::options()).unwrap();
+    let kernel = Kernel::compile(&f, &crate::test_target::options()).unwrap();
     let mut input = vec![7.0_f32.to_bits() as u128; width / 4];
     *input.last_mut().unwrap() = 0x7f800001;
     let mut out = [0];
-    kernel.call_words(&lane_words(input, 4), &mut out).unwrap();
+    kernel.call_packed(&lane_words(input, 4), &mut out).unwrap();
     assert_eq!(out[0], 7.0_f32.to_bits() as u64);
 
     let f = parse("fn main(a:vec.u128) -> u128\n r = reduce mul a\n ret r");
-    let kernel = ScalarKernel::compile(&f, &crate::test_target::options()).unwrap();
+    let kernel = Kernel::compile(&f, &crate::test_target::options()).unwrap();
     let mut lanes = vec![1; width / 16];
     lanes[0] = (1 << 64) | 1;
     if lanes.len() > 1 {
@@ -422,7 +422,9 @@ fn physical_sve_tail_does_not_extend_iota_or_reductions() {
     }
     let want = lanes.iter().copied().fold(1u128, u128::wrapping_mul);
     let mut out = [0; 2];
-    kernel.call_words(&lane_words(lanes, 16), &mut out).unwrap();
+    kernel
+        .call_packed(&lane_words(lanes, 16), &mut out)
+        .unwrap();
     assert_eq!(out, [want as u64, (want >> 64) as u64]);
 }
 
@@ -436,7 +438,7 @@ fn wide_rearrangement_and_mask_tests_keep_full_pairs() {
     let shuffle = parse(
         "fn main(a:vec.u128 b:vec.u128 idx:vec.u128) -> vec.u128\n r = shuffle a b idx\n ret r",
     );
-    let shuffle = ScalarKernel::compile(&shuffle, &crate::test_target::options()).unwrap();
+    let shuffle = Kernel::compile(&shuffle, &crate::test_target::options()).unwrap();
     let cases = [
         (0, a(0)),
         ((n - 1) as u128, a(n - 1)),
@@ -453,12 +455,12 @@ fn wide_rearrangement_and_mask_tests_keep_full_pairs() {
         let mut args = sources.clone();
         args.extend(lane_words(cases.clone().map(|(idx, _)| idx), 16));
         let mut out = vec![0; n * 2];
-        shuffle.call_words(&args, &mut out).unwrap();
+        shuffle.call_packed(&args, &mut out).unwrap();
         assert_eq!(out, lane_words(cases.map(|(_, want)| want), 16));
     }
 
     let expand = parse("fn main(a:vec.i128 mask:vec.i128) -> vec.i128\n r = expand a mask\n ret r");
-    let expand = ScalarKernel::compile(&expand, &crate::test_target::options()).unwrap();
+    let expand = Kernel::compile(&expand, &crate::test_target::options()).unwrap();
     for mask in [
         [1 << 127; 4],
         [1 << 63; 4],
@@ -467,7 +469,7 @@ fn wide_rearrangement_and_mask_tests_keep_full_pairs() {
         let mut args = lane_words((0..n).map(a), 16);
         args.extend(lane_words(mask[..n].iter().copied(), 16));
         let mut out = vec![0; n * 2];
-        expand.call_words(&args, &mut out).unwrap();
+        expand.call_packed(&args, &mut out).unwrap();
         let mut inputs = (0..n).map(a);
         let expected = mask[..n].iter().map(|&x| {
             if x >> 127 != 0 {
@@ -481,7 +483,7 @@ fn wide_rearrangement_and_mask_tests_keep_full_pairs() {
 
     for (op, all) in [("all", true), ("any", false)] {
         let f = parse(&format!("fn main(a:vec.u128) -> i32\n r = {op} a\n ret r"));
-        let kernel = ScalarKernel::compile(&f, &crate::test_target::options()).unwrap();
+        let kernel = Kernel::compile(&f, &crate::test_target::options()).unwrap();
         for values in [
             [1, 1 << 64, 1, 1 << 127],
             [1 << 64, 1, 1 << 127, 1],
@@ -496,7 +498,7 @@ fn wide_rearrangement_and_mask_tests_keep_full_pairs() {
             };
             let mut out = [0];
             kernel
-                .call_words(&lane_words(values.iter().copied(), 16), &mut out)
+                .call_packed(&lane_words(values.iter().copied(), 16), &mut out)
                 .unwrap();
             assert_eq!(out[0] as i32, if want { -1 } else { 0 });
         }
@@ -533,9 +535,9 @@ fn vector_integer_division_checks_every_logical_lane() {
             let f = parse(&format!(
                 "fn main(a:vec.{ty} b:vec.{ty}) -> vec.{ty}\n r = {op} a b\n ret r"
             ));
-            let code = ScalarKernel::compile(&f, &crate::test_target::options()).unwrap();
+            let code = Kernel::compile(&f, &crate::test_target::options()).unwrap();
             let mut actual = vec![0; width / 8];
-            code.call_words(&args, &mut actual).unwrap();
+            code.call_packed(&args, &mut actual).unwrap();
             let want = lhs.into_iter().zip(rhs).cycle().take(lanes).map(|(a, b)| {
                 if is_rem {
                     (a % b) as u128
@@ -556,7 +558,7 @@ fn narrow_division_reports_the_earliest_fault_across_groups() {
         let f = parse(&format!(
             "fn main(a:vec.i8 b:vec.i8) -> vec.i8\n r = {op} a b\n ret r"
         ));
-        let code = ScalarKernel::compile(&f, &crate::test_target::options()).unwrap();
+        let code = Kernel::compile(&f, &crate::test_target::options()).unwrap();
         for (first, second, error) in [
             (0, 255, CallError::Trap(crate::Trap::DivisionByZero)),
             (255, 0, CallError::Trap(crate::Trap::DivisionOverflow)),
@@ -566,7 +568,7 @@ fn narrow_division_reports_the_earliest_fault_across_groups() {
             rhs[boundary] = second;
             let mut args = lane_words(std::iter::repeat_n(128, width), 1);
             args.extend(lane_words(rhs, 1));
-            assert_eq!(code.call_words(&args, &mut vec![0; width / 8]), Err(error));
+            assert_eq!(code.call_packed(&args, &mut vec![0; width / 8]), Err(error));
         }
     }
 }
@@ -580,7 +582,7 @@ fn compress_keeps_order_and_zeros_the_full_tail() {
         let f = parse(&format!(
             "fn main(a:vec.{ty} m:vec.{ty}) -> vec.{ty}\n r = compress a m\n ret r"
         ));
-        let code = ScalarKernel::compile(&f, &crate::test_target::options()).unwrap();
+        let code = Kernel::compile(&f, &crate::test_target::options()).unwrap();
         let data: Vec<_> = (0..n).map(|i| sign | (3 * i + 1) as u128).collect();
         let sparse = (1u64 << (n - 1)) | (1 << (n.saturating_sub(2))) | (1 << (n / 4)) | 1;
         for bits in [0, u64::MAX, 1, 1 << (n - 1), sparse, 0x0070_0093_0100_8421] {
@@ -598,7 +600,7 @@ fn compress_keeps_order_and_zeros_the_full_tail() {
                 .collect();
             want.resize(n, 0);
             let mut actual = vec![u64::MAX; width / 8];
-            code.call_words(&args, &mut actual).unwrap();
+            code.call_packed(&args, &mut actual).unwrap();
             assert_eq!(actual, lane_words(want, size), "{ty}, mask {bits:#x}");
         }
     }
@@ -624,7 +626,7 @@ fn wide_indexed_memory_uses_both_words_in_lane_order() {
     let flags = [active | 21, inactive, active | 1, active];
     let pass = [join(17, 33), join(18, 34), join(19, 35), join(20, 36)];
     let expected = [original[0], pass[1], original[2], original[0]];
-    let load = ScalarKernel::compile(&parse(
+    let load = Kernel::compile(&parse(
         "fn main(p:ptr i:vec.i128 m:vec.u128 a:vec.u128) -> vec.u128\n r = maskedload p i m a\n ret r"
     ), &crate::test_target::options()).unwrap();
     for rotate in 0..indices.len() {
@@ -636,11 +638,11 @@ fn wide_indexed_memory_uses_both_words_in_lane_order() {
         }
         let mut actual = vec![0; 2 * n];
         // SAFETY: the middle cell has both neighbors live and every other address is masked out.
-        unsafe { load.call_words_raw(&args, &mut actual) }.unwrap();
+        unsafe { load.call_packed_unchecked(&args, &mut actual) }.unwrap();
         assert_eq!(actual, words(expected));
     }
 
-    let store = ScalarKernel::compile(&parse(
+    let store = Kernel::compile(&parse(
         "fn main(p:ptr i:vec.i128 m:vec.u128 a:vec.u128) -> i32\n maskedstore p i m a\n z = const 0\n ret z"
     ), &crate::test_target::options()).unwrap();
     for count in [n, n - 1] {
@@ -656,7 +658,7 @@ fn wide_indexed_memory_uses_both_words_in_lane_order() {
         ));
         args.extend(lane_words(pass[..n].iter().copied(), 16));
         // SAFETY: every active index wraps to the first live mutable cell.
-        unsafe { store.call_words_raw(&args, &mut [0]) }.unwrap();
+        unsafe { store.call_packed_unchecked(&args, &mut [0]) }.unwrap();
         let mut expected = original;
         if count != 0 {
             expected[0] = pass[count - 1];
@@ -696,7 +698,7 @@ fn wide_integer_operations_match_rust_for_both_words() {
             let f = parse(&format!(
                 "fn main(a:vec.{ty} b:vec.{ty}) -> vec.{ty}\n r = {op} a b\n ret r"
             ));
-            let kernel = ScalarKernel::compile(&f, &crate::test_target::options()).unwrap();
+            let kernel = Kernel::compile(&f, &crate::test_target::options()).unwrap();
             let pairs = if ty == "i128" {
                 signed.map(|(a, b)| (a as u128, b as u128))
             } else {
@@ -742,7 +744,7 @@ fn wide_integer_operations_match_rust_for_both_words() {
                     }
                 });
                 let mut actual = vec![0; 2 * n];
-                kernel.call_words(&args, &mut actual).unwrap();
+                kernel.call_packed(&args, &mut actual).unwrap();
                 assert_eq!(actual, lane_words(want, 16), "{ty} {op}");
             }
         }
@@ -777,12 +779,12 @@ fn wide_shifts_saturation_and_counts_use_the_entire_pair() {
         let f = parse(&format!(
             "fn main(a:vec.{ty} b:vec.{ty}) -> vec.{ty}\n r = {op} a b\n ret r"
         ));
-        let kernel = ScalarKernel::compile(&f, &crate::test_target::options()).unwrap();
+        let kernel = Kernel::compile(&f, &crate::test_target::options()).unwrap();
         for counts in shifts.chunks(n) {
             let mut args = lane_words(std::iter::repeat_n(a, n), 16);
             args.extend(lane_words(counts.iter().map(|&i| i | (1 << 124)), 16));
             let mut actual = vec![0; 2 * n];
-            kernel.call_words(&args, &mut actual).unwrap();
+            kernel.call_packed(&args, &mut actual).unwrap();
             assert_eq!(
                 actual,
                 lane_words(counts.iter().map(|&i| evaluate(a, i as u32)), 16),
@@ -808,7 +810,7 @@ fn wide_shifts_saturation_and_counts_use_the_entire_pair() {
             let f = parse(&format!(
                 "fn main(a:vec.{ty} b:vec.{ty}) -> vec.{ty}\n r = {op} a b\n ret r"
             ));
-            let kernel = ScalarKernel::compile(&f, &crate::test_target::options()).unwrap();
+            let kernel = Kernel::compile(&f, &crate::test_target::options()).unwrap();
             let pairs = if ty == "i128" {
                 signed.map(|(a, b)| (a as u128, b as u128))
             } else {
@@ -824,7 +826,7 @@ fn wide_shifts_saturation_and_counts_use_the_entire_pair() {
                     (_, false) => a.saturating_add(b),
                 });
                 let mut actual = vec![0; 2 * n];
-                kernel.call_words(&args, &mut actual).unwrap();
+                kernel.call_packed(&args, &mut actual).unwrap();
                 assert_eq!(actual, lane_words(want, 16), "{ty} {op}");
             }
         }
@@ -850,11 +852,11 @@ fn wide_shifts_saturation_and_counts_use_the_entire_pair() {
         let f = parse(&format!(
             "fn main(a:vec.i128) -> vec.i128\n r = {op} a\n ret r"
         ));
-        let kernel = ScalarKernel::compile(&f, &crate::test_target::options()).unwrap();
+        let kernel = Kernel::compile(&f, &crate::test_target::options()).unwrap();
         for input in boundary.chunks(n) {
             let mut actual = vec![u64::MAX; 2 * n];
             kernel
-                .call_words(&lane_words(input.iter().copied(), 16), &mut actual)
+                .call_packed(&lane_words(input.iter().copied(), 16), &mut actual)
                 .unwrap();
             assert_eq!(
                 actual,
@@ -893,10 +895,10 @@ fn packed_division_preserves_the_live_left_operand() {
         .map(|(a, b)| (a - a / b).to_bits())
         .collect();
     for policy in [Inlining::Always, Inlining::Never] {
-        let jit = ScalarKernel::compile(&f, &crate::test_target::options().with_inlining(policy))
-            .unwrap();
+        let jit =
+            Kernel::compile(&f, &crate::test_target::options().with_inlining(policy)).unwrap();
         let mut actual = vec![0; lanes];
-        jit.call_words(&args, &mut actual).unwrap();
+        jit.call_packed(&args, &mut actual).unwrap();
         assert_eq!(actual, expected);
     }
 }
@@ -1013,13 +1015,13 @@ fn floating_and_wide_integer_casts_round_and_saturate_at_target_width() {
         let f = parse(&format!(
             "fn main(a:{from}) -> {to}\n r = cast {to} a\n ret r"
         ));
-        let kernel = ScalarKernel::compile(&f, &crate::test_target::options()).unwrap();
+        let kernel = Kernel::compile(&f, &crate::test_target::options()).unwrap();
         for (bits, want) in input.into_iter().zip(expected) {
             let args = [bits as u64, (bits >> 64) as u64];
             let args = &args[..if from.ends_with("128") { 2 } else { 1 }];
             let mut output = [0; 2];
             let out = &mut output[..if to.ends_with("128") { 2 } else { 1 }];
-            kernel.call_words(args, out).unwrap();
+            kernel.call_packed(args, out).unwrap();
             assert_eq!(
                 u128::from(output[0]) | (u128::from(output[1]) << 64),
                 want,
@@ -1047,10 +1049,10 @@ fn wide_root_return_and_outline_preserve_all_words() {
         .collect();
     let expected: Vec<_> = args.iter().map(|v| v.wrapping_mul(2)).collect();
     for policy in [Inlining::Always, Inlining::Never] {
-        let code = ScalarKernel::compile(&f, &crate::test_target::options().with_inlining(policy))
-            .unwrap();
+        let code =
+            Kernel::compile(&f, &crate::test_target::options().with_inlining(policy)).unwrap();
         let mut result = vec![0; args.len()];
-        code.call_words(&args, &mut result).unwrap();
+        code.call_packed(&args, &mut result).unwrap();
         assert_eq!(result, expected);
     }
 }
@@ -1069,9 +1071,9 @@ fn wide_arithmetic_and_iota_preserve_lane_pairs() {
         let f = parse(&format!(
             "fn main(a:vec.u128 b:vec.u128) -> vec.u128\n r = {op} a b\n ret r"
         ));
-        let jit = ScalarKernel::compile(&f, &crate::test_target::options()).unwrap();
+        let jit = Kernel::compile(&f, &crate::test_target::options()).unwrap();
         let mut actual = vec![0; 2 * lanes];
-        jit.call_words(&args, &mut actual).unwrap();
+        jit.call_packed(&args, &mut actual).unwrap();
         let expected: Vec<_> = lhs
             .iter()
             .zip(&rhs)
@@ -1081,9 +1083,9 @@ fn wide_arithmetic_and_iota_preserve_lane_pairs() {
     }
     let f = parse("fn main() -> vec.u128\n r = iota u128\n ret r");
     let mut actual = vec![u64::MAX; 2 * lanes];
-    ScalarKernel::compile(&f, &crate::test_target::options())
+    Kernel::compile(&f, &crate::test_target::options())
         .unwrap()
-        .call_words(&[], &mut actual)
+        .call_packed(&[], &mut actual)
         .unwrap();
     assert_eq!(
         actual,
@@ -1105,11 +1107,11 @@ fn sve_logical_width_and_shorter_thread_are_checked() {
           ret lanes
     ",
     );
-    let code = ScalarKernel::compile(&f, &crate::test_target::options()).unwrap();
+    let code = Kernel::compile(&f, &crate::test_target::options()).unwrap();
     let original: Vec<_> = (0_i32..64).map(|i| i.wrapping_mul(123456789)).collect();
     let mut output = vec![-1i32; original.len()];
     // SAFETY: live disjoint arrays each contain at least the largest SVE register.
-    let result = unsafe { code.call_raw(&[output.as_mut_ptr() as u64, original.as_ptr() as u64]) };
+    let result = unsafe { code.call_word(&[output.as_mut_ptr() as u64, original.as_ptr() as u64]) };
     assert_eq!(result, Ok(lanes as u64));
     assert_eq!(
         output[..lanes],
@@ -1136,7 +1138,7 @@ fn sve_logical_width_and_shorter_thread_are_checked() {
             output.fill(-1);
             // SAFETY: both arrays remain live for the call and cover the original width.
             let result =
-                unsafe { code.call_raw(&[output.as_mut_ptr() as u64, original.as_ptr() as u64]) };
+                unsafe { code.call_word(&[output.as_mut_ptr() as u64, original.as_ptr() as u64]) };
             assert_eq!(
                 result,
                 Err(CallError::Target(
@@ -1152,7 +1154,7 @@ fn sve_logical_width_and_shorter_thread_are_checked() {
             assert_eq!(restored, initial as i32);
             // SAFETY: the same disjoint, live arrays cover the configured width.
             let result =
-                unsafe { code.call_raw(&[output.as_mut_ptr() as u64, original.as_ptr() as u64]) };
+                unsafe { code.call_word(&[output.as_mut_ptr() as u64, original.as_ptr() as u64]) };
             assert_eq!(result, Ok(lanes as u64));
             assert!(
                 output[..lanes]

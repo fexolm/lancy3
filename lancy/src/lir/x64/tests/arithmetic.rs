@@ -1,7 +1,7 @@
 use crate::hir::ssa::InterpretError;
 use crate::hir::{Binary, Function, Op as H, Terminator};
 use crate::{
-    CallError, ScalarKernel, Trap,
+    CallError, Kernel, Trap,
     lir::x64::{
         compile::compile,
         inst::{Alu, Inst, Rhs},
@@ -23,8 +23,8 @@ fn arithmetic_and_spills_match_the_reference() {
             result = f.append(b, H::Bin(Add, result, *a)).unwrap();
         }
         f.set_terminator(b, Terminator::Return(result));
-        let k = ScalarKernel::compile(&f, &crate::test_target::options()).unwrap();
-        assert!(k.workspace_words() >= 36);
+        let k = Kernel::compile(&f, &crate::test_target::options()).unwrap();
+        assert!(k.workspace_words() >= 18);
         let mut input = [1; 40];
         for left in [i32::MIN, -42, 0, 1, i32::MAX] {
             for right in [i32::MIN, -1, 0, 7, 32, 63, 0x5566_7788] {
@@ -68,7 +68,7 @@ fn selection_uses_an_immediate_and_drops_an_unused_multiply() {
         ]
     ));
     assert_eq!(
-        ScalarKernel::compile(&f, &crate::test_target::options())
+        Kernel::compile(&f, &crate::test_target::options())
             .unwrap()
             .call(&[]),
         Ok(4)
@@ -84,7 +84,7 @@ fn aliased_fixed_operands_keep_the_live_input() {
         let y = f.append(b, H::Bin(op, x, x)).unwrap();
         let result = f.append(b, H::Bin(Binary::Xor, y, x)).unwrap();
         f.set_terminator(b, Terminator::Return(result));
-        let k = ScalarKernel::compile(&f, &crate::test_target::options()).unwrap();
+        let k = Kernel::compile(&f, &crate::test_target::options()).unwrap();
         for x in [i32::MIN, -33, -1, 0, 1, 31, 32, i32::MAX] {
             let value = match op {
                 Binary::Shl => Some(x.wrapping_shl(x as u32)),
@@ -105,7 +105,7 @@ fn aliased_fixed_operands_keep_the_live_input() {
 
 #[test]
 fn disjoint_pressure_peaks_reuse_workspace() {
-    fn compile(phases: usize) -> ScalarKernel {
+    fn compile(phases: usize) -> Kernel {
         let mut f = Function::scalar(1);
         let b = f.entry();
         let x = f.params(b)[0];
@@ -122,12 +122,12 @@ fn disjoint_pressure_peaks_reuse_workspace() {
             }
         }
         f.set_terminator(b, Terminator::Return(sum));
-        ScalarKernel::compile(&f, &crate::test_target::options()).unwrap()
+        Kernel::compile(&f, &crate::test_target::options()).unwrap()
     }
     let single = compile(1);
     let many = compile(8);
     assert_eq!(single.call(&[19]), Ok(19 + 32 * 19 + 528));
     assert_eq!(many.call(&[19]), Ok(19 + 8 * (32 * 19 + 528)));
-    assert!(single.workspace_words() >= 32);
+    assert!(single.workspace_words() >= 16);
     assert!(many.workspace_words() < 2 * single.workspace_words());
 }

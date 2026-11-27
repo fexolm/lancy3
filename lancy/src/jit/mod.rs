@@ -4,30 +4,7 @@ mod memory;
 pub(crate) mod packed_test;
 mod workspace;
 
-pub use kernel::ScalarKernel;
-
-/// Machine offsets associated with debug points in a single compiled body.
-#[derive(Debug)]
-pub struct DebugFunction {
-    pub start: u64,
-    pub end: u64,
-    pub workspace_offset: usize,
-    pub points: Vec<(u32, u64)>,
-    /// The active frame, after the prologue and before the epilogue.
-    pub frame: DebugFrame,
-}
-
-/// Stack-based unwind rules for the active portion of a compiled body.
-#[derive(Debug)]
-pub struct DebugFrame {
-    pub start: u64,
-    pub end: u64,
-    pub cfa_from_sp: i32,
-    /// (DWARF register, byte offset relative to the CFA).
-    pub saved: Vec<(u16, i32)>,
-    /// (DWARF register, byte offset relative to the workspace register).
-    pub workspace_saved: Vec<(u16, i64)>,
-}
+pub use kernel::Kernel;
 
 #[cfg(test)]
 pub(crate) mod tests;
@@ -41,7 +18,9 @@ use splice_target::TargetError;
 /// What to compile for and how.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CompileOptions {
+    /// The machine to generate code for.
     pub target: Target,
+    /// Whether calls are expanded in release code.
     pub inlining: Inlining,
     /// Keep source points, outlined calls and debugger frame layouts.
     /// Debug code is never inlined, whatever `inlining` says.
@@ -64,10 +43,12 @@ impl CompileOptions {
         Target::host().map(Self::new)
     }
 
+    /// These options with `inlining`.
     pub fn with_inlining(self, inlining: Inlining) -> Self {
         Self { inlining, ..self }
     }
 
+    /// These options for a debug build.
     pub fn with_debug(self) -> Self {
         Self {
             debug: true,

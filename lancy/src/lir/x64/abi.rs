@@ -110,16 +110,16 @@ pub(crate) static WIN64: Abi = abi(
 );
 
 impl Abi {
-    pub fn env(&'static self) -> &'static MachineEnv {
+    pub(crate) fn env(&'static self) -> &'static MachineEnv {
         &self.env
     }
 
-    pub fn is_win64(&self) -> bool {
+    pub(crate) fn is_win64(&self) -> bool {
         std::ptr::eq(self, &WIN64)
     }
 
     /// Whether `extern "C"` functions of this process use another convention.
-    pub fn is_foreign(&self) -> bool {
+    pub(crate) fn is_foreign(&self) -> bool {
         self.is_win64() != cfg!(windows)
     }
 }
@@ -132,7 +132,7 @@ pub(crate) struct Cpu {
 }
 
 impl Cpu {
-    pub fn new(bytes: usize, isa: X86Features) -> Self {
+    pub(crate) fn new(bytes: usize, isa: X86Features) -> Self {
         // Every target with wide vectors has the instructions for them; see
         // `splice_target::Target::x86_64`.
         debug_assert!(bytes == 16 || isa.avx2 && (bytes == 32 || isa.avx512f && bytes == 64));
@@ -151,7 +151,7 @@ pub(crate) struct Machine {
 }
 
 impl Machine {
-    pub fn new(target: &splice_target::Target) -> Self {
+    pub(crate) fn new(target: &splice_target::Target) -> Self {
         let isa = target
             .x86()
             .expect("x64 code generation for an x86-64 target");
@@ -169,14 +169,14 @@ impl Machine {
 #[cfg(all(test, target_arch = "x86_64"))]
 impl Cpu {
     /// The test target's extensions and width.
-    pub fn host() -> Self {
+    pub(crate) fn host() -> Self {
         Machine::host().cpu
     }
 }
 
 #[cfg(all(test, target_arch = "x86_64"))]
 impl Machine {
-    pub fn host() -> Self {
+    pub(crate) fn host() -> Self {
         Self::new(&crate::test_target::target())
     }
 }

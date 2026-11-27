@@ -1,4 +1,4 @@
-use crate::ScalarKernel;
+use crate::Kernel;
 use crate::hir::{Binary, Function, Lane, Op, Scale, Simd, Terminator, Type};
 use crate::lir::x64::{
     compile::compile,
@@ -34,7 +34,7 @@ fn branch_covers_a_single_use_comparison_and_retains_a_shared_mask() {
             !shared
         );
         assert_eq!(insts.iter().any(|i| matches!(i, Inst::Compare(..))), shared);
-        let code = ScalarKernel::compile(&f, &crate::test_target::options()).unwrap();
+        let code = Kernel::compile(&f, &crate::test_target::options()).unwrap();
         assert_eq!(code.call(&[-9]), Ok(if shared { -1 } else { -9 }));
         assert_eq!(code.call(&[2]), Ok(1));
     }
@@ -62,7 +62,7 @@ fn all_true_branch_only_covers_an_unshared_result() {
                 .any(|i| matches!(i, Inst::BranchAll(Lane::I32, _))),
             cfg!(feature = "experimental-simd") && !shared && (cpu.bytes != 32 || cpu.isa.avx2)
         );
-        let code = ScalarKernel::compile(&f, &crate::test_target::options()).unwrap();
+        let code = Kernel::compile(&f, &crate::test_target::options()).unwrap();
         assert_eq!(code.call(&[0]), Ok(0));
         assert_eq!(code.call(&[1]), Ok(if shared { -1 } else { 1 }));
     }
@@ -104,10 +104,10 @@ fn load_covers_scaled_address_and_shift_covers_its_constant() {
     );
     let words = [-0x123456i32, 0];
     let args = [words[1..].as_ptr() as u64, u32::MAX as u64];
-    let code = ScalarKernel::compile(&f, &crate::test_target::options()).unwrap();
+    let code = Kernel::compile(&f, &crate::test_target::options()).unwrap();
     // SAFETY: index -1 from the second element addresses the first live i32.
     assert_eq!(
-        unsafe { code.call_raw(&args) }.unwrap() as i32,
+        unsafe { code.call_word(&args) }.unwrap() as i32,
         words[0] >> 16
     );
 }

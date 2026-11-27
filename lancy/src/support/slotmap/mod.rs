@@ -4,6 +4,9 @@ mod dense;
 mod key;
 mod slots;
 
-pub use dense::DenseMap;
-pub use key::SlotKey;
-pub use slots::SlotMap;
+pub(crate) use dense::DenseMap;
+pub(crate) use key::{SlotKey, slot_key};
+pub(crate) use slots::SlotMap;
+
+#[cfg(test)]
+mod tests;

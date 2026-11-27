@@ -1,21 +1,17 @@
 use crate::{
-    CallError, Inlining, ScalarKernel, SignatureError, Trap,
+    CallError, Inlining, Kernel, SignatureError, Trap,
     hir::{Binary, Function, Lane, Op, Simd, Terminator, Ternary, Type, Unary},
 };
 use splice_target::X86Features;
 use std::sync::Arc;
 
-fn kernel(
-    types: &[Type],
-    result: Type,
-    body: impl FnOnce(&[crate::hir::Value]) -> Op,
-) -> ScalarKernel {
+fn kernel(types: &[Type], result: Type, body: impl FnOnce(&[crate::hir::Value]) -> Op) -> Kernel {
     let mut f = Function::new(types, result);
     let b = f.entry();
     let op = body(f.params(b));
     let r = f.append(b, op).unwrap();
     f.set_terminator(b, Terminator::Return(r));
-    ScalarKernel::compile(&f, &crate::test_target::options()).unwrap()
+    Kernel::compile(&f, &crate::test_target::options()).unwrap()
 }
 
 #[test]
@@ -65,7 +61,7 @@ fn each_integer_width_wraps_and_divides_with_its_signedness() {
                     .map(|x| u64::from_le_bytes(x.try_into().unwrap()))
                     .collect();
                 let mut out = vec![0; expected.len().div_ceil(8)];
-                k.call_words(&args, &mut out).unwrap();
+                k.call_packed(&args, &mut out).unwrap();
                 let actual: Vec<_> = out.into_iter().flat_map(u64::to_le_bytes).collect();
                 assert_eq!(&actual[..expected.len()], expected, "{ty:?} {op:?}");
             }
@@ -90,7 +86,7 @@ fn fp_results_include_signed_zero_nan_and_fused_rounding() {
                 x.to_bits()
             }
         };
-        let run = |k: &ScalarKernel, inputs: &[u64]| {
+        let run = |k: &Kernel, inputs: &[u64]| {
             let mut args = Vec::new();
             for &n in inputs {
                 let mut a = vec![0; bytes.div_ceil(8) * 8];
@@ -103,7 +99,7 @@ fn fp_results_include_signed_zero_nan_and_fused_rounding() {
                 );
             }
             let mut out = vec![0; bytes.div_ceil(8)];
-            k.call_words(&args, &mut out).unwrap();
+            k.call_packed(&args, &mut out).unwrap();
             let bits: Vec<_> = out.into_iter().flat_map(u64::to_le_bytes).collect();
             bits[..bytes]
                 .chunks_exact(lane.bytes())
@@ -159,18 +155,18 @@ fn wide_spills_and_outlined_calls_preserve_every_lane() {
     }
     root.set_terminator(b, Terminator::Return(sum));
     for policy in [Inlining::Never, Inlining::Always] {
-        let k = ScalarKernel::compile(&root, &crate::test_target::options().with_inlining(policy))
-            .unwrap();
+        let k =
+            Kernel::compile(&root, &crate::test_target::options().with_inlining(policy)).unwrap();
         let mut input: Vec<_> = (0..22 * w).map(|i| 0x100000003 * (i + 1) as u64).collect();
         input.push(0);
         let mut out = vec![0; w];
-        k.call_words(&input, &mut out).unwrap();
+        k.call_packed(&input, &mut out).unwrap();
         for i in 0..w {
             assert_eq!(out[i], (0..22).map(|j| input[j * w + i]).sum());
         }
         *input.last_mut().unwrap() = w as u64;
         assert_eq!(
-            k.call_words(&input, &mut out),
+            k.call_packed(&input, &mut out),
             Err(CallError::Trap(Trap::Bounds))
         );
     }
@@ -188,7 +184,7 @@ fn unaligned_vector_store_precedes_trap() {
     f.append_inst(b, Op::BoundsCheck(i, n)).unwrap();
     f.append_inst(b, Op::Store(p, x)).unwrap();
     f.set_terminator(b, Terminator::Return(i));
-    let k = ScalarKernel::compile(&f, &crate::test_target::options()).unwrap();
+    let k = Kernel::compile(&f, &crate::test_target::options()).unwrap();
     let w = crate::test_target::width();
     let original: Vec<_> = (0..w + 2).map(|i| (201 + 19 * i) as u8).collect();
     for (i, result) in [
@@ -208,7 +204,7 @@ fn unaligned_vector_store_precedes_trap() {
         }
         // SAFETY: p points one byte into this live, exclusively owned width+2 byte buffer.
         assert_eq!(
-            unsafe { k.call_raw(&[buf[1..].as_mut_ptr() as u64, i]) },
+            unsafe { k.call_word(&[buf[1..].as_mut_ptr() as u64, i]) },
             result
         );
         assert_eq!(buf, expected);
@@ -497,7 +493,7 @@ fn signed_zero_and_unordered_fp_comparisons_make_per_lane_masks() {
             Op::Bin(op, v[0], v[1])
         });
         let mut out = vec![0; w / 2];
-        k.call_words(&args, &mut out).unwrap();
+        k.call_packed(&args, &mut out).unwrap();
         for i in 0..w {
             let (a, b) = (xs[i % 4], ys[i % 4]);
             let expected = match op {
@@ -523,14 +519,14 @@ fn typed_word_abi_rejects_short_buffers_before_execution() {
     let n = crate::test_target::width() / 8;
     let result = &mut vec![0xdead; n];
     assert_eq!(
-        f.call_words(&[1], result),
-        Err(CallError::Signature(SignatureError::Arity {
+        f.call_packed(&[1], result),
+        Err(CallError::Signature(SignatureError::ArgumentWords {
             expected: n,
             actual: 1
         }))
     );
     assert_eq!(
-        f.call_words(&vec![0; n], &mut result[..1]),
+        f.call_packed(&vec![0; n], &mut result[..1]),
         Err(CallError::Signature(SignatureError::ResultWords {
             expected: n,
             actual: 1
@@ -559,7 +555,7 @@ fn saturating_float_cast_uses_every_lane() {
         for pair in cases.chunks_exact(2) {
             let bits = u64::from(pair[0].to_bits()) | u64::from(pair[1].to_bits()) << 32;
             let mut result = vec![0; w];
-            k.call_words(&vec![bits; w], &mut result).unwrap();
+            k.call_packed(&vec![bits; w], &mut result).unwrap();
             let convert = |x: f32| {
                 if ty == Type::Vector(Lane::I32) {
                     x as i32 as u32
@@ -586,7 +582,7 @@ fn mixed_scalar_mask_selects_full_width_values() {
             args.extend(vec![0x1111; words]);
             args.extend(vec![0x7777; words]);
             let mut out = vec![0; words];
-            k.call_words(&args, &mut out).unwrap();
+            k.call_packed(&args, &mut out).unwrap();
             let mask = if size == 1 { 0xff } else { u64::MAX };
             assert!(
                 out.iter()

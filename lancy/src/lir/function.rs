@@ -31,24 +31,28 @@ pub(super) struct Function<I: TargetInst> {
 }
 
 impl<I: TargetInst> Function<I> {
-    pub fn insts(&self) -> &[I] {
+    pub(super) fn insts(&self) -> &[I] {
         &self.insts
     }
 
-    pub fn machine(&self) -> &I::Machine {
+    pub(super) fn machine(&self) -> &I::Machine {
         &self.machine
     }
 
-    pub fn details(&self) -> &I::Details {
+    pub(super) fn details(&self) -> &I::Details {
         &self.details
     }
 
     /// Where selection stores an instruction's payload before pushing it.
-    pub fn details_mut(&mut self) -> &mut I::Details {
+    pub(super) fn details_mut(&mut self) -> &mut I::Details {
         &mut self.details
     }
 
-    pub fn new(machine: I::Machine, blocks: usize, vregs: usize) -> Result<Self, CompileError> {
+    pub(super) fn new(
+        machine: I::Machine,
+        blocks: usize,
+        vregs: usize,
+    ) -> Result<Self, CompileError> {
         if vregs > super::MAX_VALUES || blocks > i32::MAX as usize {
             return Err(CompileError::Unsupported(crate::Limit::Registers));
         }
@@ -68,7 +72,7 @@ impl<I: TargetInst> Function<I> {
         })
     }
 
-    pub fn temp(&mut self, class: RegClass) -> Result<VReg, CompileError> {
+    pub(super) fn temp(&mut self, class: RegClass) -> Result<VReg, CompileError> {
         if self.vregs == super::MAX_VALUES {
             return Err(CompileError::Unsupported(crate::Limit::Registers));
         }
@@ -79,7 +83,7 @@ impl<I: TargetInst> Function<I> {
 
     /// Append an instruction to the open block: the one the next
     /// [`Self::end_block`] closes. Blocks are numbered in the order they close.
-    pub fn push(&mut self, inst: I) -> Result<(), CompileError> {
+    pub(super) fn push(&mut self, inst: I) -> Result<(), CompileError> {
         inst.operands(&self.machine, &self.details, &mut self.operands);
         for &temp in inst.temps(&self.machine) {
             let operand = match temp {
@@ -130,18 +134,23 @@ impl<I: TargetInst> Function<I> {
         self.operands[first..at].copy_from_slice(operands);
     }
 
-    pub fn loop_depth(&self, block: Block) -> usize {
+    pub(super) fn loop_depth(&self, block: Block) -> usize {
         self.blocks[block.index()].loop_depth
     }
 
     /// True for a backedge or the branch arm leading to its copy block.
-    pub fn leads_to_backedge(&self, block: Block, edge: usize) -> bool {
+    pub(super) fn leads_to_backedge(&self, block: Block, edge: usize) -> bool {
         self.backedges[self.blocks[block.index()].edges.start + edge]
     }
 
     /// Add a successor edge of the open block, in the order of its branch's
     /// targets.
-    pub fn edge(&mut self, target: Block, args: impl IntoIterator<Item = VReg>, backedge: bool) {
+    pub(super) fn edge(
+        &mut self,
+        target: Block,
+        args: impl IntoIterator<Item = VReg>,
+        backedge: bool,
+    ) {
         self.predecessors[target.index()].push(Block::new(self.blocks.len()));
         self.successors.push(target);
         let start = self.block_values.len();
@@ -150,7 +159,7 @@ impl<I: TargetInst> Function<I> {
         self.backedges.push(backedge);
     }
 
-    pub fn end_block(
+    pub(super) fn end_block(
         &mut self,
         params: impl IntoIterator<Item = VReg>,
         loop_depth: usize,

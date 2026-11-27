@@ -8,7 +8,7 @@ use regalloc2::{RegClass, VReg};
 pub(super) struct Masks(Vec<bool>);
 
 impl Masks {
-    pub fn analyze(f: &Function, cfg: &ControlFlowGraph, cpu: Cpu) -> Self {
+    pub(super) fn analyze(f: &Function, cfg: &ControlFlowGraph, cpu: Cpu) -> Self {
         if !simd::evex(cpu) {
             return Self(Vec::new());
         }
@@ -124,11 +124,11 @@ impl Masks {
         Self(groups.finish())
     }
 
-    pub fn contains(&self, v: Value) -> bool {
+    pub(super) fn contains(&self, v: Value) -> bool {
         self.0.get(v.index()).copied().unwrap_or(false)
     }
 
-    pub fn reg(&self, f: &Function, v: Value) -> VReg {
+    pub(super) fn reg(&self, f: &Function, v: Value) -> VReg {
         let ty = f.value_type(v);
         let class = if matches!(ty, Type::Vector(_)) && self.contains(v) {
             RegClass::Float

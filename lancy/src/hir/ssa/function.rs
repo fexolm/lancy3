@@ -14,7 +14,10 @@ use crate::hir::IrError;
 use crate::support::slotmap::{DenseMap, SlotMap};
 use std::{ops::Range, sync::Arc};
 
-crate::slot_key!(pub Block);
+crate::support::slotmap::slot_key!(
+    /// A basic block.
+    pub Block
+);
 
 #[derive(Clone, Debug)]
 struct BlockData {
@@ -35,7 +38,10 @@ impl Default for BlockData {
     }
 }
 
-crate::slot_key!(pub Inst);
+crate::support::slotmap::slot_key!(
+    /// An instruction.
+    pub Inst
+);
 
 #[derive(Clone, Debug)]
 struct InstData {
@@ -65,14 +71,20 @@ impl Span {
     }
 }
 
-crate::slot_key!(pub Call);
+crate::support::slotmap::slot_key!(
+    /// A call site, recorded by [`Function::add_call`].
+    pub Call
+);
 #[derive(Clone, Debug)]
 struct CallData {
     callee: Arc<Function>,
     args: Span,
 }
 
-crate::slot_key!(pub Edge);
+crate::support::slotmap::slot_key!(
+    /// A control-flow edge with its arguments, recorded by [`Function::add_edge`].
+    pub Edge
+);
 
 /// An SSA function under construction or verified by [`Function::verify`].
 ///
@@ -86,6 +98,22 @@ crate::slot_key!(pub Edge);
 /// operations are rejected by [`Function::append`] and structural errors
 /// that a builder can make with valid handles by `verify`, both as an
 /// [`IrError`].
+///
+/// Each kind of handle has its own type, so a block cannot stand for a value:
+///
+/// ```
+/// # use lancy::hir::Function;
+/// let mut f = Function::scalar(1);
+/// let block = f.create_block();
+/// assert!(f.params(block).is_empty());
+/// ```
+///
+/// ```compile_fail
+/// # use lancy::hir::Function;
+/// let f = Function::scalar(1);
+/// let value = f.params(f.entry())[0];
+/// f.params(value);
+/// ```
 #[derive(Clone, Debug)]
 pub struct Function {
     arity: usize,
@@ -107,9 +135,13 @@ pub struct Function {
 /// borrowed, and shared bytes stay immutable throughout the call.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SliceParam {
+    /// The pointer parameter.
     pub ptr: Value,
+    /// The length parameter, in elements.
     pub len: Value,
+    /// Bytes per element.
     pub element: u8,
+    /// Whether the kernel may write the slice.
     pub writable: bool,
 }
 
@@ -119,6 +151,7 @@ impl Function {
         Self::from_types(params.iter().copied(), return_type)
     }
 
+    /// A function of `arity` `i32` parameters and an `i32` result.
     pub fn scalar(arity: usize) -> Self {
         Self::from_types(std::iter::repeat_n(Type::I32, arity), Type::I32)
     }
@@ -144,15 +177,19 @@ impl Function {
         f
     }
 
+    /// Number of parameters.
     pub fn arity(&self) -> usize {
         self.arity
     }
+    /// Parameter types in ABI order.
     pub fn param_types(&self) -> &[Type] {
         &self.types.as_slice()[..self.arity]
     }
+    /// The result type.
     pub fn return_type(&self) -> Type {
         self.return_type
     }
+    /// The type of a parameter or result.
     pub fn value_type(&self, value: Value) -> Type {
         self.types[value]
     }
@@ -244,9 +281,11 @@ impl Function {
                 .zip(self.slice_param(b))
                 .is_some_and(|(a, b)| a.writable || b.writable)
     }
+    /// The entry block; its parameters are the function's.
     pub fn entry(&self) -> Block {
         Block::from_index(0)
     }
+    /// Number of value IDs issued.
     pub fn value_count(&self) -> usize {
         self.types.len()
     }
@@ -258,9 +297,11 @@ impl Function {
     pub fn block_capacity(&self) -> usize {
         self.blocks.slot_count()
     }
+    /// The live blocks in ID order.
     pub fn blocks(&self) -> impl Iterator<Item = Block> + '_ {
         self.blocks.keys()
     }
+    /// The parameters of `b`.
     pub fn params(&self, b: Block) -> &[Value] {
         &self.blocks[b].params
     }
@@ -269,6 +310,7 @@ impl Function {
     pub fn param_index(&self, b: Block, value: Value) -> Option<usize> {
         self.params(b).iter().position(|&param| param == value)
     }
+    /// The instructions of `b` in order.
     pub fn instructions(&self, b: Block) -> impl Iterator<Item = Inst> + '_ {
         let mut cursor = self.blocks[b].first;
         std::iter::from_fn(move || {
@@ -280,9 +322,11 @@ impl Function {
             Some(inst)
         })
     }
+    /// The operation of an instruction.
     pub fn op(&self, i: Inst) -> &Op {
         &self.insts[i].op
     }
+    /// The value an instruction defines, if any.
     pub fn result(&self, i: Inst) -> Option<Value> {
         let result = self.insts[i].result;
         (result != Value::INVALID).then_some(result)
@@ -306,6 +350,7 @@ impl Function {
             .as_ref()
             .expect("unterminated SSA block")
     }
+    /// The target and arguments of an edge.
     pub fn edge(&self, edge: Edge) -> (Block, &[Value]) {
         let (block, args) = self.edges[edge];
         (block, &self.operands[args.range()])
@@ -402,18 +447,22 @@ impl Function {
         Some((&data.callee, &self.operands[data.args.range()]))
     }
 
+    /// The callee and arguments of a call.
     pub fn call(&self, call: Call) -> (&Arc<Function>, &[Value]) {
         let data = &self.calls[call];
         (&data.callee, &self.operands[data.args.range()])
     }
 
+    /// A new empty block without parameters.
     pub fn create_block(&mut self) -> Block {
         self.blocks.insert(BlockData::default())
     }
 
+    /// Append an `i32` parameter to `block`.
     pub fn append_param(&mut self, block: Block) -> Value {
         self.append_typed_param(block, Type::I32)
     }
+    /// Append a parameter of type `ty` to `block`.
     pub fn append_typed_param(&mut self, block: Block, ty: Type) -> Value {
         let params = &mut self.blocks[block].params;
         let value = self.types.insert(ty);
@@ -475,19 +524,23 @@ impl Function {
         Ok(id)
     }
 
+    /// Record a call of `callee` with `args`, for an [`Op::Call`].
     pub fn add_call(&mut self, callee: Arc<Function>, args: &[Value]) -> Call {
         let args = Span::append(&mut self.operands, args);
         self.calls.insert(CallData { callee, args })
     }
 
+    /// Record an edge to `target` passing `args` to its parameters.
     pub fn add_edge(&mut self, target: Block, args: &[Value]) -> Edge {
         let args = Span::append(&mut self.operands, args);
         self.edges.insert((target, args))
     }
+    /// End `b` with `term`, replacing any earlier terminator.
     pub fn set_terminator(&mut self, b: Block, term: Terminator) {
         self.blocks[b].term = Some(term);
     }
 
+    /// End `from` with a jump to `to` passing `args`.
     pub fn jump(&mut self, from: Block, to: Block, args: &[Value]) {
         let edge = self.add_edge(to, args);
         self.set_terminator(from, Terminator::Jump(edge));

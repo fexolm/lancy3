@@ -66,15 +66,15 @@ pub(in crate::lir::x64) struct Native {
 }
 
 impl Native {
-    pub fn temporaries(self) -> usize {
+    pub(crate) fn temporaries(self) -> usize {
         self.recipe.map_or(0, |r| {
             r.temporaries(self.action, self.input, self.output, self.cpu)
         })
     }
-    pub fn separate_output(self) -> bool {
+    pub(crate) fn separate_output(self) -> bool {
         self.recipe.is_some()
     }
-    pub fn tied(self) -> bool {
+    pub(crate) fn tied(self) -> bool {
         if self.recipe.is_some() {
             return false;
         }
@@ -84,7 +84,7 @@ impl Native {
                 && matches!(self.action, Action::Binary(_)))
     }
 
-    pub fn emit_allocated(
+    pub(crate) fn emit_allocated(
         self,
         a: &mut CodeAssembler,
         regs: &[usize],

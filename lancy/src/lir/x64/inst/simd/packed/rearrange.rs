@@ -9,21 +9,21 @@ pub(in crate::lir::x64) enum PairedShuffle {
 
 impl PairedShuffle {
     /// The listing name and whether the form takes the high halves.
-    pub fn parts(self) -> (&'static str, bool) {
+    pub(crate) fn parts(self) -> (&'static str, bool) {
         match self {
             Self::Interleave(high) => ("interleave", high),
             Self::Deinterleave(high) => ("deinterleave", high),
         }
     }
 
-    pub fn index(self, i: usize, lanes: usize) -> usize {
+    pub(crate) fn index(self, i: usize, lanes: usize) -> usize {
         match self {
             Self::Interleave(high) => i / 2 + i % 2 * lanes + usize::from(high) * lanes / 2,
             Self::Deinterleave(odd) => 2 * i + usize::from(odd),
         }
     }
 
-    pub fn emit(
+    pub(crate) fn emit(
         self,
         a: &mut CodeAssembler,
         pool: &mut emit::Constants,

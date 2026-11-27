@@ -1,4 +1,4 @@
-use super::ScalarKernel;
+use super::Kernel;
 use crate::hir::{Binary, Function, Op, Terminator};
 use crate::{CallError, CompileError, Inlining, SignatureError, Trap};
 use std::mem::MaybeUninit;
@@ -41,26 +41,24 @@ fn scratch_pointers_require_the_raw_call_contract_transitively() {
     caller.set_terminator(block, Terminator::Return(returned));
 
     for policy in [crate::Inlining::Always, crate::Inlining::Never] {
-        let kernel = ScalarKernel::compile(
+        let kernel = Kernel::compile(
             &caller,
             &crate::test_target::options().with_inlining(policy),
         )
         .unwrap();
         assert_eq!(
             kernel.call(&[]),
-            Err(crate::CallError::Signature(
-                SignatureError::PointerSignature
-            ))
+            Err(crate::CallError::Signature(SignatureError::NotI32))
         );
         assert_eq!(
-            kernel.call_words(&[], &mut [0]),
+            kernel.call_packed(&[], &mut [0]),
             Err(crate::CallError::Signature(
                 SignatureError::PointerSignature
             ))
         );
         // SAFETY: the only access is the initialized first word of this
         // live frame's aligned scratch area. No pointers cross the ABI.
-        assert_eq!(unsafe { kernel.call_raw(&[]) }, Ok(19));
+        assert_eq!(unsafe { kernel.call_word(&[]) }, Ok(19));
     }
 }
 /// Two nested call levels around a division that traps on a zero divisor,
@@ -108,7 +106,7 @@ fn nested_normal_and_trapping_returns_restore_host_registers() {
         .flat_map(|options| [Inlining::Always, Inlining::Never].map(|policy| (options, policy)))
     {
         let policy = (options.target.calling_convention(), policy);
-        let kernel = ScalarKernel::compile(&f, &options.with_inlining(policy.1)).unwrap();
+        let kernel = Kernel::compile(&f, &options.with_inlining(policy.1)).unwrap();
         for (divisor, expected) in [(3, Ok(0)), (0, Err(CallError::Trap(Trap::DivisionByZero)))] {
             let mut args = [7u64; 24];
             args[1] = divisor;
@@ -135,7 +133,7 @@ fn nested_normal_and_trapping_returns_restore_host_registers() {
 #[test]
 fn one_kernel_serves_concurrent_callers_and_drops_on_another_thread() {
     let f = nested_division();
-    let kernel = ScalarKernel::compile(&f, &crate::test_target::options()).unwrap();
+    let kernel = Kernel::compile(&f, &crate::test_target::options()).unwrap();
     let expected = |i: u64| -> Result<i32, CallError> {
         if i == 0 {
             return Err(CallError::Trap(Trap::DivisionByZero));

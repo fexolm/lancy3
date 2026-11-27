@@ -1,4 +1,4 @@
-use crate::ScalarKernel;
+use crate::Kernel;
 use crate::hir::{Binary, Function, Op, Terminator};
 
 // A missing move can affect a later use far from the instruction that clobbered
@@ -46,7 +46,7 @@ fn program(mut seed: u32) -> Function {
 fn mixed_instruction_sequences_match_unoptimized_ssa() {
     for seed in 1..=64 {
         let f = program(seed);
-        let kernel = ScalarKernel::compile(&f, &crate::test_target::options())
+        let kernel = Kernel::compile(&f, &crate::test_target::options())
             .unwrap_or_else(|e| panic!("seed={seed}: {e}"));
         let mut state = seed;
         let inputs = [

@@ -24,7 +24,7 @@ fn replacing_a_call_changes_the_next_modules_reachable_functions() {
     assert_eq!(after.functions.len(), 1);
     assert!(after.call_graph.callees(after.call_graph.root()).is_empty());
     assert_eq!(
-        crate::ScalarKernel::compile(&root, &crate::test_target::options())
+        crate::Kernel::compile(&root, &crate::test_target::options())
             .unwrap()
             .call(&[17]),
         Ok(17)
@@ -77,7 +77,7 @@ fn batch_replacement_keeps_ids_and_rolls_back_failed_edits() {
     assert_eq!(*f.op(two), Op::Const(7));
     assert_eq!(f.result(one), Some(value));
     assert_eq!(
-        crate::ScalarKernel::compile(&f, &crate::test_target::options())
+        crate::Kernel::compile(&f, &crate::test_target::options())
             .unwrap()
             .call(&[]),
         Ok(7)
@@ -122,7 +122,7 @@ fn merging_rewrites_dominated_call_and_loop_arguments() {
     assert_eq!(f.edge(no), (exit, &[b][..]));
     assert_eq!(f.blocks().collect::<Vec<_>>(), vec![entry, latch, exit]);
     assert_eq!(f.instructions(latch).collect::<Vec<_>>(), vec![call_inst]);
-    let kernel = crate::ScalarKernel::compile(&f, &crate::test_target::options()).unwrap();
+    let kernel = crate::Kernel::compile(&f, &crate::test_target::options()).unwrap();
     assert_eq!(kernel.call(&[0, 17]), Ok(17));
 }
 

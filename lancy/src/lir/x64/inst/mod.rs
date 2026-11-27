@@ -284,11 +284,11 @@ pub(super) enum Inst {
     Ret(VReg),
 }
 
-crate::slot_key!(pub(super) NativeId);
-crate::slot_key!(pub(super) ExpansionId);
-crate::slot_key!(pub(super) SelectId);
-crate::slot_key!(pub(super) MaskedId);
-crate::slot_key!(pub(super) ClobberId);
+crate::support::slotmap::slot_key!(pub(super) NativeId);
+crate::support::slotmap::slot_key!(pub(super) ExpansionId);
+crate::support::slotmap::slot_key!(pub(super) SelectId);
+crate::support::slotmap::slot_key!(pub(super) MaskedId);
+crate::support::slotmap::slot_key!(pub(super) ClobberId);
 
 /// An operation with a native vector or scalar form.
 #[derive(Clone, Copy, Debug)]
@@ -332,20 +332,20 @@ pub(super) struct Details {
 }
 
 impl Details {
-    pub fn native(&mut self, native: NativeInst) -> Inst {
+    pub(super) fn native(&mut self, native: NativeInst) -> Inst {
         Inst::Native(self.natives.insert(native))
     }
-    pub fn fallback(&mut self, expansion: Expansion) -> Inst {
+    pub(super) fn fallback(&mut self, expansion: Expansion) -> Inst {
         Inst::Fallback(self.expansions.insert(expansion))
     }
-    pub fn select(&mut self, select: MaskSelect) -> Inst {
+    pub(super) fn select(&mut self, select: MaskSelect) -> Inst {
         Inst::SelectMask(self.selects.insert(select))
     }
-    pub fn masked(&mut self, access: MaskedMemory<VReg>) -> Inst {
+    pub(super) fn masked(&mut self, access: MaskedMemory<VReg>) -> Inst {
         Inst::Masked(self.masked.insert(access))
     }
     /// A call writes what the callee writes, except its result register.
-    pub fn call(&mut self, target: FunctionId, dst: VReg, mut written: PRegSet) -> Inst {
+    pub(super) fn call(&mut self, target: FunctionId, dst: VReg, mut written: PRegSet) -> Inst {
         written.remove(return_reg(dst));
         Inst::Call {
             target,

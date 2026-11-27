@@ -2,6 +2,9 @@ use super::{Block, Call, Edge, Inst, Lane, Type, Value, ssa::SliceParam};
 use thiserror::Error;
 
 /// A structural, typing or dominance error in an SSA function or an attempted edit.
+///
+/// Each variant's message describes it; the fields name the entities involved.
+#[expect(missing_docs, reason = "each variant's #[error] message documents it")]
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum IrError {
     #[error("unknown SSA instruction {inst:?}")]

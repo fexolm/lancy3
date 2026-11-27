@@ -318,7 +318,7 @@ fn packed_bit_counts_handle_zero_and_the_top_bit() {
 #[test]
 fn packed_integer_temporaries_preserve_live_inputs_under_pressure() {
     use crate::{
-        ScalarKernel,
+        Kernel,
         hir::{Function, Op, Terminator, Ternary},
     };
 
@@ -342,7 +342,7 @@ fn packed_integer_temporaries_preserve_live_inputs_under_pressure() {
         acc = f.append(block, Op::Bin(B::Add, acc, x)).unwrap();
     }
     f.set_terminator(block, Terminator::Return(acc));
-    let k = ScalarKernel::compile(&f, &crate::test_target::options()).unwrap();
+    let k = Kernel::compile(&f, &crate::test_target::options()).unwrap();
     let lanes = crate::test_target::width() / 8;
     let inputs: Vec<u64> = (0..ARITY * lanes)
         .map(|i| {
@@ -352,7 +352,7 @@ fn packed_integer_temporaries_preserve_live_inputs_under_pressure() {
         })
         .collect();
     let mut actual = vec![0; lanes];
-    k.call_words(&inputs, &mut actual).unwrap();
+    k.call_packed(&inputs, &mut actual).unwrap();
     for lane in 0..lanes {
         let args: Vec<_> = inputs[lane..].iter().step_by(lanes).copied().collect();
         let mut expected = args[0];

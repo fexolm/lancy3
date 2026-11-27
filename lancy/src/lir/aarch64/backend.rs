@@ -28,8 +28,8 @@ use super::{
 use crate::lir::{Code, Stage, Stages, regalloc::Allocations};
 use crate::{
     CompileError, Trap,
+    debug::{FrameInfo, FunctionInfo, Point},
     hir::{Type, ssa::VerifiedBody},
-    jit::{DebugFrame, DebugFunction},
     lir::layout,
     module::{FunctionId, Module},
     support::slotmap::DenseMap,
@@ -50,7 +50,7 @@ pub(crate) struct Config {
 }
 
 impl Config {
-    pub fn new(target: &splice_target::Target) -> Self {
+    pub(super) fn new(target: &splice_target::Target) -> Self {
         let features = target
             .arm64()
             .expect("AArch64 code generation for an AArch64 target");
@@ -158,10 +158,8 @@ impl Assembler {
                 "{code:?} writes {reg:?}, which its instruction does not declare"
             );
         }
-        self.words.push(
-            code.encode(operands, self.words.len() as u64 * 4)
-                .map_err(super::Error::from)?,
-        );
+        self.words
+            .push(code.encode(operands, self.words.len() as u64 * 4)?);
         Ok(())
     }
 
@@ -255,7 +253,7 @@ impl Assembler {
                         target: target as usize,
                     })
                 } else {
-                    super::Error::from(error).into()
+                    error.into()
                 }
             })?;
         }
@@ -992,7 +990,10 @@ fn emit_compiled(
                             if !debug {
                                 continue;
                             }
-                            points.push((id, out.a.words.len() as u64 * 4));
+                            points.push(Point {
+                                id,
+                                offset: out.a.words.len() as u64 * 4,
+                            });
                         }
                         out.inst(
                             inst,
@@ -1038,14 +1039,12 @@ fn emit_compiled(
             } else {
                 Vec::new()
             };
-            debug_functions.push(DebugFunction {
-                start,
-                end: a.words.len() as u64 * 4,
-                workspace_offset: machine.frame.debug_base,
+            debug_functions.push(FunctionInfo {
+                code: start..a.words.len() as u64 * 4,
+                slots: machine.frame.debug_base,
                 points,
-                frame: DebugFrame {
-                    start: body_start,
-                    end: frame_end,
+                frame: FrameInfo {
+                    code: body_start..frame_end,
                     cfa_from_sp: HOST_STACK_BYTES as i32,
                     saved: saved
                         .iter()

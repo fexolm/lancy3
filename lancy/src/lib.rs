@@ -1,5 +1,6 @@
 #![doc = include_str!("../README.md")]
 #![deny(unsafe_op_in_unsafe_fn)]
+#![warn(missing_docs, unreachable_pub)]
 
 #[cfg(not(any(
     all(target_arch = "x86_64", any(windows, target_os = "linux")),
@@ -7,21 +8,19 @@
 )))]
 compile_error!("lancy supports x86-64 Windows and Linux, and little-endian AArch64 Linux");
 
+pub mod debug;
 mod error;
 #[cfg(test)]
 mod filetests;
 /// Typed SSA with block parameters and stable instruction and block IDs.
 pub mod hir;
-/// Installation and execution of compiled kernels.
-pub mod jit;
+mod jit;
 mod lir;
 mod module;
-pub mod support;
-
-pub use lir::aarch64;
+mod support;
 
 pub use error::{CallError, CompileError, InternalError, Limit, SignatureError, Trap};
-pub use jit::{CompileOptions, Inlining, ScalarKernel};
+pub use jit::{CompileOptions, Inlining, Kernel};
 /// Targets: extensions, vector width and calling convention.
 pub use splice_target::{self as target, Target};
 
@@ -30,15 +29,15 @@ pub use splice_target::{self as target, Target};
 pub(crate) mod test_target {
     use crate::{CompileOptions, Target};
 
-    pub fn options() -> CompileOptions {
+    pub(crate) fn options() -> CompileOptions {
         CompileOptions::host().expect("SPLICE_SIMD names a target of this machine")
     }
 
-    pub fn target() -> Target {
+    pub(crate) fn target() -> Target {
         options().target
     }
 
-    pub fn width() -> usize {
+    pub(crate) fn width() -> usize {
         target().vector_bytes()
     }
 }

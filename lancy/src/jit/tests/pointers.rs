@@ -1,4 +1,4 @@
-use crate::ScalarKernel;
+use crate::Kernel;
 use crate::hir::ssa::InterpretError;
 use crate::hir::{Binary, Function, Op, Scale, Terminator, Type};
 use std::sync::Arc;
@@ -33,7 +33,7 @@ fn pointer_arguments_survive_spills_calls_and_block_parameters() {
     let ptr = f.append(b, Op::Load(Ptr, at)).unwrap();
     f.set_terminator(b, Terminator::Return(ptr));
 
-    let kernel = ScalarKernel::compile(&f, &crate::test_target::options()).unwrap();
+    let kernel = Kernel::compile(&f, &crate::test_target::options()).unwrap();
     for native in [false, true] {
         for condition in [0, 1] {
             let mut data = [0i32; 5];
@@ -46,7 +46,7 @@ fn pointer_arguments_survive_spills_calls_and_block_parameters() {
             // SAFETY: each scalar has its own writable address and output[1..9] holds one pointer.
             let result = unsafe {
                 if native {
-                    kernel.call_raw(&args).map_err(InterpretError::Trap)
+                    kernel.call_word(&args).map_err(InterpretError::Trap)
                 } else {
                     f.interpret_raw(&args)
                 }
@@ -71,14 +71,14 @@ fn pointer_offsets_sign_extend_indices_before_scaling() {
         .append(b, Op::PtrOffset(base, index, Scale::Eight))
         .unwrap();
     f.set_terminator(b, Terminator::Return(ptr));
-    let kernel = ScalarKernel::compile(&f, &crate::test_target::options()).unwrap();
+    let kernel = Kernel::compile(&f, &crate::test_target::options()).unwrap();
     let data = [0u64; 3];
     let base = data[1..].as_ptr() as u64;
     // SAFETY: this kernel only computes an address and never dereferences it.
     for index in [-1i32, 0, 1, i32::MAX, i32::MIN] {
         let expected = base.wrapping_add_signed(i64::from(index) * 8);
         assert_eq!(
-            unsafe { kernel.call_raw(&[base, index as u32 as u64]) },
+            unsafe { kernel.call_word(&[base, index as u32 as u64]) },
             Ok(expected)
         );
     }
@@ -108,13 +108,13 @@ fn constant_offsets_outside_disp32_keep_the_full_pointer_width() {
             let i = f.append(b, Op::Const(index)).unwrap();
             let at = f.append(b, Op::PtrOffset(base, i, scale)).unwrap();
             f.set_terminator(b, Terminator::Return(at));
-            let kernel = ScalarKernel::compile(&f, &crate::test_target::options()).unwrap();
+            let kernel = Kernel::compile(&f, &crate::test_target::options()).unwrap();
             let word = 0u64;
             let base = std::ptr::from_ref(&word) as u64;
             let expected = base.wrapping_add_signed(i64::from(index) * stride);
             // SAFETY: the kernel only computes an address; it never accesses the result.
             assert_eq!(
-                unsafe { kernel.call_raw(&[base]) },
+                unsafe { kernel.call_word(&[base]) },
                 Ok(expected),
                 "{scale:?}, {index}"
             );
@@ -139,7 +139,7 @@ fn scaled_store_between_overlapping_loads_changes_exactly_four_bytes() {
         let after = f.append(b, Op::Load(Type::I32, window)).unwrap();
         let change = f.append(b, Op::Bin(Binary::Sub, after, before)).unwrap();
         f.set_terminator(b, Terminator::Return(change));
-        let kernel = ScalarKernel::compile(&f, &crate::test_target::options()).unwrap();
+        let kernel = Kernel::compile(&f, &crate::test_target::options()).unwrap();
 
         for index in -3i32..=3 {
             let dst = (33 + index * stride) as usize;
@@ -162,7 +162,7 @@ fn scaled_store_between_overlapping_loads_changes_exactly_four_bytes() {
                 ];
                 // SAFETY: both raw pointers derive from the live byte array. The
                 // four-byte accesses start in 5..=61, and unaligned access is allowed.
-                let actual = unsafe { kernel.call_raw(&args) }.map(|v| v as i32);
+                let actual = unsafe { kernel.call_word(&args) }.map(|v| v as i32);
                 assert_eq!(
                     actual,
                     Ok(change),

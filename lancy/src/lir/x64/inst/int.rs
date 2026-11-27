@@ -16,14 +16,14 @@ pub(in crate::lir::x64) struct Int {
 }
 
 impl Int {
-    pub const I32: Self = Self {
+    pub(crate) const I32: Self = Self {
         bytes: 4,
         signed: true,
     };
 
     /// The integer view of a scalar type that lives in a general register.
     /// Pointers are unsigned words; 16-bit floats and 128-bit integers have none.
-    pub fn of(ty: Type) -> Option<Self> {
+    pub(crate) fn of(ty: Type) -> Option<Self> {
         if ty == Type::Ptr {
             return Some(Self {
                 bytes: 8,
@@ -37,17 +37,17 @@ impl Int {
         })
     }
 
-    pub fn bits(self) -> i32 {
+    pub(crate) fn bits(self) -> i32 {
         i32::from(self.bytes) * 8
     }
 
     /// Operations on narrow values use 32-bit registers.
-    pub fn wide(self) -> bool {
+    pub(crate) fn wide(self) -> bool {
         self.bytes == 8
     }
 
     /// The least and greatest values, sign-extended into a word.
-    pub fn range(self) -> (i64, i64) {
+    pub(crate) fn range(self) -> (i64, i64) {
         let bits = self.bits() as u32;
         if self.signed {
             (i64::MIN >> (64 - bits), i64::MAX >> (64 - bits))
@@ -73,7 +73,7 @@ pub(in crate::lir::x64) enum Cond {
 }
 
 impl Cond {
-    pub fn from_binary(op: Binary, signed: bool) -> Option<Self> {
+    pub(crate) fn from_binary(op: Binary, signed: bool) -> Option<Self> {
         Some(match (op, signed) {
             (Binary::Eq, _) => Self::Eq,
             (Binary::Ne, _) => Self::Ne,
@@ -89,7 +89,7 @@ impl Cond {
         })
     }
 
-    pub fn inverse(self) -> Self {
+    pub(crate) fn inverse(self) -> Self {
         match self {
             Self::Eq => Self::Ne,
             Self::Ne => Self::Eq,
@@ -104,7 +104,7 @@ impl Cond {
         }
     }
 
-    pub fn name(self) -> &'static str {
+    pub(crate) fn name(self) -> &'static str {
         match self {
             Self::Eq => "eq",
             Self::Ne => "ne",
@@ -119,7 +119,7 @@ impl Cond {
         }
     }
 
-    pub fn set(self, a: &mut CodeAssembler, dst: AsmRegister8) -> Result {
+    pub(crate) fn set(self, a: &mut CodeAssembler, dst: AsmRegister8) -> Result {
         match self {
             Self::Eq => a.sete(dst),
             Self::Ne => a.setne(dst),
@@ -134,7 +134,7 @@ impl Cond {
         }
     }
 
-    pub fn jump(self, a: &mut CodeAssembler, label: CodeLabel) -> Result {
+    pub(crate) fn jump(self, a: &mut CodeAssembler, label: CodeLabel) -> Result {
         match self {
             Self::Eq => a.je(label),
             Self::Ne => a.jne(label),
@@ -150,7 +150,7 @@ impl Cond {
     }
 
     /// Move `src` into `dst` when the condition holds, at `wide` or 32 bits.
-    pub fn select(self, a: &mut CodeAssembler, wide: bool, dst: usize, src: Src) -> Result {
+    pub(crate) fn select(self, a: &mut CodeAssembler, wide: bool, dst: usize, src: Src) -> Result {
         macro_rules! cmov {
             ($op:ident) => {
                 match (wide, src) {
@@ -220,7 +220,7 @@ pub(in crate::lir::x64) enum Alu {
 }
 
 impl Alu {
-    pub fn from_binary(op: Binary) -> Option<Self> {
+    pub(crate) fn from_binary(op: Binary) -> Option<Self> {
         Some(match op {
             Binary::Add => Self::Add,
             Binary::Sub => Self::Sub,
@@ -234,7 +234,7 @@ impl Alu {
         })
     }
 
-    pub fn name(self) -> &'static str {
+    pub(crate) fn name(self) -> &'static str {
         match self {
             Self::Add => "add",
             Self::Sub => "sub",
@@ -248,11 +248,11 @@ impl Alu {
     }
 
     /// Whether the operation reads its right operand only from a register.
-    pub fn register_only(self) -> bool {
+    pub(crate) fn register_only(self) -> bool {
         matches!(self, Self::Min | Self::Max)
     }
 
-    pub fn emit(self, a: &mut CodeAssembler, int: Int, dst: usize, src: Src) -> Result {
+    pub(crate) fn emit(self, a: &mut CodeAssembler, int: Int, dst: usize, src: Src) -> Result {
         // Carries out of a narrow value land in its undefined upper bits.
         let size = if int.wide() { 8 } else { 4 };
         match self {
@@ -321,7 +321,7 @@ pub(in crate::lir::x64) enum Shift {
 }
 
 impl Shift {
-    pub fn from_binary(op: Binary) -> Option<Self> {
+    pub(crate) fn from_binary(op: Binary) -> Option<Self> {
         Some(match op {
             Binary::Shl => Self::Left,
             Binary::Shr => Self::Right,
@@ -331,7 +331,7 @@ impl Shift {
         })
     }
 
-    pub fn name(self) -> &'static str {
+    pub(crate) fn name(self) -> &'static str {
         match self {
             Self::Left => "shl",
             Self::Right => "shr",
@@ -344,7 +344,13 @@ impl Shift {
     /// x86 reduces a register count modulo 32 or 64 and rotates modulo the
     /// operand size, which is the operation's definition except for shifts
     /// of 8- and 16-bit values: those reduce CL first and restore it.
-    pub fn emit(self, a: &mut CodeAssembler, int: Int, dst: usize, count: Option<i32>) -> Result {
+    pub(crate) fn emit(
+        self,
+        a: &mut CodeAssembler,
+        int: Int,
+        dst: usize,
+        count: Option<i32>,
+    ) -> Result {
         let narrow_shift =
             int.bytes < 4 && matches!(self, Self::Left | Self::Right) && count.is_none();
         // R10 keeps the count, or computes the result when the value is the
@@ -395,7 +401,7 @@ pub(in crate::lir::x64) enum IntUnary {
 }
 
 impl IntUnary {
-    pub fn from_unary(op: Unary) -> Option<Self> {
+    pub(crate) fn from_unary(op: Unary) -> Option<Self> {
         Some(match op {
             Unary::Neg => Self::Neg,
             Unary::Not => Self::Not,
@@ -407,7 +413,7 @@ impl IntUnary {
         })
     }
 
-    pub fn name(self) -> &'static str {
+    pub(crate) fn name(self) -> &'static str {
         match self {
             Self::Neg => "neg",
             Self::Not => "not",
@@ -419,12 +425,12 @@ impl IntUnary {
     }
 
     /// Whether the sequence needs a scratch register besides R10.
-    pub fn needs_temp(self, isa: splice_target::X86Features) -> bool {
+    pub(crate) fn needs_temp(self, isa: splice_target::X86Features) -> bool {
         self == Self::Popcnt && !isa.popcnt
     }
 
     /// Compute in place on `dst`, which holds the operand.
-    pub fn emit(
+    pub(crate) fn emit(
         self,
         a: &mut CodeAssembler,
         isa: splice_target::X86Features,

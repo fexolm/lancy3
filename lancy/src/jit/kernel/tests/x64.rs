@@ -81,7 +81,7 @@ fn xmm_abi_probe(entry: Entry) -> Result<Vec<u8>, IcedError> {
 
 #[test]
 fn outlined_vector_pressure_preserves_windows_xmm_registers_on_normal_and_trapping_exits() {
-    use super::super::ScalarKernel;
+    use super::super::Kernel;
     use crate::{
         Inlining,
         hir::{Binary, Function, Lane, Op, Scale, Terminator, Type},
@@ -131,7 +131,7 @@ fn outlined_vector_pressure_preserves_windows_xmm_registers_on_normal_and_trappi
         .with_calling_convention(CallingConvention::Win64)
         .unwrap();
     let options = crate::CompileOptions::new(target).with_inlining(Inlining::Never);
-    let kernel = ScalarKernel::compile(&root, &options).unwrap();
+    let kernel = Kernel::compile(&root, &options).unwrap();
 
     // SAFETY: the owner keeps this readable executable mapping alive. This
     // kernel only uses immediate integer constants, so the mapping is all text.

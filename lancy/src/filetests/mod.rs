@@ -5,7 +5,7 @@ mod run;
 use crate::hir::{self, Function, ssa::VerifiedBody, text::ParseError, transforms::passes};
 use crate::lir::{self, Stage, Stages};
 use crate::module::Module;
-use crate::{CompileError, Inlining, ScalarKernel, jit};
+use crate::{CompileError, Inlining, Kernel, jit};
 use filecheck::{CheckerBuilder, NO_VARIABLES};
 use run::Run;
 use splice_target::{Arch, Target};
@@ -366,7 +366,7 @@ impl<'a> Case<'a> {
         }
         self.all_checks_reached()?;
         if !self.runs.is_empty() {
-            let kernel = ScalarKernel::compile(
+            let kernel = Kernel::compile(
                 &f,
                 &crate::test_target::options().with_inlining(self.policy),
             )

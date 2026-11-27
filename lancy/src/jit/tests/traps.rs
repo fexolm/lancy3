@@ -1,5 +1,5 @@
 use crate::hir::{Binary, Function, Op, Scale, Terminator, Type};
-use crate::{CallError, Inlining, ScalarKernel, Trap};
+use crate::{CallError, Inlining, Kernel, Trap};
 use std::sync::Arc;
 
 #[test]
@@ -9,7 +9,7 @@ fn bounds_check_compares_both_i32_operands_as_unsigned() {
     let [index, len] = f.params(b).try_into().unwrap();
     f.append_inst(b, Op::BoundsCheck(index, len)).unwrap();
     f.set_terminator(b, Terminator::Return(index));
-    let kernel = ScalarKernel::compile(&f, &crate::test_target::options()).unwrap();
+    let kernel = Kernel::compile(&f, &crate::test_target::options()).unwrap();
     for index in [0, 1, i32::MAX, i32::MIN, -2, -1] {
         for len in [0, 1, i32::MAX, i32::MIN, -2, -1] {
             let expected = if (index as u32) < len as u32 {
@@ -88,8 +88,7 @@ fn first_trap_stops_at_the_exact_store_in_each_callee() {
         let f = two_checked_calls(op);
         for policy in [Inlining::Always, Inlining::Never] {
             let kernel =
-                ScalarKernel::compile(&f, &crate::test_target::options().with_inlining(policy))
-                    .unwrap();
+                Kernel::compile(&f, &crate::test_target::options().with_inlining(policy)).unwrap();
             for (inputs @ [n, d1, i1, d2, i2], expected_result, writes) in cases.clone() {
                 let mut output = [-777; 7];
                 let mut args = [0u64; 6];
@@ -99,7 +98,7 @@ fn first_trap_stops_at_the_exact_store_in_each_callee() {
                 }
                 // SAFETY: all stores use constant indices 0..=6 in this live,
                 // exclusively borrowed i32 array, even when a check fails.
-                let actual = unsafe { kernel.call_raw(&args) }.map(|v| v as i32);
+                let actual = unsafe { kernel.call_word(&args) }.map(|v| v as i32);
                 let mut expected = [-777; 7];
                 expected[..writes].copy_from_slice(&[n, d1, i1, n, d2, i2, 99][..writes]);
                 assert_eq!(actual, expected_result, "{op:?}, {policy:?}, {inputs:?}");

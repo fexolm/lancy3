@@ -28,7 +28,7 @@ pub(super) struct FrameRequirements {
 }
 
 impl FrameRequirements {
-    pub fn scan<I: TargetInst>(body: &Function<I>) -> Self {
+    pub(super) fn scan<I: TargetInst>(body: &Function<I>) -> Self {
         let mut needs = Self::default();
         for inst in body.insts() {
             match inst.frame_use(body.machine()) {

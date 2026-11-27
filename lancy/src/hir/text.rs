@@ -418,6 +418,7 @@ impl Function {
 /// A malformed text, or IR that the builder rejects while it is read.
 #[derive(Debug)]
 pub enum ParseError {
+    /// The text is not HIR; the message names the line.
     Syntax(String),
     /// The builder's error, after the location of the operation.
     Invalid(String, IrError),

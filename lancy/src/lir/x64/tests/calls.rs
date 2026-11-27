@@ -1,7 +1,7 @@
 use crate::hir::ssa::InterpretError;
 use crate::hir::{Binary, Function, Op as H, Scale, Terminator, Type};
 use crate::lir::x64::compile::compile;
-use crate::{CallError, ScalarKernel, SignatureError, Trap};
+use crate::{CallError, Kernel, SignatureError, Trap};
 use std::sync::Arc;
 
 #[test]
@@ -31,7 +31,7 @@ fn a_small_callee_leaves_registers_available_to_its_caller() {
         0
     );
     assert_eq!(
-        ScalarKernel::compile(&f, &crate::test_target::options())
+        Kernel::compile(&f, &crate::test_target::options())
             .unwrap()
             .call(&[1, 2, 3, 4]),
         Ok(11)
@@ -65,12 +65,10 @@ fn checked_nested_access_preserves_prior_stores_and_forwards_addresses() {
     let last = root.append(b, H::PtrOffset(dst, two, Scale::Four)).unwrap();
     root.append_inst(b, H::Store(last, result)).unwrap();
     root.set_terminator(b, Terminator::Return(result));
-    let k = ScalarKernel::compile(&root, &crate::test_target::options()).unwrap();
+    let k = Kernel::compile(&root, &crate::test_target::options()).unwrap();
     assert_eq!(
         k.call(&[0; 6]),
-        Err(crate::CallError::Signature(
-            SignatureError::PointerSignature
-        ))
+        Err(crate::CallError::Signature(SignatureError::NotI32))
     );
     for (i, j) in [(-1, 1), (1, -1), (3, 0), (0, 3), (1, 1)] {
         let data = [2i32, 42, 1];
@@ -87,7 +85,7 @@ fn checked_nested_access_preserves_prior_stores_and_forwards_addresses() {
             // SAFETY: both arrays have three elements and all variable indices are checked.
             let result = unsafe {
                 if native {
-                    k.call_raw(&args).map_err(InterpretError::Trap)
+                    k.call_word(&args).map_err(InterpretError::Trap)
                 } else {
                     root.interpret_raw(&args)
                 }
@@ -133,7 +131,7 @@ fn shared_calls_preserve_live_registers_and_spilled_arguments() {
             .len(),
         2
     );
-    let k = ScalarKernel::compile(
+    let k = Kernel::compile(
         &f,
         &crate::test_target::options().with_inlining(crate::Inlining::Never),
     )

@@ -43,7 +43,7 @@ pub(super) struct Allocations<'a> {
 }
 
 impl<'a> Allocations<'a> {
-    pub fn of<I: TargetInst>(
+    pub(super) fn of<I: TargetInst>(
         f: &'a Function<I>,
         output: &'a Output,
         inst: regalloc2::Inst,
@@ -59,7 +59,7 @@ impl<'a> Allocations<'a> {
     }
 
     /// The register encoding of the instruction's `i`-th temporary.
-    pub fn temp(self, i: usize) -> usize {
+    pub(super) fn temp(self, i: usize) -> usize {
         self.temps[i]
             .as_reg()
             .expect("a register temporary")
@@ -67,7 +67,9 @@ impl<'a> Allocations<'a> {
     }
 
     /// Each operand with its allocation, temporaries included.
-    pub fn iter(self) -> impl Iterator<Item = (regalloc2::Operand, regalloc2::Allocation)> + 'a {
+    pub(super) fn iter(
+        self,
+    ) -> impl Iterator<Item = (regalloc2::Operand, regalloc2::Allocation)> + 'a {
         self.operands
             .iter()
             .copied()
@@ -76,7 +78,7 @@ impl<'a> Allocations<'a> {
 
     /// Where `v` is. Two uses of one value read the same bits, so a
     /// register is preferred when the value has several operands.
-    pub fn get(self, v: regalloc2::VReg) -> regalloc2::Allocation {
+    pub(super) fn get(self, v: regalloc2::VReg) -> regalloc2::Allocation {
         let mut found = None;
         for (operand, &alloc) in self.operands.iter().zip(self.allocs) {
             if operand.vreg() == v {
@@ -90,7 +92,7 @@ impl<'a> Allocations<'a> {
     }
 
     /// The register encoding of `v`, which has a register constraint.
-    pub fn reg(self, v: regalloc2::VReg) -> usize {
+    pub(super) fn reg(self, v: regalloc2::VReg) -> usize {
         self.get(v)
             .as_reg()
             .expect("register-constrained operand")

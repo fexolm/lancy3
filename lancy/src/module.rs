@@ -3,7 +3,7 @@
 use crate::{CompileError, support::slotmap::DenseMap};
 use std::collections::HashMap;
 
-crate::slot_key!(pub(crate) FunctionId);
+crate::support::slotmap::slot_key!(pub(crate) FunctionId);
 pub(crate) type FunctionIds<T> = HashMap<*const T, FunctionId>;
 
 /// Call edges are transferred intact when lowering preserves function identities.
@@ -13,10 +13,10 @@ pub(crate) struct CallGraph {
 }
 
 impl CallGraph {
-    pub fn root(&self) -> FunctionId {
+    pub(crate) fn root(&self) -> FunctionId {
         self.root
     }
-    pub fn callees(&self, caller: FunctionId) -> &[FunctionId] {
+    pub(crate) fn callees(&self, caller: FunctionId) -> &[FunctionId] {
         &self.callees[caller]
     }
 }
@@ -29,7 +29,7 @@ pub(crate) struct Module<T> {
 impl<T> Module<T> {
     /// Inspect each distinct source body once. The callback supplies its
     /// direct callees and the payload to retain at this stage of compilation.
-    pub fn discover<'a, N>(
+    pub(crate) fn discover<'a, N>(
         root: &'a N,
         mut inspect: impl FnMut(&'a N, &mut Vec<&'a N>) -> Result<T, CompileError>,
     ) -> Result<(Self, FunctionIds<N>), CompileError> {
@@ -82,7 +82,7 @@ impl<T> Module<T> {
 
     /// Translate the bodies while retaining the same call graph. Each
     /// callee's translated body is already available to its caller.
-    pub fn try_map_functions<U>(
+    pub(crate) fn try_map_functions<U>(
         self,
         mut lower: impl FnMut(
             FunctionId,

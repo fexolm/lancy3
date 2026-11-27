@@ -8,7 +8,7 @@ use crate::support::numeric::integer;
 
 /// Why an operation may stop the program instead of producing its result.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum TrapKind {
+pub(crate) enum TrapKind {
     /// Integer division or remainder by zero, or a signed `MIN / -1`.
     Division,
     /// A lane index at or above the vector's lane count.
@@ -26,7 +26,7 @@ pub enum TrapKind {
 
 /// What executing an operation does besides producing its result.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct Effects {
+pub(crate) struct Effects {
     pub reads: bool,
     pub writes: bool,
     pub trap: Option<TrapKind>,
@@ -69,7 +69,7 @@ impl Effects {
     /// No effect at all: the operation can be removed when unused, moved or
     /// evaluated speculatively.
     #[inline]
-    pub fn is_none(self) -> bool {
+    pub(crate) fn is_none(self) -> bool {
         self == Self::NONE
     }
 }
@@ -79,7 +79,7 @@ impl Effects {
 /// of `mask` when masked. A compressing store (`limit` set) writes the active
 /// lanes packed from `address`, so its mask does not name element positions.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct Access {
+pub(crate) struct Access {
     pub address: Value,
     pub ty: Type,
     pub indices: Option<Value>,

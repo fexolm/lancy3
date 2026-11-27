@@ -4,7 +4,7 @@ use super::Result;
 use crate::hir::ssa::{InterpretError, buffer_address};
 use crate::hir::{Function, Lane, Type};
 use crate::support::numeric::Bits;
-use crate::{CallError, ScalarKernel, Trap};
+use crate::{CallError, Kernel, Trap};
 
 pub(crate) struct Run {
     line: usize,
@@ -321,7 +321,7 @@ impl Run {
     /// # Safety
     /// The caller must have successfully interpreted this run against `f`,
     /// the source of `kernel`, including its checked buffer accesses.
-    pub(crate) unsafe fn native(&self, f: &Function, kernel: &ScalarKernel) -> Result<()> {
+    pub(crate) unsafe fn native(&self, f: &Function, kernel: &Kernel) -> Result<()> {
         let typed = self.typed(f)?;
         let mut buffers = self.initial();
         let mut words = Vec::new();
@@ -343,7 +343,7 @@ impl Run {
         // inputs and initial bytes with checked accesses. Every executed access
         // is within these live buffers, including every active lane of a masked
         // access; CallScratch addresses lie in the kernel's own frame.
-        let actual = unsafe { kernel.call_words_raw(&words, &mut result) }.map(|()| {
+        let actual = unsafe { kernel.call_packed_unchecked(&words, &mut result) }.map(|()| {
             let mut bits = [0; 64];
             for (chunk, word) in bits.chunks_exact_mut(8).zip(&result) {
                 chunk.copy_from_slice(&word.to_le_bytes());

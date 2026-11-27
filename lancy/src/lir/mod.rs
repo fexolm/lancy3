@@ -1,4 +1,4 @@
-pub mod aarch64;
+pub(crate) mod aarch64;
 mod constants;
 mod fallback;
 mod frame;
@@ -13,7 +13,7 @@ mod x64;
 
 use crate::hir::ssa::VerifiedBody;
 use crate::module::Module;
-use crate::{CompileError, jit::DebugFunction};
+use crate::{CompileError, debug::FunctionInfo};
 pub(crate) use fallback::Sites;
 use function::Function;
 use inst::TargetInst;
@@ -30,7 +30,7 @@ pub(crate) struct Code {
     pub bytes: Vec<u8>,
     /// Workspace size in 64-bit words.
     pub words: usize,
-    pub debug: Vec<DebugFunction>,
+    pub debug: Vec<FunctionInfo>,
     /// The numeric fallback sites the code addresses.
     pub sites: fallback::Sites,
 }

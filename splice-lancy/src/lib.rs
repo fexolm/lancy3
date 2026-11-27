@@ -2,7 +2,7 @@
 mod debug_info;
 mod lower;
 
-use lancy::ScalarKernel;
+use lancy::Kernel;
 pub use lower::lower;
 use splice_core::call::{Interface, SliceDescriptor};
 use splice_core::frontend::{Body, Signature};
@@ -40,7 +40,7 @@ impl Backend for Lancy {
 }
 
 pub struct LancyKernel {
-    code: splice_jit::Published<ScalarKernel>,
+    code: splice_jit::Published<Kernel>,
     interface: Interface,
 }
 
@@ -65,7 +65,7 @@ impl LancyKernel {
         if debug {
             compile_options = compile_options.with_debug();
         }
-        let code = ScalarKernel::compile(&hir, &compile_options)
+        let code = Kernel::compile(&hir, &compile_options)
             .map_err(|e| splice_core::BuildError::backend("lancy", e))?;
         let mut publish = splice_jit::Publish::new(debug);
         if debug {
@@ -95,13 +95,12 @@ unsafe impl Executable for LancyKernel {
     }
 
     unsafe fn enter(&self, words: &[u64], slices: &[SliceDescriptor]) -> Result<u64, CallError> {
-        if slices.is_empty() && !self.code.memory().requires_raw_call() {
-            let mut word = [0];
-            self.code
-                .memory()
-                .call_words(words, &mut word)
+        let mut result = [0];
+        if slices.is_empty() {
+            // SAFETY: as below, without slices.
+            unsafe { self.code.memory().call_packed_unchecked(words, &mut result) }
                 .map_err(call_error)?;
-            return Ok(word[0]);
+            return Ok(result[0]);
         }
         // Lancy takes the scalars followed by each slice's address and length.
         let count = words.len() + 2 * slices.len();
@@ -122,7 +121,13 @@ unsafe impl Executable for LancyKernel {
         // and exclusive Rust contexts. Both Splice lowering paths check
         // permissions and use native call scratch only for initialized,
         // shape-checked packets.
-        unsafe { self.code.memory().call_raw(packed) }.map_err(call_error)
+        unsafe {
+            self.code
+                .memory()
+                .call_packed_unchecked(packed, &mut result)
+        }
+        .map_err(call_error)?;
+        Ok(result[0])
     }
 }
 

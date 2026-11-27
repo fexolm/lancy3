@@ -17,7 +17,7 @@ pub(in crate::lir::x64) enum Recipe {
     Rearrange(rearrange::Rule),
 }
 impl Recipe {
-    pub fn temporaries(self, action: Action, input: Type, output: Type, c: Cpu) -> usize {
+    pub(crate) fn temporaries(self, action: Action, input: Type, output: Type, c: Cpu) -> usize {
         match self {
             Self::Halves => {
                 packed_half(action, input, output, c).unwrap().temporaries()
@@ -31,7 +31,7 @@ impl Recipe {
             Self::Rearrange(r) => r.temps(action, input, c),
         }
     }
-    pub fn emit(
+    pub(crate) fn emit(
         self,
         a: &mut CodeAssembler,
         native: Native,

@@ -9,7 +9,7 @@ use crate::{
 };
 
 impl Recipe {
-    pub fn select(action: Action, input: Type, output: Type, c: Cpu) -> Option<Self> {
+    pub(crate) fn select(action: Action, input: Type, output: Type, c: Cpu) -> Option<Self> {
         integer::Rule::select(action, input, c)
             .map(Self::Int)
             .or_else(|| float::Rule::select(action, input, output, c).map(Self::Float))

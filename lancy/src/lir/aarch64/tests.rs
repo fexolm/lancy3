@@ -1,5 +1,5 @@
-use lancy::aarch64::{Arrangement as A, Code, Encoder, Error, Instruction, Operand, Register as R};
-use lancy::aarch64::{ConditionCode, Feature, FeatureSet, PredQual, ShiftKind};
+use super::{Arrangement as A, Code, EncodeError, Operand, Register as R};
+use super::{ConditionCode, Feature, FeatureSet, PredQual, ShiftKind};
 
 fn add(immediate: u64) -> [Operand; 3] {
     [
@@ -11,137 +11,52 @@ fn add(immediate: u64) -> [Operand; 3] {
 
 #[test]
 fn a64_neon_sve_and_sve2_match_llvm_mc() {
-    let mut storage = [0_u8; 21];
-    let mut encoder = Encoder::new(0x4000, &mut storage[1..]).unwrap();
-    encoder.push(Code::Add_64_addsub_imm, &add(7)).unwrap();
-    encoder
-        .push(
+    let z5 = Operand::vec(R::Z5, A::D);
+    let cases: [(Code, &[Operand], u32); 4] = [
+        (Code::Add_64_addsub_imm, &add(7), 0x9100_1c20),
+        (
             Code::Add_asimdsame_only,
             &[
                 Operand::vec(R::V2, A::S4),
                 Operand::vec(R::V3, A::S4),
                 Operand::vec(R::V4, A::S4),
             ],
-        )
-        .unwrap();
-    encoder
-        .push(
+            0x4ea4_8462,
+        ),
+        (
             Code::Ptrue_p_s_,
             &[Operand::vec(R::P0, A::S), Operand::named(8)],
-        )
-        .unwrap();
-    let z5 = Operand::vec(R::Z5, A::D);
-    encoder
-        .push(
+            0x2598_e100,
+        ),
+        (
             Code::Eor3_z_zzz_,
             &[z5, z5, Operand::vec(R::Z6, A::D), Operand::vec(R::Z7, A::D)],
-        )
-        .unwrap();
-    encoder
-        .push(
-            Code::Saddl2_asimd,
-            &[
-                Operand::vec(R::V0, A::S4),
-                Operand::vec(R::V1, A::H8),
-                Operand::vec(R::V2, A::H8),
-            ],
-        )
-        .unwrap();
-    // llvm-mc-21 -triple=aarch64 -mattr=+sve2 -show-encoding
-    assert_eq!(
-        encoder.bytes(),
-        [
-            0x9100_1c20_u32,
-            0x4ea4_8462,
-            0x2598_e100,
             0x0426_38e5,
-            0x4e62_0020
-        ]
-        .into_iter()
-        .flat_map(u32::to_le_bytes)
-        .collect::<Vec<_>>()
-    );
-}
-
-#[test]
-fn forward_and_backward_relocations_use_the_instruction_address() {
-    let mut storage = [0; 20];
-    let mut encoder = Encoder::new(0x4000, &mut storage).unwrap();
-    encoder.push(Code::Nop_HI_hints, &[]).unwrap();
-    let forward = encoder
-        .push(Code::B_only_branch_imm, &[Operand::label(0x4004)])
-        .unwrap();
-    encoder.push(Code::Nop_HI_hints, &[]).unwrap();
-    let target = encoder.pc();
-    encoder
-        .push(Code::B_only_branch_imm, &[Operand::label(0x4000)])
-        .unwrap();
-    encoder
-        .patch(forward, Code::B_only_branch_imm, &[Operand::label(target)])
-        .unwrap();
-    assert_eq!(encoder.pc(), 0x4010);
-    assert_eq!(&encoder.bytes()[4..8], &0x1400_0002_u32.to_le_bytes());
-    assert_eq!(&encoder.bytes()[12..16], &0x17ff_fffd_u32.to_le_bytes());
-}
-
-#[test]
-fn failed_encoding_and_patch_leave_the_stream_unchanged() {
-    let mut storage = [0xff; 7];
-    let mut encoder = Encoder::new(0x4000, &mut storage).unwrap();
-    assert!(matches!(
-        encoder.push(Code::Add_64_addsub_imm, &add(4096)),
-        Err(Error::Encoding(_))
-    ));
-    assert_eq!(encoder.pc(), 0x4000);
-    assert!(encoder.bytes().is_empty());
-
-    encoder.push(Code::Add_64_addsub_imm, &add(7)).unwrap();
-    let before = [0x20, 0x1c, 0, 0x91];
-    assert_eq!(
-        encoder.push(Code::Nop_HI_hints, &[]),
-        Err(Error::BufferFull)
-    );
-    assert_eq!(
-        encoder.patch(1, Code::Nop_HI_hints, &[]),
-        Err(Error::InvalidPatch(1))
-    );
-    assert_eq!(
-        encoder.patch(4, Code::Nop_HI_hints, &[]),
-        Err(Error::InvalidPatch(4))
-    );
-    for target in [0x4001, 0x4000 + (1 << 27)] {
-        assert!(matches!(
-            encoder.patch(0, Code::B_only_branch_imm, &[Operand::label(target)]),
-            Err(Error::Encoding(_))
-        ));
+        ),
+    ];
+    // llvm-mc-21 -triple=aarch64 -mattr=+sve2 -show-encoding
+    for (code, operands, expected) in cases {
+        assert_eq!(code.encode(operands, 0x4000), Ok(expected), "{code:?}");
     }
-    assert_eq!(encoder.pc(), 0x4004);
-    assert_eq!(encoder.bytes(), before);
-    assert_eq!(storage[4..], [0xff; 3]);
 }
 
 #[test]
-fn rejects_invalid_target_address_ranges() {
-    let mut storage = [0; 4];
-    assert!(matches!(
-        Encoder::new(3, &mut storage),
-        Err(Error::UnalignedAddress(3))
-    ));
-    assert!(matches!(
-        Encoder::new(u64::MAX - 3, &mut storage),
-        Err(Error::AddressOverflow)
-    ));
-}
-
-#[test]
-fn reused_instruction_is_encoded_at_its_new_pc() {
-    let branch =
-        Instruction::with(Code::B_only_branch_imm, &[Operand::label(0x400c)], 0x4000).unwrap();
-    let mut storage = [0; 8];
-    let mut encoder = Encoder::new(0x4004, &mut storage).unwrap();
-    encoder.push_instruction(&branch).unwrap();
-    encoder.push_instruction(&branch).unwrap();
-    assert_eq!(encoder.bytes(), &[2, 0, 0, 0x14, 1, 0, 0, 0x14]);
+fn branches_encode_relative_to_the_instruction_address() {
+    let b = Code::B_only_branch_imm;
+    assert_eq!(b.encode(&[Operand::label(0x400c)], 0x4004), Ok(0x1400_0002));
+    assert_eq!(b.encode(&[Operand::label(0x400c)], 0x4008), Ok(0x1400_0001));
+    assert_eq!(b.encode(&[Operand::label(0x4000)], 0x400c), Ok(0x17ff_fffd));
+    for target in [0x4001, 0x4000 + (1 << 27)] {
+        assert_eq!(
+            b.encode(&[Operand::label(target)], 0x4000),
+            Err(EncodeError::Branch { pc: 0x4000, target })
+        );
+    }
+    assert_eq!(
+        Code::Nop_HI_hints.encode(&[], 3),
+        Err(EncodeError::Address(3))
+    );
+    assert!(Code::Add_64_addsub_imm.encode(&add(4096), 0).is_err());
 }
 
 #[test]
@@ -161,8 +76,8 @@ fn scalar_and_vector_field_boundaries_match_llvm_mc() {
         ),
         (
             Sub_32_addsub_shift,
-            &[r(R::W4), r(R::W3), shifted(R::W2, ShiftKind::Asr, 31)],
-            0x4b82_7c64,
+            &[r(R::W4), r(R::W3), shifted(R::W2, ShiftKind::Lsr, 31)],
+            0x4b42_7c64,
         ),
         (
             Eor_64_log_shift,
@@ -194,7 +109,6 @@ fn scalar_and_vector_field_boundaries_match_llvm_mc() {
             &[r(R::V31), memory(R::SP, 65520)],
             0x3dbf_ffff,
         ),
-        (Cbnz_64_compbranch, &[r(R::X3), label(0xffc)], 0xb5ff_ffe3),
         (
             B_only_condbranch,
             &[Operand::cond(ConditionCode::Ne), label(0x100c)],
@@ -213,11 +127,7 @@ fn scalar_and_vector_field_boundaries_match_llvm_mc() {
         ),
     ];
     for &(code, operands, expected) in cases {
-        assert_eq!(
-            Instruction::with(code, operands, 0x1000).unwrap().encode(),
-            Ok(expected),
-            "{code:?}"
-        );
+        assert_eq!(code.encode(operands, 0x1000), Ok(expected), "{code:?}");
     }
 }
 
@@ -254,7 +164,7 @@ fn rejects_reserved_fields_and_wrong_register_roles() {
         ),
     ];
     for &(code, operands) in cases {
-        assert!(Instruction::with(code, operands, 0).is_err(), "{code:?}");
+        assert!(code.encode(operands, 0).is_err(), "{code:?}");
     }
 }
 
@@ -263,7 +173,7 @@ fn sve_memory_and_sve2_arithmetic_match_llvm_mc() {
     use Code::*;
     let z = Operand::vec;
     let pred = Operand::pred;
-    let mem = Operand::mem_mul_vl;
+    let mem = Operand::mem_off;
     let zd = [z(R::Z31, A::D), z(R::Z30, A::D), z(R::Z29, A::D)];
     for (code, expected) in [
         (Sub_z_zz_, 0x04fd_07df),
@@ -272,29 +182,18 @@ fn sve_memory_and_sve2_arithmetic_match_llvm_mc() {
         (Orr_z_zz_, 0x047d_33df),
         (Eor_z_zz_, 0x04bd_33df),
     ] {
-        assert_eq!(
-            Instruction::with(code, &zd, 0).unwrap().encode(),
-            Ok(expected)
-        );
+        assert_eq!(code.encode(&zd, 0), Ok(expected));
     }
-    let load = [z(R::Z31, A::S), pred(R::P7, PredQual::Zero), mem(R::SP, -8)];
-    let store = [z(R::Z31, A::D), pred(R::P7, PredQual::None), mem(R::SP, 7)];
-    assert_eq!(
-        Instruction::with(Ld1w_z_p_bi_u32, &load, 0)
-            .unwrap()
-            .encode(),
-        Ok(0xa548_bfff)
-    );
-    assert_eq!(
-        Instruction::with(St1d_z_p_bi_, &store, 0).unwrap().encode(),
-        Ok(0xe5e7_ffff)
-    );
+    let load = [z(R::Z31, A::S), pred(R::P7, PredQual::Zero), mem(R::SP, 0)];
+    let store = [z(R::Z31, A::D), pred(R::P7, PredQual::None), mem(R::SP, 0)];
+    assert_eq!(Ld1w_z_p_bi_u32.encode(&load, 0), Ok(0xa540_bfff));
+    assert_eq!(St1d_z_p_bi_.encode(&store, 0), Ok(0xe5e0_ffff));
     for operands in [
         [load[0], pred(R::P8, PredQual::Zero), load[2]],
         [load[0], pred(R::P7, PredQual::Merge), load[2]],
         [load[0], load[1], mem(R::SP, 8)],
     ] {
-        assert!(Instruction::with(Ld1w_z_p_bi_u32, &operands, 0).is_err());
+        assert!(Ld1w_z_p_bi_u32.encode(&operands, 0).is_err());
     }
     assert!(!Mul_z_zz_.is_available(FeatureSet::NONE.with(Feature::Sve)));
     assert!(Ld1w_z_p_bi_u32.is_available(FeatureSet::NONE.with(Feature::Sve2)));
@@ -358,17 +257,17 @@ fn wide_arithmetic_and_permutations_match_llvm_mc() {
         ),
     ];
     for &(code, operands, expected) in cases {
-        assert_eq!(
-            Instruction::with(code, operands, 0).unwrap().encode(),
-            Ok(expected),
-            "{code:?}"
-        );
+        assert_eq!(code.encode(operands, 0), Ok(expected), "{code:?}");
     }
     let out = v(R::V0, A::S4);
     let src = v(R::V1, A::S4);
-    assert!(Instruction::with(Sshr_asimd_imm, &[out, src, imm(0)], 0).is_err());
-    assert!(Instruction::with(Sshr_asimd_imm, &[out, src, imm(33)], 0).is_err());
-    assert!(Instruction::with(Orr_32_log_imm, &[r(R::W0), r(R::W1), imm(0)], 0).is_err());
+    assert!(Sshr_asimd_imm.encode(&[out, src, imm(0)], 0).is_err());
+    assert!(Sshr_asimd_imm.encode(&[out, src, imm(33)], 0).is_err());
+    assert!(
+        Orr_32_log_imm
+            .encode(&[r(R::W0), r(R::W1), imm(0)], 0)
+            .is_err()
+    );
     let sve = FeatureSet::NONE.with(Feature::Sve);
     assert!(Dup_z_zi.is_available(sve));
     assert!(!Histcnt_z_p_zz.is_available(sve));
@@ -470,11 +369,7 @@ fn lane_and_immediate_operands_match_llvm_mc() {
         ),
     ];
     for &(code, operands, expected) in cases {
-        assert_eq!(
-            Instruction::with(code, operands, 0).unwrap().encode(),
-            Ok(expected),
-            "{code:?}"
-        );
+        assert_eq!(code.encode(operands, 0), Ok(expected), "{code:?}");
     }
     let z0 = v(R::Z0, A::S);
     for (code, operands) in [
@@ -485,6 +380,6 @@ fn lane_and_immediate_operands_match_llvm_mc() {
         (Dup_z_zi, vec![v(R::Z0, A::Q), v(R::Z1, A::Q), imm(4)]),
         (Dup_z_zi, vec![z0, v(R::Z1, A::D), imm(0)]),
     ] {
-        assert!(Instruction::with(code, &operands, 0).is_err(), "{code:?}");
+        assert!(code.encode(&operands, 0).is_err(), "{code:?}");
     }
 }

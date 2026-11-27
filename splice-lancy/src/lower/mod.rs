@@ -1,14 +1,15 @@
 //! Stage Splice's typed operations directly into Lancy SSA.
 //! Only mutable-name bindings and the operands of forward edges are deferred.
 //! The portable path replays a function into the same builder.
+mod block_map;
 mod seal;
 mod simd;
 #[cfg(test)]
 mod tests;
 
+use block_map::BlockMap;
 use lancy::Trap;
 use lancy::hir::{self, Block, Function, Op, Value};
-use lancy::support::slotmap::DenseMap;
 use splice_core::{
     BufferKind,
     frontend::{Body, KernelBuilder, KernelSource, Signature, Specialization},
@@ -174,7 +175,7 @@ impl<'a> Builder<'a> {
             }
             first.defs.insert(Reg(i as u32), v);
         }
-        let mut blocks = DenseMap::new();
+        let mut blocks = BlockMap::new();
         let state = blocks.insert(first);
         debug_assert_eq!(state, entry);
         let mut builder = Self {
@@ -280,7 +281,7 @@ struct Builder<'a> {
     kinds: &'a [BufferKind],
     /// Width of the target's vectors; fixes lane counts and alignment.
     vector_bytes: usize,
-    blocks: DenseMap<Block, State>,
+    blocks: BlockMap<State>,
     current: Option<Block>,
     types: Vec<ValueType>,
     /// Blocks whose parameter for a register needs a value from every

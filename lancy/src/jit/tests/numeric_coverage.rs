@@ -2,7 +2,7 @@
 pub(crate) mod conversions;
 mod rounding;
 use crate::{
-    CallError, ScalarKernel, Trap,
+    CallError, Kernel, Trap,
     hir::operation::operation,
     hir::{Binary, Function, Lane, Op, Simd, Terminator, Ternary, Type, Unary, Value},
     support::numeric::{Bits, evaluate},
@@ -194,7 +194,7 @@ fn boundary(lane: Lane) -> Vec<u128> {
     }
 }
 
-/// Compare `ScalarKernel` with `evaluate`, results and traps alike, on
+/// Compare `Kernel` with `evaluate`, results and traps alike, on
 /// operand sets that pair every value of `inputs` with every other.
 fn differential(params: &[Type], ret: Type, make_op: impl FnOnce(&[Value]) -> Op) {
     let mut f = Function::new(params, ret);
@@ -203,7 +203,7 @@ fn differential(params: &[Type], ret: Type, make_op: impl FnOnce(&[Value]) -> Op
     let (action, input_type, output_type, _) = operation(op, |v| f.value_type(v)).unwrap();
     let v = f.append(b, op).unwrap();
     f.set_terminator(b, Terminator::Return(v));
-    let k = ScalarKernel::compile(&f, &crate::test_target::options())
+    let k = Kernel::compile(&f, &crate::test_target::options())
         .unwrap_or_else(|e| panic!("{params:?} {op:?}: {e}"));
     let width = crate::test_target::width();
     for inputs in [ordinary, boundary] {
@@ -224,7 +224,7 @@ fn differential(params: &[Type], ret: Type, make_op: impl FnOnce(&[Value]) -> Op
 }
 
 fn check_round(
-    k: &ScalarKernel,
+    k: &Kernel,
     params: &[Type],
     ret: Type,
     op: Op,
@@ -252,7 +252,7 @@ fn check_round(
     }
     let n = ret.bytes(width);
     let mut out = vec![0; n.div_ceil(8)];
-    let actual = k.call_words(&args, &mut out);
+    let actual = k.call_packed(&args, &mut out);
     let context = || format!("{params:?} {op:?} {:x?}", bits.map(|b| b[..16].to_vec()));
     let expected = match (reference(&bits), actual) {
         (Ok(expected), Ok(())) => expected,
@@ -377,7 +377,7 @@ fn wide_integer_cast_resolves_ties_from_the_low_word() {
         let b = f.entry();
         let r = f.append(b, Op::Cast(dest, f.params(b)[0])).unwrap();
         f.set_terminator(b, Terminator::Return(r));
-        let k = ScalarKernel::compile(&f, &crate::test_target::options()).unwrap();
+        let k = Kernel::compile(&f, &crate::test_target::options()).unwrap();
         for (input, bits) in [
             (midpoint - 1, expected),
             (midpoint, expected),
@@ -385,7 +385,7 @@ fn wide_integer_cast_resolves_ties_from_the_low_word() {
         ] {
             let args = [input as u64, (input >> 64) as u64];
             let mut out = [0];
-            k.call_words(&args, &mut out).unwrap();
+            k.call_packed(&args, &mut out).unwrap();
             assert_eq!(out[0], bits, "{input} as {dest:?}");
         }
     }
@@ -400,7 +400,7 @@ fn overflowing_and_zero_divisors_trap_in_lane_order() {
         let [lhs, rhs] = f.params(b).try_into().unwrap();
         let r = f.append(b, Op::Bin(op, lhs, rhs)).unwrap();
         f.set_terminator(b, Terminator::Return(r));
-        let k = ScalarKernel::compile(&f, &crate::test_target::options()).unwrap();
+        let k = Kernel::compile(&f, &crate::test_target::options()).unwrap();
         let n = crate::test_target::width() / 8;
         for (overflow, zero, err) in [
             (0, 1, CallError::Trap(Trap::DivisionOverflow)),
@@ -411,7 +411,7 @@ fn overflowing_and_zero_divisors_trap_in_lane_order() {
             args[n + overflow] = u64::MAX;
             args[n + zero] = 0;
             let mut out = vec![0x55; n];
-            assert_eq!(k.call_words(&args, &mut out), Err(err));
+            assert_eq!(k.call_packed(&args, &mut out), Err(err));
         }
     }
 }

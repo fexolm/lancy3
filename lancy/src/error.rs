@@ -1,5 +1,6 @@
 use crate::hir::IrError;
-pub use splice_target::{TargetError, abi::Trap};
+use splice_target::TargetError;
+pub use splice_target::abi::Trap;
 use std::io;
 use thiserror::Error;
 
@@ -7,6 +8,7 @@ use thiserror::Error;
 #[non_exhaustive]
 #[derive(Debug, Error)]
 pub enum CompileError {
+    /// The function or a callee fails verification.
     #[error(transparent)]
     InvalidIr(#[from] IrError),
     /// The function exceeds a limit of the JIT or the target.
@@ -18,7 +20,9 @@ pub enum CompileError {
     /// The operating system refused to install machine code.
     #[error("{operation} failed while installing machine code")]
     Os {
+        /// The system call that failed.
         operation: &'static str,
+        /// The operating system's error.
         #[source]
         source: io::Error,
     },
@@ -38,13 +42,14 @@ impl CompileError {
     }
 }
 
-impl From<crate::aarch64::Error> for CompileError {
-    fn from(error: crate::aarch64::Error) -> Self {
+impl From<crate::lir::aarch64::EncodeError> for CompileError {
+    fn from(error: crate::lir::aarch64::EncodeError) -> Self {
         Self::internal(error)
     }
 }
 
 /// A limit of the JIT or the target that a function exceeds.
+#[expect(missing_docs, reason = "each variant's #[error] message documents it")]
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
 pub enum Limit {
@@ -83,6 +88,7 @@ pub enum CallError {
     /// vector length is shorter than the compiled kernel requires.
     #[error(transparent)]
     Target(#[from] TargetError),
+    /// The arguments or result buffer do not fit the signature.
     #[error(transparent)]
     Signature(#[from] SignatureError),
     /// The kernel stopped. A [`Trap::RustPanic`] message is available from
@@ -92,15 +98,26 @@ pub enum CallError {
 }
 
 /// The arguments or the entry point do not match the kernel's signature.
+#[expect(missing_docs, reason = "the fields are the expected and actual counts")]
 #[non_exhaustive]
 #[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
 pub enum SignatureError {
+    /// [`Kernel::call`](crate::Kernel::call) got the wrong number of
+    /// arguments.
     #[error("expected {expected} arguments, got {actual}")]
     Arity { expected: usize, actual: usize },
-    #[error("use call_words or call_words_raw for a multiword signature")]
-    WideSignature,
+    /// [`Kernel::call`](crate::Kernel::call) needs a function of `i32`
+    /// parameters and an `i32` result.
+    #[error("the signature is not i32 parameters and an i32 result; use call_packed")]
+    NotI32,
+    /// The packed arguments do not fill the parameters' words.
+    #[error("expected {expected} argument words, got {actual}")]
+    ArgumentWords { expected: usize, actual: usize },
+    /// The result buffer does not match the result's words.
     #[error("expected {expected} result words, got {actual}")]
     ResultWords { expected: usize, actual: usize },
-    #[error("signature requires a typed invocation")]
+    /// The signature passes pointers, or the code builds them from call
+    /// scratch, so only the unsafe entry may call it.
+    #[error("the signature passes pointers; use call_packed_unchecked")]
     PointerSignature,
 }
