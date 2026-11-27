@@ -14,6 +14,7 @@ mod packed_integer;
 mod packed_rearrange;
 mod scalar;
 
+pub(in crate::lir::x64) use memory::Indices;
 pub(in crate::lir::x64) use packed::packed_half;
 
 use super::super::inst::{Inst, SelectCond, class};
@@ -54,7 +55,7 @@ pub(super) fn select(
     f: &Function,
     body: &mut lir::Function<Inst>,
     out: &mut Vec<Inst>,
-    target: (Cpu, &Masks),
+    (cpu, masks, indices): (Cpu, &Masks, &mut Indices),
     root: Root,
     callee: impl Fn(Call) -> (FunctionId, PRegSet),
 ) -> Result<(), CompileError> {
@@ -63,8 +64,9 @@ pub(super) fn select(
         f,
         body,
         out,
-        cpu: target.0,
-        masks: target.1,
+        cpu,
+        masks,
+        indices,
         result: None,
     };
     let inst = match root {
@@ -75,6 +77,14 @@ pub(super) fn select(
         Root::Term(term) => rules.terminator(term),
     };
     out.push(inst);
+    // Every address using a shared index was selected before its
+    // definition: uses are selected first.
+    if let Root::Inst(i) = root
+        && let Some(v) = f.result(i)
+        && let Some(extend) = indices.extension(v, masks.reg(f, v))
+    {
+        out.push(extend);
+    }
     Ok(())
 }
 
@@ -85,6 +95,7 @@ struct Rules<'a> {
     out: &'a mut Vec<Inst>,
     cpu: Cpu,
     masks: &'a Masks,
+    indices: &'a mut Indices,
     result: Option<Value>,
 }
 

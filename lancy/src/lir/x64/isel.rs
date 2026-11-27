@@ -45,8 +45,17 @@ pub(super) fn select(
     };
     let edges = Edges::new(source);
     let mut body = edges.function(machine)?;
+    let mut indices = rules::Indices::new(f);
     let mut blocks = isel::select(f, cfg, |ctx, root, out| {
-        rules::select(ctx, f, &mut body, out, (cpu, &masks), root, &callee_info)
+        rules::select(
+            ctx,
+            f,
+            &mut body,
+            out,
+            (cpu, &masks, &mut indices),
+            root,
+            &callee_info,
+        )
     })?;
     for &b in cfg.reverse_postorder() {
         let entry = b == f.entry();
@@ -67,6 +76,11 @@ pub(super) fn select(
                     ty,
                     index,
                 })?;
+            }
+        }
+        for &param in f.params(b) {
+            if let Some(extend) = indices.extension(param, reg(param)) {
+                body.push(extend)?;
             }
         }
         for op in blocks[b].drain(..) {
