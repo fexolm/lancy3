@@ -57,6 +57,7 @@ impl Named for Inst {
             }
             Self::Literal(lane, n, _) => format!("literal.{} {n:#x}", lane_name(lane)),
             Self::Iota(lane, _) => format!("iota.{}", lane_name(lane)),
+            Self::SplatLiteral(lane, n, _) => format!("splat.literal.{} {n:#x}", lane_name(lane)),
             Self::BitMove(from, to, ..) => format!("bitcast.{}.{}", ty(from), ty(to)),
             Self::Imm(_, n) => format!("imm {n}"),
             Self::Copy(..) => "copy".into(),

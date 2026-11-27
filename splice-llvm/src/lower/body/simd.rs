@@ -75,6 +75,9 @@ impl<'ctx> Body<'_, 'ctx> {
             (false, false) => ir.build_int_s_extend(x, ty, "")?,
             (false, true) if from.is_unsigned() => ir.build_unsigned_int_to_float(x, ty, "")?,
             (false, true) => ir.build_signed_int_to_float(x, ty, "")?,
+            (true, false) if matches!(from, Element::F32 | Element::F64) => {
+                self.saturating_float_to_int(x, to, ty)?
+            }
             (true, false) => {
                 let name = if to.is_unsigned() {
                     "llvm.fptoui.sat"
@@ -88,6 +91,51 @@ impl<'ctx> Body<'_, 'ctx> {
                     .into_vector_value()
             }
         })
+    }
+
+    /// `fptosi.sat` and `fptoui.sat` on vectors, which LLVM 19 scalarizes on
+    /// x86-64, as compares and selects around a plain conversion: a lane
+    /// below the integer range converts its lowest value, a lane at or
+    /// above `2^k` takes the largest value, NaN takes zero. A lane whose
+    /// plain conversion is poison is always replaced by a select.
+    fn saturating_float_to_int(
+        &self,
+        x: VectorValue<'ctx>,
+        to: Element,
+        ty: VectorType<'ctx>,
+    ) -> Built<VectorValue<'ctx>> {
+        let ir = self.builder;
+        let lanes = x.get_type().get_size() as usize;
+        let float = x.get_type().get_element_type().into_float_type();
+        let int = ty.get_element_type().into_int_type();
+        let floats = |v: f64| VectorType::const_vector(&vec![float.const_float(v); lanes]);
+        let bits = to.bytes() as i32 * 8;
+        let signed = !to.is_unsigned();
+        // Integers in `lowest..2^k` are the range; both bounds are powers of
+        // two, so exact in either float type.
+        let k = if signed { bits - 1 } else { bits };
+        let lowest = if signed { -(2f64.powi(k)) } else { 0.0 };
+        let largest = if signed {
+            (1u64 << (bits - 1)) - 1
+        } else {
+            u64::MAX >> (64 - bits)
+        };
+        let below = ir.build_float_compare(FloatPredicate::OLT, x, floats(lowest), "")?;
+        let clamped = ir
+            .build_select(below, floats(lowest), x, "")?
+            .into_vector_value();
+        let converted = if signed {
+            ir.build_float_to_signed_int(clamped, ty, "")?
+        } else {
+            ir.build_float_to_unsigned_int(clamped, ty, "")?
+        };
+        let above = ir.build_float_compare(FloatPredicate::OGE, x, floats(2f64.powi(k)), "")?;
+        let top = VectorType::const_vector(&vec![int.const_int(largest, false); lanes]);
+        let value = ir.build_select(above, top, converted, "")?;
+        let nan = ir.build_float_compare(FloatPredicate::UNO, x, x, "")?;
+        Ok(ir
+            .build_select(nan, ty.const_zero(), value.into_vector_value(), "")?
+            .into_vector_value())
     }
 
     fn vector(&self, reg: Reg) -> Built<VectorValue<'ctx>> {

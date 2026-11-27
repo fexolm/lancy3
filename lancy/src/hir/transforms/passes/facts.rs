@@ -245,6 +245,23 @@ impl Facts {
         self.roots[v]
     }
 
+    /// Record that `value` equals the earlier `root`, a root itself.
+    pub(super) fn merge_value(&mut self, value: Value, root: Value) {
+        debug_assert_eq!(self.roots[root], root);
+        self.roots[value] = root;
+    }
+
+    /// Replace every use of the values `aliases` maps elsewhere by their
+    /// images: each one an equal value whose definition dominates the
+    /// replaced one's uses. Parameters that forwarded a replaced value
+    /// forward its image.
+    pub(super) fn merge_values(&mut self, f: &mut Function, aliases: &DenseMap<Value, Value>) {
+        f.substitute_values(aliases);
+        for root in self.roots.values_mut() {
+            *root = aliases[*root];
+        }
+    }
+
     pub(super) fn forward_acyclic_params(&self, f: &mut Function, cfg: &ControlFlowGraph) {
         debug_assert!(!cfg.has_cycle());
         if cfg.reverse_postorder()[1..]

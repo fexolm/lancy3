@@ -323,7 +323,7 @@ const BACKENDS: &[(&str, &str)] = &[
 /// Each profile's results live in the Criterion baseline `splice-SIMD`,
 /// next to the ISA it ran with.
 fn bench_tables(run: bool, profiles: &[String]) -> Result {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+    let root = root();
     let criterion = env::var_os("CARGO_TARGET_DIR")
         .map_or_else(|| root.join("target"), PathBuf::from)
         .join("criterion");
@@ -412,8 +412,25 @@ fn baseline(criterion: &Path, name: &str) -> Result<Rows> {
 }
 
 fn json_string(json: &str, key: &str) -> Option<String> {
-    let (_, rest) = json.split_once(&format!("\"{key}\":\""))?;
+    quoted_value(json, &format!("\"{key}\":"))
+}
+
+/// The string in quotes right after `prefix`, as in JSON `"key":"value"`
+/// or TOML `key = "value"`.
+fn quoted_value(text: &str, prefix: &str) -> Option<String> {
+    let (_, rest) = text.split_once(&format!("{prefix}\""))?;
     Some(rest.split_once('"')?.0.to_owned())
+}
+
+fn root() -> &'static Path {
+    Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap()
+}
+
+/// The `llvm-config` of the LLVM that splice-llvm links.
+fn llvm_config() -> PathBuf {
+    env::var_os("LLVM_SYS_191_PREFIX")
+        .map(|prefix| PathBuf::from(prefix).join("bin/llvm-config"))
+        .unwrap_or_else(|| "llvm-config-19".into())
 }
 
 fn json_number(json: &str, key: &str) -> Option<f64> {
@@ -444,15 +461,12 @@ fn render(root: &Path, sections: &[(String, String, Rows)]) -> String {
         &env::var("RUSTC").unwrap_or_else(|_| "rustc".into()),
         &["--version"],
     );
-    let llvm = env::var_os("LLVM_SYS_191_PREFIX")
-        .map(|prefix| PathBuf::from(prefix).join("bin/llvm-config"))
-        .unwrap_or_else(|| "llvm-config-19".into());
-    let llvm = run(&llvm.to_string_lossy(), &["--version"]);
+    let llvm = run(&llvm_config().to_string_lossy(), &["--version"]);
     let lock = std::fs::read_to_string(root.join("Cargo.lock")).unwrap_or_default();
     let cranelift = lock
         .split("[[package]]")
         .find(|package| package.contains("name = \"cranelift-codegen\""))
-        .and_then(|package| json_like_value(package, "version"))
+        .and_then(|package| quoted_value(package, "version = "))
         .unwrap_or_else(|| "unknown".into());
     let cpu = std::fs::read_to_string("/proc/cpuinfo")
         .ok()
@@ -556,11 +570,6 @@ fn commit(root: &Path) -> String {
     }
 }
 
-fn json_like_value(toml: &str, key: &str) -> Option<String> {
-    let (_, rest) = toml.split_once(&format!("{key} = \""))?;
-    Some(rest.split_once('"')?.0.to_owned())
-}
-
 fn duration(ns: f64) -> String {
     let (value, unit) = if ns >= 1e6 {
         (ns / 1e6, "ms")
@@ -582,10 +591,8 @@ fn duration(ns: f64) -> String {
 /// BE-05: with LLVM linked statically, its GDB JIT interface and splice-jit's
 /// weak one must resolve to a single definition.
 fn static_llvm() -> Result {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
-    let real = env::var_os("LLVM_SYS_191_PREFIX")
-        .map(|prefix| PathBuf::from(prefix).join("bin/llvm-config"))
-        .unwrap_or_else(|| "llvm-config-19".into());
+    let root = root();
+    let real = llvm_config();
     // splice-llvm prefers libLLVM.so; a prefix whose llvm-config reports no
     // shared library makes llvm-sys link the static archives instead.
     let prefix = root.join("target/static-llvm/prefix");

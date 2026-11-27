@@ -7,6 +7,7 @@ use super::{checkpoint, dead, loops, memory, simplify};
 use crate::Trap;
 use crate::hir::transforms::{ControlFlowGraph, DomTree};
 use crate::hir::{Block, Function, IrError, Op, Value};
+use splice_target::Arch;
 use std::collections::HashMap;
 
 /// What a pass left valid.
@@ -43,17 +44,25 @@ pub(super) struct Analyses<'a> {
     /// Bounds built by a pass with extra knowledge (the loop bounds of
     /// `loops`). Without them, a pass builds the plain bounds itself.
     bounds: Option<Bounds>,
+    /// The architecture the function is compiled for; register budgets
+    /// depend on it.
+    pub(super) arch: Arch,
 }
 
 impl<'a> Analyses<'a> {
     /// Start from a CFG and dominator tree that describe `f`, such as the
     /// verifier's.
-    pub(super) fn new(cfg: Held<'a, ControlFlowGraph>, dom: Option<&'a DomTree>) -> Self {
+    pub(super) fn new(
+        cfg: Held<'a, ControlFlowGraph>,
+        dom: Option<&'a DomTree>,
+        arch: Arch,
+    ) -> Self {
         Self {
             cfg: Some(cfg),
             dom: dom.map(Held::Borrowed),
             facts: None,
             bounds: None,
+            arch,
         }
     }
 
@@ -171,6 +180,19 @@ const PIPELINE: &[Pass] = &[
             let s = a.all(f)?;
             dead::eliminate(f, s.cfg, s.facts);
             Ok(Preserved::All)
+        },
+    },
+    // Last: earlier passes leave chains of straight-line blocks (inlined
+    // calls, removed checks). One block lets instruction selection share
+    // values across them, such as the extension of an index.
+    Pass {
+        name: "merge jump chains",
+        run: |f, _| {
+            Ok(if f.merge_jump_chains() {
+                Preserved::Nothing
+            } else {
+                Preserved::All
+            })
         },
     },
 ];

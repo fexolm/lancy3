@@ -512,7 +512,9 @@ impl Lower<'_> {
             Expr::Paren(inner) => return self.known_value(&inner.expr, hint),
             Expr::Group(inner) => return self.known_value(&inner.expr, hint),
             Expr::Unary(unary) => {
-                let value = operand(&unary.expr, None)?;
+                // `-x` and `!x` have the type of `x`; `*x` does not.
+                let deref = matches!(unary.op, UnOp::Deref(_));
+                let value = operand(&unary.expr, if deref { None } else { hint })?;
                 let op = &unary.op;
                 match op {
                     UnOp::Deref(_) => Value::new(Stage::Host, self.known_deref(value)),

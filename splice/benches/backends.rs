@@ -27,6 +27,7 @@ mod gaps;
 mod large;
 #[path = "../examples/workloads/matmul.rs"]
 mod matmul;
+mod micro;
 #[path = "../examples/workloads/probe.rs"]
 mod probe;
 #[path = "../examples/relational/mod.rs"]
@@ -351,6 +352,6 @@ fn simd_hash_lookup(c: &mut Criterion) {
 criterion_group! {
     name = backends;
     config = Criterion::default().sample_size(30);
-    targets = projection, sql_plan, simd_matmul, simd_hash_lookup, large::compare, gaps::compare
+    targets = projection, sql_plan, simd_matmul, simd_hash_lookup, large::compare, gaps::compare, micro::compare
 }
 criterion_main!(backends);

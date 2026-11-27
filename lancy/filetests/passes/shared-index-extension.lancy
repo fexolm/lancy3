@@ -1,0 +1,70 @@
+# An index that several addresses use is sign-extended once, right after
+# its definition (here at the start of the loop body), and every access
+# reuses the wide register. Extending it at each access cost one movsxd per
+# access and, for the loop counter, copies around its increment.
+fn main(a:ptr b:ptr n:i32) -> i32
+  zero = const 0
+  jump head(zero zero)
+block head(i:i32 acc:i32)
+  more = lt i n
+  br more body(i acc) | done(acc)
+block body(j:i32 s:i32)
+  pa = offset a j 4
+  x = load i32 pa
+  pb = offset b j 4
+  y = load i32 pb
+  p = mul x y
+  t = add s p
+  pc = offset a j 4
+  store pc p
+  one = const 1
+  next = add j one
+  jump head(next t)
+block done(r:i32)
+  ret r
+@isel check: extend.i32
+@isel not: extend.i32
+@asm check: movsxd
+@asm not: movsxd
+@run 2 -> 22 | 02 00 00 00 03 00 00 00 | 0a 00 00 00 0c 00 00 00 | 05 00 00 00 04 00 00 00 | 05 00 00 00 04 00 00 00
+@run 0 -> 0 | 02 00 00 00 | 02 00 00 00 | 05 00 00 00 | 05 00 00 00
+
+---
+
+# Counterexample: the shared extension is a sign extension. A negative
+# index addresses before an interior pointer; reading its low 32 bits as a
+# 64-bit index would address 16 GiB past it.
+fn main(base:ptr i:i32) -> i32
+  one = const 1
+  p = offset base one 4
+  pa = offset p i 4
+  x = load i32 pa
+  pb = offset p i 4
+  y = load i32 pb
+  r = add x y
+  ret r
+@isel check: extend.i32
+@isel not: extend.i32
+@run -1 -> 14 | 07 00 00 00 09 00 00 00 | 07 00 00 00 09 00 00 00
+@run 0 -> 18 | 07 00 00 00 09 00 00 00 | 07 00 00 00 09 00 00 00
+
+---
+
+# Counterexample: an index that one address uses keeps its extension at
+# the access, inside the branch that needs it, so the other path runs no
+# extension and the wide register is not live across the branch.
+fn main(base:ptr i:i32 c:i32) -> i32
+  br c load() | skip()
+block load()
+  pa = offset base i 4
+  x = load i32 pa
+  ret x
+block skip()
+  ret i
+@isel check: branch
+@isel not: extend.i32
+@isel check: ret
+@isel check: extend.i32
+@isel nextln: load.i32
+@run 1 1 -> 9 | 07 00 00 00 09 00 00 00 | 07 00 00 00 09 00 00 00
+@run 5 0 -> 5 | 07 00 00 00 | 07 00 00 00

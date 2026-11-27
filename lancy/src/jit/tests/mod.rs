@@ -10,6 +10,7 @@ mod traps;
 use super::{Inlining, Kernel, passes};
 use crate::CompileError;
 use crate::hir::{Binary, Function, Op, Terminator};
+use splice_target::Arch;
 use std::sync::Arc;
 
 #[test]
@@ -70,7 +71,7 @@ fn every_size_limit_of_the_expanded_body_falls_back_to_calls() {
     ];
     for limit in limits {
         let mut limit = Some(limit);
-        let lowered = super::optimize_and_lower(&module, Inlining::Always, |m| {
+        let lowered = super::optimize_and_lower(&module, Inlining::Always, Arch::X86_64, |m| {
             // The first attempt is the inlined single-function body.
             match limit.take() {
                 Some(error) => {

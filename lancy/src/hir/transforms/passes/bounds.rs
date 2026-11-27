@@ -242,6 +242,20 @@ impl Bounds {
             if f.value_type(a) != Type::I32 {
                 continue;
             }
+            if let Binary::Eq | Binary::Ne = kind {
+                // Equal operands bound each other from both sides.
+                let equal = if kind == Binary::Eq { yes } else { no };
+                if cfg.predecessors(equal) == [block] {
+                    let scope = dom.scope(equal);
+                    let scope = 2 * scope.start..2 * scope.end;
+                    for (lower, upper) in [(a, b), (b, a)] {
+                        if loop_bounds.binary_search(&lower).is_ok() {
+                            before.record((lower, upper), scope.clone(), ());
+                        }
+                    }
+                }
+                continue;
+            }
             let Some((high, low, on_yes)) = at_least(kind, a, b) else {
                 continue;
             };

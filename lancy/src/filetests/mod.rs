@@ -351,7 +351,10 @@ impl<'a> Case<'a> {
         let targets = [Arch::X86_64, Arch::Aarch64]
             .map(|arch| lir::filetest_target(arch).map(|target| (arch, target)));
         let targets = targets.into_iter().collect::<Result<Vec<_>>>()?;
-        let lowered = jit::optimize_and_lower(&source, self.policy, |module| {
+        // One optimized body is lowered for both machines. It uses the
+        // x86-64 register budgets, the smaller ones, so `@opt` is the same
+        // on every host.
+        let lowered = jit::optimize_and_lower(&source, self.policy, Arch::X86_64, |module| {
             self.lower(module, &targets, emit)
         })
         .map_err(|e| format!("opt: {e}"))?;

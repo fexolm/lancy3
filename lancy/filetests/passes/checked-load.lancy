@@ -47,8 +47,6 @@ block tail()
 @opt nextln: jump b3()
 @opt nextln: block b3()
 @opt nextln: bounds
-@opt nextln: jump b4()
-@opt nextln: block b4()
 @opt nextln: ret
 @run 0 1 1 -> !bounds
 @run 1 0 1 -> 0

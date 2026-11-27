@@ -1,13 +1,47 @@
 use super::Rules;
+use crate::support::slotmap::DenseMap;
 use crate::{
     CompileError,
-    hir::{Op, Scale, Simd, Type, Value, VectorAddress},
+    hir::{Function, Op, Scale, Simd, Type, Value, VectorAddress},
     lir::x64::inst::{
         Address, Inst, Int, VectorMask,
         simd::{MaskedMemory, evex_masked_memory},
     },
 };
-use regalloc2::RegClass;
+use regalloc2::{RegClass, VReg};
+
+/// Sign extensions of `i32` indices to pointer width. An index that several
+/// address computations use is extended once, right after its definition,
+/// and every address reuses the wide register; another one is extended at
+/// its use, which keeps the wide register short-lived.
+pub(in crate::lir::x64) struct Indices {
+    shared: DenseMap<Value, bool>,
+    wide: DenseMap<Value, Option<VReg>>,
+}
+
+impl Indices {
+    pub(in crate::lir::x64) fn new(f: &Function) -> Self {
+        let mut uses = DenseMap::filled(f.value_count(), 0u8);
+        for b in f.blocks() {
+            for inst in f.instructions(b) {
+                if let Op::PtrOffset(_, index, _) = *f.op(inst) {
+                    uses[index] = uses[index].saturating_add(1);
+                }
+            }
+        }
+        let shared = DenseMap::from_fn(f.value_count(), |v| uses[v] > 1);
+        Self {
+            shared,
+            wide: DenseMap::filled(f.value_count(), None),
+        }
+    }
+
+    /// The extension of `v` that selected addresses use, if any: the
+    /// caller places it right after the definition of `v`.
+    pub(in crate::lir::x64) fn extension(&self, v: Value, narrow: VReg) -> Option<Inst> {
+        Some(Inst::Extend(Int::I32, self.wide[v]?, narrow))
+    }
+}
 
 impl Rules<'_> {
     pub(super) fn bounds_check(&mut self, index: Value, length: Value) -> Inst {
@@ -130,9 +164,23 @@ impl Rules<'_> {
                 disp,
             });
         }
-        let wide = self.body.temp(RegClass::Int)?;
-        let index = self.input(index);
-        self.out.push(Inst::Extend(Int::I32, wide, index));
+        let wide = if self.indices.shared[index] {
+            // Extended once where the index is defined (see `Indices`).
+            self.ctx.require(index);
+            match self.indices.wide[index] {
+                Some(wide) => wide,
+                None => {
+                    let wide = self.body.temp(RegClass::Int)?;
+                    self.indices.wide[index] = Some(wide);
+                    wide
+                }
+            }
+        } else {
+            let wide = self.body.temp(RegClass::Int)?;
+            let index = self.input(index);
+            self.out.push(Inst::Extend(Int::I32, wide, index));
+            wide
+        };
         Ok(Address {
             base,
             index: Some((wide, scale)),

@@ -1,0 +1,211 @@
+# `if m < n || n <= 0 { return -1 }`: the short-circuit operand that is
+# already true joins as a constant. Its edge skips the join and the branch
+# on the other comparison guards the loop, so `m >= n` covers the stores.
+fn main(p:ptr n:i32 q:ptr m:i32) -> i32
+  slice p n read4
+  slice q m write4
+  short = lt m n
+  br short taken() | rhs()
+block taken()
+  t = const -1
+  jump join(t)
+block rhs()
+  zero = const 0
+  empty = le n zero
+  jump join(empty)
+block join(c:i32)
+  br c fail() | start()
+block fail()
+  r = const -1
+  ret r
+block start()
+  z = const 0
+  jump head(z)
+block head(i:i32)
+  more = lt i n
+  br more body(i) | done()
+block body(j:i32)
+  bounds j n
+  a = offset p j 4
+  x = load i32 a
+  bounds j m
+  b = offset q j 4
+  store b x
+  one = const 1
+  k = add j one
+  jump head(k)
+block done()
+  ret n
+@source check: bounds
+@opt check: lt
+@opt not: bounds
+@opt check: ret
+@run 2 2 -> 2 | 01 00 00 00 02 00 00 00 | 01 00 00 00 02 00 00 00 | aa aa aa aa aa aa aa aa | 01 00 00 00 02 00 00 00
+@run 2 1 -> -1 | 01 00 00 00 02 00 00 00 | 01 00 00 00 02 00 00 00 | aa aa aa aa | aa aa aa aa
+@run 0 1 -> -1 | | | aa aa aa aa | aa aa aa aa
+
+---
+
+# The constant enters an empty branch block that is a loop header: the
+# edge keeps its target, so the loop stays reducible.
+fn main(n:i32) -> i32
+  one = const 1
+  zero = const 0
+  jump head(one zero)
+block head(c:i32 i:i32)
+  br c body(i) | done(i)
+block body(j:i32)
+  k = add j one
+  more = lt k n
+  jump head(more k)
+block done(r:i32)
+  ret r
+@opt check: jump
+@opt nextln: block
+@opt nextln: br
+@run 5 -> 5
+@run 0 -> 1
+
+---
+
+# A join block that computes something is not a forwarding block.
+fn main(a:i32 b:i32) -> i32
+  br a left() | right()
+block left()
+  t = const 1
+  jump join(t)
+block right()
+  jump join(b)
+block join(c:i32)
+  seven = const 7
+  d = add c seven
+  br c yes(d) | no()
+block yes(v:i32)
+  ret v
+block no()
+  z = const 0
+  ret z
+@opt check: = add
+@opt check: br
+@run 1 0 -> 8
+@run 0 0 -> 0
+@run 0 5 -> 12
+
+---
+
+# `if m != n { return -1 }`: the loop bound equals the slice length on the
+# fall-through edge, so the stores need no check.
+fn main(p:ptr n:i32 q:ptr m:i32) -> i32
+  slice p n read4
+  slice q m write4
+  differ = ne m n
+  br differ fail() | start()
+block fail()
+  r = const -1
+  ret r
+block start()
+  z = const 0
+  jump head(z)
+block head(i:i32)
+  more = lt i n
+  br more body(i) | done()
+block body(j:i32)
+  bounds j n
+  a = offset p j 4
+  x = load i32 a
+  bounds j m
+  b = offset q j 4
+  store b x
+  one = const 1
+  k = add j one
+  jump head(k)
+block done()
+  ret n
+@opt not: bounds
+@run 1 1 -> 1 | 05 00 00 00 | 05 00 00 00 | aa aa aa aa | 05 00 00 00
+@run 1 2 -> -1 | 05 00 00 00 | 05 00 00 00 | aa aa aa aa aa aa aa aa | aa aa aa aa aa aa aa aa
+
+---
+
+# `if m == n { return -1 }` proves nothing about `m >= n` on the loop path.
+fn main(p:ptr n:i32 q:ptr m:i32) -> i32
+  slice p n read4
+  slice q m write4
+  same = eq m n
+  br same fail() | start()
+block fail()
+  r = const -1
+  ret r
+block start()
+  z = const 0
+  jump head(z)
+block head(i:i32)
+  more = lt i n
+  br more body(i) | done()
+block body(j:i32)
+  bounds j n
+  a = offset p j 4
+  x = load i32 a
+  bounds j m
+  b = offset q j 4
+  store b x
+  one = const 1
+  k = add j one
+  jump head(k)
+block done()
+  ret n
+@opt check: bounds
+@run 2 1 -> !bounds | 05 00 00 00 06 00 00 00 | 05 00 00 00 06 00 00 00 | aa aa aa aa | 05 00 00 00
+@run 1 1 -> -1 | 05 00 00 00 | 05 00 00 00 | aa aa aa aa | aa aa aa aa
+
+---
+
+# A successor reads a join parameter directly, and the join stops
+# dominating it. Every edge passes the same value, through the single-edge
+# block `right`, so that value replaces the parameter.
+fn main(a:i32 b:i32) -> i32
+  br a left() | right(b)
+block left()
+  t = const 1
+  jump join(t b)
+block right(w:i32)
+  jump join(a w)
+block join(c:i32 v:i32)
+  br c yes() | no()
+block yes()
+  ret v
+block no()
+  z = const 0
+  ret z
+@opt check: block b1()
+@opt nextln: jump b4()
+@opt check: block b4()
+@opt nextln: ret v1
+@run 1 5 -> 5
+@run 0 5 -> 0
+@run 3 -2 -> -2
+
+---
+
+# Different values reach the parameter that a successor reads, so the
+# join keeps its edges and dominates the read.
+fn main(a:i32 b:i32) -> i32
+  br a left() | right()
+block left()
+  t = const 1
+  jump join(t b)
+block right()
+  jump join(a a)
+block join(c:i32 v:i32)
+  br c yes() | no()
+block yes()
+  ret v
+block no()
+  z = const 0
+  ret z
+@opt check: block
+@opt check: br
+@opt nextln: block
+@run 1 5 -> 5
+@run 0 5 -> 0
+@run 3 -2 -> -2

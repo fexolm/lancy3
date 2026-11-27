@@ -3,10 +3,12 @@ use super::facts::Facts;
 use super::pipeline::{Analyses, Preserved};
 use crate::hir::transforms::{ControlFlowGraph, DomTree, NaturalLoops};
 use crate::hir::{
-    Binary, Block, Function, IrError, MAX_VECTOR_BYTES, Op, Simd, Terminator, Type, Unary, Value,
-    ssa::Edge,
+    Binary, Block, Function, IrError, Lane, MAX_VECTOR_BYTES, Op, Simd, Terminator, Type, Unary,
+    Value, ssa::Edge,
 };
 use crate::support::slotmap::DenseMap;
+use splice_target::Arch;
+use std::collections::{HashMap, HashSet};
 mod fusion;
 mod memory;
 mod recurrence;
@@ -23,13 +25,14 @@ enum Rewrite {
 /// the passes after this one.
 pub(super) fn run(f: &mut Function, analyses: &mut Analyses<'_>) -> Result<Preserved, IrError> {
     let mut allow_unswitch = true;
+    let arch = analyses.arch;
     loop {
         let (cfg, dom) = analyses.graph(f)?;
         if !cfg.has_cycle() {
             return Ok(Preserved::All);
         }
         let mut analysis = None;
-        match simplify_loops(f, cfg, dom, allow_unswitch, &mut analysis) {
+        match simplify_loops(f, cfg, dom, allow_unswitch, arch, &mut analysis) {
             Rewrite::None => {
                 if let Some((facts, bounds)) = analysis {
                     analyses.keep(facts, bounds);
@@ -51,6 +54,7 @@ fn simplify_loops(
     cfg: &ControlFlowGraph,
     dom: &DomTree,
     allow_unswitch: bool,
+    arch: Arch,
     analysis: &mut Option<(Facts, Bounds)>,
 ) -> Rewrite {
     let loops = NaturalLoops::discover(cfg, dom);
@@ -62,7 +66,7 @@ fn simplify_loops(
         return Rewrite::None;
     }
     let mut facts = Facts::new(f, cfg, dom);
-    hoist(f, dom, &loops, &mut facts);
+    hoist(f, dom, &loops, &mut facts, arch);
     let mut counted = DenseMap::filled(f.block_capacity(), None);
     for &header in &loops.headers {
         counted[header] = counted_loop(f, cfg, dom, &loops, &facts, header);
@@ -90,7 +94,7 @@ fn simplify_loops(
     }
 }
 
-fn hoist(f: &mut Function, dom: &DomTree, loops: &NaturalLoops, facts: &mut Facts) {
+fn hoist(f: &mut Function, dom: &DomTree, loops: &NaturalLoops, facts: &mut Facts, arch: Arch) {
     // Keep the outermost preheader as a fast path for fully invariant values.
     let mut outer = DenseMap::filled(f.block_capacity(), Block::INVALID);
     for &header in loops.headers.iter().rev() {
@@ -103,26 +107,30 @@ fn hoist(f: &mut Function, dom: &DomTree, loops: &NaturalLoops, facts: &mut Fact
     }
 
     // Hoisting many vector-valued expressions across a backedge can trade
-    // cheap recomputation for spills (see `HOIST_VECTOR_VALUES`). Count
+    // cheap recomputation for spills (see `hoist_vector_values`). Count
     // definitions as an upper bound on loop-local vector register demand.
-    const VECTOR_BUDGET: usize = super::limits::HOIST_VECTOR_VALUES;
+    let budget = super::limits::hoist_vector_values(arch);
     let mut vector_values = DenseMap::filled(f.block_capacity(), 0);
     for &block in dom.preorder() {
         let Some(pressure) = vector_values.get_mut(loops.owner[block]) else {
             continue;
         };
-        if *pressure > VECTOR_BUDGET {
+        if *pressure > budget {
             continue;
         }
         if block != loops.owner[block] && matches!(f.terminator(block), Terminator::Branch { .. }) {
-            *pressure = VECTOR_BUDGET + 1;
+            *pressure = budget + 1;
             continue;
         }
         *pressure += f
             .params(block)
             .iter()
             .copied()
-            .chain(f.instructions(block).filter_map(|inst| f.result(inst)))
+            .chain(
+                f.instructions(block)
+                    .filter(|&inst| !is_literal(f, facts, *f.op(inst)))
+                    .filter_map(|inst| f.result(inst)),
+            )
             .filter(|&v| match f.value_type(v) {
                 Type::Vector(_) => true,
                 ty => ty
@@ -131,6 +139,26 @@ fn hoist(f: &mut Function, dom: &DomTree, loops: &NaturalLoops, facts: &mut Fact
             })
             .count();
     }
+
+    // A literal or splat that was already moved to the same preheader is
+    // reused, so each constant occupies one register across the loop.
+    let mut constants = HashMap::new();
+    // An `i32` constant moves only to be splatted before the loop: other
+    // uses take it as an immediate or keep a general register short-lived.
+    let mut splatted = HashSet::new();
+    for &block in dom.preorder() {
+        if loops.owner[block] != Block::INVALID {
+            for inst in f.instructions(block) {
+                if let Op::Simd(Simd::Splat(scalar)) = *f.op(inst)
+                    && let Some(Op::Const(_)) = facts.op(f, scalar)
+                {
+                    splatted.insert(facts.root(scalar));
+                }
+            }
+        }
+    }
+    let mut aliases = DenseMap::from_fn(f.value_count(), |v| v);
+    let mut merged = false;
 
     // Results that can be evaluated early without observing a trap.
     let mut total = Vec::new();
@@ -144,7 +172,7 @@ fn hoist(f: &mut Function, dom: &DomTree, loops: &NaturalLoops, facts: &mut Fact
         if nearest == Block::INVALID && outermost == Block::INVALID {
             continue;
         }
-        let extended = nearest != Block::INVALID && vector_values[header] <= VECTOR_BUDGET;
+        let extended = nearest != Block::INVALID && vector_values[header] <= budget;
         // Without `extended`, only `i32` arithmetic other than division moves,
         // which has no effects.
         total.clear();
@@ -163,6 +191,8 @@ fn hoist(f: &mut Function, dom: &DomTree, loops: &NaturalLoops, facts: &mut Fact
                 return None;
             }
             let cheap = match op {
+                Op::Literal(..) => true,
+                Op::Const(_) => splatted.contains(&result),
                 Op::Bin(kind, ..) => !matches!(kind, Binary::Pow | Binary::Atan2 | Binary::Hypot),
                 Op::Unary(kind, ..) => matches!(
                     kind,
@@ -216,8 +246,43 @@ fn hoist(f: &mut Function, dom: &DomTree, loops: &NaturalLoops, facts: &mut Fact
             let mut op = op;
             op.map_operands(|v| facts.root(v));
             facts.defs[result].block = target;
+            let constant = match op {
+                Op::Literal(lane, bits) => Some(Constant::Literal(lane, bits)),
+                Op::Const(n) => Some(Constant::Literal(Lane::I32, u128::from(n as u32))),
+                Op::Simd(Simd::Splat(scalar)) => Some(Constant::Splat(scalar)),
+                _ => None,
+            };
+            if let Some(constant) = constant {
+                let earlier = *constants.entry((target, constant)).or_insert(result);
+                if earlier != result {
+                    aliases[result] = earlier;
+                    facts.merge_value(result, earlier);
+                    merged = true;
+                }
+            }
             Some((target, op))
         });
+    }
+    if merged {
+        facts.merge_values(f, &aliases);
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum Constant {
+    Literal(Lane, u128),
+    Splat(Value),
+}
+
+/// A literal, or the splat of one or of an `i32` constant: hoisting it costs no more registers than
+/// reloading it costs loads (see `hoist_vector_values`).
+fn is_literal(f: &Function, facts: &Facts, op: Op) -> bool {
+    match op {
+        Op::Literal(..) => true,
+        Op::Simd(Simd::Splat(scalar)) => {
+            matches!(facts.op(f, scalar), Some(Op::Literal(..) | Op::Const(_)))
+        }
+        _ => false,
     }
 }
 

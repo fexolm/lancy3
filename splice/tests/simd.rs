@@ -1664,3 +1664,144 @@ fn i64_multiply_keeps_the_low_word_of_every_product() {
         }
     }
 }
+
+/// A masked access with a prefix mask, as a vector loop's tail writes it.
+#[kernel]
+fn prefix_tail(src: &[i32], out: &mut [i32], at: i32, count: i32) -> i32 {
+    let active = Lane::<i32>::first_n(count as usize);
+    let v = Lane::load_select(src, at as usize, active, Lane::<i32>::splat(-1));
+    v.store_select(out, at as usize, active);
+    0
+}
+
+#[test]
+fn prefix_masks_trap_exactly_when_an_active_lane_is_outside() {
+    // Lancy checks a prefix mask against the room as lane counts; every
+    // backend agrees with these element-by-element rules.
+    let w = Lane::<i32>::lanes();
+    let kernels = compile_all!(prefix_tail);
+    let src: Vec<i32> = (0..2 * w as i32 + 3).map(|x| 10 + x).collect();
+    for src_len in [w - 1, w, w + 2] {
+        for out_len in [w - 2, w + 1] {
+            for at in [0, 1, 2, w - 1, w, w + 1] {
+                for count in [-1, 0, 1, 2, w as i32 - 1, w as i32, w as i32 + 1] {
+                    let active = if count < 0 {
+                        w
+                    } else {
+                        (count as usize).min(w)
+                    };
+                    let src_room = src_len.saturating_sub(at);
+                    let out_room = out_len.saturating_sub(at);
+                    let mut want = vec![7; out_len];
+                    let expected = if active > src_room {
+                        Err(CallError::Trap(Trap::Bounds))
+                    } else {
+                        let written = active.min(out_room);
+                        if written > 0 {
+                            let lanes = at..at + written;
+                            want[lanes.clone()].copy_from_slice(&src[lanes]);
+                        }
+                        if active > out_room {
+                            Err(CallError::Trap(Trap::Bounds))
+                        } else {
+                            Ok(0)
+                        }
+                    };
+                    for kernel in &kernels {
+                        let mut out = vec![7; out_len];
+                        let actual = splice_testkit::call_i32(
+                            kernel,
+                            &[at as i32, count],
+                            &mut [
+                                BufferArg::from(&src[..src_len]),
+                                BufferArg::from(out.as_mut_slice()),
+                            ],
+                        );
+                        let case = (src_len, out_len, at, count);
+                        assert_eq!(actual, expected, "{case:?}");
+                        assert_eq!(out, want, "{case:?}");
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[kernel]
+fn saturating_float_casts(
+    singles: &[f32],
+    doubles: &[f64],
+    signed: &mut [i32],
+    unsigned: &mut [u32],
+    wide: &mut [i64],
+) -> i32 {
+    let w = Lane::<f32>::lanes();
+    let mut i = 0;
+    while i + w <= singles.len() {
+        let x = Lane::<f32>::load(singles, i);
+        x.cast::<i32>().store(signed, i);
+        x.cast::<u32>().store(unsigned, i);
+        i += w;
+    }
+    let w = Lane::<f64>::lanes();
+    let mut i = 0;
+    while i + w <= doubles.len() {
+        Lane::<f64>::load(doubles, i).cast::<i64>().store(wide, i);
+        i += w;
+    }
+    0
+}
+
+#[test]
+fn float_to_integer_lanes_saturate_and_send_nan_to_zero() {
+    // Rust's `as` is the reference: it truncates, saturates and maps NaN
+    // to zero. The values sit at and next to each bound.
+    let edges = [
+        f64::NAN,
+        f64::INFINITY,
+        f64::NEG_INFINITY,
+        0.0,
+        -0.0,
+        0.5,
+        -0.5,
+        -1.0,
+        123.9,
+        -123.9,
+        2f64.powi(31),
+        2f64.powi(31) - 128.0,
+        -(2f64.powi(31)),
+        -(2f64.powi(31)) - 256.0,
+        2f64.powi(32),
+        2f64.powi(32) - 256.0,
+        2f64.powi(63),
+        2f64.powi(63) - 1024.0,
+        -(2f64.powi(63)),
+        -(2f64.powi(63)) - 4096.0,
+        1e20,
+        -1e20,
+    ];
+    let lanes = Lane::<f32>::lanes();
+    let n = edges.len().div_ceil(lanes) * lanes;
+    let singles: Vec<f32> = (0..n).map(|i| edges[i % edges.len()] as f32).collect();
+    let doubles: Vec<f64> = (0..n).map(|i| edges[i % edges.len()]).collect();
+    for kernel in compile_all!(saturating_float_casts) {
+        let (mut signed, mut unsigned, mut wide) = (vec![7; n], vec![7; n], vec![7; n]);
+        let result = splice_testkit::call_i32(
+            &kernel,
+            &[],
+            &mut [
+                BufferArg::from(singles.as_slice()),
+                BufferArg::from(doubles.as_slice()),
+                BufferArg::from(signed.as_mut_slice()),
+                BufferArg::from(unsigned.as_mut_slice()),
+                BufferArg::from(wide.as_mut_slice()),
+            ],
+        );
+        assert_eq!(result, Ok(0));
+        for i in 0..n {
+            assert_eq!(signed[i], singles[i] as i32, "{}", singles[i]);
+            assert_eq!(unsigned[i], singles[i] as u32, "{}", singles[i]);
+            assert_eq!(wide[i], doubles[i] as i64, "{}", doubles[i]);
+        }
+    }
+}

@@ -680,6 +680,38 @@ impl Emitter<'_> {
                 8 => a.mov(q(dst), bits as u64),
                 size => a.mov(r(dst), (bits & (u128::MAX >> (128 - size * 8))) as u32),
             },
+            Inst::SplatLiteral(_, 0, dst) => {
+                // Zeroing idioms break the dependency on the old value; the
+                // VEX form also clears the upper bits of a wider register.
+                let x = simd::XMM[reg(dst)];
+                if width == 16 {
+                    a.pxor(x, x)
+                } else {
+                    a.vpxor(x, x, x)
+                }
+            }
+            Inst::SplatLiteral(l, bits, dst) => {
+                // AVX broadcasts a 4- or 8-byte element from memory with one
+                // load operation. Other widths load a whole vector.
+                let element = l.bytes();
+                let size = if width >= 32 && element >= 4 {
+                    element
+                } else {
+                    width
+                };
+                let mut data = [0; 64];
+                for lane in data[..size].chunks_exact_mut(element) {
+                    lane.copy_from_slice(&bits.to_le_bytes()[..element]);
+                }
+                let at = ptr(self.constants.label(a, data, size));
+                match (width, size) {
+                    (32, 4) => a.vpbroadcastd(YMM[reg(dst)], dword_ptr(at)),
+                    (32, 8) => a.vpbroadcastq(YMM[reg(dst)], qword_ptr(at)),
+                    (64, 4) => a.vpbroadcastd(ZMM[reg(dst)], dword_ptr(at)),
+                    (64, 8) => a.vpbroadcastq(ZMM[reg(dst)], qword_ptr(at)),
+                    _ => simd::load(a, reg(dst), at, width),
+                }
+            }
             Inst::Iota(l, dst) => {
                 let bits = super::super::constants::iota_bytes(l, width);
                 let label = self.constants.label(a, bits, width);

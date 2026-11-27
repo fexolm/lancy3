@@ -72,15 +72,18 @@ impl PairedShuffle {
                     word.copy_from_slice(&(self.index(i, 16) as u32).to_le_bytes());
                 }
                 let label = pool.label(a, bits, 64);
+                if dst != lhs && dst != rhs {
+                    // `vpermi2d` overwrites its index table with the result,
+                    // so a destination apart from both inputs holds the table.
+                    load(a, dst, ptr(label), 64)?;
+                    return a.vpermi2d(ZMM[dst], ZMM[lhs], ZMM[rhs]);
+                }
                 load(a, SCRATCH, ptr(label), 64)?;
-                if dst == rhs && lhs != rhs {
+                if dst == lhs {
+                    a.vpermt2d(ZMM[dst], ZMM[SCRATCH], ZMM[rhs])
+                } else {
                     a.vpermi2d(ZMM[SCRATCH], ZMM[lhs], ZMM[rhs])?;
                     copy(a, dst, SCRATCH, 64)
-                } else {
-                    if dst != lhs {
-                        copy(a, dst, lhs, 64)?;
-                    }
-                    a.vpermt2d(ZMM[dst], ZMM[SCRATCH], ZMM[rhs])
                 }
             }
         }
