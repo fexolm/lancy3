@@ -203,12 +203,7 @@ impl<'a> Validating<'a> {
     /// The type of the elements of `buffer`, accessed one at a time.
     fn element(&self, buffer: Buffer, write: bool) -> Result<ScalarType> {
         let kind = self.buffer(buffer)?;
-        let ty = ScalarType::of_element(kind.element()).ok_or_else(|| {
-            self.error(format!(
-                "a scalar register cannot hold a {} element",
-                kind.element().name()
-            ))
-        })?;
+        let ty = kind.element();
         if write && !kind.writable() {
             return Err(self.error("store to read-only buffer"));
         }
@@ -372,6 +367,14 @@ impl KernelBuilder for Validating<'_> {
         self.types.get(r.0 as usize).copied()
     }
     fn local(&mut self, ty: ValueType) -> Result<Reg> {
+        if let ValueType::Vector(e) | ValueType::Mask(e) = ty
+            && !ty.is_supported()
+        {
+            return Err(BuildError::unsupported(format!(
+                "SIMD lanes of {} are not supported",
+                e.name()
+            )));
+        }
         let r = self.inner.local(ty)?;
         Ok(self.allocated(r, ty))
     }

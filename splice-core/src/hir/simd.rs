@@ -1,14 +1,26 @@
 use super::{Buffer, BufferKind, ScalarType};
-use crate::simd::Element;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ValueType {
     Scalar(ScalarType),
-    Vector(Element),
-    Mask(Element),
+    /// A vector of lanes of a type whose [`ScalarType::is_lane`] holds.
+    Vector(ScalarType),
+    /// One predicate per lane of a vector of the type.
+    Mask(ScalarType),
     /// A value of an `#[intrinsic] struct`: an opaque type that only the
     /// backends that implement its intrinsics represent.
     Opaque(crate::intrinsic::OpaqueType),
+}
+
+impl ValueType {
+    /// Whether a register can have this type: vectors and masks need a
+    /// lane element.
+    pub const fn is_supported(self) -> bool {
+        match self {
+            Self::Scalar(_) | Self::Opaque(_) => true,
+            Self::Vector(e) | Self::Mask(e) => e.is_lane(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -41,13 +53,15 @@ pub enum SimdOp {
     ScatterSelect(Buffer),
     Add,
     Sub,
+    SaturatingAdd,
+    SaturatingSub,
     Mul,
     Div,
     Sqrt,
     MulAdd,
-    Cast(Element),
-    Widen { to: Element, high: bool },
-    Narrow(Element),
+    Cast(ScalarType),
+    Widen { to: ScalarType, high: bool },
+    Narrow(ScalarType),
     ReduceSum,
     Min,
     Max,
@@ -72,7 +86,7 @@ pub enum SimdOp {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Simd {
-    pub element: Element,
+    pub element: ScalarType,
     pub op: SimdOp,
 }
 
@@ -91,12 +105,14 @@ pub enum Slot {
     Offset,
     /// A scalar `bool`.
     Bool,
+    /// A scalar of the element type `e`.
+    Element,
     /// A vector of the given element.
-    Converted(Element),
+    Converted(ScalarType),
 }
 
 impl Slot {
-    pub const fn value_type(self, element: Element) -> ValueType {
+    pub const fn value_type(self, element: ScalarType) -> ValueType {
         match self {
             Self::Vector => ValueType::Vector(element),
             Self::Mask => ValueType::Mask(element),
@@ -104,6 +120,7 @@ impl Slot {
             Self::Lane => ValueType::Scalar(ScalarType::I32),
             Self::Offset => ValueType::Scalar(ScalarType::Index),
             Self::Bool => ValueType::Scalar(ScalarType::Bool),
+            Self::Element => ValueType::Scalar(element),
             Self::Converted(to) => ValueType::Vector(to),
         }
     }
@@ -118,19 +135,19 @@ pub enum Elements {
     Integer,
     Float,
     /// A conversion to an element of the same width.
-    SameWidth(Element),
+    SameWidth(ScalarType),
     /// A conversion to an element of twice the width and the same kind.
-    Wider(Element),
+    Wider(ScalarType),
     /// A conversion to an element of half the width and the same kind.
-    Narrower(Element),
+    Narrower(ScalarType),
 }
 
 impl Elements {
-    pub const fn accepts(self, e: Element) -> bool {
+    pub const fn accepts(self, e: ScalarType) -> bool {
         match self {
             Self::Any => true,
-            Self::I32 => matches!(e, Element::I32),
-            Self::I32OrU32 => matches!(e, Element::I32 | Element::U32),
+            Self::I32 => matches!(e, ScalarType::I32),
+            Self::I32OrU32 => matches!(e, ScalarType::I32 | ScalarType::U32),
             Self::Integer => !e.is_float(),
             Self::Float => e.is_float(),
             Self::SameWidth(to) => e.bytes() == to.bytes(),
@@ -209,7 +226,7 @@ impl SimdOp {
             Lanes => ("lanes", &[], Some(Offset), E::Any),
             FirstN => ("first_n", &[Offset], Some(Mask), E::Any),
             Splat(_) => ("splat", &[], Some(Vector), E::Any),
-            SplatScalar => ("splat_scalar", &[Lane], Some(Vector), E::I32),
+            SplatScalar => ("splat_scalar", &[Element], Some(Vector), E::Any),
             Iota => ("iota", &[], Some(Vector), E::Any),
             Shuffle(_) => ("shuffle", &[Vector, Vector], Some(Vector), E::I32),
             PrefixSum => ("prefix_sum", &[Vector], Some(Vector), E::I32),
@@ -217,17 +234,17 @@ impl SimdOp {
             Compress => ("compress", &[Vector, Mask], Some(Vector), E::I32),
             Expand => ("expand", &[Vector, Mask, Vector], Some(Vector), E::I32),
             Swizzle => ("swizzle", &[Vector, Vector], Some(Vector), E::I32),
-            Count => ("count", &[Mask], Some(Lane), E::I32),
+            Count => ("count", &[Mask], Some(Lane), E::Any),
             Shr(_) => ("shr", &[Vector], Some(Vector), E::I32OrU32),
             RotateLeft(_) => ("rotate_left", &[Vector], Some(Vector), E::I32OrU32),
             CompressStore(_) => ("compress_store", &[Offset, Mask, Vector], None, E::I32),
-            Last => ("last", &[Vector], Some(Lane), E::I32),
-            ExtractWrapping => ("extract_wrapping", &[Vector, Lane], Some(Lane), E::I32),
+            Last => ("last", &[Vector], Some(Element), E::Any),
+            ExtractWrapping => ("extract_wrapping", &[Vector, Lane], Some(Element), E::Any),
             ReplaceWrapping => (
                 "replace_wrapping",
-                &[Vector, Lane, Lane],
+                &[Vector, Lane, Element],
                 Some(Vector),
-                E::I32,
+                E::Any,
             ),
             Load(_) => ("load", &[Offset], Some(Vector), E::Any),
             Store(_) => ("store", &[Offset, Vector], None, E::Any),
@@ -244,6 +261,18 @@ impl SimdOp {
             ScatterSelect(_) => ("scatter_select", &[Indices, Mask, Vector], None, E::Any),
             Add => ("add", &[Vector, Vector], Some(Vector), E::Any),
             Sub => ("sub", &[Vector, Vector], Some(Vector), E::Any),
+            SaturatingAdd => (
+                "saturating_add",
+                &[Vector, Vector],
+                Some(Vector),
+                E::Integer,
+            ),
+            SaturatingSub => (
+                "saturating_sub",
+                &[Vector, Vector],
+                Some(Vector),
+                E::Integer,
+            ),
             Mul => ("mul", &[Vector, Vector], Some(Vector), E::Any),
             Div => ("div", &[Vector, Vector], Some(Vector), E::Float),
             Sqrt => ("sqrt", &[Vector], Some(Vector), E::Float),
@@ -256,9 +285,9 @@ impl SimdOp {
                 Some(Converted(to)),
                 E::Narrower(to),
             ),
-            ReduceSum => ("reduce_sum", &[Vector], Some(Lane), E::I32),
-            Min => ("min", &[Vector, Vector], Some(Vector), E::I32OrU32),
-            Max => ("max", &[Vector, Vector], Some(Vector), E::I32OrU32),
+            ReduceSum => ("reduce_sum", &[Vector], Some(Element), E::Integer),
+            Min => ("min", &[Vector, Vector], Some(Vector), E::Integer),
+            Max => ("max", &[Vector, Vector], Some(Vector), E::Integer),
             And => ("and", &[Vector, Vector], Some(Vector), E::Integer),
             Or => ("or", &[Vector, Vector], Some(Vector), E::Integer),
             Xor => ("xor", &[Vector, Vector], Some(Vector), E::Integer),
@@ -330,6 +359,19 @@ impl Simd {
 
     pub fn validate(self, args: &[ValueType], buffers: &[BufferKind]) -> crate::Result<()> {
         let info = self.op.info();
+        let converted = match info.output {
+            Some(Slot::Converted(to)) => Some(to),
+            _ => None,
+        };
+        if let Some(e) = std::iter::once(self.element)
+            .chain(converted)
+            .find(|e| !e.is_lane())
+        {
+            return Err(crate::BuildError::unsupported(format!(
+                "SIMD lanes of {} are not supported",
+                e.name()
+            )));
+        }
         if !info.elements.accepts(self.element) {
             return Err(crate::BuildError::verify(format!(
                 "SIMD {} requires {} lanes, got {}",

@@ -27,9 +27,6 @@ impl<T: LaneElement> Mask<T> {
     pub fn all(self) -> bool;
     /// `yes` in the active lanes, `no` in the others.
     pub fn select<U: LaneElement<Index = T::Index>>(self, yes: Lane<U>, no: Lane<U>) -> Lane<U>;
-}
-#[crate::intrinsic(simd)]
-impl Mask<i32> {
     /// Number of active lanes.
     pub fn count(self) -> i32;
 }
@@ -130,24 +127,38 @@ impl<T: LaneElement> Lane<T> {
     pub fn narrow<U: LaneElement>(self, high: Self) -> Lane<U>
     where
         T: LaneCast<U>;
+    /// Lane `index` modulo `lanes()`.
+    pub fn extract_wrapping(self, index: i32) -> T;
+    /// `self` with lane `index` modulo `lanes()` set to `value`.
+    pub fn replace_wrapping(self, index: i32, value: T) -> Self;
+    /// The last lane.
+    pub fn last(self) -> T;
+}
+
+#[crate::intrinsic(simd)]
+impl<T: LaneInteger> Lane<T> {
+    /// The wrapping sum of the lanes.
+    pub fn reduce_sum(self) -> T;
+    /// The smaller of each pair of lanes.
+    pub fn simd_min(self, rhs: Self) -> Self;
+    /// The larger of each pair of lanes.
+    pub fn simd_max(self, rhs: Self) -> Self;
+    /// Add each pair of lanes, clamping to the lane type's range.
+    pub fn saturating_add(self, rhs: Self) -> Self;
+    /// Subtract each pair of lanes, clamping to the lane type's range.
+    pub fn saturating_sub(self, rhs: Self) -> Self;
 }
 
 #[crate::intrinsic(simd)]
 impl Lane<u32> {
     /// Rotate each lane left by a known count modulo 32.
     pub fn rotate_left(self, count: u32) -> Self;
-    pub fn simd_min(self, rhs: Self) -> Self;
-    pub fn simd_max(self, rhs: Self) -> Self;
 }
 
 #[crate::intrinsic(simd)]
 impl Lane<i32> {
-    /// The wrapping sum of the lanes.
-    pub fn reduce_sum(self) -> i32;
     /// Rotate each lane's bits left by a known count modulo 32.
     pub fn rotate_left(self, count: u32) -> Self;
-    pub fn simd_min(self, rhs: Self) -> Self;
-    pub fn simd_max(self, rhs: Self) -> Self;
     /// Elements from `offset` until `src[offset..]` is vector-aligned.
     pub fn alignment_prefix(src: &[i32], offset: usize) -> usize;
     /// The active lanes in order, zero in the remaining lanes.
@@ -165,12 +176,6 @@ impl Lane<i32> {
     pub fn deinterleave_odd(self, rhs: Self) -> Self;
     /// Inclusive wrapping prefix sums of the lanes.
     pub fn prefix_sum(self) -> Self;
-    /// Lane `index` modulo `lanes()`.
-    pub fn extract_wrapping(self, index: i32) -> i32;
-    /// `self` with lane `index` modulo `lanes()` set to `value`.
-    pub fn replace_wrapping(self, index: i32, value: i32) -> Self;
-    /// The last lane.
-    pub fn last(self) -> i32;
 }
 
 #[crate::intrinsic(simd)]

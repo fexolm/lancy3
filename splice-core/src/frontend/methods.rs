@@ -8,7 +8,7 @@
 //! operands the kernel passes, typed by the builder.
 use super::KernelBuilder;
 use crate::hir::{Binary, Buffer, Constant, Reg, ScalarType, Simd, SimdOp, ValueType};
-use crate::simd::{Element, Shuffle};
+use crate::simd::Shuffle;
 
 /// How a core method stages its operands.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -150,7 +150,7 @@ pub enum Operand {
 #[derive(Clone, Copy, Debug)]
 pub enum SimdSelf {
     Value(Reg),
-    Lane(Element),
+    Lane(ScalarType),
 }
 
 /// The SIMD intrinsic being staged: its receiver, its element and its operands.
@@ -158,10 +158,10 @@ struct SimdCall<'a> {
     builder: &'a mut dyn KernelBuilder,
     method: &'a str,
     receiver: Option<Reg>,
-    element: Element,
+    element: ScalarType,
     args: &'a [Operand],
     /// The element of the result, for a method generic over it (`cast::<U>()`).
-    output: Option<Element>,
+    output: Option<ScalarType>,
 }
 
 type SimdLowering = fn(&mut SimdCall<'_>) -> crate::Result<Option<Reg>>;
@@ -169,7 +169,7 @@ type SimdLowering = fn(&mut SimdCall<'_>) -> crate::Result<Option<Reg>>;
 /// The lowering of each intrinsic that `splice::simd` declares for `Lane`,
 /// by method in name order: the portable SIMD operations it stages. An operator trait's
 /// method (`add`) also lowers its compound assignment (`add_assign`).
-const LANE: [(&str, SimdLowering); 51] = [
+const LANE: [(&str, SimdLowering); 53] = [
     ("add", |c| c.with_args(SimdOp::Add, 1)),
     ("add_masked", |c| {
         let (mask, rhs, fallback) = (c.value(0)?, c.value(1)?, c.value(2)?);
@@ -238,13 +238,15 @@ const LANE: [(&str, SimdLowering); 51] = [
     ("reduce_sum", |c| c.with_args(SimdOp::ReduceSum, 0)),
     ("replace_wrapping", |c| {
         let index = c.scalar(0, ScalarType::I32)?;
-        let value = c.scalar(1, ScalarType::I32)?;
+        let value = c.scalar(1, c.element)?;
         c.op(SimdOp::ReplaceWrapping, &[c.this()?, index, value])
     }),
     ("rotate_left", |c| {
         let count = c.count(0)?;
         c.with_args(SimdOp::RotateLeft(count), 0)
     }),
+    ("saturating_add", |c| c.with_args(SimdOp::SaturatingAdd, 1)),
+    ("saturating_sub", |c| c.with_args(SimdOp::SaturatingSub, 1)),
     ("scatter", |c| c.scatter(SimdOp::Scatter, false)),
     ("scatter_select", |c| c.scatter(SimdOp::ScatterSelect, true)),
     ("shr", |c| {
@@ -262,7 +264,7 @@ const LANE: [(&str, SimdLowering); 51] = [
     ("splat", |c| match c.arg(0)? {
         // `Lane::splat` of a known value carries its bit pattern.
         Operand::Known(value) => c.op(SimdOp::Splat(value.bits()), &[]),
-        Operand::Reg(value) if c.element == Element::I32 => c.op(SimdOp::SplatScalar, &[value]),
+        Operand::Reg(value) if c.element == ScalarType::I32 => c.op(SimdOp::SplatScalar, &[value]),
         _ => Err(c.error("splats a known value or a runtime i32")),
     }),
     ("sqrt", |c| c.with_args(SimdOp::Sqrt, 0)),
@@ -331,7 +333,7 @@ pub fn simd(
     method: &str,
     this: SimdSelf,
     args: &[Operand],
-    output: Option<Element>,
+    output: Option<ScalarType>,
 ) -> crate::Result<Option<Reg>> {
     let (receiver, element, mask) = match this {
         SimdSelf::Lane(element) => (None, element, false),
@@ -390,7 +392,7 @@ impl SimdCall<'_> {
             Operand::Known(value) => {
                 let value = value
                     .cast(ty)
-                    .ok_or_else(|| self.error("expected an integer operand"))?;
+                    .ok_or_else(|| self.error(&format!("expected a `{ty}` operand")))?;
                 self.builder.constant(value)
             }
             Operand::Buffer(_) => Err(self.error("expected a scalar operand")),
@@ -416,7 +418,7 @@ impl SimdCall<'_> {
         }
     }
 
-    fn output(&self) -> crate::Result<Element> {
+    fn output(&self) -> crate::Result<ScalarType> {
         self.output
             .ok_or_else(|| self.error("specify the output lane type"))
     }
@@ -527,6 +529,6 @@ mod tests {
             }
         }
         assert!(declared.contains(&(true, "select".into())));
-        assert!(simd_lowering(false, "saturating_add").is_none());
+        assert!(simd_lowering(false, "saturating_mul").is_none());
     }
 }

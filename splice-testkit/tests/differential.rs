@@ -3,7 +3,6 @@
 use splice::frontend::{KernelBuilder, Signature};
 use splice::hir::{Binary, Buffer, Reg, Simd, SimdOp};
 use splice::hir::{Constant, ScalarType};
-use splice::simd::Element;
 use splice::{BufferArg, BufferKind, CallError, KernelScalar, Trap};
 use splice_testkit::{Stage, agree};
 use std::rc::Rc;
@@ -13,11 +12,11 @@ fn bytes() -> usize {
     splice::Target::host().unwrap().vector_bytes()
 }
 
-fn simd(b: &mut dyn KernelBuilder, element: Element, op: SimdOp, args: &[Reg]) -> Reg {
+fn simd(b: &mut dyn KernelBuilder, element: ScalarType, op: SimdOp, args: &[Reg]) -> Reg {
     b.simd(Simd { element, op }, args).unwrap().unwrap()
 }
 
-fn store(b: &mut dyn KernelBuilder, element: Element, buffer: u32, at: Reg, value: Reg) {
+fn store(b: &mut dyn KernelBuilder, element: ScalarType, buffer: u32, at: Reg, value: Reg) {
     b.simd(
         Simd {
             element,
@@ -28,7 +27,7 @@ fn store(b: &mut dyn KernelBuilder, element: Element, buffer: u32, at: Reg, valu
     .unwrap();
 }
 
-fn load(b: &mut dyn KernelBuilder, element: Element, buffer: u32, at: Reg) -> Reg {
+fn load(b: &mut dyn KernelBuilder, element: ScalarType, buffer: u32, at: Reg) -> Reg {
     simd(b, element, SimdOp::Load(Buffer(buffer)), &[at])
 }
 
@@ -39,6 +38,20 @@ fn edges(ty: ScalarType) -> Vec<Constant> {
     }
     match ty {
         ScalarType::Bool => all([false, true]),
+        ScalarType::Char => all([
+            '\0',
+            'a',
+            '\u{7f}',
+            '\u{80}',
+            'é',
+            '\u{d7ff}',
+            '\u{e000}',
+            char::MAX,
+        ]),
+        ScalarType::I8 => all([0, 1, -1, 7, 8, -8, i8::MIN, i8::MAX]),
+        ScalarType::U8 => all([0, 1, 7, 8, 9, 1 << 7, (1 << 7) - 1, u8::MAX]),
+        ScalarType::I16 => all([0, 1, -1, 15, 16, -16, i16::MIN, i16::MAX]),
+        ScalarType::U16 => all([0, 1, 15, 16, 17, 1 << 15, (1 << 15) - 1, u16::MAX]),
         ScalarType::I32 => all([0, 1, -1, 31, 32, -32, i32::MIN, i32::MAX]),
         ScalarType::U32 => all([0, 1, 31, 32, 33, 1 << 31, (1 << 31) - 1, u32::MAX]),
         ScalarType::I64 => all([0, 1, -1, 63, 64, 1 << 32, i64::MIN, i64::MAX]),
@@ -68,69 +81,61 @@ fn edges(ty: ScalarType) -> Vec<Constant> {
 }
 
 /// The buffer element that holds a scalar type: a `bool` is an `i32`
-/// word, an unsigned 64-bit integer the bits of an `i64`.
-fn storage(ty: ScalarType) -> Element {
+/// word, every other type itself.
+fn storage(ty: ScalarType) -> ScalarType {
     match ty {
-        ScalarType::Bool => Element::I32,
-        ScalarType::U64 | ScalarType::Index => Element::I64,
-        ty => ty.element().expect("a buffer element"),
+        ScalarType::Bool => ScalarType::I32,
+        ty => ty,
     }
 }
 
-/// Typed slices for `values`, stored as `storage(ty)`.
-enum Column {
-    I32(Vec<i32>),
-    U32(Vec<u32>),
-    I64(Vec<i64>),
-    F32(Vec<f32>),
-    F64(Vec<f64>),
-}
+macro_rules! columns {
+    ($($ty:ident: $rust:ty),*) => {
+        /// Typed slices for `values`, stored as `storage(ty)`.
+        enum Column {
+            $($ty(Vec<$rust>),)*
+        }
 
-impl Column {
-    fn new(ty: ScalarType, values: impl IntoIterator<Item = Constant>) -> Self {
-        let bits = values.into_iter().map(Constant::bits);
-        match storage(ty) {
-            Element::I32 => Self::I32(bits.map(|b| b as u32 as i32).collect()),
-            Element::U32 => Self::U32(bits.map(|b| b as u32).collect()),
-            Element::I64 => Self::I64(bits.map(|b| b as i64).collect()),
-            Element::F32 => Self::F32(bits.map(|b| f32::from_bits(b as u32)).collect()),
-            _ => Self::F64(bits.map(f64::from_bits).collect()),
+        impl Column {
+            fn new(ty: ScalarType, values: impl IntoIterator<Item = Constant>) -> Self {
+                let words = values.into_iter().map(|value| Constant::new(storage(ty), value.bits()).bits());
+                match storage(ty) {
+                    $(ScalarType::$ty => Self::$ty(words.map(<$rust as KernelScalar>::from_word).collect()),)*
+                    ty => unreachable!("{ty} is not stored"),
+                }
+            }
+            fn read(&self) -> BufferArg<'_> {
+                match self {
+                    $(Self::$ty(v) => BufferArg::read(v),)*
+                }
+            }
+            fn write(&mut self) -> BufferArg<'_> {
+                match self {
+                    $(Self::$ty(v) => BufferArg::write(v),)*
+                }
+            }
+            /// Every value as `ty`.
+            fn shown(&self, ty: ScalarType) -> Vec<String> {
+                match self {
+                    $(Self::$ty(v) => v.iter().map(|x| show(Constant::new(ty, x.to_word()))).collect(),)*
+                }
+            }
+            /// The first value as `ty`.
+            fn first(&self, ty: ScalarType) -> String {
+                let word = match self {
+                    $(Self::$ty(v) => v[0].to_word(),)*
+                };
+                show(Constant::new(ty, word))
+            }
         }
-    }
-    fn read(&self) -> BufferArg<'_> {
-        match self {
-            Self::I32(v) => BufferArg::read(v),
-            Self::U32(v) => BufferArg::read(v),
-            Self::I64(v) => BufferArg::read(v),
-            Self::F32(v) => BufferArg::read(v),
-            Self::F64(v) => BufferArg::read(v),
-        }
-    }
-    fn write(&mut self) -> BufferArg<'_> {
-        match self {
-            Self::I32(v) => BufferArg::write(v),
-            Self::U32(v) => BufferArg::write(v),
-            Self::I64(v) => BufferArg::write(v),
-            Self::F32(v) => BufferArg::write(v),
-            Self::F64(v) => BufferArg::write(v),
-        }
-    }
-    /// The first value as `ty`. Every NaN prints alike: the reference
-    /// does not define NaN payloads.
-    fn first(&self, ty: ScalarType) -> String {
-        let bits = match self {
-            Self::I32(v) => u64::from(v[0] as u32),
-            Self::U32(v) => u64::from(v[0]),
-            Self::I64(v) => v[0] as u64,
-            Self::F32(v) if v[0].is_nan() => return "NaN".into(),
-            Self::F32(v) => u64::from(v[0].to_bits()),
-            Self::F64(v) if v[0].is_nan() => return "NaN".into(),
-            Self::F64(v) => v[0].to_bits(),
-        };
-        show(Constant::new(ty, bits))
-    }
+    };
 }
+columns!(
+    Char: char, I8: i8, U8: u8, I16: i16, U16: u16, I32: i32, U32: u32, I64: i64, U64: u64,
+    Index: usize, F32: f32, F64: f64
+);
 
+/// Every NaN prints alike: the reference does not define NaN payloads.
 fn show(value: Constant) -> String {
     let nan = match value.ty() {
         ScalarType::F32 => f32::from_bits(value.bits() as u32).is_nan(),
@@ -161,7 +166,6 @@ fn read_operands(
                     let zero = b.constant(Constant::from(0))?;
                     b.binary(Binary::Ne, word, zero)
                 }
-                ScalarType::U64 | ScalarType::Index => b.cast(word, ty),
                 _ => Ok(word),
             }
         })
@@ -172,7 +176,6 @@ fn read_operands(
 fn write_result(b: &mut dyn KernelBuilder, ty: ScalarType, value: Reg) -> splice::Result<()> {
     let value = match ty {
         ScalarType::Bool => b.cast(value, ScalarType::I32)?,
-        ScalarType::U64 | ScalarType::Index => b.cast(value, ScalarType::I64)?,
         _ => value,
     };
     let zero = b.constant(Constant::from(0usize))?;
@@ -280,7 +283,7 @@ fn every_scalar_type_passes_into_and_out_of_the_entry_at_its_position() {
             .collect()
     };
     let rows: Vec<_> = (0..8).map(row).collect();
-    let slices = [BufferKind::new(Element::I32, false)];
+    let slices = [BufferKind::new(ScalarType::I32, false)];
     for buffers in [&[][..], &slices[..]] {
         for (k, &ty) in types.iter().enumerate() {
             let stage: Stage = Rc::new(move |b| b.ret(b.arg(k)?));
@@ -313,7 +316,7 @@ fn every_scalar_type_passes_into_and_out_of_the_entry_at_its_position() {
 #[test]
 fn every_slice_count_reaches_the_kernel_at_its_position() {
     for count in [0, 1, 8, 9, 15, 16, 17] {
-        let kinds = vec![BufferKind::new(Element::I32, count % 2 == 0); count];
+        let kinds = vec![BufferKind::new(ScalarType::I32, count % 2 == 0); count];
         let kinds: &'static [BufferKind] = Box::leak(kinds.into_boxed_slice());
         let stage: Stage = Rc::new(move |b| {
             // `arg(0) + Σ (i + 1)·xs_i[i]`, stored in the last writable slice.
@@ -366,11 +369,11 @@ fn every_slice_count_reaches_the_kernel_at_its_position() {
 #[test]
 fn every_scalar_type_computes_on_entry_words_and_returns_one() {
     for ty in ScalarType::ALL {
-        let op = if ty == ScalarType::Bool {
-            Binary::Xor
-        } else {
-            Binary::Add
-        };
+        // The first operation the type has: `char` only compares.
+        let (op, out) = [Binary::Add, Binary::Xor, Binary::Lt]
+            .into_iter()
+            .find_map(|op| Some((op, op.output(ty)?)))
+            .expect("every type has an operation");
         let stage: Stage = Rc::new(move |b| {
             let r = b.binary(op, b.arg(0)?, b.arg(1)?)?;
             b.ret(r)
@@ -382,12 +385,12 @@ fn every_scalar_type_computes_on_entry_words_and_returns_one() {
             .collect();
         let seen = agree(
             &format!("{ty} {op:?} of entry words"),
-            Signature::new(&[ty; 2], ty, &[]),
+            Signature::new(&[ty; 2], out, &[]),
             &stage,
             |call| {
                 pairs
                     .iter()
-                    .map(|(a, z)| show_word(ty, call(&[a.bits(), z.bits()], &mut [])))
+                    .map(|(a, z)| show_word(out, call(&[a.bits(), z.bits()], &mut [])))
                     .collect()
             },
         );
@@ -624,7 +627,7 @@ fn every_backend_reports_the_same_typed_trap() {
         (4, 100),
         (9, 7),
     ];
-    let kinds = [BufferKind::new(Element::I32, false)];
+    let kinds = [BufferKind::new(ScalarType::I32, false)];
     let seen = agree(
         "traps",
         Signature::new(&[ScalarType::I32; 2], ScalarType::I32, &kinds),
@@ -669,7 +672,7 @@ fn index(b: &mut dyn KernelBuilder, i: usize) -> splice::Result<Reg> {
 
 /// Load `extra + 1` vectors of `from` (at 0 and at each argument), apply
 /// `op`, store the result as `to`.
-fn unary(from: Element, to: Element, op: SimdOp, extra: usize) -> Stage {
+fn unary(from: ScalarType, to: ScalarType, op: SimdOp, extra: usize) -> Stage {
     Rc::new(move |b| {
         let zero = b.constant(Constant::from(0usize))?;
         let mut args = vec![load(b, from, 0, zero)];
@@ -684,13 +687,13 @@ fn unary(from: Element, to: Element, op: SimdOp, extra: usize) -> Stage {
     })
 }
 
-fn kinds(from: Element, to: Element) -> [BufferKind; 2] {
+fn kinds(from: ScalarType, to: ScalarType) -> [BufferKind; 2] {
     [BufferKind::new(from, false), BufferKind::new(to, true)]
 }
 
 #[test]
 fn float_to_integer_casts_saturate_like_rust() {
-    let n = Element::F32.lanes(bytes());
+    let n = ScalarType::F32.lanes(bytes());
     let src: Vec<f32> = [
         f32::NAN,
         f32::INFINITY,
@@ -713,13 +716,18 @@ fn float_to_integer_casts_saturate_like_rust() {
     .cycle()
     .take(n)
     .collect();
-    let stage = unary(Element::F32, Element::I32, SimdOp::Cast(Element::I32), 0);
+    let stage = unary(
+        ScalarType::F32,
+        ScalarType::I32,
+        SimdOp::Cast(ScalarType::I32),
+        0,
+    );
     let seen = agree(
         "f32 -> i32",
         Signature::new(
             &[ScalarType::I32; 0],
             ScalarType::I32,
-            &kinds(Element::F32, Element::I32),
+            &kinds(ScalarType::F32, ScalarType::I32),
         ),
         &stage,
         |call| {
@@ -734,13 +742,18 @@ fn float_to_integer_casts_saturate_like_rust() {
     let expected: Vec<i32> = src.iter().map(|&x| x as i32).collect();
     assert_eq!(seen, [format!("Ok(0) {expected:?}")]);
 
-    let stage = unary(Element::F32, Element::U32, SimdOp::Cast(Element::U32), 0);
+    let stage = unary(
+        ScalarType::F32,
+        ScalarType::U32,
+        SimdOp::Cast(ScalarType::U32),
+        0,
+    );
     let seen = agree(
         "f32 -> u32",
         Signature::new(
             &[ScalarType::I32; 0],
             ScalarType::I32,
-            &kinds(Element::F32, Element::U32),
+            &kinds(ScalarType::F32, ScalarType::U32),
         ),
         &stage,
         |call| {
@@ -755,7 +768,7 @@ fn float_to_integer_casts_saturate_like_rust() {
     let expected: Vec<u32> = src.iter().map(|&x| x as u32).collect();
     assert_eq!(seen, [format!("Ok(0) {expected:?}")]);
 
-    let m = Element::F64.lanes(bytes());
+    let m = ScalarType::F64.lanes(bytes());
     let src: Vec<f64> = [
         f64::NAN,
         1e19,
@@ -770,13 +783,18 @@ fn float_to_integer_casts_saturate_like_rust() {
     .cycle()
     .take(m)
     .collect();
-    let stage = unary(Element::F64, Element::I64, SimdOp::Cast(Element::I64), 0);
+    let stage = unary(
+        ScalarType::F64,
+        ScalarType::I64,
+        SimdOp::Cast(ScalarType::I64),
+        0,
+    );
     let seen = agree(
         "f64 -> i64",
         Signature::new(
             &[ScalarType::I32; 0],
             ScalarType::I32,
-            &kinds(Element::F64, Element::I64),
+            &kinds(ScalarType::F64, ScalarType::I64),
         ),
         &stage,
         |call| {
@@ -794,7 +812,7 @@ fn float_to_integer_casts_saturate_like_rust() {
 
 #[test]
 fn integer_to_float_casts_round_like_rust() {
-    let m = Element::I64.lanes(bytes());
+    let m = ScalarType::I64.lanes(bytes());
     let src: Vec<i64> = [
         i64::MAX,
         i64::MIN,
@@ -809,13 +827,18 @@ fn integer_to_float_casts_round_like_rust() {
     .cycle()
     .take(m)
     .collect();
-    let stage = unary(Element::I64, Element::F64, SimdOp::Cast(Element::F64), 0);
+    let stage = unary(
+        ScalarType::I64,
+        ScalarType::F64,
+        SimdOp::Cast(ScalarType::F64),
+        0,
+    );
     let seen = agree(
         "i64 -> f64",
         Signature::new(
             &[ScalarType::I32; 0],
             ScalarType::I32,
-            &kinds(Element::I64, Element::F64),
+            &kinds(ScalarType::I64, ScalarType::F64),
         ),
         &stage,
         |call| {
@@ -830,7 +853,7 @@ fn integer_to_float_casts_round_like_rust() {
     let expected: Vec<f64> = src.iter().map(|&x| x as f64).collect();
     assert_eq!(seen, [format!("Ok(0) {:?}", expected.map_bits())]);
 
-    let n = Element::U32.lanes(bytes());
+    let n = ScalarType::U32.lanes(bytes());
     let src: Vec<u32> = [
         u32::MAX,
         0x8000_0001,
@@ -845,13 +868,18 @@ fn integer_to_float_casts_round_like_rust() {
     .cycle()
     .take(n)
     .collect();
-    let stage = unary(Element::U32, Element::F32, SimdOp::Cast(Element::F32), 0);
+    let stage = unary(
+        ScalarType::U32,
+        ScalarType::F32,
+        SimdOp::Cast(ScalarType::F32),
+        0,
+    );
     let seen = agree(
         "u32 -> f32",
         Signature::new(
             &[ScalarType::I32; 0],
             ScalarType::I32,
-            &kinds(Element::U32, Element::F32),
+            &kinds(ScalarType::U32, ScalarType::F32),
         ),
         &stage,
         |call| {
@@ -883,7 +911,7 @@ impl Bits for Vec<f64> {
 
 #[test]
 fn float_arithmetic_is_correctly_rounded_on_special_values() {
-    let n = Element::F32.lanes(bytes());
+    let n = ScalarType::F32.lanes(bytes());
     let src: Vec<f32> = [0.1f32, -4.0, 1e30, -0.0, 3.0, 16777217.0, 1.0000001, 7.0]
         .into_iter()
         .cycle()
@@ -898,13 +926,13 @@ fn float_arithmetic_is_correctly_rounded_on_special_values() {
         }
     };
     for (op, extra) in [(SimdOp::Sqrt, 0), (SimdOp::Div, 1), (SimdOp::MulAdd, 2)] {
-        let stage = unary(Element::F32, Element::F32, op, extra);
+        let stage = unary(ScalarType::F32, ScalarType::F32, op, extra);
         let seen = agree(
             &format!("{op:?}"),
             Signature::new(
                 &vec![ScalarType::I32; extra],
                 ScalarType::I32,
-                &kinds(Element::F32, Element::F32),
+                &kinds(ScalarType::F32, ScalarType::F32),
             ),
             &stage,
             |call| {
@@ -924,7 +952,7 @@ fn float_arithmetic_is_correctly_rounded_on_special_values() {
 
 #[test]
 fn float_comparisons_follow_ieee_unordered_rules() {
-    let n = Element::F32.lanes(bytes());
+    let n = ScalarType::F32.lanes(bytes());
     let src: Vec<f32> = [f32::NAN, 1.0, f32::NAN, 2.0, 1.0, -0.0, 0.0, f32::INFINITY]
         .into_iter()
         .cycle()
@@ -944,13 +972,13 @@ fn float_comparisons_follow_ieee_unordered_rules() {
                 b.constant(Constant::from(0usize))?,
                 b.constant(Constant::from(1usize))?,
             );
-            let x = load(b, Element::F32, 0, zero);
-            let y = load(b, Element::F32, 0, one);
-            let m = simd(b, Element::F32, op, &[x, y]);
-            let yes = simd(b, Element::F32, Splat(1f32.to_bits().into()), &[]);
-            let no = simd(b, Element::F32, Splat(0), &[]);
-            let s = simd(b, Element::F32, Select, &[m, yes, no]);
-            store(b, Element::F32, 1, zero, s);
+            let x = load(b, ScalarType::F32, 0, zero);
+            let y = load(b, ScalarType::F32, 0, one);
+            let m = simd(b, ScalarType::F32, op, &[x, y]);
+            let yes = simd(b, ScalarType::F32, Splat(1f32.to_bits().into()), &[]);
+            let no = simd(b, ScalarType::F32, Splat(0), &[]);
+            let s = simd(b, ScalarType::F32, Select, &[m, yes, no]);
+            store(b, ScalarType::F32, 1, zero, s);
             done(b)?;
             Ok(())
         });
@@ -959,7 +987,7 @@ fn float_comparisons_follow_ieee_unordered_rules() {
             Signature::new(
                 &[ScalarType::I32; 0],
                 ScalarType::I32,
-                &kinds(Element::F32, Element::F32),
+                &kinds(ScalarType::F32, ScalarType::F32),
             ),
             &stage,
             |call| {
@@ -980,7 +1008,7 @@ fn float_comparisons_follow_ieee_unordered_rules() {
 
 #[test]
 fn integer_lane_operations_agree_on_boundary_values() {
-    let n = Element::I32.lanes(bytes());
+    let n = ScalarType::I32.lanes(bytes());
     let src: Vec<i32> = (0..2 * n as i32)
         .map(|i| {
             [
@@ -1005,7 +1033,7 @@ fn integer_lane_operations_agree_on_boundary_values() {
         })
         .collect();
     use SimdOp::*;
-    for element in [Element::I32, Element::U32] {
+    for element in [ScalarType::I32, ScalarType::U32] {
         for (op, extra) in [
             (Shr(5), 0),
             (Shr(37), 0),
@@ -1018,7 +1046,7 @@ fn integer_lane_operations_agree_on_boundary_values() {
             (Mul, 1),
             (Not, 0),
         ] {
-            if matches!(op, Swizzle | PrefixSum) && element != Element::I32 {
+            if matches!(op, Swizzle | PrefixSum) && element != ScalarType::I32 {
                 continue;
             }
             let stage = unary(element, element, op, extra);
@@ -1040,7 +1068,7 @@ fn integer_lane_operations_agree_on_boundary_values() {
                                 vec![]
                             };
                             let mut out = vec![0i32; n];
-                            let r = if element == Element::I32 {
+                            let r = if element == ScalarType::I32 {
                                 call(
                                     &args,
                                     &mut [BufferArg::from(&src[..]), BufferArg::from(&mut out[..])],
@@ -1067,38 +1095,298 @@ fn integer_lane_operations_agree_on_boundary_values() {
     }
 }
 
+/// One lane operation and its reference on the lanes of `x` and `y`:
+/// `n` result lanes, or a scalar result in lane 0.
+/// Stages a lane operation on the vectors `x`, `y` and the `i32` lane `k`.
+type LaneStage = fn(&mut dyn KernelBuilder, ScalarType, Reg, Reg, Reg) -> splice::Result<Reg>;
+/// The expected lanes for `x`, `y` and the lane `k`.
+type LaneReference = Box<dyn Fn(&[Constant], &[Constant], usize) -> Vec<Constant>>;
+
+struct LaneCase {
+    name: String,
+    stage: LaneStage,
+    /// Whether the stage returns a scalar of the lane type.
+    scalar: bool,
+    reference: LaneReference,
+}
+
+/// The lane operations every integer lane type has, with a reference
+/// that applies the scalar operation of the type (`Binary::checked_eval`)
+/// to each lane.
+fn lane_cases() -> Vec<LaneCase> {
+    use SimdOp::*;
+    let eval = |op: Binary, a: Constant, b: Constant| op.checked_eval(a, b).unwrap();
+    let mut cases = Vec::new();
+    for (simd_op, op) in [
+        (Add, Binary::Add),
+        (Sub, Binary::Sub),
+        (Mul, Binary::Mul),
+        (SaturatingAdd, Binary::SaturatingAdd),
+        (SaturatingSub, Binary::SaturatingSub),
+        (Min, Binary::Min),
+        (Max, Binary::Max),
+        (And, Binary::And),
+        (Or, Binary::Or),
+        (Xor, Binary::Xor),
+    ] {
+        let stage: LaneStage = match simd_op {
+            Add => |b, e, x, y, _| Ok(simd(b, e, Add, &[x, y])),
+            Sub => |b, e, x, y, _| Ok(simd(b, e, Sub, &[x, y])),
+            Mul => |b, e, x, y, _| Ok(simd(b, e, Mul, &[x, y])),
+            SaturatingAdd => |b, e, x, y, _| Ok(simd(b, e, SaturatingAdd, &[x, y])),
+            SaturatingSub => |b, e, x, y, _| Ok(simd(b, e, SaturatingSub, &[x, y])),
+            Min => |b, e, x, y, _| Ok(simd(b, e, Min, &[x, y])),
+            Max => |b, e, x, y, _| Ok(simd(b, e, Max, &[x, y])),
+            And => |b, e, x, y, _| Ok(simd(b, e, And, &[x, y])),
+            Or => |b, e, x, y, _| Ok(simd(b, e, Or, &[x, y])),
+            _ => |b, e, x, y, _| Ok(simd(b, e, Xor, &[x, y])),
+        };
+        cases.push(LaneCase {
+            name: format!("{simd_op:?}"),
+            stage,
+            scalar: false,
+            reference: Box::new(move |x, y, _| {
+                x.iter().zip(y).map(|(&a, &b)| eval(op, a, b)).collect()
+            }),
+        });
+    }
+    // A comparison selects `x` where it holds, else `y`.
+    for (simd_op, op) in [
+        (Eq, Binary::Eq),
+        (Ne, Binary::Ne),
+        (Lt, Binary::Lt),
+        (Le, Binary::Le),
+        (Gt, Binary::Gt),
+        (Ge, Binary::Ge),
+    ] {
+        let stage: LaneStage = match simd_op {
+            Eq => |b, e, x, y, _| {
+                let m = simd(b, e, Eq, &[x, y]);
+                Ok(simd(b, e, Select, &[m, x, y]))
+            },
+            Ne => |b, e, x, y, _| {
+                let m = simd(b, e, Ne, &[x, y]);
+                Ok(simd(b, e, Select, &[m, x, y]))
+            },
+            Lt => |b, e, x, y, _| {
+                let m = simd(b, e, Lt, &[x, y]);
+                Ok(simd(b, e, Select, &[m, x, y]))
+            },
+            Le => |b, e, x, y, _| {
+                let m = simd(b, e, Le, &[x, y]);
+                Ok(simd(b, e, Select, &[m, x, y]))
+            },
+            Gt => |b, e, x, y, _| {
+                let m = simd(b, e, Gt, &[x, y]);
+                Ok(simd(b, e, Select, &[m, x, y]))
+            },
+            _ => |b, e, x, y, _| {
+                let m = simd(b, e, Ge, &[x, y]);
+                Ok(simd(b, e, Select, &[m, x, y]))
+            },
+        };
+        cases.push(LaneCase {
+            name: format!("{simd_op:?} select"),
+            stage,
+            scalar: false,
+            reference: Box::new(move |x, y, _| {
+                x.iter()
+                    .zip(y)
+                    .map(|(&a, &b)| {
+                        if eval(op, a, b) == Constant::from(true) {
+                            a
+                        } else {
+                            b
+                        }
+                    })
+                    .collect()
+            }),
+        });
+    }
+    cases.push(LaneCase {
+        name: "reduce_sum".into(),
+        stage: |b, e, x, _, _| Ok(simd(b, e, ReduceSum, &[x])),
+        scalar: true,
+        reference: Box::new(move |x, _, _| {
+            vec![
+                x.iter()
+                    .fold(Constant::new(x[0].ty(), 0), |s, &a| eval(Binary::Add, s, a)),
+            ]
+        }),
+    });
+    cases.push(LaneCase {
+        name: "count of lt".into(),
+        stage: |b, e, x, y, _| {
+            let m = simd(b, e, Lt, &[x, y]);
+            let count = simd(b, e, Count, &[m]);
+            b.cast(count, e)
+        },
+        scalar: true,
+        reference: Box::new(move |x, y, _| {
+            let count = x
+                .iter()
+                .zip(y)
+                .filter(|(a, b)| eval(Binary::Lt, **a, **b) == true.into());
+            vec![
+                Constant::from(count.count() as i32)
+                    .cast(x[0].ty())
+                    .unwrap(),
+            ]
+        }),
+    });
+    cases.push(LaneCase {
+        name: "last".into(),
+        stage: |b, e, x, _, _| Ok(simd(b, e, Last, &[x])),
+        scalar: true,
+        reference: Box::new(|x, _, _| vec![*x.last().unwrap()]),
+    });
+    cases.push(LaneCase {
+        name: "extract_wrapping".into(),
+        stage: |b, e, x, _, k| Ok(simd(b, e, ExtractWrapping, &[x, k])),
+        scalar: true,
+        reference: Box::new(|x, _, k| vec![x[k % x.len()]]),
+    });
+    cases.push(LaneCase {
+        name: "replace_wrapping with lane 0 of y".into(),
+        stage: |b, e, x, y, k| {
+            let zero = b.constant(Constant::from(0))?;
+            let value = simd(b, e, ExtractWrapping, &[y, zero]);
+            Ok(simd(b, e, ReplaceWrapping, &[x, k, value]))
+        },
+        scalar: false,
+        reference: Box::new(|x, y, k| {
+            let mut out = x.to_vec();
+            out[k % x.len()] = y[0];
+            out
+        }),
+    });
+    cases.push(LaneCase {
+        name: "splat_scalar of lane 1 of x".into(),
+        stage: |b, e, x, _, _| {
+            let one = b.constant(Constant::from(1))?;
+            let value = simd(b, e, ExtractWrapping, &[x, one]);
+            Ok(simd(b, e, SplatScalar, &[value]))
+        },
+        scalar: false,
+        reference: Box::new(|x, _, _| vec![x[1]; x.len()]),
+    });
+    cases
+}
+
+/// Every integer lane type, from `i8` to `i64`, computes each lane
+/// operation as its scalar operation on every pair of boundary values, on
+/// every backend and build route.
+#[test]
+fn every_integer_lane_operation_matches_the_scalar_operation_per_lane() {
+    for e in ScalarType::ALL
+        .into_iter()
+        .filter(|e| e.is_lane() && e.is_integer())
+    {
+        let n = e.lanes(bytes());
+        let values = edges(e);
+        // Batches of `x` then `y` lanes: together every pair of edges.
+        let pairs: Vec<_> = values
+            .iter()
+            .flat_map(|&a| values.iter().map(move |&b| (a, b)))
+            .collect();
+        let batches: Vec<Vec<(Constant, Constant)>> = pairs
+            .chunks(n)
+            .map(|chunk| chunk.iter().cycle().take(n).copied().collect())
+            .collect();
+        let data = Column::new(
+            e,
+            batches.iter().flat_map(|batch| {
+                batch
+                    .iter()
+                    .map(|p| p.0)
+                    .chain(batch.iter().map(|p| p.1))
+                    .collect::<Vec<_>>()
+            }),
+        );
+        for case in lane_cases() {
+            let stage_fn = case.stage;
+            let scalar = case.scalar;
+            let stage: Stage = Rc::new(move |b| {
+                let at = index(b, 0)?;
+                let lanes = b.constant(Constant::from(n))?;
+                let at_y = b.binary(Binary::Add, at, lanes)?;
+                let x = load(b, e, 0, at);
+                let y = load(b, e, 0, at_y);
+                let k = b.arg(1)?;
+                let r = stage_fn(b, e, x, y, k)?;
+                let zero = b.constant(Constant::from(0usize))?;
+                if scalar {
+                    b.store(Buffer(1), zero, r)?;
+                } else {
+                    store(b, e, 1, zero, r);
+                }
+                done(b)
+            });
+            let lane = |i: usize| (i * 5 + 3) as i32;
+            let seen = agree(
+                &format!("{e} {}", case.name),
+                Signature::new(&[ScalarType::I32; 2], ScalarType::I32, &kinds(e, e)),
+                &stage,
+                |call| {
+                    (0..batches.len())
+                        .map(|i| {
+                            let mut out = Column::new(e, vec![Constant::new(e, 0); n]);
+                            let args = [(2 * n * i) as u64, lane(i) as u32 as u64];
+                            match call(&args, &mut [data.read(), out.write()]) {
+                                Ok(_) if scalar => out.first(e),
+                                Ok(_) => out.shown(e).join(" "),
+                                Err(error) => format!("{error:?}"),
+                            }
+                        })
+                        .collect()
+                },
+            );
+            let want: Vec<_> = batches
+                .iter()
+                .enumerate()
+                .map(|(i, batch)| {
+                    let (x, y): (Vec<_>, Vec<_>) = batch.iter().copied().unzip();
+                    let out = (case.reference)(&x, &y, lane(i) as usize);
+                    out.into_iter().map(show).collect::<Vec<_>>().join(" ")
+                })
+                .collect();
+            assert_eq!(seen, want, "{e} {}", case.name);
+        }
+    }
+}
+
 #[test]
 fn first_n_masks_saturate_at_both_ends() {
     use SimdOp::*;
     let stage: Stage = Rc::new(|b| {
         let k = index(b, 0)?;
-        let m = simd(b, Element::U16, FirstN, &[k]);
-        let ones = simd(b, Element::U16, Splat(1), &[]);
-        let zeros = simd(b, Element::U16, Splat(0), &[]);
-        let s = simd(b, Element::U16, Select, &[m, ones, zeros]);
+        let m = simd(b, ScalarType::U16, FirstN, &[k]);
+        let ones = simd(b, ScalarType::U16, Splat(1), &[]);
+        let zeros = simd(b, ScalarType::U16, Splat(0), &[]);
+        let s = simd(b, ScalarType::U16, Select, &[m, ones, zeros]);
         let zero = b.constant(Constant::from(0usize))?;
-        store(b, Element::U16, 0, zero, s);
-        let m = simd(b, Element::I64, FirstN, &[k]);
-        let any = simd(b, Element::I64, Any, &[m]);
+        store(b, ScalarType::U16, 0, zero, s);
+        let m = simd(b, ScalarType::I64, FirstN, &[k]);
+        let any = simd(b, ScalarType::I64, Any, &[m]);
         let any = b.cast(any, ScalarType::I32)?;
-        let all = simd(b, Element::I64, All, &[m]);
+        let all = simd(b, ScalarType::I64, All, &[m]);
         let all = b.cast(all, ScalarType::I32)?;
         let r = b.binary(Binary::Add, any, all)?;
-        let m = simd(b, Element::I32, FirstN, &[k]);
-        let count = simd(b, Element::I32, Count, &[m]);
+        let m = simd(b, ScalarType::I32, FirstN, &[k]);
+        let count = simd(b, ScalarType::I32, Count, &[m]);
         let ten = b.constant(Constant::from(10))?;
         let count = b.binary(Binary::Mul, count, ten)?;
         let r = b.binary(Binary::Add, r, count)?;
         b.ret(r)?;
         Ok(())
     });
-    let n = Element::U16.lanes(bytes());
+    let n = ScalarType::U16.lanes(bytes());
     let seen = agree(
         "first_n",
         Signature::new(
             &[ScalarType::I32; 1],
             ScalarType::I32,
-            &[BufferKind::new(Element::U16, true)],
+            &[BufferKind::new(ScalarType::U16, true)],
         ),
         &stage,
         |call| {
@@ -1145,10 +1433,10 @@ fn first_n_masks_saturate_at_both_ends() {
     .map(|k: i32| {
         // The count is `k as usize`.
         let active = |lanes: usize| (k as usize).min(lanes);
-        let i64s = Element::I64.lanes(bytes());
+        let i64s = ScalarType::I64.lanes(bytes());
         let any = i32::from(active(i64s) > 0);
         let all = i32::from(active(i64s) == i64s);
-        let count = active(Element::I32.lanes(bytes())) as i32;
+        let count = active(ScalarType::I32.lanes(bytes())) as i32;
         let out: Vec<u16> = (0..n).map(|i| u16::from(i < active(n))).collect();
         format!("Ok({}) {out:?}", any + all + 10 * count)
     })
@@ -1158,14 +1446,14 @@ fn first_n_masks_saturate_at_both_ends() {
 
 #[test]
 fn compress_expand_and_compress_store_agree_at_buffer_edges() {
-    let n = Element::I32.lanes(bytes());
+    let n = ScalarType::I32.lanes(bytes());
     for op in [SimdOp::Compress, SimdOp::Expand] {
         let stage: Stage = Rc::new(move |b| {
             let (zero, one) = (
                 b.constant(Constant::from(0usize))?,
                 b.constant(Constant::from(1usize))?,
             );
-            let e = Element::I32;
+            let e = ScalarType::I32;
             let x = load(b, e, 0, zero);
             let flags = load(b, e, 1, zero);
             let z = simd(b, e, SimdOp::Splat(0), &[]);
@@ -1233,7 +1521,7 @@ fn compress_expand_and_compress_store_agree_at_buffer_edges() {
 fn u16_gather_and_scatter_check_indices_at_16_bit_boundaries() {
     let stage: Stage = Rc::new(|b| {
         let zero = b.constant(Constant::from(0usize))?;
-        let e = Element::U16;
+        let e = ScalarType::U16;
         let index = load(b, e, 0, zero);
         let g = simd(b, e, SimdOp::Gather(Buffer(1)), &[index]);
         store(b, e, 2, zero, g);
@@ -1247,11 +1535,11 @@ fn u16_gather_and_scatter_check_indices_at_16_bit_boundaries() {
         done(b)?;
         Ok(())
     });
-    let n = Element::U16.lanes(bytes());
+    let n = ScalarType::U16.lanes(bytes());
     let kinds = [
-        BufferKind::new(Element::U16, false),
-        BufferKind::new(Element::U16, false),
-        BufferKind::new(Element::U16, true),
+        BufferKind::new(ScalarType::U16, false),
+        BufferKind::new(ScalarType::U16, false),
+        BufferKind::new(ScalarType::U16, true),
     ];
     let cases = [
         (70000usize, 65535u16),
@@ -1302,7 +1590,7 @@ fn u16_gather_and_scatter_check_indices_at_16_bit_boundaries() {
 #[test]
 fn partial_vector_accesses_agree_at_negative_and_far_offsets() {
     let stage: Stage = Rc::new(|b| {
-        let e = Element::I64;
+        let e = ScalarType::I64;
         let zero = b.constant(Constant::from(0usize))?;
         let x = simd(b, e, SimdOp::Iota, &[]);
         let k = index(b, 1)?;
@@ -1314,10 +1602,10 @@ fn partial_vector_accesses_agree_at_negative_and_far_offsets() {
         done(b)?;
         Ok(())
     });
-    let n = Element::I64.lanes(bytes());
+    let n = ScalarType::I64.lanes(bytes());
     let kinds = [
-        BufferKind::new(Element::I64, true),
-        BufferKind::new(Element::I64, false),
+        BufferKind::new(ScalarType::I64, true),
+        BufferKind::new(ScalarType::I64, false),
     ];
     agree(
         "i64 partial accesses",
@@ -1348,37 +1636,37 @@ fn narrowing_and_widening_agree_on_extreme_lanes() {
             b.constant(Constant::from(0usize))?,
             b.constant(Constant::from(1usize))?,
         );
-        let x = load(b, Element::I64, 0, zero);
-        let y = load(b, Element::I64, 0, one);
-        let narrow = simd(b, Element::I64, SimdOp::Narrow(Element::I32), &[x, y]);
-        store(b, Element::I32, 1, zero, narrow);
-        let w = load(b, Element::U16, 2, zero);
+        let x = load(b, ScalarType::I64, 0, zero);
+        let y = load(b, ScalarType::I64, 0, one);
+        let narrow = simd(b, ScalarType::I64, SimdOp::Narrow(ScalarType::I32), &[x, y]);
+        store(b, ScalarType::I32, 1, zero, narrow);
+        let w = load(b, ScalarType::U16, 2, zero);
         let high = SimdOp::Widen {
-            to: Element::U32,
+            to: ScalarType::U32,
             high: true,
         };
-        let hi = simd(b, Element::U16, high, &[w]);
-        store(b, Element::U32, 3, zero, hi);
+        let hi = simd(b, ScalarType::U16, high, &[w]);
+        store(b, ScalarType::U32, 3, zero, hi);
         let high = SimdOp::Widen {
-            to: Element::I64,
+            to: ScalarType::I64,
             high: true,
         };
-        let hi = simd(b, Element::I32, high, &[narrow]);
-        store(b, Element::I64, 4, zero, hi);
+        let hi = simd(b, ScalarType::I32, high, &[narrow]);
+        store(b, ScalarType::I64, 4, zero, hi);
         done(b)?;
         Ok(())
     });
     let (n, m, h) = (
-        Element::I32.lanes(bytes()),
-        Element::I64.lanes(bytes()),
-        Element::U16.lanes(bytes()),
+        ScalarType::I32.lanes(bytes()),
+        ScalarType::I64.lanes(bytes()),
+        ScalarType::U16.lanes(bytes()),
     );
     let kinds = [
-        BufferKind::new(Element::I64, false),
-        BufferKind::new(Element::I32, true),
-        BufferKind::new(Element::U16, false),
-        BufferKind::new(Element::U32, true),
-        BufferKind::new(Element::I64, true),
+        BufferKind::new(ScalarType::I64, false),
+        BufferKind::new(ScalarType::I32, true),
+        BufferKind::new(ScalarType::U16, false),
+        BufferKind::new(ScalarType::U32, true),
+        BufferKind::new(ScalarType::I64, true),
     ];
     agree(
         "narrow/widen",
@@ -1490,7 +1778,7 @@ fn every_build_route_reports_the_same_verify_error() {
 /// first bad active one are written.
 #[test]
 fn trapping_and_repeated_writes_leave_the_same_buffer_on_every_backend() {
-    let e = Element::I32;
+    let e = ScalarType::I32;
     let n = e.lanes(bytes());
     let stage: Stage = Rc::new(move |b| {
         let at = index(b, 0)?;
@@ -1537,8 +1825,8 @@ fn trapping_and_repeated_writes_leave_the_same_buffer_on_every_backend() {
         Ok(())
     });
     let kinds = [
-        BufferKind::new(Element::I32, false),
-        BufferKind::new(Element::I32, true),
+        BufferKind::new(ScalarType::I32, false),
+        BufferKind::new(ScalarType::I32, true),
     ];
     let len = n + 2;
     // Scatter indices: lane 1 repeats lane 0, lane `bad` is out of bounds.
@@ -1613,12 +1901,12 @@ fn trapping_and_repeated_writes_leave_the_same_buffer_on_every_backend() {
 /// repeated indices wins. Inactive lanes are never checked.
 #[test]
 fn every_slice_access_matches_the_lane_order_model() {
-    check_lane_order::<u16>(Element::U16);
-    check_lane_order::<i32>(Element::I32);
-    check_lane_order::<i64>(Element::I64);
+    check_lane_order::<u16>(ScalarType::U16);
+    check_lane_order::<i32>(ScalarType::I32);
+    check_lane_order::<i64>(ScalarType::I64);
 }
 
-fn check_lane_order<T>(e: Element)
+fn check_lane_order<T>(e: ScalarType)
 where
     T: splice::BufferElement + Copy + std::fmt::Debug + TryFrom<i64>,
 {

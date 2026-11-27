@@ -11,7 +11,7 @@ mod simd;
 mod types;
 mod verify;
 pub use simd::{Access, Elements, Memory, OpInfo, Simd, SimdOp, Slot, ValueType};
-pub use types::{Constant, ScalarType};
+pub use types::{Constant, ScalarInfo, ScalarKind, ScalarType};
 
 pub use buffer::{
     Buffer, BufferArg, BufferElement, BufferKind, check_forwarding, validate_buffers,

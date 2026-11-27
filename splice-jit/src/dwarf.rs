@@ -5,8 +5,7 @@ use gimli::write::{
 };
 use gimli::{self as dw, Encoding, Format, LineEncoding, LittleEndian, Register};
 use splice_core::debug::{ConstantType, Location, Type};
-use splice_core::hir::ScalarType;
-use splice_core::simd::Element;
+use splice_core::hir::{ScalarKind, ScalarType};
 use std::path::Path;
 
 pub(crate) const ENCODING: Encoding = Encoding {
@@ -45,26 +44,21 @@ fn base(unit: &mut Unit, label: &str, bytes: usize, encoding: dw::DwAte) -> Unit
     id
 }
 
-fn element(unit: &mut Unit, elem: Element) -> UnitEntryId {
-    let encoding = match elem {
-        Element::F32 | Element::F64 => dw::DW_ATE_float,
-        Element::I32 | Element::I64 => dw::DW_ATE_signed,
-        Element::U16 | Element::U32 => dw::DW_ATE_unsigned,
+/// The base type of a scalar, from its kind.
+fn scalar(unit: &mut Unit, ty: ScalarType) -> UnitEntryId {
+    let encoding = match ty.kind() {
+        ScalarKind::Bool => dw::DW_ATE_boolean,
+        ScalarKind::Char => dw::DW_ATE_UTF,
+        ScalarKind::Signed => dw::DW_ATE_signed,
+        ScalarKind::Unsigned => dw::DW_ATE_unsigned,
+        ScalarKind::Float => dw::DW_ATE_float,
     };
-    base(unit, elem.name(), elem.bytes(), encoding)
+    base(unit, ty.name(), ty.bytes(), encoding)
 }
 
 fn emit_type(unit: &mut Unit, ty: Type) -> UnitEntryId {
     match ty {
-        Type::Scalar(ty) => {
-            let encoding = match ty {
-                ScalarType::Bool => dw::DW_ATE_boolean,
-                ScalarType::F32 | ScalarType::F64 => dw::DW_ATE_float,
-                ScalarType::I32 | ScalarType::I64 => dw::DW_ATE_signed,
-                ScalarType::U32 | ScalarType::U64 | ScalarType::Index => dw::DW_ATE_unsigned,
-            };
-            base(unit, ty.name(), ty.bytes(), encoding)
-        }
+        Type::Scalar(ty) => scalar(unit, ty),
         Type::Constant(kind) => match kind {
             ConstantType::Bool => base(unit, "bool", 1, dw::DW_ATE_boolean),
             ConstantType::Usize => base(unit, "usize", 8, dw::DW_ATE_unsigned),
@@ -91,7 +85,7 @@ fn emit_type(unit: &mut Unit, ty: Type) -> UnitEntryId {
             element: elem,
             lanes,
         } => {
-            let elem_ty = element(unit, elem);
+            let elem_ty = scalar(unit, elem);
             let id = unit.add(unit.root(), dw::DW_TAG_array_type);
             unit.get_mut(id).set(dw::DW_AT_type, A::UnitRef(elem_ty));
             let count = unit.add(id, dw::DW_TAG_subrange_type);
@@ -100,7 +94,7 @@ fn emit_type(unit: &mut Unit, ty: Type) -> UnitEntryId {
             id
         }
         Type::Slice(elem) => {
-            let elem_ty = element(unit, elem);
+            let elem_ty = scalar(unit, elem);
             let ptr = unit.add(unit.root(), dw::DW_TAG_pointer_type);
             unit.get_mut(ptr).set(dw::DW_AT_type, A::UnitRef(elem_ty));
             unit.get_mut(ptr).set(dw::DW_AT_byte_size, A::Udata(8));

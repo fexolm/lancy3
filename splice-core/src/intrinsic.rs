@@ -10,7 +10,6 @@
 //! backend does not implement fails the build with an error that names
 //! both ([`unsupported`]).
 use crate::hir::{ScalarType, ValueType};
-use crate::simd::Element;
 
 /// The item that declares an intrinsic, by its path as `module_path!()`
 /// spells the declaring module: an `#[intrinsic]` trait, or an
@@ -154,11 +153,10 @@ pub(crate) fn check<B: crate::Backend>(
 }
 
 fn value_type(f: &mut std::fmt::Formatter<'_>, ty: ValueType) -> std::fmt::Result {
-    let element = |e: Element| format!("{e:?}").to_lowercase();
     match ty {
         ValueType::Scalar(ty) => write!(f, "{ty}"),
-        ValueType::Vector(e) => write!(f, "Lane<{}>", element(e)),
-        ValueType::Mask(e) => write!(f, "Mask<{}>", element(e)),
+        ValueType::Vector(e) => write!(f, "Lane<{e}>"),
+        ValueType::Mask(e) => write!(f, "Mask<{e}>"),
         ValueType::Opaque(ty) => write!(f, "{ty}"),
     }
 }

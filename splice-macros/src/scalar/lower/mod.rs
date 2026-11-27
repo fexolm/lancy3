@@ -23,35 +23,14 @@ use std::collections::HashMap;
 use syn::spanned::Spanned;
 use syn::{BinOp, Block, Error, Expr, Pat, Path, Result, Stmt, UnOp};
 
-/// A runtime number type other than `usize`.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(in crate::scalar) enum Number {
-    I32,
-    U32,
-    I64,
-    U64,
-    F32,
-    F64,
-}
-impl Number {
-    fn name(self) -> &'static str {
-        match self {
-            Self::I32 => "i32",
-            Self::U32 => "u32",
-            Self::I64 => "i64",
-            Self::U64 => "u64",
-            Self::F32 => "f32",
-            Self::F64 => "f64",
-        }
-    }
-    fn is_float(self) -> bool {
-        matches!(self, Self::F32 | Self::F64)
-    }
-}
+use crate::kast::types::Primitive;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum Scalar {
-    Number(Number),
+    /// A runtime number other than `usize`, or a `char`: a primitive
+    /// [`Primitive::is_kernel_scalar`] accepts. rustc checked the
+    /// operations on it; the IR type is `<T as KernelScalar>::TYPE`.
+    Number(Primitive),
     Bool,
     /// A `usize`.
     Index,
@@ -62,7 +41,7 @@ pub(super) enum Scalar {
     Mask(Elem),
 }
 impl Scalar {
-    pub(in crate::scalar) const I32: Self = Self::Number(Number::I32);
+    pub(in crate::scalar) const I32: Self = Self::Number(Primitive::I32);
     pub(in crate::scalar) fn base(self) -> Self {
         if self == Self::Length {
             Self::Index
@@ -77,33 +56,29 @@ impl Scalar {
         Self::of(crate::kast::types::Primitive::of(ty)?)
     }
     /// The runtime scalar of a primitive Rust type.
-    pub(in crate::scalar) fn of(primitive: crate::kast::types::Primitive) -> Option<Self> {
-        use crate::kast::types::Primitive;
+    pub(in crate::scalar) fn of(primitive: Primitive) -> Option<Self> {
         Some(match primitive {
             Primitive::Bool => Self::Bool,
-            Primitive::I32 => Self::I32,
-            Primitive::U32 => Self::Number(Number::U32),
-            Primitive::I64 => Self::Number(Number::I64),
-            Primitive::U64 => Self::Number(Number::U64),
-            Primitive::F32 => Self::Number(Number::F32),
-            Primitive::F64 => Self::Number(Number::F64),
             Primitive::Usize => Self::Index,
+            p if p.is_kernel_scalar() => Self::Number(p),
             _ => return None,
         })
     }
     /// The primitive Rust type of a scalar register.
-    pub(in crate::scalar) fn primitive(self) -> Option<crate::kast::types::Primitive> {
-        crate::kast::types::Primitive::named(&self.rust_type()?.to_string())
+    pub(in crate::scalar) fn primitive(self) -> Option<Primitive> {
+        Some(match self.base() {
+            Self::Number(p) => p,
+            Self::Bool => Primitive::Bool,
+            Self::Index => Primitive::Usize,
+            _ => return None,
+        })
     }
     /// The Rust type of a scalar register, unless only the builder knows it.
     pub(in crate::scalar) fn rust_type(self) -> Option<Ident> {
-        let name = match self.base() {
-            Self::Number(n) => n.name(),
-            Self::Bool => "bool",
-            Self::Index => "usize",
-            _ => return None,
-        };
-        Some(Ident::new(name, proc_macro2::Span::call_site()))
+        Some(Ident::new(
+            self.primitive()?.name(),
+            proc_macro2::Span::call_site(),
+        ))
     }
     /// A scalar a kernel signature can carry.
     pub(in crate::scalar) fn is_scalar(self) -> bool {
@@ -116,7 +91,8 @@ impl Scalar {
         matches!(self, Self::Number(n) if n.is_float())
     }
     fn is_number(self) -> bool {
-        matches!(self, Self::Number(_) | Self::Index | Self::Length)
+        matches!(self, Self::Number(p) if p.is_number())
+            || matches!(self, Self::Index | Self::Length)
     }
 }
 
@@ -236,13 +212,8 @@ pub(super) struct Lower<'a> {
 /// The IR type of a runtime scalar, or `None` for a vector, a mask, or a
 /// scalar whose type only the builder knows.
 pub(super) fn scalar_type(root: &Path, t: Scalar) -> Option<TokenStream> {
-    let ty = match t.base() {
-        Scalar::Number(n) => Ident::new(&n.name().to_uppercase(), proc_macro2::Span::call_site()),
-        Scalar::Bool => Ident::new("Bool", proc_macro2::Span::call_site()),
-        Scalar::Index => Ident::new("Index", proc_macro2::Span::call_site()),
-        _ => return None,
-    };
-    Some(emit!(#root::hir::ScalarType::#ty))
+    let ty = t.rust_type()?;
+    Some(emit!(<#ty as #root::KernelScalar>::TYPE))
 }
 
 /// The stage of a number literal: its suffix, else the number type its use
@@ -250,13 +221,13 @@ pub(super) fn scalar_type(root: &Path, t: Scalar) -> Option<TokenStream> {
 /// is a host value.
 fn literal_stage(suffix: &str, float: bool, hint: Option<Scalar>) -> Stage {
     if !suffix.is_empty() {
-        return crate::kast::types::Primitive::named(suffix)
+        return Primitive::named(suffix)
             .and_then(Scalar::of)
             .map_or(Stage::Host, Stage::Literal);
     }
     Stage::Literal(match hint.map(Scalar::base) {
         Some(t) if t.is_number() && t.is_float() == float => t,
-        _ if float => Scalar::Number(Number::F64),
+        _ if float => Scalar::Number(Primitive::F64),
         _ => Scalar::I32,
     })
 }

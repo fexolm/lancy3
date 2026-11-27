@@ -1,6 +1,6 @@
 // Every signature diagnostic of #[kernel] points at the offending item.
 use splice::kernel;
-use splice::simd::{Element, Lane};
+use splice::simd::{Lane, LaneElement};
 use splice::BufferArg;
 
 #[kernel]
@@ -12,7 +12,7 @@ fn wide_result() -> i128 {
 }
 
 #[kernel]
-fn generic_vector<T: Element>() -> Lane<T> {
+fn generic_vector<T: LaneElement>() -> Lane<T> {
     Lane::splat(T::default())
 }
 
@@ -100,3 +100,13 @@ fn missing_aggregate_field(x: i32) -> i32 {
 }
 
 fn main() {}
+
+#[kernel]
+fn bool_slice(flags: &[bool]) -> i32 {
+    flags.len() as i32
+}
+
+#[kernel]
+fn pointer_sized(x: isize) -> isize {
+    x
+}

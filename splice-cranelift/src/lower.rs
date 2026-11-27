@@ -2,7 +2,7 @@ use cranelift_codegen::ir::{
     DebugTag, FuncRef, InstBuilder, MemFlags, StackSlotData, StackSlotKind, TrapCode, Type, Value,
     condcodes::{FloatCC, IntCC},
     immediates::{Ieee32, Ieee64},
-    types::{F32, F64, I8, I32, I64},
+    types::{F32, F64, I8, I16, I32, I64},
 };
 use cranelift_frontend::FunctionBuilder;
 use splice_core::Function;
@@ -19,11 +19,13 @@ mod simd;
 
 pub(crate) use simd::{Machine, keep_compared_loads_in_registers};
 
-/// The CLIF type of a scalar register. A `Bool` is an `I8` holding 0 or 1.
+/// The CLIF type of a scalar register. A `Bool` is an `I8` holding 0 or 1;
+/// a `Char` is its code point.
 pub(crate) fn scalar_type(ty: ScalarType) -> Type {
     match ty {
-        ScalarType::Bool => I8,
-        ScalarType::I32 | ScalarType::U32 => I32,
+        ScalarType::Bool | ScalarType::I8 | ScalarType::U8 => I8,
+        ScalarType::I16 | ScalarType::U16 => I16,
+        ScalarType::Char | ScalarType::I32 | ScalarType::U32 => I32,
         ScalarType::I64 | ScalarType::U64 | ScalarType::Index => I64,
         ScalarType::F32 => F32,
         ScalarType::F64 => F64,
@@ -50,7 +52,7 @@ fn word(builder: &mut FunctionBuilder, value: Value, ty: ScalarType) -> Value {
     let bits = match ty {
         ScalarType::F32 => builder.ins().bitcast(I32, MemFlags::new(), value),
         ScalarType::F64 => return builder.ins().bitcast(I64, MemFlags::new(), value),
-        ScalarType::I64 | ScalarType::U64 | ScalarType::Index => return value,
+        _ if ty.bits() == 64 => return value,
         _ => value,
     };
     builder.ins().uextend(I64, bits)
@@ -66,14 +68,11 @@ fn forward_status(builder: &mut FunctionBuilder, status: Value) {
 
 /// The result in the low half of a success status.
 fn from_status(b: &mut FunctionBuilder, ty: ScalarType, status: Value) -> Value {
-    if ty == ScalarType::Bool {
-        return b.ins().ireduce(I8, status);
-    }
-    let word = b.ins().ireduce(I32, status);
     if ty == ScalarType::F32 {
+        let word = b.ins().ireduce(I32, status);
         b.ins().bitcast(F32, MemFlags::new(), word)
     } else {
-        word
+        b.ins().ireduce(scalar_type(ty), status)
     }
 }
 
@@ -459,11 +458,32 @@ fn convert(b: &mut FunctionBuilder, value: Value, from: ScalarType, to: ScalarTy
                 b.ins().uextend(target, value)
             }
         }
+        // Cranelift converts 32- and 64-bit integers: a narrower one is
+        // exactly its `i32`. A `bool` is an `I8`.
+        (false, true) if scalar_type(from).bits() < 32 => {
+            let wide = ScalarType::integer(32, from.is_signed());
+            let value = convert(b, value, from, wide);
+            convert(b, value, wide, to)
+        }
         (false, true) if from.is_signed() => b.ins().fcvt_from_sint(target, value),
         (false, true) => b.ins().fcvt_from_uint(target, value),
         (true, true) if to == ScalarType::F64 => b.ins().fpromote(target, value),
         (true, true) => b.ins().fdemote(target, value),
-        // Saturating, with NaN as zero.
+        // Saturating, with NaN as zero; to a narrow integer through an
+        // `i32`, clamped to its range.
+        (true, false) if to.bits() < 32 => {
+            let wide = b.ins().fcvt_to_sint_sat(I32, value);
+            let (min, max) = if to.is_signed() {
+                (-(1i64 << (to.bits() - 1)), (1i64 << (to.bits() - 1)) - 1)
+            } else {
+                (0, (1i64 << to.bits()) - 1)
+            };
+            let min = b.ins().iconst(I32, min);
+            let max = b.ins().iconst(I32, max);
+            let clamped = b.ins().smax(wide, min);
+            let clamped = b.ins().smin(clamped, max);
+            b.ins().ireduce(target, clamped)
+        }
         (true, false) if to.is_signed() => b.ins().fcvt_to_sint_sat(target, value),
         (true, false) => b.ins().fcvt_to_uint_sat(target, value),
     }

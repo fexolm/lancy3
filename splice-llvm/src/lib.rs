@@ -440,18 +440,18 @@ mod tests {
     fn full_vector_accesses_use_element_alignment_and_short_stores_preserve_the_prefix() {
         use splice_core::{
             frontend::{self, KernelBuilder},
+            hir::ScalarType,
             hir::{Buffer, Simd, SimdOp},
-            simd::Element,
         };
         let kinds = [
-            BufferKind::new(Element::U16, false),
-            BufferKind::new(Element::U16, true),
+            BufferKind::new(ScalarType::U16, false),
+            BufferKind::new(ScalarType::U16, true),
         ];
         fn stage(b: &mut dyn KernelBuilder) -> splice_core::Result<()> {
             let result = b.arg(0)?;
             let offset = b.cast(result, ScalarType::Index)?;
             let op = |op| Simd {
-                element: Element::U16,
+                element: ScalarType::U16,
                 op,
             };
             let value = b.simd(op(SimdOp::Load(Buffer(0))), &[offset])?.unwrap();
@@ -467,7 +467,7 @@ mod tests {
             options(),
         )
         .unwrap();
-        let lanes = Element::U16.lanes(options().target.vector_bytes());
+        let lanes = ScalarType::U16.lanes(options().target.vector_bytes());
         let ty = format!("<{lanes} x i16>");
         let machine = target::Machine::new(&options().target);
         let target = target::machine(&options().target, false).unwrap();
@@ -537,8 +537,8 @@ mod tests {
     fn masked_memory_emits_intrinsics_and_preserves_ordered_errors() {
         use splice_core::{
             frontend::{self, KernelBuilder},
+            hir::ScalarType,
             hir::{Buffer, Simd, SimdOp},
-            simd::Element,
         };
         let kinds = [
             BufferKind::READ_I32,
@@ -549,7 +549,7 @@ mod tests {
         ];
         fn stage(b: &mut dyn KernelBuilder) -> splice_core::Result<()> {
             let op = |op| Simd {
-                element: Element::I32,
+                element: ScalarType::I32,
                 op,
             };
             let base = b.cast(b.arg(0)?, ScalarType::Index)?;
@@ -615,7 +615,7 @@ mod tests {
         let machine = target::Machine::new(&options().target);
         let target = target::machine(&options().target, false).unwrap();
         let ctx = Context::create();
-        let n = Element::I32.lanes(options().target.vector_bytes());
+        let n = ScalarType::I32.lanes(options().target.vector_bytes());
         for direct in [false, true] {
             let m = build_module(&ctx, &target, machine, |ctx, m| {
                 if direct {

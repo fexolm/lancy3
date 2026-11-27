@@ -206,7 +206,7 @@ impl Function {
             let is_param = |v: Value, ty| entry.contains(&v) && self.types[v] == ty;
             if !is_param(slice.ptr, Type::Ptr)
                 || !is_param(slice.len, Type::I32)
-                || !matches!(slice.element, 2 | 4 | 8)
+                || !matches!(slice.element, 1 | 2 | 4 | 8)
                 || slice_of[slice.ptr].is_some()
                 || slice_of[slice.len].is_some()
             {

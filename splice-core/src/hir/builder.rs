@@ -153,8 +153,7 @@ impl KernelBuilder for FunctionBuilder {
             .function
             .buffer_kinds
             .get(buffer.index())
-            .and_then(|kind| ScalarType::of_element(kind.element()))
-            .unwrap_or(ScalarType::I32);
+            .map_or(ScalarType::I32, |kind| kind.element());
         self.scalar(ty, |dst| Instr::Load { dst, buffer, index })
     }
     fn store(&mut self, buffer: Buffer, index: Reg, value: Reg) -> crate::Result<()> {
