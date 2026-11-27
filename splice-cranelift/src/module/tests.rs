@@ -472,3 +472,71 @@ fn stack_shuffles_share_one_slot_per_function() {
         assert_eq!(code.call(&[lane], &mut []), Ok(2 * lane));
     }
 }
+
+/// `name` on the parameter, with `increment` as its body.
+fn intrinsic_call(name: &str) -> Function {
+    let body = Arc::new(increment());
+    let mut f = FunctionBuilder::new(
+        options(),
+        Signature::new(&[ScalarType::I32; 1], ScalarType::I32, &[]),
+    );
+    let intrinsic = splice_core::intrinsic::Intrinsic::new(name, body.signature());
+    let value = f
+        .intrinsic(
+            &intrinsic,
+            &[f.arg(0).unwrap()],
+            splice_core::intrinsic::Fallback::Function(&body),
+        )
+        .unwrap();
+    f.ret(value).unwrap();
+    f.finish().unwrap()
+}
+
+#[test]
+fn a_supported_intrinsic_declares_no_body() {
+    let lower = |f: &Function, policy| {
+        let mut jit = JITModule::new(JITBuilder::new(default_libcall_names()).unwrap());
+        KernelModule::lower(&mut jit, f, &options().target, false, policy).map(|m| m.bodies.len())
+    };
+    // Cranelift's `rotate_left` takes a `u32` count: this one compiles its body.
+    let rotate = intrinsic_call("rotate_left");
+    assert_eq!(
+        lower(&rotate, splice_core::IntrinsicPolicy::Fallback).unwrap(),
+        2
+    );
+    let ones = {
+        let body = Arc::new({
+            let mut f = FunctionBuilder::new(
+                options(),
+                Signature::new(&[ScalarType::U64; 1], ScalarType::U32, &[]),
+            );
+            let zero = f.constant(Constant::new(ScalarType::U32, 0)).unwrap();
+            f.ret(zero).unwrap();
+            f.finish().unwrap()
+        });
+        let mut f = FunctionBuilder::new(
+            options(),
+            Signature::new(&[ScalarType::U64; 1], ScalarType::U32, &[]),
+        );
+        let intrinsic = splice_core::intrinsic::Intrinsic::new("count_ones", body.signature());
+        let value = f
+            .intrinsic(
+                &intrinsic,
+                &[f.arg(0).unwrap()],
+                splice_core::intrinsic::Fallback::Function(&body),
+            )
+            .unwrap();
+        f.ret(value).unwrap();
+        f.finish().unwrap()
+    };
+    assert_eq!(
+        lower(&ones, splice_core::IntrinsicPolicy::Error).unwrap(),
+        1
+    );
+    let error = lower(
+        &intrinsic_call("acme.op"),
+        splice_core::IntrinsicPolicy::Error,
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("acme.op") && error.to_string().contains("cranelift"));
+}

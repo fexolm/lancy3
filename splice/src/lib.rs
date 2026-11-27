@@ -71,7 +71,7 @@ pub use splice_core::__private;
 /// Lancy, Splice's own JIT (feature `lancy`, on by default).
 #[cfg(feature = "lancy")]
 pub mod lancy {
-    pub use splice_lancy::{Lancy, LancyKernel};
+    pub use splice_lancy::{Lancy, LancyKernel, lower};
 }
 
 /// Cranelift (feature `cranelift`).

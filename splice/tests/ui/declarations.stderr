@@ -70,56 +70,98 @@ error: expected a nonempty intrinsic name
 91 |     #[intrinsic("")]
    |                 ^^
 
-error: one #[intrinsic("name")] is allowed on a kernel method with a body
+error: one #[intrinsic("name")] is allowed on a kernel function or method with a body
    --> tests/ui/declarations.rs:101:5
     |
 101 |     #[intrinsic("b")]
     |     ^^^^^^^^^^^^^^^^^
 
-error: runtime parameters must be bool, i32, u32, i64, u64, usize, f32, f64 or a slice of u16, u32, i32, i64, f32, or f64
-   --> tests/ui/declarations.rs:109:16
+error: an #[intrinsic] takes and returns concrete kernel scalars
+   --> tests/ui/declarations.rs:112:22
     |
-109 |     fn area(x: char) -> i32;
+112 |     fn slice_operand(xs: &[i32]) -> i32 {
+    |                      ^^
+
+error: an #[intrinsic] takes and returns concrete kernel scalars
+   --> tests/ui/declarations.rs:116:5
+    |
+116 |     fn no_result(x: i32) {
+    |     ^^^^^^^^^^^^^^^^^^^^
+
+error: an #[intrinsic] takes and returns concrete kernel scalars
+   --> tests/ui/declarations.rs:120:5
+    |
+120 |     fn generic<const N: i32>(x: i32) -> i32 {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: an #[intrinsic] takes and returns concrete kernel scalars
+   --> tests/ui/declarations.rs:127:1
+    |
+127 | fn host_operand(#[comptime] n: i32, x: i32) -> i32 {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: one #[intrinsic("name")] is allowed on a kernel function or method with a body
+   --> tests/ui/declarations.rs:132:1
+    |
+132 | #[intrinsic("acme.block")]
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: #[intrinsic] is not supported on a trait method; put it on a free #[kernel] function or a method of an inherent #[kernel] impl
+   --> tests/ui/declarations.rs:137:5
+    |
+137 |     #[intrinsic("acme.measure")]
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: #[intrinsic] is not supported on a trait method; put it on a free #[kernel] function or a method of an inherent #[kernel] impl
+   --> tests/ui/declarations.rs:145:5
+    |
+145 |     #[intrinsic("acme.measure")]
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: runtime parameters must be bool, i32, u32, i64, u64, usize, f32, f64 or a slice of u16, u32, i32, i64, f32, or f64
+   --> tests/ui/declarations.rs:153:16
+    |
+153 |     fn area(x: char) -> i32;
     |                ^^^^
 
 error: expected a free function, impl or trait
-   --> tests/ui/declarations.rs:113:1
+   --> tests/ui/declarations.rs:157:1
     |
-113 | struct NotAFunction;
+157 | struct NotAFunction;
     | ^^^^^^^^^^^^^^^^^^^^
 
 error: KernelType can only be derived for structs
-   --> tests/ui/declarations.rs:116:6
+   --> tests/ui/declarations.rs:160:6
     |
-116 | enum NotAStruct {
+160 | enum NotAStruct {
     |      ^^^^^^^^^^
 
 error: expected `crate = path`, at most once
-   --> tests/ui/declarations.rs:121:10
+   --> tests/ui/declarations.rs:165:10
     |
-121 | #[splice(root = splice)]
+165 | #[splice(root = splice)]
     |          ^^^^
 
 error: expected `crate = path`, at most once
-   --> tests/ui/declarations.rs:127:26
+   --> tests/ui/declarations.rs:171:26
     |
-127 | #[splice(crate = splice, crate = splice)]
+171 | #[splice(crate = splice, crate = splice)]
     |                          ^^^^^
 
 error: union fields do not have a known active variant
-   --> tests/ui/declarations.rs:133:7
+   --> tests/ui/declarations.rs:177:7
     |
-133 | union Bits {
+177 | union Bits {
     |       ^^^^
 
 error: a kernel accepts at most 4 #[cfg]/#[cfg_attr] parameter attributes
-   --> tests/ui/declarations.rs:139:1
+   --> tests/ui/declarations.rs:183:1
     |
-139 | / fn many_conditions(
-140 | |     #[cfg(test)] a: i32,
-141 | |     #[cfg(test)] b: i32,
-142 | |     #[cfg(test)] c: i32,
-143 | |     #[cfg(test)] d: i32,
-144 | |     #[cfg(test)] e: i32,
-145 | | ) -> i32 {
+183 | / fn many_conditions(
+184 | |     #[cfg(test)] a: i32,
+185 | |     #[cfg(test)] b: i32,
+186 | |     #[cfg(test)] c: i32,
+187 | |     #[cfg(test)] d: i32,
+188 | |     #[cfg(test)] e: i32,
+189 | | ) -> i32 {
     | |________^

@@ -73,8 +73,8 @@ fn binary(op: Binary) -> hir::Binary {
 }
 
 /// The Lancy operation that implements `intrinsic`, if Lancy emits it: the
-/// bit counts of a 32- or 64-bit integer as `u32`, and the square root of
-/// a float. Lancy selects code for these on every target.
+/// bit counts of a 32- or 64-bit integer as `u32`. Lancy selects code for
+/// these on every target.
 pub(crate) fn native_intrinsic(intrinsic: &Intrinsic<'_>) -> Option<hir::Unary> {
     use ScalarType as S;
     let signature = intrinsic.signature;
@@ -86,7 +86,6 @@ pub(crate) fn native_intrinsic(intrinsic: &Intrinsic<'_>) -> Option<hir::Unary> 
         "count_ones" if integer => Some(hir::Unary::Popcnt),
         "leading_zeros" if integer => Some(hir::Unary::LeadingZeros),
         "trailing_zeros" if integer => Some(hir::Unary::TrailingZeros),
-        "sqrt" if param.is_float() && signature.result == param => Some(hir::Unary::Sqrt),
         _ => None,
     }
 }
@@ -981,18 +980,20 @@ impl KernelBuilder for Builder<'_> {
         args: &[Reg],
     ) -> splice_core::Result<Reg> {
         let op = native_intrinsic(intrinsic).expect("a supported intrinsic");
-        let ty = intrinsic.signature.params[0];
-        let value = self.local(ValueType::Scalar(ty))?;
+        let result = intrinsic.signature.result;
+        let dst = self.local(ValueType::Scalar(result))?;
         if self.reachable() {
             let operand = self.read(args[0]);
-            let v = self.value(Op::Unary(op, operand));
-            self.bind(value, v);
+            let count = self.value(Op::Unary(op, operand));
+            // The count of a 64-bit operand fits its low bits.
+            let count = if intrinsic.signature.params[0] == result {
+                count
+            } else {
+                self.value(Op::Cast(scalar_type(result), count))
+            };
+            self.bind(dst, count);
         }
-        if intrinsic.signature.result == ty {
-            Ok(value)
-        } else {
-            self.cast(value, intrinsic.signature.result)
-        }
+        Ok(dst)
     }
     fn unsupported_intrinsic(&self, intrinsic: &Intrinsic<'_>) -> splice_core::Result<()> {
         splice_core::intrinsic::unsupported(self.policy, "lancy", intrinsic)

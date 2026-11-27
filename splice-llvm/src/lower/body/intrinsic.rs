@@ -14,8 +14,6 @@ pub(crate) enum Native {
     TrailingZeros,
     /// `rotate_left(x, n: u32)` of a 32- or 64-bit integer.
     RotateLeft,
-    /// `sqrt` of a float.
-    Sqrt,
     /// `mul_add(a, b, c)` of floats, where the machine fuses it: LLVM would
     /// otherwise call the C library.
     MulAdd,
@@ -38,7 +36,6 @@ pub(crate) fn native(intrinsic: &Intrinsic<'_>, machine: &Machine) -> Option<Nat
             })
         }
         ("rotate_left", &[x, S::U32]) if integer(x) && result == x => Some(Native::RotateLeft),
-        ("sqrt", &[x]) if x.is_float() && result == x => Some(Native::Sqrt),
         ("mul_add", &[a, b, c])
             if a.is_float() && a == b && b == c && result == a && machine.fma =>
         {
@@ -87,7 +84,6 @@ impl<'ctx> Body<'_, 'ctx> {
                 let count = ir.build_int_cast_sign_flag(count, ty.into_int_type(), false, "")?;
                 call("llvm.fshl", &[x.into(), x.into(), count.into()])?
             }
-            Native::Sqrt => call("llvm.sqrt", &[x.into()])?,
             Native::MulAdd => {
                 let (b, c) = (self.value(args[1])?, self.value(args[2])?);
                 call("llvm.fma", &[x.into(), b.into(), c.into()])?

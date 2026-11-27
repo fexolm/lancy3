@@ -15,8 +15,6 @@ pub(crate) enum Native {
     TrailingZeros,
     /// `rotate_left(x, n: u32)` of a 32- or 64-bit integer.
     RotateLeft,
-    /// `sqrt` of a float.
-    Sqrt,
 }
 
 /// How Cranelift implements `intrinsic`, if it does.
@@ -30,7 +28,6 @@ pub(crate) fn native(intrinsic: &Intrinsic<'_>) -> Option<Native> {
         ("leading_zeros", &[x]) if integer(x) && result == S::U32 => Some(Native::LeadingZeros),
         ("trailing_zeros", &[x]) if integer(x) && result == S::U32 => Some(Native::TrailingZeros),
         ("rotate_left", &[x, S::U32]) if integer(x) && result == x => Some(Native::RotateLeft),
-        ("sqrt", &[x]) if x.is_float() && result == x => Some(Native::Sqrt),
         _ => None,
     }
 }
@@ -60,6 +57,5 @@ pub(crate) fn emit(b: &mut FunctionBuilder, op: Native, args: &[Value]) -> Value
         }
         // `rotl` takes the count modulo the width, as Rust does.
         Native::RotateLeft => b.ins().rotl(x, args[1]),
-        Native::Sqrt => b.ins().sqrt(x),
     }
 }
