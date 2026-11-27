@@ -1,4 +1,3 @@
-use splice::lancy::Lancy;
 use splice::simd::Lane;
 use splice::{BuildError, Codegen, Executable, kernel};
 use std::cell::Cell;
@@ -1247,7 +1246,7 @@ fn usize_parameters_and_results_keep_all_64_bits() {
     splice_testkit::each_backend!(B => check::<B>());
 }
 
-// `min`/`max` are tested here as registered intrinsics; `clamp` is not one.
+// `min`/`max` are tested here as core operations; `clamp` is not one.
 #[allow(clippy::manual_clamp)]
 #[kernel]
 fn integer_methods(xs: &[i32], a: i32, b: i32, n: usize) -> i32 {
@@ -1265,10 +1264,10 @@ fn integer_methods(xs: &[i32], a: i32, b: i32, n: usize) -> i32 {
 }
 
 /// MAC-13, MAC-14: integer methods of runtime `i32` and `usize` values are
-/// registered intrinsics: each stages one portable operation, without a
-/// Rust call, and matches Rust on both build paths.
+/// core operations: each stages one portable operation, without a Rust
+/// call or an intrinsic, and matches Rust on both build paths.
 #[test]
-fn integer_methods_are_intrinsics_on_every_integer_type() {
+fn integer_methods_are_core_operations_on_every_integer_type() {
     use splice::hir::{Binary, Instr};
     let ir = integer_methods::ir().unwrap();
     let ops: Vec<_> = splice_testkit::instructions(&ir)
@@ -1286,7 +1285,10 @@ fn integer_methods_are_intrinsics_on_every_integer_type() {
     ] {
         assert!(ops.contains(&op), "{op:?} in {ops:?}");
     }
-    assert!(!splice_testkit::instructions(&ir).any(|op| matches!(op, Instr::RustCall { .. })));
+    assert!(
+        !splice_testkit::instructions(&ir)
+            .any(|op| matches!(op, Instr::RustCall { .. } | Instr::Intrinsic { .. }))
+    );
     fn check<B: Codegen<Output: Executable>>() {
         let direct = integer_methods::build::<B>(integer_methods::BuildArgs {}).unwrap();
         let portable = B::compile(&integer_methods::ir().unwrap()).unwrap();
@@ -1319,50 +1321,55 @@ mod intrinsic_methods {
 
     #[kernel]
     impl Math {
-        #[intrinsic("splice.i32.max")]
+        #[intrinsic("acme.max")]
         pub fn max(a: i32, b: i32) -> i32 {
             if a > b { a } else { b }
         }
-
-        #[intrinsic("acme.i32.max")]
-        pub fn unregistered(a: i32, b: i32) -> i32 {
-            if a > b { a } else { b }
-        }
     }
 
     #[kernel]
-    pub fn registered(x: i32, y: i32) -> i32 {
+    pub fn maximum(x: i32, y: i32) -> i32 {
         Math::max(x, y)
-    }
-
-    #[kernel]
-    pub fn fallback(x: i32, y: i32) -> i32 {
-        Math::unregistered(x, y)
     }
 }
 
-/// MAC-13: a `#[intrinsic("name")]` method stages the registered operation
-/// in place of its body; an unregistered name stages the body.
+/// MAC-13: a `#[intrinsic("name")]` method reaches the portable IR as an
+/// intrinsic call whose fallback is the method's body; a backend without
+/// the intrinsic compiles that body.
 #[test]
-fn intrinsic_methods_stage_the_registered_operation_or_their_body() {
-    use intrinsic_methods::{fallback, registered};
-    use splice::hir::{Binary, Instr};
-    let branches = |ir: &splice::Function| {
-        splice_testkit::instructions(ir).any(|op| matches!(op, Instr::Branch { .. }))
-    };
-    let maxima = |ir: &splice::Function| {
-        splice_testkit::instructions(ir).any(|op| matches!(op, Instr::Bin(_, Binary::Max, ..)))
-    };
-    let ir = registered::ir().unwrap();
-    assert!(maxima(&ir) && !branches(&ir));
-    let ir = fallback::ir().unwrap();
-    assert!(!maxima(&ir) && branches(&ir));
-    for (x, y) in [(-5, 2), (7, 3), (i32::MIN, i32::MAX)] {
-        let code = registered::build::<Lancy>(registered::BuildArgs {}).unwrap();
-        assert_eq!(code.call(registered::CallArgs { x, y }), Ok(x.max(y)));
-        let code = fallback::build::<Lancy>(fallback::BuildArgs {}).unwrap();
-        assert_eq!(code.call(fallback::CallArgs { x, y }), Ok(x.max(y)));
+fn intrinsic_methods_record_the_intrinsic_with_their_body() {
+    use intrinsic_methods::maximum;
+    use splice::hir::Instr;
+    let ir = maximum::ir().unwrap();
+    let fallback = ir
+        .instructions()
+        .iter()
+        .find_map(|op| match op {
+            Instr::Intrinsic { name, fallback, .. } if &**name == "acme.max" => Some(fallback),
+            _ => None,
+        })
+        .expect("an intrinsic call");
+    assert!(
+        !ir.instructions()
+            .iter()
+            .any(|op| matches!(op, Instr::Branch { .. }))
+    );
+    assert!(
+        fallback
+            .instructions()
+            .iter()
+            .any(|op| matches!(op, Instr::Branch { .. }))
+    );
+    fn check<B: Codegen<Output: Executable>>() {
+        let direct = maximum::build::<B>(maximum::BuildArgs {}).unwrap();
+        let portable = B::compile(&maximum::ir().unwrap()).unwrap();
+        for (x, y) in [(-5, 2), (7, 3), (i32::MIN, i32::MAX)] {
+            for code in [&direct, &portable] {
+                assert_eq!(code.call(maximum::CallArgs { x, y }), Ok(x.max(y)));
+            }
+        }
     }
+    splice_testkit::each_backend!(B => check::<B>());
 }
 
 /// MAC-09: a primitive named by its full path is the same type.

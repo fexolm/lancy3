@@ -57,6 +57,7 @@ pub(crate) fn expand(root: Path, print: bool, tokens: TokenStream) -> Result<Tok
                         &method.vis,
                         trait_path.is_some(),
                         intrinsic.as_ref(),
+                        implementation.generics.params.is_empty(),
                     )
                     .unwrap_or_else(|error| {
                         errors.push(error);

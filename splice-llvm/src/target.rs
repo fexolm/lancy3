@@ -14,6 +14,8 @@ pub(crate) struct Machine {
     pub(crate) x86_compress: bool,
     /// See [`scalable`].
     pub(crate) scalable: bool,
+    /// A fused multiply-add instruction: AArch64, or x86 with FMA.
+    pub(crate) fma: bool,
 }
 
 impl Machine {
@@ -25,6 +27,7 @@ impl Machine {
                 .x86()
                 .is_some_and(|isa| isa.avx10 > 0 || isa.avx512f && (bytes == 64 || isa.vl)),
             scalable: scalable(target),
+            fma: target.x86().is_none_or(|isa| isa.fma),
         }
     }
 }

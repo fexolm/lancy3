@@ -13,12 +13,13 @@ use inkwell::{
     values::FunctionValue,
 };
 use splice_core::{
-    Function,
+    Function, IntrinsicPolicy,
     debug::{Location, Point, Slot, Variable},
     frontend::{Body as StagedBody, KernelBuilder, KernelSource, Signature, Specialization},
     hir::{
         Binary, Buffer, Constant, ContextSlice, Label, Reg, RustTarget, ScalarType, Simd, ValueType,
     },
+    intrinsic::Intrinsic,
 };
 
 /// A Rust call returns an `i32` word.
@@ -51,6 +52,7 @@ struct Graph<'a, 'ctx> {
     machine: crate::target::Machine,
     module: &'a Module<'ctx>,
     debug: bool,
+    lowering: Lowering,
     count: Cell<usize>,
     staged: RefCell<Staged>,
     static_rust_slice_operands: Cell<bool>,
@@ -133,6 +135,30 @@ impl<'ctx> Graph<'_, 'ctx> {
     }
 }
 
+/// How a build lowers its kernel: with source points, and what it does with
+/// an intrinsic LLVM does not implement.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Lowering {
+    pub(crate) debug: bool,
+    pub(crate) unsupported_intrinsic: IntrinsicPolicy,
+    /// The backend named in diagnostics.
+    pub(crate) backend: &'static str,
+}
+
+impl Lowering {
+    pub(crate) fn new(options: &splice_core::BuildOptions, auto_vectorize: bool) -> Self {
+        Self {
+            debug: options.debug(),
+            unsupported_intrinsic: options.unsupported_intrinsic,
+            backend: if auto_vectorize {
+                "llvm"
+            } else {
+                "llvm-manual-simd"
+            },
+        }
+    }
+}
+
 /// Stage `stage` into `module` as the kernel and its callees, with the
 /// public entry point.
 pub(crate) fn populate<'ctx>(
@@ -141,13 +167,15 @@ pub(crate) fn populate<'ctx>(
     machine: crate::target::Machine,
     signature: Signature<'_>,
     stage: impl FnOnce(&mut dyn KernelBuilder) -> splice_core::Result<()>,
-    debug: bool,
+    lowering: Lowering,
 ) -> splice_core::Result<Staged> {
+    let debug = lowering.debug;
     let graph = Graph {
         ctx,
         machine,
         module,
         debug,
+        lowering,
         count: Cell::new(0),
         staged: RefCell::default(),
         static_rust_slice_operands: Cell::new(false),
@@ -179,7 +207,7 @@ pub(crate) fn populate_function<'ctx>(
     module: &Module<'ctx>,
     machine: crate::target::Machine,
     function: &Function,
-    debug: bool,
+    lowering: Lowering,
 ) -> splice_core::Result<Staged> {
     populate(
         ctx,
@@ -187,7 +215,7 @@ pub(crate) fn populate_function<'ctx>(
         machine,
         function.signature(),
         |b| splice_core::hir::replay(function, b),
-        debug,
+        lowering,
     )
 }
 
@@ -380,6 +408,26 @@ impl KernelBuilder for Direct<'_, '_> {
     ) -> splice_core::Result<Reg> {
         let plan = target.plan(self.kinds, args.len(), slices);
         self.result(result, |ir, dst| ir.rust_call(dst, plan, args))
+    }
+    fn supports_intrinsic(&self, intrinsic: &Intrinsic<'_>) -> bool {
+        body::native(intrinsic, &self.graph.machine).is_some()
+    }
+    fn emit_intrinsic(
+        &mut self,
+        intrinsic: &Intrinsic<'_>,
+        args: &[Reg],
+    ) -> splice_core::Result<Reg> {
+        let op = body::native(intrinsic, &self.graph.machine).expect("a supported intrinsic");
+        let result = intrinsic.signature.result;
+        self.result(result, |ir, d| ir.native_intrinsic(d, op, args, result))
+    }
+    fn unsupported_intrinsic(&self, intrinsic: &Intrinsic<'_>) -> splice_core::Result<()> {
+        let lowering = self.graph.lowering;
+        splice_core::intrinsic::unsupported(
+            lowering.unsupported_intrinsic,
+            lowering.backend,
+            intrinsic,
+        )
     }
     fn call_kernel(
         &mut self,

@@ -14,6 +14,13 @@ pub struct Lancy;
 impl Backend for Lancy {
     type Output = LancyKernel;
 
+    fn supports_intrinsic(
+        intrinsic: &splice_core::intrinsic::Intrinsic<'_>,
+        _target: &splice_core::Target,
+    ) -> bool {
+        lower::native_intrinsic(intrinsic).is_some()
+    }
+
     fn stage(
         signature: Signature<'_>,
         body: Body<'_>,
@@ -21,8 +28,15 @@ impl Backend for Lancy {
     ) -> splice_core::Result<Self::Output> {
         let _span = tracing::debug_span!(target: "splice_core::compile", "compile", backend = "lancy", input = "staged").entered();
         LancyKernel::compile(signature, options, |vector_bytes, debug| {
-            tracing::debug_span!(target: "splice_core::compile", "stage_lancy_hir")
-                .in_scope(|| lower::stage(signature, body, vector_bytes, debug))
+            tracing::debug_span!(target: "splice_core::compile", "stage_lancy_hir").in_scope(|| {
+                lower::stage(
+                    signature,
+                    body,
+                    vector_bytes,
+                    options.unsupported_intrinsic,
+                    debug,
+                )
+            })
         })
     }
 
@@ -33,7 +47,9 @@ impl Backend for Lancy {
         let _span = tracing::debug_span!(target: "splice_core::compile", "compile", backend = "lancy", input = "portable").entered();
         LancyKernel::compile(function.signature(), options, |vector_bytes, debug| {
             let graph = tracing::debug_span!(target: "splice_core::compile", "lower_lancy_hir")
-                .in_scope(|| lower::lower_with(function, vector_bytes, debug))?;
+                .in_scope(|| {
+                    lower::lower_with(function, vector_bytes, options.unsupported_intrinsic, debug)
+                })?;
             Ok((graph, function.source()))
         })
     }

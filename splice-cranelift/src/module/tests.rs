@@ -42,7 +42,14 @@ fn caller(child: Function, times: usize) -> Function {
 
 fn emitted_graph(f: &Function, unique_bodies: usize) -> HashMap<FuncId, Vec<FuncId>> {
     let mut jit = JITModule::new(JITBuilder::new(default_libcall_names()).unwrap());
-    let kernel = KernelModule::lower(&mut jit, f, &options().target, false).unwrap();
+    let kernel = KernelModule::lower(
+        &mut jit,
+        f,
+        &options().target,
+        false,
+        options().unsupported_intrinsic,
+    )
+    .unwrap();
     assert_eq!(kernel.bodies.len(), unique_bodies);
     let mut graph = HashMap::new();
     kernel
@@ -93,7 +100,14 @@ fn branches_use_comparison_bits_and_preserve_comparison_masks() {
         let f = f.finish().unwrap();
 
         let mut jit = JITModule::new(JITBuilder::new(default_libcall_names()).unwrap());
-        let module = KernelModule::lower(&mut jit, &f, &options().target, false).unwrap();
+        let module = KernelModule::lower(
+            &mut jit,
+            &f,
+            &options().target,
+            false,
+            options().unsupported_intrinsic,
+        )
+        .unwrap();
         let body = &module.bodies[&module.entry];
         let branch = body
             .layout
@@ -149,7 +163,14 @@ fn branches_use_vector_reduction_bits_and_preserve_scalar_masks() {
     let f = f.finish().unwrap();
 
     let mut jit = JITModule::new(JITBuilder::new(default_libcall_names()).unwrap());
-    let module = KernelModule::lower(&mut jit, &f, &options().target, false).unwrap();
+    let module = KernelModule::lower(
+        &mut jit,
+        &f,
+        &options().target,
+        false,
+        options().unsupported_intrinsic,
+    )
+    .unwrap();
     let body = &module.bodies[&module.entry];
     let branch = body
         .layout
@@ -229,7 +250,14 @@ fn packed_chunks_cover_the_vector_and_a_short_store_keeps_its_prefix() {
     let f = f.finish().unwrap();
 
     let mut jit = JITModule::new(JITBuilder::new(default_libcall_names()).unwrap());
-    let module = KernelModule::lower(&mut jit, &f, &options().target, false).unwrap();
+    let module = KernelModule::lower(
+        &mut jit,
+        &f,
+        &options().target,
+        false,
+        options().unsupported_intrinsic,
+    )
+    .unwrap();
     let body = &module.bodies[&module.entry];
     let chunks = e.lanes(options().target.vector_bytes()) / 8;
     assert_eq!(instructions_of_type(body, Opcode::Load, I16X8), chunks);
@@ -306,7 +334,14 @@ fn masked_contiguous_access_selects_packed_and_ordered_paths() {
     let f = f.finish().unwrap();
 
     let mut jit = JITModule::new(JITBuilder::new(default_libcall_names()).unwrap());
-    let module = KernelModule::lower(&mut jit, &f, &options().target, false).unwrap();
+    let module = KernelModule::lower(
+        &mut jit,
+        &f,
+        &options().target,
+        false,
+        options().unsupported_intrinsic,
+    )
+    .unwrap();
     let body = &module.bodies[&module.entry];
     assert!(instructions_of_type(body, Opcode::Load, I16X8) > 0);
     assert!(instructions_of_type(body, Opcode::Store, I16X8) > 0);
@@ -353,7 +388,14 @@ fn a_full_gather_has_one_bounds_branch_for_all_lanes() {
     }
     let mut jit = JITModule::new(JITBuilder::new(default_libcall_names()).unwrap());
     let ir = first_block::ir().unwrap();
-    let module = KernelModule::lower(&mut jit, &ir, &options().target, false).unwrap();
+    let module = KernelModule::lower(
+        &mut jit,
+        &ir,
+        &options().target,
+        false,
+        options().unsupported_intrinsic,
+    )
+    .unwrap();
     let entry = &module.bodies[&module.entry];
     let branches = entry
         .layout
@@ -408,7 +450,14 @@ fn stack_shuffles_share_one_slot_per_function() {
     let f = f.finish().unwrap();
 
     let mut jit = JITModule::new(JITBuilder::new(default_libcall_names()).unwrap());
-    let module = KernelModule::lower(&mut jit, &f, &options().target, false).unwrap();
+    let module = KernelModule::lower(
+        &mut jit,
+        &f,
+        &options().target,
+        false,
+        options().unsupported_intrinsic,
+    )
+    .unwrap();
     let body = &module.bodies[&module.entry];
     assert_eq!(body.sized_stack_slots.len(), 1, "{body}");
     assert_eq!(

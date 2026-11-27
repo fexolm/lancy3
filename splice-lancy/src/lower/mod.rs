@@ -11,12 +11,13 @@ use block_map::BlockMap;
 use lancy::Trap;
 use lancy::hir::{self, Block, Function, Op, Value};
 use splice_core::{
-    BufferKind,
+    BufferKind, IntrinsicPolicy,
     frontend::{Body, KernelBuilder, KernelSource, Signature, Specialization},
     hir::{
         Binary, Buffer, Constant, ContextSlice, Label, PacketStore, PacketValue, Reg, RustTarget,
         ScalarType, Simd, ValueType,
     },
+    intrinsic::Intrinsic,
 };
 use std::{
     collections::{HashMap, HashSet},
@@ -71,6 +72,25 @@ fn binary(op: Binary) -> hir::Binary {
     }
 }
 
+/// The Lancy operation that implements `intrinsic`, if Lancy emits it: the
+/// bit counts of a 32- or 64-bit integer as `u32`, and the square root of
+/// a float. Lancy selects code for these on every target.
+pub(crate) fn native_intrinsic(intrinsic: &Intrinsic<'_>) -> Option<hir::Unary> {
+    use ScalarType as S;
+    let signature = intrinsic.signature;
+    let [param] = *signature.params else {
+        return None;
+    };
+    let integer = matches!(param, S::I32 | S::U32 | S::I64 | S::U64) && signature.result == S::U32;
+    match intrinsic.name {
+        "count_ones" if integer => Some(hir::Unary::Popcnt),
+        "leading_zeros" if integer => Some(hir::Unary::LeadingZeros),
+        "trailing_zeros" if integer => Some(hir::Unary::TrailingZeros),
+        "sqrt" if param.is_float() && signature.result == param => Some(hir::Unary::Sqrt),
+        _ => None,
+    }
+}
+
 /// A source point of a debug build: the function it belongs to and, after
 /// the marker that opens each function, the point with its saved values.
 pub(crate) struct DebugSource {
@@ -83,11 +103,13 @@ pub(crate) fn stage(
     signature: Signature<'_>,
     body: Body<'_>,
     vector_bytes: usize,
+    policy: IntrinsicPolicy,
     debug: Option<&mut Vec<DebugSource>>,
 ) -> splice_core::Result<(Function, Option<&'static KernelSource>)> {
     let mut debug = debug;
     let sources = debug.as_deref_mut().map(std::mem::take);
     let mut builder = Builder::new(signature, true, vector_bytes, sources)?;
+    builder.policy = policy;
     let staged = body(&mut builder);
     if let (Some(out), Some(sources)) = (debug, builder.debug.take()) {
         *out = sources;
@@ -104,18 +126,20 @@ pub fn lower(
     root: &splice_core::Function,
     target: &splice_core::Target,
 ) -> splice_core::Result<hir::Function> {
-    lower_with(root, target.vector_bytes(), None)
+    lower_with(root, target.vector_bytes(), IntrinsicPolicy::Fallback, None)
 }
 
 pub(crate) fn lower_with(
     root: &splice_core::Function,
     vector_bytes: usize,
+    policy: IntrinsicPolicy,
     debug: Option<&mut Vec<DebugSource>>,
 ) -> splice_core::Result<hir::Function> {
     let (graph, _) = stage(
         root.signature(),
         Box::new(|b| splice_core::hir::replay(root, b)),
         vector_bytes,
+        policy,
         debug,
     )?;
     Ok(graph)
@@ -198,6 +222,7 @@ impl<'a> Builder<'a> {
             indices: HashMap::new(),
             debug,
             marker: 0,
+            policy: IntrinsicPolicy::Fallback,
         };
         if let Some(sources) = &mut builder.debug {
             // Each function opens with a marker that names it.
@@ -228,6 +253,7 @@ impl<'a> Builder<'a> {
         body: impl FnOnce(&mut dyn KernelBuilder) -> splice_core::Result<()>,
     ) -> splice_core::Result<Arc<Function>> {
         let mut child = Builder::new(signature, false, self.vector_bytes, self.debug.take())?;
+        child.policy = self.policy;
         std::mem::swap(&mut child.callees, &mut self.callees);
         std::mem::swap(&mut child.functions, &mut self.functions);
         let staged = body(&mut child);
@@ -295,6 +321,8 @@ struct Builder<'a> {
     debug: Option<Vec<DebugSource>>,
     /// This function's entry in `debug`.
     marker: usize,
+    /// What the build does with an intrinsic Lancy does not implement.
+    policy: IntrinsicPolicy,
 }
 
 #[derive(Clone, Copy)]
@@ -943,6 +971,31 @@ impl KernelBuilder for Builder<'_> {
         ));
         self.define(dst, Op::Load(scalar_type(result), packet));
         Ok(dst)
+    }
+    fn supports_intrinsic(&self, intrinsic: &Intrinsic<'_>) -> bool {
+        native_intrinsic(intrinsic).is_some()
+    }
+    fn emit_intrinsic(
+        &mut self,
+        intrinsic: &Intrinsic<'_>,
+        args: &[Reg],
+    ) -> splice_core::Result<Reg> {
+        let op = native_intrinsic(intrinsic).expect("a supported intrinsic");
+        let ty = intrinsic.signature.params[0];
+        let value = self.local(ValueType::Scalar(ty))?;
+        if self.reachable() {
+            let operand = self.read(args[0]);
+            let v = self.value(Op::Unary(op, operand));
+            self.bind(value, v);
+        }
+        if intrinsic.signature.result == ty {
+            Ok(value)
+        } else {
+            self.cast(value, intrinsic.signature.result)
+        }
+    }
+    fn unsupported_intrinsic(&self, intrinsic: &Intrinsic<'_>) -> splice_core::Result<()> {
+        splice_core::intrinsic::unsupported(self.policy, "lancy", intrinsic)
     }
     fn call_kernel(
         &mut self,

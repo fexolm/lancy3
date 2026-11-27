@@ -3,7 +3,8 @@
 pub use crate::hir::FunctionBuilder;
 #[doc(hidden)]
 pub mod evaluation;
-pub mod intrinsics;
+#[doc(hidden)]
+pub mod methods;
 #[doc(hidden)]
 pub mod native;
 #[doc(hidden)]
@@ -17,6 +18,7 @@ use crate::hir::{
     Binary, Buffer, BufferKind, Constant, ContextSlice, Function, Label, Reg, ScalarType, Simd,
     ValueType,
 };
+use crate::intrinsic::{Fallback, Intrinsic};
 use std::sync::Arc;
 
 /// A function body is staged once against the builder selected by its backend.
@@ -166,6 +168,52 @@ pub trait KernelBuilder {
             buffers,
             Box::new(move |b| crate::hir::replay(&callee, b)),
         )
+    }
+
+    /// Whether this builder emits its own code for `intrinsic`.
+    fn supports_intrinsic(&self, _intrinsic: &Intrinsic<'_>) -> bool {
+        false
+    }
+    /// Emit `intrinsic` on `args`. Called only when
+    /// [`supports_intrinsic`](Self::supports_intrinsic) holds.
+    fn emit_intrinsic(&mut self, intrinsic: &Intrinsic<'_>, _args: &[Reg]) -> crate::Result<Reg> {
+        Err(crate::BuildError::unsupported(format!(
+            "intrinsic {intrinsic} in this builder"
+        )))
+    }
+    /// Report that this builder does not implement `intrinsic`: `Ok` lets
+    /// the call compile the intrinsic's body. A backend's builder applies
+    /// [`BuildOptions::unsupported_intrinsic`](crate::BuildOptions) and
+    /// names its backend.
+    fn unsupported_intrinsic(&self, intrinsic: &Intrinsic<'_>) -> crate::Result<()> {
+        crate::intrinsic::unsupported(
+            crate::IntrinsicPolicy::Fallback,
+            std::any::type_name::<Self>(),
+            intrinsic,
+        )
+    }
+    /// Call `intrinsic` on `args`: its native code when this builder
+    /// supports it, otherwise its `fallback` body as a nested function.
+    fn intrinsic(
+        &mut self,
+        intrinsic: &Intrinsic<'_>,
+        args: &[Reg],
+        fallback: Fallback<'_>,
+    ) -> crate::Result<Reg> {
+        if self.supports_intrinsic(intrinsic) {
+            return self.emit_intrinsic(intrinsic, args);
+        }
+        self.unsupported_intrinsic(intrinsic)?;
+        match fallback {
+            Fallback::Staged {
+                key: Some(key),
+                body,
+            } => self.call_specialized(key, args, &[], body),
+            Fallback::Staged { key: None, body } => {
+                self.call_kernel(intrinsic.signature, args, &[], body)
+            }
+            Fallback::Function(function) => self.call_function(function, args, &[]),
+        }
     }
 }
 

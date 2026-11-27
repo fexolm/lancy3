@@ -11,6 +11,7 @@ use splice_core::call::SliceDescriptor;
 use splice_core::hir::{
     Binary, Constant, Instr, PacketStore, PacketValue, Reg, ScalarType, ValueType,
 };
+use splice_core::intrinsic::Intrinsic;
 use std::collections::HashMap;
 use std::mem::{offset_of, size_of};
 use std::sync::Arc;
@@ -328,12 +329,37 @@ pub(super) fn emit(
                 let value = b.ins().stack_load(scalar_type(result), packet, 0);
                 b.def_var(var(dst), value);
             }
-            Instr::Call {
+            Instr::Intrinsic {
                 dst,
-                ref function,
+                ref name,
                 ref args,
-                buffers: ref forwarded,
-            } => {
+                ref fallback,
+            } if crate::intrinsic::native(&Intrinsic::new(name, fallback.signature()))
+                .is_some() =>
+            {
+                let native = crate::intrinsic::native(&Intrinsic::new(name, fallback.signature()))
+                    .expect("a supported intrinsic");
+                let args: Vec<_> = args.iter().map(|&r| b.use_var(var(r))).collect();
+                let value = crate::intrinsic::emit(&mut b, native, &args);
+                b.def_var(var(dst), value);
+            }
+            // An intrinsic Cranelift does not implement calls its body.
+            Instr::Call { .. } | Instr::Intrinsic { .. } => {
+                let (dst, function, args, forwarded) = match op {
+                    Instr::Call {
+                        dst,
+                        function,
+                        args,
+                        buffers,
+                    } => (*dst, function, args, &buffers[..]),
+                    Instr::Intrinsic {
+                        dst,
+                        args,
+                        fallback,
+                        ..
+                    } => (*dst, fallback, args, &[][..]),
+                    _ => unreachable!(),
+                };
                 let result = function.result();
                 let slot = returns_in_memory(result).then(|| {
                     b.create_sized_stack_slot(StackSlotData::new(
