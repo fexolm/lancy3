@@ -101,7 +101,12 @@ macro_rules! scalar_value {
         }
     )*};
 }
-scalar_value!(bool => Bool, i32 => I32, u32 => U32, i64 => I64, u64 => U64, usize => Index, f32 => F32, f64 => F64);
+// Every kernel scalar (`KernelScalar`); a blanket impl would overlap the one
+// for `#[intrinsic] struct`s.
+scalar_value!(
+    bool => Bool, char => Char, i8 => I8, u8 => U8, i16 => I16, u16 => U16, i32 => I32,
+    u32 => U32, i64 => I64, u64 => U64, usize => Index, f32 => F32, f64 => F64
+);
 
 /// Every intrinsic Splice declares. Every backend implements all of them.
 pub fn declared() -> Vec<IntrinsicId> {

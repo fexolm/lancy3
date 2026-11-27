@@ -59,7 +59,7 @@ impl Lower<'_> {
             else {
                 return err(
                     m,
-                    "as_slice::<T>() requires u16, u32, i32, i64, f32, or f64",
+                    "as_slice::<T>() requires a slice element: a kernel scalar other than bool",
                 );
             };
             let slot = self.host(self.expr(&index.index)?, &index.index)?;

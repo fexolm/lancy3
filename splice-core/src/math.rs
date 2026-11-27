@@ -30,10 +30,14 @@ macro_rules! math {
         }
     )*};
 }
-math!(i32, u32, i64, u64);
+math!(i8, u8, i16, u16, i32, u32, i64, u64);
 
 /// The intrinsics of every [`Math`] implementation.
-pub(crate) const INTRINSICS: [&[IntrinsicId]; 4] = [
+pub(crate) const INTRINSICS: [&[IntrinsicId]; 8] = [
+    <i8 as Math>::__SPLICE_INTRINSICS,
+    <u8 as Math>::__SPLICE_INTRINSICS,
+    <i16 as Math>::__SPLICE_INTRINSICS,
+    <u16 as Math>::__SPLICE_INTRINSICS,
     <i32 as Math>::__SPLICE_INTRINSICS,
     <u32 as Math>::__SPLICE_INTRINSICS,
     <i64 as Math>::__SPLICE_INTRINSICS,

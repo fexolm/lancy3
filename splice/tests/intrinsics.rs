@@ -1,5 +1,5 @@
 //! Kernel intrinsics: body-less methods of `#[intrinsic]` traits that every
-//! backend implements. `splice::Math` on every integer type, every backend,
+//! backend implements. `splice::Math` on every integer type (8 to 64 bits), every backend,
 //! both build paths and both modes; a user's intrinsic that no backend
 //! implements fails the build and names the intrinsic and the backend.
 use splice::hir::Instr;
@@ -21,6 +21,10 @@ macro_rules! math_kernels {
     )*};
 }
 math_kernels! {
+    math_i8: i8, u8;
+    math_u8: u8, u8;
+    math_i16: i16, u16;
+    math_u16: u16, u16;
     math_i32: i32, u32;
     math_u32: u32, u32;
     math_i64: i64, u64;
@@ -63,6 +67,10 @@ fn math_intrinsics_match_rust_on_every_backend_path_and_mode() {
                 }
             };
         }
+        run!(math_i8, [0, 1, -1, 0x30, i8::MIN, i8::MAX]);
+        run!(math_u8, [0, 1, u8::MAX, 0x81, 12]);
+        run!(math_i16, [0, 1, -1, 0x0f00, i16::MIN, i16::MAX]);
+        run!(math_u16, [0, 1, u16::MAX, 0x8001, 12]);
         run!(math_i32, [0, 1, -1, 0x00f0_0000, i32::MIN, i32::MAX]);
         run!(math_u32, [0, 1, u32::MAX, 0x8000_0001, 12]);
         run!(math_i64, [0, 1, -1, 1 << 40, i64::MIN, i64::MAX]);
@@ -97,7 +105,7 @@ fn math_calls_record_structural_intrinsic_ids() {
 #[test]
 fn every_backend_implements_every_declared_intrinsic() {
     let declared = splice::intrinsic::declared();
-    assert_eq!(declared.len(), 16, "{declared:?}");
+    assert_eq!(declared.len(), 32, "{declared:?}");
     let target = splice::Target::host().unwrap();
     fn check<B: Codegen>(declared: &[IntrinsicId], target: &splice::Target) {
         for id in declared {

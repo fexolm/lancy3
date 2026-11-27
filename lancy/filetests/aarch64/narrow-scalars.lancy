@@ -57,3 +57,55 @@ fn main(x:u8 y:u8) -> u8
 @aarch64-isel check: int.minmax cs x1
 @run 200 100 -> 255
 @run 1 2 -> 3
+---
+# Bit counts and rotation of a narrow sum (splice::Math on u8) read only
+# its 8 bits: 200 + 100 = 44 = 0b0010_1100.
+fn main(x:u8 y:u8) -> i32
+  s = add x y
+  p = popcnt s
+  l = leadingzeros s
+  t = trailingzeros s
+  r = rotateleft s y
+  p32 = cast i32 p
+  l32 = cast i32 l
+  t32 = cast i32 t
+  r32 = cast i32 r
+  k = const 256
+  hi = mul l32 k
+  a = add p32 hi
+  k2 = const 65536
+  tt = mul t32 k2
+  b = add a tt
+  k3 = const 16777216
+  rr = mul r32 k3
+  c = add b rr
+  ret c
+@aarch64-isel check: popcnt
+@run 200 100 -> -1040055805
+@run 255 1 -> 526336
+@run 0 0 -> 526336
+---
+# The same on a signed 16-bit difference: -32768 - 1 wraps to 32767.
+fn main(x:i16 y:i16) -> i32
+  s = sub x y
+  p = popcnt s
+  l = leadingzeros s
+  t = trailingzeros s
+  r = rotateleft s y
+  p32 = cast i32 p
+  l32 = cast i32 l
+  t32 = cast i32 t
+  r32 = cast i32 r
+  k = const 256
+  hi = mul l32 k
+  a = add p32 hi
+  k2 = const 65536
+  tt = mul t32 k2
+  b = add a tt
+  k3 = const 16777216
+  rr = mul r32 k3
+  c = add b rr
+  ret c
+@aarch64-isel check: popcnt
+@run -32768 1 -> -33554161
+@run 0 16 -> -268173300

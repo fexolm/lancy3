@@ -319,3 +319,58 @@ fn narrow_lanes_compute_each_lane_like_rust_in_both_paths_and_modes() {
         });
     }
 }
+
+/// A specialization on narrow types and char, rendered as Rust.
+#[kernel(print)]
+fn tally(#[comptime] limit: u8, text: &[char], bytes: &[u8], small: i8, half: i16) -> u16 {
+    let mut count: u16 = 0;
+    for &c in text {
+        if c == 'é' || c > 'z' {
+            count += 1;
+        }
+    }
+    let n = Lane::<u8>::lanes();
+    if bytes.len() >= n {
+        let top = Lane::<u8>::load(bytes, 0).simd_min(Lane::splat(limit));
+        count = count.wrapping_add(top.reduce_sum() as u16);
+    }
+    count.wrapping_add((small as i16 + half) as u16)
+}
+
+#[test]
+fn narrow_kernels_print_as_rust_and_run_their_specialization() {
+    let printed = tally::print(200).unwrap();
+    for part in [
+        "'é'",
+        "'z'",
+        "char",
+        "u8",
+        "i8",
+        "i16",
+        "u16",
+        "Lane :: < u8 >",
+        "splat(200)",
+        "reduce_sum",
+    ] {
+        assert!(printed.contains(part), "{part}: {printed}");
+    }
+    let text = ['a', 'é', '{', 'z'];
+    let bytes: Vec<u8> = (0..128u32).map(|i| (i * 53 % 256) as u8).collect();
+    let n = splice::simd::lanes::<u8>();
+    let sum = bytes[..n]
+        .iter()
+        .fold(0u8, |s, &b| s.wrapping_add(b.min(200)));
+    let expected = 2u16
+        .wrapping_add(u16::from(sum))
+        .wrapping_add((-3i16 + 1000) as u16);
+    for options in options() {
+        splice_testkit::each_backend!(B => {
+            let direct = tally::build_with_options::<B>(options, tally::BuildArgs { limit: 200 }).unwrap();
+            let portable = B::compile(&tally::ir_with_options(options, 200).unwrap()).unwrap();
+            for code in [&direct, &portable] {
+                let args = tally::CallArgs { text: &text, bytes: &bytes, small: -3, half: 1000 };
+                assert_eq!(code.call(args), Ok(expected));
+            }
+        });
+    }
+}

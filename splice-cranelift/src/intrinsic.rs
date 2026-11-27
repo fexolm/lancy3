@@ -13,13 +13,12 @@ pub(crate) fn native(id: &IntrinsicId) -> Option<MathOp> {
 /// `op` on `args`.
 pub(crate) fn emit(b: &mut FunctionBuilder, op: MathOp, args: &[Value]) -> Value {
     let x = args[0];
-    // A count of a 64-bit operand fits the low half.
-    let count = |b: &mut FunctionBuilder, count: Value| {
-        if b.func.dfg.value_type(count) == I32 {
-            count
-        } else {
-            b.ins().ireduce(I32, count)
-        }
+    // The count of an operand of any width is a `u32`: it fits the low
+    // half of a 64-bit operand's type and zero-extends a narrow one's.
+    let count = |b: &mut FunctionBuilder, count: Value| match b.func.dfg.value_type(count).bits() {
+        32 => count,
+        64 => b.ins().ireduce(I32, count),
+        _ => b.ins().uextend(I32, count),
     };
     match op {
         MathOp::CountOnes => {
