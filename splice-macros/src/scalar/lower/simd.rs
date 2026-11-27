@@ -177,6 +177,8 @@ enum Declared {
 /// A parameter or result type of a SIMD intrinsic.
 #[derive(Copy, Clone, PartialEq, Eq)]
 enum DeclaredType {
+    /// `Self`: the vector or mask of the call.
+    Own,
     Lane(Declared),
     Mask(Declared),
     /// `&[T]` or `&mut [T]`.
@@ -289,7 +291,7 @@ fn declared_type(t: &Type, own: Option<&str>, generic: &[String]) -> DeclaredTyp
     };
     match t {
         Type::Reference(r) if matches!(&*r.elem, Type::Slice(_)) => DeclaredType::Slice,
-        Type::Path(p) if p.path.is_ident("Self") => DeclaredType::Lane(Declared::Own),
+        Type::Path(p) if p.path.is_ident("Self") => DeclaredType::Own,
         Type::Path(p) if own == Some("T") && p.path.is_ident("T") => DeclaredType::Element,
         Type::Path(p) if matches!(p.path.segments.last(), Some(s) if s.ident == "Lane" || s.ident == "Mask") =>
         {
@@ -329,7 +331,8 @@ impl Signature {
             Declared::Method => generic.ok_or(()),
         };
         Ok(Some(match t {
-            DeclaredType::Lane(Declared::Own) if owner == Owner::Mask => Scalar::Mask(own),
+            DeclaredType::Own if owner == Owner::Mask => Scalar::Mask(own),
+            DeclaredType::Own => Scalar::Vector(own),
             DeclaredType::Lane(d) => Scalar::Vector(element(d)?),
             DeclaredType::Mask(d) => Scalar::Mask(element(d)?),
             DeclaredType::Element => own.scalar().ok_or(())?,
@@ -451,7 +454,7 @@ impl Lower<'_> {
                     emit!(#operand::Known(#root::hir::Constant::from(#root::simd::LaneElement::bits({let scalar: #ty = #value; scalar}))))
                 }
             }
-            DeclaredType::Mask(_) | DeclaredType::Lane(_) => {
+            DeclaredType::Own | DeclaredType::Mask(_) | DeclaredType::Lane(_) => {
                 let ty = Signature::resolve(param, owner, own, generic.or(Some(own)))
                     .ok()
                     .flatten()

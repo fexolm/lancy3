@@ -1,7 +1,7 @@
 //! The Rust methods of runtime kernel values that are core operations:
 //! `x.saturating_add(y)` on a runtime integer stages one portable
 //! [`Binary`] operation, which every backend implements. These are not
-//! intrinsics (see [`crate::intrinsic`]): no backend chooses them.
+//! intrinsics (see [`mod@crate::intrinsic`]): no backend chooses them.
 //!
 //! The intrinsics of [`Lane`](crate::simd::Lane) and [`Mask`](crate::simd::Mask)
 //! are the SIMD part ([`simd`]): each declared one stages [`SimdOp`]s on the
