@@ -1,6 +1,6 @@
 use splice_core::frontend::Body;
 use splice_core::frontend::Signature;
-use splice_core::hir::{Binary, Buffer, Label, Reg, ValueType};
+use splice_core::hir::{Binary, Label, Reg, ValueType};
 use splice_core::hir::{Constant, ScalarType};
 use splice_core::{BufferArg, BufferKind, BuildOptions, Codegen, Executable, Mode};
 use splice_llvm::Llvm;
@@ -84,7 +84,7 @@ fn nested_bodies_keep_their_llvm_insertion_points_and_propagate_faults() {
                 }),
             )?;
             let zero = f.constant(Constant::from(0usize))?;
-            f.store(Buffer(0), zero, value)?;
+            f.store(f.buffer(0)?, zero, value)?;
             let loaded = f.call_kernel(
                 Signature::new(
                     &[ScalarType::I32; 1],
@@ -92,15 +92,15 @@ fn nested_bodies_keep_their_llvm_insertion_points_and_propagate_faults() {
                     &[BufferKind::READ_I32],
                 ),
                 &[index],
-                &[Buffer(0)],
+                &[f.buffer(0)?],
                 Box::new(|child| {
                     let at = child.cast(child.arg(0)?, ScalarType::Index)?;
-                    let v = child.load(Buffer(0), at)?;
+                    let v = child.load(child.buffer(0)?, at)?;
                     child.ret(v)?;
                     Ok(())
                 }),
             )?;
-            f.store(Buffer(0), zero, loaded)?;
+            f.store(f.buffer(0)?, zero, loaded)?;
             f.ret(loaded)?;
             Ok(())
         }),
@@ -177,12 +177,12 @@ fn direct_builder_checks_handles_control_flow_and_borrow_contracts() {
         Box::new(|_| Ok(())),
         Box::new(|b| {
             let k = b.constant(Constant::from(0))?;
-            b.store(Buffer(0), k, k)?;
+            b.store(b.buffer(0)?, k, k)?;
             b.ret(k)?;
             Ok(())
         }),
         Box::new(|b| {
-            let k = b.buffer_len(Buffer(4))?;
+            let k = b.buffer(4).map(|s| s.len)?;
             b.ret(k)?;
             Ok(())
         }),
@@ -194,7 +194,7 @@ fn direct_builder_checks_handles_control_flow_and_borrow_contracts() {
                     &[BufferKind::WRITE_I32, BufferKind::READ_I32],
                 ),
                 &[],
-                &[Buffer(1), Buffer(1)],
+                &[b.buffer(1)?, b.buffer(1)?],
                 Box::new(|c| {
                     let n = c.constant(Constant::from(0))?;
                     c.ret(n)?;

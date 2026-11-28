@@ -107,7 +107,7 @@ pub(crate) fn trait_defaults(
             }
             Binding::Buffer(_) => {
                 materializable = false;
-                emit!(#id: #hir::Buffer)
+                emit!(#id: #hir::Slice)
             }
             _ => {
                 return Err(syn::Error::new_spanned(

@@ -248,7 +248,7 @@ fn masked_f64_memory_keeps_global_lane_order_across_chunks() {
     use splice_core::{
         BufferKind,
         hir::ScalarType::{F64, I64},
-        hir::{Buffer, Simd, SimdOp},
+        hir::{Simd, SimdOp, Slice},
     };
 
     let mut f = FunctionBuilder::new(
@@ -266,13 +266,13 @@ fn masked_f64_memory_keeps_global_lane_order_across_chunks() {
     );
     let offset = f.constant(Constant::from(0usize)).unwrap();
     let mut simd = |element, op, args: &[_]| f.simd(Simd { element, op }, args).unwrap();
-    let data = simd(F64, SimdOp::Load(Buffer(0)), &[offset]).unwrap();
-    let indices = simd(I64, SimdOp::Load(Buffer(1)), &[offset]).unwrap();
+    let data = simd(F64, SimdOp::Load(Slice::param(0, 0)), &[offset]).unwrap();
+    let indices = simd(I64, SimdOp::Load(Slice::param(0, 1)), &[offset]).unwrap();
     let zero = simd(F64, SimdOp::Splat(0), &[]).unwrap();
     let active = simd(F64, SimdOp::Gt, &[data, zero]).unwrap();
     let gathered = simd(
         F64,
-        SimdOp::GatherSelect(Buffer(2)),
+        SimdOp::GatherSelect(Slice::param(0, 2)),
         &[indices, active, zero],
     )
     .unwrap();
@@ -280,7 +280,7 @@ fn masked_f64_memory_keeps_global_lane_order_across_chunks() {
     let selected = simd(F64, SimdOp::Select, &[active, sum, zero]).unwrap();
     simd(
         F64,
-        SimdOp::ScatterSelect(Buffer(3)),
+        SimdOp::ScatterSelect(Slice::param(0, 3)),
         &[indices, active, selected],
     );
     let any = simd(F64, SimdOp::Any, &[active]).unwrap();

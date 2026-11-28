@@ -103,7 +103,7 @@ impl Lower<'_> {
             && m.args.is_empty()
             && matches!(receiver.stage, Stage::Buffer(_))
         {
-            let length = emit!({let buffer=#receiver; __splice_builder.buffer_len(buffer)?});
+            let length = emit!({let buffer=#receiver; buffer.len});
             return Ok(if m.method == "len" {
                 Value::new(Stage::Reg(Scalar::Length), length)
             } else {

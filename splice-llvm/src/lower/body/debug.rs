@@ -63,8 +63,7 @@ impl<'ctx> Body<'_, 'ctx> {
                         b.build_int_s_extend(load(reg)?.into_vector_value(), ty, "")?
                             .into()
                     }
-                    debug::Store::Data(buffer) => self.slices[buffer.index()].data.into(),
-                    debug::Store::Length(buffer) => self.slices[buffer.index()].len.into(),
+                    debug::Store::Data(reg) | debug::Store::Length(reg) => load(reg)?,
                 };
                 save(offset, value)?;
             }

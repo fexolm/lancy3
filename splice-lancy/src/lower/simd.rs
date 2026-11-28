@@ -5,8 +5,8 @@ use lancy::hir::{
     Binary, Block, Lane, Op, Scale, Simd as V, Ternary, Type, Unary, Value, VectorAddress,
 };
 use splice_core::hir::{
-    Buffer, Reg, ScalarType, Simd, SimdOp, ValueType,
-    memory::{self, Address, BeforeTrap, Masked, Slice},
+    Reg, ScalarType, Simd, SimdOp, Slice, ValueType,
+    memory::{self, Address, BeforeTrap, Masked, Region},
 };
 
 /// The Lancy lane of a vector element: its scalar type.
@@ -21,6 +21,7 @@ pub(super) fn native_type(ty: ValueType) -> Type {
         ValueType::Scalar(ty) => super::scalar_type(ty),
         ValueType::Vector(e) => Type::Vector(lane(e)),
         ValueType::Mask(e) => Type::Vector(lane(e.index())),
+        ValueType::Ptr(_) => Type::Ptr,
     }
 }
 
@@ -35,7 +36,7 @@ pub(super) fn stride(e: ScalarType) -> Scale {
     }
 }
 
-impl Builder<'_> {
+impl Builder {
     pub(super) fn emit_simd(
         &mut self,
         inst: Simd,
@@ -251,6 +252,12 @@ impl Builder<'_> {
                 let zero = append(Op::literal(lane, 0));
                 append(Op::Simd(V::Splat(zero)))
             }
+            // Lancy has no null pointer; a valid one stands for the
+            // unassigned pointer the verifier rejects.
+            Type::Ptr => append(Op::CallScratch {
+                offset: 0,
+                bytes: 8,
+            }),
             ty => append(Op::literal(ty.lane().expect("a scalar lane"), 0)),
         }
     }
@@ -288,7 +295,7 @@ impl Builder<'_> {
     }
 }
 
-impl memory::Primitives for Builder<'_> {
+impl memory::Primitives for Builder {
     type Scalar = Value;
     type Vector = Value;
     type Error = splice_core::BuildError;
@@ -303,13 +310,13 @@ impl memory::Primitives for Builder<'_> {
     }
     fn require_full(
         &mut self,
-        s: Slice,
+        s: Region,
         offset: Value,
         before_trap: BeforeTrap<'_, Self>,
     ) -> splice_core::Result<()> {
         // `BoundsCheck` is the form Lancy's bounds analysis removes. An
         // offset outside the slice leaves no lane to write before the trap.
-        let (_, len) = self.slice(s.buffer);
+        let (_, len) = self.slice(s.slice);
         self.effect(Op::BoundsCheck(offset, len));
         let count = self.value(Op::Simd(V::LaneCount(lane(s.element))));
         let remaining = self.value(Op::Bin(Binary::Sub, len, offset));
@@ -322,8 +329,8 @@ impl memory::Primitives for Builder<'_> {
         let short = self.value(Op::Bin(Binary::Lt, remaining, count));
         self.trap_if(short, before_trap)
     }
-    fn room(&mut self, s: Slice, offset: Value) -> splice_core::Result<Value> {
-        let (_, len) = self.slice(s.buffer);
+    fn room(&mut self, s: Region, offset: Value) -> splice_core::Result<Value> {
+        let (_, len) = self.slice(s.slice);
         let zero = self.value(Op::Const(0));
         let nonnegative = self.value(Op::Bin(Binary::Ge, offset, zero));
         let left = self.value(Op::Bin(Binary::Sub, len, offset));
@@ -335,9 +342,9 @@ impl memory::Primitives for Builder<'_> {
     fn first_lanes(&mut self, e: ScalarType, count: Value) -> splice_core::Result<Value> {
         Ok(self.first_lanes(e, count))
     }
-    fn outside(&mut self, s: Slice, indices: Value) -> splice_core::Result<Value> {
+    fn outside(&mut self, s: Region, indices: Value) -> splice_core::Result<Value> {
         let e = s.element;
-        let (_, len) = self.slice(s.buffer);
+        let (_, len) = self.slice(s.slice);
         let index = e.index();
         // Reinterpreting negative indices as unsigned puts them above every
         // valid length: buffer validation caps lengths at i32::MAX, and a
@@ -361,8 +368,8 @@ impl memory::Primitives for Builder<'_> {
         let outside = self.value(Op::Bin(Binary::Ge, offsets, limit));
         Ok(self.value(Op::Bitcast(Type::Vector(lane(index)), outside)))
     }
-    fn length_at_most(&mut self, buffer: Buffer, n: u64) -> splice_core::Result<Value> {
-        let (_, len) = self.slice(buffer);
+    fn length_at_most(&mut self, slice: Slice, n: u64) -> splice_core::Result<Value> {
+        let (_, len) = self.slice(slice);
         let n = self.value(Op::Const(n.min(i32::MAX as u64) as i32));
         Ok(self.value(Op::Bin(Binary::Le, len, n)))
     }
@@ -412,7 +419,7 @@ impl memory::Primitives for Builder<'_> {
     }
     fn load(
         &mut self,
-        s: Slice,
+        s: Region,
         at: Address<Value, Value>,
         masked: Option<Masked<Value>>,
     ) -> splice_core::Result<Value> {
@@ -438,7 +445,7 @@ impl memory::Primitives for Builder<'_> {
     }
     fn store(
         &mut self,
-        s: Slice,
+        s: Region,
         at: Address<Value, Value>,
         mask: Option<Value>,
         value: Value,
@@ -460,13 +467,13 @@ impl memory::Primitives for Builder<'_> {
     }
     fn compress_store(
         &mut self,
-        s: Slice,
+        s: Region,
         offset: Value,
         mask: Value,
         value: Value,
         room: Value,
     ) -> splice_core::Result<()> {
-        let (base, _) = self.slice(s.buffer);
+        let (base, _) = self.slice(s.slice);
         let base = self.value(Op::PtrOffset(base, offset, stride(s.element)));
         self.effect(Op::Simd(V::CompressStore {
             base,
@@ -478,11 +485,11 @@ impl memory::Primitives for Builder<'_> {
     }
 }
 
-impl Builder<'_> {
+impl Builder {
     /// The address of the lanes at `at` in the slice.
-    fn vector_address(&mut self, s: Slice, at: Address<Value, Value>) -> VectorAddress {
+    fn vector_address(&mut self, s: Region, at: Address<Value, Value>) -> VectorAddress {
         let e = s.element;
-        let (base, _) = self.slice(s.buffer);
+        let (base, _) = self.slice(s.slice);
         match at {
             Address::Offset(offset) => VectorAddress {
                 base: self.value(Op::PtrOffset(base, offset, stride(e))),

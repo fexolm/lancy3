@@ -1,4 +1,4 @@
-use splice::hir::{Buffer, Constant, ScalarType, Simd, SimdOp};
+use splice::hir::{Constant, ScalarType, Simd, SimdOp, Slice};
 use splice::{
     BufferArg, BufferKind, BuildError, CallError, Codegen, Executable, Trap, TypedKernel, kernel,
     std::intrinsics::simd::{Lane, Mask},
@@ -275,12 +275,12 @@ fn signed_vector_min_max_stay_explicit_and_preserve_lane_order() {
     assert_eq!(
         ops,
         [
-            SimdOp::Load(splice::hir::Buffer(0)),
-            SimdOp::Load(splice::hir::Buffer(1)),
+            SimdOp::Load(ir.param_slice(0)),
+            SimdOp::Load(ir.param_slice(1)),
             SimdOp::Min,
-            SimdOp::Store(splice::hir::Buffer(2)),
+            SimdOp::Store(ir.param_slice(2)),
             SimdOp::Max,
-            SimdOp::Store(splice::hir::Buffer(3)),
+            SimdOp::Store(ir.param_slice(3)),
             SimdOp::ElementWidth,
         ]
     );
@@ -772,9 +772,9 @@ fn scalable_add_wraps_at_u16_and_preserves_prefix_on_short_store() {
     );
     let ops = splice_testkit::simd_ops(&ir);
     for op in [
-        SimdOp::Load(Buffer(0)),
+        SimdOp::Load(ir.param_slice(0)),
         SimdOp::Add,
-        SimdOp::Store(Buffer(2)),
+        SimdOp::Store(ir.param_slice(2)),
         SimdOp::ElementWidth,
     ] {
         assert!(
@@ -1280,7 +1280,7 @@ fn verifier_checks_vector_mask_and_buffer_element_types() {
         BufferKind,
         frontend::{KernelBuilder, Signature, materialize},
         hir::ScalarType,
-        hir::{Buffer, Reg, Simd, SimdOp},
+        hir::{Reg, Simd, SimdOp},
     };
     const KINDS: [BufferKind; 1] = [BufferKind::new(ScalarType::F32, false)];
     /// An operation built from the offset and the loaded vector.
@@ -1294,7 +1294,7 @@ fn verifier_checks_vector_mask_and_buffer_element_types() {
                     .simd(
                         Simd {
                             element: ScalarType::F32,
-                            op: SimdOp::Load(Buffer(0)),
+                            op: SimdOp::Load(b.buffer(0)?),
                         },
                         &[offset],
                     )?
@@ -1311,10 +1311,28 @@ fn verifier_checks_vector_mask_and_buffer_element_types() {
     };
     assert!(stage(None).is_ok());
     let cases: [Operation; 4] = [
-        |offset, _| (ScalarType::F64, SimdOp::Load(Buffer(0)), vec![offset]),
+        |offset, _| {
+            (
+                ScalarType::F64,
+                SimdOp::Load(Slice::param(0, 0)),
+                vec![offset],
+            )
+        },
         |_, f| (ScalarType::F32, SimdOp::Any, vec![f]),
-        |offset, f| (ScalarType::F32, SimdOp::Store(Buffer(0)), vec![offset, f]),
-        |_, f| (ScalarType::F32, SimdOp::Store(Buffer(0)), vec![f, f]),
+        |offset, f| {
+            (
+                ScalarType::F32,
+                SimdOp::Store(Slice::param(0, 0)),
+                vec![offset, f],
+            )
+        },
+        |_, f| {
+            (
+                ScalarType::F32,
+                SimdOp::Store(Slice::param(0, 0)),
+                vec![f, f],
+            )
+        },
     ];
     for bad in cases {
         assert!(matches!(

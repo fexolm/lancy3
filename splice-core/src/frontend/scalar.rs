@@ -653,21 +653,25 @@ impl Drop for ExpansionGuard {
 /// Resolve a read-only column against the layout supplied at specialization.
 #[doc(hidden)]
 pub fn column(
-    (kinds, base): (&[crate::BufferKind], crate::hir::Buffer),
+    (kinds, slices): (&[crate::BufferKind], &[crate::hir::Slice]),
     slot: usize,
     element: crate::hir::ScalarType,
-) -> crate::Result<crate::hir::Buffer> {
+) -> crate::Result<crate::hir::Slice> {
+    column_kind(kinds, slot, element)?;
+    slices
+        .get(slot)
+        .copied()
+        .ok_or_else(|| crate::BuildError::staging(format!("unknown column {slot}")))
+}
+
+/// Check that column `slot` of a table with `kinds` holds `element`s.
+pub fn column_kind(
+    kinds: &[crate::BufferKind],
+    slot: usize,
+    element: crate::hir::ScalarType,
+) -> crate::Result<()> {
     match kinds.get(slot) {
-        Some(kind) if kind.context_signature().is_none() && kind.element() == element => {
-            let index = base
-                .index()
-                .checked_add(slot)
-                .and_then(|i| u32::try_from(i).ok())
-                .ok_or_else(|| {
-                    crate::BuildError::staging(format!("column {slot} is not representable"))
-                })?;
-            Ok(crate::hir::Buffer(index))
-        }
+        Some(kind) if kind.context_signature().is_none() && kind.element() == element => Ok(()),
         Some(_) => Err(crate::BuildError::staging(format!(
             "column {slot} expects {} elements",
             element.name()

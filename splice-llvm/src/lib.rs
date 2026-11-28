@@ -427,7 +427,7 @@ mod tests {
         use splice_core::{
             frontend::{self, KernelBuilder},
             hir::ScalarType,
-            hir::{Buffer, Simd, SimdOp},
+            hir::{Simd, SimdOp},
         };
         let kinds = [
             BufferKind::new(ScalarType::U16, false),
@@ -440,10 +440,10 @@ mod tests {
                 element: ScalarType::U16,
                 op,
             };
-            let value = b.simd(op(SimdOp::Load(Buffer(0))), &[offset])?.unwrap();
+            let value = b.simd(op(SimdOp::Load(b.buffer(0)?)), &[offset])?.unwrap();
             let one = b.simd(op(SimdOp::Splat(1)), &[])?.unwrap();
             let sum = b.simd(op(SimdOp::Add), &[one, value])?.unwrap();
-            b.simd(op(SimdOp::Store(Buffer(1))), &[offset, sum])?;
+            b.simd(op(SimdOp::Store(b.buffer(1)?)), &[offset, sum])?;
             b.ret(result)?;
             Ok(())
         }
@@ -524,7 +524,7 @@ mod tests {
         use splice_core::{
             frontend::{self, KernelBuilder},
             hir::ScalarType,
-            hir::{Buffer, Simd, SimdOp},
+            hir::{Simd, SimdOp},
         };
         let kinds = [
             BufferKind::READ_I32,
@@ -541,27 +541,27 @@ mod tests {
             let base = b.cast(b.arg(0)?, ScalarType::Index)?;
             let first = b.constant(Constant::from(0usize))?;
             let zero = b.constant(Constant::from(0))?;
-            let indices = b.simd(op(SimdOp::Load(Buffer(0))), &[first])?.unwrap();
-            let flags = b.simd(op(SimdOp::Load(Buffer(1))), &[first])?.unwrap();
+            let indices = b.simd(op(SimdOp::Load(b.buffer(0)?)), &[first])?.unwrap();
+            let flags = b.simd(op(SimdOp::Load(b.buffer(1)?)), &[first])?.unwrap();
             let zeros = b.simd(op(SimdOp::Splat(0)), &[])?.unwrap();
             let mask = b.simd(op(SimdOp::Ne), &[flags, zeros])?.unwrap();
             let lanes = b.simd(op(SimdOp::Iota), &[])?.unwrap();
             let contiguous = b
-                .simd(op(SimdOp::LoadSelect(Buffer(2))), &[base, mask, lanes])?
+                .simd(op(SimdOp::LoadSelect(b.buffer(2)?)), &[base, mask, lanes])?
                 .unwrap();
             b.simd(
-                op(SimdOp::StoreSelect(Buffer(3))),
+                op(SimdOp::StoreSelect(b.buffer(3)?)),
                 &[base, mask, contiguous],
             )?;
             let gathered = b
                 .simd(
-                    op(SimdOp::GatherSelect(Buffer(2))),
+                    op(SimdOp::GatherSelect(b.buffer(2)?)),
                     &[indices, mask, contiguous],
                 )?
                 .unwrap();
             let distinct = b.simd(op(SimdOp::Add), &[gathered, lanes])?.unwrap();
             b.simd(
-                op(SimdOp::ScatterSelect(Buffer(4))),
+                op(SimdOp::ScatterSelect(b.buffer(4)?)),
                 &[indices, mask, distinct],
             )?;
             b.ret(zero)?;

@@ -1,5 +1,5 @@
 use super::{
-    Binary, Buffer, Constant, ContextSlice, Function, Instr, Label, Reg, ScalarType, ValueType,
+    Binary, Constant, ContextSlice, Function, Instr, Label, Reg, ScalarType, Slice, ValueType,
 };
 use crate::frontend::{Body, KernelBuilder, KernelSource, Signature, Specialization};
 use crate::hir::Intrinsic;
@@ -69,7 +69,7 @@ impl FunctionBuilder {
         &mut self,
         signature: Signature<'_>,
         args: &[Reg],
-        buffers: &[Buffer],
+        buffers: &[Slice],
         key: Option<Specialization>,
         body: Body<'_>,
     ) -> crate::Result<Reg> {
@@ -118,6 +118,13 @@ impl KernelBuilder for FunctionBuilder {
             variables: variables.into(),
         }))
     }
+    fn buffer(&self, index: usize) -> crate::Result<Slice> {
+        if index < self.function.buffer_kinds.len() {
+            Ok(self.function.param_slice(index))
+        } else {
+            Err(crate::BuildError::verify("invalid buffer index"))
+        }
+    }
     fn reg_type(&self, r: Reg) -> Option<ValueType> {
         self.function.checked_reg_type(r)
     }
@@ -144,20 +151,16 @@ impl KernelBuilder for FunctionBuilder {
     fn cast(&mut self, src: Reg, to: ScalarType) -> crate::Result<Reg> {
         self.scalar(to, |dst| Instr::Cast { dst, src })
     }
-    fn buffer_len(&mut self, buffer: Buffer) -> crate::Result<Reg> {
-        self.scalar(ScalarType::Index, |dst| Instr::BufferLen { dst, buffer })
+    fn load(&mut self, slice: Slice, index: Reg) -> crate::Result<Reg> {
+        let ty = match self.function.checked_reg_type(slice.ptr) {
+            Some(ValueType::Ptr(kind)) => kind.element(),
+            _ => ScalarType::I32,
+        };
+        self.scalar(ty, |dst| Instr::Load { dst, slice, index })
     }
-    fn load(&mut self, buffer: Buffer, index: Reg) -> crate::Result<Reg> {
-        let ty = self
-            .function
-            .buffer_kinds
-            .get(buffer.index())
-            .map_or(ScalarType::I32, |kind| kind.element());
-        self.scalar(ty, |dst| Instr::Load { dst, buffer, index })
-    }
-    fn store(&mut self, buffer: Buffer, index: Reg, value: Reg) -> crate::Result<()> {
+    fn store(&mut self, slice: Slice, index: Reg, value: Reg) -> crate::Result<()> {
         self.push(Instr::Store {
-            buffer,
+            slice,
             index,
             value,
         })
@@ -211,7 +214,7 @@ impl KernelBuilder for FunctionBuilder {
         &mut self,
         signature: Signature<'_>,
         args: &[Reg],
-        buffers: &[Buffer],
+        buffers: &[Slice],
         body: Body<'_>,
     ) -> crate::Result<Reg> {
         self.staged_call(signature, args, buffers, None, body)
@@ -220,7 +223,7 @@ impl KernelBuilder for FunctionBuilder {
         &mut self,
         key: Specialization,
         args: &[Reg],
-        buffers: &[Buffer],
+        buffers: &[Slice],
         body: Body<'_>,
     ) -> crate::Result<Reg> {
         self.staged_call(key.signature(), args, buffers, Some(key), body)
@@ -229,7 +232,7 @@ impl KernelBuilder for FunctionBuilder {
         &mut self,
         function: &Arc<Function>,
         args: &[Reg],
-        buffers: &[Buffer],
+        buffers: &[Slice],
     ) -> crate::Result<Reg> {
         self.scalar(function.result(), |dst| Instr::Call {
             dst,

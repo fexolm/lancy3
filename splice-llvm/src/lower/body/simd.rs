@@ -9,8 +9,8 @@ use inkwell::{
     values::{BasicMetadataValueEnum, BasicValueEnum, IntValue, VectorValue},
 };
 use splice_core::hir::{
-    Buffer, Reg, ScalarKind, ScalarType, Simd, SimdOp, ValueType,
-    memory::{self, Address, BeforeTrap, Masked, Slice},
+    Reg, ScalarKind, ScalarType, Simd, SimdOp, Slice as SliceValue, ValueType,
+    memory::{self, Address, BeforeTrap, Masked, Region},
 };
 
 fn element_type(ctx: &Context, e: ScalarType) -> BasicTypeEnum<'_> {
@@ -61,6 +61,7 @@ pub(super) fn llvm_type(ctx: &Context, bytes: usize, ty: ValueType) -> BasicType
         ValueType::Scalar(ty) => scalar_type(ctx, ty),
         ValueType::Vector(e) => vector_type(ctx, bytes, e).into(),
         ValueType::Mask(e) => ctx.bool_type().vec_type(e.lanes(bytes) as u32).into(),
+        ValueType::Ptr(_) => ctx.ptr_type(inkwell::AddressSpace::default()).into(),
     }
 }
 
@@ -241,7 +242,7 @@ impl<'ctx> Body<'_, 'ctx> {
                 loaded.into()
             }
             AlignmentPrefix(b) => {
-                let slice = self.slices[b.index()];
+                let slice = self.slice(b)?;
                 let base = ir.build_ptr_to_int(slice.data, self.ctx.i32_type(), "address.low")?;
                 // Only the low bits of the address decide the alignment.
                 let offset = ir.build_int_truncate(self.load(args[0])?, self.ctx.i32_type(), "")?;
@@ -583,12 +584,12 @@ impl<'ctx> Body<'_, 'ctx> {
     /// The address of each lane at `at`: one pointer, or a vector of them.
     fn lane_address(
         &self,
-        s: Slice,
+        s: Region,
         at: Address<IntValue<'ctx>, VectorValue<'ctx>>,
     ) -> Built<BasicValueEnum<'ctx>> {
         let ir = self.builder;
         let el = element_type(self.ctx, s.element);
-        let data = self.slices[s.buffer.index()].data;
+        let data = self.slice(s.slice)?.data;
         Ok(match at {
             // SAFETY: plain GEP computes the address without accessing
             // memory or asserting in-bounds; `memory::lower` checks each use.
@@ -660,7 +661,7 @@ impl<'ctx> Body<'_, 'ctx> {
     fn masked_intrinsic(
         &self,
         name: &'static str,
-        s: Slice,
+        s: Region,
         address: BasicValueEnum<'ctx>,
     ) -> Built<(
         inkwell::values::FunctionValue<'ctx>,
@@ -685,7 +686,7 @@ impl<'ctx> memory::Primitives for Body<'_, 'ctx> {
     }
     fn require_full(
         &mut self,
-        s: Slice,
+        s: Region,
         offset: Self::Scalar,
         before_trap: BeforeTrap<'_, Self>,
     ) -> Built<()> {
@@ -695,16 +696,16 @@ impl<'ctx> memory::Primitives for Body<'_, 'ctx> {
             .i64_type()
             .const_int(u64::from(self.lanes(s.element)), false);
         let end = self.builder.build_int_add(offset, lanes, "")?;
-        let len = self.slices[s.buffer.index()].len;
+        let len = self.slice(s.slice)?.len;
         let outside = self
             .builder
             .build_int_compare(IntPredicate::UGT, end, len, "")?;
         self.trap_if(outside, before_trap)
     }
-    fn room(&mut self, s: Slice, offset: Self::Scalar) -> Built<Self::Scalar> {
+    fn room(&mut self, s: Region, offset: Self::Scalar) -> Built<Self::Scalar> {
         // Slice lengths fit i32; the subtraction is guarded for an invalid offset.
         let ir = self.builder;
-        let len = self.slices[s.buffer.index()].len;
+        let len = self.slice(s.slice)?.len;
         let room = ir
             .build_select(
                 ir.build_int_compare(IntPredicate::ULT, offset, len, "")?,
@@ -725,7 +726,7 @@ impl<'ctx> memory::Primitives for Body<'_, 'ctx> {
             "inside",
         )?)
     }
-    fn outside(&mut self, s: Slice, indices: Self::Vector) -> Built<Self::Vector> {
+    fn outside(&mut self, s: Region, indices: Self::Vector) -> Built<Self::Vector> {
         let ir = self.builder;
         let ty = self.index_type(s.element);
         let lanes = self.lanes(s.element);
@@ -736,8 +737,7 @@ impl<'ctx> memory::Primitives for Body<'_, 'ctx> {
         } else {
             ir.build_int_z_extend_or_bit_cast(indices, ty.vec_type(lanes), "")?
         };
-        let len =
-            ir.build_int_truncate_or_bit_cast(self.slices[s.buffer.index()].len, ty, "length")?;
+        let len = ir.build_int_truncate_or_bit_cast(self.slice(s.slice)?.len, ty, "length")?;
         Ok(ir.build_int_compare(
             IntPredicate::UGE,
             offsets,
@@ -745,11 +745,11 @@ impl<'ctx> memory::Primitives for Body<'_, 'ctx> {
             "outside",
         )?)
     }
-    fn length_at_most(&mut self, buffer: Buffer, n: u64) -> Built<Self::Scalar> {
+    fn length_at_most(&mut self, slice: SliceValue, n: u64) -> Built<Self::Scalar> {
         let n = self.ctx.i64_type().const_int(n, false);
         Ok(self.builder.build_int_compare(
             IntPredicate::ULE,
-            self.slices[buffer.index()].len,
+            Body::load(self, slice.len)?,
             n,
             "",
         )?)
@@ -807,7 +807,7 @@ impl<'ctx> memory::Primitives for Body<'_, 'ctx> {
     }
     fn load(
         &mut self,
-        s: Slice,
+        s: Region,
         at: Address<Self::Scalar, Self::Vector>,
         masked: Option<Masked<Self::Vector>>,
     ) -> Built<Self::Vector> {
@@ -843,7 +843,7 @@ impl<'ctx> memory::Primitives for Body<'_, 'ctx> {
     }
     fn store(
         &mut self,
-        s: Slice,
+        s: Region,
         at: Address<Self::Scalar, Self::Vector>,
         mask: Option<Self::Vector>,
         value: Self::Vector,
@@ -871,7 +871,7 @@ impl<'ctx> memory::Primitives for Body<'_, 'ctx> {
     }
     fn compress_store(
         &mut self,
-        s: Slice,
+        s: Region,
         offset: Self::Scalar,
         mask: Self::Vector,
         value: Self::Vector,

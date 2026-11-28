@@ -337,7 +337,7 @@ impl Context {
             .map(|slice| {
                 let buffer = lower.bound_path(&slice.path, slice.binding).code;
                 let writable = slice.writable;
-                emit!(#root::hir::ContextSlice { buffer: #buffer, writable: #writable })
+                emit!(#root::hir::ContextSlice { slice: #buffer, writable: #writable })
             })
             .collect::<Vec<_>>();
         // A width is pure and target-dependent. It can cross the object ABI as
@@ -415,7 +415,7 @@ impl Context {
                 #body
             };
             let __splice_result = #root::frontend::scalar::result_type(__splice_operation);
-            __splice_builder.rust_call(#root::hir::RustTarget::Context { buffer: #buffer, operation: __splice_context_frame.operation(ordinal)? }, &arguments, &[#(#slices),*], __splice_result)?
+            __splice_builder.rust_call(#root::hir::RustTarget::Context { context: #buffer, operation: __splice_context_frame.operation(ordinal)? }, &arguments, &[#(#slices),*], __splice_result)?
         }))
     }
 
@@ -466,7 +466,7 @@ impl Context {
         let code = emit!({
             trait Missing {
                 fn #marker() -> bool {false}
-                fn #name<Elements, #(#params),*>(_: #root::hir::Buffer, #(_: #params,)*
+                fn #name<Elements, #(#params),*>(_: #root::hir::Slice, #(_: #params,)*
                     _: ::core::marker::PhantomData<Elements>, _: #root::__private::ContextFrame, _: &mut dyn #root::frontend::KernelBuilder) -> #root::Result<#root::hir::Reg> {
                     ::core::result::Result::Err(#root::BuildError::staging("Rust method cannot be linked into the scalar kernel"))
                 }

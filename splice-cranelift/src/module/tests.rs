@@ -206,7 +206,7 @@ fn packed_chunks_cover_the_vector_and_a_short_store_keeps_its_prefix() {
     use splice_core::{
         BufferKind,
         hir::ScalarType,
-        hir::{Buffer, Simd, SimdOp},
+        hir::{Simd, SimdOp, Slice},
     };
 
     let e = ScalarType::U16;
@@ -221,10 +221,10 @@ fn packed_chunks_cover_the_vector_and_a_short_store_keeps_its_prefix() {
     let result = f.arg(0).unwrap();
     let offset = f.cast(result, ScalarType::Index).unwrap();
     let mut simd = |op, args: &[_]| f.simd(Simd { element: e, op }, args).unwrap();
-    let x = simd(SimdOp::Load(Buffer(0)), &[offset]).unwrap();
+    let x = simd(SimdOp::Load(Slice::param(1, 0)), &[offset]).unwrap();
     let one = simd(SimdOp::Splat(1), &[]).unwrap();
     let sum = simd(SimdOp::Add, &[x, one]).unwrap();
-    simd(SimdOp::Store(Buffer(1)), &[offset, sum]);
+    simd(SimdOp::Store(Slice::param(1, 1)), &[offset, sum]);
     f.ret(result).unwrap();
     let f = f.finish().unwrap();
 
@@ -280,7 +280,7 @@ fn masked_contiguous_access_selects_packed_and_ordered_paths() {
     use splice_core::{
         BufferKind,
         hir::ScalarType,
-        hir::{Buffer, Simd, SimdOp},
+        hir::{Simd, SimdOp, Slice},
     };
 
     // The only vector memory operations here have runtime masks, so a plain
@@ -300,8 +300,12 @@ fn masked_contiguous_access_selects_packed_and_ordered_paths() {
     let mut simd = |op, args: &[_]| f.simd(Simd { element: e, op }, args).unwrap();
     let mask = simd(SimdOp::FirstN, &[count]).unwrap();
     let zero = simd(SimdOp::Splat(0), &[]).unwrap();
-    let v = simd(SimdOp::LoadSelect(Buffer(0)), &[offset, mask, zero]).unwrap();
-    simd(SimdOp::StoreSelect(Buffer(1)), &[offset, mask, v]);
+    let v = simd(
+        SimdOp::LoadSelect(Slice::param(2, 0)),
+        &[offset, mask, zero],
+    )
+    .unwrap();
+    simd(SimdOp::StoreSelect(Slice::param(2, 1)), &[offset, mask, v]);
     f.ret(result).unwrap();
     let f = f.finish().unwrap();
 

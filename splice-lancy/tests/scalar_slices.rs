@@ -1,5 +1,5 @@
 use splice::{BufferArg, BufferKind, Executable, kernel};
-use splice_core::hir::{Buffer, Instr};
+use splice_core::hir::Instr;
 use splice_lancy::Lancy;
 
 #[kernel]
@@ -56,7 +56,7 @@ fn slice_calls_remap_arguments_and_keep_row_updates() {
         &[BufferKind::READ_I32, BufferKind::WRITE_I32]
     );
     assert!(f.instructions().iter().any(|i| matches!(i,
-        Instr::Call { buffers, .. } if buffers == &[Buffer(1), Buffer(0)]
+        Instr::Call { buffers, .. } if buffers == &[f.param_slice(1), f.param_slice(0)]
     )));
     let k = score_column::build::<Lancy>(score_column::BuildArgs { factor: 2 }).unwrap();
     let mut out = [2; 5];
