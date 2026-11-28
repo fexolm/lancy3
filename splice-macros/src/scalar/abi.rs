@@ -143,7 +143,14 @@ pub(super) fn generate(
             let Type::Slice(slice) = &*reference.elem else {
                 unreachable!("buffer parameters are slices")
             };
-            let element = &slice.elem;
+            // The scalar of `&[T]`, or of the inner slices of `&[&[T]]`.
+            let element = match &*slice.elem {
+                Type::Reference(inner) => match &*inner.elem {
+                    Type::Slice(inner) => &inner.elem,
+                    _ => unreachable!("a generic slice of slices holds slices"),
+                },
+                element => element,
+            };
             invoke_generics
                 .make_where_clause()
                 .predicates
@@ -160,8 +167,17 @@ pub(super) fn generate(
         let Type::Reference(reference) = ty else {
             unreachable!("buffer parameters are references")
         };
-        if matches!(&*reference.elem, Type::Path(path) if path.path.is_ident("str")) {
+        let str = |ty: &Type| matches!(ty, Type::Path(path) if path.path.is_ident("str"));
+        if str(&reference.elem) {
             emit!(#root::BufferArg::str(self.#name))
+        } else if let Type::Slice(slice) = &*reference.elem
+            && let Type::Reference(inner) = &*slice.elem
+        {
+            if str(&inner.elem) {
+                emit!(#root::BufferArg::strs(self.#name))
+            } else {
+                emit!(#root::BufferArg::slices(self.#name))
+            }
         } else if reference.mutability.is_some() {
             emit!(#root::BufferArg::write(self.#name))
         } else {

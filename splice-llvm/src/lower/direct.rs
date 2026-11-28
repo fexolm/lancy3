@@ -357,11 +357,26 @@ impl KernelBuilder for Direct<'_, '_> {
         self.emit(|ir| ir.slice_range(dst, slice, start, end))?;
         Ok(dst)
     }
+    fn load_slice(&mut self, slice: Slice, index: Reg) -> splice_core::Result<Slice> {
+        let Some(ValueType::Ptr(kind)) = self.native.reg_type(slice.ptr) else {
+            unreachable!("validated slice");
+        };
+        let splice_core::hir::Element::Slice(&inner) = kind.element() else {
+            unreachable!("validated slice of slices");
+        };
+        let dst = Slice {
+            ptr: self.local(ValueType::Ptr(inner))?,
+            len: self.local(ValueType::Scalar(ScalarType::Index))?,
+        };
+        self.emit(|ir| ir.load_slice(dst, slice, index))?;
+        Ok(dst)
+    }
     fn load(&mut self, b: Slice, index: Reg) -> splice_core::Result<Reg> {
         let Some(ValueType::Ptr(kind)) = self.native.reg_type(b.ptr) else {
             unreachable!("validated slice");
         };
-        self.result(kind.element(), |ir, d| ir.read_element(d, b, index))
+        let element = kind.scalar().expect("a validated slice of scalars");
+        self.result(element, |ir, d| ir.read_element(d, b, index))
     }
     fn store(&mut self, b: Slice, index: Reg, value: Reg) -> splice_core::Result<()> {
         self.emit(|ir| ir.write_element(b, index, value))

@@ -671,7 +671,9 @@ pub fn column_kind(
     element: crate::hir::ScalarType,
 ) -> crate::Result<()> {
     match kinds.get(slot) {
-        Some(kind) if kind.context_signature().is_none() && kind.element() == element => Ok(()),
+        Some(kind) if kind.context_signature().is_none() && kind.scalar() == Some(element) => {
+            Ok(())
+        }
         Some(_) => Err(crate::BuildError::staging(format!(
             "column {slot} expects {} elements",
             element.name()

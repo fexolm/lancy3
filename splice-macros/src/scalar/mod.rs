@@ -5,7 +5,7 @@ pub(crate) mod abi;
 pub(crate) mod lower;
 pub(crate) mod methods;
 pub(crate) use lower::simd::simd_path;
-use lower::{Binding, BufferType, Lower, Scalar};
+use lower::{Binding, BufferType, Lower, Scalar, SliceOf};
 pub(crate) use lower::{Elem, uses_stage_requirements};
 use proc_macro2::{Ident, TokenStream};
 use std::collections::HashMap;
@@ -225,10 +225,15 @@ pub(super) fn expand(
                 buffer_names.push(id);
                 let elem = writable.elem.tokens(&root, &types);
                 let write = writable.write;
-                buffer_kinds.push(if writable.utf8 {
-                    emit!(#hir::BufferKind::STR)
-                } else {
-                    emit!(#hir::BufferKind::new(#elem,#write))
+                buffer_kinds.push(match writable.slice_of {
+                    Some(SliceOf::Strs) => {
+                        emit!(#hir::BufferKind::slices(&#hir::BufferKind::STR))
+                    }
+                    Some(SliceOf::Slices) => {
+                        emit!(#hir::BufferKind::slices(const { &#hir::BufferKind::new(#elem, false) }))
+                    }
+                    None if writable.utf8 => emit!(#hir::BufferKind::STR),
+                    None => emit!(#hir::BufferKind::new(#elem,#write)),
                 });
                 emit!(#id: #hir::Slice)
             }
@@ -795,6 +800,13 @@ fn parameter<'a>(arg: &'a FnArg, types: &[&Ident], name: Ident) -> Result<abi::P
         {
             Binding::Reg(Scalar::from_type(&arg.ty, types).unwrap(), mutable)
         }
+        [] if nested_mutable_slice(&arg.ty) => {
+            return Err(Error::new_spanned(
+                &arg.ty,
+                "a slice of slices must be shared at both levels (`&[&[T]]` or `&[&str]`): \
+                 kernels do not support `&mut` slices of slices",
+            ));
+        }
         [] if matches!(&*arg.ty, Type::Reference(r) if r.mutability.is_some())
             && slice_type(&arg.ty, types).is_none() =>
         {
@@ -872,24 +884,64 @@ fn slice_type(ty: &syn::Type, types: &[&Ident]) -> Option<BufferType> {
     let syn::Type::Reference(reference) = ty else {
         return None;
     };
-    if let syn::Type::Path(path) = &*reference.elem
-        && path.qself.is_none()
-        && path.path.is_ident("str")
-    {
+    if is_str(&reference.elem) {
         return reference.mutability.is_none().then_some(BufferType {
             elem: Elem::Named(crate::kast::types::Primitive::U8),
             write: false,
             utf8: true,
+            slice_of: None,
         });
     }
     let syn::Type::Slice(slice) = &*reference.elem else {
         return None;
     };
+    if let syn::Type::Reference(inner) = &*slice.elem {
+        // `&[&[T]]` or `&[&str]`; `&mut` at either level is rejected by
+        // `nested_mutable_slice`.
+        if reference.mutability.is_some() || inner.mutability.is_some() {
+            return None;
+        }
+        if is_str(&inner.elem) {
+            return Some(BufferType {
+                elem: Elem::Named(crate::kast::types::Primitive::U8),
+                write: false,
+                utf8: false,
+                slice_of: Some(SliceOf::Strs),
+            });
+        }
+        let syn::Type::Slice(inner) = &*inner.elem else {
+            return None;
+        };
+        return Some(BufferType {
+            elem: Elem::parse(&inner.elem, types)?,
+            write: false,
+            utf8: false,
+            slice_of: Some(SliceOf::Slices),
+        });
+    }
     Some(BufferType {
         elem: Elem::parse(&slice.elem, types)?,
         write: reference.mutability.is_some(),
         utf8: false,
+        slice_of: None,
     })
+}
+
+fn is_str(ty: &syn::Type) -> bool {
+    matches!(ty, syn::Type::Path(path) if path.qself.is_none() && path.path.is_ident("str"))
+}
+
+/// `&mut [&[T]]`, `&[&mut [T]]` and the like: a slice of slices that is
+/// not shared at both levels, which kernels do not support.
+fn nested_mutable_slice(ty: &syn::Type) -> bool {
+    let syn::Type::Reference(reference) = ty else {
+        return false;
+    };
+    let syn::Type::Slice(slice) = &*reference.elem else {
+        return false;
+    };
+    matches!(&*slice.elem, syn::Type::Reference(inner)
+        if reference.mutability.is_some() || inner.mutability.is_some())
 }
 
 #[cfg(test)]

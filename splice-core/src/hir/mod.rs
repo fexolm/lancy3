@@ -15,7 +15,9 @@ mod verify;
 pub use simd::{Access, Elements, Memory, OpInfo, Simd, SimdOp, Slot, ValueType};
 pub use types::{Constant, ScalarInfo, ScalarKind, ScalarType};
 
-pub use buffer::{BufferArg, BufferElement, BufferKind, Types, check_forwarding, validate_buffers};
+pub use buffer::{
+    BufferArg, BufferElement, BufferKind, Element, Types, check_forwarding, validate_buffers,
+};
 pub use builder::FunctionBuilder;
 pub use replay::replay;
 pub use rust_call::{PacketStore, PacketValue, RustCallPlan, RustTarget};
@@ -168,6 +170,14 @@ pub enum Instr {
         start: Reg,
         end: Reg,
     },
+    /// `dst = slice[index]` of a slice of slices, trapping unless `index`
+    /// is below the length: both halves of the element, read together.
+    /// The only definition of `dst`, like [`SliceRange`](Self::SliceRange).
+    LoadSlice {
+        dst: Slice,
+        slice: Slice,
+        index: Reg,
+    },
     /// Read element `index` of `slice`, trapping unless it is below the length.
     Load {
         dst: Reg,
@@ -209,9 +219,11 @@ impl Instr {
     fn may_trap(&self) -> bool {
         match self {
             Self::Bin(_, op, ..) => op.may_trap(),
-            Self::Load { .. } | Self::Store { .. } | Self::RustCall { .. } | Self::TrapBounds => {
-                true
-            }
+            Self::Load { .. }
+            | Self::LoadSlice { .. }
+            | Self::Store { .. }
+            | Self::RustCall { .. }
+            | Self::TrapBounds => true,
             Self::Call { function, .. } => function.needs_status(),
             Self::CallIntrinsic {
                 intrinsic: Intrinsic::Simd(inst),
@@ -225,7 +237,9 @@ impl Instr {
     /// [`SliceRange`](Self::SliceRange).
     fn written(&self) -> impl Iterator<Item = Reg> {
         let (first, second) = match *self {
-            Self::SliceRange { dst, .. } => (Some(dst.ptr), Some(dst.len)),
+            Self::SliceRange { dst, .. } | Self::LoadSlice { dst, .. } => {
+                (Some(dst.ptr), Some(dst.len))
+            }
             _ => (self.written_scalar(), None),
         };
         first.into_iter().chain(second)

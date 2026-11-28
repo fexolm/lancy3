@@ -13,8 +13,8 @@ use lancy::hir::{self, Block, Function, Op, Value};
 use splice_core::{
     frontend::{Body, KernelBuilder, KernelSource, Signature, Specialization},
     hir::{
-        Binary, Constant, ContextSlice, Intrinsic, Label, MathOp, PacketStore, PacketValue, Reg,
-        RustTarget, ScalarType, Slice, ValueType,
+        Binary, BufferKind, Constant, ContextSlice, Element, Intrinsic, Label, MathOp, PacketStore,
+        PacketValue, Reg, RustTarget, ScalarType, Slice, ValueType,
     },
 };
 use std::{
@@ -405,7 +405,7 @@ impl Builder {
     /// The type of the elements of `slice`.
     fn element(&self, slice: Slice) -> ScalarType {
         match self.types[slice.ptr.0 as usize] {
-            ValueType::Ptr(kind) => kind.element(),
+            ValueType::Ptr(kind) => kind.scalar().expect("a validated slice of scalars"),
             _ => unreachable!("validated slice"),
         }
     }
@@ -432,6 +432,19 @@ impl Builder {
                 let max = append(Op::Literal(hir::Lane::Usize, i32::MAX as u128));
                 let clamped = append(Op::Bin(hir::Binary::Min, index, max));
                 append(Op::Cast(hir::Type::I32, clamped))
+            }
+        }
+    }
+    /// `base` advanced by `offset` (an `i32` within the slice) elements.
+    /// Lancy scales an offset by at most 8 bytes: a 16-byte slice element
+    /// advances twice, so the offset is never doubled in `i32`.
+    fn advance(&mut self, base: Value, offset: Value, element: Element) -> Value {
+        match element {
+            Element::Scalar(ty) => self.value(Op::PtrOffset(base, offset, simd::stride(ty))),
+            Element::Slice(_) => {
+                const { assert!(Element::Slice(&BufferKind::STR).bytes() == 16) };
+                let half = self.value(Op::PtrOffset(base, offset, hir::Scale::Eight));
+                self.value(Op::PtrOffset(half, offset, hir::Scale::Eight))
             }
         }
     }
@@ -1036,12 +1049,37 @@ impl KernelBuilder for Builder {
             let start = self.index_min(start, end);
             // `start <= len`, which fits `i32`.
             let offset = self.index32(start);
-            self.define(
-                dst.ptr,
-                Op::PtrOffset(base, offset, simd::stride(kind.element())),
-            );
+            let ptr = self.advance(base, offset, kind.element());
+            self.bind(dst.ptr, ptr);
             let length = self.value(Op::Bin(hir::Binary::Sub, end, start));
             self.difference32(length, end, start);
+            self.bind(dst.len, length);
+        }
+        Ok(dst)
+    }
+    fn load_slice(&mut self, slice: Slice, index: Reg) -> splice_core::Result<Slice> {
+        let ValueType::Ptr(kind) = self.types[slice.ptr.0 as usize] else {
+            unreachable!("validated slice pointer")
+        };
+        let splice_core::hir::Element::Slice(&inner) = kind.element() else {
+            unreachable!("validated slice of slices")
+        };
+        let dst = Slice {
+            ptr: self.result(ValueType::Ptr(inner))?,
+            len: self.result(ValueType::Scalar(ScalarType::Index))?,
+        };
+        if self.reachable() {
+            let index = self.read(index);
+            let index = self.index32(index);
+            let (base, len) = self.slice(slice);
+            self.effect(Op::BoundsCheck(index, len));
+            let element = self.advance(base, index, kind.element());
+            let ptr = self.value(Op::Load(hir::Type::Ptr, element));
+            self.bind(dst.ptr, ptr);
+            let offset = Element::SLICE_LEN_OFFSET / 8;
+            let offset = self.const32(offset as i32);
+            let at = self.value(Op::PtrOffset(element, offset, hir::Scale::Eight));
+            let length = self.value(Op::Load(scalar_type(ScalarType::Index), at));
             self.bind(dst.len, length);
         }
         Ok(dst)

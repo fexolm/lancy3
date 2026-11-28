@@ -92,6 +92,21 @@ pub struct SliceDescriptor {
 const _: () =
     assert!(size_of::<SliceDescriptor>() == 16 && std::mem::offset_of!(SliceDescriptor, len) == 8);
 
+// A slice element (`hir::Element::Slice`) is read in place from the
+// caller's `&[&[T]]` or `&[&str]`: Rust's slice reference must be laid out
+// as a descriptor, pointer first and the element count second.
+#[allow(unsafe_code)]
+const _: () = {
+    assert!(size_of::<&[u8]>() == size_of::<SliceDescriptor>());
+    assert!(align_of::<&[u8]>() == align_of::<SliceDescriptor>());
+    assert!(size_of::<&str>() == size_of::<&[u8]>());
+    let fat = std::ptr::slice_from_raw_parts(std::ptr::null::<u64>(), 3);
+    // SAFETY: a `*const [u64]` is two words; the null pointer carries no
+    // provenance, so both read as integers at compile time.
+    let words: [usize; 2] = unsafe { std::mem::transmute(fat) };
+    assert!(words[0] == 0 && words[1] == 3);
+};
+
 /// The entry LLVM and Cranelift emit: one scalar word per parameter, one
 /// descriptor per buffer and the result word, which the caller zeroes. It
 /// returns a status ([`crate::Trap::status`]); the result travels in memory.

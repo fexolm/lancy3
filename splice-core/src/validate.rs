@@ -207,6 +207,16 @@ impl<'a> Validating<'a> {
         |r: Reg| self.types.get(r.0 as usize).copied()
     }
 
+    /// Record the fresh pair `dst` of a slice of `kind` that one operation
+    /// reading `reads` produced.
+    fn define_pair(&mut self, dst: Slice, kind: BufferKind, reads: &[Reg]) {
+        self.allocated(dst.ptr, ValueType::Ptr(kind));
+        self.allocated(dst.len, ValueType::Scalar(ScalarType::Index));
+        self.pairs.insert(dst.ptr, dst.len);
+        self.block().defined.insert(dst.len);
+        self.record(reads, Some(dst.ptr));
+    }
+
     /// Reject a slice whose pointer and length were not produced together.
     fn paired(&self, slice: Slice) -> Result<()> {
         if self.pairs.get(&slice.ptr) == Some(&slice.len) {
@@ -238,7 +248,9 @@ impl<'a> Validating<'a> {
     /// The type of the elements of `slice`, accessed one at a time.
     fn element(&self, slice: Slice, write: bool) -> Result<ScalarType> {
         let kind = self.buffer(slice)?;
-        let ty = kind.element();
+        let ty = kind
+            .scalar()
+            .ok_or_else(|| self.error("a slice element is read with `load_slice`"))?;
         if write && !kind.writable() {
             return Err(self.error("store to read-only buffer"));
         }
@@ -375,9 +387,9 @@ impl KernelBuilder for Validating<'_> {
                 }
                 crate::debug::Value::Register(_) => {}
                 crate::debug::Value::Slice(slice)
-                    if self
-                        .slice_kind(slice)
-                        .map_or(true, |kind| kind.context_signature().is_some()) =>
+                    if self.slice_kind(slice).map_or(true, |kind| {
+                        kind.context_signature().is_some() || kind.scalar().is_none()
+                    }) =>
                 {
                     return Err(self.error("invalid debug buffer"));
                 }
@@ -470,11 +482,16 @@ impl KernelBuilder for Validating<'_> {
         self.expect(start, ScalarType::Index)?;
         self.expect(end, ScalarType::Index)?;
         let dst = self.inner.slice_range(slice, start, end)?;
-        self.allocated(dst.ptr, ValueType::Ptr(kind));
-        self.allocated(dst.len, ValueType::Scalar(ScalarType::Index));
-        self.pairs.insert(dst.ptr, dst.len);
-        self.block().defined.insert(dst.len);
-        self.record(&[slice.ptr, slice.len, start, end], Some(dst.ptr));
+        self.define_pair(dst, kind, &[slice.ptr, slice.len, start, end]);
+        Ok(dst)
+    }
+    fn load_slice(&mut self, slice: Slice, index: Reg) -> Result<Slice> {
+        self.expect(index, ScalarType::Index)?;
+        let crate::hir::Element::Slice(&inner) = self.buffer(slice)?.element() else {
+            return Err(self.error("`load_slice` reads a slice of slices"));
+        };
+        let dst = self.inner.load_slice(slice, index)?;
+        self.define_pair(dst, inner, &[slice.ptr, slice.len, index]);
         Ok(dst)
     }
     fn load(&mut self, slice: Slice, index: Reg) -> Result<Reg> {
@@ -580,7 +597,9 @@ impl KernelBuilder for Validating<'_> {
             self.paired(context)?;
         }
         for s in slices {
-            self.paired(s.slice)?;
+            if self.slice_kind(s.slice)?.scalar().is_none() {
+                return Err(self.error("a Rust call takes slices of scalars"));
+            }
         }
         let types = self.rust_operands(args);
         self.at(target.check(&self.reg_types(), types.into_iter(), slices))?;
@@ -706,6 +725,12 @@ impl Sink {
             debug,
         }
     }
+    fn pair(&mut self) -> Result<Slice> {
+        Ok(Slice {
+            ptr: self.next()?,
+            len: self.next()?,
+        })
+    }
     fn next(&mut self) -> Result<Reg> {
         let r = Reg(self.registers);
         self.registers = self
@@ -743,10 +768,10 @@ impl KernelBuilder for Sink {
         self.next()
     }
     fn slice_range(&mut self, _: Slice, _: Reg, _: Reg) -> Result<Slice> {
-        Ok(Slice {
-            ptr: self.next()?,
-            len: self.next()?,
-        })
+        self.pair()
+    }
+    fn load_slice(&mut self, _: Slice, _: Reg) -> Result<Slice> {
+        self.pair()
     }
     fn load(&mut self, _: Slice, _: Reg) -> Result<Reg> {
         self.next()

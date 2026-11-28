@@ -6,9 +6,53 @@ use std::fmt;
 use std::marker::PhantomData;
 use std::ptr::NonNull;
 
+/// What one element of a slice holds. Its [`bytes`](Self::bytes) are the
+/// one layout fact a backend addresses elements by; an element that is
+/// not a scalar is read whole by its own operation (a slice element by
+/// [`KernelBuilder::load_slice`]).
+///
+/// [`KernelBuilder::load_slice`]: crate::frontend::KernelBuilder::load_slice
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Element {
+    Scalar(ScalarType),
+    /// A shared slice of `kind`, `&[T]` or `&str`: a pointer and a length,
+    /// laid out as Rust's slice reference and [`SliceDescriptor`].
+    ///
+    /// [`SliceDescriptor`]: crate::call::SliceDescriptor
+    Slice(&'static BufferKind),
+}
+
+impl Element {
+    /// The distance between consecutive elements in memory.
+    pub const fn bytes(self) -> usize {
+        match self {
+            Self::Scalar(ty) => ty.bytes(),
+            Self::Slice(_) => size_of::<crate::call::SliceDescriptor>(),
+        }
+    }
+    /// The byte offset of the length in a [`Slice`](Self::Slice) element.
+    pub const SLICE_LEN_OFFSET: usize = std::mem::offset_of!(crate::call::SliceDescriptor, len);
+    pub const fn scalar(self) -> Option<ScalarType> {
+        match self {
+            Self::Scalar(ty) => Some(ty),
+            Self::Slice(_) => None,
+        }
+    }
+}
+
+impl fmt::Display for Element {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Scalar(ty) => f.write_str(ty.name()),
+            Self::Slice(kind) if kind.utf8 => f.write_str("&str"),
+            Self::Slice(kind) => write!(f, "&[{}]", kind.element),
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct BufferKind {
-    element: ScalarType,
+    element: Element,
     writable: bool,
     /// The bytes are UTF-8: a `&str`, a read-only slice of `u8`.
     utf8: bool,
@@ -33,8 +77,22 @@ impl BufferKind {
             "a bool slice is not a kernel buffer"
         );
         Self {
-            element,
+            element: Element::Scalar(element),
             writable,
+            utf8: false,
+            context: None,
+        }
+    }
+    /// A shared slice whose elements are slices of `inner`: `&[&[T]]` or
+    /// `&[&str]`. Inner slices are shared (`&[&mut [T]]` is not supported).
+    pub const fn slices(inner: &'static BufferKind) -> Self {
+        assert!(
+            !inner.writable && inner.context.is_none(),
+            "a slice element is a shared slice"
+        );
+        Self {
+            element: Element::Slice(inner),
+            writable: false,
             utf8: false,
             context: None,
         }
@@ -42,7 +100,7 @@ impl BufferKind {
     #[doc(hidden)]
     pub const fn context(signature: &'static ContextSignature) -> Self {
         Self {
-            element: ScalarType::I32,
+            element: Element::Scalar(ScalarType::I32),
             writable: true,
             utf8: false,
             context: Some(signature),
@@ -52,8 +110,12 @@ impl BufferKind {
     pub const fn context_signature(self) -> Option<&'static ContextSignature> {
         self.context
     }
-    pub const fn element(self) -> ScalarType {
+    pub const fn element(self) -> Element {
         self.element
+    }
+    /// The element type of a slice of scalars.
+    pub const fn scalar(self) -> Option<ScalarType> {
+        self.element.scalar()
     }
     /// Whether the slice is a `&str`, whose bytes are UTF-8.
     pub const fn utf8(self) -> bool {
@@ -164,6 +226,27 @@ impl<'a> BufferArg<'a> {
         }
     }
 
+    /// A slice of slices, `&[&[T]]`: each element is Rust's slice
+    /// reference, which [`Element::Slice`] reads in place.
+    pub fn slices<T: BufferElement>(slices: &'a [&'a [T]]) -> Self {
+        Self {
+            data: NonNull::from(slices).cast(),
+            len: slices.len(),
+            kind: BufferKind::slices(const { &BufferKind::new(T::TYPE, false) }),
+            borrow: PhantomData,
+        }
+    }
+
+    /// A slice of `&str`s, `&[&str]`.
+    pub fn strs(texts: &'a [&'a str]) -> Self {
+        Self {
+            data: NonNull::from(texts).cast(),
+            len: texts.len(),
+            kind: BufferKind::slices(&BufferKind::STR),
+            borrow: PhantomData,
+        }
+    }
+
     #[doc(hidden)]
     pub fn context(context: &'a mut RuntimeContext<'a>) -> Self {
         let kind = BufferKind::context(context.signature());
@@ -211,7 +294,7 @@ impl BufferArg<'_> {
     #[allow(unsafe_code)]
     pub fn as_slice<T: BufferElement>(&self) -> &[T] {
         assert!(
-            self.kind.context.is_none() && self.kind.element == T::TYPE,
+            self.kind.context.is_none() && self.kind.element == Element::Scalar(T::TYPE),
             "expected a {} buffer",
             T::TYPE.name()
         );
@@ -254,7 +337,7 @@ pub fn validate_buffers(
         if !kind.accepts(arg.kind()) {
             return Err(ReadOnly { buffer });
         }
-        if arg.len() > longest {
+        if arg.len() > longest || !nested_within(kind.element(), arg.data, arg.len, longest) {
             return Err(Length {
                 buffer,
                 limit: longest,
@@ -311,6 +394,29 @@ pub fn check_forwarding(
         }
     }
     Ok(())
+}
+
+/// Whether every slice inside the `len` elements at `data` is at most
+/// `longest` long: a backend's limit holds for each slice a kernel reads.
+/// Only a backend with a limit below every Rust slice length pays the walk.
+#[allow(unsafe_code)]
+fn nested_within(element: Element, data: NonNull<u8>, len: usize, longest: usize) -> bool {
+    let Element::Slice(inner) = element else {
+        return true;
+    };
+    if longest >= isize::MAX as usize && inner.element.scalar().is_some() {
+        return true;
+    }
+    // SAFETY: a `BufferArg` of slice elements borrows `len` Rust slice
+    // references (`BufferArg::slices`/`strs`), whose layout is the
+    // descriptor's (asserted next to `SliceDescriptor`).
+    let slices = unsafe {
+        std::slice::from_raw_parts(data.as_ptr().cast::<crate::call::SliceDescriptor>(), len)
+    };
+    slices.iter().all(|s| {
+        let data = NonNull::new(s.data).unwrap_or(NonNull::dangling());
+        s.len as usize <= longest && nested_within(inner.element, data, s.len as usize, longest)
+    })
 }
 
 /// What the registers of a function under construction hold.
@@ -378,6 +484,43 @@ mod tests {
         let fits = &long[..limit];
         assert!(validate_buffers(&kinds, &[BufferArg::read(fits)], limit).is_ok());
         assert!(validate_buffers(&kinds, &[BufferArg::read(&long)], usize::MAX).is_ok());
+    }
+
+    /// A backend's length limit holds for every slice a kernel reads, the
+    /// elements of a slice of slices included.
+    #[test]
+    fn a_slice_of_slices_checks_each_length() {
+        use crate::SignatureError;
+        let (short, long) = ([1u16], [1u16, 2, 3]);
+        let rows: [&[u16]; 2] = [&short, &long];
+        let arg = BufferArg::slices(&rows);
+        let kind = BufferKind::slices(const { &BufferKind::new(ScalarType::U16, false) });
+        assert_eq!(arg.kind(), kind);
+        assert_eq!(kind.element().bytes(), 16);
+        assert!(validate_buffers(&[kind], &[BufferArg::slices(&rows)], 3).is_ok());
+        assert!(matches!(
+            validate_buffers(&[kind], &[BufferArg::slices(&rows)], 2),
+            Err(SignatureError::Length {
+                buffer: 0,
+                limit: 2
+            })
+        ));
+        let texts = ["ab", "€"];
+        let strs = BufferKind::slices(&BufferKind::STR);
+        assert!(validate_buffers(&[strs], &[BufferArg::strs(&texts)], 3).is_ok());
+        assert!(validate_buffers(&[strs], &[BufferArg::strs(&texts)], 2).is_err());
+        // A `&[&[u8]]` is not a `&[&str]`, nor the other way round.
+        let bytes: [&[u8]; 1] = [b"ab"];
+        assert!(matches!(
+            validate_buffers(&[strs], &[BufferArg::slices(&bytes)], usize::MAX),
+            Err(SignatureError::Element { buffer: 0, .. })
+        ));
+        assert_eq!(
+            validate_buffers(&[kind], &[BufferArg::strs(&texts)], usize::MAX)
+                .unwrap_err()
+                .to_string(),
+            "buffer 0 expects &[u16] elements"
+        );
     }
 
     #[test]

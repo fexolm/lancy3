@@ -9,7 +9,7 @@ use splice_core::Function;
 use splice_core::Trap;
 use splice_core::call::SliceDescriptor;
 use splice_core::hir::{
-    Binary, Constant, Instr, PacketStore, PacketValue, Reg, ScalarType, ValueType,
+    Binary, Constant, Element, Instr, PacketStore, PacketValue, Reg, ScalarType, ValueType,
 };
 use std::collections::HashMap;
 use std::mem::{offset_of, size_of};
@@ -285,11 +285,28 @@ pub(super) fn emit(
                 let length = binary(&mut b, Binary::Sub, index, end, start);
                 b.def_var(var(dst.len), length);
             }
+            Instr::LoadSlice { dst, slice, index } => {
+                let ValueType::Ptr(kind) = f.reg_type(slice.ptr) else {
+                    unreachable!("verified slice pointer");
+                };
+                let index = b.use_var(var(index));
+                let pair = [b.use_var(var(slice.ptr)), b.use_var(var(slice.len))];
+                let addr = element(&mut b, pair, index, kind.element().bytes());
+                let (ptr, len) = (scalar_type(ScalarType::Index), Element::SLICE_LEN_OFFSET);
+                let data = b
+                    .ins()
+                    .load(ptr, MemFlags::trusted().with_readonly(), addr, 0);
+                b.def_var(var(dst.ptr), data);
+                let count =
+                    b.ins()
+                        .load(ptr, MemFlags::trusted().with_readonly(), addr, len as i32);
+                b.def_var(var(dst.len), count);
+            }
             Instr::Load { dst, slice, index } => {
                 let index = b.use_var(var(index));
                 let ty = scalar_type(scalar(f, dst));
                 let pair = [b.use_var(var(slice.ptr)), b.use_var(var(slice.len))];
-                let addr = element(&mut b, pair, index, ty);
+                let addr = element(&mut b, pair, index, ty.bytes() as usize);
                 let value = b.ins().load(ty, MemFlags::new(), addr, 0);
                 b.def_var(var(dst), value);
             }
@@ -302,7 +319,7 @@ pub(super) fn emit(
                 let ty = scalar_type(scalar(f, value));
                 let value = b.use_var(var(value));
                 let pair = [b.use_var(var(slice.ptr)), b.use_var(var(slice.len))];
-                let addr = element(&mut b, pair, index, ty);
+                let addr = element(&mut b, pair, index, ty.bytes() as usize);
                 b.ins().store(MemFlags::new(), value, addr, 0);
             }
             Instr::RustCall {
@@ -447,11 +464,12 @@ fn return_if(b: &mut FunctionBuilder, condition: Value, result: Value) {
     b.switch_to_block(next);
 }
 
-fn element(b: &mut FunctionBuilder, [data, len]: [Value; 2], index: Value, ty: Type) -> Value {
+/// The address of element `index` of `bytes` each, after a bounds check.
+fn element(b: &mut FunctionBuilder, [data, len]: [Value; 2], index: Value, bytes: usize) -> Value {
     let invalid = b.ins().icmp(IntCC::UnsignedGreaterThanOrEqual, index, len);
     let bounds = trap(b, Trap::Bounds);
     return_if(b, invalid, bounds);
-    let bytes = b.ins().imul_imm(index, i64::from(ty.bytes()));
+    let bytes = b.ins().imul_imm(index, bytes as i64);
     b.ins().iadd(data, bytes)
 }
 

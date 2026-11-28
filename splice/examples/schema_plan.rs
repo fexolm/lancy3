@@ -42,7 +42,7 @@ impl Schema {
     fn from_batch(columns: &[BufferArg<'_>; 6]) -> Self {
         let layout = std::array::from_fn(|i| columns[i].kind());
         Self {
-            elements: layout.map(BufferKind::element),
+            elements: layout.map(|kind| kind.scalar().expect("a column of scalars")),
             layout,
         }
     }

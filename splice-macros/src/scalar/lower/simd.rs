@@ -22,6 +22,26 @@ pub(crate) struct BufferType {
     pub write: bool,
     /// A `&str`: read-only `u8`s that hold UTF-8.
     pub utf8: bool,
+    /// A shared slice whose elements are shared slices of `elem` (`&str`s
+    /// when [`SliceOf::Strs`]): `&[&[T]]` or `&[&str]`.
+    pub slice_of: Option<SliceOf>,
+}
+#[derive(Copy, Clone, PartialEq, Eq)]
+pub(crate) enum SliceOf {
+    Slices,
+    Strs,
+}
+impl BufferType {
+    /// The type of one element of a slice of slices.
+    pub(crate) fn inner(self) -> Option<Self> {
+        let slice_of = self.slice_of?;
+        Some(Self {
+            elem: self.elem,
+            write: false,
+            utf8: slice_of == SliceOf::Strs,
+            slice_of: None,
+        })
+    }
 }
 impl Elem {
     pub(crate) const I32: Self = Self::Named(Primitive::I32);

@@ -116,7 +116,7 @@ fn staged_and_portable_calls_keep_writes_up_to_the_first_fault() {
             ),
             Err(splice_core::SignatureError::Element {
                 buffer: 0,
-                expected: splice_core::hir::ScalarType::I32
+                expected: splice_core::hir::Element::Scalar(splice_core::hir::ScalarType::I32)
             }
             .into())
         );

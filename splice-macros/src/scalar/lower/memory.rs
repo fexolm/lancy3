@@ -106,6 +106,7 @@ impl Lower<'_> {
                     elem,
                     write: false,
                     utf8: false,
+                    slice_of: None,
                 }),
                 emit!(#root::frontend::scalar::column(#table, #slot, #element)?),
             ));
@@ -510,6 +511,23 @@ impl Lower<'_> {
                 emit!(
                     ::core::result::Result::Err::<#root::hir::Reg, #root::BuildError>(#root::BuildError::staging("runtime index requires a runtime slice"))?
                 ),
+            ));
+        }
+        let slice = self.expr(&index.expr)?;
+        if let Stage::Buffer(outer) = slice.stage
+            && let Some(inner) = outer.inner()
+        {
+            // `xs[i]` of a `&[&[T]]` is a `&[T]` (a `&str` of a `&[&str]`):
+            // both halves of the element, read together.
+            let value = self.expr(&index.index)?;
+            let offset = self.reg(value, Scalar::Index, &index.index)?;
+            let slice = slice.code;
+            return Ok(Value::new(
+                Stage::Buffer(inner),
+                emit!({
+                    let (buffer, __splice_index) = (#slice, #offset);
+                    __splice_builder.load_slice(buffer, __splice_index)?
+                }),
             ));
         }
         let (_, slice, offset, element) = self.index_operands(index)?;

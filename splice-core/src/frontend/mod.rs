@@ -133,6 +133,12 @@ pub trait KernelBuilder {
     /// difference within `len`.
     ///
     fn slice_range(&mut self, slice: Slice, start: Reg, end: Reg) -> crate::Result<Slice>;
+    /// Element `index` of a slice of slices (an [`Element::Slice`]), as a
+    /// slice: its pointer and length, read together. Traps unless `index`
+    /// is below the length.
+    ///
+    /// [`Element::Slice`]: crate::hir::Element::Slice
+    fn load_slice(&mut self, slice: Slice, index: Reg) -> crate::Result<Slice>;
     /// Element `index` of `slice`; traps unless `index` is below its length.
     fn load(&mut self, slice: Slice, index: Reg) -> crate::Result<Reg>;
     /// Write element `index` of `slice`; traps unless `index` is below its length.
