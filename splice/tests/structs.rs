@@ -169,6 +169,22 @@ fn regions(points: &mut [Point], cut: i32, at: i32) -> f32 {
     total * 100.0 + moved as f32 + chunks + points[at as usize].y
 }
 
+/// A mutable struct parameter and nested struct fields assigned whole.
+#[kernel]
+fn reposition(mut p: Particle, xs: &mut [Particle], to: &Point) -> f64 {
+    p.pos = Point { x: to.y, y: to.x };
+    p.mass += 0.5;
+    let q = p.pos;
+    for i in 0..xs.len() {
+        xs[i].pos = q;
+        xs[i].id = p.id;
+    }
+    if !xs.is_empty() {
+        xs[0] = p;
+    }
+    p.mass + q.x as f64
+}
+
 macro_rules! builds {
     ($kernel:ident, $b:ident) => {{
         let mut codes = Vec::new();
@@ -289,6 +305,20 @@ fn check<B: Codegen<Output: Executable>>() {
                     "{n} ids, floor {floor:?}"
                 );
             }
+        }
+    }
+    for code in builds!(reposition, B) {
+        let to = Point { x: 2.5, y: -4.0 };
+        for n in 0..3 {
+            let (mut actual, mut expected) = (particles(), particles());
+            let call = reposition::CallArgs {
+                p: particles()[1],
+                xs: &mut actual[..n],
+                to: &to,
+            };
+            let result = code.call(call);
+            let wanted = reposition(particles()[1], &mut expected[..n], &to);
+            assert_eq!((result, actual), (Ok(wanted), expected), "{n} particles");
         }
     }
     let cloud: Vec<Point> = (0..7)
