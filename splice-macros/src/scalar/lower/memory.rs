@@ -4,7 +4,7 @@ use super::{Lower, Scalar, Stage, Value, err};
 use crate::kast::types::Primitive;
 use proc_macro2::TokenStream;
 use splice_core::hir::MathOp;
-use syn::{BinOp, Expr, ExprCast, ExprIndex, ExprReference, Result, UnOp};
+use syn::{BinOp, Expr, ExprCast, ExprIndex, ExprPath, ExprReference, Result, UnOp};
 
 pub(super) fn math_op(name: &str) -> Option<MathOp> {
     Some(match name {
@@ -14,6 +14,30 @@ pub(super) fn math_op(name: &str) -> Option<MathOp> {
         "rotate_left" => MathOp::RotateLeft,
         _ => return None,
     })
+}
+
+pub(super) fn integer_owner(path: &ExprPath) -> Option<Scalar> {
+    use crate::kast::types::Primitive;
+    let ty = match &path.qself {
+        Some(q) if q.as_token.is_none() => (*q.ty).clone(),
+        Some(_) => return None,
+        None => {
+            let owner = super::simd::owner_path(path)?;
+            syn::parse_quote!(#owner)
+        }
+    };
+    let primitive = Primitive::of(&ty)?;
+    match primitive {
+        Primitive::I8
+        | Primitive::U8
+        | Primitive::I16
+        | Primitive::U16
+        | Primitive::I32
+        | Primitive::U32
+        | Primitive::I64
+        | Primitive::U64 => Scalar::of(primitive),
+        _ => None,
+    }
 }
 
 pub(super) fn primitive_method(name: &str) -> bool {
@@ -176,46 +200,15 @@ impl Lower<'_> {
         let Some(op) = math_op(&member.ident.to_string()) else {
             return Ok(None);
         };
-        let mut owner = path.path.clone();
-        owner.segments.pop();
-        owner.segments.pop_punct();
-        if owner.segments.is_empty() && path.qself.is_none() {
+        let Some(kind) = integer_owner(path) else {
             return Ok(None);
-        }
-        let qualified_trait = path.qself.as_ref().is_some_and(|q| q.as_token.is_some());
-        let ty: syn::Type = match &path.qself {
-            Some(q) => (*q.ty).clone(),
-            None => syn::parse_quote!(#owner),
         };
-        let kind = Scalar::from_type(&ty, self.types);
-        let inherent = kind.is_some() && !qualified_trait;
-        if !inherent && (owner.segments.is_empty() || !crate::scalar::methods::method_path(path)) {
-            return Ok(None);
-        }
-        if !inherent && owner.segments.last().is_some_and(|s| s.ident == "Self") {
-            return Ok(None);
-        }
-        let builtin = || {
-            let mut args = c.args.iter();
-            let first = args.next().ok_or_else(|| {
-                syn::Error::new_spanned(member, "missing integer intrinsic receiver")
-            })?;
-            let receiver = self.expr_with_hint(first, kind)?;
-            let kind = kind.unwrap_or(match receiver.stage {
-                Stage::Reg(t) | Stage::Word(t) | Stage::Literal(t) => t,
-                _ => Scalar::Inferred,
-            });
-            self.math_call(op, receiver, kind, first, args)
-        };
-        if inherent {
-            return builtin().map(Some);
-        }
-        let ordinary = self.call(c, None)?;
-        let mut value =
-            builtin().unwrap_or_else(|e| Value::new(ordinary.stage, e.into_compile_error()));
-        value.code =
-            super::calls::select_builtin(self.root, &owner, "math", value.code, ordinary.code);
-        Ok(Some(value))
+        let mut args = c.args.iter();
+        let first = args
+            .next()
+            .ok_or_else(|| syn::Error::new_spanned(member, "missing integer intrinsic receiver"))?;
+        let receiver = self.expr_with_hint(first, Some(kind))?;
+        self.math_call(op, receiver, kind, first, args).map(Some)
     }
 
     fn math_call<'a>(

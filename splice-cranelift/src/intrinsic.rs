@@ -26,7 +26,8 @@ pub(crate) fn emit(b: &mut FunctionBuilder, op: MathOp, args: &[Value]) -> Value
             let c = b.ins().ctz(x);
             count(b, c)
         }
-        // `rotl` takes the count modulo the width, as Rust does.
+        // Cranelift's `rotl` accepts an independent scalar integer count.
+        // It takes that count modulo the value's width, as Rust does.
         MathOp::RotateLeft => b.ins().rotl(x, args[1]),
     }
 }

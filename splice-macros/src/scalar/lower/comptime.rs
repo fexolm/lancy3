@@ -454,6 +454,15 @@ impl Lower<'_> {
                         opaque()
                     });
                 }
+                if super::memory::math_op(&path.path.segments.last().unwrap().ident.to_string())
+                    .is_some()
+                    && super::memory::integer_owner(path).is_some()
+                {
+                    let args = c.args.iter().map(visit).collect::<Result<Vec<_>>>()?;
+                    return Ok(emit!(if false { #path(#(#args),*) } else {
+                        return ::core::result::Result::Err(#support::BuildError::staging("intrinsic requires kernel staging"))
+                    }));
+                }
                 let trait_owner = crate::scalar::methods::trait_path(path);
                 let evaluator = if trait_owner.is_some() {
                     "eval_method"
@@ -490,7 +499,7 @@ impl Lower<'_> {
                     Some(Scalar::Index | Scalar::Length) => emit!(usize),
                     _ => emit!(i32),
                 };
-                let ordinary = if let Some(owner) = trait_owner {
+                if let Some(owner) = trait_owner {
                     let method = &path.path.segments.last().unwrap().ident;
                     crate::declaration::trait_method_eval_dispatch(
                         support,
@@ -509,26 +518,6 @@ impl Lower<'_> {
                     impl<T: ?Sized> __SpliceOpaqueMethod for T {}
                     #target((#(#args,)*))?
                     })
-                };
-                if super::memory::math_op(&path.path.segments.last().unwrap().ident.to_string())
-                    .is_some()
-                {
-                    let mut owner = path.path.clone();
-                    owner.segments.pop();
-                    owner.segments.pop_punct();
-                    let args = c.args.iter().map(visit).collect::<Result<Vec<_>>>()?;
-                    let unknown = emit!(if false { #path(#(#args),*) } else {
-                        return ::core::result::Result::Err(#support::BuildError::staging("intrinsic requires kernel staging"))
-                    });
-                    if owner.segments.is_empty()
-                        || Scalar::from_type(&syn::parse_quote!(#owner), self.types).is_some()
-                    {
-                        unknown
-                    } else {
-                        super::calls::select_builtin(support, &owner, "math", unknown, ordinary)
-                    }
-                } else {
-                    ordinary
                 }
             }
             Expr::Call(c) if matches!(c.func.as_ref(),Expr::Path(p) if p.qself.is_none()) => {

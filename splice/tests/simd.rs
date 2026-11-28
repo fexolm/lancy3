@@ -502,7 +502,7 @@ fn lane_values_cross_nested_kernel_calls_as_parameters_and_results() {
 }
 
 #[test]
-#[should_panic(expected = "kernel intrinsic called outside a #[kernel]")]
+#[should_panic(expected = "Splice intrinsic stub executed in Rust")]
 fn lane_operations_do_not_run_outside_a_kernel() {
     let _ = Lane::<i32>::splat(1);
 }
