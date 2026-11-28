@@ -71,7 +71,10 @@ pub(super) fn expand(
             .ok_or_else(|| {
                 Error::new_spanned(
                     ty,
-                    "expected (), bool, i32, u32, i64, u64, usize, f32, f64, Lane<T> or Mask<T>",
+                    format!(
+                        "expected (), a kernel scalar ({}), Lane<T> or Mask<T>",
+                        crate::kast::types::Primitive::kernel_scalars()
+                    ),
                 )
             })?
     };
@@ -794,7 +797,10 @@ fn parameter<'a>(arg: &'a FnArg, types: &[&Ident], name: Ident) -> Result<abi::P
             let writable = slice_type(&arg.ty, types).ok_or_else(|| {
                 Error::new_spanned(
                     &arg.ty,
-                    "runtime parameters must be bool, i32, u32, i64, u64, usize, f32, f64 or a slice of u16, u32, i32, i64, f32, or f64",
+                    format!(
+                        "runtime parameters must be a kernel scalar ({}) or a slice of one other than bool",
+                        crate::kast::types::Primitive::kernel_scalars()
+                    ),
                 )
             })?;
             if mutable {

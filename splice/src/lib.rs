@@ -87,12 +87,12 @@ pub mod __private {
     }
     impl<T: LaneElement> SimdType for &PhantomData<Lane<T>> {
         fn simd_type(self) -> Option<ValueType> {
-            Some(ValueType::Vector(T::ELEMENT))
+            Some(ValueType::Vector(<T as splice_core::KernelScalar>::TYPE))
         }
     }
     impl<T: LaneElement> SimdType for &PhantomData<Mask<T>> {
         fn simd_type(self) -> Option<ValueType> {
-            Some(ValueType::Mask(T::ELEMENT))
+            Some(ValueType::Mask(<T as splice_core::KernelScalar>::TYPE))
         }
     }
     impl<T: ?Sized> SimdType for &&PhantomData<T> {

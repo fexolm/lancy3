@@ -12,14 +12,14 @@
 //!   that repeat an index wins;
 //! - a compress store writes the compressed lanes that fit, then traps if
 //!   any did not.
+use super::ScalarType;
 use super::{Access, Buffer, Reg, Simd, SimdOp};
-use crate::simd::Element;
 
 /// The slice an operation accesses and the element of its vector.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Slice {
     pub buffer: Buffer,
-    pub element: Element,
+    pub element: ScalarType,
 }
 
 /// Where the lanes of an access are: consecutive elements from an offset,
@@ -61,11 +61,16 @@ pub trait Primitives {
     /// count, which may exceed the number of lanes when all of them do.
     fn room(&mut self, slice: Slice, offset: Self::Scalar) -> Result<Self::Scalar, Self::Error>;
     /// The mask of the first `count` lanes, for a [`room`](Self::room).
-    fn first_lanes(&mut self, e: Element, count: Self::Scalar)
-    -> Result<Self::Vector, Self::Error>;
-    /// The lanes whose index is not below the slice length, compared at
-    /// the width of the index lanes. This is exact for a length that fits
-    /// that width.
+    fn first_lanes(
+        &mut self,
+        e: ScalarType,
+        count: Self::Scalar,
+    ) -> Result<Self::Vector, Self::Error>;
+    /// The lanes whose index, with the signedness of the index lanes, is
+    /// negative or not below the slice length. This is exact for every
+    /// length but, with narrow unsigned index lanes, a length above their
+    /// largest value, where the result is ignored (no such index leaves the
+    /// slice).
     fn outside(&mut self, slice: Slice, indices: Self::Vector)
     -> Result<Self::Vector, Self::Error>;
     /// Whether `buffer` holds at most `n` elements: a `bool`.
@@ -76,8 +81,11 @@ pub trait Primitives {
     /// Whether `mask` has a lane: a `bool`.
     fn any(&mut self, mask: Self::Vector) -> Result<Self::Scalar, Self::Error>;
     /// The lanes before the first lane of `mask`, or all lanes if it has none.
-    fn before_first(&mut self, e: Element, mask: Self::Vector)
-    -> Result<Self::Vector, Self::Error>;
+    fn before_first(
+        &mut self,
+        e: ScalarType,
+        mask: Self::Vector,
+    ) -> Result<Self::Vector, Self::Error>;
     /// Whether `mask` has more lanes than `count`, a lane count: a `bool`.
     fn exceeds(
         &mut self,
@@ -218,8 +226,12 @@ pub fn lower<P: Primitives>(
                 None => outside,
             };
             let mut fail = p.any(bad)?;
-            if e.index() == Element::U16 {
-                let short = p.length_at_most(slice.buffer, u64::from(u16::MAX))?;
+            // Narrow unsigned indices cannot leave a longer slice; narrow
+            // signed ones still can, by being negative.
+            let index = e.index();
+            if !index.is_signed() && index.bits() < 32 {
+                let largest = u64::MAX >> (64 - index.bits());
+                let short = p.length_at_most(slice.buffer, largest)?;
                 fail = p.and(fail, short)?;
             }
             if !write {

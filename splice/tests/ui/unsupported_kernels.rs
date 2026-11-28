@@ -27,4 +27,10 @@ fn printed_steps(#[comptime] plan: &[i32], xs: &[i32]) -> i32 {
     hits
 }
 
+// `char::from_u32` returns an `Option`, which a kernel register cannot hold.
+#[kernel]
+fn decode(code: u32) -> char {
+    char::from_u32(code).unwrap_or('?')
+}
+
 fn main() {}

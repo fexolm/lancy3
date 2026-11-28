@@ -1,7 +1,6 @@
 use super::*;
 use lancy::hir::Simd as V;
 use splice_core::hir::{Constant, ScalarType};
-use splice_core::simd::Element;
 use splice_core::{
     BufferArg, Executable,
     hir::{Simd, SimdOp},
@@ -30,7 +29,7 @@ fn both(
 
 fn u16_op(op: SimdOp) -> Simd {
     Simd {
-        element: Element::U16,
+        element: ScalarType::U16,
         op,
     }
 }
@@ -38,11 +37,11 @@ fn u16_op(op: SimdOp) -> Simd {
 #[test]
 fn signed_index_gathers_check_each_width_with_one_unsigned_comparison() {
     let kinds = [
-        BufferKind::new(Element::I32, false),
-        BufferKind::new(Element::I64, false),
+        BufferKind::new(ScalarType::I32, false),
+        BufferKind::new(ScalarType::I64, false),
     ];
     for graph in both(0, &kinds, |b| {
-        for (element, buffer) in [(Element::I32, Buffer(0)), (Element::I64, Buffer(1))] {
+        for (element, buffer) in [(ScalarType::I32, Buffer(0)), (ScalarType::I64, Buffer(1))] {
             let simd = |op| Simd { element, op };
             let ids = b.simd(simd(SimdOp::Iota), &[])?.unwrap();
             b.simd(simd(SimdOp::Gather(buffer)), &[ids])?;
@@ -76,8 +75,8 @@ fn signed_index_gathers_check_each_width_with_one_unsigned_comparison() {
 #[test]
 fn packed_load_and_store_have_an_ordered_short_store_exit() {
     let kinds = [
-        BufferKind::new(Element::U16, false),
-        BufferKind::new(Element::U16, true),
+        BufferKind::new(ScalarType::U16, false),
+        BufferKind::new(ScalarType::U16, true),
     ];
     for graph in both(1, &kinds, |b| {
         let first = b.constant(Constant::from(0usize))?;
@@ -114,7 +113,7 @@ fn packed_load_and_store_have_an_ordered_short_store_exit() {
             |_, _| Ok((graph, None)),
         )
         .unwrap();
-        let lanes = Element::U16.lanes(options().target.vector_bytes());
+        let lanes = ScalarType::U16.lanes(options().target.vector_bytes());
         assert_eq!(
             lanes * 2,
             splice_target::Target::host().unwrap().vector_bytes()
@@ -143,8 +142,8 @@ fn packed_load_and_store_have_an_ordered_short_store_exit() {
 #[test]
 fn scatter_addresses_unsigned_u16_and_stops_at_the_first_active_error() {
     let kinds = [
-        BufferKind::new(Element::U16, false),
-        BufferKind::new(Element::U16, true),
+        BufferKind::new(ScalarType::U16, false),
+        BufferKind::new(ScalarType::U16, true),
     ];
     for graph in both(0, &kinds, |b| {
         let first = b.constant(Constant::from(0usize))?;
@@ -161,7 +160,7 @@ fn scatter_addresses_unsigned_u16_and_stops_at_the_first_active_error() {
             |_, _| Ok((graph, None)),
         )
         .unwrap();
-        let mut indices = vec![0; Element::U16.lanes(options().target.vector_bytes())];
+        let mut indices = vec![0; ScalarType::U16.lanes(options().target.vector_bytes())];
         indices[..4].copy_from_slice(&[32768, 32768, 65535, 1]);
         for n in [65535, 65536] {
             let mut dst = vec![99; n];
@@ -189,7 +188,7 @@ fn scatter_addresses_unsigned_u16_and_stops_at_the_first_active_error() {
 
 #[test]
 fn masked_contiguous_store_never_wraps_an_invalid_offset_to_zero() {
-    let kinds = [BufferKind::new(Element::U16, true)];
+    let kinds = [BufferKind::new(ScalarType::U16, true)];
     for graph in both(1, &kinds, |b| {
         let i = b.simd(u16_op(SimdOp::Iota), &[])?.unwrap();
         let one = b.simd(u16_op(SimdOp::Splat(1)), &[])?.unwrap();
@@ -220,16 +219,16 @@ fn masked_contiguous_store_never_wraps_an_invalid_offset_to_zero() {
 
 #[test]
 fn vectors_and_masks_keep_their_element_type_across_a_join() {
-    let kinds = [BufferKind::new(Element::F64, true)];
+    let kinds = [BufferKind::new(ScalarType::F64, true)];
     for graph in both(1, &kinds, |b| {
         let inst = |op| Simd {
-            element: Element::F64,
+            element: ScalarType::F64,
             op,
         };
         let zero = b.constant(Constant::from(0))?;
         let first = b.constant(Constant::from(0usize))?;
-        let v = b.local(ValueType::Vector(Element::F64))?;
-        let mask = b.local(ValueType::Mask(Element::F64))?;
+        let v = b.local(ValueType::Vector(ScalarType::F64))?;
+        let mask = b.local(ValueType::Mask(ScalarType::F64))?;
         let (left, right, join) = (b.label()?, b.label()?, b.label()?);
         let taken = b.binary(splice_core::hir::Binary::Ne, b.arg(0)?, zero)?;
         b.branch(taken, left, right)?;
@@ -260,7 +259,7 @@ fn vectors_and_masks_keep_their_element_type_across_a_join() {
         )
         .unwrap();
         for (input, expected) in [(1, 1.25), (0, 3.0)] {
-            let mut dst = vec![3.0; Element::F64.lanes(options().target.vector_bytes())];
+            let mut dst = vec![3.0; ScalarType::F64.lanes(options().target.vector_bytes())];
             assert_eq!(
                 kernel.call(&[input], &mut [BufferArg::write::<f64>(&mut dst)]),
                 Ok(0)

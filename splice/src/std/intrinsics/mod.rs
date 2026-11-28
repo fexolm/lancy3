@@ -24,4 +24,4 @@ builtin_marker!(__splice_lane, [simd, lane], $);
 builtin_marker!(__splice_mask, [simd], $);
 pub mod simd;
 
-pub use simd::{Element, Lane, LaneCast, LaneElement, LaneIndex, Mask, Shuffle};
+pub use simd::{Lane, LaneCast, LaneElement, LaneIndex, LaneInteger, Mask, Shuffle};

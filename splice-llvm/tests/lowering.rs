@@ -180,22 +180,22 @@ fn shared_callees_loops_and_unreachable_tails_form_valid_llvm_blocks() {
 fn masked_f64_gather_checks_active_indices_at_full_i64_width() {
     use splice_core::{
         frontend::{self, KernelBuilder},
+        hir::ScalarType,
         hir::{Simd, SimdOp},
-        simd::Element,
     };
     let kinds = [
-        BufferKind::new(Element::I64, false),
-        BufferKind::new(Element::F64, false),
-        BufferKind::new(Element::F64, true),
+        BufferKind::new(ScalarType::I64, false),
+        BufferKind::new(ScalarType::F64, false),
+        BufferKind::new(ScalarType::F64, true),
     ];
     fn stage(b: &mut dyn KernelBuilder) -> splice_core::Result<()> {
         let zero = b.constant(Constant::from(0usize))?;
         let i64op = |op| Simd {
-            element: Element::I64,
+            element: ScalarType::I64,
             op,
         };
         let f64op = |op| Simd {
-            element: Element::F64,
+            element: ScalarType::F64,
             op,
         };
         let idx = b.simd(i64op(SimdOp::Load(Buffer(0))), &[zero])?.unwrap();
@@ -221,7 +221,7 @@ fn masked_f64_gather_checks_active_indices_at_full_i64_width() {
         options(),
     )
     .unwrap();
-    let n = Element::F64.lanes(options().target.vector_bytes());
+    let n = ScalarType::F64.lanes(options().target.vector_bytes());
     for kernel in [
         Llvm::build_with_options(
             Signature::new(&[ScalarType::I32; 0], ScalarType::I32, &kinds),

@@ -172,7 +172,12 @@ impl<B: Backend> Codegen for B {}
 
 /// A Rust type of a kernel scalar and its ABI word: the value's bits in the
 /// low `TYPE.bits()` bits and zero above (`bool` is 0 or 1, a float its IEEE
-/// bit pattern).
+/// bit pattern, a `char` its code point).
+#[diagnostic::on_unimplemented(
+    message = "`{Self}` is not a kernel scalar type",
+    label = "not a kernel scalar",
+    note = "kernel scalars are `bool`, `char`, `i8`, `u8`, `i16`, `u16`, `i32`, `u32`, `i64`, `u64`, `usize`, `f32` and `f64`"
+)]
 pub trait KernelScalar: Copy + Into<Constant> {
     const TYPE: ScalarType;
     fn to_word(self) -> u64 {
@@ -194,6 +199,14 @@ macro_rules! kernel_scalar {
 }
 kernel_scalar! {
     bool => Bool, |word| word & 1 != 0;
+    // Kernels produce only valid `char`s: casts from `u8` and constants,
+    // which validation checks, and parameters and `char` slices, which the
+    // call checks.
+    char => Char, |word| char::from_u32(word as u32).expect("a kernel word of type char holds a char");
+    i8 => I8, |word| word as i8;
+    u8 => U8, |word| word as u8;
+    i16 => I16, |word| word as i16;
+    u16 => U16, |word| word as u16;
     i32 => I32, |word| word as i32;
     u32 => U32, |word| word as u32;
     i64 => I64, |word| word as i64;
@@ -217,11 +230,10 @@ pub(crate) fn validate_scalars(
             actual: args.len(),
         });
     }
-    match params
-        .iter()
-        .zip(args)
-        .position(|(&ty, &word)| Constant::new(ty, word).bits() != word)
-    {
+    match params.iter().zip(args).position(|(&ty, &word)| {
+        Constant::new(ty, word).bits() != word
+            || (ty == ScalarType::Char && char::from_u32(word as u32).is_none())
+    }) {
         Some(index) => Err(SignatureError::Word {
             index,
             ty: params[index],

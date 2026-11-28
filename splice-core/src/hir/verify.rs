@@ -24,7 +24,6 @@ mod tests {
     };
     use super::*;
     use crate::debug::{Location, Point, Value, Variable};
-    use crate::simd::Element;
     use std::sync::Arc;
 
     const R0: Reg = Reg(0);
@@ -180,7 +179,7 @@ mod tests {
             error(1, vec![], vec![], vec![Instr::Return(R1)]),
             "invalid register at instruction 0"
         );
-        let vector = ValueType::Vector(Element::I32);
+        let vector = ValueType::Vector(ScalarType::I32);
         assert_eq!(
             error(
                 1,
@@ -203,7 +202,7 @@ mod tests {
                     Instr::CallIntrinsic {
                         dst: Some(R1),
                         intrinsic: Intrinsic::Simd(Simd {
-                            element: Element::I32,
+                            element: ScalarType::I32,
                             op: SimdOp::ElementWidth,
                         }),
                         args: vec![],
@@ -342,11 +341,12 @@ mod tests {
         assert_eq!(
             typed_error(
                 index(),
-                vec![BufferKind::new(Element::U16, true)],
+                vec![BufferKind::new(ScalarType::U16, true)],
                 vec![I32],
                 vec![load.clone(), Instr::Return(R1)]
             ),
-            "a scalar register cannot hold a u16 element at instruction 0"
+            "result register type mismatch at instruction 0",
+            "a u16 element loads into a u16 register"
         );
         assert_eq!(
             error(

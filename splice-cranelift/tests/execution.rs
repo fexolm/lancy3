@@ -116,7 +116,7 @@ fn staged_and_portable_calls_keep_writes_up_to_the_first_fault() {
             ),
             Err(splice_core::SignatureError::Element {
                 buffer: 0,
-                expected: splice_core::simd::Element::I32
+                expected: splice_core::hir::ScalarType::I32
             }
             .into())
         );
@@ -247,8 +247,8 @@ fn shared_callees_stack_arguments_and_backedges_outlive_the_ir() {
 fn masked_f64_memory_keeps_global_lane_order_across_chunks() {
     use splice_core::{
         BufferKind,
+        hir::ScalarType::{F64, I64},
         hir::{Buffer, Simd, SimdOp},
-        simd::Element::{F64, I64},
     };
 
     let mut f = FunctionBuilder::new(

@@ -12,8 +12,8 @@ fn wide_result() -> i128 {
 }
 
 #[kernel]
-fn unsupported_vector() -> Lane<u8> {
-    Lane::splat(0)
+fn unsupported_vector() -> Lane<char> {
+    Lane::splat('a')
 }
 
 #[kernel]
@@ -100,3 +100,13 @@ fn missing_aggregate_field(x: i32) -> i32 {
 }
 
 fn main() {}
+
+#[kernel]
+fn bool_slice(flags: &[bool]) -> i32 {
+    flags.len() as i32
+}
+
+#[kernel]
+fn pointer_sized(x: isize) -> isize {
+    x
+}

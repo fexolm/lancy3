@@ -25,6 +25,8 @@ pub(super) enum Param {
     Count,
     Offset,
     Int,
+    /// A value of the lane type.
+    Element,
     Vector,
     Mask,
     Indices,
@@ -37,6 +39,8 @@ pub(super) enum Output {
     Converted,
     Bool,
     Int,
+    /// A value of the lane type.
+    Element,
     Length,
     Unit,
 }
@@ -104,6 +108,12 @@ registry! {
     },
     (Owner::Lane, "simd_min") => rule!((v; rhs: Vector) -> Vector, __SpliceOp::Min, [v, rhs]),
     (Owner::Lane, "simd_max") => rule!((v; rhs: Vector) -> Vector, __SpliceOp::Max, [v, rhs]),
+    (Owner::Lane, "saturating_add") => {
+        rule!((v; rhs: Vector) -> Vector, __SpliceOp::SaturatingAdd, [v, rhs])
+    },
+    (Owner::Lane, "saturating_sub") => {
+        rule!((v; rhs: Vector) -> Vector, __SpliceOp::SaturatingSub, [v, rhs])
+    },
     (Owner::Lane, "simd_eq") => rule!((v; rhs: Vector) -> Mask, __SpliceOp::Eq, [v, rhs]),
     (Owner::Lane, "simd_ne") => rule!((v; rhs: Vector) -> Mask, __SpliceOp::Ne, [v, rhs]),
     (Owner::Lane, "simd_lt") => rule!((v; rhs: Vector) -> Mask, __SpliceOp::Lt, [v, rhs]),
@@ -146,9 +156,9 @@ registry! {
     },
     (Owner::Lane, "not") => rule!((v;) -> Vector, __SpliceOp::Not, [v]),
     (Owner::Lane, "prefix_sum") => rule!((v;) -> Vector, __SpliceOp::PrefixSum, [v]),
-    (Owner::Lane, "reduce_sum") => rule!((v;) -> Int, __SpliceOp::ReduceSum, [v]),
+    (Owner::Lane, "reduce_sum") => rule!((v;) -> Element, __SpliceOp::ReduceSum, [v]),
     (Owner::Lane, "sqrt") => rule!((v;) -> Vector, __SpliceOp::Sqrt, [v]),
-    (Owner::Lane, "last") => rule!((v;) -> Int, __SpliceOp::Last, [v]),
+    (Owner::Lane, "last") => rule!((v;) -> Element, __SpliceOp::Last, [v]),
     (Owner::Lane, "shr") => rule!((v; count: Count) -> Vector, __SpliceOp::Shr(count), [v]),
     (Owner::Lane, "rotate_left") => {
         rule!((v; count: Count) -> Vector, __SpliceOp::RotateLeft(count), [v])
@@ -166,10 +176,10 @@ registry! {
         rule!((v; indices: Vector) -> Vector, __SpliceOp::Swizzle, [v, indices])
     },
     (Owner::Lane, "extract_wrapping") => {
-        rule!((v; index: Int) -> Int, __SpliceOp::ExtractWrapping, [v, index])
+        rule!((v; index: Int) -> Element, __SpliceOp::ExtractWrapping, [v, index])
     },
     (Owner::Lane, "replace_wrapping") => {
-        rule!((v; index: Int, value: Int) -> Vector, __SpliceOp::ReplaceWrapping, [v, index, value])
+        rule!((v; index: Int, value: Element) -> Vector, __SpliceOp::ReplaceWrapping, [v, index, value])
     },
     (Owner::Lane, "cast") => rule!((v;) -> Converted, __SpliceOp::Cast(__splice_to), [v]),
     (Owner::Lane, "narrow") => {

@@ -18,7 +18,7 @@ use std::ops::{
 };
 
 use core::marker::PhantomData;
-pub use splice_core::simd::{Element, LaneElement, LaneIndex, Shuffle};
+pub use splice_core::simd::{LaneElement, LaneIndex, LaneInteger, Shuffle};
 
 // The companion marker follows use aliases in the macro namespace.
 #[doc(hidden)]
@@ -67,8 +67,6 @@ impl<T: LaneElement> Mask<T> {
         /// `yes` in the active lanes, `no` in the others.
         pub fn select<U: LaneElement<Index = T::Index>>(self, yes: Lane<U>, no: Lane<U>) -> Lane<U>
     }
-}
-impl Mask<i32> {
     intrinsic! {
         /// Number of active lanes.
         pub fn count(self) -> i32
@@ -113,7 +111,7 @@ impl<T: LaneElement> Lane<T> {
         pub fn first_n(count: usize) -> Mask<T>
     }
     intrinsic! {
-        /// `v` in every lane: a known value, or a runtime `i32`.
+        /// `v` in every lane: a known value or a runtime scalar of the lane type.
         pub fn splat(v: T) -> Self
     }
     intrinsic! {
@@ -224,6 +222,41 @@ impl<T: LaneElement> Lane<T> {
         where
             T: LaneCast<U>
     }
+    intrinsic! {
+        /// Lane `index` modulo `element_width()`.
+        pub fn extract_wrapping(self, index: i32) -> T
+    }
+    intrinsic! {
+        /// `self` with lane `index` modulo `element_width()` set to `value`.
+        pub fn replace_wrapping(self, index: i32, value: T) -> Self
+    }
+    intrinsic! {
+        /// The last lane.
+        pub fn last(self) -> T
+    }
+}
+
+impl<T: LaneInteger> Lane<T> {
+    intrinsic! {
+        /// The wrapping sum of the lanes.
+        pub fn reduce_sum(self) -> T
+    }
+    intrinsic! {
+        /// The smaller of each pair of lanes.
+        pub fn simd_min(self, rhs: Self) -> Self
+    }
+    intrinsic! {
+        /// The larger of each pair of lanes.
+        pub fn simd_max(self, rhs: Self) -> Self
+    }
+    intrinsic! {
+        /// Add each pair of lanes, clamping to the lane type's range.
+        pub fn saturating_add(self, rhs: Self) -> Self
+    }
+    intrinsic! {
+        /// Subtract each pair of lanes, clamping to the lane type's range.
+        pub fn saturating_sub(self, rhs: Self) -> Self
+    }
 }
 
 impl Lane<u32> {
@@ -231,28 +264,12 @@ impl Lane<u32> {
         /// Rotate each lane left by a known count modulo 32.
         pub fn rotate_left(self, count: u32) -> Self
     }
-    intrinsic! {
-        pub fn simd_min(self, rhs: Self) -> Self
-    }
-    intrinsic! {
-        pub fn simd_max(self, rhs: Self) -> Self
-    }
 }
 
 impl Lane<i32> {
     intrinsic! {
-        /// The wrapping sum of the lanes.
-        pub fn reduce_sum(self) -> i32
-    }
-    intrinsic! {
         /// Rotate each lane's bits left by a known count modulo 32.
         pub fn rotate_left(self, count: u32) -> Self
-    }
-    intrinsic! {
-        pub fn simd_min(self, rhs: Self) -> Self
-    }
-    intrinsic! {
-        pub fn simd_max(self, rhs: Self) -> Self
     }
     intrinsic! {
         /// Elements from `offset` until `src[offset..]` is vector-aligned.
@@ -290,18 +307,6 @@ impl Lane<i32> {
     intrinsic! {
         /// Inclusive wrapping prefix sums of the lanes.
         pub fn prefix_sum(self) -> Self
-    }
-    intrinsic! {
-        /// Lane `index` modulo `element_width()`.
-        pub fn extract_wrapping(self, index: i32) -> i32
-    }
-    intrinsic! {
-        /// `self` with lane `index` modulo `element_width()` set to `value`.
-        pub fn replace_wrapping(self, index: i32, value: i32) -> Self
-    }
-    intrinsic! {
-        /// The last lane.
-        pub fn last(self) -> i32
     }
 }
 

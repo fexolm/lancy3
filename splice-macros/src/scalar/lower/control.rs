@@ -611,6 +611,10 @@ impl Lower<'_> {
                         self.constant(emit!({let __splice_value: #ty = #l; __splice_value}))
                     }
                     (Lit::Bool(_), Scalar::Bool | Scalar::Inferred) => self.constant(emit!(#l)),
+                    (
+                        Lit::Char(_),
+                        Scalar::Number(crate::kast::types::Primitive::Char) | Scalar::Inferred,
+                    ) => self.constant(emit!(#l)),
                     _ => return err(l, "pattern type differs from match subject"),
                 };
                 Ok(self.bin("Eq", emit!(__splice_subject), lit))

@@ -203,12 +203,7 @@ impl<'a> Validating<'a> {
     /// The type of the elements of `buffer`, accessed one at a time.
     fn element(&self, buffer: Buffer, write: bool) -> Result<ScalarType> {
         let kind = self.buffer(buffer)?;
-        let ty = ScalarType::of_element(kind.element()).ok_or_else(|| {
-            self.error(format!(
-                "a scalar register cannot hold a {} element",
-                kind.element().name()
-            ))
-        })?;
+        let ty = kind.element();
         if write && !kind.writable() {
             return Err(self.error("store to read-only buffer"));
         }
@@ -372,6 +367,14 @@ impl KernelBuilder for Validating<'_> {
         self.types.get(r.0 as usize).copied()
     }
     fn local(&mut self, ty: ValueType) -> Result<Reg> {
+        if let ValueType::Vector(e) | ValueType::Mask(e) = ty
+            && !ty.is_supported()
+        {
+            return Err(BuildError::unsupported(format!(
+                "SIMD lanes of {} are not supported",
+                e.name()
+            )));
+        }
         let r = self.inner.local(ty)?;
         Ok(self.allocated(r, ty))
     }
@@ -389,6 +392,11 @@ impl KernelBuilder for Validating<'_> {
         Ok(dst)
     }
     fn constant(&mut self, value: Constant) -> Result<Reg> {
+        // A kernel's `char`s reach `&mut [char]` and the result word that
+        // `KernelScalar::from_word` decodes: each must be a Unicode scalar value.
+        if value.ty() == ScalarType::Char && char::from_u32(value.bits() as u32).is_none() {
+            return Err(self.error(format!("{:#x} is not a char", value.bits())));
+        }
         let r = self.inner.constant(value)?;
         Ok(self.value(&[], r, ValueType::Scalar(value.ty())))
     }

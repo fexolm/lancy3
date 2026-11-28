@@ -1,4 +1,4 @@
-//! Integer intrinsics on each backend, staging path and build mode.
+//! Integer intrinsics (8 to 64 bits) on each backend, staging path and build mode.
 use splice::hir::Instr;
 use splice::hir::{Intrinsic, MathOp, ScalarType};
 use splice::{BuildOptions, Codegen, Executable, Mode, kernel};
@@ -18,6 +18,10 @@ macro_rules! math_kernels {
     )*};
 }
 math_kernels! {
+    math_i8: i8, u8;
+    math_u8: u8, u8;
+    math_i16: i16, u16;
+    math_u16: u16, u16;
     math_i32: i32, u32;
     math_u32: u32, u32;
     math_i64: i64, u64;
@@ -60,6 +64,10 @@ fn math_intrinsics_match_rust_on_every_backend_path_and_mode() {
                 }
             };
         }
+        run!(math_i8, [0, 1, -1, 0x30, i8::MIN, i8::MAX]);
+        run!(math_u8, [0, 1, u8::MAX, 0x81, 12]);
+        run!(math_i16, [0, 1, -1, 0x0f00, i16::MIN, i16::MAX]);
+        run!(math_u16, [0, 1, u16::MAX, 0x8001, 12]);
         run!(math_i32, [0, 1, -1, 0x00f0_0000, i32::MIN, i32::MAX]);
         run!(math_u32, [0, 1, u32::MAX, 0x8000_0001, 12]);
         run!(math_i64, [0, 1, -1, 1 << 40, i64::MIN, i64::MAX]);
