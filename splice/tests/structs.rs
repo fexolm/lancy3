@@ -84,6 +84,14 @@ fn swap_pairs(xs: &mut [Particle], out: &mut [Point]) -> i32 {
         let p = xs[i % n.max(1)].pos;
         out[i] = Point { x: p.y, y: 1.5 };
     }
+    // A struct literal local, with a known field, stored whole.
+    let corner = Point {
+        x: 0.5,
+        y: n as f32,
+    };
+    if !out.is_empty() {
+        out[0] = corner;
+    }
     if n > 0 {
         xs[0] = Particle {
             alive: true,
@@ -185,6 +193,14 @@ fn reposition(mut p: Particle, xs: &mut [Particle], to: &Point) -> f64 {
     p.mass + q.x as f64
 }
 
+/// An unsuffixed literal field of a struct literal has the field's type
+/// (`f32` here, not `f64`), in arithmetic as in a store.
+#[kernel]
+fn literal_field(a: f32) -> f32 {
+    let p = Point { x: 0.5, y: a };
+    p.x * p.y + 0.25
+}
+
 macro_rules! builds {
     ($kernel:ident, $b:ident) => {{
         let mut codes = Vec::new();
@@ -223,6 +239,12 @@ fn check<B: Codegen<Output: Executable>>() {
         for p in points {
             assert_eq!(code.call(norm1::CallArgs { p }), Ok(norm1(p)));
         }
+    }
+    for code in builds!(literal_field, B) {
+        assert_eq!(
+            code.call(literal_field::CallArgs { a: 3.0 }),
+            Ok(literal_field(3.0))
+        );
     }
     for code in builds!(by_reference, B) {
         for p in &points {

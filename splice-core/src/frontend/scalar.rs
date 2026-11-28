@@ -164,6 +164,13 @@ pub fn aggregate<T, const N: usize>(
     Ok(fields)
 }
 
+/// The constant `value` of an aggregate field whose type `probe` names:
+/// the field takes the probe's argument, so rustc types an unsuffixed
+/// literal `value` as the field. `probe` never runs.
+pub fn field_constant<T: ScalarConstant, S>(_probe: impl FnOnce(T) -> S, value: T) -> Constant {
+    value.constant()
+}
+
 /// An aggregate local of a kernel: the IR cannot run its destructor, so a
 /// type with drop glue does not compile.
 pub fn dropless_aggregate<T>(_: fn() -> T) {
