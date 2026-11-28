@@ -221,6 +221,10 @@ impl<'f, 'b> Replay<'f, 'b> {
                     let (a, z) = (self.reg(a)?, self.reg(z)?);
                     self.define(dst, |b| b.binary(op, a, z))?;
                 }
+                &Instr::Offset { dst, ptr, offset } => {
+                    let (ptr, offset) = (self.reg(ptr)?, self.reg(offset)?);
+                    self.define(dst, |b| b.offset(ptr, offset))?;
+                }
                 &Instr::Load { dst, slice, index } => {
                     let (slice, index) = (self.slice(slice)?, self.reg(index)?);
                     self.define(dst, |b| b.load(slice, index))?;

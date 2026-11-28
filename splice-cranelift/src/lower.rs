@@ -264,6 +264,16 @@ pub(super) fn emit(
                 let value = binary(&mut b, op, scalar(f, left), lhs, rhs);
                 b.def_var(var(dst), value);
             }
+            Instr::Offset { dst, ptr, offset } => {
+                let ValueType::Ptr(kind) = f.reg_type(ptr) else {
+                    unreachable!("verified slice pointer");
+                };
+                let base = b.use_var(var(ptr));
+                let offset = b.use_var(var(offset));
+                let bytes = b.ins().imul_imm(offset, kind.element().bytes() as i64);
+                let value = b.ins().iadd(base, bytes);
+                b.def_var(var(dst), value);
+            }
             Instr::Load { dst, slice, index } => {
                 let index = b.use_var(var(index));
                 let ty = scalar_type(scalar(f, dst));

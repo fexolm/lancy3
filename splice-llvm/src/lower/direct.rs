@@ -345,6 +345,12 @@ impl KernelBuilder for Direct<'_, '_> {
     fn cast(&mut self, src: Reg, to: ScalarType) -> splice_core::Result<Reg> {
         self.result(to, |ir, d| ir.cast(d, src, to))
     }
+    fn offset(&mut self, ptr: Reg, offset: Reg) -> splice_core::Result<Reg> {
+        let ty = self.native.reg_type(ptr).expect("validated slice pointer");
+        let dst = self.local(ty)?;
+        self.emit(|ir| ir.advance(dst, ptr, offset))?;
+        Ok(dst)
+    }
     fn load(&mut self, b: Slice, index: Reg) -> splice_core::Result<Reg> {
         let Some(ValueType::Ptr(kind)) = self.native.reg_type(b.ptr) else {
             unreachable!("validated slice");

@@ -900,6 +900,23 @@ impl KernelBuilder for Builder {
         }
         Ok(dst)
     }
+    fn offset(&mut self, ptr: Reg, offset: Reg) -> splice_core::Result<Reg> {
+        let ty = self.types[ptr.0 as usize];
+        let ValueType::Ptr(kind) = ty else {
+            unreachable!("validated slice pointer")
+        };
+        let dst = self.local(ty)?;
+        if self.reachable() {
+            // The frontend checked the offset against a length, which fits `i32`.
+            let (base, offset) = (self.read(ptr), self.read(offset));
+            let offset = self.index32(offset);
+            self.define(
+                dst,
+                Op::PtrOffset(base, offset, simd::stride(kind.element())),
+            );
+        }
+        Ok(dst)
+    }
     fn load(&mut self, slice: Slice, index: Reg) -> splice_core::Result<Reg> {
         let ty = self.element(slice);
         let dst = self.local(ValueType::Scalar(ty))?;

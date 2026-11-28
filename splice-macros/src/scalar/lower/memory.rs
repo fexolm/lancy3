@@ -113,6 +113,35 @@ impl Lower<'_> {
                 )
             });
         }
+        if matches!(receiver.stage, Stage::Buffer(_)) {
+            let name = m.method.to_string();
+            if matches!(
+                name.as_str(),
+                "first"
+                    | "last"
+                    | "get"
+                    | "first_mut"
+                    | "last_mut"
+                    | "get_mut"
+                    | "split_first"
+                    | "split_last"
+                    | "split_first_mut"
+                    | "split_last_mut"
+            ) {
+                return err(
+                    &m.method,
+                    &format!("`{name}` returns an Option, which kernels do not support yet"),
+                );
+            }
+            if name == "split_at" || name == "split_at_mut" {
+                return err(
+                    m,
+                    &format!(
+                        "bind the halves of `{name}` with `let (head, tail) = slice.{name}(mid);`"
+                    ),
+                );
+            }
+        }
         let kind = match receiver.stage {
             Stage::Reg(t) | Stage::Word(t)
                 if t.is_number()
@@ -301,8 +330,13 @@ impl Lower<'_> {
             Expr::Unary(x) if matches!(x.op, UnOp::Deref(_)) => &*x.expr,
             expr => expr,
         };
-        let value = self.expr(target)?;
         let writable = reference.mutability.is_some();
+        if let Expr::Index(index) = target
+            && let Expr::Range(range) = &*index.index
+        {
+            return self.subslice(reference, index, range, writable);
+        }
+        let value = self.expr(target)?;
         match value.stage {
             Stage::Buffer(actual) if !writable || actual.write => Ok(Value::new(
                 Stage::Buffer(super::BufferType {
@@ -313,6 +347,49 @@ impl Lower<'_> {
             )),
             _ => err(reference, "only a runtime slice can be reborrowed here"),
         }
+    }
+
+    /// `&xs[range]` or `&mut xs[range]`: a subslice, which traps as Rust's
+    /// slice index panics unless the range lies in the slice.
+    fn subslice(
+        &self,
+        reference: &ExprReference,
+        index: &ExprIndex,
+        range: &syn::ExprRange,
+        writable: bool,
+    ) -> Result<Value> {
+        let slice = self.expr(&index.expr)?;
+        let Stage::Buffer(actual) = slice.stage else {
+            return err(&index.expr, "only a runtime slice can be sliced here");
+        };
+        if writable && !actual.write {
+            return err(reference, "a shared slice cannot be reborrowed as mutable");
+        }
+        let ty = Stage::Buffer(super::BufferType {
+            write: writable,
+            ..actual
+        });
+        let bound = |e: &Expr| -> Result<TokenStream> {
+            let value = self.expr(e)?;
+            self.reg(value, Scalar::Index, e)
+        };
+        let start = range.start.as_deref().map(bound).transpose()?;
+        let end = range.end.as_deref().map(bound).transpose()?;
+        if start.is_none() && end.is_none() {
+            return Ok(Value::new(ty, slice.code));
+        }
+        let start = start.unwrap_or_else(|| self.constant(emit!(0usize)));
+        let inclusive = matches!(range.limits, syn::RangeLimits::Closed(_));
+        let end = end.unwrap_or_else(|| emit!(__splice_slice.len));
+        Ok(Value::new(
+            ty,
+            emit!({
+                let __splice_slice = #slice;
+                let __splice_start = #start;
+                let __splice_end = #end;
+                __splice_builder.subslice(__splice_slice, __splice_start, __splice_end, #inclusive)?
+            }),
+        ))
     }
 
     /// A runtime slice element: whether the slice is writable, the slice,
