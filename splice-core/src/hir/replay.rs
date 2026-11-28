@@ -270,6 +270,25 @@ impl<'f, 'b> Replay<'f, 'b> {
                     let (slice, index) = (self.slice(slice)?, self.reg(index)?);
                     self.define(dst, |b| b.load(slice, index))?;
                 }
+                &Instr::LoadField {
+                    dst,
+                    slice,
+                    index,
+                    field,
+                } => {
+                    let (slice, index) = (self.slice(slice)?, self.reg(index)?);
+                    self.define(dst, |b| b.load_field(slice, index, field as usize))?;
+                }
+                &Instr::StoreField {
+                    slice,
+                    index,
+                    field,
+                    value,
+                } => {
+                    let slice = self.slice(slice)?;
+                    let (index, value) = (self.reg(index)?, self.reg(value)?);
+                    self.b.store_field(slice, index, field as usize, value)?;
+                }
                 &Instr::Store {
                     slice,
                     index,

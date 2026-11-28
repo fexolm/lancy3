@@ -446,7 +446,32 @@ impl Builder {
                 let half = self.value(Op::PtrOffset(base, offset, hir::Scale::Eight));
                 self.value(Op::PtrOffset(half, offset, hir::Scale::Eight))
             }
+            Element::Struct(_) => {
+                // The interface bounds the bytes of a struct slice by
+                // `i32::MAX` (`with_longest_slice`), so the byte offset of an
+                // element below the checked length fits `i32`.
+                let size = i32::try_from(element.bytes()).expect("a struct slice fits i32");
+                let size = self.const32(size);
+                let bytes = self.value(Op::Bin(hir::Binary::Mul, offset, size));
+                self.value(Op::PtrOffset(base, bytes, hir::Scale::One))
+            }
         }
+    }
+    /// The address of scalar `field` of struct element `index` (an `i32`
+    /// index), after its bounds check, and the field's type.
+    fn field_address(&mut self, slice: Slice, index: Value, field: usize) -> (Value, ScalarType) {
+        let ValueType::Ptr(kind) = self.types[slice.ptr.0 as usize] else {
+            unreachable!("validated slice pointer")
+        };
+        let (offset, ty) = kind.element().field(field).expect("a validated field");
+        let (base, len) = self.slice(slice);
+        self.effect(Op::BoundsCheck(index, len));
+        let element = self.advance(base, index, kind.element());
+        let offset = self.const32(i32::try_from(offset).expect("a field within its struct"));
+        (
+            self.value(Op::PtrOffset(element, offset, hir::Scale::One)),
+            ty,
+        )
     }
     /// The minimum of two `Index` values, with its `i32` form.
     fn index_min(&mut self, a: Value, b: Value) -> Value {
@@ -1093,6 +1118,47 @@ impl KernelBuilder for Builder {
             self.define_load(dst, slice, index);
         }
         Ok(dst)
+    }
+    fn load_field(&mut self, slice: Slice, index: Reg, field: usize) -> splice_core::Result<Reg> {
+        let ValueType::Ptr(kind) = self.types[slice.ptr.0 as usize] else {
+            unreachable!("validated slice pointer")
+        };
+        let (_, ty) = kind.element().field(field).expect("a validated field");
+        let dst = self.result(ValueType::Scalar(ty))?;
+        if self.reachable() {
+            let index = self.read(index);
+            let index = self.index32(index);
+            let (address, ty) = self.field_address(slice, index, field);
+            let value = if ty == ScalarType::Bool {
+                // A `bool` is one byte in memory and an `i32` register.
+                let byte = self.value(Op::Load(hir::Type::U8, address));
+                self.value(Op::Cast(hir::Type::I32, byte))
+            } else {
+                self.value(Op::Load(scalar_type(ty), address))
+            };
+            self.bind(dst, value);
+        }
+        Ok(dst)
+    }
+    fn store_field(
+        &mut self,
+        slice: Slice,
+        index: Reg,
+        field: usize,
+        value: Reg,
+    ) -> splice_core::Result<()> {
+        if self.reachable() {
+            let (index, value) = (self.read(index), self.read(value));
+            let index = self.index32(index);
+            let (address, ty) = self.field_address(slice, index, field);
+            let value = if ty == ScalarType::Bool {
+                self.value(Op::Cast(hir::Type::U8, value))
+            } else {
+                value
+            };
+            self.effect(Op::Store(address, value));
+        }
+        Ok(())
     }
     fn store(&mut self, slice: Slice, index: Reg, value: Reg) -> splice_core::Result<()> {
         if self.reachable() {

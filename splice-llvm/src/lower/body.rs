@@ -644,7 +644,81 @@ impl<'a, 'ctx> Body<'a, 'ctx> {
                     .struct_type(&[ptr.into(), len.into()], false)
                     .into()
             }
+            // Bytes: the frontend addresses one scalar field at a time.
+            Element::Struct(ty) => self.ctx.i8_type().array_type(ty.size as u32).into(),
         }
+    }
+    /// The address of scalar `field` of struct element `index` of `s`,
+    /// after a bounds check, and the field's type.
+    fn field(
+        &mut self,
+        s: SliceValue,
+        index: Reg,
+        field: usize,
+    ) -> Built<(PointerValue<'ctx>, ScalarType)> {
+        let ValueType::Ptr(kind) = self.registers[s.ptr.0 as usize].0 else {
+            unreachable!("validated slice pointer");
+        };
+        let (offset, ty) = kind.element().field(field).expect("a validated field");
+        let element = self.element_type(kind.element());
+        let (data, len) = (self.value(s.ptr)?.into_pointer_value(), self.load(s.len)?);
+        let index = self.load(index)?;
+        let invalid = self
+            .builder
+            .build_int_compare(IntPredicate::UGE, index, len, "")?;
+        self.exit_if(invalid, Failure::Trap(Trap::Bounds))?;
+        let offset = self.ctx.i64_type().const_int(offset as u64, false);
+        // SAFETY: only the edge with `index < len` reaches the address, the
+        // verifier guarantees that `len` is the length at `data`, and
+        // checked the field to lie within its element.
+        let at = unsafe {
+            let at = self
+                .builder
+                .build_in_bounds_gep(element, data, &[index], "")?;
+            self.builder
+                .build_in_bounds_gep(self.ctx.i8_type(), at, &[offset], "")?
+        };
+        Ok((at, ty))
+    }
+    pub(super) fn read_field(
+        &mut self,
+        dst: Reg,
+        s: SliceValue,
+        index: Reg,
+        field: usize,
+    ) -> Built<()> {
+        let (at, ty) = self.field(s, index, field)?;
+        let value = if ty == ScalarType::Bool {
+            // A `bool` is a byte that holds 0 or 1; an `i1` in memory would
+            // leave the bits above it unspecified.
+            let byte = self.builder.build_load(self.ctx.i8_type(), at, "")?;
+            self.builder
+                .build_int_truncate(byte.into_int_value(), self.ctx.bool_type(), "")?
+                .into()
+        } else {
+            self.builder
+                .build_load(simd::scalar_type(self.ctx, ty), at, "")?
+        };
+        self.store(dst, value)
+    }
+    pub(super) fn write_field(
+        &mut self,
+        s: SliceValue,
+        index: Reg,
+        field: usize,
+        value: Reg,
+    ) -> Built<()> {
+        let (at, ty) = self.field(s, index, field)?;
+        let value = self.value(value)?;
+        if ty == ScalarType::Bool {
+            let byte =
+                self.builder
+                    .build_int_z_extend(value.into_int_value(), self.ctx.i8_type(), "")?;
+            self.builder.build_store(at, byte)?;
+        } else {
+            self.builder.build_store(at, value)?;
+        }
+        Ok(())
     }
     /// `dst = s[index]` of a slice of slices, after a bounds check.
     pub(super) fn load_slice(&mut self, dst: SliceValue, s: SliceValue, index: Reg) -> Built<()> {

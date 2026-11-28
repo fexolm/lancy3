@@ -139,6 +139,22 @@ pub trait KernelBuilder {
     ///
     /// [`Element::Slice`]: crate::hir::Element::Slice
     fn load_slice(&mut self, slice: Slice, index: Reg) -> crate::Result<Slice>;
+    /// Scalar `field` of struct element `index` of `slice` (an
+    /// [`Element::Struct`], see [`Element::field`]); traps unless `index`
+    /// is below its length.
+    ///
+    /// [`Element::Struct`]: crate::hir::Element::Struct
+    /// [`Element::field`]: crate::hir::Element::field
+    fn load_field(&mut self, slice: Slice, index: Reg, field: usize) -> crate::Result<Reg>;
+    /// Write scalar `field` of struct element `index` of `slice`; traps
+    /// unless `index` is below its length.
+    fn store_field(
+        &mut self,
+        slice: Slice,
+        index: Reg,
+        field: usize,
+        value: Reg,
+    ) -> crate::Result<()>;
     /// Element `index` of `slice`; traps unless `index` is below its length.
     fn load(&mut self, slice: Slice, index: Reg) -> crate::Result<Reg>;
     /// Write element `index` of `slice`; traps unless `index` is below its length.

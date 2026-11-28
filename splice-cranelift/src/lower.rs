@@ -310,6 +310,27 @@ pub(super) fn emit(
                 let value = b.ins().load(ty, MemFlags::new(), addr, 0);
                 b.def_var(var(dst), value);
             }
+            Instr::LoadField {
+                dst,
+                slice,
+                index,
+                field,
+            } => {
+                let addr = field_address(f, &mut b, &var, slice, index, field);
+                let ty = scalar_type(scalar(f, dst));
+                let value = b.ins().load(ty, MemFlags::new(), addr, 0);
+                b.def_var(var(dst), value);
+            }
+            Instr::StoreField {
+                slice,
+                index,
+                field,
+                value,
+            } => {
+                let addr = field_address(f, &mut b, &var, slice, index, field);
+                let value = b.use_var(var(value));
+                b.ins().store(MemFlags::new(), value, addr, 0);
+            }
             Instr::Store {
                 slice,
                 index,
@@ -471,6 +492,30 @@ fn element(b: &mut FunctionBuilder, [data, len]: [Value; 2], index: Value, bytes
     return_if(b, invalid, bounds);
     let bytes = b.ins().imul_imm(index, bytes as i64);
     b.ins().iadd(data, bytes)
+}
+
+/// The address of scalar `field` of struct element `index` of `slice`,
+/// after its bounds check. The verifier checked the field to lie within
+/// its element; a `bool` field is a byte, as a `bool` register is.
+fn field_address(
+    f: &Function,
+    b: &mut FunctionBuilder,
+    var: &impl Fn(Reg) -> cranelift_frontend::Variable,
+    slice: splice_core::hir::Slice,
+    index: Reg,
+    field: u32,
+) -> Value {
+    let ValueType::Ptr(kind) = f.reg_type(slice.ptr) else {
+        unreachable!("verified slice pointer");
+    };
+    let (offset, _) = kind
+        .element()
+        .field(field as usize)
+        .expect("a verified field");
+    let index = b.use_var(var(index));
+    let pair = [b.use_var(var(slice.ptr)), b.use_var(var(slice.len))];
+    let addr = element(b, pair, index, kind.element().bytes());
+    b.ins().iadd_imm(addr, offset as i64)
 }
 
 fn constant(b: &mut FunctionBuilder, c: Constant) -> Value {
