@@ -288,6 +288,9 @@ impl Lower<'_> {
                 }
                 return self.unroll(f);
             };
+            if let Some(inner) = ty.inner() {
+                return self.slices_loop(f, slice, inner);
+            }
             // `str::bytes` yields bytes; a slice yields references, which
             // `&x` or a plain name (dereferenced as `*x`) reads by value.
             let binding = match &*f.pat {
@@ -427,6 +430,34 @@ impl Lower<'_> {
 
     /// A runtime slice a `for` loop reads element by element, and the
     /// element's register.
+    /// `for s in xs` (or `for &s in xs`) over a `&[&[T]]` or `&[&str]`:
+    /// `s` is each element, a slice whose halves are read together.
+    fn slices_loop(
+        &self,
+        f: &syn::ExprForLoop,
+        slice: TokenStream,
+        inner: super::BufferType,
+    ) -> Result<Value> {
+        let binding = match &*f.pat {
+            Pat::Reference(pattern) => crate::scalar::named(&pattern.pat)?,
+            pat => crate::scalar::named(pat)?,
+        };
+        if binding.mutability.is_some() || binding.by_ref.is_some() {
+            return err(binding, "expected an immutable loop variable");
+        }
+        let id = &binding.ident;
+        let index = quote::format_ident!(
+            "__splice_element_index",
+            span = proc_macro2::Span::mixed_site()
+        );
+        let (start, one) = (self.constant(emit!(0usize)), self.constant(emit!(1usize)));
+        let setup = emit!(let buffer = #slice;
+            let (__splice_start, __splice_one) = (#start, #one);
+            let __splice_limit = buffer.len;);
+        let read = emit!(let #id = __splice_builder.load_slice(buffer, #index)?;);
+        self.counted_loop(f, binding, Binding::Buffer(inner), &index, setup, read)
+    }
+
     pub(super) fn iterated_buffer(
         &self,
         iterable: &Expr,
@@ -457,7 +488,13 @@ impl Lower<'_> {
         let Some(Binding::Buffer(ty)) = self.binding(path) else {
             return Ok(None);
         };
-        let Some(element) = ty.elem.scalar().filter(|_| ty.utf8 == bytes) else {
+        // The element of a slice of slices is a slice: `scalar` is unused.
+        let element = if ty.slice_of.is_some() && !bytes {
+            Some(Scalar::I32)
+        } else {
+            ty.elem.scalar().filter(|_| ty.utf8 == bytes)
+        };
+        let Some(element) = element else {
             return Ok(None);
         };
         let slice = self.expr(operand)?;

@@ -16,8 +16,8 @@ use inkwell::values::{
 use inkwell::{FloatPredicate, IntPredicate, module::Module};
 use splice_core::Trap;
 use splice_core::hir::{
-    Binary, BufferKind, Constant, Label, PacketStore, PacketValue, Reg, RustCallPlan, ScalarType,
-    Slice as SliceValue, ValueType,
+    Binary, BufferKind, Constant, Element, Label, PacketStore, PacketValue, Reg, RustCallPlan,
+    ScalarType, Slice as SliceValue, ValueType,
 };
 
 type Built<T> = Result<T, Error>;
@@ -295,7 +295,7 @@ impl<'a, 'ctx> Body<'a, 'ctx> {
         Ok(Slice {
             data: self.value(s.ptr)?.into_pointer_value(),
             len: self.load(s.len)?,
-            element: kind.element(),
+            element: kind.scalar().expect("a validated slice of scalars"),
         })
     }
 
@@ -619,7 +619,7 @@ impl<'a, 'ctx> Body<'a, 'ctx> {
             self.binary(Binary::Min, index, self.value(end)?, len)?
         };
         let start = self.binary(Binary::Min, index, self.value(start)?, end)?;
-        let element = simd::scalar_type(self.ctx, kind.element());
+        let element = self.element_type(kind.element());
         let base = self.value(slice.ptr)?.into_pointer_value();
         // SAFETY: `start <= len`, so the address is in the allocation of
         // `slice` or one past it; the verifier guarantees that `slice.len`
@@ -631,6 +631,46 @@ impl<'a, 'ctx> Body<'a, 'ctx> {
         self.store(dst.ptr, address)?;
         let length = self.binary(Binary::Sub, index, end, start)?;
         self.store(dst.len, length)
+    }
+    /// The LLVM type of one element: a scalar, or a slice element laid
+    /// out as `SliceDescriptor`, `{ ptr, i64 }`.
+    fn element_type(&self, element: Element) -> BasicTypeEnum<'ctx> {
+        match element {
+            Element::Scalar(ty) => simd::scalar_type(self.ctx, ty),
+            Element::Slice(_) => {
+                let ptr = self.ctx.ptr_type(inkwell::AddressSpace::default());
+                let len = self.ctx.i64_type();
+                self.ctx
+                    .struct_type(&[ptr.into(), len.into()], false)
+                    .into()
+            }
+        }
+    }
+    /// `dst = s[index]` of a slice of slices, after a bounds check.
+    pub(super) fn load_slice(&mut self, dst: SliceValue, s: SliceValue, index: Reg) -> Built<()> {
+        let ValueType::Ptr(kind) = self.registers[s.ptr.0 as usize].0 else {
+            unreachable!("validated slice pointer");
+        };
+        let element = self.element_type(kind.element());
+        let (data, len) = (self.value(s.ptr)?.into_pointer_value(), self.load(s.len)?);
+        let index = self.load(index)?;
+        let invalid = self
+            .builder
+            .build_int_compare(IntPredicate::UGE, index, len, "")?;
+        self.exit_if(invalid, Failure::Trap(Trap::Bounds))?;
+        // SAFETY: only the edge with `index < len` reaches the address, and
+        // the verifier guarantees that `len` is the length at `data`.
+        let at = unsafe {
+            self.builder
+                .build_in_bounds_gep(element, data, &[index], "")?
+        };
+        let ptr = self.ctx.ptr_type(inkwell::AddressSpace::default());
+        let inner = self.builder.build_load(ptr, at, "")?;
+        self.store(dst.ptr, inner)?;
+        const { assert!(Element::SLICE_LEN_OFFSET == 8) };
+        let at = self.builder.build_struct_gep(element, at, 1, "")?;
+        let count = self.builder.build_load(self.ctx.i64_type(), at, "")?;
+        self.store(dst.len, count)
     }
     pub(super) fn read_element(&mut self, dst: Reg, s: SliceValue, index: Reg) -> Built<()> {
         let ptr = self.element(s, index)?;

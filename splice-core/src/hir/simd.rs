@@ -430,7 +430,7 @@ impl Simd {
             .slice
             .kind(types)
             .ok_or_else(|| crate::BuildError::verify("invalid SIMD buffer"))?;
-        if kind.context_signature().is_some() || kind.element() != self.element {
+        if kind.context_signature().is_some() || kind.scalar() != Some(self.element) {
             return Err(crate::BuildError::verify(
                 "SIMD buffer element type mismatch",
             ));

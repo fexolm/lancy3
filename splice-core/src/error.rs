@@ -49,10 +49,10 @@ pub enum SignatureError {
     },
     #[error("expected {expected} buffers, got {actual}")]
     Buffers { expected: usize, actual: usize },
-    #[error("buffer {buffer} expects {} elements", expected.name())]
+    #[error("buffer {buffer} expects {expected} elements")]
     Element {
         buffer: usize,
-        expected: crate::hir::ScalarType,
+        expected: crate::hir::Element,
     },
     #[error("buffer {buffer} has the wrong Rust context signature")]
     Context { buffer: usize },

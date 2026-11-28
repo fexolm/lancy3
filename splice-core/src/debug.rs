@@ -209,7 +209,9 @@ impl Point {
                         ValueType::Ptr(_) => unreachable!("a pointer is saved with its slice"),
                     },
                     Value::Slice(slice) => match reg_type(slice.ptr) {
-                        ValueType::Ptr(kind) => Type::Slice(kind.element()),
+                        ValueType::Ptr(kind) => {
+                            Type::Slice(kind.scalar().expect("a verified debug slice of scalars"))
+                        }
                         _ => unreachable!("a verified slice"),
                     },
                     Value::Constant(_) => return None,

@@ -143,7 +143,7 @@ impl<'f, 'b> Replay<'f, 'b> {
         self.b.assign(dst, value)
     }
 
-    /// Bind the pair a [`Instr::SliceRange`] produces to `dst`: two fresh
+    /// Bind the pair a [`Instr::SliceRange`] or [`Instr::LoadSlice`] produces to `dst`: two fresh
     /// registers in order, since a slice's registers have no other
     /// definition (the verifier rejects an assignment to either).
     fn define_slice(
@@ -156,7 +156,7 @@ impl<'f, 'b> Replay<'f, 'b> {
         if dst.len.0 as usize != index + 1 || !fresh(dst.ptr) || !fresh(dst.len) {
             return Err(crate::BuildError::verify_at(
                 self.pc,
-                "a slice range defines a fresh register pair",
+                "a slice operation defines a fresh register pair",
             ));
         }
         self.allocate_below(index)?;
@@ -261,6 +261,10 @@ impl<'f, 'b> Replay<'f, 'b> {
                     let slice = self.slice(slice)?;
                     let (start, end) = (self.reg(start)?, self.reg(end)?);
                     self.define_slice(dst, |b| b.slice_range(slice, start, end))?;
+                }
+                &Instr::LoadSlice { dst, slice, index } => {
+                    let (slice, index) = (self.slice(slice)?, self.reg(index)?);
+                    self.define_slice(dst, |b| b.load_slice(slice, index))?;
                 }
                 &Instr::Load { dst, slice, index } => {
                     let (slice, index) = (self.slice(slice)?, self.reg(index)?);

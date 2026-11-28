@@ -139,7 +139,8 @@ pub struct SliceParam {
     pub ptr: Value,
     /// The length parameter, in elements.
     pub len: Value,
-    /// Bytes per element.
+    /// Bytes per element: a scalar, or 16 for an element of two words
+    /// (a slice reference).
     pub element: u8,
     /// Whether the kernel may write the slice.
     pub writable: bool,
@@ -206,7 +207,7 @@ impl Function {
             let is_param = |v: Value, ty| entry.contains(&v) && self.types[v] == ty;
             if !is_param(slice.ptr, Type::Ptr)
                 || !is_param(slice.len, Type::I32)
-                || !matches!(slice.element, 1 | 2 | 4 | 8)
+                || !matches!(slice.element, 1 | 2 | 4 | 8 | 16)
                 || slice_of[slice.ptr].is_some()
                 || slice_of[slice.len].is_some()
             {

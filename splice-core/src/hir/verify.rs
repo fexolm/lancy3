@@ -475,7 +475,66 @@ mod tests {
                 ],
                 vec![range(reversed), Instr::Return(R0)]
             ),
-            "a slice range defines a fresh register pair at instruction 0"
+            "a slice operation defines a fresh register pair at instruction 0"
+        );
+    }
+
+    /// A slice of slices is read only whole, by `LoadSlice`.
+    #[test]
+    fn slice_elements_are_loaded_as_slices() {
+        static ROWS: BufferKind = BufferKind::slices(&BufferKind::READ_I32);
+        let index = || vec![ScalarType::Index];
+        let param = Slice::param(1, 0);
+        let row = Slice {
+            ptr: Reg(3),
+            len: Reg(4),
+        };
+        let load_row = Instr::LoadSlice {
+            dst: row,
+            slice: param,
+            index: R0,
+        };
+        let row_locals = vec![
+            ValueType::Ptr(BufferKind::READ_I32),
+            ValueType::Scalar(ScalarType::Index),
+            I32,
+        ];
+        let read = |slice| Instr::Load {
+            dst: Reg(5),
+            slice,
+            index: R0,
+        };
+        let ok = typed(
+            index(),
+            vec![ROWS],
+            row_locals.clone(),
+            vec![load_row.clone(), read(row), Instr::Return(Reg(5))],
+        );
+        assert!(ok.verify().is_ok());
+        assert_eq!(
+            typed_error(
+                index(),
+                vec![ROWS],
+                vec![I32],
+                vec![
+                    Instr::Load {
+                        dst: Reg(3),
+                        slice: param,
+                        index: R0
+                    },
+                    Instr::Return(Reg(3))
+                ]
+            ),
+            "a slice element is read with `load_slice` at instruction 0"
+        );
+        assert_eq!(
+            typed_error(
+                index(),
+                vec![BufferKind::READ_I32],
+                row_locals,
+                vec![load_row, Instr::Return(R0)]
+            ),
+            "`load_slice` reads a slice of slices at instruction 0"
         );
     }
 

@@ -13,8 +13,8 @@ mod memory;
 pub(crate) mod simd;
 mod source;
 mod word;
-pub(super) use simd::BufferType;
 pub(crate) use simd::Elem;
+pub(super) use simd::{BufferType, SliceOf};
 
 use crate::kast::DeclId;
 use proc_macro2::{Ident, TokenStream};
@@ -468,11 +468,13 @@ impl Lower<'_> {
             (Word(t), Host | Literal(_)) | (Host | Literal(_), Word(t)) => Ok(Word(t)),
             (Word(t), Reg(_)) | (Reg(_), Word(t)) => Ok(Reg(t)),
             (Reg(a), Reg(b)) if a.base() == b.base() => Ok(Reg(a.base())),
-            (Buffer(a), Buffer(b)) if a.elem == b.elem => Ok(Buffer(BufferType {
-                write: a.write && b.write,
-                utf8: a.utf8 && b.utf8,
-                ..a
-            })),
+            (Buffer(a), Buffer(b)) if a.elem == b.elem && a.slice_of == b.slice_of => {
+                Ok(Buffer(BufferType {
+                    write: a.write && b.write,
+                    utf8: a.utf8 && b.utf8,
+                    ..a
+                }))
+            }
             (Reg(t), Literal(u)) | (Literal(u), Reg(t)) if t == u => Ok(Reg(t)),
             // rustc typed both arms alike: a number literal beside a
             // register has the register's type.
@@ -652,6 +654,9 @@ impl Lower<'_> {
             let value = match binding {
                 Binding::Word(_) => return None,
                 Binding::Reg(..) => emit!(#root::debug::Value::Register(#ident)),
+                // Debug info describes slices of scalars; like a column
+                // table, a slice of slices is not shown.
+                Binding::Buffer(ty) if ty.slice_of.is_some() => return None,
                 Binding::Buffer(_) => emit!(#root::debug::Value::Slice(#ident)),
                 Binding::Host(_) => {
                     let constant = Self::constant_name(&ident);

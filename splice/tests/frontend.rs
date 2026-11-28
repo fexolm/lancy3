@@ -459,6 +459,9 @@ mod directly_staged {
         fn slice_range(&mut self, _: Slice, _: Reg, _: Reg) -> splice::Result<Slice> {
             unreachable!()
         }
+        fn load_slice(&mut self, _: Slice, _: Reg) -> splice::Result<Slice> {
+            unreachable!()
+        }
         fn load(&mut self, _: Slice, _: Reg) -> splice::Result<Reg> {
             unreachable!()
         }

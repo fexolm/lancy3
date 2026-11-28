@@ -1,0 +1,11 @@
+error: a slice of slices must be shared at both levels (`&[&[T]]` or `&[&str]`): kernels do not support `&mut` slices of slices
+ --> tests/ui/mutable_slices_of_slices.rs:5:16
+  |
+5 | fn inner(rows: &[&mut [i32]]) -> i32 {
+  |                ^^^^^^^^^^^^^
+
+error: a slice of slices must be shared at both levels (`&[&[T]]` or `&[&str]`): kernels do not support `&mut` slices of slices
+  --> tests/ui/mutable_slices_of_slices.rs:10:16
+   |
+10 | fn outer(rows: &mut [&[i32]]) -> i32 {
+   |                ^^^^^^^^^^^^^

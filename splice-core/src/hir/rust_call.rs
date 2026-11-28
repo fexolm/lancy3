@@ -173,7 +173,10 @@ impl RustTarget {
         for (index, &ContextSlice { slice, writable }) in slices.iter().enumerate() {
             let at = header + layout.slices_at + index as u32 * ContextArguments::SLICE_BYTES;
             let kind: BufferKind = slice.kind(types).expect("a checked Rust slice operand");
-            let tag = ContextArguments::view_tag(kind.element(), writable);
+            let tag = ContextArguments::view_tag(
+                kind.scalar().expect("a checked Rust slice of scalars"),
+                writable,
+            );
             stores.extend([
                 PacketStore {
                     at,

@@ -168,9 +168,24 @@ impl KernelBuilder for FunctionBuilder {
         })?;
         Ok(dst)
     }
+    fn load_slice(&mut self, slice: Slice, index: Reg) -> crate::Result<Slice> {
+        let ty = match self.function.checked_reg_type(slice.ptr) {
+            Some(ValueType::Ptr(kind)) => match kind.element() {
+                super::Element::Slice(&inner) => ValueType::Ptr(inner),
+                super::Element::Scalar(_) => ValueType::Ptr(kind),
+            },
+            _ => ValueType::Scalar(ScalarType::I32),
+        };
+        let dst = Slice {
+            ptr: self.local(ty)?,
+            len: self.local(ValueType::Scalar(ScalarType::Index))?,
+        };
+        self.push(Instr::LoadSlice { dst, slice, index })?;
+        Ok(dst)
+    }
     fn load(&mut self, slice: Slice, index: Reg) -> crate::Result<Reg> {
         let ty = match self.function.checked_reg_type(slice.ptr) {
-            Some(ValueType::Ptr(kind)) => kind.element(),
+            Some(ValueType::Ptr(kind)) => kind.scalar().unwrap_or(ScalarType::I32),
             _ => ScalarType::I32,
         };
         self.scalar(ty, |dst| Instr::Load { dst, slice, index })
