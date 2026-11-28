@@ -470,6 +470,7 @@ impl Lower<'_> {
             (Reg(a), Reg(b)) if a.base() == b.base() => Ok(Reg(a.base())),
             (Buffer(a), Buffer(b)) if a.elem == b.elem => Ok(Buffer(BufferType {
                 write: a.write && b.write,
+                utf8: a.utf8 && b.utf8,
                 ..a
             })),
             (Reg(t), Literal(u)) | (Literal(u), Reg(t)) if t == u => Ok(Reg(t)),
@@ -720,6 +721,9 @@ impl Lower<'_> {
         if let Some(literal) = aggregate::Literal::of(self, local, &init.expr) {
             return self.aggregate_local(&local.pat, &literal);
         }
+        if let Some(split) = self.split_local(&local.pat, &init.expr)? {
+            return Ok(split);
+        }
         let hint = match &local.pat {
             Pat::Type(t) => Scalar::from_type(&t.ty, self.types),
             Pat::Ident(_) => self.body.literal_type(local).and_then(Scalar::of),
@@ -811,6 +815,58 @@ impl Lower<'_> {
         };
         self.declare(name, binding);
         Ok(emit!(let #id = #rhs;))
+    }
+
+    /// `let (head, tail) = xs.split_at(mid);`, or `split_at_mut`: two
+    /// subslices, after a check that traps unless `mid` is within the length
+    /// (and, for a `&str`, a character boundary).
+    fn split_local(&mut self, pat: &Pat, init: &Expr) -> Result<Option<TokenStream>> {
+        let (Pat::Tuple(tuple), Expr::MethodCall(m)) = (pat, init) else {
+            return Ok(None);
+        };
+        let write = m.method == "split_at_mut";
+        if !(write || m.method == "split_at") || m.args.len() != 1 {
+            return Ok(None);
+        }
+        let slice = self.expr(&m.receiver)?;
+        let Stage::Buffer(actual) = slice.stage else {
+            return Ok(None);
+        };
+        let names: Vec<_> = tuple.elems.iter().collect();
+        let [Pat::Ident(head), Pat::Ident(tail)] = names[..] else {
+            return err(
+                pat,
+                "bind the two halves to names: `let (head, tail) = ...`",
+            );
+        };
+        if [head, tail]
+            .iter()
+            .any(|p| p.mutability.is_some() || p.by_ref.is_some() || p.subpat.is_some())
+        {
+            return err(pat, "a runtime slice binding must be a fixed reference");
+        }
+        if write && !actual.write {
+            return err(m, "`split_at_mut` needs a writable slice");
+        }
+        let mid = self.expr(&m.args[0])?;
+        let mid = self.reg(mid, Scalar::Index, &m.args[0])?;
+        let ty = BufferType { write, ..actual };
+        self.declare(head, Binding::Buffer(ty));
+        self.declare(tail, Binding::Buffer(ty));
+        let (head, tail) = (&head.ident, &tail.ident);
+        // A `&str` splits only at a character boundary.
+        let split = if actual.utf8 {
+            emit!(str_split_at)
+        } else {
+            emit!(split_at)
+        };
+        Ok(Some(emit! {
+            let (#head, #tail) = {
+                let __splice_slice = #slice;
+                let __splice_mid = #mid;
+                __splice_builder.#split(__splice_slice, __splice_mid)?
+            };
+        }))
     }
 
     fn expr(&self, e: &Expr) -> Result<Value> {

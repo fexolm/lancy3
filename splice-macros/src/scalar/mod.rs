@@ -210,8 +210,8 @@ pub(super) fn expand(
                 emit!(#support::Host(#id): #support::Host<#ty>)
             }
             Binding::Columns => {
-                inline_args.push(emit!((__splice_columns, #hir::Buffer(__splice_column_base))));
-                emit!(#id: (&[#hir::BufferKind], #hir::Buffer))
+                inline_args.push(emit!((__splice_columns, &__splice_column_slices[..])));
+                emit!(#id: (&[#hir::BufferKind], &[#hir::Slice]))
             }
             Binding::Buffer(writable) => {
                 if columns.is_some() {
@@ -220,13 +220,17 @@ pub(super) fn expand(
                         "declare the column table after other buffers",
                     ));
                 }
-                let index = buffer_names.len() as u32;
-                inline_args.push(emit!(#hir::Buffer(#index)));
+                let index = buffer_names.len();
+                inline_args.push(emit!(__splice_builder.buffer(#index)?));
                 buffer_names.push(id);
                 let elem = writable.elem.tokens(&root, &types);
                 let write = writable.write;
-                buffer_kinds.push(emit!(#hir::BufferKind::new(#elem,#write)));
-                emit!(#id: #hir::Buffer)
+                buffer_kinds.push(if writable.utf8 {
+                    emit!(#hir::BufferKind::STR)
+                } else {
+                    emit!(#hir::BufferKind::new(#elem,#write))
+                });
+                emit!(#id: #hir::Slice)
             }
             Binding::Context => {
                 if columns.is_some() || context.is_some() {
@@ -242,12 +246,12 @@ pub(super) fn expand(
                         "the Rust context parameter requires a named binding",
                     ));
                 }
-                let index = buffer_names.len() as u32;
+                let index = buffer_names.len();
                 context = Some(lower::Context::for_function(id.clone(), ty));
-                inline_args.push(emit!(#hir::Buffer(#index)));
+                inline_args.push(emit!(__splice_builder.buffer(#index)?));
                 buffer_names.push(id);
                 buffer_kinds.push(emit!(#hir::BufferKind::context(&__SPLICE_CONTEXT_SIGNATURE)));
-                emit!(#id: #hir::Buffer)
+                emit!(#id: #hir::Slice)
             }
             Binding::Reg(_, mutable) => {
                 let index = reg_names.len();
@@ -548,18 +552,21 @@ pub(super) fn expand(
             ));
         }
         crate::declaration::rebase_expression(&mut layout, &sig.generics);
-        let base = buffer_names.len() as u32;
+        let base = buffer_names.len();
         let setup = emit! {
             let __splice_layout = #layout;
             let __splice_columns: &[#hir::BufferKind] = ::core::convert::AsRef::as_ref(&__splice_layout);
             if __splice_columns.iter().any(|column| column.writable()) {
                 return ::core::result::Result::Err(#root::BuildError::staging("a shared column table cannot contain writable columns"));
             }
-            let __splice_column_base = #base;
+            let __splice_column_count = __splice_columns.len();
             let mut __splice_kinds = (#kinds).to_vec();
             __splice_kinds.extend_from_slice(__splice_columns);
             let __splice_body: #frontend::Body<'_> = ::std::boxed::Box::new(move |__splice_builder| {
                 #source
+                let __splice_column_slices = (0..__splice_column_count)
+                    .map(|column| __splice_builder.buffer(#base + column))
+                    .collect::<#root::Result<::std::vec::Vec<_>>>()?;
                 let output = __SpliceDefinition::__splice_inline #fish (#(#inline_args,)* #root_context_args __splice_builder)?;
                 __splice_builder.ret(output)?;
                 ::core::result::Result::Ok(())
@@ -865,12 +872,23 @@ fn slice_type(ty: &syn::Type, types: &[&Ident]) -> Option<BufferType> {
     let syn::Type::Reference(reference) = ty else {
         return None;
     };
+    if let syn::Type::Path(path) = &*reference.elem
+        && path.qself.is_none()
+        && path.path.is_ident("str")
+    {
+        return reference.mutability.is_none().then_some(BufferType {
+            elem: Elem::Named(crate::kast::types::Primitive::U8),
+            write: false,
+            utf8: true,
+        });
+    }
     let syn::Type::Slice(slice) = &*reference.elem else {
         return None;
     };
     Some(BufferType {
         elem: Elem::parse(&slice.elem, types)?,
         write: reference.mutability.is_some(),
+        utf8: false,
     })
 }
 

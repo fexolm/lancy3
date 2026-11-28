@@ -2,8 +2,8 @@
 //! paths, against Rust `as` on boundary inputs (NaN, infinities, signed zero,
 //! saturation edges and wrapping integers).
 use splice::frontend::{self, KernelBuilder, Signature};
-use splice::hir::{Buffer, Simd, SimdOp};
 use splice::hir::{Constant, ScalarType};
+use splice::hir::{Simd, SimdOp};
 use splice::{BufferKind, BuildOptions, Codegen, Executable, Mode};
 
 fn options() -> BuildOptions {
@@ -130,7 +130,7 @@ fn stage(
     move |b| {
         let load = Simd {
             element: from,
-            op: SimdOp::Load(Buffer(0)),
+            op: SimdOp::Load(b.buffer(0)?),
         };
         let zero = b.constant(Constant::from(0usize))?;
         let low = b.simd(load, &[zero])?.unwrap();
@@ -147,7 +147,7 @@ fn stage(
         let converted = b.simd(Simd { element: from, op }, &args)?.unwrap();
         let store = Simd {
             element: to,
-            op: SimdOp::Store(Buffer(1)),
+            op: SimdOp::Store(b.buffer(1)?),
         };
         b.simd(store, &[zero, converted])?;
         let result = b.constant(Constant::from(0))?;

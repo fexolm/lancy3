@@ -16,7 +16,7 @@ pub use specialization::{ComptimeKey, KeyArgument, MaybeKey, Specialization};
 
 use crate::hir::Intrinsic;
 use crate::hir::{
-    Binary, Buffer, BufferKind, Constant, ContextSlice, Function, Label, Reg, ScalarType, Simd,
+    Binary, BufferKind, Constant, ContextSlice, Function, Label, Reg, ScalarType, Simd, Slice,
     ValueType,
 };
 use std::sync::Arc;
@@ -43,6 +43,27 @@ pub struct Signature<'a> {
 }
 
 impl<'a> Signature<'a> {
+    /// The registers of buffer parameter `buffer`, after the scalars.
+    pub const fn slice(&self, buffer: usize) -> Slice {
+        Slice::param(self.params.len(), buffer)
+    }
+    /// The type of parameter register `r`, if it is one.
+    pub fn param_type(&self, r: Reg) -> Option<ValueType> {
+        let index = r.0 as usize;
+        if let Some(&ty) = self.params.get(index) {
+            return Some(ValueType::Scalar(ty));
+        }
+        let slices = index - self.params.len();
+        match self.buffers.get(slices / 2) {
+            Some(&kind) if slices.is_multiple_of(2) => Some(ValueType::Ptr(kind)),
+            Some(_) => Some(ValueType::Scalar(ScalarType::Index)),
+            None => None,
+        }
+    }
+    /// The number of parameter registers.
+    pub const fn registers(&self) -> usize {
+        self.params.len() + 2 * self.buffers.len()
+    }
     pub const fn new(
         params: &'a [ScalarType],
         result: ScalarType,
@@ -91,6 +112,8 @@ pub trait KernelBuilder {
             .map(Reg)
             .map_err(|_| crate::BuildError::verify("invalid parameter index"))
     }
+    /// The slice of buffer parameter `index`: its two registers.
+    fn buffer(&self, index: usize) -> crate::Result<Slice>;
     fn reg_type(&self, r: Reg) -> Option<ValueType>;
     fn local(&mut self, ty: ValueType) -> crate::Result<Reg>;
     fn simd(&mut self, inst: Simd, args: &[Reg]) -> crate::Result<Option<Reg>> {
@@ -99,9 +122,21 @@ pub trait KernelBuilder {
     fn constant(&mut self, value: Constant) -> crate::Result<Reg>;
     /// Rust's `value as to`.
     fn cast(&mut self, value: Reg, to: ScalarType) -> crate::Result<Reg>;
-    fn buffer_len(&mut self, buffer: Buffer) -> crate::Result<Reg>;
-    fn load(&mut self, buffer: Buffer, index: Reg) -> crate::Result<Reg>;
-    fn store(&mut self, buffer: Buffer, index: Reg, value: Reg) -> crate::Result<()>;
+    /// `&slice[s..e]` for `e = min(end, len)` and `s = min(start, e)`, with
+    /// no trap: the part of `slice` the range selects, clamped so that it
+    /// stays within `slice` whatever `start` and `end` hold. This is the
+    /// only way to derive a slice: its pointer and length come from one
+    /// operation, and the verifier accepts a slice operand only as such a
+    /// pair or a buffer parameter. The checked forms (`subslice` and the
+    /// others on `dyn KernelBuilder`) trap first, so the minima are `start`
+    /// and `end`; they show a backend that the length is a nonnegative
+    /// difference within `len`.
+    ///
+    fn slice_range(&mut self, slice: Slice, start: Reg, end: Reg) -> crate::Result<Slice>;
+    /// Element `index` of `slice`; traps unless `index` is below its length.
+    fn load(&mut self, slice: Slice, index: Reg) -> crate::Result<Reg>;
+    /// Write element `index` of `slice`; traps unless `index` is below its length.
+    fn store(&mut self, slice: Slice, index: Reg, value: Reg) -> crate::Result<()>;
     fn binary(&mut self, op: Binary, a: Reg, b: Reg) -> crate::Result<Reg>;
     fn assign(&mut self, dst: Reg, src: Reg) -> crate::Result<()>;
     fn label(&mut self) -> crate::Result<Label>;
@@ -134,7 +169,7 @@ pub trait KernelBuilder {
         &mut self,
         signature: Signature<'_>,
         args: &[Reg],
-        buffers: &[Buffer],
+        buffers: &[Slice],
         body: Body<'_>,
     ) -> crate::Result<Reg>;
 
@@ -145,7 +180,7 @@ pub trait KernelBuilder {
         &mut self,
         key: Specialization,
         args: &[Reg],
-        buffers: &[Buffer],
+        buffers: &[Slice],
         body: Body<'_>,
     ) -> crate::Result<Reg> {
         self.call_kernel(key.signature(), args, buffers, body)
@@ -157,7 +192,7 @@ pub trait KernelBuilder {
         &mut self,
         function: &Arc<Function>,
         args: &[Reg],
-        buffers: &[Buffer],
+        buffers: &[Slice],
     ) -> crate::Result<Reg> {
         let callee = Arc::clone(function);
         self.call_kernel(
@@ -194,6 +229,101 @@ impl dyn KernelBuilder + '_ {
     }
 
     /// Continue in a fresh block when the condition holds.
+    /// `&slice[start..end]`, or `&slice[start..=end]` when `inclusive`:
+    /// traps with [`crate::Trap::Bounds`], as Rust's slice index panics,
+    /// unless `start <= end` and the end is within the length.
+    pub fn subslice(
+        &mut self,
+        slice: Slice,
+        start: Reg,
+        end: Reg,
+        inclusive: bool,
+    ) -> crate::Result<Slice> {
+        let (inside, end) = if inclusive {
+            let one = self.constant(Constant::from(1usize))?;
+            let inside = self.binary(Binary::Lt, end, slice.len)?;
+            (inside, self.binary(Binary::Add, end, one)?)
+        } else {
+            (self.binary(Binary::Le, end, slice.len)?, end)
+        };
+        let ordered = self.binary(Binary::Le, start, end)?;
+        let valid = self.binary(Binary::And, inside, ordered)?;
+        let (next, fail) = (self.label()?, self.label()?);
+        self.branch(valid, next, fail)?;
+        self.mark(fail)?;
+        self.trap_bounds()?;
+        self.mark(next)?;
+        self.slice_range(slice, start, end)
+    }
+
+    /// `text.is_char_boundary(index)` for the UTF-8 bytes `text`: the end,
+    /// or a byte inside that does not continue a character. It reads no
+    /// byte at or past the end.
+    pub fn is_char_boundary(&mut self, text: Slice, index: Reg) -> crate::Result<Reg> {
+        let result = self.local(ValueType::Scalar(ScalarType::Bool))?;
+        let (inside, outside, done) = (self.label()?, self.label()?, self.label()?);
+        let within = self.binary(Binary::Lt, index, text.len)?;
+        self.branch(within, inside, outside)?;
+        self.mark(inside)?;
+        let byte = self.load(text, index)?;
+        let top = self.constant(Constant::from(0xc0u8))?;
+        let continuation = self.constant(Constant::from(0x80u8))?;
+        let top = self.binary(Binary::And, byte, top)?;
+        let starts = self.binary(Binary::Ne, top, continuation)?;
+        self.assign(result, starts)?;
+        self.jump(done)?;
+        self.mark(outside)?;
+        let end = self.binary(Binary::Eq, index, text.len)?;
+        self.assign(result, end)?;
+        self.jump(done)?;
+        self.mark(done)?;
+        Ok(result)
+    }
+
+    /// `&text[start..end]` of a `&str` (or `..=` when `inclusive`): the
+    /// range check of `subslice`, then a trap unless both
+    /// ends are character boundaries, as Rust's `str` index panics.
+    pub fn str_subslice(
+        &mut self,
+        text: Slice,
+        start: Reg,
+        end: Reg,
+        inclusive: bool,
+    ) -> crate::Result<Slice> {
+        let part = self.subslice(text, start, end, inclusive)?;
+        let end = self.binary(Binary::Add, start, part.len)?;
+        let first = self.is_char_boundary(text, start)?;
+        let last = self.is_char_boundary(text, end)?;
+        let valid = self.binary(Binary::And, first, last)?;
+        let (next, fail) = (self.label()?, self.label()?);
+        self.branch(valid, next, fail)?;
+        self.mark(fail)?;
+        self.trap_bounds()?;
+        self.mark(next)?;
+        Ok(part)
+    }
+
+    /// `slice.split_at(mid)`: traps unless `mid` is within the length.
+    pub fn split_at(&mut self, slice: Slice, mid: Reg) -> crate::Result<(Slice, Slice)> {
+        let zero = self.constant(Constant::from(0usize))?;
+        let head = self.subslice(slice, zero, mid, false)?;
+        Ok((head, self.slice_range(slice, mid, slice.len)?))
+    }
+
+    /// `text.split_at(mid)` of a `&str`: the check of
+    /// `split_at`, then a trap unless `mid` is a character
+    /// boundary, as Rust's `str::split_at` panics.
+    pub fn str_split_at(&mut self, text: Slice, mid: Reg) -> crate::Result<(Slice, Slice)> {
+        let halves = self.split_at(text, mid)?;
+        let boundary = self.is_char_boundary(text, mid)?;
+        let (next, fail) = (self.label()?, self.label()?);
+        self.branch(boundary, next, fail)?;
+        self.mark(fail)?;
+        self.trap_bounds()?;
+        self.mark(next)?;
+        Ok(halves)
+    }
+
     pub fn branch_if_false(&mut self, cond: Reg, otherwise: Label) -> crate::Result<()> {
         let next = self.label()?;
         self.branch(cond, next, otherwise)?;

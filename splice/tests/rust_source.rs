@@ -272,7 +272,6 @@ fn unrolled_calls_reuse_equal_steps_and_keep_the_runtime_loop()
     for pattern in [
         |i: &Instr| matches!(i, Instr::Branch { .. }),
         |i: &Instr| matches!(i, Instr::Load { .. }),
-        |i: &Instr| matches!(i, Instr::BufferLen { .. }),
     ] {
         assert!(ir.instructions().iter().any(pattern));
     }

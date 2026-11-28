@@ -1,7 +1,7 @@
 use splice::__private::{ContextArguments, StaticRustSymbol};
 use splice::frontend::{KernelBuilder, Signature, materialize};
-use splice::hir::{Buffer, ContextSlice, Instr, RustTarget};
 use splice::hir::{Constant, ScalarType};
+use splice::hir::{ContextSlice, Instr, RustTarget, Slice};
 use splice::{BufferArg, BufferKind, BuildOptions, Codegen, Executable, KernelScalar, Mode};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -62,9 +62,9 @@ const CHILD_KINDS: [BufferKind; 2] = [READ_U16, BufferKind::WRITE_I32];
 const SHARED_INPUT: ContextSlice = view(0, false);
 const MUTABLE_OUTPUT: ContextSlice = view(1, true);
 
-const fn view(buffer: u32, writable: bool) -> ContextSlice {
+const fn view(buffer: usize, writable: bool) -> ContextSlice {
     ContextSlice {
-        buffer: Buffer(buffer),
+        slice: Slice::param(1, buffer),
         writable,
     }
 }
@@ -83,16 +83,16 @@ fn modify_child(builder: &mut dyn KernelBuilder) -> splice::Result<()> {
 fn forward_slices(builder: &mut dyn KernelBuilder) -> splice::Result<()> {
     let first = builder.constant(Constant::from(0usize))?;
     let marker = builder.constant(Constant::from(91))?;
-    builder.store(Buffer(0), first, marker)?;
+    builder.store(builder.buffer(0)?, first, marker)?;
     let result = builder.call_kernel(
         Signature::new(&[ScalarType::I32; 1], ScalarType::I32, &CHILD_KINDS),
         &[builder.arg(0)?],
-        &[Buffer(1), Buffer(0)],
+        &[builder.buffer(1)?, builder.buffer(0)?],
         Box::new(modify_child),
     )?;
     let one = builder.constant(Constant::from(1))?;
     let next = builder.binary(splice::hir::Binary::Add, result, one)?;
-    builder.store(Buffer(0), first, next)?;
+    builder.store(builder.buffer(0)?, first, next)?;
     builder.ret(result)?;
     Ok(())
 }

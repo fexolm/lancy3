@@ -2,8 +2,8 @@
 //! legacy-SSE `cmpps`/`cmppd` memory operand, which faults unless the address
 //! is 16-byte aligned.
 use splice_core::frontend::{self, KernelBuilder, Signature};
-use splice_core::hir::{Buffer, Simd, SimdOp};
 use splice_core::hir::{Constant, ScalarType};
+use splice_core::hir::{Simd, SimdOp};
 use splice_core::target::Profile;
 use splice_core::{BufferArg, BufferKind, BuildOptions, Codegen, Executable, Mode, Target};
 use splice_cranelift::Cranelift;
@@ -17,7 +17,7 @@ fn shifted_compare(
     move |b| {
         let zero = b.constant(Constant::from(0usize))?;
         let one = b.constant(Constant::from(1usize))?;
-        let load = SimdOp::Load(Buffer(0));
+        let load = SimdOp::Load(b.buffer(0)?);
         let x = b.simd(Simd { element, op: load }, &[zero])?.unwrap();
         let y = b.simd(Simd { element, op: load }, &[one])?.unwrap();
         let mask = b

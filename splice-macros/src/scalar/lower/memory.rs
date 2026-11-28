@@ -102,7 +102,11 @@ impl Lower<'_> {
             let root = self.root;
             let element = elem.tokens(root, self.types);
             return Ok(Value::new(
-                Stage::Buffer(super::BufferType { elem, write: false }),
+                Stage::Buffer(super::BufferType {
+                    elem,
+                    write: false,
+                    utf8: false,
+                }),
                 emit!(#root::frontend::scalar::column(#table, #slot, #element)?),
             ));
         }
@@ -127,7 +131,7 @@ impl Lower<'_> {
             && m.args.is_empty()
             && matches!(receiver.stage, Stage::Buffer(_))
         {
-            let length = emit!({let buffer=#receiver; __splice_builder.buffer_len(buffer)?});
+            let length = emit!({let buffer=#receiver; buffer.len});
             return Ok(if m.method == "len" {
                 Value::new(Stage::Reg(Scalar::Length), length)
             } else {
@@ -136,6 +140,82 @@ impl Lower<'_> {
                     self.bin("Eq", length, self.constant(emit!(0usize))),
                 )
             });
+        }
+        if let Stage::Buffer(text @ super::BufferType { utf8: true, .. }) = receiver.stage {
+            let name = m.method.to_string();
+            match (name.as_str(), m.args.len()) {
+                ("as_bytes", 0) => {
+                    return Ok(Value::new(
+                        Stage::Buffer(super::BufferType {
+                            utf8: false,
+                            ..text
+                        }),
+                        receiver.code,
+                    ));
+                }
+                ("is_char_boundary", 1) => {
+                    let index = self.expr(&m.args[0])?;
+                    let index = self.reg(index, Scalar::Index, &m.args[0])?;
+                    return Ok(Value::new(
+                        Stage::Reg(Scalar::Bool),
+                        emit!({
+                            let __splice_text = #receiver;
+                            let __splice_index = #index;
+                            __splice_builder.is_char_boundary(__splice_text, __splice_index)?
+                        }),
+                    ));
+                }
+                ("len" | "is_empty", 0) => {}
+                ("chars" | "char_indices", 0) => {
+                    return err(
+                        &m.method,
+                        &format!(
+                            "`str::{name}` is not supported in kernels: decoding a char needs Option"
+                        ),
+                    );
+                }
+                ("bytes", 0) => {
+                    return err(
+                        m,
+                        "iterate a str's bytes in a loop: `for b in text.bytes()`",
+                    );
+                }
+                _ => {
+                    return err(
+                        &m.method,
+                        &format!("`str::{name}` is not supported in kernels; use `as_bytes()`"),
+                    );
+                }
+            }
+        }
+        if matches!(receiver.stage, Stage::Buffer(_)) {
+            let name = m.method.to_string();
+            if matches!(
+                name.as_str(),
+                "first"
+                    | "last"
+                    | "get"
+                    | "first_mut"
+                    | "last_mut"
+                    | "get_mut"
+                    | "split_first"
+                    | "split_last"
+                    | "split_first_mut"
+                    | "split_last_mut"
+            ) {
+                return err(
+                    &m.method,
+                    &format!("`{name}` returns an Option, which kernels do not support yet"),
+                );
+            }
+            if name == "split_at" || name == "split_at_mut" {
+                return err(
+                    m,
+                    &format!(
+                        "bind the halves of `{name}` with `let (head, tail) = slice.{name}(mid);`"
+                    ),
+                );
+            }
         }
         let kind = match receiver.stage {
             Stage::Reg(t) | Stage::Word(t)
@@ -294,8 +374,13 @@ impl Lower<'_> {
             Expr::Unary(x) if matches!(x.op, UnOp::Deref(_)) => &*x.expr,
             expr => expr,
         };
-        let value = self.expr(target)?;
         let writable = reference.mutability.is_some();
+        if let Expr::Index(index) = target
+            && let Expr::Range(range) = &*index.index
+        {
+            return self.subslice(reference, index, range, writable);
+        }
+        let value = self.expr(target)?;
         match value.stage {
             Stage::Buffer(actual) if !writable || actual.write => Ok(Value::new(
                 Stage::Buffer(super::BufferType {
@@ -308,6 +393,54 @@ impl Lower<'_> {
         }
     }
 
+    /// `&xs[range]` or `&mut xs[range]`: a subslice, which traps as Rust's
+    /// slice index panics unless the range lies in the slice.
+    fn subslice(
+        &self,
+        reference: &ExprReference,
+        index: &ExprIndex,
+        range: &syn::ExprRange,
+        writable: bool,
+    ) -> Result<Value> {
+        let slice = self.expr(&index.expr)?;
+        let Stage::Buffer(actual) = slice.stage else {
+            return err(&index.expr, "only a runtime slice can be sliced here");
+        };
+        if writable && !actual.write {
+            return err(reference, "a shared slice cannot be reborrowed as mutable");
+        }
+        let ty = Stage::Buffer(super::BufferType {
+            write: writable,
+            ..actual
+        });
+        let take = if actual.utf8 {
+            emit!(str_subslice)
+        } else {
+            emit!(subslice)
+        };
+        let bound = |e: &Expr| -> Result<TokenStream> {
+            let value = self.expr(e)?;
+            self.reg(value, Scalar::Index, e)
+        };
+        let start = range.start.as_deref().map(bound).transpose()?;
+        let end = range.end.as_deref().map(bound).transpose()?;
+        if start.is_none() && end.is_none() {
+            return Ok(Value::new(ty, slice.code));
+        }
+        let start = start.unwrap_or_else(|| self.constant(emit!(0usize)));
+        let inclusive = matches!(range.limits, syn::RangeLimits::Closed(_));
+        let end = end.unwrap_or_else(|| emit!(__splice_slice.len));
+        Ok(Value::new(
+            ty,
+            emit!({
+                let __splice_slice = #slice;
+                let __splice_start = #start;
+                let __splice_end = #end;
+                __splice_builder.#take(__splice_slice, __splice_start, __splice_end, #inclusive)?
+            }),
+        ))
+    }
+
     /// A runtime slice element: whether the slice is writable, the slice,
     /// the offset and the element's register type.
     fn index_operands(
@@ -318,6 +451,9 @@ impl Lower<'_> {
         let Stage::Buffer(writable) = slice.stage else {
             return err(&index.expr, "index a runtime slice parameter");
         };
+        if writable.utf8 {
+            return err(index, "a str has no integer index; index its `as_bytes()`");
+        }
         let Some(element) = writable.elem.scalar() else {
             return err(
                 index,

@@ -1,4 +1,4 @@
-use super::{BufferKind, ScalarType, Simd, ValueType};
+use super::{ScalarType, Simd, ValueType};
 
 /// A built-in operation. Buffer identities and build-time immediates live
 /// in the operation, while runtime operands are registers of the call.
@@ -33,9 +33,9 @@ impl Intrinsic {
         }
     }
 
-    pub fn validate(self, args: &[ValueType], buffers: &[BufferKind]) -> crate::Result<()> {
+    pub fn validate(self, args: &[ValueType], types: super::Types<'_>) -> crate::Result<()> {
         match self {
-            Self::Simd(simd) => simd.validate(args, buffers),
+            Self::Simd(simd) => simd.validate(args, types),
             Self::Math { op, ty } => {
                 let operands = [ValueType::Scalar(ty), ValueType::Scalar(ScalarType::U32)];
                 let arity = if op == MathOp::RotateLeft { 2 } else { 1 };
@@ -64,24 +64,31 @@ mod tests {
             ty: U64,
         };
         assert_eq!(rotate.output(), Some(scalar(U64)));
-        assert!(rotate.validate(&[scalar(U64), scalar(U32)], &[]).is_ok());
+        assert!(
+            rotate
+                .validate(&[scalar(U64), scalar(U32)], &|_| None)
+                .is_ok()
+        );
         for args in [
             vec![scalar(U64)],
             vec![scalar(U64), scalar(I32)],
             vec![scalar(U32), scalar(U32)],
         ] {
-            assert!(rotate.validate(&args, &[]).is_err());
+            assert!(rotate.validate(&args, &|_| None).is_err());
         }
         let ones = Intrinsic::Math {
             op: MathOp::CountOnes,
             ty: I32,
         };
         assert_eq!(ones.output(), Some(scalar(U32)));
-        assert!(ones.validate(&[scalar(I32), scalar(U32)], &[]).is_err());
+        assert!(
+            ones.validate(&[scalar(I32), scalar(U32)], &|_| None)
+                .is_err()
+        );
         let float = Intrinsic::Math {
             op: MathOp::CountOnes,
             ty: F32,
         };
-        assert!(float.validate(&[scalar(F32)], &[]).is_err());
+        assert!(float.validate(&[scalar(F32)], &|_| None).is_err());
     }
 }

@@ -1,4 +1,4 @@
-use super::{Buffer, BufferKind, ScalarType};
+use super::{ScalarType, Slice, Types};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ValueType {
@@ -7,6 +7,9 @@ pub enum ValueType {
     Vector(ScalarType),
     /// One predicate per lane of a vector of the type.
     Mask(ScalarType),
+    /// The address of the first element of a slice of this kind: the
+    /// pointer half of a [`Slice`].
+    Ptr(super::BufferKind),
 }
 
 impl ValueType {
@@ -14,7 +17,7 @@ impl ValueType {
     /// lane element.
     pub const fn is_supported(self) -> bool {
         match self {
-            Self::Scalar(_) => true,
+            Self::Scalar(_) | Self::Ptr(_) => true,
             Self::Vector(e) | Self::Mask(e) => e.is_lane(),
         }
     }
@@ -30,25 +33,25 @@ pub enum SimdOp {
     Iota,
     Shuffle(crate::simd::Shuffle),
     PrefixSum,
-    AlignmentPrefix(Buffer),
+    AlignmentPrefix(Slice),
     Compress,
     Expand,
     Swizzle,
     Count,
     Shr(u32),
     RotateLeft(u32),
-    CompressStore(Buffer),
+    CompressStore(Slice),
     Last,
     ExtractWrapping,
     ReplaceWrapping,
-    Load(Buffer),
-    Store(Buffer),
-    LoadSelect(Buffer),
-    StoreSelect(Buffer),
-    Gather(Buffer),
-    Scatter(Buffer),
-    GatherSelect(Buffer),
-    ScatterSelect(Buffer),
+    Load(Slice),
+    Store(Slice),
+    LoadSelect(Slice),
+    StoreSelect(Slice),
+    Gather(Slice),
+    Scatter(Slice),
+    GatherSelect(Slice),
+    ScatterSelect(Slice),
     Add,
     AddMasked,
     Sub,
@@ -191,12 +194,12 @@ pub enum Access {
     Write,
 }
 
-/// The buffer an operation accesses. The first operand addresses it: an
+/// The slice an operation accesses. The first operand addresses it: an
 /// [`Slot::Offset`], or [`Slot::Indices`] when `indexed`. A `masked`
 /// operation touches only the lanes of its [`Slot::Mask`] operand.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Memory {
-    pub buffer: Buffer,
+    pub slice: Slice,
     pub access: Access,
     pub indexed: bool,
     pub masked: bool,
@@ -313,13 +316,13 @@ impl SimdOp {
             Select => ("select", &[Mask, Vector, Vector], Some(Vector), E::Any),
         };
         const fn memory(
-            buffer: Buffer,
+            slice: Slice,
             access: Access,
             indexed: bool,
             masked: bool,
         ) -> Option<Memory> {
             Some(Memory {
-                buffer,
+                slice,
                 access,
                 indexed,
                 masked,
@@ -346,6 +349,24 @@ impl SimdOp {
         }
     }
 
+    /// This operation with its slice, if it has one, replaced by `f` of it.
+    pub fn map_slice<E>(self, f: impl FnOnce(Slice) -> Result<Slice, E>) -> Result<Self, E> {
+        use SimdOp::*;
+        Ok(match self {
+            AlignmentPrefix(s) => AlignmentPrefix(f(s)?),
+            CompressStore(s) => CompressStore(f(s)?),
+            Load(s) => Load(f(s)?),
+            Store(s) => Store(f(s)?),
+            LoadSelect(s) => LoadSelect(f(s)?),
+            StoreSelect(s) => StoreSelect(f(s)?),
+            Gather(s) => Gather(f(s)?),
+            Scatter(s) => Scatter(f(s)?),
+            GatherSelect(s) => GatherSelect(f(s)?),
+            ScatterSelect(s) => ScatterSelect(f(s)?),
+            op => op,
+        })
+    }
+
     /// Whether the operation can fail: only buffer accesses check bounds.
     pub const fn may_trap(self) -> bool {
         match self.info().memory {
@@ -363,7 +384,7 @@ impl Simd {
             .map(|slot| slot.value_type(self.element))
     }
 
-    pub fn validate(self, args: &[ValueType], buffers: &[BufferKind]) -> crate::Result<()> {
+    pub fn validate(self, args: &[ValueType], types: Types<'_>) -> crate::Result<()> {
         let info = self.op.info();
         let converted = match info.output {
             Some(Slot::Converted(to)) => Some(to),
@@ -405,8 +426,9 @@ impl Simd {
         let Some(memory) = info.memory else {
             return Ok(());
         };
-        let kind = buffers
-            .get(memory.buffer.index())
+        let kind = memory
+            .slice
+            .kind(types)
             .ok_or_else(|| crate::BuildError::verify("invalid SIMD buffer"))?;
         if kind.context_signature().is_some() || kind.element() != self.element {
             return Err(crate::BuildError::verify(

@@ -1,25 +1,17 @@
 use crate::KernelScalar;
-use crate::hir::ScalarType;
+use crate::hir::{Reg, ScalarType, Slice, ValueType};
 use crate::runtime_context::{ContextSignature, RuntimeContext};
 use std::collections::HashMap;
 use std::fmt;
 use std::marker::PhantomData;
 use std::ptr::NonNull;
 
-/// A buffer parameter in a function's separate buffer argument list.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct Buffer(pub u32);
-
-impl Buffer {
-    pub fn index(self) -> usize {
-        self.0 as usize
-    }
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct BufferKind {
     element: ScalarType,
     writable: bool,
+    /// The bytes are UTF-8: a `&str`, a read-only slice of `u8`.
+    utf8: bool,
     context: Option<&'static ContextSignature>,
 }
 
@@ -28,6 +20,11 @@ impl BufferKind {
     pub const READ_I32: Self = Self::new(ScalarType::I32, false);
     /// A writable `i32` slice.
     pub const WRITE_I32: Self = Self::new(ScalarType::I32, true);
+    /// A `&str`: a shared slice of `u8` that holds UTF-8.
+    pub const STR: Self = Self {
+        utf8: true,
+        ..Self::new(ScalarType::U8, false)
+    };
     /// # Panics
     /// If `element` is `Bool`: a kernel cannot borrow a `bool` slice.
     pub const fn new(element: ScalarType, writable: bool) -> Self {
@@ -38,6 +35,7 @@ impl BufferKind {
         Self {
             element,
             writable,
+            utf8: false,
             context: None,
         }
     }
@@ -46,6 +44,7 @@ impl BufferKind {
         Self {
             element: ScalarType::I32,
             writable: true,
+            utf8: false,
             context: Some(signature),
         }
     }
@@ -56,6 +55,17 @@ impl BufferKind {
     pub const fn element(self) -> ScalarType {
         self.element
     }
+    /// Whether the slice is a `&str`, whose bytes are UTF-8.
+    pub const fn utf8(self) -> bool {
+        self.utf8
+    }
+    /// This kind without the UTF-8 guarantee: `str::as_bytes`.
+    pub const fn bytes(self) -> Self {
+        Self {
+            utf8: false,
+            ..self
+        }
+    }
     pub const fn writable(self) -> bool {
         self.writable
     }
@@ -64,8 +74,9 @@ impl BufferKind {
     pub const fn may_alias(self, other: Self) -> bool {
         !self.writable() && !other.writable()
     }
+    /// A `&str` is also its bytes, but bytes need not be a `&str`.
     fn accepts(self, actual: Self) -> bool {
-        self.same_type(actual) && (!self.writable || actual.writable)
+        self.same_type(actual) && (!self.writable || actual.writable) && (!self.utf8 || actual.utf8)
     }
     fn same_type(self, actual: Self) -> bool {
         self.element == actual.element && self.context == actual.context
@@ -132,6 +143,14 @@ impl<'a> BufferArg<'a> {
             len: slice.len(),
             kind: BufferKind::new(T::TYPE, false),
             borrow: PhantomData,
+        }
+    }
+
+    /// A `&str`, as its UTF-8 bytes. Native code never writes through it.
+    pub fn str(text: &'a str) -> Self {
+        Self {
+            kind: BufferKind::STR,
+            ..Self::read(text.as_bytes())
         }
     }
 
@@ -230,6 +249,9 @@ pub fn validate_buffers(
                 expected: kind.element(),
             });
         }
+        if kind.utf8() && !arg.kind().utf8() {
+            return Err(Utf8 { buffer });
+        }
         if !kind.accepts(arg.kind()) {
             return Err(ReadOnly { buffer });
         }
@@ -240,12 +262,15 @@ pub fn validate_buffers(
     Ok(())
 }
 
-/// Check the borrow contract at a static call site. Multiple immutable
-/// views may name the same buffer. A mutable view needs exclusive access.
+/// Check the borrow contract at a static call site, where the caller's
+/// registers have `types`. Multiple immutable views may name the same
+/// slice. A mutable view needs exclusive access: a slice value passed
+/// twice is rejected, and distinct values are distinct borrows, which the
+/// Rust source that produced them guarantees.
 pub fn check_forwarding(
-    caller: &[BufferKind],
+    types: Types<'_>,
     callee: &[BufferKind],
-    actual: &[Buffer],
+    actual: &[Slice],
 ) -> crate::Result<()> {
     if callee.len() != actual.len() {
         return Err(crate::BuildError::verify(format!(
@@ -254,38 +279,50 @@ pub fn check_forwarding(
             actual.len()
         )));
     }
-    if actual.is_empty() {
-        return Ok(());
-    }
     let mut seen: HashMap<_, BufferKind> = HashMap::new();
-    for (&required, &buffer) in callee.iter().zip(actual) {
-        let kind = caller
-            .get(buffer.index())
-            .ok_or_else(|| crate::BuildError::verify(format!("unknown buffer {}", buffer.0)))?;
-        if !required.same_type(*kind) {
+    for (i, (&required, &slice)) in callee.iter().zip(actual).enumerate() {
+        let kind = slice.kind(types).ok_or_else(|| {
+            crate::BuildError::verify(format!("buffer argument {i} is not a slice"))
+        })?;
+        if !required.same_type(kind) {
             return Err(crate::BuildError::verify(format!(
-                "buffer {} has wrong element type",
-                buffer.0
+                "buffer argument {i} has wrong element type"
             )));
         }
-        if !required.accepts(*kind) {
+        if required.utf8() && !kind.utf8() {
             return Err(crate::BuildError::verify(format!(
-                "buffer {} is read-only",
-                buffer.0
+                "buffer argument {i} is not a &str"
             )));
         }
-        if actual.len() > 1
-            && seen
-                .insert(buffer, required)
-                .is_some_and(|prior| !prior.may_alias(required))
+        if !required.accepts(kind) {
+            return Err(crate::BuildError::verify(format!(
+                "buffer argument {i} is read-only"
+            )));
+        }
+        if seen
+            .insert(slice.ptr, required)
+            .is_some_and(|prior| !prior.may_alias(required))
         {
             return Err(crate::BuildError::verify(format!(
-                "writable buffer {} aliases another call argument",
-                buffer.0
+                "writable buffer argument {i} aliases another call argument"
             )));
         }
     }
     Ok(())
+}
+
+/// What the registers of a function under construction hold.
+pub type Types<'a> = &'a dyn Fn(Reg) -> Option<ValueType>;
+
+impl Slice {
+    /// The kind of this slice when its registers have `types`: `None`
+    /// unless the pointer is a [`ValueType::Ptr`] and the length an `Index`.
+    pub fn kind(self, types: Types<'_>) -> Option<BufferKind> {
+        match (types(self.ptr), types(self.len)) {
+            (Some(ValueType::Ptr(kind)), Some(ValueType::Scalar(ScalarType::Index))) => Some(kind),
+            _ => None,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -306,6 +343,21 @@ mod tests {
     }
 
     /// Backends address slices with signed 32-bit offsets (BE-19).
+    #[test]
+    fn a_str_parameter_needs_a_str() {
+        use crate::SignatureError;
+        let text = BufferArg::str("ab");
+        assert_eq!(text.kind(), BufferKind::STR);
+        assert!(validate_buffers(&[BufferKind::STR], &[BufferArg::str("ab")]).is_ok());
+        assert!(matches!(
+            validate_buffers(&[BufferKind::STR], &[BufferArg::read(b"ab")]),
+            Err(SignatureError::Utf8 { buffer: 0 })
+        ));
+        // A `&str` is also its bytes.
+        let bytes = BufferKind::new(ScalarType::U8, false);
+        assert!(validate_buffers(&[bytes], &[BufferArg::str("ab")]).is_ok());
+    }
+
     #[test]
     #[cfg(all(target_os = "linux", target_pointer_width = "64"))]
     fn a_slice_longer_than_i32_max_is_rejected() {

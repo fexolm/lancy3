@@ -20,6 +20,8 @@ pub(crate) enum Elem {
 pub(crate) struct BufferType {
     pub elem: Elem,
     pub write: bool,
+    /// A `&str`: read-only `u8`s that hold UTF-8.
+    pub utf8: bool,
 }
 impl Elem {
     pub(crate) const I32: Self = Self::Named(Primitive::I32);

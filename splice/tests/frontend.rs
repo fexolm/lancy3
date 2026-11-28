@@ -397,7 +397,7 @@ fn verification_resolves_jumps_even_in_unreachable_code() {
 mod directly_staged {
     use super::*;
     use splice::frontend::{Body, KernelBuilder};
-    use splice::hir::{Buffer, Label, Reg, ValueType};
+    use splice::hir::{Label, Reg, Slice, ValueType};
     struct Config<'a>(&'a i32);
 
     #[kernel]
@@ -452,13 +452,16 @@ mod directly_staged {
             self.constants.push(n.bits() as i32);
             self.local(ValueType::Scalar(ScalarType::I32))
         }
-        fn buffer_len(&mut self, _: Buffer) -> splice::Result<Reg> {
+        fn buffer(&self, _: usize) -> splice::Result<Slice> {
             unreachable!()
         }
-        fn load(&mut self, _: Buffer, _: Reg) -> splice::Result<Reg> {
+        fn slice_range(&mut self, _: Slice, _: Reg, _: Reg) -> splice::Result<Slice> {
             unreachable!()
         }
-        fn store(&mut self, _: Buffer, _: Reg, _: Reg) -> splice::Result<()> {
+        fn load(&mut self, _: Slice, _: Reg) -> splice::Result<Reg> {
+            unreachable!()
+        }
+        fn store(&mut self, _: Slice, _: Reg, _: Reg) -> splice::Result<()> {
             unreachable!()
         }
         fn binary(&mut self, _: Binary, _: Reg, _: Reg) -> splice::Result<Reg> {
@@ -491,7 +494,7 @@ mod directly_staged {
             &mut self,
             signature: Signature<'_>,
             _: &[Reg],
-            _: &[Buffer],
+            _: &[Slice],
             body: Body<'_>,
         ) -> splice::Result<Reg> {
             let child = Self::stage(signature, body, options())?;

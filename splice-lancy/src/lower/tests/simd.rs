@@ -41,7 +41,10 @@ fn signed_index_gathers_check_each_width_with_one_unsigned_comparison() {
         BufferKind::new(ScalarType::I64, false),
     ];
     for graph in both(0, &kinds, |b| {
-        for (element, buffer) in [(ScalarType::I32, Buffer(0)), (ScalarType::I64, Buffer(1))] {
+        for (element, buffer) in [
+            (ScalarType::I32, b.buffer(0)?),
+            (ScalarType::I64, b.buffer(1)?),
+        ] {
             let simd = |op| Simd { element, op };
             let ids = b.simd(simd(SimdOp::Iota), &[])?.unwrap();
             b.simd(simd(SimdOp::Gather(buffer)), &[ids])?;
@@ -80,11 +83,13 @@ fn packed_load_and_store_have_an_ordered_short_store_exit() {
     ];
     for graph in both(1, &kinds, |b| {
         let first = b.constant(Constant::from(0usize))?;
-        let a = b.simd(u16_op(SimdOp::Load(Buffer(0))), &[first])?.unwrap();
+        let a = b
+            .simd(u16_op(SimdOp::Load(b.buffer(0)?)), &[first])?
+            .unwrap();
         let one = b.simd(u16_op(SimdOp::Splat(1)), &[])?.unwrap();
         let sum = b.simd(u16_op(SimdOp::Add), &[a, one])?.unwrap();
         let at = b.cast(b.arg(0)?, ScalarType::Index)?;
-        b.simd(u16_op(SimdOp::Store(Buffer(1))), &[at, sum])?;
+        b.simd(u16_op(SimdOp::Store(b.buffer(1)?)), &[at, sum])?;
         let zero = b.constant(Constant::from(0))?;
         b.ret(zero)?;
         Ok(())
@@ -147,10 +152,12 @@ fn scatter_addresses_unsigned_u16_and_stops_at_the_first_active_error() {
     ];
     for graph in both(0, &kinds, |b| {
         let first = b.constant(Constant::from(0usize))?;
-        let ids = b.simd(u16_op(SimdOp::Load(Buffer(0))), &[first])?.unwrap();
+        let ids = b
+            .simd(u16_op(SimdOp::Load(b.buffer(0)?)), &[first])?
+            .unwrap();
         let zero = b.constant(Constant::from(0))?;
         let values = b.simd(u16_op(SimdOp::Iota), &[])?.unwrap();
-        b.simd(u16_op(SimdOp::Scatter(Buffer(1))), &[ids, values])?;
+        b.simd(u16_op(SimdOp::Scatter(b.buffer(1)?)), &[ids, values])?;
         b.ret(zero)?;
         Ok(())
     }) {
@@ -194,7 +201,7 @@ fn masked_contiguous_store_never_wraps_an_invalid_offset_to_zero() {
         let one = b.simd(u16_op(SimdOp::Splat(1)), &[])?.unwrap();
         let enabled = b.simd(u16_op(SimdOp::Eq), &[i, one])?.unwrap();
         let at = b.cast(b.arg(0)?, ScalarType::Index)?;
-        b.simd(u16_op(SimdOp::StoreSelect(Buffer(0))), &[at, enabled, i])?;
+        b.simd(u16_op(SimdOp::StoreSelect(b.buffer(0)?)), &[at, enabled, i])?;
         b.ret(b.arg(0)?)?;
         Ok(())
     }) {
@@ -241,7 +248,7 @@ fn vectors_and_masks_keep_their_element_type_across_a_join() {
             b.jump(join)?;
         }
         b.mark(join)?;
-        b.simd(inst(SimdOp::StoreSelect(Buffer(0))), &[first, mask, v])?;
+        b.simd(inst(SimdOp::StoreSelect(b.buffer(0)?)), &[first, mask, v])?;
         b.ret(zero)?;
         Ok(())
     }) {

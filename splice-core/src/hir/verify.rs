@@ -19,11 +19,11 @@ impl Function {
 #[cfg(test)]
 mod tests {
     use super::super::{
-        Binary, Buffer, BufferKind, Constant, Intrinsic, Label, Reg, ScalarType, Simd, SimdOp,
-        ValueType,
+        Binary, BufferKind, Constant, Intrinsic, Label, Reg, ScalarType, Simd, SimdOp, ValueType,
     };
     use super::*;
     use crate::debug::{Location, Point, Value, Variable};
+    use crate::hir::Slice;
     use std::sync::Arc;
 
     const R0: Reg = Reg(0);
@@ -125,11 +125,11 @@ mod tests {
             vec![I32],
             vec![
                 Instr::Load {
-                    dst: R1,
-                    buffer: Buffer(0),
+                    dst: Reg(3),
+                    slice: Slice::param(1, 0),
                     index: R0,
                 },
-                Instr::Return(R1),
+                Instr::Return(Reg(3)),
             ],
         )
         .verify()
@@ -188,6 +188,20 @@ mod tests {
                 vec![Instr::Copy(R1, R0), Instr::Return(R0)]
             ),
             "register copy type mismatch at instruction 0"
+        );
+        let index = ValueType::Scalar(ScalarType::Index);
+        assert_eq!(
+            typed_error(
+                vec![ScalarType::Index],
+                vec![BufferKind::READ_I32],
+                vec![index],
+                vec![
+                    Instr::Copy(Reg(3), R0),
+                    Instr::Copy(Reg(2), Reg(3)),
+                    Instr::Return(R0)
+                ]
+            ),
+            "a buffer parameter's registers are read-only at instruction 1"
         );
         assert_eq!(
             error(1, vec![], vec![vector], vec![Instr::Return(R1)]),
@@ -303,7 +317,7 @@ mod tests {
         }
         let slice = vec![Variable {
             name: "xs",
-            value: Value::Slice(Buffer(0)),
+            value: Value::Slice(Slice::param(1, 0)),
         }];
         assert_eq!(
             error(
@@ -319,12 +333,12 @@ mod tests {
     #[test]
     fn buffer_errors() {
         let load = Instr::Load {
-            dst: R1,
-            buffer: Buffer(0),
+            dst: Reg(3),
+            slice: Slice::param(1, 0),
             index: R0,
         };
         let store = Instr::Store {
-            buffer: Buffer(0),
+            slice: Slice::param(1, 0),
             index: R0,
             value: R0,
         };
@@ -333,8 +347,8 @@ mod tests {
             typed_error(
                 index(),
                 vec![],
-                vec![I32],
-                vec![load.clone(), Instr::Return(R1)]
+                vec![I32; 3],
+                vec![load.clone(), Instr::Return(Reg(3))]
             ),
             "invalid buffer at instruction 0"
         );
@@ -343,7 +357,7 @@ mod tests {
                 index(),
                 vec![BufferKind::new(ScalarType::U16, true)],
                 vec![I32],
-                vec![load.clone(), Instr::Return(R1)]
+                vec![load.clone(), Instr::Return(Reg(3))]
             ),
             "result register type mismatch at instruction 0",
             "a u16 element loads into a u16 register"
@@ -353,7 +367,7 @@ mod tests {
                 1,
                 vec![BufferKind::READ_I32],
                 vec![I32],
-                vec![load, Instr::Return(R1)]
+                vec![load, Instr::Return(Reg(3))]
             ),
             "expected a register of type usize, got i32 at instruction 0"
         );
@@ -374,6 +388,94 @@ mod tests {
                 vec![store, Instr::Return(R0)]
             ),
             "expected a register of type i32, got usize at instruction 0"
+        );
+    }
+
+    /// Portable IR passes the same pairing check as a staged body.
+    #[test]
+    fn slice_operands_are_recorded_pairs() {
+        let index = || vec![ScalarType::Index];
+        let param = Slice::param(1, 0);
+        let derived = Slice {
+            ptr: Reg(3),
+            len: Reg(4),
+        };
+        let range = |dst| Instr::SliceRange {
+            dst,
+            slice: param,
+            start: R0,
+            end: R0,
+        };
+        let load = |slice| Instr::Load {
+            dst: Reg(5),
+            slice,
+            index: R0,
+        };
+        let locals = || {
+            vec![
+                ValueType::Ptr(BufferKind::READ_I32),
+                ValueType::Scalar(ScalarType::Index),
+                I32,
+            ]
+        };
+        let forged = Slice {
+            ptr: param.ptr,
+            len: R0,
+        };
+        assert_eq!(
+            typed_error(
+                index(),
+                vec![BufferKind::READ_I32],
+                vec![I32],
+                vec![
+                    Instr::Load {
+                        dst: Reg(3),
+                        slice: forged,
+                        index: R0
+                    },
+                    Instr::Return(Reg(3))
+                ]
+            ),
+            "a slice operand must be a buffer parameter or the result of one slice operation \
+             at instruction 0"
+        );
+        let paired = typed(
+            index(),
+            vec![BufferKind::READ_I32],
+            locals(),
+            vec![range(derived), load(derived), Instr::Return(Reg(5))],
+        );
+        assert!(paired.verify().is_ok());
+        let mixed = Slice {
+            ptr: derived.ptr,
+            len: param.len,
+        };
+        assert_eq!(
+            typed_error(
+                index(),
+                vec![BufferKind::READ_I32],
+                locals(),
+                vec![range(derived), load(mixed), Instr::Return(Reg(5))]
+            ),
+            "a slice operand must be a buffer parameter or the result of one slice operation \
+             at instruction 1"
+        );
+        let reversed = Slice {
+            ptr: Reg(4),
+            len: Reg(3),
+        };
+        assert_eq!(
+            typed_error(
+                index(),
+                vec![BufferKind::READ_I32],
+                vec![
+                    ValueType::Scalar(ScalarType::Index),
+                    ValueType::Ptr(BufferKind::READ_I32),
+                    I32
+                ],
+                vec![range(reversed), Instr::Return(R0)]
+            ),
+            "a slice range defines a fresh register pair at instruction 0"
         );
     }
 

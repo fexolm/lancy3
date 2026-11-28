@@ -1,0 +1,35 @@
+error: `first` returns an Option, which kernels do not support yet
+ --> tests/ui/slice_options.rs:7:19
+  |
+7 |     let head = xs.first();
+  |                   ^^^^^
+
+error: `get` returns an Option, which kernels do not support yet
+  --> tests/ui/slice_options.rs:13:16
+   |
+13 |     let x = xs.get(i as usize);
+   |                ^^^
+
+error: bind the halves of `split_at` with `let (head, tail) = slice.split_at(mid);`
+  --> tests/ui/slice_options.rs:19:18
+   |
+19 |     let halves = xs.split_at(1);
+   |                  ^^^^^^^^^^^^^^
+
+error: a shared slice cannot be reborrowed as mutable
+  --> tests/ui/slice_options.rs:25:16
+   |
+25 |     let tail = &mut xs[1..];
+   |                ^^^^^^^^^^^^
+
+error: `str::chars` is not supported in kernels: decoding a char needs Option
+  --> tests/ui/slice_options.rs:32:19
+   |
+32 |     for c in text.chars() {
+   |                   ^^^^^
+
+error: `str::find` is not supported in kernels; use `as_bytes()`
+  --> tests/ui/slice_options.rs:41:22
+   |
+41 |     let other = text.find('a');
+   |                      ^^^^

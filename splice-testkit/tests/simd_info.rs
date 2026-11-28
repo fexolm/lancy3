@@ -3,7 +3,7 @@
 //! table accepts, the result has the table's type, and every backend
 //! compiles and runs each accepted operation with the same effect.
 use splice::frontend::{self, KernelBuilder, Signature};
-use splice::hir::{Access, Buffer, Constant, ScalarType, Simd, SimdOp, Slot, ValueType};
+use splice::hir::{Access, Constant, ScalarType, Simd, SimdOp, Slice, Slot, ValueType};
 use splice::std::intrinsics::simd::Shuffle as Pairing;
 use splice::{BufferArg, BufferElement, BufferKind, BuildError, BuildOptions, Codegen, Mode};
 use std::fmt::Debug;
@@ -17,7 +17,7 @@ fn elements() -> impl Iterator<Item = ScalarType> {
 /// operands, result or elements.
 fn operations() -> Vec<SimdOp> {
     use SimdOp::*;
-    let b = Buffer(0);
+    let b = Slice::param(0, 0);
     let mut ops = vec![
         ElementWidth,
         ByteWidth,
@@ -100,7 +100,7 @@ fn stage(inst: Simd, b: &mut dyn KernelBuilder) -> splice::Result<Option<ValueTy
     let e = inst.element;
     let zero = b.constant(Constant::from(0usize))?;
     let load = |b: &mut dyn KernelBuilder, element, buffer| {
-        let op = SimdOp::Load(Buffer(buffer));
+        let op = SimdOp::Load(b.buffer(buffer)?);
         Ok::<_, BuildError>(b.simd(Simd { element, op }, &[zero])?.unwrap())
     };
     let mut args = Vec::new();

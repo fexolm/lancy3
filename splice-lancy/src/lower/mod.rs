@@ -11,11 +11,10 @@ use block_map::BlockMap;
 use lancy::Trap;
 use lancy::hir::{self, Block, Function, Op, Value};
 use splice_core::{
-    BufferKind,
     frontend::{Body, KernelBuilder, KernelSource, Signature, Specialization},
     hir::{
-        Binary, Buffer, Constant, ContextSlice, Intrinsic, Label, MathOp, PacketStore, PacketValue,
-        Reg, RustTarget, ScalarType, ValueType,
+        Binary, Constant, ContextSlice, Intrinsic, Label, MathOp, PacketStore, PacketValue, Reg,
+        RustTarget, ScalarType, Slice, ValueType,
     },
 };
 use std::{
@@ -127,11 +126,11 @@ pub(crate) fn lower_with(
     Ok(graph)
 }
 
-impl<'a> Builder<'a> {
+impl Builder {
     /// A function with `signature`. The root function is the kernel's
     /// entry: its `bool` parameters and result are 0 or 1.
     fn new(
-        signature: Signature<'a>,
+        signature: Signature<'_>,
         root: bool,
         vector_bytes: usize,
         debug: Option<Vec<DebugSource>>,
@@ -171,6 +170,30 @@ impl<'a> Builder<'a> {
             .set_slice_params(slices)
             .expect("buffer parameters are (Ptr, I32) pairs");
         let mut first = State::default();
+        let mut types: Vec<_> = scalars.iter().map(|&ty| ValueType::Scalar(ty)).collect();
+        // A buffer parameter is the slice of its two registers; its `Index`
+        // length extends the nonnegative `i32` of the ABI.
+        let mut indices = HashMap::new();
+        for (i, &kind) in kinds.iter().enumerate() {
+            let slice = Slice::param(arity, i);
+            let (ptr, len32) = (
+                graph.params(entry)[arity + 2 * i],
+                graph.params(entry)[arity + 2 * i + 1],
+            );
+            let len = graph
+                .append(entry, Op::Cast(hir::Type::Usize, len32))
+                .unwrap();
+            indices.insert(
+                len,
+                Narrow::Extends {
+                    value: len32,
+                    nonnegative: true,
+                },
+            );
+            first.defs.insert(slice.ptr, ptr);
+            first.defs.insert(slice.len, len);
+            types.extend([ValueType::Ptr(kind), ValueType::Scalar(ScalarType::Index)]);
+        }
         for (i, &ty) in scalars.iter().enumerate() {
             let mut v = graph.params(entry)[i];
             if root && ty == ScalarType::Bool {
@@ -185,23 +208,23 @@ impl<'a> Builder<'a> {
         let state = blocks.insert(first);
         debug_assert_eq!(state, entry);
         let mut builder = Self {
+            arity,
+            buffers: kinds.len(),
             graph,
             source: None,
             callees: HashMap::new(),
             functions: HashMap::new(),
-            arity,
             root,
             result,
-            kinds,
             vector_bytes,
             blocks,
             current: Some(entry),
-            types: scalars.iter().map(|&ty| ValueType::Scalar(ty)).collect(),
+            types,
             demands: Vec::new(),
             observed: HashMap::new(),
             unassigned: HashSet::new(),
             labels: Vec::new(),
-            indices: HashMap::new(),
+            indices,
             debug,
             marker: 0,
         };
@@ -271,17 +294,17 @@ struct State {
     exit: Option<Exit>,
 }
 
-struct Builder<'a> {
+struct Builder {
+    arity: usize,
+    buffers: usize,
     graph: Function,
     source: Option<&'static KernelSource>,
     callees: HashMap<Specialization, Arc<Function>>,
     /// Lowered portable callees, by identity.
     functions: HashMap<*const splice_core::Function, (Arc<splice_core::Function>, Arc<Function>)>,
-    arity: usize,
     /// Whether this is the kernel's entry rather than a callee.
     root: bool,
     result: ScalarType,
-    kinds: &'a [BufferKind],
     /// Width of the target's vectors; fixes lane counts and alignment.
     vector_bytes: usize,
     blocks: BlockMap<State>,
@@ -326,7 +349,7 @@ enum Narrow {
     Bounded(Value),
 }
 
-impl Builder<'_> {
+impl Builder {
     fn math(&mut self, op: MathOp, ty: ScalarType, args: &[Reg]) -> splice_core::Result<Reg> {
         let dst = self.local(ValueType::Scalar(op.result(ty)))?;
         if !self.reachable() {
@@ -363,10 +386,18 @@ impl Builder<'_> {
         self.bind(dst, result);
         Ok(dst)
     }
-    fn slice(&self, buffer: Buffer) -> (Value, Value) {
-        let first = self.arity + 2 * buffer.index();
-        let params = self.graph.params(self.graph.entry());
-        (params[first], params[first + 1])
+    /// The base pointer of `slice` and its `i32` length.
+    fn slice(&mut self, slice: Slice) -> (Value, Value) {
+        let base = self.read(slice.ptr);
+        let len = self.read(slice.len);
+        (base, self.index32(len))
+    }
+    /// The type of the elements of `slice`.
+    fn element(&self, slice: Slice) -> ScalarType {
+        match self.types[slice.ptr.0 as usize] {
+            ValueType::Ptr(kind) => kind.element(),
+            _ => unreachable!("validated slice"),
+        }
     }
 
     /// The `i32` Lancy index of a `usize` slice index or offset, with the
@@ -392,6 +423,10 @@ impl Builder<'_> {
                 append(Op::Cast(hir::Type::I32, clamped))
             }
         }
+    }
+    /// The minimum of two `Index` values.
+    fn index_min(&mut self, a: Value, b: Value) -> Value {
+        self.value(Op::Bin(hir::Binary::Min, a, b))
     }
     fn const32(&mut self, n: i32) -> Value {
         self.value(Op::Const(n))
@@ -434,9 +469,9 @@ impl Builder<'_> {
         };
         Some(self.value(Op::Bin(kind, a, b)))
     }
-    fn address(&mut self, buffer: Buffer, index: Value) -> Value {
-        let (base, len) = self.slice(buffer);
-        let scale = simd::stride(self.kinds[buffer.index()].element());
+    fn address(&mut self, slice: Slice, index: Value) -> Value {
+        let (base, len) = self.slice(slice);
+        let scale = simd::stride(self.element(slice));
         let block = self.current.expect("open block");
         self.graph
             .append_inst(block, Op::BoundsCheck(index, len))
@@ -477,7 +512,18 @@ impl Builder<'_> {
             });
         }
     }
+    /// The entry value of a register of a buffer parameter, which the
+    /// verifier keeps unassigned: no block needs a parameter for it.
+    fn slice_param(&self, r: Reg) -> Option<Value> {
+        let index = r.0 as usize;
+        (self.arity..self.arity + 2 * self.buffers)
+            .contains(&index)
+            .then(|| self.blocks[self.graph.entry()].defs[&r])
+    }
     fn read(&mut self, r: Reg) -> Value {
+        if let Some(v) = self.slice_param(r) {
+            return v;
+        }
         let b = self.current.expect("open block");
         if let Some(&v) = self.blocks[b].defs.get(&r) {
             self.require(v);
@@ -495,6 +541,9 @@ impl Builder<'_> {
     /// Read a scalar register for a source point. It need not be assigned on
     /// every path; where it is not, the point sees zero.
     fn observe(&mut self, r: Reg) -> Value {
+        if let Some(v) = self.slice_param(r) {
+            return v;
+        }
         let b = self.current.expect("open block");
         if let Some(&v) = self.blocks[b].defs.get(&r) {
             return v;
@@ -664,8 +713,8 @@ impl Builder<'_> {
         let v = self.value(op);
         self.bind(r, v);
     }
-    fn define_load(&mut self, dst: Reg, buffer: Buffer, index: Value) {
-        let address = self.address(buffer, index);
+    fn define_load(&mut self, dst: Reg, slice: Slice, index: Value) {
+        let address = self.address(slice, index);
         let ty = scalar_type(self.scalar(dst));
         self.define(dst, Op::Load(ty, address));
     }
@@ -674,13 +723,13 @@ impl Builder<'_> {
         callee: Arc<Function>,
         result: ScalarType,
         args: &[Reg],
-        buffers: &[Buffer],
+        buffers: &[Slice],
     ) -> splice_core::Result<Reg> {
         let dst = self.local(ValueType::Scalar(result))?;
         if self.reachable() {
             let mut values: Vec<_> = args.iter().map(|&r| self.read(r)).collect();
-            for &buffer in buffers {
-                let (ptr, len) = self.slice(buffer);
+            for &slice in buffers {
+                let (ptr, len) = self.slice(slice);
                 values.extend([ptr, len]);
             }
             let call = self.graph.add_call(callee, &values);
@@ -693,7 +742,7 @@ impl Builder<'_> {
         &mut self,
         signature: Signature<'_>,
         args: &[Reg],
-        buffers: &[Buffer],
+        buffers: &[Slice],
         key: Option<Specialization>,
         body: Body<'_>,
     ) -> splice_core::Result<Reg> {
@@ -740,7 +789,7 @@ impl Builder<'_> {
     }
 }
 
-impl KernelBuilder for Builder<'_> {
+impl KernelBuilder for Builder {
     fn set_source(&mut self, source: &'static KernelSource) {
         self.source = Some(source);
         if let Some(sources) = &mut self.debug {
@@ -763,7 +812,7 @@ impl KernelBuilder for Builder<'_> {
             variables: variables.into(),
         };
         let slots: Vec<_> = point
-            .slots(|r| self.types[r.0 as usize], self.kinds, self.vector_bytes)
+            .slots(|r| self.types[r.0 as usize], self.vector_bytes)
             .collect();
         for slot in &slots {
             let types = &self.types;
@@ -782,10 +831,10 @@ impl KernelBuilder for Builder<'_> {
                     splice_core::debug::Store::Scalar(reg, _)
                     | splice_core::debug::Store::Vector(reg)
                     | splice_core::debug::Store::Mask(reg, _) => self.observe(reg),
-                    splice_core::debug::Store::Data(buffer) => self.slice(buffer).0,
-                    splice_core::debug::Store::Length(buffer) => {
-                        let len = self.slice(buffer).1;
-                        self.value(Op::Cast(hir::Type::I64, len))
+                    splice_core::debug::Store::Data(ptr) => self.observe(ptr),
+                    splice_core::debug::Store::Length(len) => {
+                        let len = self.observe(len);
+                        self.value(Op::Cast(hir::Type::U64, len))
                     }
                 };
                 let at = u32::try_from(at)
@@ -804,6 +853,13 @@ impl KernelBuilder for Builder<'_> {
         });
         self.effect(Op::DebugPoint(id));
         Ok(())
+    }
+    fn buffer(&self, index: usize) -> splice_core::Result<Slice> {
+        if index < self.buffers {
+            Ok(Slice::param(self.arity, index))
+        } else {
+            Err(splice_core::BuildError::verify("invalid buffer index"))
+        }
     }
     fn reg_type(&self, r: Reg) -> Option<ValueType> {
         self.types.get(r.0 as usize).copied()
@@ -848,30 +904,50 @@ impl KernelBuilder for Builder<'_> {
         }
         Ok(dst)
     }
-    fn buffer_len(&mut self, buffer: Buffer) -> splice_core::Result<Reg> {
-        let dst = self.local(ValueType::Scalar(ScalarType::Index))?;
+    fn slice_range(&mut self, slice: Slice, start: Reg, end: Reg) -> splice_core::Result<Slice> {
+        let ty = self.types[slice.ptr.0 as usize];
+        let ValueType::Ptr(kind) = ty else {
+            unreachable!("validated slice pointer")
+        };
+        let dst = Slice {
+            ptr: self.local(ty)?,
+            len: self.local(ValueType::Scalar(ScalarType::Index))?,
+        };
         if self.reachable() {
-            let (_, len) = self.slice(buffer);
-            let v = self.extend_index(len);
-            self.bind(dst, v);
+            let (base, len) = (self.read(slice.ptr), self.read(slice.len));
+            let (start, end) = (self.read(start), self.read(end));
+            let end = if end == len {
+                len
+            } else {
+                self.index_min(end, len)
+            };
+            let start = self.index_min(start, end);
+            // `start <= len`, which fits `i32`.
+            let offset = self.index32(start);
+            self.define(
+                dst.ptr,
+                Op::PtrOffset(base, offset, simd::stride(kind.element())),
+            );
+            let length = self.value(Op::Bin(hir::Binary::Sub, end, start));
+            self.bind(dst.len, length);
         }
         Ok(dst)
     }
-    fn load(&mut self, buffer: Buffer, index: Reg) -> splice_core::Result<Reg> {
-        let ty = self.kinds[buffer.index()].element();
+    fn load(&mut self, slice: Slice, index: Reg) -> splice_core::Result<Reg> {
+        let ty = self.element(slice);
         let dst = self.local(ValueType::Scalar(ty))?;
         if self.reachable() {
             let index = self.read(index);
             let index = self.index32(index);
-            self.define_load(dst, buffer, index);
+            self.define_load(dst, slice, index);
         }
         Ok(dst)
     }
-    fn store(&mut self, buffer: Buffer, index: Reg, value: Reg) -> splice_core::Result<()> {
+    fn store(&mut self, slice: Slice, index: Reg, value: Reg) -> splice_core::Result<()> {
         if self.reachable() {
             let (index, value) = (self.read(index), self.read(value));
             let index = self.index32(index);
-            let addr = self.address(buffer, index);
+            let addr = self.address(slice, index);
             self.effect(Op::Store(addr, value));
         }
         Ok(())
@@ -948,7 +1024,8 @@ impl KernelBuilder for Builder<'_> {
         if !self.reachable() {
             return Ok(dst);
         }
-        let plan = target.plan(self.kinds, args.len(), slices);
+        let types = &self.types;
+        let plan = target.plan(&|r| types.get(r.0 as usize).copied(), args.len(), slices);
         let packet = self.value(Op::CallScratch {
             offset: 0,
             bytes: plan.bytes,
@@ -964,12 +1041,13 @@ impl KernelBuilder for Builder<'_> {
                     let word = self.word(args[n]);
                     store(self, at, word);
                 }
-                PacketValue::Data(buffer) => {
-                    let ptr = self.slice(buffer).0;
+                PacketValue::Data(ptr) => {
+                    let ptr = self.read(ptr);
                     store(self, at, ptr);
                 }
-                PacketValue::Length(buffer) => {
-                    let len = self.slice(buffer).1;
+                PacketValue::Length(len) => {
+                    let len = self.read(len);
+                    let len = self.index32(len);
                     store(self, at, len);
                 }
                 PacketValue::Tag(tag) => {
@@ -983,7 +1061,7 @@ impl KernelBuilder for Builder<'_> {
             }
         }
         let receiver = match plan.context {
-            Some(context) => self.slice(context).0,
+            Some(context) => self.read(context.ptr),
             None => packet,
         };
         let operation = self.value(Op::Const(plan.operation as i32));
@@ -1002,7 +1080,7 @@ impl KernelBuilder for Builder<'_> {
         &mut self,
         signature: Signature<'_>,
         args: &[Reg],
-        buffers: &[Buffer],
+        buffers: &[Slice],
         body: Body<'_>,
     ) -> splice_core::Result<Reg> {
         self.staged_call(signature, args, buffers, None, body)
@@ -1011,7 +1089,7 @@ impl KernelBuilder for Builder<'_> {
         &mut self,
         key: Specialization,
         args: &[Reg],
-        buffers: &[Buffer],
+        buffers: &[Slice],
         body: Body<'_>,
     ) -> splice_core::Result<Reg> {
         self.staged_call(key.signature(), args, buffers, Some(key), body)
@@ -1020,7 +1098,7 @@ impl KernelBuilder for Builder<'_> {
         &mut self,
         function: &Arc<splice_core::Function>,
         args: &[Reg],
-        buffers: &[Buffer],
+        buffers: &[Slice],
     ) -> splice_core::Result<Reg> {
         let key = Arc::as_ptr(function);
         let callee = match self.functions.get(&key) {

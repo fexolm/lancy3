@@ -1,7 +1,7 @@
 //! Operation × element × boundary data on every backend, build route and
 //! build mode, checked against each other and against Rust.
 use splice::frontend::{KernelBuilder, Signature};
-use splice::hir::{Binary, Buffer, Reg, Simd, SimdOp};
+use splice::hir::{Binary, Reg, Simd, SimdOp, Slice};
 use splice::hir::{Constant, ScalarType};
 use splice::{BufferArg, BufferKind, CallError, KernelScalar, Trap};
 use splice_testkit::{Stage, agree};
@@ -20,7 +20,7 @@ fn store(b: &mut dyn KernelBuilder, element: ScalarType, buffer: u32, at: Reg, v
     b.simd(
         Simd {
             element,
-            op: SimdOp::Store(Buffer(buffer)),
+            op: SimdOp::Store(b.buffer(buffer as usize).unwrap()),
         },
         &[at, value],
     )
@@ -28,7 +28,8 @@ fn store(b: &mut dyn KernelBuilder, element: ScalarType, buffer: u32, at: Reg, v
 }
 
 fn load(b: &mut dyn KernelBuilder, element: ScalarType, buffer: u32, at: Reg) -> Reg {
-    simd(b, element, SimdOp::Load(Buffer(buffer)), &[at])
+    let slice = b.buffer(buffer as usize).unwrap();
+    simd(b, element, SimdOp::Load(slice), &[at])
 }
 
 /// Boundary values of each scalar type.
@@ -160,7 +161,7 @@ fn read_operands(
         .map(|i| {
             let offset = b.constant(Constant::from(i))?;
             let at = b.binary(Binary::Add, first, offset)?;
-            let word = b.load(Buffer(0), at)?;
+            let word = b.load(b.buffer(0).unwrap(), at)?;
             match ty {
                 ScalarType::Bool => {
                     let zero = b.constant(Constant::from(0))?;
@@ -179,7 +180,7 @@ fn write_result(b: &mut dyn KernelBuilder, ty: ScalarType, value: Reg) -> splice
         _ => value,
     };
     let zero = b.constant(Constant::from(0usize))?;
-    b.store(Buffer(1), zero, value)?;
+    b.store(b.buffer(1).unwrap(), zero, value)?;
     let zero = b.constant(Constant::from(0))?;
     b.ret(zero)
 }
@@ -323,14 +324,14 @@ fn every_slice_count_reaches_the_kernel_at_its_position() {
             let mut total = b.arg(0)?;
             for i in 0..count {
                 let at = b.constant(Constant::from(i))?;
-                let x = b.load(Buffer(i as u32), at)?;
+                let x = b.load(b.buffer(i)?, at)?;
                 let weight = b.constant(Constant::from(i as i32 + 1))?;
                 let x = b.binary(Binary::Mul, x, weight)?;
                 total = b.binary(Binary::Add, total, x)?;
             }
             if let Some(last) = (0..count).rev().find(|i| kinds[*i].writable()) {
                 let at = b.constant(Constant::from(0usize))?;
-                b.store(Buffer(last as u32), at, total)?;
+                b.store(b.buffer(last)?, at, total)?;
             }
             b.ret(total)
         });
@@ -599,7 +600,7 @@ fn every_backend_reports_the_same_typed_trap() {
         ];
         b.mark(exits[0])?;
         let at = b.cast(value, ScalarType::Index)?;
-        let read = b.load(Buffer(0), at)?;
+        let read = b.load(b.buffer(0).unwrap(), at)?;
         b.ret(read)?;
         for (&exit, (op, x, y)) in exits[1..4].iter().zip(&operations) {
             b.mark(exit)?;
@@ -1316,7 +1317,7 @@ fn every_integer_lane_operation_matches_the_scalar_operation_per_lane() {
                 let r = stage_fn(b, e, x, y, k)?;
                 let zero = b.constant(Constant::from(0usize))?;
                 if scalar {
-                    b.store(Buffer(1), zero, r)?;
+                    b.store(b.buffer(1).unwrap(), zero, r)?;
                 } else {
                     store(b, e, 1, zero, r);
                 }
@@ -1469,7 +1470,7 @@ fn compress_expand_and_compress_store_agree_at_buffer_edges() {
             b.simd(
                 Simd {
                     element: e,
-                    op: SimdOp::CompressStore(Buffer(3)),
+                    op: SimdOp::CompressStore(b.buffer(3).unwrap()),
                 },
                 &[at, m, x],
             )?;
@@ -1523,12 +1524,13 @@ fn u16_gather_and_scatter_check_indices_at_16_bit_boundaries() {
         let zero = b.constant(Constant::from(0usize))?;
         let e = ScalarType::U16;
         let index = load(b, e, 0, zero);
-        let g = simd(b, e, SimdOp::Gather(Buffer(1)), &[index]);
+        let slice = b.buffer(1).unwrap();
+        let g = simd(b, e, SimdOp::Gather(slice), &[index]);
         store(b, e, 2, zero, g);
         b.simd(
             Simd {
                 element: e,
-                op: SimdOp::Scatter(Buffer(2)),
+                op: SimdOp::Scatter(b.buffer(2).unwrap()),
             },
             &[index, g],
         )?;
@@ -1596,7 +1598,8 @@ fn partial_vector_accesses_agree_at_negative_and_far_offsets() {
         let k = index(b, 1)?;
         let m = simd(b, e, SimdOp::FirstN, &[k]);
         let at = index(b, 0)?;
-        let l = simd(b, e, SimdOp::LoadSelect(Buffer(1)), &[at, m, x]);
+        let slice = b.buffer(1).unwrap();
+        let l = simd(b, e, SimdOp::LoadSelect(slice), &[at, m, x]);
         store(b, e, 0, zero, l);
         store(b, e, 0, at, x);
         done(b)?;
@@ -1736,11 +1739,11 @@ fn every_build_route_reports_the_same_verify_error() {
         ("read-only store", |b| {
             let first = b.constant(Constant::from(0usize))?;
             let zero = b.constant(Constant::from(0))?;
-            b.store(Buffer(0), first, zero)?;
+            b.store(b.buffer(0).unwrap(), first, zero)?;
             b.ret(zero)
         }),
         ("invalid buffer", |b| {
-            let len = b.buffer_len(Buffer(1))?;
+            let len = b.buffer(1).map(|s| s.len)?;
             b.ret(len)
         }),
         ("falls off the end", |b| {
@@ -1791,10 +1794,10 @@ fn trapping_and_repeated_writes_leave_the_same_buffer_on_every_backend() {
         let indices = load(b, e, 0, zero);
         let op = b.arg(2)?;
         let ops = [
-            SimdOp::Store(Buffer(1)),
-            SimdOp::StoreSelect(Buffer(1)),
-            SimdOp::Scatter(Buffer(1)),
-            SimdOp::ScatterSelect(Buffer(1)),
+            SimdOp::Store(Slice::param(3, 1)),
+            SimdOp::StoreSelect(Slice::param(3, 1)),
+            SimdOp::Scatter(Slice::param(3, 1)),
+            SimdOp::ScatterSelect(Slice::param(3, 1)),
         ];
         let next = (0..ops.len())
             .map(|_| b.label())
@@ -1913,14 +1916,14 @@ where
     let t = |x: i64| T::try_from(x).ok().expect("a value of the element");
     let n = e.lanes(bytes());
     let ops = [
-        SimdOp::Load(Buffer(1)),
-        SimdOp::LoadSelect(Buffer(1)),
-        SimdOp::Gather(Buffer(1)),
-        SimdOp::GatherSelect(Buffer(1)),
-        SimdOp::Store(Buffer(1)),
-        SimdOp::StoreSelect(Buffer(1)),
-        SimdOp::Scatter(Buffer(1)),
-        SimdOp::ScatterSelect(Buffer(1)),
+        SimdOp::Load(Slice::param(3, 1)),
+        SimdOp::LoadSelect(Slice::param(3, 1)),
+        SimdOp::Gather(Slice::param(3, 1)),
+        SimdOp::GatherSelect(Slice::param(3, 1)),
+        SimdOp::Store(Slice::param(3, 1)),
+        SimdOp::StoreSelect(Slice::param(3, 1)),
+        SimdOp::Scatter(Slice::param(3, 1)),
+        SimdOp::ScatterSelect(Slice::param(3, 1)),
     ];
     let stage: Stage = Rc::new(move |b| {
         let at = index(b, 0)?;

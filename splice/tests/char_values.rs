@@ -3,7 +3,7 @@
 //! `char` from anything but `u8`, on any backend or build route, so a safe
 //! call never writes an invalid `char` into a `&mut [char]`.
 use splice::frontend::{self, KernelBuilder, Signature};
-use splice::hir::{Buffer, Constant, ScalarType};
+use splice::hir::{Constant, ScalarType};
 use splice::{BufferArg, BufferKind, BuildOptions, Codegen, Executable, Mode};
 
 /// A runner of the compiled kernel (`None` for the portable IR alone), or
@@ -20,7 +20,7 @@ fn store_char(value: Value) -> impl Fn(&mut dyn KernelBuilder) -> splice::Result
     move |b| {
         let value = value(b)?;
         let zero = b.constant(Constant::index(0))?;
-        b.store(Buffer(0), zero, value)?;
+        b.store(b.buffer(0)?, zero, value)?;
         let result = b.constant(Constant::from(0))?;
         b.ret(result)
     }

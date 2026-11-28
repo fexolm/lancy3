@@ -15,9 +15,7 @@ mod verify;
 pub use simd::{Access, Elements, Memory, OpInfo, Simd, SimdOp, Slot, ValueType};
 pub use types::{Constant, ScalarInfo, ScalarKind, ScalarType};
 
-pub use buffer::{
-    Buffer, BufferArg, BufferElement, BufferKind, check_forwarding, validate_buffers,
-};
+pub use buffer::{BufferArg, BufferElement, BufferKind, Types, check_forwarding, validate_buffers};
 pub use builder::FunctionBuilder;
 pub use replay::replay;
 pub use rust_call::{PacketStore, PacketValue, RustCallPlan, RustTarget};
@@ -33,8 +31,35 @@ pub struct Label(pub u32);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ContextSlice {
-    pub buffer: Buffer,
+    pub slice: Slice,
     pub writable: bool,
+}
+
+/// A slice value: a pair of registers, the address of its first element
+/// (of type [`ValueType::Ptr`], which names the element) and its length
+/// (an `Index`). Buffer parameters are the ABI source of such pairs; any
+/// pair of registers of those types is a slice, so the frontend keeps a
+/// pointer with the length it was checked against.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct Slice {
+    pub ptr: Reg,
+    pub len: Reg,
+}
+
+impl Slice {
+    /// The registers of buffer parameter `buffer` of a function with
+    /// `arity` scalar parameters: two per buffer, after the scalars.
+    ///
+    /// # Panics
+    /// If the registers are not representable.
+    pub const fn param(arity: usize, buffer: usize) -> Self {
+        let ptr = arity + 2 * buffer;
+        assert!(ptr < u32::MAX as usize - 1, "too many parameters");
+        Self {
+            ptr: Reg(ptr as u32),
+            len: Reg(ptr as u32 + 1),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -130,17 +155,28 @@ pub enum Instr {
     },
     Copy(Reg, Reg),
     Bin(Reg, Binary, Reg, Reg),
-    BufferLen {
-        dst: Reg,
-        buffer: Buffer,
+    /// `dst = &slice[s..e]` for `e = min(end, len)` and `s = min(start, e)`:
+    /// within `slice` whatever the operands, so the pair is a slice by
+    /// construction (see [`KernelBuilder::slice_range`]). `dst.ptr` has the
+    /// type of `slice.ptr`, `dst.len` is an `Index`, and the instruction is
+    /// the only definition of both.
+    ///
+    /// [`KernelBuilder::slice_range`]: crate::frontend::KernelBuilder::slice_range
+    SliceRange {
+        dst: Slice,
+        slice: Slice,
+        start: Reg,
+        end: Reg,
     },
+    /// Read element `index` of `slice`, trapping unless it is below the length.
     Load {
         dst: Reg,
-        buffer: Buffer,
+        slice: Slice,
         index: Reg,
     },
+    /// Write element `index` of `slice`, trapping unless it is below the length.
     Store {
-        buffer: Buffer,
+        slice: Slice,
         index: Reg,
         value: Reg,
     },
@@ -165,7 +201,7 @@ pub enum Instr {
         dst: Reg,
         function: Arc<Function>,
         args: Vec<Reg>,
-        buffers: Vec<Buffer>,
+        buffers: Vec<Slice>,
     },
 }
 
@@ -185,14 +221,23 @@ impl Instr {
         }
     }
 
-    fn written(&self) -> Option<Reg> {
+    /// The registers the instruction writes: one, or the pair of a
+    /// [`SliceRange`](Self::SliceRange).
+    fn written(&self) -> impl Iterator<Item = Reg> {
+        let (first, second) = match *self {
+            Self::SliceRange { dst, .. } => (Some(dst.ptr), Some(dst.len)),
+            _ => (self.written_scalar(), None),
+        };
+        first.into_iter().chain(second)
+    }
+
+    fn written_scalar(&self) -> Option<Reg> {
         match self {
             Self::CallIntrinsic { dst, .. } => *dst,
             Self::Const(dst, _)
             | Self::Cast { dst, .. }
             | Self::Copy(dst, _)
             | Self::Bin(dst, ..)
-            | Self::BufferLen { dst, .. }
             | Self::Load { dst, .. }
             | Self::Call { dst, .. }
             | Self::RustCall { dst, .. } => Some(*dst),
@@ -218,8 +263,8 @@ pub struct Function {
 pub fn check_call(
     callee: crate::frontend::Signature<'_>,
     args: impl ExactSizeIterator<Item = Option<ValueType>>,
-    caller_kinds: &[BufferKind],
-    buffers: &[Buffer],
+    caller_types: Types<'_>,
+    buffers: &[Slice],
 ) -> crate::Result<()> {
     if args.len() != callee.params.len() {
         return Err(crate::BuildError::verify(format!(
@@ -243,7 +288,7 @@ pub fn check_call(
             }
         }
     }
-    check_forwarding(caller_kinds, callee.buffers, buffers)
+    check_forwarding(caller_types, callee.buffers, buffers)
 }
 
 impl Function {
@@ -256,7 +301,12 @@ impl Function {
     }
 
     pub fn register_count(&self) -> usize {
-        self.params.len() + self.locals.len()
+        self.signature().registers() + self.locals.len()
+    }
+
+    /// The registers of buffer parameter `buffer`.
+    pub fn param_slice(&self, buffer: usize) -> Slice {
+        Slice::param(self.params.len(), buffer)
     }
 
     pub fn reg_type(&self, r: Reg) -> ValueType {
@@ -265,9 +315,10 @@ impl Function {
 
     fn checked_reg_type(&self, r: Reg) -> Option<ValueType> {
         let index = r.0 as usize;
-        match self.params.get(index) {
-            Some(&ty) => Some(ValueType::Scalar(ty)),
-            None => self.locals.get(index - self.params.len()).copied(),
+        let signature = self.signature();
+        match signature.param_type(r) {
+            Some(ty) => Some(ty),
+            None => self.locals.get(index - signature.registers()).copied(),
         }
     }
 
