@@ -274,7 +274,7 @@ impl dyn KernelBuilder + '_ {
     }
 
     /// `&text[start..end]` of a `&str` (or `..=` when `inclusive`): the
-    /// range check of [`subslice`](Self::subslice), then a trap unless both
+    /// range check of `subslice`, then a trap unless both
     /// ends are character boundaries, as Rust's `str` index panics.
     pub fn str_subslice(
         &mut self,
