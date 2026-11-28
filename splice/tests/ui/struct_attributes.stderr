@@ -1,0 +1,29 @@
+error: `#[kernel_type(soa)]` is not supported yet
+ --> tests/ui/struct_attributes.rs:4:15
+  |
+4 | #[kernel_type(soa)]
+  |               ^^^
+
+error: `#[kernel_type(align)]` is not supported yet
+  --> tests/ui/struct_attributes.rs:10:15
+   |
+10 | #[kernel_type(align(16))]
+   |               ^^^^^
+
+error: a `transparent` kernel type has exactly one field
+  --> tests/ui/struct_attributes.rs:17:8
+   |
+17 | struct Two(u32, u32);
+   |        ^^^
+
+error: expected `#[kernel_type(transparent)]` or `#[kernel_type(pod)]`
+  --> tests/ui/struct_attributes.rs:20:15
+   |
+20 | #[kernel_type(packed_simd)]
+   |               ^^^^^^^^^^^
+
+error: kernel data cannot borrow: a `pod` or `transparent` kernel type has no lifetime parameters
+  --> tests/ui/struct_attributes.rs:27:16
+   |
+27 | struct Borrowed<'a> {
+   |                ^^^^

@@ -1,0 +1,96 @@
+error: a struct reference binding is fixed; copy the struct into a `let mut` binding to change it
+  --> tests/ui/struct_kernels.rs:13:10
+   |
+13 | fn fixed(mut p: &Point) -> f32 {
+   |          ^^^^^
+
+error: returning a struct from a kernel is not supported yet; write it to a `&mut [T]` parameter
+  --> tests/ui/struct_kernels.rs:18:30
+   |
+18 | fn returned(xs: &[Point]) -> Point {
+   |                              ^^^^^
+
+error: passing a struct value to a call is not supported yet; pass its fields, or a slice of structs
+  --> tests/ui/struct_kernels.rs:29:10
+   |
+29 |     x_of(xs[0])
+   |          ^^^^^
+
+error: struct update requires an owned Rust value
+  --> tests/ui/struct_kernels.rs:34:13
+   |
+34 |     xs[0] = Point { x: 1.0, ..p };
+   |             ^^^^^^^^^^^^^^^^^^^^^
+
+error: SIMD operations on slices of structs are not supported yet
+  --> tests/ui/struct_kernels.rs:46:13
+   |
+46 |     v.store(xs, 0);
+   |             ^^
+
+error: SIMD operations on slices of structs are not supported yet
+  --> tests/ui/struct_kernels.rs:40:24
+   |
+40 |     let v = Lane::load(xs, 0);
+   |                        ^^
+
+error[E0277]: `Point` is not a SIMD lane element
+  --> tests/ui/struct_kernels.rs:40:24
+   |
+40 |     let v = Lane::load(xs, 0);
+   |             ---------- ^^ not a lane element
+   |             |
+   |             required by a bound introduced by this call
+   |
+help: the trait `LaneElement` is not implemented for `Point`
+  --> tests/ui/struct_kernels.rs:7:1
+   |
+ 7 | struct Point {
+   | ^^^^^^^^^^^^
+   = note: lane elements are `i8`, `u8`, `i16`, `u16`, `i32`, `u32`, `i64`, `f32` and `f64`
+   = help: the following other types implement trait `LaneElement`:
+             f32
+             f64
+             i16
+             i32
+             i64
+             i8
+             u16
+             u32
+             u8
+note: required by a bound in `splice::std::intrinsics::Lane::<T>::load`
+  --> src/std/intrinsics/simd.rs
+   |
+   | impl<T: LaneElement> Lane<T> {
+   |         ^^^^^^^^^^^ required by this bound in `Lane::<T>::load`
+...
+   |         pub fn load(src: &[T], offset: usize) -> Self
+   |                ---- required by a bound in this associated function
+
+error[E0277]: `Point` is not a SIMD lane element
+  --> tests/ui/struct_kernels.rs:40:13
+   |
+40 |     let v = Lane::load(xs, 0);
+   |             ^^^^^^^^^^^^^^^^^ not a lane element
+   |
+help: the trait `LaneElement` is not implemented for `Point`
+  --> tests/ui/struct_kernels.rs:7:1
+   |
+ 7 | struct Point {
+   | ^^^^^^^^^^^^
+   = note: lane elements are `i8`, `u8`, `i16`, `u16`, `i32`, `u32`, `i64`, `f32` and `f64`
+   = help: the following other types implement trait `LaneElement`:
+             f32
+             f64
+             i16
+             i32
+             i64
+             i8
+             u16
+             u32
+             u8
+note: required by a bound in `splice::std::intrinsics::Lane`
+  --> src/std/intrinsics/simd.rs
+   |
+   | pub struct Lane<T: LaneElement>(PhantomData<T>);
+   |                    ^^^^^^^^^^^ required by this bound in `Lane`

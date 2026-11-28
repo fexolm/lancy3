@@ -581,6 +581,12 @@ impl Lower<'_> {
             } else {
                 let inferred = match (sig.params.first(), c.args.first()) {
                     (Some(Param::Buffer), Some(arg)) => match self.expr(arg)?.stage {
+                        Stage::Buffer(b) if b.elem == Elem::Record => {
+                            return err(
+                                arg,
+                                "SIMD operations on slices of structs are not supported yet",
+                            );
+                        }
                         Stage::Buffer(b) => Some(b.elem),
                         _ => return err(arg, "expected a runtime buffer"),
                     },
@@ -739,6 +745,12 @@ impl Lower<'_> {
             && let Some(dst) = first
             && let Stage::Buffer(buffer) = self.expr(dst)?.stage
         {
+            if buffer.elem == Elem::Record {
+                return err(
+                    dst,
+                    "SIMD operations on slices of structs are not supported yet",
+                );
+            }
             return Ok(Some(Scalar::Vector(buffer.elem)));
         }
         Ok(None)

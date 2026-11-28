@@ -126,8 +126,47 @@ fn largest(ids: &[Id], out: &mut [Id], floor: Id) -> i32 {
     if !out.is_empty() {
         out[0] = best;
         out[out.len() - 1].0 = floor.0 + 1;
+        if out.len() > 1 {
+            out[1] = Id(7);
+        }
     }
     index
+}
+
+#[kernel]
+fn centroid_x(points: &[Point]) -> f32 {
+    let mut sum = 0.0_f32;
+    for p in points {
+        sum += p.x;
+    }
+    for &p in points.iter() {
+        sum += p.y * 0.5;
+    }
+    sum
+}
+
+#[kernel]
+fn scale_all(points: &mut [Point], by: f32) -> i32 {
+    for i in 0..points.len() {
+        points[i].x *= by;
+    }
+    points.len() as i32
+}
+
+/// Struct slices are resliced, split and passed to nested kernels; `at`
+/// is read last.
+#[kernel]
+fn regions(points: &mut [Point], cut: i32, at: i32) -> f32 {
+    let tail = &points[cut as usize..];
+    let total = centroid_x(tail);
+    let (head, rest) = points.split_at_mut(1);
+    scale_all(head, 3.0);
+    let moved = scale_all(&mut rest[1..], -1.0);
+    let mut chunks = 0.0_f32;
+    for pair in points.chunks_exact(2) {
+        chunks += pair[1].x - pair[0].y;
+    }
+    total * 100.0 + moved as f32 + chunks + points[at as usize].y
 }
 
 macro_rules! builds {
@@ -252,6 +291,45 @@ fn check<B: Codegen<Output: Executable>>() {
             }
         }
     }
+    let cloud: Vec<Point> = (0..7)
+        .map(|i| Point {
+            x: i as f32 * 1.25 - 2.0,
+            y: 3.0 - i as f32,
+        })
+        .collect();
+    for code in builds!(centroid_x, B) {
+        for n in 0..=cloud.len() {
+            let call = centroid_x::CallArgs {
+                points: &cloud[..n],
+            };
+            assert_eq!(code.call(call), Ok(centroid_x(&cloud[..n])), "{n} points");
+        }
+    }
+    for code in builds!(regions, B) {
+        for n in 2..=cloud.len() {
+            for (cut, at) in [
+                (0, 0),
+                (2, 1),
+                (n as i32, 0),
+                (n as i32 + 1, 0),
+                (1, n as i32),
+            ] {
+                let (mut actual, mut expected) = (cloud[..n].to_vec(), cloud[..n].to_vec());
+                let call = regions::CallArgs {
+                    points: &mut actual,
+                    cut,
+                    at,
+                };
+                let result = code.call(call);
+                let wanted = rust(|| regions(&mut expected, cut, at));
+                assert_eq!(
+                    (result, actual),
+                    (wanted, expected),
+                    "{n} points, cut {cut}, at {at}"
+                );
+            }
+        }
+    }
 }
 
 #[test]
@@ -263,4 +341,63 @@ fn structs_match_rust_on_every_backend() {
         }
     }));
     splice_testkit::each_backend!(B => check::<B>());
+}
+
+#[kernel]
+fn same(xs: &[Point]) -> bool {
+    xs[0] == xs[1]
+}
+
+/// A whole struct is not a scalar: comparing two is reported when the
+/// kernel is built, on every backend.
+#[test]
+fn struct_values_are_not_compared_yet() {
+    fn check<B: Codegen<Output: Executable>>() {
+        let options = BuildOptions::host(Mode::Release).unwrap();
+        let error = same::build_with_options::<B>(options, same::BuildArgs {})
+            .err()
+            .expect("comparing structs is rejected");
+        assert!(
+            error.to_string().contains("kernels do not compare"),
+            "{error}"
+        );
+    }
+    splice_testkit::each_backend!(B => check::<B>());
+}
+
+/// The derived layout is the one rustc chose, reordered fields and padding
+/// included.
+#[test]
+fn layouts_are_rustc_layouts() {
+    use splice::KernelData;
+    use splice::hir::{DataType, ScalarType};
+    use std::mem::{align_of, offset_of, size_of};
+    let DataType::Struct(particle) = Particle::TYPE else {
+        panic!("a struct layout")
+    };
+    assert_eq!(
+        (particle.size, particle.align),
+        (size_of::<Particle>(), align_of::<Particle>())
+    );
+    let offsets: Vec<_> = particle.fields.iter().map(|f| (f.name, f.offset)).collect();
+    assert_eq!(
+        offsets,
+        [
+            ("alive", offset_of!(Particle, alive)),
+            ("pos", offset_of!(Particle, pos)),
+            ("tag", offset_of!(Particle, tag)),
+            ("mass", offset_of!(Particle, mass)),
+            ("kind", offset_of!(Particle, kind)),
+            ("id", offset_of!(Particle, id)),
+        ]
+    );
+    assert_eq!(
+        Particle::TYPE.leaf(2),
+        Some((
+            offset_of!(Particle, pos) + offset_of!(Point, y),
+            ScalarType::F32
+        ))
+    );
+    assert_eq!(Id::TYPE, DataType::Scalar(ScalarType::U32));
+    assert_eq!(Particle::TYPE.check(), Ok(()));
 }

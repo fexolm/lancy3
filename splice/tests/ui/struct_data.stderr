@@ -1,0 +1,343 @@
+error[E0277]: `Vec<i32>` is not kernel data
+  --> tests/ui/struct_data.rs:22:8
+   |
+22 | struct Owned {
+   |        ^^^^^ not a kernel scalar or a Copy struct of kernel data
+   |
+   = help: the trait `KernelData` is not implemented for `Vec<i32>`
+   = note: kernel data are kernel scalars and `Copy` structs that derive `splice::KernelType` whose fields are kernel data; references, slices, arrays, enums, `Option` and `Result` are not supported as kernel data yet
+   = help: the following other types implement trait `KernelData`:
+             NotCopy
+             Owned
+             WithOption
+             WithReference
+             bool
+             char
+             f32
+             f64
+           and $N others
+note: required for `Owned` to implement `KernelData`
+  --> tests/ui/struct_data.rs:20:10
+   |
+20 | #[derive(splice::KernelType)]
+   |          ^^^^^^^^^^^^^^^^^^ unsatisfied trait bound introduced in this `derive` macro
+21 | #[kernel_type(pod)]
+22 | struct Owned {
+   |        ^^^^^
+note: required by a bound in `__splice_kernel_data`
+  --> tests/ui/struct_data.rs:20:10
+   |
+20 | #[derive(splice::KernelType)]
+   |          ^^^^^^^^^^^^^^^^^^ required by this bound in `__splice_kernel_data`
+   = note: this error originates in the derive macro `splice::KernelType` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0277]: `Owned` is not kernel data
+  --> tests/ui/struct_data.rs:22:8
+   |
+22 | struct Owned {
+   |        ^^^^^ not a kernel scalar or a Copy struct of kernel data
+   |
+help: the trait `std::marker::Copy` is not implemented for `Owned`
+  --> tests/ui/struct_data.rs:22:1
+   |
+22 | struct Owned {
+   | ^^^^^^^^^^^^
+   = note: kernel data are kernel scalars and `Copy` structs that derive `splice::KernelType` whose fields are kernel data; references, slices, arrays, enums, `Option` and `Result` are not supported as kernel data yet
+help: the trait `KernelData` is implemented for `Owned`
+  --> tests/ui/struct_data.rs:20:10
+   |
+20 | #[derive(splice::KernelType)]
+   |          ^^^^^^^^^^^^^^^^^^
+note: required for `Owned` to implement `KernelData`
+  --> tests/ui/struct_data.rs:20:10
+   |
+20 | #[derive(splice::KernelType)]
+   |          ^^^^^^^^^^^^^^^^^^ unsatisfied trait bound introduced in this `derive` macro
+21 | #[kernel_type(pod)]
+22 | struct Owned {
+   |        ^^^^^
+note: required by a bound in `__splice_kernel_data`
+  --> tests/ui/struct_data.rs:20:10
+   |
+20 | #[derive(splice::KernelType)]
+   |          ^^^^^^^^^^^^^^^^^^ required by this bound in `__splice_kernel_data`
+   = note: this error originates in the derive macro `splice::KernelType` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0277]: `&'static i32` is not kernel data
+  --> tests/ui/struct_data.rs:26:1
+   |
+26 | #[kernel]
+   | ^^^^^^^^^
+   | |
+   | not a kernel scalar or a Copy struct of kernel data
+   | required by a bound introduced by this call
+   |
+   = help: the trait `KernelData` is not implemented for `&'static i32`
+   = note: kernel data are kernel scalars and `Copy` structs that derive `splice::KernelType` whose fields are kernel data; references, slices, arrays, enums, `Option` and `Result` are not supported as kernel data yet
+help: the trait `KernelData` is implemented for `i32`
+  --> $WORKSPACE/splice-core/src/lib.rs
+   |
+   |           impl KernelData for $ty {
+   |           ^^^^^^^^^^^^^^^^^^^^^^^
+...
+   | / kernel_data!(
+   | |     bool, char, i8, u8, i16, u16, i32, u32, i64, u64, usize, f32, f64
+   | | );
+   | |_- in this macro invocation
+note: required for `WithReference` to implement `KernelData`
+  --> tests/ui/struct_data.rs:5:23
+   |
+ 5 | #[derive(Clone, Copy, splice::KernelType)]
+   |                       ^^^^^^^^^^^^^^^^^^ unsatisfied trait bound introduced in this `derive` macro
+ 6 | struct WithReference {
+   |        ^^^^^^^^^^^^^
+note: required by a bound in `BufferArg::<'a>::records`
+  --> $WORKSPACE/splice-core/src/hir/buffer.rs
+   |
+   |     pub fn records<T: crate::KernelData>(slice: &'a [T]) -> Self {
+   |                       ^^^^^^^^^^^^^^^^^ required by this bound in `BufferArg::<'a>::records`
+   = note: this error originates in the attribute macro `kernel` which comes from the expansion of the derive macro `splice::KernelType` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0277]: `&'static i32` is not kernel data
+  --> tests/ui/struct_data.rs:27:17
+   |
+27 | fn reference(p: WithReference) -> i32 {
+   |                 ^^^^^^^^^^^^^ not a kernel scalar or a Copy struct of kernel data
+   |
+   = help: the trait `KernelData` is not implemented for `&'static i32`
+   = note: kernel data are kernel scalars and `Copy` structs that derive `splice::KernelType` whose fields are kernel data; references, slices, arrays, enums, `Option` and `Result` are not supported as kernel data yet
+help: the trait `KernelData` is implemented for `i32`
+  --> $WORKSPACE/splice-core/src/lib.rs
+   |
+   |           impl KernelData for $ty {
+   |           ^^^^^^^^^^^^^^^^^^^^^^^
+...
+   | / kernel_data!(
+   | |     bool, char, i8, u8, i16, u16, i32, u32, i64, u64, usize, f32, f64
+   | | );
+   | |_- in this macro invocation
+note: required for `WithReference` to implement `KernelData`
+  --> tests/ui/struct_data.rs:5:23
+   |
+ 5 | #[derive(Clone, Copy, splice::KernelType)]
+   |                       ^^^^^^^^^^^^^^^^^^ unsatisfied trait bound introduced in this `derive` macro
+ 6 | struct WithReference {
+   |        ^^^^^^^^^^^^^
+note: required by a bound in `BufferKind::data_of`
+  --> $WORKSPACE/splice-core/src/hir/buffer.rs
+   |
+   |     pub const fn data_of<T: crate::KernelData>(writable: bool) -> Self {
+   |                             ^^^^^^^^^^^^^^^^^ required by this bound in `BufferKind::data_of`
+   = note: this error originates in the macro `kernel_data` which comes from the expansion of the derive macro `splice::KernelType` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0277]: `NotCopy` is not kernel data
+  --> tests/ui/struct_data.rs:31:1
+   |
+31 | #[kernel]
+   | ^^^^^^^^^
+   | |
+   | not a kernel scalar or a Copy struct of kernel data
+   | required by a bound introduced by this call
+   |
+   = help: the trait `std::marker::Copy` is not implemented for `NotCopy`
+   = note: kernel data are kernel scalars and `Copy` structs that derive `splice::KernelType` whose fields are kernel data; references, slices, arrays, enums, `Option` and `Result` are not supported as kernel data yet
+help: the trait `KernelData` is implemented for `NotCopy`
+  --> tests/ui/struct_data.rs:10:10
+   |
+10 | #[derive(splice::KernelType)]
+   |          ^^^^^^^^^^^^^^^^^^
+note: required for `NotCopy` to implement `KernelData`
+  --> tests/ui/struct_data.rs:10:10
+   |
+10 | #[derive(splice::KernelType)]
+   |          ^^^^^^^^^^^^^^^^^^ unsatisfied trait bound introduced in this `derive` macro
+11 | struct NotCopy {
+   |        ^^^^^^^
+note: required by a bound in `BufferArg::<'a>::records`
+  --> $WORKSPACE/splice-core/src/hir/buffer.rs
+   |
+   |     pub fn records<T: crate::KernelData>(slice: &'a [T]) -> Self {
+   |                       ^^^^^^^^^^^^^^^^^ required by this bound in `BufferArg::<'a>::records`
+   = note: this error originates in the attribute macro `kernel` which comes from the expansion of the derive macro `splice::KernelType` (in Nightly builds, run with -Z macro-backtrace for more info)
+help: consider annotating `NotCopy` with `#[derive(Copy)]`
+   |
+11 + #[derive(Copy)]
+12 | struct NotCopy {
+   |
+
+error[E0277]: `NotCopy` is not kernel data
+  --> tests/ui/struct_data.rs:32:19
+   |
+32 | fn not_copy(xs: &[NotCopy]) -> i32 {
+   |                   ^^^^^^^ not a kernel scalar or a Copy struct of kernel data
+   |
+   = help: the trait `std::marker::Copy` is not implemented for `NotCopy`
+   = note: kernel data are kernel scalars and `Copy` structs that derive `splice::KernelType` whose fields are kernel data; references, slices, arrays, enums, `Option` and `Result` are not supported as kernel data yet
+help: the trait `KernelData` is implemented for `NotCopy`
+  --> tests/ui/struct_data.rs:10:10
+   |
+10 | #[derive(splice::KernelType)]
+   |          ^^^^^^^^^^^^^^^^^^
+note: required for `NotCopy` to implement `KernelData`
+  --> tests/ui/struct_data.rs:10:10
+   |
+10 | #[derive(splice::KernelType)]
+   |          ^^^^^^^^^^^^^^^^^^ unsatisfied trait bound introduced in this `derive` macro
+11 | struct NotCopy {
+   |        ^^^^^^^
+note: required by a bound in `BufferKind::data_of`
+  --> $WORKSPACE/splice-core/src/hir/buffer.rs
+   |
+   |     pub const fn data_of<T: crate::KernelData>(writable: bool) -> Self {
+   |                             ^^^^^^^^^^^^^^^^^ required by this bound in `BufferKind::data_of`
+   = note: this error originates in the derive macro `splice::KernelType` (in Nightly builds, run with -Z macro-backtrace for more info)
+help: consider annotating `NotCopy` with `#[derive(Copy)]`
+   |
+11 + #[derive(Copy)]
+12 | struct NotCopy {
+   |
+
+error[E0277]: `Option<u8>` is not kernel data
+  --> tests/ui/struct_data.rs:36:1
+   |
+36 | #[kernel]
+   | ^^^^^^^^^
+   | |
+   | not a kernel scalar or a Copy struct of kernel data
+   | required by a bound introduced by this call
+   |
+   = help: the trait `KernelData` is not implemented for `Option<u8>`
+   = note: kernel data are kernel scalars and `Copy` structs that derive `splice::KernelType` whose fields are kernel data; references, slices, arrays, enums, `Option` and `Result` are not supported as kernel data yet
+   = help: the following other types implement trait `KernelData`:
+             NotCopy
+             Owned
+             WithOption
+             WithReference
+             bool
+             char
+             f32
+             f64
+           and $N others
+note: required for `WithOption` to implement `KernelData`
+  --> tests/ui/struct_data.rs:15:23
+   |
+15 | #[derive(Clone, Copy, splice::KernelType)]
+   |                       ^^^^^^^^^^^^^^^^^^ unsatisfied trait bound introduced in this `derive` macro
+16 | struct WithOption {
+   |        ^^^^^^^^^^
+note: required by a bound in `BufferArg::<'a>::records_mut`
+  --> $WORKSPACE/splice-core/src/hir/buffer.rs
+   |
+   |     pub fn records_mut<T: crate::KernelData>(slice: &'a mut [T]) -> Self {
+   |                           ^^^^^^^^^^^^^^^^^ required by this bound in `BufferArg::<'a>::records_mut`
+   = note: this error originates in the attribute macro `kernel` which comes from the expansion of the derive macro `splice::KernelType` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0277]: `Option<i32>` is not kernel data
+  --> tests/ui/struct_data.rs:36:1
+   |
+36 | #[kernel]
+   | ^^^^^^^^^
+   | |
+   | not a kernel scalar or a Copy struct of kernel data
+   | required by a bound introduced by this call
+   |
+   = help: the trait `KernelData` is not implemented for `Option<i32>`
+   = note: kernel data are kernel scalars and `Copy` structs that derive `splice::KernelType` whose fields are kernel data; references, slices, arrays, enums, `Option` and `Result` are not supported as kernel data yet
+   = help: the following other types implement trait `KernelData`:
+             NotCopy
+             Owned
+             WithOption
+             WithReference
+             bool
+             char
+             f32
+             f64
+           and $N others
+note: required by a bound in `BufferArg::<'a>::records`
+  --> $WORKSPACE/splice-core/src/hir/buffer.rs
+   |
+   |     pub fn records<T: crate::KernelData>(slice: &'a [T]) -> Self {
+   |                       ^^^^^^^^^^^^^^^^^ required by this bound in `BufferArg::<'a>::records`
+   = note: this error originates in the attribute macro `kernel` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0277]: `Option<u8>` is not kernel data
+  --> tests/ui/struct_data.rs:37:21
+   |
+37 | fn option(xs: &mut [WithOption], y: Option<i32>) -> i32 {
+   |                     ^^^^^^^^^^ not a kernel scalar or a Copy struct of kernel data
+   |
+   = help: the trait `KernelData` is not implemented for `Option<u8>`
+   = note: kernel data are kernel scalars and `Copy` structs that derive `splice::KernelType` whose fields are kernel data; references, slices, arrays, enums, `Option` and `Result` are not supported as kernel data yet
+   = help: the following other types implement trait `KernelData`:
+             NotCopy
+             Owned
+             WithOption
+             WithReference
+             bool
+             char
+             f32
+             f64
+           and $N others
+note: required for `WithOption` to implement `KernelData`
+  --> tests/ui/struct_data.rs:15:23
+   |
+15 | #[derive(Clone, Copy, splice::KernelType)]
+   |                       ^^^^^^^^^^^^^^^^^^ unsatisfied trait bound introduced in this `derive` macro
+16 | struct WithOption {
+   |        ^^^^^^^^^^
+note: required by a bound in `BufferKind::data_of`
+  --> $WORKSPACE/splice-core/src/hir/buffer.rs
+   |
+   |     pub const fn data_of<T: crate::KernelData>(writable: bool) -> Self {
+   |                             ^^^^^^^^^^^^^^^^^ required by this bound in `BufferKind::data_of`
+   = note: this error originates in the derive macro `splice::KernelType` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0277]: `Option<i32>` is not kernel data
+  --> tests/ui/struct_data.rs:37:37
+   |
+37 | fn option(xs: &mut [WithOption], y: Option<i32>) -> i32 {
+   |                                     ^^^^^^^^^^^ not a kernel scalar or a Copy struct of kernel data
+   |
+   = help: the trait `KernelData` is not implemented for `Option<i32>`
+   = note: kernel data are kernel scalars and `Copy` structs that derive `splice::KernelType` whose fields are kernel data; references, slices, arrays, enums, `Option` and `Result` are not supported as kernel data yet
+   = help: the following other types implement trait `KernelData`:
+             NotCopy
+             Owned
+             WithOption
+             WithReference
+             bool
+             char
+             f32
+             f64
+           and $N others
+note: required by a bound in `BufferKind::data_of`
+  --> $WORKSPACE/splice-core/src/hir/buffer.rs
+   |
+   |     pub const fn data_of<T: crate::KernelData>(writable: bool) -> Self {
+   |                             ^^^^^^^^^^^^^^^^^ required by this bound in `BufferKind::data_of`
+
+warning: unused variable: `p`
+  --> tests/ui/struct_data.rs:27:14
+   |
+27 | fn reference(p: WithReference) -> i32 {
+   |              ^ help: if this is intentional, prefix it with an underscore: `_p`
+   |
+   = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `xs`
+  --> tests/ui/struct_data.rs:32:13
+   |
+32 | fn not_copy(xs: &[NotCopy]) -> i32 {
+   |             ^^ help: if this is intentional, prefix it with an underscore: `_xs`
+
+warning: unused variable: `xs`
+  --> tests/ui/struct_data.rs:37:11
+   |
+37 | fn option(xs: &mut [WithOption], y: Option<i32>) -> i32 {
+   |           ^^ help: if this is intentional, prefix it with an underscore: `_xs`
+
+warning: unused variable: `y`
+  --> tests/ui/struct_data.rs:37:34
+   |
+37 | fn option(xs: &mut [WithOption], y: Option<i32>) -> i32 {
+   |                                  ^ help: if this is intentional, prefix it with an underscore: `_y`

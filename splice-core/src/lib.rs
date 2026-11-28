@@ -73,7 +73,7 @@ pub(crate) const fn data_type<T: KernelData>() -> hir::DataType {
     );
     assert!(
         !matches!(T::TYPE, hir::DataType::Scalar(ScalarType::Bool)),
-        "a slice of bool is not kernel data"
+        "a slice of bool (or of a transparent newtype over bool) is not supported as kernel data yet"
     );
     T::TYPE
 }

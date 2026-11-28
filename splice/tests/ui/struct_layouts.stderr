@@ -1,0 +1,133 @@
+warning: unused variable: `xs`
+  --> tests/ui/struct_layouts.rs:26:11
+   |
+26 | fn packed(xs: &[Packed]) -> i32 {
+   |           ^^ help: if this is intentional, prefix it with an underscore: `_xs`
+   |
+   = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+error[E0080]: evaluation panicked: a repr(packed) struct is not supported as kernel data yet
+ --> tests/ui/struct_layouts.rs:5:23
+  |
+5 | #[derive(Clone, Copy, splice::KernelType)]
+  |                       ^^^^^^^^^^^^^^^^^^ evaluation of `<Packed as splice::KernelData>::TYPE` failed here
+
+note: erroneous constant encountered
+ --> $WORKSPACE/splice-core/src/lib.rs
+  |
+  |         T::TYPE.bytes() == size_of::<T>() && T::TYPE.align() <= align_of::<T>(),
+  |         ^^^^^^^
+
+note: erroneous constant encountered
+  --> tests/ui/struct_layouts.rs:25:1
+   |
+25 | #[kernel]
+   | ^^^^^^^^^
+   |
+   = note: this note originates in the attribute macro `kernel` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: unused variable: `w`
+  --> tests/ui/struct_layouts.rs:31:12
+   |
+31 | fn wrapper(w: Wrapper) -> i32 {
+   |            ^ help: if this is intentional, prefix it with an underscore: `_w`
+
+error[E0080]: evaluation panicked: a transparent kernel type wraps a kernel scalar
+  --> tests/ui/struct_layouts.rs:17:23
+   |
+17 | #[derive(Clone, Copy, splice::KernelType)]
+   |                       ^^^^^^^^^^^^^^^^^^ evaluation of `<Wrapper as splice::KernelData>::TYPE` failed here
+
+note: erroneous constant encountered
+  --> tests/ui/struct_layouts.rs:30:1
+   |
+30 | #[kernel]
+   | ^^^^^^^^^
+   |
+   = note: this note originates in the attribute macro `kernel` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: unused variable: `xs`
+  --> tests/ui/struct_layouts.rs:36:10
+   |
+36 | fn flags(xs: &[Flag]) -> i32 {
+   |          ^^ help: if this is intentional, prefix it with an underscore: `_xs`
+
+error[E0080]: evaluation panicked: a slice of bool (or of a transparent newtype over bool) is not supported as kernel data yet
+  --> tests/ui/struct_layouts.rs:35:1
+   |
+35 | #[kernel]
+   | ^^^^^^^^^ evaluation of `flags::ir_with_options::{closure#0}::{constant#0}` failed inside this call
+   |
+note: inside `BufferKind::data_of::<Flag>`
+  --> $WORKSPACE/splice-core/src/hir/buffer.rs
+   |
+   |         Self::data(crate::data_type::<T>(), writable)
+   |                    ^^^^^^^^^^^^^^^^^^^^^^^
+note: inside `splice_core::data_type::<Flag>`
+  --> $RUST/core/src/panic.rs
+   |
+   = note: the failure occurred here
+   |
+  ::: $WORKSPACE/splice-core/src/lib.rs
+   |
+   | /     assert!(
+   | |         !matches!(T::TYPE, hir::DataType::Scalar(ScalarType::Bool)),
+   | |         "a slice of bool (or of a transparent newtype over bool) is not supported as kernel data yet"
+   | |     );
+   | |_____- in this macro invocation
+
+note: erroneous constant encountered
+  --> tests/ui/struct_layouts.rs:35:1
+   |
+35 | #[kernel]
+   | ^^^^^^^^^
+   |
+   = note: this note originates in the attribute macro `kernel` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0080]: evaluation panicked: a slice of bool (or of a transparent newtype over bool) is not supported as kernel data yet
+  --> tests/ui/struct_layouts.rs:35:1
+   |
+35 | #[kernel]
+   | ^^^^^^^^^ evaluation of `flags::__splice_call::{constant#0}` failed inside this call
+   |
+note: inside `BufferKind::data_of::<Flag>`
+  --> $WORKSPACE/splice-core/src/hir/buffer.rs
+   |
+   |         Self::data(crate::data_type::<T>(), writable)
+   |                    ^^^^^^^^^^^^^^^^^^^^^^^
+note: inside `splice_core::data_type::<Flag>`
+  --> $RUST/core/src/panic.rs
+   |
+   = note: the failure occurred here
+   |
+  ::: $WORKSPACE/splice-core/src/lib.rs
+   |
+   | /     assert!(
+   | |         !matches!(T::TYPE, hir::DataType::Scalar(ScalarType::Bool)),
+   | |         "a slice of bool (or of a transparent newtype over bool) is not supported as kernel data yet"
+   | |     );
+   | |_____- in this macro invocation
+
+error[E0080]: evaluation panicked: a slice of bool (or of a transparent newtype over bool) is not supported as kernel data yet
+  --> tests/ui/struct_layouts.rs:35:1
+   |
+35 | #[kernel]
+   | ^^^^^^^^^ evaluation of `flags::__splice_call::{constant#1}` failed inside this call
+   |
+note: inside `BufferKind::data_of::<Flag>`
+  --> $WORKSPACE/splice-core/src/hir/buffer.rs
+   |
+   |         Self::data(crate::data_type::<T>(), writable)
+   |                    ^^^^^^^^^^^^^^^^^^^^^^^
+note: inside `splice_core::data_type::<Flag>`
+  --> $RUST/core/src/panic.rs
+   |
+   = note: the failure occurred here
+   |
+  ::: $WORKSPACE/splice-core/src/lib.rs
+   |
+   | /     assert!(
+   | |         !matches!(T::TYPE, hir::DataType::Scalar(ScalarType::Bool)),
+   | |         "a slice of bool (or of a transparent newtype over bool) is not supported as kernel data yet"
+   | |     );
+   | |_____- in this macro invocation
