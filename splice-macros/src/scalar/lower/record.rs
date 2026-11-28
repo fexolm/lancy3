@@ -51,8 +51,11 @@ impl Lower<'_> {
                 _ => return Ok(None),
             },
             Expr::Index(index) if !matches!(&*index.index, Expr::Range(_)) => {
-                match self.expr(&index.expr)?.stage {
-                    Stage::Buffer(buffer) if buffer.elem == Elem::Record => Root::Element(index),
+                // Any other operand reports its own errors where it is lowered.
+                match self.expr(&index.expr).map(|value| value.stage) {
+                    Ok(Stage::Buffer(buffer)) if buffer.elem == Elem::Record => {
+                        Root::Element(index)
+                    }
                     _ => return Ok(None),
                 }
             }
