@@ -127,10 +127,9 @@ fn parameters(
             b.ins()
                 .load(I64, flags, addr, offset_of!(SliceDescriptor, data) as i32),
         );
-        // A length is at most `i32::MAX`: its low half, on little-endian hosts.
         params.push(
             b.ins()
-                .load(I32, flags, addr, offset_of!(SliceDescriptor, len) as i32),
+                .load(I64, flags, addr, offset_of!(SliceDescriptor, len) as i32),
         );
     }
     // The caller zeroes the result word, so storing the value at its type
@@ -150,13 +149,8 @@ pub(super) fn emit(
     let vars = simd::Registers::new(&mut b, f, m);
     let var = |r: Reg| vars.get(r)[0];
     // A buffer parameter is the slice of its two registers: the data
-    // pointer and the `Index` length that extends the ABI's `i32`.
+    // pointer and the `Index` length.
     for (index, &value) in params.iter().enumerate() {
-        let value = if index >= f.arity() && (index - f.arity()) % 2 == 1 {
-            b.ins().uextend(I64, value)
-        } else {
-            value
-        };
         b.def_var(var(Reg(index as u32)), value);
     }
     let labels: Vec<_> = (0..f.label_count()).map(|_| b.create_block()).collect();
@@ -328,10 +322,7 @@ pub(super) fn emit(
                             word(&mut b, value, scalar(f, args[n]))
                         }
                         PacketValue::Data(ptr) => b.use_var(var(ptr)),
-                        PacketValue::Length(len) => {
-                            let len = b.use_var(var(len));
-                            b.ins().ireduce(I32, len)
-                        }
+                        PacketValue::Length(len) => b.use_var(var(len)),
                         PacketValue::Tag(tag) => b.ins().iconst(I32, i64::from(tag)),
                         PacketValue::Symbol(address) => b.ins().iconst(I64, address as i64),
                     };
@@ -389,7 +380,7 @@ pub(super) fn emit(
                 actuals.extend(args.iter().map(|&r| b.use_var(var(r))));
                 for slice in forwarded {
                     let len = b.use_var(var(slice.len));
-                    actuals.extend([b.use_var(var(slice.ptr)), b.ins().ireduce(I32, len)]);
+                    actuals.extend([b.use_var(var(slice.ptr)), len]);
                 }
                 let call = b.ins().call(imports[&Arc::as_ptr(function)], &actuals);
                 let status = b.inst_results(call)[0];

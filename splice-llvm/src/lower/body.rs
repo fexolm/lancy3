@@ -233,12 +233,14 @@ impl<'a, 'ctx> Body<'a, 'ctx> {
         Ok(())
     }
 
-    /// A `usize` memory offset as `i64`, clamped to `i32::MAX`: every slice
-    /// length fits `i32`, so a larger offset is out of bounds either way.
+    /// A `usize` memory offset as `i64`, clamped to `i64::MAX`: every slice
+    /// length is below it (a Rust slice spans at most `isize::MAX` bytes),
+    /// so a larger offset is out of bounds either way and adding a lane
+    /// count does not wrap.
     fn offset(&self, reg: Reg) -> Built<IntValue<'ctx>> {
         let wide = self.ctx.i64_type();
         let umin = self.intrinsic("llvm.umin", &[wide.into()])?;
-        let max = wide.const_int(i32::MAX as u64, false);
+        let max = wide.const_int(i64::MAX as u64, false);
         Ok(self
             .builder
             .build_call(umin, &[self.load(reg)?.into(), max.into()], "")?
@@ -700,10 +702,7 @@ impl<'a, 'ctx> Body<'a, 'ctx> {
             let value: BasicValueEnum<'ctx> = match value {
                 PacketValue::Word(n) => self.word(args[n])?.into(),
                 PacketValue::Data(ptr) => self.value(ptr)?,
-                PacketValue::Length(len) => self
-                    .builder
-                    .build_int_truncate(self.load(len)?, word, "")?
-                    .into(),
+                PacketValue::Length(len) => self.load(len)?.into(),
                 PacketValue::Tag(tag) => word.const_int(u64::from(tag), false).into(),
                 PacketValue::Symbol(address) => wide.const_int(address as u64, false).into(),
             };

@@ -79,7 +79,8 @@ impl LancyKernel {
         }
         Ok(Self {
             code: publish.finish(true, code)?,
-            interface: Interface::new(signature),
+            // Lancy indexes with `i32` (see `lower::Builder::index32`).
+            interface: Interface::new(signature).with_longest_slice(i32::MAX as usize),
         })
     }
 }

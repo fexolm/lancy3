@@ -84,7 +84,8 @@ unsafe impl<E: Executable + ?Sized> Executable for Box<E> {
 #[derive(Clone, Copy, Debug)]
 pub struct SliceDescriptor {
     pub data: *mut u8,
-    /// At most `i32::MAX`: [`crate::validate_buffers`] rejects longer slices.
+    /// The element count; a backend may limit it (see
+    /// [`Interface::with_longest_slice`]).
     pub len: u64,
 }
 
@@ -128,6 +129,8 @@ pub struct Interface {
     result: ScalarType,
     buffers: Box<[BufferKind]>,
     sve: Option<Sve>,
+    /// The most elements of a slice argument the code handles.
+    longest_slice: usize,
 }
 
 /// SVE code depends on the vector length of the thread that runs it, which
@@ -147,6 +150,7 @@ impl Interface {
             result: signature.result,
             buffers: signature.buffers.into(),
             sve: None,
+            longest_slice: usize::MAX,
         }
     }
 
@@ -159,6 +163,16 @@ impl Interface {
                 target,
                 power_of_two,
             }),
+            ..self
+        }
+    }
+
+    /// The code handles slices of at most `elements` elements: a longer
+    /// argument is rejected with [`crate::SignatureError::Length`] before
+    /// the call. Without it, every Rust slice is accepted.
+    pub fn with_longest_slice(self, elements: usize) -> Self {
+        Self {
+            longest_slice: elements,
             ..self
         }
     }
@@ -202,7 +216,7 @@ pub(crate) fn call<E: Executable + ?Sized>(
     let interface = kernel.interface();
     interface.check_thread()?;
     crate::validate_scalars(&interface.params, args)?;
-    crate::validate_buffers(&interface.buffers, buffers)?;
+    crate::validate_buffers(&interface.buffers, buffers, interface.longest_slice)?;
     if buffers.is_empty() {
         // SAFETY: as below, with no buffers.
         let word = unsafe { kernel.enter(args, &[]) }?;

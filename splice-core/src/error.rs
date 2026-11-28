@@ -60,8 +60,8 @@ pub enum SignatureError {
     Utf8 { buffer: usize },
     #[error("buffer {buffer} requires a writable slice")]
     ReadOnly { buffer: usize },
-    #[error("buffer {buffer} length exceeds i32::MAX")]
-    Length { buffer: usize },
+    #[error("buffer {buffer} is longer than the {limit} elements this backend supports")]
+    Length { buffer: usize, limit: usize },
 }
 
 /// Failure to build a kernel. No part of a failed build is kept.

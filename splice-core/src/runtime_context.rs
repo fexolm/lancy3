@@ -250,7 +250,7 @@ impl<'a> RuntimeContext<'a> {
 #[repr(C)]
 struct SliceView {
     data: *const u8,
-    len: i32,
+    len: u64,
     element: u32,
 }
 
@@ -319,9 +319,9 @@ impl StaticRustSymbol {
 impl<'a> ContextArguments<'a> {
     /// Bytes of one scalar word.
     pub const WORD_BYTES: u32 = 8;
-    pub const SLICE_BYTES: u32 = 16;
+    pub const SLICE_BYTES: u32 = 24;
     pub const LENGTH_OFFSET: u32 = 8;
-    pub const ELEMENT_OFFSET: u32 = 12;
+    pub const ELEMENT_OFFSET: u32 = 16;
     const WRITABLE: u32 = 1 << 31;
 
     pub const fn view_tag(element: crate::hir::ScalarType, writable: bool) -> u32 {

@@ -222,15 +222,14 @@ impl BufferArg<'_> {
     }
 }
 
-/// Check arity, mutability and representable slice lengths before entering native code.
-///
-/// Every slice is at most `i32::MAX` elements long: backends rely on it, for
-/// example LLVM sign-extends 32-bit gather offsets, which is the index itself
-/// only below `2^31`.
+/// Check arity, mutability and slice lengths before entering native code:
+/// a slice longer than `longest` elements, the most the backend handles, is
+/// rejected.
 #[inline]
 pub fn validate_buffers(
     kinds: &[BufferKind],
     args: &[BufferArg<'_>],
+    longest: usize,
 ) -> Result<(), crate::SignatureError> {
     use crate::SignatureError::*;
     if kinds.len() != args.len() {
@@ -255,8 +254,11 @@ pub fn validate_buffers(
         if !kind.accepts(arg.kind()) {
             return Err(ReadOnly { buffer });
         }
-        if arg.len() > i32::MAX as usize {
-            return Err(Length { buffer });
+        if arg.len() > longest {
+            return Err(Length {
+                buffer,
+                limit: longest,
+            });
         }
     }
     Ok(())
@@ -342,34 +344,40 @@ mod tests {
         assert_eq!(address, data.as_mut_ptr().cast());
     }
 
-    /// Backends address slices with signed 32-bit offsets (BE-19).
     #[test]
     fn a_str_parameter_needs_a_str() {
         use crate::SignatureError;
         let text = BufferArg::str("ab");
         assert_eq!(text.kind(), BufferKind::STR);
-        assert!(validate_buffers(&[BufferKind::STR], &[BufferArg::str("ab")]).is_ok());
+        assert!(validate_buffers(&[BufferKind::STR], &[BufferArg::str("ab")], usize::MAX).is_ok());
         assert!(matches!(
-            validate_buffers(&[BufferKind::STR], &[BufferArg::read(b"ab")]),
+            validate_buffers(&[BufferKind::STR], &[BufferArg::read(b"ab")], usize::MAX),
             Err(SignatureError::Utf8 { buffer: 0 })
         ));
         // A `&str` is also its bytes.
         let bytes = BufferKind::new(ScalarType::U8, false);
-        assert!(validate_buffers(&[bytes], &[BufferArg::str("ab")]).is_ok());
+        assert!(validate_buffers(&[bytes], &[BufferArg::str("ab")], usize::MAX).is_ok());
     }
 
+    /// A backend's limit rejects only longer slices; without one, a slice
+    /// past `i32::MAX` elements is accepted.
     #[test]
     #[cfg(all(target_os = "linux", target_pointer_width = "64"))]
-    fn a_slice_longer_than_i32_max_is_rejected() {
+    fn only_a_slice_past_the_backend_limit_is_rejected() {
         // Zeroed pages are mapped lazily: the 4 GiB are never touched.
         let long = vec![0u16; i32::MAX as usize + 1];
         let kinds = [BufferKind::new(ScalarType::U16, false)];
+        let limit = i32::MAX as usize;
         assert!(matches!(
-            validate_buffers(&kinds, &[BufferArg::read(&long)]),
-            Err(crate::SignatureError::Length { buffer: 0 })
+            validate_buffers(&kinds, &[BufferArg::read(&long)], limit),
+            Err(crate::SignatureError::Length {
+                buffer: 0,
+                limit: _
+            })
         ));
-        let fits = &long[..i32::MAX as usize];
-        assert!(validate_buffers(&kinds, &[BufferArg::read(fits)]).is_ok());
+        let fits = &long[..limit];
+        assert!(validate_buffers(&kinds, &[BufferArg::read(fits)], limit).is_ok());
+        assert!(validate_buffers(&kinds, &[BufferArg::read(&long)], usize::MAX).is_ok());
     }
 
     #[test]

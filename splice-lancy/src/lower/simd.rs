@@ -347,7 +347,7 @@ impl memory::Primitives for Builder {
         let (_, len) = self.slice(s.slice);
         let index = e.index();
         // Reinterpreting negative indices as unsigned puts them above every
-        // valid length: buffer validation caps lengths at i32::MAX, and a
+        // valid length: the Lancy interface caps lengths at i32::MAX, and a
         // narrow limit at the first negative index. A narrow unsigned limit
         // saturates at the largest index, where `memory` ignores the result:
         // no such index leaves a longer slice.
