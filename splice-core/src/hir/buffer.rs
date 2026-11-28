@@ -596,6 +596,33 @@ mod tests {
         );
     }
 
+    /// A backend that addresses slices in `i32` (Lancy) bounds the bytes of
+    /// a slice of structs, not only its length.
+    #[test]
+    fn a_struct_slice_limit_counts_bytes() {
+        use crate::hir::{DataType, Field, StructType};
+        static PAIR: StructType = StructType {
+            name: "Pair",
+            size: 16,
+            align: 8,
+            fields: &[Field {
+                name: "a",
+                offset: 0,
+                ty: DataType::Scalar(ScalarType::I64),
+            }],
+        };
+        let element = Element::Struct(&PAIR);
+        let limit = i32::MAX as usize;
+        assert!(structs_within(element, limit / 16, limit));
+        assert!(!structs_within(element, limit / 16 + 1, limit));
+        assert!(structs_within(element, limit, usize::MAX));
+        assert!(structs_within(
+            Element::Scalar(ScalarType::I64),
+            limit,
+            limit
+        ));
+    }
+
     #[test]
     #[should_panic(expected = "expected a i64 buffer")]
     fn borrowing_another_element_type_panics() {

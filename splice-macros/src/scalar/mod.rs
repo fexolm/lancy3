@@ -69,6 +69,12 @@ pub(super) fn expand(
         Scalar::from_type(ty, &types)
             .filter(|t| t.is_scalar() || matches!(t, Scalar::Vector(_) | Scalar::Mask(_)))
             .ok_or_else(|| {
+                if record_type(ty) {
+                    return Error::new_spanned(
+                        ty,
+                        "returning a struct from a kernel is not supported yet; write it to a `&mut [T]` parameter",
+                    );
+                }
                 Error::new_spanned(
                     ty,
                     format!(

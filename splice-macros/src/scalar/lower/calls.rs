@@ -30,6 +30,14 @@ impl Lower<'_> {
                 "a Splice kernel calls functions by path, not through a local function value",
             );
         }
+        for arg in &c.args {
+            if self.whole_record(arg)? {
+                return err(
+                    arg,
+                    "passing a struct value to a call is not supported yet; pass its fields, or a slice of structs",
+                );
+            }
+        }
         let root = self.root;
         let support = emit!(#root::frontend::scalar);
         let values = c

@@ -92,6 +92,14 @@ impl Lower<'_> {
         }))
     }
 
+    /// Whether `e` is a whole struct value (not one of its fields), which
+    /// the macro knows to be a struct.
+    pub(super) fn whole_record(&self, e: &Expr) -> Result<bool> {
+        Ok(self
+            .record_place(e)?
+            .is_some_and(|(_, path)| path.is_empty()))
+    }
+
     fn record_support(&self) -> TokenStream {
         let root = self.root;
         emit!(#root::frontend::record::Record)
@@ -137,6 +145,31 @@ impl Lower<'_> {
                 return Ok(emit!({
                     let __splice_type: #root::hir::DataType = #ty;
                     #support::literal(__splice_type, ::std::vec![#(#fields),*])?
+                }));
+            }
+            // A tuple struct's constructor, `Id(7)` or `Pair(a, b)`: types are
+            // named in upper camel case, functions in snake case. A kernel
+            // function cannot return a struct.
+            Expr::Call(call)
+                if matches!(&*call.func, Expr::Path(path) if path.path.segments.last()
+                    .is_some_and(|s| s.ident.to_string().starts_with(|c: char| c.is_ascii_uppercase()))) =>
+            {
+                let fields = call
+                    .args
+                    .iter()
+                    .enumerate()
+                    .map(|(index, arg)| {
+                        let name = index.to_string();
+                        let value = self.record_value(
+                            arg,
+                            emit!(#support::type_of(__splice_type, &[#name])?),
+                        )?;
+                        Ok(emit!((#name, #value)))
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                return Ok(emit!({
+                    let __splice_type: #root::hir::DataType = #ty;
+                    #support::tuple(__splice_type, ::std::vec![#(#fields),*])?
                 }));
             }
             Expr::Path(path) if matches!(self.binding(path), Some(Binding::Aggregate(_))) => {

@@ -157,6 +157,16 @@ impl Record {
         Ok(Self { ty, leaves })
     }
 
+    /// A tuple struct of type `ty` from its fields `"0"`, `"1"`, ...; a
+    /// `transparent` newtype is its one field.
+    pub fn tuple(ty: DataType, fields: Vec<(&str, Self)>) -> Result<Self> {
+        match (ty, &fields[..]) {
+            (DataType::Scalar(_), [(_, value)]) if value.ty == ty => Ok(value.clone()),
+            (DataType::Scalar(_), [(_, value)]) => Err(mismatch(ty, value.ty)),
+            _ => Self::literal(ty, fields),
+        }
+    }
+
     pub fn ty(&self) -> DataType {
         self.ty
     }

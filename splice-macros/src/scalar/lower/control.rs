@@ -322,8 +322,18 @@ impl Lower<'_> {
             let setup = emit!(let buffer = #slice;
                 let (__splice_start, __splice_one) = (#start, #one);
                 let __splice_limit = buffer.len;);
-            let read = emit!(let #id = __splice_builder.load(buffer, #index)?;);
-            let binding_kind = Binding::Reg(element, false);
+            let (read, binding_kind) = if ty.elem == super::Elem::Record {
+                let root = self.root;
+                (
+                    emit!(let #id = #root::frontend::record::Record::load(__splice_builder, buffer, #index, &[])?;),
+                    Binding::Record(false),
+                )
+            } else {
+                (
+                    emit!(let #id = __splice_builder.load(buffer, #index)?;),
+                    Binding::Reg(element, false),
+                )
+            };
             return self.counted_loop(f, binding, binding_kind, &index, setup, read);
         };
         let (Some(start), Some(stop)) = (&range.start, &range.end) else {
@@ -489,7 +499,8 @@ impl Lower<'_> {
             return Ok(None);
         };
         // The element of a slice of slices is a slice: `scalar` is unused.
-        let element = if ty.slice_of.is_some() && !bytes {
+        let element = if (ty.slice_of.is_some() || ty.elem == super::Elem::Record) && !bytes {
+            // A struct element is a `Record`: `scalar` is unused.
             Some(Scalar::I32)
         } else {
             ty.elem.scalar().filter(|_| ty.utf8 == bytes)
