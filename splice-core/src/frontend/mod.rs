@@ -340,6 +340,13 @@ impl dyn KernelBuilder + '_ {
         self.slice_range(slice, start, end)
     }
 
+    /// The length of each chunk of `slice.chunks_exact(size)` while one
+    /// remains: `size`, which is then at most the length. The minimum
+    /// shows that bound to a backend, as in `subslice`.
+    pub fn chunk_len(&mut self, slice: Slice, size: Reg) -> crate::Result<Reg> {
+        self.binary(Binary::Min, size, slice.len)
+    }
+
     /// `slice.chunks_exact(size).remainder()`: the elements after the last
     /// whole chunk. A zero `size` traps as in
     /// `chunks_exact_end`.

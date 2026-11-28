@@ -396,9 +396,10 @@ impl Lower<'_> {
             let __splice_one = __splice_builder.copy(__splice_size)?;
             let __splice_limit = __splice_builder.chunks_exact_end(buffer, __splice_one)?;
             let __splice_start = #start;
+            let __splice_chunk_len = __splice_builder.chunk_len(buffer, __splice_one)?;
         );
         let read = emit!(
-            let #id = __splice_builder.chunk(buffer, #offset, __splice_one)?;
+            let #id = __splice_builder.chunk(buffer, #offset, __splice_chunk_len)?;
         );
         let ty = super::BufferType { write, ..actual };
         self.counted_loop(f, pat, Binding::Buffer(ty), &offset, setup, read)

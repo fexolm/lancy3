@@ -47,14 +47,15 @@ pub struct Validating<'a> {
     current: Option<usize>,
     pc: usize,
     overflow_checks: Option<bool>,
+    /// The registers `local` allocated: the only ones `assign` may write.
+    /// Every other register has the one value its operation defines.
+    locals: HashSet<Reg>,
     /// The length register of each slice pointer: a buffer parameter's
     /// pair, or the pair one [`KernelBuilder::slice_range`] produced. A
     /// slice operand must be one of these pairs, so the length a backend
     /// checks an access against is the length of the memory it addresses.
+    /// Neither register of a pair is a local, so no `assign` changes one.
     pairs: HashMap<Reg, Reg>,
-    /// The registers of the pairs `slice_range` produced: no other
-    /// operation writes them.
-    derived: HashSet<Reg>,
 }
 
 #[derive(Clone, Copy)]
@@ -106,11 +107,11 @@ impl<'a> Validating<'a> {
             current: Some(0),
             pc: 0,
             overflow_checks: None,
+            locals: HashSet::new(),
             pairs: (0..signature.buffers.len())
                 .map(|i| Slice::param(signature.params.len(), i))
                 .map(|s| (s.ptr, s.len))
                 .collect(),
-            derived: HashSet::new(),
         })
     }
 
@@ -420,6 +421,7 @@ impl KernelBuilder for Validating<'_> {
             ));
         }
         let r = self.inner.local(ty)?;
+        self.locals.insert(r);
         Ok(self.allocated(r, ty))
     }
     fn call_intrinsic(&mut self, inst: Intrinsic, args: &[Reg]) -> Result<Option<Reg>> {
@@ -471,7 +473,6 @@ impl KernelBuilder for Validating<'_> {
         self.allocated(dst.ptr, ValueType::Ptr(kind));
         self.allocated(dst.len, ValueType::Scalar(ScalarType::Index));
         self.pairs.insert(dst.ptr, dst.len);
-        self.derived.extend([dst.ptr, dst.len]);
         self.block().defined.insert(dst.len);
         self.record(&[slice.ptr, slice.len, start, end], Some(dst.ptr));
         Ok(dst)
@@ -508,8 +509,10 @@ impl KernelBuilder for Validating<'_> {
         if (self.params - 2 * self.buffers..self.params).contains(&(dst.0 as usize)) {
             return Err(self.error("a buffer parameter's registers are read-only"));
         }
-        if self.derived.contains(&dst) {
-            return Err(self.error("a slice's registers are written only by its slice operation"));
+        // A backend may read an operation's result where it is defined;
+        // scalar parameters and locals are variables.
+        if dst.0 as usize >= self.params && !self.locals.contains(&dst) {
+            return Err(self.error("only a local register can be assigned"));
         }
         self.inner.assign(dst, src)?;
         self.record(&[src], Some(dst));
