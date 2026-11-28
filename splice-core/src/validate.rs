@@ -424,6 +424,16 @@ impl KernelBuilder for Validating<'_> {
         let r = self.inner.cast(value, to)?;
         Ok(self.value(&[value], r, ValueType::Scalar(to)))
     }
+    fn offset(&mut self, ptr: Reg, offset: Reg) -> Result<Reg> {
+        let ty = self.ty(ptr)?;
+        match ty {
+            ValueType::Ptr(kind) if kind.context_signature().is_none() => {}
+            _ => return Err(self.error("expected a slice pointer")),
+        }
+        self.expect(offset, ScalarType::Index)?;
+        let r = self.inner.offset(ptr, offset)?;
+        Ok(self.value(&[ptr, offset], r, ty))
+    }
     fn load(&mut self, slice: Slice, index: Reg) -> Result<Reg> {
         self.expect(index, ScalarType::Index)?;
         let ty = self.element(slice, false)?;
@@ -676,6 +686,9 @@ impl KernelBuilder for Sink {
         self.next()
     }
     fn cast(&mut self, _: Reg, _: ScalarType) -> Result<Reg> {
+        self.next()
+    }
+    fn offset(&mut self, _: Reg, _: Reg) -> Result<Reg> {
         self.next()
     }
     fn load(&mut self, _: Slice, _: Reg) -> Result<Reg> {

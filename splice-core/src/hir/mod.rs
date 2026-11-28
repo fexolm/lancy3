@@ -155,6 +155,14 @@ pub enum Instr {
     },
     Copy(Reg, Reg),
     Bin(Reg, Binary, Reg, Reg),
+    /// `ptr` advanced by `offset` elements, unchecked: the frontend checks
+    /// the offset against the length of the slice `ptr` addresses (see
+    /// `subslice`). `dst` has the type of `ptr`.
+    Offset {
+        dst: Reg,
+        ptr: Reg,
+        offset: Reg,
+    },
     /// Read element `index` of `slice`, trapping unless it is below the length.
     Load {
         dst: Reg,
@@ -215,6 +223,7 @@ impl Instr {
             | Self::Cast { dst, .. }
             | Self::Copy(dst, _)
             | Self::Bin(dst, ..)
+            | Self::Offset { dst, .. }
             | Self::Load { dst, .. }
             | Self::Call { dst, .. }
             | Self::RustCall { dst, .. } => Some(*dst),

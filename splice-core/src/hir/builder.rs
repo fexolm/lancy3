@@ -151,6 +151,13 @@ impl KernelBuilder for FunctionBuilder {
     fn cast(&mut self, src: Reg, to: ScalarType) -> crate::Result<Reg> {
         self.scalar(to, |dst| Instr::Cast { dst, src })
     }
+    fn offset(&mut self, ptr: Reg, offset: Reg) -> crate::Result<Reg> {
+        let ty = self
+            .function
+            .checked_reg_type(ptr)
+            .unwrap_or(ValueType::Scalar(ScalarType::I32));
+        self.emit_value(ty, |dst| Instr::Offset { dst, ptr, offset })
+    }
     fn load(&mut self, slice: Slice, index: Reg) -> crate::Result<Reg> {
         let ty = match self.function.checked_reg_type(slice.ptr) {
             Some(ValueType::Ptr(kind)) => kind.element(),

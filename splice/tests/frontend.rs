@@ -455,6 +455,9 @@ mod directly_staged {
         fn buffer(&self, _: usize) -> splice::Result<Slice> {
             unreachable!()
         }
+        fn offset(&mut self, _: Reg, _: Reg) -> splice::Result<Reg> {
+            unreachable!()
+        }
         fn load(&mut self, _: Slice, _: Reg) -> splice::Result<Reg> {
             unreachable!()
         }

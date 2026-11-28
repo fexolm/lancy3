@@ -597,6 +597,20 @@ impl<'a, 'ctx> Body<'a, 'ctx> {
         let result = self.binary(op, ty, self.value(a)?, self.value(b)?)?;
         self.store(dst, result)
     }
+    pub(super) fn advance(&mut self, dst: Reg, ptr: Reg, offset: Reg) -> Built<()> {
+        let ValueType::Ptr(kind) = self.registers[ptr.0 as usize].0 else {
+            unreachable!("validated slice pointer");
+        };
+        let element = simd::scalar_type(self.ctx, kind.element());
+        let base = self.value(ptr)?.into_pointer_value();
+        // SAFETY: the frontend checked that the offset is within the slice
+        // `ptr` addresses, so the address is in its allocation or one past it.
+        let address = unsafe {
+            self.builder
+                .build_in_bounds_gep(element, base, &[self.load(offset)?], "")?
+        };
+        self.store(dst, address)
+    }
     pub(super) fn read_element(&mut self, dst: Reg, s: SliceValue, index: Reg) -> Built<()> {
         let ptr = self.element(s, index)?;
         let ty = simd::scalar_type(self.ctx, self.scalar_type(dst));

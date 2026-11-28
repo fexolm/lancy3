@@ -122,6 +122,8 @@ pub trait KernelBuilder {
     fn constant(&mut self, value: Constant) -> crate::Result<Reg>;
     /// Rust's `value as to`.
     fn cast(&mut self, value: Reg, to: ScalarType) -> crate::Result<Reg>;
+    /// `ptr` advanced by `offset` elements, without a check.
+    fn offset(&mut self, ptr: Reg, offset: Reg) -> crate::Result<Reg>;
     /// Element `index` of `slice`; traps unless `index` is below its length.
     fn load(&mut self, slice: Slice, index: Reg) -> crate::Result<Reg>;
     /// Write element `index` of `slice`; traps unless `index` is below its length.
@@ -218,6 +220,44 @@ impl dyn KernelBuilder + '_ {
     }
 
     /// Continue in a fresh block when the condition holds.
+    /// `&slice[start..end]`, or `&slice[start..=end]` when `inclusive`:
+    /// traps with [`crate::Trap::Bounds`], as Rust's slice index panics,
+    /// unless `start <= end` and the end is within the length.
+    pub fn subslice(
+        &mut self,
+        slice: Slice,
+        start: Reg,
+        end: Reg,
+        inclusive: bool,
+    ) -> crate::Result<Slice> {
+        let (inside, end) = if inclusive {
+            let one = self.constant(Constant::from(1usize))?;
+            let inside = self.binary(Binary::Lt, end, slice.len)?;
+            (inside, self.binary(Binary::Add, end, one)?)
+        } else {
+            (self.binary(Binary::Le, end, slice.len)?, end)
+        };
+        let ordered = self.binary(Binary::Le, start, end)?;
+        let valid = self.binary(Binary::And, inside, ordered)?;
+        let (next, fail) = (self.label()?, self.label()?);
+        self.branch(valid, next, fail)?;
+        self.mark(fail)?;
+        self.trap_bounds()?;
+        self.mark(next)?;
+        let ptr = self.offset(slice.ptr, start)?;
+        let len = self.binary(Binary::Sub, end, start)?;
+        Ok(Slice { ptr, len })
+    }
+
+    /// `slice.split_at(mid)`: traps unless `mid` is within the length.
+    pub fn split_at(&mut self, slice: Slice, mid: Reg) -> crate::Result<(Slice, Slice)> {
+        let zero = self.constant(Constant::from(0usize))?;
+        let head = self.subslice(slice, zero, mid, false)?;
+        let ptr = self.offset(slice.ptr, mid)?;
+        let len = self.binary(Binary::Sub, slice.len, mid)?;
+        Ok((head, Slice { ptr, len }))
+    }
+
     pub fn branch_if_false(&mut self, cond: Reg, otherwise: Label) -> crate::Result<()> {
         let next = self.label()?;
         self.branch(cond, next, otherwise)?;
