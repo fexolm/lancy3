@@ -381,6 +381,22 @@ impl KernelBuilder for Direct<'_, '_> {
     fn store(&mut self, b: Slice, index: Reg, value: Reg) -> splice_core::Result<()> {
         self.emit(|ir| ir.write_element(b, index, value))
     }
+    fn load_field(&mut self, b: Slice, index: Reg, field: usize) -> splice_core::Result<Reg> {
+        let Some(ValueType::Ptr(kind)) = self.native.reg_type(b.ptr) else {
+            unreachable!("validated slice");
+        };
+        let (_, ty) = kind.element().field(field).expect("a validated field");
+        self.result(ty, |ir, d| ir.read_field(d, b, index, field))
+    }
+    fn store_field(
+        &mut self,
+        b: Slice,
+        index: Reg,
+        field: usize,
+        value: Reg,
+    ) -> splice_core::Result<()> {
+        self.emit(|ir| ir.write_field(b, index, field, value))
+    }
     fn binary(&mut self, op: Binary, a: Reg, b: Reg) -> splice_core::Result<Reg> {
         let ty = op.output(self.scalar(a)).expect("validated operation");
         self.result(ty, |ir, d| ir.arithmetic(d, op, a, b))

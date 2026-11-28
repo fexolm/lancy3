@@ -172,7 +172,7 @@ impl KernelBuilder for FunctionBuilder {
         let ty = match self.function.checked_reg_type(slice.ptr) {
             Some(ValueType::Ptr(kind)) => match kind.element() {
                 super::Element::Slice(&inner) => ValueType::Ptr(inner),
-                super::Element::Scalar(_) => ValueType::Ptr(kind),
+                super::Element::Scalar(_) | super::Element::Struct(_) => ValueType::Ptr(kind),
             },
             _ => ValueType::Scalar(ScalarType::I32),
         };
@@ -189,6 +189,35 @@ impl KernelBuilder for FunctionBuilder {
             _ => ScalarType::I32,
         };
         self.scalar(ty, |dst| Instr::Load { dst, slice, index })
+    }
+    fn load_field(&mut self, slice: Slice, index: Reg, field: usize) -> crate::Result<Reg> {
+        let ty = match self.function.checked_reg_type(slice.ptr) {
+            Some(ValueType::Ptr(kind)) => kind.element().field(field).map(|(_, ty)| ty),
+            _ => None,
+        }
+        .unwrap_or(ScalarType::I32);
+        let field = field_number(field)?;
+        self.scalar(ty, |dst| Instr::LoadField {
+            dst,
+            slice,
+            index,
+            field,
+        })
+    }
+    fn store_field(
+        &mut self,
+        slice: Slice,
+        index: Reg,
+        field: usize,
+        value: Reg,
+    ) -> crate::Result<()> {
+        let field = field_number(field)?;
+        self.push(Instr::StoreField {
+            slice,
+            index,
+            field,
+            value,
+        })
     }
     fn store(&mut self, slice: Slice, index: Reg, value: Reg) -> crate::Result<()> {
         self.push(Instr::Store {
@@ -279,4 +308,8 @@ impl Function {
     pub fn signature(&self) -> Signature<'_> {
         Signature::new(&self.params, self.result, &self.buffer_kinds)
     }
+}
+
+fn field_number(field: usize) -> crate::Result<u32> {
+    u32::try_from(field).map_err(|_| crate::BuildError::verify("invalid struct field"))
 }

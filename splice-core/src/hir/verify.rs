@@ -538,6 +538,149 @@ mod tests {
         );
     }
 
+    /// A struct element is accessed one named scalar field at a time: the
+    /// IR names a field of the element's layout, never an offset, and the
+    /// layout itself must keep every field inside the element.
+    #[test]
+    fn struct_elements_are_accessed_by_field() {
+        use crate::hir::{DataType, Field, StructType};
+        static PAIR: StructType = StructType {
+            name: "Pair",
+            size: 8,
+            align: 4,
+            fields: &[
+                Field {
+                    name: "a",
+                    offset: 4,
+                    ty: DataType::Scalar(ScalarType::I32),
+                },
+                Field {
+                    name: "b",
+                    offset: 0,
+                    ty: DataType::Scalar(ScalarType::F32),
+                },
+            ],
+        };
+        // Claims a field past the end of an 8-byte element.
+        static FORGED: StructType = StructType {
+            name: "Forged",
+            size: 8,
+            align: 4,
+            fields: &[Field {
+                name: "a",
+                offset: 8,
+                ty: DataType::Scalar(ScalarType::I32),
+            }],
+        };
+        let read = BufferKind::data(DataType::Struct(&PAIR), false);
+        let write = BufferKind::data(DataType::Struct(&PAIR), true);
+        let index = || vec![ScalarType::Index];
+        let param = Slice::param(1, 0);
+        let load = |field| Instr::LoadField {
+            dst: Reg(3),
+            slice: param,
+            index: R0,
+            field,
+        };
+        let store = Instr::StoreField {
+            slice: param,
+            index: R0,
+            field: 0,
+            value: Reg(3),
+        };
+        let f32 = ValueType::Scalar(ScalarType::F32);
+        let ok = typed(
+            index(),
+            vec![write],
+            vec![f32, I32],
+            vec![
+                load(1),
+                Instr::Const(Reg(4), Constant::from(0i32)),
+                Instr::Return(Reg(4)),
+            ],
+        );
+        ok.verify().unwrap();
+        let error = |kind, ty, code| typed_error(index(), vec![kind], vec![ty, I32], code);
+        assert_eq!(
+            error(
+                read,
+                f32,
+                vec![
+                    load(2),
+                    Instr::Const(Reg(4), Constant::from(0i32)),
+                    Instr::Return(Reg(4))
+                ]
+            ),
+            "struct Pair has no field 2 at instruction 0"
+        );
+        assert_eq!(
+            error(
+                read,
+                I32,
+                vec![
+                    load(0),
+                    store.clone(),
+                    Instr::Const(Reg(4), Constant::from(0i32)),
+                    Instr::Return(Reg(4))
+                ]
+            ),
+            "store to read-only buffer at instruction 1"
+        );
+        assert_eq!(
+            error(
+                write,
+                f32,
+                vec![
+                    load(1),
+                    store,
+                    Instr::Const(Reg(4), Constant::from(0i32)),
+                    Instr::Return(Reg(4))
+                ]
+            ),
+            "expected a register of type i32, got f32 at instruction 1"
+        );
+        assert_eq!(
+            error(
+                BufferKind::data(DataType::Struct(&FORGED), false),
+                I32,
+                vec![
+                    load(0),
+                    Instr::Const(Reg(4), Constant::from(0i32)),
+                    Instr::Return(Reg(4))
+                ]
+            ),
+            "field a of struct Forged lies outside it or is misaligned at instruction 0"
+        );
+        assert_eq!(
+            error(
+                read,
+                I32,
+                vec![
+                    Instr::Load {
+                        dst: Reg(3),
+                        slice: param,
+                        index: R0
+                    },
+                    Instr::Const(Reg(4), Constant::from(0i32)),
+                    Instr::Return(Reg(4))
+                ]
+            ),
+            "a struct element is accessed field by field at instruction 0"
+        );
+        assert_eq!(
+            error(
+                BufferKind::READ_I32,
+                I32,
+                vec![
+                    load(0),
+                    Instr::Const(Reg(4), Constant::from(0i32)),
+                    Instr::Return(Reg(4))
+                ]
+            ),
+            "`load_field` and `store_field` access a slice of structs at instruction 0"
+        );
+    }
+
     #[test]
     fn type_errors() {
         let ty = ValueType::Scalar;

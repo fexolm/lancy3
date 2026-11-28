@@ -248,9 +248,33 @@ impl<'a> Validating<'a> {
     /// The type of the elements of `slice`, accessed one at a time.
     fn element(&self, slice: Slice, write: bool) -> Result<ScalarType> {
         let kind = self.buffer(slice)?;
-        let ty = kind
-            .scalar()
-            .ok_or_else(|| self.error("a slice element is read with `load_slice`"))?;
+        let ty = kind.scalar().ok_or_else(|| match kind.element() {
+            crate::hir::Element::Struct(_) => {
+                self.error("a struct element is accessed field by field")
+            }
+            _ => self.error("a slice element is read with `load_slice`"),
+        })?;
+        if write && !kind.writable() {
+            return Err(self.error("store to read-only buffer"));
+        }
+        Ok(ty)
+    }
+
+    /// The type of scalar `field` of the struct elements of `slice`. The
+    /// layout is checked here, so no field of a forged one reaches outside
+    /// its element.
+    fn field(&self, slice: Slice, field: usize, write: bool) -> Result<ScalarType> {
+        let kind = self.buffer(slice)?;
+        let crate::hir::Element::Struct(layout) = kind.element() else {
+            return Err(self.error("`load_field` and `store_field` access a slice of structs"));
+        };
+        crate::hir::DataType::Struct(layout)
+            .check()
+            .map_err(|message| self.error(message))?;
+        let (_, ty) = kind
+            .element()
+            .field(field)
+            .ok_or_else(|| self.error(format!("struct {} has no field {field}", layout.name)))?;
         if write && !kind.writable() {
             return Err(self.error("store to read-only buffer"));
         }
@@ -499,6 +523,20 @@ impl KernelBuilder for Validating<'_> {
         let ty = self.element(slice, false)?;
         let r = self.inner.load(slice, index)?;
         Ok(self.value(&[slice.ptr, slice.len, index], r, ValueType::Scalar(ty)))
+    }
+    fn load_field(&mut self, slice: Slice, index: Reg, field: usize) -> Result<Reg> {
+        self.expect(index, ScalarType::Index)?;
+        let ty = self.field(slice, field, false)?;
+        let r = self.inner.load_field(slice, index, field)?;
+        Ok(self.value(&[slice.ptr, slice.len, index], r, ValueType::Scalar(ty)))
+    }
+    fn store_field(&mut self, slice: Slice, index: Reg, field: usize, value: Reg) -> Result<()> {
+        self.expect(index, ScalarType::Index)?;
+        let ty = self.field(slice, field, true)?;
+        self.expect(value, ty)?;
+        self.inner.store_field(slice, index, field, value)?;
+        self.record(&[slice.ptr, slice.len, index, value], None);
+        Ok(())
     }
     fn store(&mut self, slice: Slice, index: Reg, value: Reg) -> Result<()> {
         self.expect(index, ScalarType::Index)?;
@@ -777,6 +815,12 @@ impl KernelBuilder for Sink {
         self.next()
     }
     fn store(&mut self, _: Slice, _: Reg, _: Reg) -> Result<()> {
+        Ok(())
+    }
+    fn load_field(&mut self, _: Slice, _: Reg, _: usize) -> Result<Reg> {
+        self.next()
+    }
+    fn store_field(&mut self, _: Slice, _: Reg, _: usize, _: Reg) -> Result<()> {
         Ok(())
     }
     fn binary(&mut self, _: Binary, _: Reg, _: Reg) -> Result<Reg> {

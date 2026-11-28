@@ -468,6 +468,12 @@ mod directly_staged {
         fn store(&mut self, _: Slice, _: Reg, _: Reg) -> splice::Result<()> {
             unreachable!()
         }
+        fn load_field(&mut self, _: Slice, _: Reg, _: usize) -> splice::Result<Reg> {
+            unreachable!()
+        }
+        fn store_field(&mut self, _: Slice, _: Reg, _: usize, _: Reg) -> splice::Result<()> {
+            unreachable!()
+        }
         fn binary(&mut self, _: Binary, _: Reg, _: Reg) -> splice::Result<Reg> {
             self.local(ValueType::Scalar(ScalarType::I32))
         }

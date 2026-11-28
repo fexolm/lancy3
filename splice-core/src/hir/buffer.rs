@@ -1,5 +1,5 @@
 use crate::KernelScalar;
-use crate::hir::{Reg, ScalarType, Slice, ValueType};
+use crate::hir::{DataType, Reg, ScalarType, Slice, StructType, ValueType};
 use crate::runtime_context::{ContextSignature, RuntimeContext};
 use std::collections::HashMap;
 use std::fmt;
@@ -20,6 +20,11 @@ pub enum Element {
     ///
     /// [`SliceDescriptor`]: crate::call::SliceDescriptor
     Slice(&'static BufferKind),
+    /// A struct, read and written one scalar field at a time
+    /// ([`KernelBuilder::load_field`]).
+    ///
+    /// [`KernelBuilder::load_field`]: crate::frontend::KernelBuilder::load_field
+    Struct(&'static StructType),
 }
 
 impl Element {
@@ -28,6 +33,7 @@ impl Element {
         match self {
             Self::Scalar(ty) => ty.bytes(),
             Self::Slice(_) => size_of::<crate::call::SliceDescriptor>(),
+            Self::Struct(ty) => ty.size,
         }
     }
     /// The byte offset of the length in a [`Slice`](Self::Slice) element.
@@ -35,6 +41,15 @@ impl Element {
     pub const fn scalar(self) -> Option<ScalarType> {
         match self {
             Self::Scalar(ty) => Some(ty),
+            Self::Slice(_) | Self::Struct(_) => None,
+        }
+    }
+    /// Field `field` of a struct element: its byte offset in the element
+    /// and its type. A scalar element is its own field 0.
+    pub fn field(self, field: usize) -> Option<(usize, ScalarType)> {
+        match self {
+            Self::Scalar(ty) => DataType::Scalar(ty).leaf(field),
+            Self::Struct(ty) => DataType::Struct(ty).leaf(field),
             Self::Slice(_) => None,
         }
     }
@@ -46,6 +61,7 @@ impl fmt::Display for Element {
             Self::Scalar(ty) => f.write_str(ty.name()),
             Self::Slice(kind) if kind.utf8 => f.write_str("&str"),
             Self::Slice(kind) => write!(f, "&[{}]", kind.element),
+            Self::Struct(ty) => f.write_str(ty.name),
         }
     }
 }
@@ -95,6 +111,22 @@ impl BufferKind {
             writable: false,
             utf8: false,
             context: None,
+        }
+    }
+    /// A slice of values of `ty`: a scalar slice, or one whose elements are
+    /// structs.
+    ///
+    /// # Panics
+    /// If `ty` is `bool` (see [`new`](Self::new)).
+    pub const fn data(ty: DataType, writable: bool) -> Self {
+        match ty {
+            DataType::Scalar(scalar) => Self::new(scalar, writable),
+            DataType::Struct(layout) => Self {
+                element: Element::Struct(layout),
+                writable,
+                utf8: false,
+                context: None,
+            },
         }
     }
     #[doc(hidden)]
@@ -237,6 +269,28 @@ impl<'a> BufferArg<'a> {
         }
     }
 
+    /// A shared slice of kernel data: structs that derive `KernelType`
+    /// (or the scalar of a `transparent` newtype).
+    pub fn records<T: crate::KernelData>(slice: &'a [T]) -> Self {
+        Self {
+            data: NonNull::from(slice).cast(),
+            len: slice.len(),
+            kind: const { BufferKind::data(crate::data_type::<T>(), false) },
+            borrow: PhantomData,
+        }
+    }
+
+    /// A writable slice of kernel data.
+    pub fn records_mut<T: crate::KernelData>(slice: &'a mut [T]) -> Self {
+        let len = slice.len();
+        Self {
+            data: NonNull::from(slice).cast(),
+            len,
+            kind: const { BufferKind::data(crate::data_type::<T>(), true) },
+            borrow: PhantomData,
+        }
+    }
+
     /// A slice of `&str`s, `&[&str]`.
     pub fn strs(texts: &'a [&'a str]) -> Self {
         Self {
@@ -337,7 +391,10 @@ pub fn validate_buffers(
         if !kind.accepts(arg.kind()) {
             return Err(ReadOnly { buffer });
         }
-        if arg.len() > longest || !nested_within(kind.element(), arg.data, arg.len, longest) {
+        if arg.len() > longest
+            || !structs_within(kind.element(), arg.len, longest)
+            || !nested_within(kind.element(), arg.data, arg.len, longest)
+        {
             return Err(Length {
                 buffer,
                 limit: longest,
@@ -394,6 +451,17 @@ pub fn check_forwarding(
         }
     }
     Ok(())
+}
+
+/// Whether the bytes of a slice of structs fit the backend's limit: a
+/// backend that addresses at most `longest` elements of a scalar slice
+/// (Lancy, `i32`) computes byte offsets into a struct slice in the same
+/// width, so a limit below every Rust slice length bounds its bytes.
+fn structs_within(element: Element, len: usize, longest: usize) -> bool {
+    let Element::Struct(ty) = element else {
+        return true;
+    };
+    longest >= isize::MAX as usize || len.checked_mul(ty.size).is_some_and(|b| b <= longest)
 }
 
 /// Whether every slice inside the `len` elements at `data` is at most

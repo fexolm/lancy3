@@ -3,6 +3,8 @@
 //! registers. Mutable locals and temporary results share the same index space.
 
 mod buffer;
+mod data;
+pub use data::{DataType, Field, StructType};
 mod intrinsic;
 pub use intrinsic::{Intrinsic, MathOp};
 mod builder;
@@ -178,6 +180,24 @@ pub enum Instr {
         slice: Slice,
         index: Reg,
     },
+    /// Read scalar `field` of struct element `index` of `slice` (see
+    /// [`Element::field`]), trapping unless `index` is below the length.
+    /// The field's offset and type are the element's layout: the IR names
+    /// a field, never an address.
+    LoadField {
+        dst: Reg,
+        slice: Slice,
+        index: Reg,
+        field: u32,
+    },
+    /// Write scalar `field` of struct element `index` of `slice`, trapping
+    /// unless `index` is below the length.
+    StoreField {
+        slice: Slice,
+        index: Reg,
+        field: u32,
+        value: Reg,
+    },
     /// Read element `index` of `slice`, trapping unless it is below the length.
     Load {
         dst: Reg,
@@ -220,6 +240,8 @@ impl Instr {
         match self {
             Self::Bin(_, op, ..) => op.may_trap(),
             Self::Load { .. }
+            | Self::LoadField { .. }
+            | Self::StoreField { .. }
             | Self::LoadSlice { .. }
             | Self::Store { .. }
             | Self::RustCall { .. }
@@ -253,6 +275,7 @@ impl Instr {
             | Self::Copy(dst, _)
             | Self::Bin(dst, ..)
             | Self::Load { dst, .. }
+            | Self::LoadField { dst, .. }
             | Self::Call { dst, .. }
             | Self::RustCall { dst, .. } => Some(*dst),
             _ => None,

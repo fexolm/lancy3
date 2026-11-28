@@ -36,6 +36,48 @@ pub trait KernelType {
     const FIELDS: &'static [&'static str];
 }
 
+/// A Rust type whose values a kernel reads from and writes to memory: a
+/// kernel scalar, or a `Copy` struct whose fields are kernel data.
+/// `#[derive(KernelType)]` implements it for such a struct with the layout
+/// rustc chose (no `repr(C)` is needed), and for a `transparent` newtype as
+/// its field's scalar. Implement it only through the derive: a layout that
+/// differs from the type's would address memory outside its values.
+#[diagnostic::on_unimplemented(
+    message = "`{Self}` is not kernel data",
+    label = "not a kernel scalar or a Copy struct of kernel data",
+    note = "kernel data are kernel scalars and `Copy` structs that derive `splice::KernelType` \
+            whose fields are kernel data; references, slices, arrays, enums, `Option` and \
+            `Result` are not supported as kernel data yet"
+)]
+pub trait KernelData: Copy {
+    /// The layout of a value: its scalar, or its struct's fields.
+    const TYPE: hir::DataType;
+}
+
+macro_rules! kernel_data {
+    ($($ty:ty),*) => {$(
+        impl KernelData for $ty {
+            const TYPE: hir::DataType = hir::DataType::Scalar(<$ty as KernelScalar>::TYPE);
+        }
+    )*};
+}
+kernel_data!(
+    bool, char, i8, u8, i16, u16, i32, u32, i64, u64, usize, f32, f64
+);
+
+/// The layout of `T`, checked against what rustc knows of the type.
+pub(crate) const fn data_type<T: KernelData>() -> hir::DataType {
+    assert!(
+        T::TYPE.bytes() == size_of::<T>() && T::TYPE.align() <= align_of::<T>(),
+        "a KernelData layout differs from its type's"
+    );
+    assert!(
+        !matches!(T::TYPE, hir::DataType::Scalar(ScalarType::Bool)),
+        "a slice of bool is not kernel data"
+    );
+    T::TYPE
+}
+
 mod error;
 mod typed;
 pub use error::{BuildError, CallError, SignatureError, TargetError, Trap};
