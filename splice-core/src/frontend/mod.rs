@@ -324,6 +324,30 @@ impl dyn KernelBuilder + '_ {
         Ok(halves)
     }
 
+    /// The end of the last whole chunk of `slice.chunks_exact(size)`:
+    /// `len - len % size`. A zero `size` traps with
+    /// [`crate::Trap::DivisionByZero`] where Rust's `chunks_exact` panics.
+    pub fn chunks_exact_end(&mut self, slice: Slice, size: Reg) -> crate::Result<Reg> {
+        let rest = self.binary(Binary::Rem, slice.len, size)?;
+        self.binary(Binary::Sub, slice.len, rest)
+    }
+
+    /// The chunk of `size` elements at `start` of `slice`, for a `start`
+    /// that `chunks_exact_end` bounds: no check
+    /// (`slice_range` keeps it within `slice` regardless).
+    pub fn chunk(&mut self, slice: Slice, start: Reg, size: Reg) -> crate::Result<Slice> {
+        let end = self.binary(Binary::Add, start, size)?;
+        self.slice_range(slice, start, end)
+    }
+
+    /// `slice.chunks_exact(size).remainder()`: the elements after the last
+    /// whole chunk. A zero `size` traps as in
+    /// `chunks_exact_end`.
+    pub fn chunks_exact_remainder(&mut self, slice: Slice, size: Reg) -> crate::Result<Slice> {
+        let end = self.chunks_exact_end(slice, size)?;
+        self.slice_range(slice, end, slice.len)
+    }
+
     pub fn branch_if_false(&mut self, cond: Reg, otherwise: Label) -> crate::Result<()> {
         let next = self.label()?;
         self.branch(cond, next, otherwise)?;

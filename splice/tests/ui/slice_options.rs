@@ -42,4 +42,24 @@ fn index_str(text: &str) -> i32 {
     0
 }
 
+#[kernel]
+fn bound_chunks(xs: &[i32]) -> i32 {
+    let chunks = xs.chunks_exact(2);
+    0
+}
+
+#[kernel]
+fn shared_chunks(xs: &[i32]) -> i32 {
+    for chunk in xs.chunks_exact_mut(2) {}
+    0
+}
+
+#[kernel]
+fn mutable_elements(xs: &mut [i32]) -> i32 {
+    for x in xs {
+        *x += 1;
+    }
+    0
+}
+
 fn main() {}

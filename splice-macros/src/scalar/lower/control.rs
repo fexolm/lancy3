@@ -274,7 +274,10 @@ impl Lower<'_> {
     }
     pub(super) fn for_expr(&self, f: &syn::ExprForLoop) -> Result<Value> {
         let Expr::Range(range) = &*f.expr else {
-            let Some((slice, element, bytes)) = self.iterated_buffer(&f.expr) else {
+            if let Some(chunks) = self.chunks_loop(f)? {
+                return Ok(chunks);
+            }
+            let Some((slice, ty, element, bytes)) = self.iterated_buffer(&f.expr)? else {
                 // A method of a runtime slice reports itself, as `chars` does.
                 if let Expr::MethodCall(call) = &*f.expr
                     && let Expr::Path(path) = &*call.receiver
@@ -285,9 +288,17 @@ impl Lower<'_> {
                 }
                 return self.unroll(f);
             };
-            // `str::bytes` yields bytes; a slice yields references.
+            // `str::bytes` yields bytes; a slice yields references, which
+            // `&x` or a plain name (dereferenced as `*x`) reads by value.
             let binding = match &*f.pat {
                 Pat::Reference(pattern) if !bytes => crate::scalar::named(&pattern.pat)?,
+                Pat::Ident(_) if !bytes && ty.write => {
+                    return err(
+                        &f.pat,
+                        "a `&mut` element of a runtime slice is not supported; index the slice to write it",
+                    );
+                }
+                pat @ Pat::Ident(_) => crate::scalar::named(pat)?,
                 pat if bytes => crate::scalar::named(pat)?,
                 _ => {
                     return err(
@@ -296,6 +307,9 @@ impl Lower<'_> {
                     );
                 }
             };
+            if binding.mutability.is_some() || binding.by_ref.is_some() {
+                return err(binding, "expected an immutable loop variable");
+            }
             let id = &binding.ident;
             let index = quote::format_ident!(
                 "__splice_element_index",
@@ -306,7 +320,8 @@ impl Lower<'_> {
                 let (__splice_start, __splice_one) = (#start, #one);
                 let __splice_limit = buffer.len;);
             let read = emit!(let #id = __splice_builder.load(buffer, #index)?;);
-            return self.counted_loop(f, binding, element, &index, setup, read);
+            let binding_kind = Binding::Reg(element, false);
+            return self.counted_loop(f, binding, binding_kind, &index, setup, read);
         };
         let (Some(start), Some(stop)) = (&range.start, &range.end) else {
             return err(range, "expected start..end");
@@ -336,15 +351,85 @@ impl Lower<'_> {
         let one = self.constant(one);
         let setup =
             emit!(let (__splice_start, __splice_limit, __splice_one) = (#initial, #bound, #one););
-        self.counted_loop(f, pat, kind, &pat.ident, setup, TokenStream::new())
+        self.counted_loop(
+            f,
+            pat,
+            Binding::Reg(kind, false),
+            &pat.ident,
+            setup,
+            TokenStream::new(),
+        )
+    }
+
+    /// `for chunk in xs.chunks_exact(n)` (or `chunks_exact_mut`): `chunk`
+    /// is the subslice of `n` elements at each multiple of `n` below the
+    /// end of the last whole chunk. `n == 0` traps where Rust panics.
+    fn chunks_loop(&self, f: &syn::ExprForLoop) -> Result<Option<Value>> {
+        let Expr::MethodCall(call) = &*f.expr else {
+            return Ok(None);
+        };
+        let write = call.method == "chunks_exact_mut";
+        if !(write || call.method == "chunks_exact") || call.args.len() != 1 {
+            return Ok(None);
+        }
+        let Some((slice, actual, size)) = self.chunks_exact(call, write)? else {
+            return Ok(None);
+        };
+        let Pat::Ident(pat) = &*f.pat else {
+            return err(
+                &f.pat,
+                "bind each chunk to a name: `for chunk in xs.chunks_exact(n)`",
+            );
+        };
+        if pat.mutability.is_some() || pat.by_ref.is_some() || pat.subpat.is_some() {
+            return err(pat, "a runtime slice binding must be a fixed reference");
+        }
+        let id = &pat.ident;
+        let offset = quote::format_ident!(
+            "__splice_chunk_offset",
+            span = proc_macro2::Span::mixed_site()
+        );
+        let start = self.constant(emit!(0usize));
+        let setup = emit!(
+            let buffer = #slice;
+            let __splice_size = #size;
+            let __splice_one = __splice_builder.copy(__splice_size)?;
+            let __splice_limit = __splice_builder.chunks_exact_end(buffer, __splice_one)?;
+            let __splice_start = #start;
+        );
+        let read = emit!(
+            let #id = __splice_builder.chunk(buffer, #offset, __splice_one)?;
+        );
+        let ty = super::BufferType { write, ..actual };
+        self.counted_loop(f, pat, Binding::Buffer(ty), &offset, setup, read)
+            .map(Some)
+    }
+
+    /// The slice and the chunk size of `xs.chunks_exact(n)`, or `None`
+    /// when `xs` is not a runtime slice.
+    pub(super) fn chunks_exact(
+        &self,
+        call: &syn::ExprMethodCall,
+        write: bool,
+    ) -> Result<Option<(TokenStream, super::BufferType, TokenStream)>> {
+        let slice = self.expr(&call.receiver)?;
+        let Stage::Buffer(actual) = slice.stage else {
+            return Ok(None);
+        };
+        if write && !actual.write {
+            return err(call, "`chunks_exact_mut` needs a writable slice");
+        }
+        let size = self.expr(&call.args[0])?;
+        let size = self.reg(size, Scalar::Index, &call.args[0])?;
+        Ok(Some((slice.code, actual, size)))
     }
 
     /// A runtime slice a `for` loop reads element by element, and the
     /// element's register.
-    pub(super) fn iterated_buffer<'a>(
+    pub(super) fn iterated_buffer(
         &self,
-        iterable: &'a Expr,
-    ) -> Option<(&'a syn::ExprPath, Scalar, bool)> {
+        iterable: &Expr,
+    ) -> Result<Option<(TokenStream, super::BufferType, Scalar, bool)>> {
         let (operand, bytes) = match iterable {
             Expr::MethodCall(call) if call.method == "iter" && call.args.is_empty() => {
                 (&*call.receiver, false)
@@ -354,27 +439,45 @@ impl Lower<'_> {
             }
             other => (other, false),
         };
-        let Expr::Path(path) = operand else {
-            return None;
+        // A path names a slice binding; `&xs[a..b]` reslices one.
+        let path = match operand {
+            Expr::Path(path) => path,
+            Expr::Reference(reference) => match &*reference.expr {
+                Expr::Index(index) if matches!(&*index.index, Expr::Range(_)) => {
+                    match &*index.expr {
+                        Expr::Path(path) => path,
+                        _ => return Ok(None),
+                    }
+                }
+                _ => return Ok(None),
+            },
+            _ => return Ok(None),
         };
-        match self.binding(path) {
-            Some(Binding::Buffer(ty)) if ty.utf8 == bytes => Some((path, ty.elem.scalar()?, bytes)),
-            _ => None,
-        }
+        let Some(Binding::Buffer(ty)) = self.binding(path) else {
+            return Ok(None);
+        };
+        let Some(element) = ty.elem.scalar().filter(|_| ty.utf8 == bytes) else {
+            return Ok(None);
+        };
+        let slice = self.expr(operand)?;
+        let Stage::Buffer(ty) = slice.stage else {
+            return Ok(None);
+        };
+        Ok(Some((slice.code, ty, element, bytes)))
     }
 
     fn counted_loop(
         &self,
         f: &syn::ExprForLoop,
         pat: &syn::PatIdent,
-        kind: Scalar,
+        binding: Binding,
         index: &proc_macro2::Ident,
         setup: TokenStream,
         read: TokenStream,
     ) -> Result<Value> {
         let mut scope = self.nested_region();
         let LoopFrame { next, end, .. } = scope.enter_loop(f.label.as_ref(), LoopKind::Runtime);
-        scope.declare(pat, Binding::Reg(kind, false));
+        scope.declare(pat, binding);
         let point = scope.debug_point(f.for_token.span);
         let body = scope.block(&f.body)?.code;
         let root = self.root;
