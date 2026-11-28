@@ -155,13 +155,18 @@ pub enum Instr {
     },
     Copy(Reg, Reg),
     Bin(Reg, Binary, Reg, Reg),
-    /// `ptr` advanced by `offset` elements, unchecked: the frontend checks
-    /// the offset against the length of the slice `ptr` addresses (see
-    /// `subslice`). `dst` has the type of `ptr`.
-    Offset {
-        dst: Reg,
-        ptr: Reg,
-        offset: Reg,
+    /// `dst = &slice[s..e]` for `e = min(end, len)` and `s = min(start, e)`:
+    /// within `slice` whatever the operands, so the pair is a slice by
+    /// construction (see [`KernelBuilder::slice_range`]). `dst.ptr` has the
+    /// type of `slice.ptr`, `dst.len` is an `Index`, and the instruction is
+    /// the only definition of both.
+    ///
+    /// [`KernelBuilder::slice_range`]: crate::frontend::KernelBuilder::slice_range
+    SliceRange {
+        dst: Slice,
+        slice: Slice,
+        start: Reg,
+        end: Reg,
     },
     /// Read element `index` of `slice`, trapping unless it is below the length.
     Load {
@@ -216,14 +221,23 @@ impl Instr {
         }
     }
 
-    fn written(&self) -> Option<Reg> {
+    /// The registers the instruction writes: one, or the pair of a
+    /// [`SliceRange`](Self::SliceRange).
+    fn written(&self) -> impl Iterator<Item = Reg> {
+        let (first, second) = match *self {
+            Self::SliceRange { dst, .. } => (Some(dst.ptr), Some(dst.len)),
+            _ => (self.written_scalar(), None),
+        };
+        first.into_iter().chain(second)
+    }
+
+    fn written_scalar(&self) -> Option<Reg> {
         match self {
             Self::CallIntrinsic { dst, .. } => *dst,
             Self::Const(dst, _)
             | Self::Cast { dst, .. }
             | Self::Copy(dst, _)
             | Self::Bin(dst, ..)
-            | Self::Offset { dst, .. }
             | Self::Load { dst, .. }
             | Self::Call { dst, .. }
             | Self::RustCall { dst, .. } => Some(*dst),

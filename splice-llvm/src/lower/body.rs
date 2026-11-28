@@ -597,19 +597,38 @@ impl<'a, 'ctx> Body<'a, 'ctx> {
         let result = self.binary(op, ty, self.value(a)?, self.value(b)?)?;
         self.store(dst, result)
     }
-    pub(super) fn advance(&mut self, dst: Reg, ptr: Reg, offset: Reg) -> Built<()> {
-        let ValueType::Ptr(kind) = self.registers[ptr.0 as usize].0 else {
+    /// `dst = &slice[s..e]` for `e = min(end, len)` and `s = min(start, e)`
+    /// (see `KernelBuilder::slice_range`).
+    pub(super) fn slice_range(
+        &mut self,
+        dst: SliceValue,
+        slice: SliceValue,
+        start: Reg,
+        end: Reg,
+    ) -> Built<()> {
+        let ValueType::Ptr(kind) = self.registers[slice.ptr.0 as usize].0 else {
             unreachable!("validated slice pointer");
         };
+        let index = ScalarType::Index;
+        let len = self.value(slice.len)?;
+        let end = if end == slice.len {
+            len
+        } else {
+            self.binary(Binary::Min, index, self.value(end)?, len)?
+        };
+        let start = self.binary(Binary::Min, index, self.value(start)?, end)?;
         let element = simd::scalar_type(self.ctx, kind.element());
-        let base = self.value(ptr)?.into_pointer_value();
-        // SAFETY: the frontend checked that the offset is within the slice
-        // `ptr` addresses, so the address is in its allocation or one past it.
+        let base = self.value(slice.ptr)?.into_pointer_value();
+        // SAFETY: `start <= len`, so the address is in the allocation of
+        // `slice` or one past it; the verifier guarantees that `slice.len`
+        // is the length of the memory `slice.ptr` addresses.
         let address = unsafe {
             self.builder
-                .build_in_bounds_gep(element, base, &[self.load(offset)?], "")?
+                .build_in_bounds_gep(element, base, &[start.into_int_value()], "")?
         };
-        self.store(dst, address)
+        self.store(dst.ptr, address)?;
+        let length = self.binary(Binary::Sub, index, end, start)?;
+        self.store(dst.len, length)
     }
     pub(super) fn read_element(&mut self, dst: Reg, s: SliceValue, index: Reg) -> Built<()> {
         let ptr = self.element(s, index)?;

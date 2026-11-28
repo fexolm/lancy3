@@ -34,11 +34,11 @@ impl<'f, 'b> Replay<'f, 'b> {
         let mut writes = vec![0u32; count];
         let mut copied = vec![false; count];
         for instruction in f.instructions() {
-            if let Some(r) = instruction.written()
-                && let Some(n) = writes.get_mut(r.0 as usize)
-            {
-                *n += 1;
-                copied[r.0 as usize] |= matches!(instruction, Instr::Copy(..));
+            for r in instruction.written() {
+                if let Some(n) = writes.get_mut(r.0 as usize) {
+                    *n += 1;
+                    copied[r.0 as usize] |= matches!(instruction, Instr::Copy(..));
+                }
             }
         }
         let results = (0..count)
@@ -143,6 +143,37 @@ impl<'f, 'b> Replay<'f, 'b> {
         self.b.assign(dst, value)
     }
 
+    /// Bind the pair a [`Instr::SliceRange`] produces to `dst`: two fresh
+    /// registers in order, since a slice's registers have no other
+    /// definition (the verifier rejects an assignment to either).
+    fn define_slice(
+        &mut self,
+        dst: Slice,
+        emit: impl FnOnce(&mut dyn KernelBuilder) -> crate::Result<Slice>,
+    ) -> crate::Result<()> {
+        let index = dst.ptr.0 as usize;
+        let fresh = |r: Reg| self.results.get(r.0 as usize) == Some(&true);
+        if dst.len.0 as usize != index + 1 || !fresh(dst.ptr) || !fresh(dst.len) {
+            return Err(crate::BuildError::verify_at(
+                self.pc,
+                "a slice range defines a fresh register pair",
+            ));
+        }
+        self.allocate_below(index)?;
+        let value = emit(&mut *self.b)?;
+        for (r, v) in [(dst.ptr, value.ptr), (dst.len, value.len)] {
+            if self.b.reg_type(v) != Some(self.f.reg_type(r)) {
+                return Err(crate::BuildError::verify_at(
+                    self.pc,
+                    "result register type mismatch",
+                ));
+            }
+            self.regs[r.0 as usize] = Some(v);
+        }
+        self.next = index + 2;
+        Ok(())
+    }
+
     fn run(mut self) -> crate::Result<()> {
         use crate::debug::{Value, Variable};
         for (pc, instruction) in self.f.instructions().iter().enumerate() {
@@ -221,9 +252,15 @@ impl<'f, 'b> Replay<'f, 'b> {
                     let (a, z) = (self.reg(a)?, self.reg(z)?);
                     self.define(dst, |b| b.binary(op, a, z))?;
                 }
-                &Instr::Offset { dst, ptr, offset } => {
-                    let (ptr, offset) = (self.reg(ptr)?, self.reg(offset)?);
-                    self.define(dst, |b| b.offset(ptr, offset))?;
+                &Instr::SliceRange {
+                    dst,
+                    slice,
+                    start,
+                    end,
+                } => {
+                    let slice = self.slice(slice)?;
+                    let (start, end) = (self.reg(start)?, self.reg(end)?);
+                    self.define_slice(dst, |b| b.slice_range(slice, start, end))?;
                 }
                 &Instr::Load { dst, slice, index } => {
                     let (slice, index) = (self.slice(slice)?, self.reg(index)?);
