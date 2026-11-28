@@ -111,3 +111,9 @@ error: a kernel accepts at most 4 #[cfg]/#[cfg_attr] parameter attributes
 125 | |     #[cfg(test)] e: i32,
 126 | | ) -> i32 {
     | |________^
+
+error: expected a safe synchronous kernel with Rust ABI and fixed arity
+   --> tests/ui/declarations.rs:132:5
+    |
+132 |     async fn helper() -> String {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^

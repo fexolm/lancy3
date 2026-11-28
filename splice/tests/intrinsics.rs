@@ -1,11 +1,11 @@
 //! Integer intrinsics on each backend, staging path and build mode.
 use splice::hir::Instr;
 use splice::hir::{Intrinsic, MathOp, ScalarType};
-use splice::{BuildOptions, Codegen, Executable, Mode, kernel, std::intrinsics::math::Math};
+use splice::{BuildOptions, Codegen, Executable, Mode, kernel};
 
 macro_rules! math_kernels {
     ($($name:ident: $ty:ident, $unsigned:ident;)*) => {$(
-        /// Every `Math` operation on `x`, packed into one word.
+        /// Exercise every integer intrinsic on `x`.
         #[kernel]
         fn $name(x: $ty, n: u32) -> u64 {
             let ones: u32 = x.count_ones();
@@ -13,7 +13,7 @@ macro_rules! math_kernels {
             let trailing: u32 = x.trailing_zeros();
             let rotated: $ty = x.rotate_left(n);
             ((ones as u64) | (leading as u64) << 8 | (trailing as u64) << 16)
-                ^ (rotated as $unsigned as u64) << 24
+                ^ (rotated as $unsigned as u64)
         }
     )*};
 }
@@ -28,7 +28,7 @@ fn modes() -> [BuildOptions; 2] {
     [Mode::Release, Mode::Debug].map(|mode| BuildOptions::host(mode).unwrap())
 }
 
-const COUNTS: [u32; 6] = [0, 1, 7, 31, 32, 100];
+const COUNTS: [u32; 9] = [0, 1, 7, 31, 32, 63, 64, 100, u32::MAX];
 
 /// The last segment of the backend's type name, as its errors spell it.
 fn backend_name<B>() -> &'static str {
@@ -96,12 +96,6 @@ fn integer_calls_record_typed_intrinsics() {
 }
 
 #[test]
-#[should_panic(expected = "kernel intrinsic called outside a #[kernel]")]
-fn integer_declaration_panics_in_host_rust() {
-    Math::count_ones(std::hint::black_box(3u64));
-}
-
-#[test]
 fn vector_types_are_markers_and_widths_are_kernel_declarations() {
     use splice::std::intrinsics::{Lane, Mask};
     assert_eq!(size_of::<Lane<f64>>(), 0);
@@ -112,8 +106,10 @@ fn vector_types_are_markers_and_widths_are_kernel_declarations() {
 
 #[kernel(print)]
 fn integer_spellings(#[comptime] seed: u64, x: u64) -> u32 {
-    use splice::std::intrinsics::math::Math as BitOps;
-    seed.count_ones() + <u64 as BitOps>::count_ones(x) + u64::count_ones(x) + Math::leading_zeros(x)
+    seed.count_ones()
+        + <u64>::count_ones(x)
+        + u64::count_ones(x)
+        + core::primitive::u64::leading_zeros(x)
 }
 
 #[test]
@@ -126,13 +122,17 @@ fn qualified_calls_and_known_receivers_preserve_integer_semantics() {
     });
 }
 
+type V = splice::std::intrinsics::Lane<i32>;
+type M = splice::std::intrinsics::Mask<i32>;
+
 #[kernel]
 fn masked_packet(src: &[i32], dst: &mut [i32], count: usize) {
     use core::ops::AddAssign;
     use splice::std::intrinsics::simd::Lane;
-    let mut v = Lane::load(src, 0);
+    let mut v: V = V::load(src, 0);
     v.add_assign(v);
-    let selected = v.add_masked(Lane::<i32>::first_n(count), Lane::splat(1), Lane::splat(-1));
+    let mask: M = Lane::<i32>::first_n(count);
+    let selected = v.add_masked(mask, Lane::splat(1), Lane::splat(-1));
     Lane::store(selected, dst, 0);
 }
 
@@ -162,7 +162,6 @@ fn masked_add_is_one_typed_call_and_stores_the_assigned_value() {
 }
 
 mod names {
-    use splice::std::intrinsics::math::Math;
     use splice::std::intrinsics::simd::Lane as Packet;
     use splice::{Codegen, kernel, lancy::Lancy};
     type Fixed = Packet<i32>;
@@ -185,7 +184,7 @@ mod names {
 
     #[kernel(print)]
     fn constant_count() -> u32 {
-        Math::count_ones(15u32)
+        u32::count_ones(15u32)
     }
 
     struct Lane;

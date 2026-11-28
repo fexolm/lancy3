@@ -12,8 +12,6 @@
 //!     Lane::<u16>::element_width() as i32
 //! }
 //! ```
-use super::intrinsic;
-
 use std::ops::{
     Add, AddAssign, BitAnd, BitAndAssign, BitOr, BitOrAssign, BitXor, BitXorAssign, Div, DivAssign,
     Mul, MulAssign, Not, Shr, Sub, SubAssign,

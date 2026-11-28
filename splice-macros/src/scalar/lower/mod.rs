@@ -820,13 +820,16 @@ impl Lower<'_> {
                 },
                 _ => return err(pat, "initializer must produce a scalar value"),
             };
-            if let Some(ty) = ty
-                && scalar != Scalar::Inferred
-                && annotation != Some(scalar.base())
-            {
-                return err(ty, "type annotation differs from the runtime initializer");
-            }
             let mut rhs = self.reg(value, scalar, &init.expr)?;
+            if let Some(ty) = ty {
+                if let Some(witness) = scalar.vector_witness(ty, self.root, self.types) {
+                    // The initializer determines the IR type. Let Rust resolve
+                    // the annotation, including aliases and public re-exports.
+                    rhs = emit!({ #witness #rhs });
+                } else if scalar != Scalar::Inferred && annotation != Some(scalar.base()) {
+                    return err(ty, "type annotation differs from the runtime initializer");
+                }
+            }
             if mutable {
                 rhs = emit!({let value=#rhs;__splice_builder.copy(value)?});
             }
