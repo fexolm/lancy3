@@ -15,7 +15,7 @@ impl Rules<'_> {
         b: Value,
     ) -> Result<Inst, CompileError> {
         let remainder = kind == Binary::Rem;
-        match self.ctx.constant(b) {
+        match self.dword_constant(b).map(|n| n as i32) {
             Some(1) => {
                 return Ok(if remainder {
                     Inst::Imm(dst, 0)

@@ -1,0 +1,74 @@
+fn main(out:ptr room:i32 n:i32) -> i32
+  slice out room write4
+  zero = const 0
+  two = const 2
+  one = const 1
+  limit = div room two
+  enough = le n limit
+  width = lanes i32
+  last = sub width one
+  br enough setup() | reject()
+block setup()
+  jump head(zero)
+block head(i:i32)
+  remaining = sub n i
+  full = ge remaining width
+  br full body() | done()
+block body()
+  low = mul i two
+  high = add low width
+  bounds low room
+  left = sub room low
+  bounds last left
+  bounds high room
+  right = sub room high
+  bounds last right
+  next = add i width
+  store out next
+  jump head(next)
+block done()
+  ret i
+block reject()
+  ret zero
+@source check: bounds
+@opt not: bounds
+@opt check: store
+@opt not: bounds
+@opt check: ret
+@run 1 1073741824 -> 0 | aa aa aa aa | aa aa aa aa
+
+---
+
+# The product alone can wrap and make the capacity guard succeed.
+fn main(out:ptr room:i32 n:i32) -> i32
+  slice out room write4
+  zero = const 0
+  marker = const 53
+  two = const 2
+  one = const 1
+  required = mul n two
+  enough = le required room
+  width = lanes i32
+  last = sub width one
+  br enough setup() | reject()
+block setup()
+  jump head(zero)
+block head(i:i32)
+  remaining = sub n i
+  full = ge remaining width
+  br full body() | done()
+block body()
+  low = mul i two
+  bounds low room
+  store out marker
+  left = sub room low
+  bounds last left
+  next = add i width
+  jump head(next)
+block done()
+  ret i
+block reject()
+  ret zero
+@opt check: store
+@opt check: bounds
+@run 1 1073741824 -> !bounds | aa aa aa aa | 35 00 00 00

@@ -1,0 +1,34 @@
+# Speculate only the wrapping arithmetic and preserve false-edge argument order.
+fn main(cond:i32 x:i32 scale:i32 y:i32) -> i32
+  br cond join(x x) | compute(y scale)
+block compute(a:i32 b:i32)
+  unused = cast usize a
+  p = mul a b
+  r = add p a
+  jump join(r x)
+block join(v:i32 common:i32)
+  ret v
+@opt not: br
+@opt check: = mul
+@opt check: = add
+@opt check: = select
+@run 0 7 5 -3 -> -18
+@run 2 7 5 -3 -> 7
+@run -2147483648 7 5 -3 -> 7
+@run 0 7 2 2147483647 -> 2147483645
+
+---
+
+fn main(out:ptr cond:i32 x:i32 y:i32) -> i32
+  br cond compute() | join(x)
+block compute()
+  store out x
+  r = add x y
+  jump join(r)
+block join(v:i32)
+  ret v
+@opt check: br
+@opt check: store
+@opt not: = select
+@run 0 7 2 -> 7 | 00 00 00 00 | 00 00 00 00
+@run 1 7 2 -> 9 | 00 00 00 00 | 07 00 00 00

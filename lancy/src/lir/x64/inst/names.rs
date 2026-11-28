@@ -53,7 +53,11 @@ impl Named for Inst {
             }
             Self::Fallback(id) => {
                 let e = details.expansions[id];
-                format!("fallback.{}.{}", ty(e.input), e.action)
+                if e.is_f32x4_fma(machine.cpu.bytes) {
+                    "helper.vec.f32.fma".into()
+                } else {
+                    format!("fallback.{}.{}", ty(e.input), e.action)
+                }
             }
             Self::Literal(lane, n, _) => format!("literal.{} {n:#x}", lane_name(lane)),
             Self::Iota(lane, _) => format!("iota.{}", lane_name(lane)),

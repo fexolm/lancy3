@@ -98,6 +98,63 @@ fn entry_points_check_buffer_signatures_before_executing() {
     assert_eq!(out, [24]);
 }
 
+#[test]
+fn packed_arguments_cross_the_inline_boundary_without_losing_words() {
+    use splice_core::frontend::{self, KernelBuilder, Signature};
+    use splice_core::hir::{Binary, Constant, ScalarType};
+    use splice_core::{BuildOptions, Codegen, Mode};
+
+    let options = BuildOptions::host(Mode::Release).unwrap();
+    for scalars in [0, 28, 29] {
+        let params = vec![ScalarType::U64; scalars];
+        let buffers = [BufferKind::READ_I32, BufferKind::WRITE_I32];
+        let signature = Signature::new(&params, ScalarType::U64, &buffers);
+        let stage = |b: &mut dyn KernelBuilder| {
+            let zero = b.constant(Constant::from(0_u64))?;
+            let factor = b.constant(Constant::from(131_u64))?;
+            let one = b.constant(Constant::from(1_usize))?;
+            let two = b.constant(Constant::from(2_usize))?;
+            let mut acc = zero;
+            let mut mix = |b: &mut dyn KernelBuilder, word| {
+                let scaled = b.binary(Binary::Mul, acc, factor)?;
+                acc = b.binary(Binary::Add, scaled, word)?;
+                splice_core::Result::Ok(())
+            };
+            for i in 0..scalars {
+                let arg = b.arg(i)?;
+                mix(b, arg)?;
+            }
+            for i in [0, 1] {
+                let len = b.buffer_len(Buffer(i))?;
+                let len = b.cast(len, ScalarType::U64)?;
+                mix(b, len)?;
+            }
+            let value = b.load(Buffer(0), one)?;
+            let value = b.cast(value, ScalarType::U64)?;
+            mix(b, value)?;
+            let low = b.cast(acc, ScalarType::I32)?;
+            b.store(Buffer(1), two, low)?;
+            b.ret(acc)
+        };
+        let ir = frontend::materialize(signature, Box::new(stage), options).unwrap();
+        let words: Vec<_> = (0..scalars as u64).map(|i| (i << 41) | (97 + i)).collect();
+        let expected = words
+            .iter()
+            .copied()
+            .chain([2, 3, 17])
+            .fold(0_u64, |acc, word| acc.wrapping_mul(131).wrapping_add(word));
+        for code in [
+            Lancy::build_with_options(signature, Box::new(stage), options).unwrap(),
+            Lancy::compile_with_options(&ir, options).unwrap(),
+        ] {
+            let mut out = [9, 11, 13];
+            let mut args = [BufferArg::read(&[3_i32, 17]), BufferArg::write(&mut out)];
+            assert_eq!(code.call(&words, &mut args), Ok(expected));
+            assert_eq!(out, [9, 11, expected as i32]);
+        }
+    }
+}
+
 #[kernel]
 fn assign_in_order(buffer: &mut [i32], value: i32) -> i32 {
     buffer[{

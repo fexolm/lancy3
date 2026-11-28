@@ -88,6 +88,9 @@ fn simplify_loops(
         Rewrite::Reduced
     } else if allow_unswitch && unswitch::run(f, cfg, dom, &loops, &facts) {
         Rewrite::Unswitched
+    } else if super::local_cfg::convert_computed_branches(f, cfg, &facts) {
+        // Invariant conditions get the opportunity to leave the loop first.
+        Rewrite::Reduced
     } else {
         *analysis = Some((facts, bounds));
         Rewrite::None
@@ -298,11 +301,14 @@ struct CountedLoop {
     step: Count,
     guard: Value,
     packet: Option<(Count, Value)>,
+    rounded_slice: Option<Value>,
 }
 
 impl CountedLoop {
     fn packet_size(self) -> Option<Count> {
-        self.packet.map(|(size, _)| size)
+        self.packet
+            .map(|(size, _)| size)
+            .or_else(|| self.rounded_slice.map(|_| self.step))
     }
 
     fn strict_unit_step(self) -> bool {
@@ -400,6 +406,11 @@ fn counted_loop(
         }
     }
     let step = step?;
+    let rounded_slice = if packet.is_none() && facts.constant(f, start) == Some(0) {
+        rounded_slice(f, facts, bound, step)
+    } else {
+        None
+    };
     if let Some((packet, _)) = packet {
         // Starting at zero, a negative bound fails the first packet test.
         // Otherwise both operands of the subtraction must be nonnegative.
@@ -409,7 +420,8 @@ fn counted_loop(
         if initial < 0 || (initial != 0 && !nonnegative_bound) || !step.at_most(packet) {
             return None;
         }
-    } else if step != Count::Fixed(1)
+    } else if rounded_slice.is_none()
+        && step != Count::Fixed(1)
         && facts
             .constant(f, bound)
             .is_none_or(|n| n > i32::MAX - (step.at_width(MAX_VECTOR_BYTES) - 1))
@@ -427,6 +439,26 @@ fn counted_loop(
         step,
         guard: facts.root(cond),
         packet,
+        rounded_slice,
+    })
+}
+
+/// A slice length rounded down to a multiple of the positive step.
+/// From zero, every taken strict iteration has a full packet before this
+/// bound. The increment reaches the bound without wrapping.
+fn rounded_slice(f: &Function, facts: &Facts, bound: Value, step: Count) -> Option<Value> {
+    let Op::Bin(Binary::Mul, a, b) = facts.op(f, bound)? else {
+        return None;
+    };
+    [(a, b), (b, a)].into_iter().find_map(|(quotient, width)| {
+        if Count::of(f, facts, width)? != step {
+            return None;
+        }
+        let Op::Bin(Binary::Div, len, divisor) = facts.op(f, quotient)? else {
+            return None;
+        };
+        let len = facts.root(len);
+        (Count::of(f, facts, divisor)? == step && f.is_slice_length(len)).then_some(len)
     })
 }
 

@@ -1,10 +1,10 @@
 //! Bounds-check elimination and invariant loads in natural loops.
 use super::super::bounds::{
-    Bounds, BoundsPoint, Count, Index, at_least, index, last_lane, remaining,
+    Bounds, BoundsPoint, Count, Index, at_least, doubled, index, last_lane, remaining,
 };
 use super::{CountedLoop, Facts, NaturalLoops};
 use crate::hir::transforms::{ControlFlowGraph, DomTree};
-use crate::hir::{Block, Function, Op, SliceParam, Terminator, Type, Value};
+use crate::hir::{Binary, Block, Function, Op, SliceParam, Terminator, Type, Value};
 use crate::support::slotmap::DenseMap;
 use std::collections::HashMap;
 
@@ -20,7 +20,9 @@ impl Bounds {
     ) -> bool {
         facts.constant(f, lp.start).is_some_and(|n| n >= 0)
             && count.at_most(lp.packet_size().unwrap_or(Count::Fixed(1)))
-            && (lp.bound == len || self.before(dom, lp.bound, len, lp.preheader))
+            && (lp.bound == len
+                || lp.rounded_slice == Some(len)
+                || self.before(dom, lp.bound, len, lp.preheader))
     }
 
     pub(super) fn optimize(
@@ -52,7 +54,8 @@ impl Bounds {
             });
             let covered = |f: &Function, i, len, count| {
                 active.is_some_and(|lp| {
-                    i == Index::Ssa(lp.iv) && self.loop_covers(f, facts, dom, lp, len, count)
+                    (i == Index::Ssa(lp.iv) && self.loop_covers(f, facts, dom, lp, len, count))
+                        || self.covers_interleaved_packet(f, facts, dom, lp, (i, len, count))
                 }) || (declared
                     && f.is_slice_length(len)
                     && self.covers(dom, i, len, count, BoundsPoint::End(preheader)))
@@ -121,8 +124,14 @@ impl Bounds {
                 && let Some((left, right, full_on_yes)) = at_least(kind, a, b)
                 && let Some(count) = Count::of(f, facts, right)
                 && let (len, Index::Ssa(i)) = remaining(f, facts, left)
-                && i == lp.iv
-                && self.loop_covers(f, facts, dom, lp, len, count)
+                && (i == lp.iv && self.loop_covers(f, facts, dom, lp, len, count)
+                    || self.covers_interleaved_packet(
+                        f,
+                        facts,
+                        dom,
+                        lp,
+                        (Index::Ssa(i), len, count),
+                    ))
             {
                 f.set_terminator(block, Terminator::Jump(if full_on_yes { yes } else { no }));
                 changed_cfg = true;
@@ -161,5 +170,37 @@ impl Bounds {
             }
         }
         changed_cfg
+    }
+
+    /// With a nonnegative induction and a whole packet before bound, both
+    /// interleaved packets end at or before 2 * bound. The dominating guard
+    /// proves this product fits i32 and that the destination holds it.
+    fn covers_interleaved_packet(
+        &self,
+        f: &Function,
+        facts: &Facts,
+        dom: &DomTree,
+        lp: CountedLoop,
+        access: (Index, Value, Count),
+    ) -> bool {
+        let (i, len, count) = access;
+        let (Index::Ssa(i), Some(width)) = (i, lp.packet_size()) else {
+            return false;
+        };
+        if !count.at_most(width)
+            || !self.twice_before(dom, lp.bound, len, lp.preheader)
+            || facts.constant(f, lp.start).is_none_or(|n| n < 0)
+        {
+            return false;
+        }
+        if doubled(f, facts, i) == Some(lp.iv) {
+            return true;
+        }
+        if let Some(Op::Bin(Binary::Add, a, b)) = facts.op(f, i) {
+            return [(a, b), (b, a)].into_iter().any(|(low, offset)| {
+                doubled(f, facts, low) == Some(lp.iv) && Count::of(f, facts, offset) == Some(width)
+            });
+        }
+        false
     }
 }

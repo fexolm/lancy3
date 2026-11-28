@@ -1,6 +1,7 @@
 mod abi;
 mod compile;
 mod emit;
+mod fma;
 mod frame;
 mod inst;
 mod isel;

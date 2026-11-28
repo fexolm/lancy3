@@ -267,15 +267,37 @@ impl Kernel {
     /// Writable slices must be exclusive and shared slices remain immutable.
     /// A Rust context dispatcher must receive a live, exclusive context token
     /// of the exact type expected by that dispatcher.
+    #[inline]
     pub unsafe fn call_packed_unchecked(
         &self,
         args: &[u64],
         result: &mut [u64],
     ) -> Result<(), CallError> {
-        if args.len() != self.arg_words {
+        // SAFETY: the slice supplies the readable, aligned argument block
+        // for the duration of this synchronous call.
+        unsafe { self.call_packed_raw(args.as_ptr(), args.len(), result) }
+    }
+
+    /// Accept a packed native argument block without reading it as Rust
+    /// integers. This lets callers pass layouts containing pointer fields.
+    ///
+    /// # Safety
+    ///
+    /// If the word counts match, `args` must be aligned for `u64` and
+    /// readable as `arg_words` consecutive native words until the call
+    /// returns. A zero-word block is never read. All pointer arguments
+    /// must meet the contract of [`Self::call_packed_unchecked`].
+    #[doc(hidden)]
+    pub unsafe fn call_packed_raw(
+        &self,
+        args: *const u64,
+        arg_words: usize,
+        result: &mut [u64],
+    ) -> Result<(), CallError> {
+        if arg_words != self.arg_words {
             return Err(CallError::Signature(SignatureError::ArgumentWords {
                 expected: self.arg_words,
-                actual: args.len(),
+                actual: arg_words,
             }));
         }
         if result.len() != self.result_words {
@@ -287,7 +309,7 @@ impl Kernel {
         super::workspace::with(self.words, |workspace| {
             // SAFETY: the sizes match the compiled ABI and the caller covers
             // pointer validity.
-            let low = unsafe { self.invoke(args.as_ptr(), workspace) }?;
+            let low = unsafe { self.invoke(args, workspace) }?;
             if self.result_words == 1 {
                 result[0] = low;
             } else {

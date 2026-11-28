@@ -1,5 +1,5 @@
 use crate::hir::transforms::ControlFlowGraph;
-use crate::hir::{Binary, Block, Edge, Function, Op, Simd, Terminator, Ternary, Type, Value};
+use crate::hir::{Binary, Block, Edge, Function, Lane, Op, Simd, Terminator, Ternary, Type, Value};
 use crate::support::slotmap::DenseMap;
 use std::collections::{HashMap, HashSet};
 
@@ -108,7 +108,7 @@ impl ForwardingPaths {
     }
 }
 
-/// Replace a branch joining through empty jump blocks with a numeric select.
+/// Replace a branch joining through forwarding blocks with a numeric select.
 /// Other predecessors of a forwarding block can keep using that block.
 pub(super) fn convert_branches(f: &mut Function, cfg: &ControlFlowGraph) -> bool {
     if !cfg
@@ -126,6 +126,9 @@ pub(super) fn convert_branches(f: &mut Function, cfg: &ControlFlowGraph) -> bool
         };
         let yes_target = f.edge(yes).0;
         let Some(target) = paths.merge(f, yes_target, f.edge(no).0) else {
+            if !cfg.has_cycle() {
+                changed |= convert_computed_branch(f, cfg, block, cond, yes, no);
+            }
             continue;
         };
         if target == block {
@@ -174,6 +177,162 @@ pub(super) fn convert_branches(f: &mut Function, cfg: &ControlFlowGraph) -> bool
             .unwrap();
         f.jump(block, target, &args);
         changed = true;
+    }
+    changed
+}
+
+/// A small straight-line diamond can feed a select even when its arms
+/// compute the incoming value. Only total, wrapping i32 operations may
+/// execute on the other path. Limit the extra work on a predictable branch.
+fn convert_computed_branch(
+    f: &mut Function,
+    cfg: &ControlFlowGraph,
+    block: Block,
+    cond: Value,
+    yes: Edge,
+    no: Edge,
+) -> bool {
+    let arm = |edge| {
+        let b = f.edge(edge).0;
+        if b != block
+            && cfg.predecessors(b) == [block]
+            && let Terminator::Jump(exit) = *f.terminator(b)
+        {
+            let (join, _) = f.edge(exit);
+            if join != b && join != block {
+                return (join, Some(exit));
+            }
+        }
+        (b, None)
+    };
+    let (mut join, mut yes_exit) = arm(yes);
+    let (mut other, mut no_exit) = arm(no);
+    if join != other {
+        // One incoming edge may go directly to the merge, which itself
+        // can end in a jump.
+        if join == f.edge(no).0 {
+            other = join;
+            no_exit = None;
+        } else if other == f.edge(yes).0 {
+            join = other;
+            yes_exit = None;
+        }
+    }
+    if join != other || join == block {
+        return false;
+    }
+
+    let inputs = |edge, exit| {
+        let (arm, args) = f.edge(edge);
+        let Some(exit) = exit else {
+            return args.to_vec();
+        };
+        f.edge(exit)
+            .1
+            .iter()
+            .map(|&v| f.param_index(arm, v).map_or(v, |i| args[i]))
+            .collect()
+    };
+    let mut left = inputs(yes, yes_exit);
+    let right = inputs(no, no_exit);
+    let mut differing = left
+        .iter()
+        .zip(&right)
+        .enumerate()
+        .filter(|(_, (x, y))| x != y);
+    let (Some((index, _)), None) = (differing.next(), differing.next()) else {
+        return false;
+    };
+    if f.value_type(f.params(join)[index]) != Type::I32 {
+        return false;
+    }
+
+    let mut budget = 4;
+    let mut cheap = 8;
+    for edge in [yes, no]
+        .into_iter()
+        .zip([yes_exit, no_exit])
+        .filter_map(|(edge, exit)| exit.map(|_| edge))
+    {
+        for inst in f.instructions(f.edge(edge).0) {
+            match *f.op(inst) {
+                Op::Const(_) if cheap > 0 => cheap -= 1,
+                Op::Cast(ty, v)
+                    if ty == Lane::Usize.scalar() && f.value_type(v) == Type::I32 && cheap > 0 =>
+                {
+                    cheap -= 1;
+                }
+                Op::Bin(
+                    Binary::Add
+                    | Binary::Sub
+                    | Binary::Mul
+                    | Binary::And
+                    | Binary::Or
+                    | Binary::Xor,
+                    a,
+                    _,
+                ) if f.value_type(a) == Type::I32 && budget > 0 => budget -= 1,
+                _ => return false,
+            }
+        }
+    }
+    if budget == 4 && cheap == 8 {
+        return false;
+    }
+
+    let mut speculate = |edge: Edge, exit: Option<Edge>, result: Value| {
+        let (arm, args) = f.edge(edge);
+        if exit.is_none() {
+            return result;
+        }
+        let mut values: Vec<_> = f
+            .params(arm)
+            .iter()
+            .copied()
+            .zip(args.iter().copied())
+            .collect();
+        let insts: Vec<_> = f.instructions(arm).collect();
+        let remap = |values: &[(Value, Value)], v| {
+            values
+                .iter()
+                .find(|&&(from, _)| from == v)
+                .map_or(v, |&(_, to)| to)
+        };
+        for inst in insts {
+            let mut op = *f.op(inst);
+            op.map_operands(|v| remap(&values, v));
+            let original = f.result(inst).unwrap();
+            let value = f.append(block, op).unwrap();
+            values.push((original, value));
+        }
+        remap(&values, result)
+    };
+    let a = speculate(yes, yes_exit, left[index]);
+    let b = speculate(no, no_exit, right[index]);
+    left[index] = f
+        .append(block, Op::Ternary(Ternary::Select, cond, a, b))
+        .unwrap();
+    f.jump(block, join, &left);
+    true
+}
+
+pub(super) fn convert_computed_branches(
+    f: &mut Function,
+    cfg: &ControlFlowGraph,
+    facts: &super::facts::Facts,
+) -> bool {
+    let mut changed = false;
+    for &block in cfg.reverse_postorder() {
+        if let Terminator::Branch { cond, yes, no } = *f.terminator(block)
+            // A threshold can change frequently. Keep equality tests and
+            // other predicates on their original control-flow paths.
+            && matches!(
+                facts.op(f, cond),
+                Some(Op::Bin(Binary::Lt | Binary::Le | Binary::Gt | Binary::Ge, ..))
+            )
+        {
+            changed |= convert_computed_branch(f, cfg, block, cond, yes, no);
+        }
     }
     changed
 }
