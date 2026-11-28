@@ -183,13 +183,23 @@ impl Lower<'_> {
                 let fields = fields
                     .iter()
                     .enumerate()
-                    .map(|(index, (member, kind))| {
+                    .map(|(index, (member, _))| {
                         let name = member_name(member);
-                        let word = Value::new(Stage::Word(*kind), emit!(#path[#index]));
-                        let reg = self.reg(word, Scalar::Inferred, path)?;
+                        // A known field (an unsuffixed literal the macro read
+                        // as `i32` or `f64`) takes the type of the struct's.
                         Ok(emit!((#name, {
-                            let __splice_reg = #reg;
-                            #support::of(__splice_builder, __splice_reg)?
+                            let __splice_word = #path[#index];
+                            match #root::frontend::scalar::RunArg::known(&__splice_word) {
+                                ::core::option::Option::Some(__splice_known) => #support::constant(
+                                    __splice_builder,
+                                    #support::type_of(__splice_type, &[#name])?,
+                                    __splice_known,
+                                )?,
+                                ::core::option::Option::None => {
+                                    let __splice_reg = #root::frontend::scalar::RunArg::reg(__splice_word, __splice_builder)?;
+                                    #support::of(__splice_builder, __splice_reg)?
+                                }
+                            }
                         })))
                     })
                     .collect::<Result<Vec<_>>>()?;

@@ -68,6 +68,37 @@ impl<'e> Literal<'e> {
         }
     }
 
+    /// A closure whose argument is field `index` of this literal: rustc
+    /// infers the field's type for it, which types an unsuffixed literal
+    /// as the field (the closure never runs).
+    fn field_probe(&self, root: &Path, index: usize) -> TokenStream {
+        let decode = emit!(#root::frontend::scalar::ImportWord::decode(0));
+        let probe = emit!(__splice_field);
+        let shape = match self.at {
+            Expr::Struct(literal) => {
+                let mut witness = literal.clone();
+                for (j, field) in witness.fields.iter_mut().enumerate() {
+                    field.colon_token = Some(Default::default());
+                    field.expr = Expr::Verbatim(if j == index {
+                        probe.clone()
+                    } else {
+                        decode.clone()
+                    });
+                }
+                witness.rest = None;
+                witness.into_token_stream()
+            }
+            Expr::Call(call) => {
+                let func = &call.func;
+                let values =
+                    (0..call.args.len()).map(|j| if j == index { &probe } else { &decode });
+                emit!(#func(#(#values),*))
+            }
+            _ => unreachable!("an aggregate literal"),
+        };
+        emit!(|__splice_field| #shape)
+    }
+
     pub(super) fn has_rest(&self) -> bool {
         matches!(self.at, Expr::Struct(literal) if literal.rest.is_some())
     }
@@ -117,7 +148,13 @@ impl Lower<'_> {
             };
             fields.push((member.clone(), kind));
             // A formal register can carry a known scalar from an enclosing call.
-            words.push(if matches!(value.stage, Stage::Reg(_)) {
+            words.push(if matches!(value.stage, Stage::Literal(_)) {
+                // `Point { x: 0.5, .. }` has the type of `x`, not `f64`.
+                let probe = literal.field_probe(root, words.len());
+                emit!(#root::frontend::scalar::Word::Known(
+                    #root::frontend::scalar::field_constant(#probe, #value)
+                ))
+            } else if matches!(value.stage, Stage::Reg(_)) {
                 emit!({
                     let reg = #value;
                     #root::frontend::scalar::Word::input(reg, __splice_inputs)
