@@ -103,7 +103,7 @@ impl ScalarType {
         self.is_integer() || self.is_float()
     }
 
-    /// Whether the type is the element of a [`Lane`](crate::simd::Lane): a
+    /// Whether the type is the element of a `Lane`: a
     /// number other than `u64` and `usize`.
     pub const fn is_lane(self) -> bool {
         self.is_number() && !matches!(self, Self::U64 | Self::Index)
