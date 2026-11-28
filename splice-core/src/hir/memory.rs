@@ -66,9 +66,11 @@ pub trait Primitives {
         e: ScalarType,
         count: Self::Scalar,
     ) -> Result<Self::Vector, Self::Error>;
-    /// The lanes whose index is not below the slice length, compared at
-    /// the width of the index lanes. This is exact for a length that fits
-    /// that width.
+    /// The lanes whose index, with the signedness of the index lanes, is
+    /// negative or not below the slice length. This is exact for every
+    /// length but, with narrow unsigned index lanes, a length above their
+    /// largest value, where the result is ignored (no such index leaves the
+    /// slice).
     fn outside(&mut self, slice: Slice, indices: Self::Vector)
     -> Result<Self::Vector, Self::Error>;
     /// Whether `buffer` holds at most `n` elements: a `bool`.
@@ -224,7 +226,8 @@ pub fn lower<P: Primitives>(
                 None => outside,
             };
             let mut fail = p.any(bad)?;
-            // Narrow unsigned indices cannot leave a longer slice.
+            // Narrow unsigned indices cannot leave a longer slice; narrow
+            // signed ones still can, by being negative.
             let index = e.index();
             if !index.is_signed() && index.bits() < 32 {
                 let largest = u64::MAX >> (64 - index.bits());

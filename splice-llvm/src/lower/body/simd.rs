@@ -729,7 +729,13 @@ impl<'ctx> memory::Primitives for Body<'_, 'ctx> {
         let ir = self.builder;
         let ty = self.index_type(s.element);
         let lanes = self.lanes(s.element);
-        let offsets = ir.build_int_z_extend_or_bit_cast(indices, ty.vec_type(lanes), "")?;
+        // Widen narrow indices with their sign: a negative index becomes
+        // larger than every length (validation caps lengths at `i32::MAX`).
+        let offsets = if s.element.index().is_signed() {
+            ir.build_int_s_extend_or_bit_cast(indices, ty.vec_type(lanes), "")?
+        } else {
+            ir.build_int_z_extend_or_bit_cast(indices, ty.vec_type(lanes), "")?
+        };
         let len =
             ir.build_int_truncate_or_bit_cast(self.slices[s.buffer.index()].len, ty, "length")?;
         Ok(ir.build_int_compare(

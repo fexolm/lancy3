@@ -377,3 +377,111 @@ fn narrow_kernels_print_as_rust_and_run_their_specialization() {
         });
     }
 }
+
+/// `out = src[indices]` for the lanes `base + i`, lane 0 replaced by `first`.
+#[kernel]
+fn gather_bytes(src: &[i8], out: &mut [i8], base: i8, first: i8) {
+    let indices = (Lane::<i8>::iota() + Lane::splat(base)).replace_wrapping(0, first);
+    Lane::<i8>::gather(src, indices).store(out, 0);
+}
+
+/// `dst[indices] = 7` for the lanes `base + i`, lane 0 replaced by `first`.
+#[kernel]
+fn scatter_bytes(dst: &mut [i8], base: i8, first: i8) {
+    let indices = (Lane::<i8>::iota() + Lane::splat(base)).replace_wrapping(0, first);
+    Lane::<i8>::splat(7).scatter(dst, indices);
+}
+
+#[kernel]
+fn gather_words(src: &[i16], out: &mut [i16], base: i16, first: i16) {
+    let indices = (Lane::<i16>::iota() + Lane::splat(base)).replace_wrapping(0, first);
+    Lane::<i16>::gather(src, indices).store(out, 0);
+}
+
+#[kernel]
+fn scatter_words(dst: &mut [i16], base: i16, first: i16) {
+    let indices = (Lane::<i16>::iota() + Lane::splat(base)).replace_wrapping(0, first);
+    Lane::<i16>::splat(7).scatter(dst, indices);
+}
+
+/// Signed narrow indices into slices longer than the index type reaches:
+/// every non-negative index is checked against the whole length, and a
+/// negative index is out of bounds (a gather traps, a scatter traps before
+/// writing any lane).
+#[test]
+fn signed_narrow_indices_index_long_slices_in_both_paths_and_modes() {
+    let host = splice::Target::host().unwrap().vector_bytes();
+    macro_rules! check {
+        ($B:ty, $options:expr, $ty:ty, $gather:ident, $scatter:ident, $len:expr, $base:expr) => {{
+            let lanes = host / size_of::<$ty>();
+            let src: Vec<$ty> = (0..$len).map(|i: usize| (i % 97) as $ty).collect();
+            let gathers = [
+                $gather::build_with_options::<$B>($options, $gather::BuildArgs {}).unwrap(),
+                <$B>::compile(&$gather::ir_with_options($options).unwrap()).unwrap(),
+            ];
+            let scatters = [
+                $scatter::build_with_options::<$B>($options, $scatter::BuildArgs {}).unwrap(),
+                <$B>::compile(&$scatter::ir_with_options($options).unwrap()).unwrap(),
+            ];
+            let base: $ty = $base;
+            for (path, code) in gathers.iter().enumerate() {
+                let mut out = vec![0; lanes];
+                let args = $gather::CallArgs {
+                    src: &src,
+                    out: &mut out,
+                    base,
+                    first: base,
+                };
+                assert_eq!(code.call(args), Ok(()), "gather path {path}");
+                let want: Vec<$ty> = (0..lanes).map(|i| src[base as usize + i]).collect();
+                assert_eq!(out, want, "gather path {path}");
+                let mut out = vec![0; lanes];
+                let args = $gather::CallArgs {
+                    src: &src,
+                    out: &mut out,
+                    base,
+                    first: -1,
+                };
+                assert_eq!(
+                    code.call(args),
+                    Err(CallError::Trap(Trap::Bounds)),
+                    "gather path {path}"
+                );
+            }
+            for (path, code) in scatters.iter().enumerate() {
+                let mut dst = vec![0; $len];
+                assert_eq!(
+                    code.call($scatter::CallArgs {
+                        dst: &mut dst,
+                        base,
+                        first: base
+                    }),
+                    Ok(())
+                );
+                let mut want = vec![0; $len];
+                want[base as usize..base as usize + lanes].fill(7);
+                assert!(dst == want, "scatter path {path}");
+                let mut dst = vec![0; $len];
+                let args = $scatter::CallArgs {
+                    dst: &mut dst,
+                    base,
+                    first: -1,
+                };
+                assert_eq!(
+                    code.call(args),
+                    Err(CallError::Trap(Trap::Bounds)),
+                    "scatter path {path}"
+                );
+                assert!(dst.iter().all(|&x| x == 0), "scatter path {path}");
+            }
+        }};
+    }
+    for options in options() {
+        splice_testkit::each_backend!(B => {
+            // Lengths above 255 and 65,535: a truncated length or a
+            // zero-extended -1 would decide the bounds check.
+            check!(B, options, i8, gather_bytes, scatter_bytes, 300, 50);
+            check!(B, options, i16, gather_words, scatter_words, 70_000, 5_000);
+        });
+    }
+}

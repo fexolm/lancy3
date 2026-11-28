@@ -863,8 +863,23 @@ impl memory::Primitives for Slices<'_, '_> {
             .collect())
     }
     fn outside(&mut self, s: Slice, indices: Chunks) -> Lowered<Chunks> {
-        let len = self.length(s.buffer);
-        let limit = self.splat_lane(chunk_type(s.element.index()), len);
+        let index = s.element.index();
+        let mut len = self.length(s.buffer);
+        // Compare narrow lanes against the length capped where it still fits
+        // them: at the first negative index (unsigned, every negative index is
+        // at least that), or at the largest unsigned index, where `memory`
+        // ignores the result for a longer slice.
+        if index.bits() < 32 {
+            let cap = if index.is_signed() {
+                1i64 << (index.bits() - 1)
+            } else {
+                (1i64 << index.bits()) - 1
+            };
+            let ty = self.b.func.dfg.value_type(len);
+            let cap = self.b.ins().iconst(ty, cap);
+            len = self.b.ins().umin(len, cap);
+        }
+        let limit = self.splat_lane(chunk_type(index), len);
         Ok(indices
             .iter()
             .map(|&chunk| {
