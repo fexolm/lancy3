@@ -1,6 +1,6 @@
 // Diagnostics of kernel bodies: host expressions, macros and SIMD typing.
 use splice::kernel;
-use splice::simd::Lane;
+use splice::std::intrinsics::simd::Lane;
 
 #[kernel]
 fn runtime_tuple(x: i32) -> i32 {

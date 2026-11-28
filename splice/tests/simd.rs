@@ -1,7 +1,7 @@
 use splice::hir::{Buffer, Constant, ScalarType, Simd, SimdOp};
 use splice::{
     BufferArg, BufferKind, BuildError, CallError, Codegen, Executable, Trap, TypedKernel, kernel,
-    simd::{Element, Lane, Mask},
+    std::intrinsics::simd::{Element, Lane, Mask},
 };
 
 /// This machine's `SPLICE_SIMD` target in the mode of this test build.
@@ -11,11 +11,11 @@ fn options() -> splice::BuildOptions {
 
 #[kernel]
 fn add_block(lhs: &[u16], rhs: &[u16], dst: &mut [u16]) -> i32 {
-    use splice::simd::Lane;
+    use splice::std::intrinsics::simd::Lane;
     let a: Lane<u16> = Lane::load(lhs, 1);
-    let b = splice::simd::Lane::<u16>::load(rhs, 1);
+    let b = splice::std::intrinsics::simd::Lane::<u16>::load(rhs, 1);
     (a + b).store(dst, 1);
-    Lane::<u16>::lanes() as i32
+    Lane::<u16>::element_width() as i32
 }
 
 #[kernel]
@@ -72,7 +72,7 @@ fn float_width(a: &[f32], b: &mut [f32], c: &[f64], d: &mut [f64], flag: i32) ->
     y.store(b, 0);
     let z = Lane::load(c, 0);
     (z * z).store(d, 0);
-    Lane::<f32>::lanes() as i32 - Lane::<f64>::lanes() as i32
+    Lane::<f32>::element_width() as i32 - Lane::<f64>::element_width() as i32
 }
 
 fn kernels<S, E: Executable + 'static>(
@@ -110,7 +110,7 @@ fn typed_float_lanes(
     let lo = x.widen_low::<f64>();
     let hi = x.widen_high::<f64>();
     lo.store(widened, 0);
-    hi.store(widened, Lane::<f64>::lanes());
+    hi.store(widened, Lane::<f64>::element_width());
     lo.narrow::<f32>(hi).store(round_trip, 0);
     x.sqrt().cast::<u32>().store(integers, 0);
     x.cast::<i32>().reduce_sum()
@@ -118,7 +118,7 @@ fn typed_float_lanes(
 
 #[test]
 fn typed_simd_conversions_and_fused_arithmetic_match_rust() {
-    let n = splice::simd::lanes::<f32>();
+    let n = splice::Target::host().unwrap().vector_bytes() / size_of::<f32>();
     let input: Vec<_> = [
         1.000_000_1f32,
         -0.0,
@@ -179,7 +179,7 @@ fn unsigned_words(input: &[u32], out: &mut [u32], narrow: &mut [u16]) -> i32 {
 
 #[test]
 fn unsigned_lanes_compare_shift_and_narrow_across_backends() {
-    let n = splice::simd::lanes::<u32>();
+    let n = splice::Target::host().unwrap().vector_bytes() / size_of::<u32>();
     let input: Vec<_> = [0, 0x7fffffff, 0x80000000, 0xd13e_beef, u32::MAX]
         .into_iter()
         .cycle()
@@ -219,7 +219,7 @@ fn unsigned_indexed_load(input: &[u32], index: &[u32], out: &mut [u32], count: i
 
 #[test]
 fn unsigned_indices_above_i32_max_fault_only_when_active() {
-    let n = splice::simd::lanes::<u32>();
+    let n = splice::Target::host().unwrap().vector_bytes() / size_of::<u32>();
     let mut ids = vec![u32::MAX; n];
     ids[0] = 0;
     for kernel in compile_all!(unsigned_indexed_load) {
@@ -253,7 +253,7 @@ fn signed_bounds(lhs: &[i32], rhs: &[i32], mins: &mut [i32], maxs: &mut [i32]) -
     let b = Lane::load(rhs, 0);
     a.simd_min(b).store(mins, 1);
     a.simd_max(b).store(maxs, 1);
-    Lane::<i32>::lanes() as i32
+    Lane::<i32>::element_width() as i32
 }
 
 #[test]
@@ -265,7 +265,10 @@ fn signed_vector_min_max_stay_explicit_and_preserve_lane_order() {
         .instructions()
         .iter()
         .filter_map(|instr| match instr {
-            Instr::Simd { inst, .. } => Some(inst.op),
+            Instr::CallIntrinsic {
+                intrinsic: splice::hir::Intrinsic::Simd(inst),
+                ..
+            } => Some(inst.op),
             _ => None,
         })
         .collect();
@@ -278,10 +281,10 @@ fn signed_vector_min_max_stay_explicit_and_preserve_lane_order() {
             SimdOp::Store(splice::hir::Buffer(2)),
             SimdOp::Max,
             SimdOp::Store(splice::hir::Buffer(3)),
-            SimdOp::Lanes,
+            SimdOp::ElementWidth,
         ]
     );
-    let lanes = splice::simd::lanes::<i32>();
+    let lanes = splice::Target::host().unwrap().vector_bytes() / size_of::<i32>();
     let pairs = [
         (i32::MIN, i32::MAX),
         (i32::MAX, i32::MIN),
@@ -318,14 +321,14 @@ fn signed_vector_min_max_stay_explicit_and_preserve_lane_order() {
 #[kernel]
 fn rotate_words(#[comptime] count: u32, src: &[i32], out: &mut [i32]) -> i32 {
     Lane::load(src, 0).rotate_left(count).store(out, 0);
-    Lane::<i32>::lanes() as i32
+    Lane::<i32>::element_width() as i32
 }
 
 #[test]
 fn vector_rotate_wraps_the_count_and_rotates_signed_lane_bits() {
     use splice::hir::{Instr, SimdOp};
 
-    let lanes = splice::simd::lanes::<i32>();
+    let lanes = splice::Target::host().unwrap().vector_bytes() / size_of::<i32>();
     let source: Vec<_> = [
         i32::MIN,
         i32::MAX,
@@ -342,7 +345,7 @@ fn vector_rotate_wraps_the_count_and_rotates_signed_lane_bits() {
     for count in [0, 1, 13, 15, 31, 32, 33, u32::MAX] {
         let ir = rotate_words::ir(count).unwrap();
         assert!(ir.instructions().iter().any(|instr| {
-            matches!(instr, Instr::Simd { inst, .. } if inst.op == SimdOp::RotateLeft(count & 31))
+            matches!(instr, Instr::CallIntrinsic { intrinsic: splice::hir::Intrinsic::Simd(inst), .. } if inst.op == SimdOp::RotateLeft(count & 31))
         }));
         let mut backends = Vec::new();
         splice_testkit::each_backend!(B => kernels(
@@ -371,12 +374,12 @@ fn xor_complement(a: &[i32], b: &[i32], c: &[i32], out: &mut [i32]) -> i32 {
     let y = Lane::load(b, 0);
     let z = Lane::load(c, 0);
     (!(x ^ y ^ z)).store(out, 0);
-    Lane::<i32>::lanes() as i32
+    Lane::<i32>::element_width() as i32
 }
 
 #[test]
 fn triple_xor_and_complement_preserve_every_lane_and_the_tail() {
-    let lanes = splice::simd::lanes::<i32>();
+    let lanes = splice::Target::host().unwrap().vector_bytes() / size_of::<i32>();
     let a: Vec<_> = (0..64).collect();
     let b: Vec<_> = a.iter().map(|&x| 0x7654_3210 ^ (x << 16)).collect();
     let c: Vec<_> = a.iter().map(|&x| !(x << 8)).collect();
@@ -405,12 +408,15 @@ fn triple_xor_and_complement_preserve_every_lane_and_the_tail() {
 fn floating_iotas(singles: &mut [f32], doubles: &mut [f64]) -> i32 {
     Lane::<f32>::iota().store(singles, 0);
     Lane::<f64>::iota().store(doubles, 0);
-    Lane::<f32>::lanes() as i32
+    Lane::<f32>::element_width() as i32
 }
 
 #[test]
 fn floating_iota_uses_numeric_lane_indices() {
-    let (n, m) = (splice::simd::lanes::<f32>(), splice::simd::lanes::<f64>());
+    let (n, m) = (
+        (splice::Target::host().unwrap().vector_bytes() / size_of::<f32>()),
+        (splice::Target::host().unwrap().vector_bytes() / size_of::<f64>()),
+    );
     let mut expected_singles = [-1.0_f32; 64];
     let mut expected_doubles = [-1.0_f64; 64];
     for (i, value) in expected_singles[..n].iter_mut().enumerate() {
@@ -473,7 +479,7 @@ fn nested_lanes(src: &[i32], out: &mut [i32]) -> i32 {
 
 #[test]
 fn lane_values_cross_nested_kernel_calls_as_parameters_and_results() {
-    let width = splice::simd::lanes::<i32>();
+    let width = splice::Target::host().unwrap().vector_bytes() / size_of::<i32>();
     let src: Vec<i32> = (0..width as i32).map(|i| (i - 3) * 3).collect();
     // Per lane: negative values clamp to -5, the others pass through.
     let want: Vec<i32> = src
@@ -496,7 +502,7 @@ fn lane_values_cross_nested_kernel_calls_as_parameters_and_results() {
 }
 
 #[test]
-#[should_panic(expected = "is a kernel SIMD operation: only a #[kernel] calls it")]
+#[should_panic(expected = "Splice intrinsic stub executed in Rust")]
 fn lane_operations_do_not_run_outside_a_kernel() {
     let _ = Lane::<i32>::splat(1);
 }
@@ -505,7 +511,7 @@ fn lane_operations_do_not_run_outside_a_kernel() {
 fn column_batches(left: &[i32], right: &[i32], out: &mut [i32]) -> i32 {
     let a = Lane::load(left, 0);
     let b = Lane::load(right, 0);
-    let width = Lane::<i32>::lanes() as i32;
+    let width = Lane::<i32>::element_width() as i32;
     a.interleave_low(b).store(out, 0);
     a.interleave_high(b).store(out, width as usize);
     a.deinterleave_even(b).store(out, (2 * width) as usize);
@@ -519,7 +525,7 @@ fn column_batches(left: &[i32], right: &[i32], out: &mut [i32]) -> i32 {
 
 #[test]
 fn column_permutations_and_wrapping_prefixes_cross_the_full_vector() {
-    let width = splice::simd::lanes::<i32>();
+    let width = splice::Target::host().unwrap().vector_bytes() / size_of::<i32>();
     let mut left: Vec<i32> = (0..width as i32).map(|i| i * 7).collect();
     left[0] = i32::MAX - 2;
     let right: Vec<_> = (0..width as i32)
@@ -574,7 +580,7 @@ fn rearrange_columns(src: &[i32], flags: &[i32], indices: &[i32], out: &mut [i32
     let compact = values.compress(keep);
     compact.store(out, 0);
     let idx = Lane::load(indices, 0);
-    values.swizzle(idx).store(out, Lane::<i32>::lanes());
+    values.swizzle(idx).store(out, Lane::<i32>::element_width());
     compact.swizzle(idx).last()
 }
 
@@ -585,7 +591,7 @@ fn batch_alignment(src: &[i32], offset: i32) -> i32 {
 
 #[test]
 fn alignment_prefix_uses_the_actual_subslice_and_offset() {
-    let width = splice::simd::lanes::<i32>();
+    let width = splice::Target::host().unwrap().vector_bytes() / size_of::<i32>();
     let align = width * size_of::<i32>();
     let backing = vec![37; 3 * width + 1];
     let kernels = compile_all!(batch_alignment);
@@ -612,10 +618,10 @@ fn compress_and_swizzle_return_vectors_with_zero_in_unused_lanes() {
     let ir = rearrange_columns::ir().unwrap();
     for wanted in [SimdOp::Compress, SimdOp::Swizzle] {
         assert!(ir.instructions().iter().any(
-            |instr| matches!(instr, Instr::Simd { dst: Some(_), inst, .. } if inst.op == wanted)
+            |instr| matches!(instr, Instr::CallIntrinsic { dst: Some(_), intrinsic: splice::hir::Intrinsic::Simd(inst), .. } if inst.op == wanted)
         ));
     }
-    let width = splice::simd::lanes::<i32>();
+    let width = splice::Target::host().unwrap().vector_bytes() / size_of::<i32>();
     let n = width as i32;
     let values: Vec<_> = (0..n).map(|i| 0x1734_2695 + i * 0x0103_0709).collect();
     // On a 512-bit target, select both ends of each 128-bit part. Out-of-range
@@ -688,7 +694,7 @@ fn compress_and_swizzle_return_vectors_with_zero_in_unused_lanes() {
 
 #[test]
 fn compress_store_counts_lanes_and_writes_the_fitting_prefix_in_order() {
-    let width = splice::simd::lanes::<i32>();
+    let width = splice::Target::host().unwrap().vector_bytes() / size_of::<i32>();
     let src: Vec<_> = (0..width as i32)
         .map(|i| match i % 4 {
             0 => i32::MIN,
@@ -746,7 +752,7 @@ fn compress_store_counts_lanes_and_writes_the_fitting_prefix_in_order() {
 
 #[test]
 fn scalable_add_wraps_at_u16_and_preserves_prefix_on_short_store() {
-    let w = splice::simd::lanes::<u16>();
+    let w = splice::Target::host().unwrap().vector_bytes() / size_of::<u16>();
     let a: Vec<u16> = (0..w + 2)
         .map(|i| if i == w { u16::MAX } else { i as u16 * 3 })
         .collect();
@@ -769,7 +775,7 @@ fn scalable_add_wraps_at_u16_and_preserves_prefix_on_short_store() {
         SimdOp::Load(Buffer(0)),
         SimdOp::Add,
         SimdOp::Store(Buffer(2)),
-        SimdOp::Lanes,
+        SimdOp::ElementWidth,
     ] {
         assert!(
             ops.contains(&Simd {
@@ -814,7 +820,7 @@ fn scalable_add_wraps_at_u16_and_preserves_prefix_on_short_store() {
 }
 #[test]
 fn masked_indices_skip_inactive_accesses_and_write_in_order() {
-    let w = splice::simd::lanes::<u16>();
+    let w = splice::Target::host().unwrap().vector_bytes() / size_of::<u16>();
     let mut ids = vec![u16::MAX; w];
     ids[..5].copy_from_slice(&[1, u16::MAX, 1, 3, 0]);
     let mut flags = vec![0u16; w];
@@ -880,7 +886,7 @@ fn masked_indices_skip_inactive_accesses_and_write_in_order() {
 
 #[test]
 fn unmasked_scatter_writes_aliases_in_lane_order_up_to_the_first_fault() {
-    let width = splice::simd::lanes::<i32>();
+    let width = splice::Target::host().unwrap().vector_bytes() / size_of::<i32>();
     let kernels = compile_all!(scatter_all);
     for fault in [None, Some((2, -1)), Some((width - 1, 3))] {
         let mut ids: Vec<_> = (0..width).map(|i| (i / 2 % 3) as i32).collect();
@@ -910,7 +916,7 @@ fn unmasked_scatter_writes_aliases_in_lane_order_up_to_the_first_fault() {
 
 #[test]
 fn masked_contiguous_access_skips_empty_masks_and_preserves_the_valid_store_prefix() {
-    let w = splice::simd::lanes::<i32>();
+    let w = splice::Target::host().unwrap().vector_bytes() / size_of::<i32>();
     let src: Vec<_> = (0..=w).map(|i| 100 + i as i32).collect();
     let last = 1_u32 << (w - 1);
     let ends = 1 | last;
@@ -955,7 +961,7 @@ fn masked_contiguous_access_skips_empty_masks_and_preserves_the_valid_store_pref
 
 #[test]
 fn masked_tail_uses_each_fallback_and_skips_writes() {
-    let w = splice::simd::lanes::<u16>();
+    let w = splice::Target::host().unwrap().vector_bytes() / size_of::<u16>();
     let mut flags = vec![0u16; w];
     flags[0] = 1;
     let mut want = vec![77u16; w + 2];
@@ -983,7 +989,10 @@ fn masked_tail_uses_each_fallback_and_skips_writes() {
 
 #[test]
 fn element_size_controls_lane_count_and_typed_joins() {
-    let (n, m) = (splice::simd::lanes::<f32>(), splice::simd::lanes::<f64>());
+    let (n, m) = (
+        (splice::Target::host().unwrap().vector_bytes() / size_of::<f32>()),
+        (splice::Target::host().unwrap().vector_bytes() / size_of::<f64>()),
+    );
     assert_eq!(n, 2 * m);
     let a: Vec<f32> = (0..n).map(|i| i as f32 - 4.5).collect();
     let c: Vec<f64> = (0..m).map(|i| i as f64 + 0.25).collect();
@@ -1039,7 +1048,7 @@ fn gather_u16_mask(src: &[u16], ids: &[u16], flags: &[u16], dst: &mut [u16]) -> 
 
 #[test]
 fn masked_u16_gather_visits_every_set_bit_and_keeps_each_fallback() {
-    let width = splice::simd::lanes::<u16>();
+    let width = splice::Target::host().unwrap().vector_bytes() / size_of::<u16>();
     let values: Vec<_> = (0..width as u16).map(|i| 1000 + 7 * i).collect();
     let kernels = compile_all!(gather_u16_mask);
     for bits in [0, 1 << (width - 1), 0x8001_8001, 0xaaaa_5555, u32::MAX] {
@@ -1078,7 +1087,7 @@ fn masked_u16_gather_visits_every_set_bit_and_keeps_each_fallback() {
 
 #[test]
 fn inactive_gather_retains_each_fallback_lane() {
-    let w = splice::simd::lanes::<i32>();
+    let w = splice::Target::host().unwrap().vector_bytes() / size_of::<i32>();
     let mut ids = vec![i32::MAX; w];
     let mut mask = vec![0; w];
     ids[1] = 0;
@@ -1138,7 +1147,7 @@ macro_rules! gather_bounds_test {
         fn $kernel(src: &[$ty], indices: &[$ty], out: &mut [$ty], mask_last: i32) -> i32 {
             let ids = Lane::load(indices, 0);
             Lane::<$ty>::iota().store(out, 0);
-            let w = Lane::<$ty>::lanes();
+            let w = Lane::<$ty>::element_width();
             let result = if mask_last != 0 {
                 let mask = Lane::<$ty>::first_n((w as i32 - 1) as usize);
                 Lane::gather_select(src, mask, ids, Lane::<$ty>::splat(43))
@@ -1151,7 +1160,7 @@ macro_rules! gather_bounds_test {
 
         #[test]
         fn $test() {
-            let w = splice::simd::lanes::<$ty>();
+            let w = splice::Target::host().unwrap().vector_bytes() / size_of::<$ty>();
             let src: Vec<_> = (0..$len).map(|i| (i as $ty).wrapping_mul(7)).collect();
             let end = ($len - 1) as $ty;
             let kernels = compile_all!($kernel);
@@ -1213,7 +1222,7 @@ gather_bounds_test!(
 
 #[test]
 fn signed_i64_scatter_checks_full_indices_and_commits_only_the_valid_prefix() {
-    let n = splice::simd::lanes::<i64>();
+    let n = splice::Target::host().unwrap().vector_bytes() / size_of::<i64>();
     for k in compile_all!(scatter_i64_prefix) {
         for bad in [-1, 2, 1_i64 << 61] {
             let mut ids = vec![0; n];
@@ -1241,7 +1250,7 @@ fn ieee_division(a: &[f32], b: &[f32], out: &mut [f32]) -> i32 {
 }
 #[test]
 fn floating_division_and_unordered_comparison() {
-    let n = splice::simd::lanes::<f32>();
+    let n = splice::Target::host().unwrap().vector_bytes() / size_of::<f32>();
     let a: Vec<_> = (0..n).map(|i| [0., 1., -1., 6.][i % 4]).collect();
     let b: Vec<_> = (0..n).map(|i| [0., -0., 0., 4.][i % 4]).collect();
     let expected: Vec<f32> = a.iter().zip(&b).map(|(x, y)| x / y).collect();
@@ -1271,7 +1280,7 @@ fn verifier_checks_vector_mask_and_buffer_element_types() {
         BufferKind,
         frontend::{KernelBuilder, Signature, materialize},
         hir::{Buffer, Reg, Simd, SimdOp},
-        simd::Element,
+        std::intrinsics::simd::Element,
     };
     const KINDS: [BufferKind; 1] = [BufferKind::new(Element::F32, false)];
     /// An operation built from the offset and the loaded vector.
@@ -1320,7 +1329,7 @@ fn blocks(src: &[f64], dst: &mut [f64]) -> i32 {
     let mut i = 0;
     let n = src.len() as i32;
     while i < n {
-        let step = (n - i).min(Lane::<f64>::lanes() as i32);
+        let step = (n - i).min(Lane::<f64>::element_width() as i32);
         let tail = Lane::<f64>::first_n(step as usize);
         let a = Lane::load_select(src, i as usize, tail, Lane::<f64>::splat(0.));
         (a + a).store_select(dst, i as usize, tail);
@@ -1331,14 +1340,14 @@ fn blocks(src: &[f64], dst: &mut [f64]) -> i32 {
 
 #[kernel]
 fn prefix(dst: &mut [u16], count: i32) -> i32 {
-    let m: splice::simd::Mask<u16> = Lane::first_n(count as usize);
+    let m: splice::std::intrinsics::simd::Mask<u16> = Lane::first_n(count as usize);
     Lane::<u16>::splat(11).store_select(dst, 0, m);
     m.all() as i32
 }
 
 #[test]
 fn first_n_caps_before_narrowing_and_drives_partial_blocks() {
-    let w = splice::simd::lanes::<u16>();
+    let w = splice::Target::host().unwrap().vector_bytes() / size_of::<u16>();
     for kernel in compile_all!(prefix) {
         for n in [0, 1, w as i32 - 1, w as i32, 65536, i32::MIN, -1] {
             let mut out = vec![100u16; w];
@@ -1352,7 +1361,7 @@ fn first_n_caps_before_narrowing_and_drives_partial_blocks() {
             assert!(out[expected..].iter().all(|&v| v == 100));
         }
     }
-    let w = splice::simd::lanes::<f64>();
+    let w = splice::Target::host().unwrap().vector_bytes() / size_of::<f64>();
     let kernels = compile_all!(blocks);
     for n in [0, 1, w - 1, w, w + 1, 2 * w + 3] {
         let src: Vec<_> = (0..n).map(|i| i as f64 - 0.75).collect();
@@ -1376,8 +1385,8 @@ mod locally_imported {
         {
             let x: Lane<f32> = Lane::load(a, 0);
             x.store(b, 0);
-            return Lane::<f32>::lanes() as i32;
-            use splice::simd::Lane;
+            return Lane::<f32>::element_width() as i32;
+            use splice::std::intrinsics::simd::Lane;
         }
     }
 }
@@ -1389,7 +1398,7 @@ fn forwarded(a: &[f32], b: &mut [f32]) -> i32 {
 
 #[test]
 fn typed_slice_forwarding_and_block_local_import() {
-    let n = splice::simd::lanes::<f32>();
+    let n = splice::Target::host().unwrap().vector_bytes() / size_of::<f32>();
     let input: Vec<_> = (0..n).map(|i| i as f32 + 0.5).collect();
     for k in compile_all!(forwarded) {
         let mut out = vec![0f32; n];
@@ -1414,7 +1423,7 @@ fn gather_positive_indices(src: &[f32], indices: &[i32], dst: &mut [f32]) -> i32
 
 #[test]
 fn integer_mask_selects_float_lanes() {
-    let n = splice::simd::lanes::<f32>();
+    let n = splice::Target::host().unwrap().vector_bytes() / size_of::<f32>();
     let mut ids = vec![-1; n];
     ids[n - 1] = 0;
     let mut expected = vec![(-0f32).to_bits(); n];
@@ -1457,7 +1466,7 @@ fn inferred_vectors(src: &[f32], dst: &mut [f32]) -> i32 {
 
 #[test]
 fn data_operands_determine_the_element_type_independently_of_the_mask() {
-    let n = splice::simd::lanes::<f32>();
+    let n = splice::Target::host().unwrap().vector_bytes() / size_of::<f32>();
     let src: Vec<_> = (0..n).map(|i| 0.5 + i as f32).collect();
     let mut expected: Vec<_> = src.iter().map(|x| 2.5 + x).collect();
     expected[0] = 2.75;
@@ -1479,7 +1488,7 @@ fn data_operands_determine_the_element_type_independently_of_the_mask() {
 
 #[kernel]
 fn copy_at(src: &[i32], dst: &mut [i32], offset: i32) -> i32 {
-    let width: usize = Lane::<i32>::lanes();
+    let width: usize = Lane::<i32>::element_width();
     for i in 0..width {
         dst[0] += i as i32 + 1;
     }
@@ -1489,7 +1498,7 @@ fn copy_at(src: &[i32], dst: &mut [i32], offset: i32) -> i32 {
 
 #[test]
 fn vector_load_checks_the_whole_block_after_prior_writes() {
-    let n = splice::simd::lanes::<i32>();
+    let n = splice::Target::host().unwrap().vector_bytes() / size_of::<i32>();
     let src: Vec<_> = (0..=n as i32).collect();
     let kernels = compile_all!(copy_at);
     for offset in [1, 2, -1, i32::MIN, i32::MAX] {
@@ -1524,7 +1533,7 @@ fn refill_lanes(src: &[i32], flags: &[i32], dst: &mut [i32], idx: i32) -> i32 {
 
 #[test]
 fn register_refill_and_wrapping_lane_index_match_across_backends() {
-    let width = splice::simd::lanes::<i32>();
+    let width = splice::Target::host().unwrap().vector_bytes() / size_of::<i32>();
     let src: Vec<_> = (0..width as i32)
         .map(|i| 0x1234_5678 + i * 0x0103_0709)
         .collect();
@@ -1615,12 +1624,12 @@ fn host_scratch_slots_retain_independent_runtime_values() {
 #[kernel]
 fn mul_i64_block(lhs: &[i64], rhs: &[i64], dst: &mut [i64]) -> i32 {
     (Lane::load(lhs, 0) * Lane::load(rhs, 0)).store(dst, 0);
-    Lane::<i64>::lanes() as i32
+    Lane::<i64>::element_width() as i32
 }
 
 #[test]
 fn i64_multiply_keeps_the_low_word_of_every_product() {
-    let n = splice::simd::lanes::<i64>();
+    let n = splice::Target::host().unwrap().vector_bytes() / size_of::<i64>();
     let inputs = [
         (-1_i64, 2_i64),
         ((1 << 32) + 1, (1 << 32) + 1),
@@ -1663,7 +1672,7 @@ fn prefix_tail(src: &[i32], out: &mut [i32], at: i32, count: i32) -> i32 {
 fn prefix_masks_trap_exactly_when_an_active_lane_is_outside() {
     // Lancy checks a prefix mask against the room as lane counts; every
     // backend agrees with these element-by-element rules.
-    let w = splice::simd::lanes::<i32>();
+    let w = splice::Target::host().unwrap().vector_bytes() / size_of::<i32>();
     let kernels = compile_all!(prefix_tail);
     let src: Vec<i32> = (0..2 * w as i32 + 3).map(|x| 10 + x).collect();
     for src_len in [w - 1, w, w + 2] {
@@ -1720,7 +1729,7 @@ fn saturating_float_casts(
     unsigned: &mut [u32],
     wide: &mut [i64],
 ) -> i32 {
-    let w = Lane::<f32>::lanes();
+    let w = Lane::<f32>::element_width();
     let mut i = 0;
     while i + w <= singles.len() {
         let x = Lane::<f32>::load(singles, i);
@@ -1728,7 +1737,7 @@ fn saturating_float_casts(
         x.cast::<u32>().store(unsigned, i);
         i += w;
     }
-    let w = Lane::<f64>::lanes();
+    let w = Lane::<f64>::element_width();
     let mut i = 0;
     while i + w <= doubles.len() {
         Lane::<f64>::load(doubles, i).cast::<i64>().store(wide, i);
@@ -1765,7 +1774,7 @@ fn float_to_integer_lanes_saturate_and_send_nan_to_zero() {
         1e20,
         -1e20,
     ];
-    let lanes = splice::simd::lanes::<f32>();
+    let lanes = splice::Target::host().unwrap().vector_bytes() / size_of::<f32>();
     let n = edges.len().div_ceil(lanes) * lanes;
     let singles: Vec<f32> = (0..n).map(|i| edges[i % edges.len()] as f32).collect();
     let doubles: Vec<f64> = (0..n).map(|i| edges[i % edges.len()]).collect();

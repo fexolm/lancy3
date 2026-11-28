@@ -29,6 +29,8 @@ struct Operation {
     expr: Expr,
     operands: Vec<Operand>,
     borrowed: Vec<SliceOperand>,
+    widths: Vec<Path>,
+    imports: Vec<Vec<syn::ItemUse>>,
 }
 
 /// A captured slice or scalar: a path of the body and what it is bound to
@@ -81,7 +83,19 @@ impl Operation {
             }
         });
         let expr = &self.expr;
-        emit!({ #(#operands)* #views #(#borrowed)* #expr })
+        let width_slots = (!self.widths.is_empty()).then(|| {
+            let first = self.operands.len();
+            let slots = self.widths.iter().map(|owner| {
+                let element = super::simd::width_element(root, owner);
+                emit!({ let slot = next; next += usize::from((#element).is_some()); slot })
+            });
+            emit!(let mut next = #first; let __splice_width_slots = [#(#slots),*];)
+        });
+        let mut code = emit!({ #(#operands)* #views #(#borrowed)* #width_slots #expr });
+        for imports in self.imports.iter().rev().filter(|items| !items.is_empty()) {
+            code = emit!({ #(#[allow(unused_imports)] #imports)* #code });
+        }
+        code
     }
 }
 
@@ -127,12 +141,12 @@ impl Context {
 
     pub(in crate::scalar) fn signature(&self, root: &Path) -> TokenStream {
         let operations = self.operations.borrow();
-        let arities = operations
-            .iter()
-            .map(|operation| operation.operands.len() as u32);
+        let arities = operations.iter().flat_map(|operation| {
+            (0..=operation.widths.len()).map(|extra| (operation.operands.len() + extra) as u32)
+        });
         let borrows = operations
             .iter()
-            .map(|operation| operation.borrowed.len() as u32);
+            .flat_map(|op| std::iter::repeat_n(op.borrowed.len() as u32, op.widths.len() + 1));
         let children = self.children.borrow();
         let signatures = children.iter().map(|child| {
             let target = &child.target;
@@ -204,11 +218,12 @@ impl Context {
         self.operations
             .borrow()
             .iter()
-            .enumerate()
-            .map(|(ordinal, operation)| {
-                let ordinal = ordinal as u32;
+            .scan(0u32, |next, operation| {
+                let first = *next;
+                let last = first + operation.widths.len() as u32;
+                *next = last + 1;
                 let body = operation.body(root, types);
-                emit!(#ordinal => #word::encode(#body),)
+                Some(emit!(#first..=#last => #word::encode(#body),))
             })
             .collect()
     }
@@ -325,34 +340,73 @@ impl Context {
                 emit!(#root::hir::ContextSlice { buffer: #buffer, writable: #writable })
             })
             .collect::<Vec<_>>();
+        // A width is pure and target-dependent. It can cross the object ABI as
+        // an IR word, even inside a short circuit or between effectful calls.
+        let mut nested = NestedIntrinsics {
+            lower,
+            widths: Vec::new(),
+            guarded: Vec::new(),
+            paths: Vec::new(),
+        };
+        nested.visit_expr(expr);
         let mut operations = self.operations.borrow_mut();
         let key = lower.body.expr(expr);
-        let ordinal =
-            if let Some(ordinal) = operations.iter().position(|operation| operation.key == key) {
-                ordinal as u32
-            } else {
-                let ordinal = operations.len() as u32;
-                let mut objects = FindObjects {
-                    lower,
-                    name: &self.argument,
-                    found: Vec::new(),
-                };
-                objects.visit_expr(expr);
-                let mut expr = expr.clone();
-                ReplaceObject(objects.found.into_iter()).visit_expr_mut(&mut expr);
-                operations.push(Operation {
-                    key,
-                    expr,
-                    operands: captures.operands,
-                    borrowed: captures.borrowed,
-                });
-                ordinal
+        let index = if let Some(index) = operations.iter().position(|op| op.key == key) {
+            index
+        } else {
+            let mut objects = FindObjects {
+                lower,
+                name: &self.argument,
+                found: Vec::new(),
             };
-        let body = operations[ordinal as usize].body(root, lower.types);
+            objects.visit_expr(expr);
+            let mut expr = expr.clone();
+            ReplaceObject(objects.found.into_iter()).visit_expr_mut(&mut expr);
+            if !nested.widths.is_empty() {
+                ReplaceWidths {
+                    paths: nested.paths.iter().copied(),
+                    slot: 0,
+                    root,
+                }
+                .visit_expr_mut(&mut expr);
+            }
+            operations.push(Operation {
+                key,
+                expr,
+                operands: captures.operands,
+                borrowed: captures.borrowed,
+                widths: nested
+                    .widths
+                    .iter()
+                    .map(|(_, owner)| owner.clone())
+                    .collect(),
+                imports: lower.imports.clone(),
+            });
+            operations.len() - 1
+        };
+        // The signature is static even when an alias resolves to an ordinary
+        // Rust type. One layout per possible word count shares a callback.
+        let base: u32 = operations[..index]
+            .iter()
+            .map(|op| op.widths.len() as u32 + 1)
+            .sum();
+        let packet = if nested.widths.is_empty() {
+            emit!(let arguments = [#(#operands),*]; let ordinal = #base;)
+        } else {
+            let widths = nested.widths.iter().map(|(name, owner)| {
+                let probe = super::simd::width_element(root, owner);
+                let reg = super::simd::width(root, name, emit!(element));
+                emit!(if let Some(element) = #probe { arguments.push(#reg); ordinal += 1; })
+            });
+            emit!(let mut arguments = ::std::vec![#(#operands),*]; let mut ordinal = #base; #(#widths)*)
+        };
+        let body = operations[index].body(root, lower.types);
         let object = &self.object;
         let buffer = &self.argument;
+        let guarded = nested.guarded;
         Ok(emit!({
-            let arguments = [#(#operands),*];
+            #(if #guarded { return Err(#root::BuildError::staging("nested intrinsic in an opaque Rust object expression is unsupported; bind its result before the object operation")); })*
+            #packet
             // The closure only names the operation's Rust result type.
             #[allow(unreachable_code, unused_variables, unused_mut, clippy::diverging_sub_expression)]
             let __splice_operation = || {
@@ -361,7 +415,7 @@ impl Context {
                 #body
             };
             let __splice_result = #root::frontend::scalar::result_type(__splice_operation);
-            __splice_builder.rust_call(#root::hir::RustTarget::Context { buffer: #buffer, operation: __splice_context_frame.operation(#ordinal)? }, &arguments, &[#(#slices),*], __splice_result)?
+            __splice_builder.rust_call(#root::hir::RustTarget::Context { buffer: #buffer, operation: __splice_context_frame.operation(ordinal)? }, &arguments, &[#(#slices),*], __splice_result)?
         }))
     }
 
@@ -605,6 +659,128 @@ fn writable_object_place(mut expr: &Expr, lower: &Lower<'_>, object: &Ident) -> 
 
 fn is_object(path: &ExprPath, lower: &Lower<'_>, object: &Ident) -> bool {
     path.path.is_ident(object) && matches!(lower.binding(path), Some(Binding::Context))
+}
+
+/// Name resolution is shared with scalar lowering. The Rust callback sees a
+/// decoded word in place of each width, and cannot execute an intrinsic body.
+struct NestedIntrinsics<'a, 'ast> {
+    lower: &'a Lower<'ast>,
+    widths: Vec<(String, Path)>,
+    guarded: Vec<TokenStream>,
+    paths: Vec<bool>,
+}
+
+impl NestedIntrinsics<'_, '_> {
+    fn path(&mut self, path: &ExprPath, zero_arg_call: bool) -> Option<(String, Path)> {
+        if self.lower.local_owner(path) {
+            return None;
+        }
+        let root = self.lower.root;
+        let mut width = None;
+        let member = &path.path.segments.last().unwrap().ident;
+        let name = member.to_string();
+        if !crate::scalar::methods::method_path(path)
+            && path.path.segments.len() > 1
+            && super::simd::registered(&name)
+        {
+            // A lowercase prefix may denote a module or a type alias.
+            // Only a module's free function can be imported. Require
+            // that proof before allowing the expression into Rust.
+            // An associated call on a lowercase alias uses <alias>::m.
+            let mut function = path.path.clone();
+            function.segments.last_mut().unwrap().arguments = syn::PathArguments::None;
+            self.guarded.push(emit!({
+                #[allow(unused_imports)] use #function as __splice_opaque_free_function;
+                false
+            }));
+        }
+        if super::simd::simd_path(path) {
+            let owner = super::simd::owner_path(path).unwrap();
+            let nominal = super::simd::type_probe(root, &owner);
+            if (member == "element_width" || member == "byte_width") && zero_arg_call {
+                width = Some((member.to_string(), owner));
+            } else {
+                self.guarded.push(super::calls::select_builtin(
+                    root,
+                    &owner,
+                    "simd",
+                    emit!(true),
+                    emit!(#nominal.is_some()),
+                ));
+            }
+        } else if super::memory::math_op(&name).is_some()
+            && super::memory::integer_owner(path).is_some()
+        {
+            self.guarded.push(emit!(true));
+        }
+        width
+    }
+}
+impl Visit<'_> for NestedIntrinsics<'_, '_> {
+    fn visit_expr_path(&mut self, path: &ExprPath) {
+        // A function item passed to a callback must not expose the Rust stub.
+        self.path(path, false);
+    }
+
+    fn visit_expr_call(&mut self, call: &syn::ExprCall) {
+        let width = match &*call.func {
+            Expr::Path(path) => self.path(path, call.args.is_empty()),
+            _ => None,
+        };
+        self.paths.push(width.is_some());
+        if let Some(width) = width {
+            self.widths.push(width);
+        } else {
+            if !matches!(&*call.func, Expr::Path(_)) {
+                self.visit_expr(&call.func);
+            }
+            for arg in &call.args {
+                self.visit_expr(arg);
+            }
+        }
+    }
+    fn visit_expr_method_call(&mut self, call: &syn::ExprMethodCall) {
+        if super::memory::math_op(&call.method.to_string()).is_some()
+            && (matches!(&*call.receiver, Expr::Path(p) if matches!(self.lower.binding(p), Some(Binding::Reg(t, _) | Binding::Word(t)) if t.is_number()))
+                || matches!(&*call.receiver, Expr::Lit(_)))
+        {
+            self.guarded.push(emit!(true));
+        }
+        visit::visit_expr_method_call(self, call);
+    }
+}
+
+struct ReplaceWidths<'a> {
+    paths: std::iter::Copied<std::slice::Iter<'a, bool>>,
+    slot: usize,
+    root: &'a Path,
+}
+impl VisitMut for ReplaceWidths<'_> {
+    fn visit_expr_mut(&mut self, expr: &mut Expr) {
+        if let Expr::Call(call) = expr
+            && self
+                .paths
+                .next()
+                .expect("a call of the original expression")
+        {
+            let Expr::Path(path) = &*call.func else {
+                unreachable!("a width has a type owner")
+            };
+            let owner = super::simd::owner_path(path).expect("a registered width");
+            let slot = self.slot;
+            let root = self.root;
+            self.slot += 1;
+            *expr = syn::parse2(emit!({
+                use #root::__private::ContextWidth as _;
+                (&::core::marker::PhantomData::<#owner>).context_width(
+                    || <usize as #root::frontend::scalar::ImportWord>::decode(__splice_arguments.word(__splice_width_slots[#slot])),
+                    || #call,
+                )
+            })).expect("context width expression");
+        } else {
+            visit_mut::visit_expr_mut(self, expr);
+        }
+    }
 }
 
 struct Captures<'a, 'ast> {

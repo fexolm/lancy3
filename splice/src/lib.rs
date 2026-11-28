@@ -59,14 +59,68 @@
 
 pub use splice_core::{
     Backend, BufferArg, BufferElement, BufferKind, BuildError, BuildOptions, CallArgs, CallError,
-    Codegen, CompileInput, ComptimeKey, Executable, Function, KernelScalar, KernelType, Math, Mode,
+    Codegen, CompileInput, ComptimeKey, Executable, Function, KernelScalar, KernelType, Mode,
     Result, SignatureError, Target, TargetError, Trap, TypedIr, TypedKernel, debug, frontend, hir,
-    intrinsic, kernel, math, simd, target, validate_buffers,
+    target, validate_buffers,
 };
+
+pub use splice_macros::{ComptimeKey, KernelType, kernel};
+
+/// Standard kernel operations.
+pub mod std {
+    pub mod intrinsics;
+}
 
 /// Items that generated code names. Not a stable API.
 #[doc(hidden)]
-pub use splice_core::__private;
+pub mod __private {
+    use crate::{
+        hir::ValueType,
+        std::intrinsics::simd::{Lane, LaneElement, Mask},
+    };
+    use core::marker::PhantomData;
+    pub use splice_core::__private::*;
+
+    /// Resolve a concrete Rust type alias during staging.
+    pub trait SimdType {
+        fn simd_type(self) -> Option<ValueType>;
+    }
+    impl<T: LaneElement> SimdType for &PhantomData<Lane<T>> {
+        fn simd_type(self) -> Option<ValueType> {
+            Some(ValueType::Vector(T::ELEMENT))
+        }
+    }
+    impl<T: LaneElement> SimdType for &PhantomData<Mask<T>> {
+        fn simd_type(self) -> Option<ValueType> {
+            Some(ValueType::Mask(T::ELEMENT))
+        }
+    }
+    impl<T: ?Sized> SimdType for &&PhantomData<T> {
+        fn simd_type(self) -> Option<ValueType> {
+            None
+        }
+    }
+
+    /// Restore a captured width inside a Rust object expression. An unrelated
+    /// associated function keeps its own result type and evaluation order.
+    pub trait ContextWidth<R> {
+        fn context_width(self, from_ir: impl FnOnce() -> usize, ordinary: impl FnOnce() -> R) -> R;
+    }
+    impl<T: LaneElement> ContextWidth<usize> for &PhantomData<Lane<T>> {
+        fn context_width(
+            self,
+            from_ir: impl FnOnce() -> usize,
+            _: impl FnOnce() -> usize,
+        ) -> usize {
+            from_ir()
+        }
+    }
+    impl<T: ?Sized, R> ContextWidth<R> for &&PhantomData<T> {
+        fn context_width(self, _: impl FnOnce() -> usize, ordinary: impl FnOnce() -> R) -> R {
+            ordinary()
+        }
+    }
+}
 
 /// Lancy, Splice's own JIT (feature `lancy`, on by default).
 #[cfg(feature = "lancy")]

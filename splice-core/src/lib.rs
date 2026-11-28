@@ -2,16 +2,12 @@
 //! A portable function can also be materialized for inspection and reuse.
 #![deny(unsafe_code)]
 
-extern crate self as splice;
-
 #[allow(unsafe_code)]
 pub mod call;
 pub use call::Executable;
 pub mod debug;
 pub mod frontend;
 pub mod hir;
-pub mod intrinsic;
-pub mod math;
 #[allow(unsafe_code)]
 mod runtime_context;
 pub mod simd;
@@ -49,10 +45,6 @@ pub use typed::{CallArgs, CompileInput, TypedIr, TypedKernel};
 pub use frontend::ComptimeKey;
 pub use hir::{BufferArg, BufferElement, BufferKind, Function, validate_buffers};
 use hir::{Constant, ScalarType};
-pub use math::Math;
-#[doc(hidden)]
-pub use splice_macros::simd_api as __simd_api;
-pub use splice_macros::{ComptimeKey, KernelType, intrinsic, kernel};
 
 /// Result of staging or compiling a kernel.
 pub type Result<T> = std::result::Result<T, BuildError>;
@@ -132,14 +124,7 @@ impl BuildOptions {
 pub trait Backend: Sized {
     /// The value produced by a successful build.
     type Output;
-    /// Whether this backend implements the intrinsic `id` on `target`, on
-    /// both build paths. A build that calls an intrinsic its backend does
-    /// not implement fails with [`intrinsic::unsupported`].
-    fn supports_intrinsic(id: &intrinsic::IntrinsicId, target: &Target) -> bool;
-    /// Compile a verified portable function that passed the intrinsic
-    /// check: the backend implements its intrinsics, and it holds no
-    /// opaque value ([`hir::ValueType::Opaque`]). Source points are available
-    /// when the function was staged in debug mode.
+    /// Compile a verified portable function with the selected target and mode.
     fn compile_function(function: &Function, options: BuildOptions) -> Result<Self::Output>;
     /// Stage `body` with `options`. The body checks its own operations
     /// (see [`validate::Validating`]), so the backend's builder receives
@@ -151,7 +136,6 @@ pub trait Backend: Sized {
         options: BuildOptions,
     ) -> Result<Self::Output> {
         let function = frontend::record(signature, body, options)?;
-        intrinsic::check::<Self>(&function, &options.target)?;
         Self::compile_function(&function, options)
     }
 }

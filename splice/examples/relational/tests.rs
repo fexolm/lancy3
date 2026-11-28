@@ -218,7 +218,7 @@ fn branching_join_tree_runs_against_changing_tables() {
 
 #[test]
 fn filter_compacts_batches_and_project_reads_both_original_columns() {
-    let width = splice::simd::lanes::<i32>();
+    let width = splice::Target::host().unwrap().vector_bytes() / size_of::<i32>();
     let plan = Plan::Project(
         Box::new(Plan::Filter(
             Box::new(Plan::Scan(0)),
@@ -253,7 +253,7 @@ fn filter_compacts_batches_and_project_reads_both_original_columns() {
 
 #[test]
 fn short_scan_filter_project_batches_fit_shifted_workspaces() {
-    let width = splice::simd::lanes::<i32>();
+    let width = splice::Target::host().unwrap().vector_bytes() / size_of::<i32>();
     let plan = Plan::Project(
         Box::new(Plan::Filter(
             Box::new(Plan::Scan(1)),
@@ -302,7 +302,7 @@ fn short_scan_filter_project_batches_fit_shifted_workspaces() {
 
 #[test]
 fn fused_scan_filter_project_needs_only_two_words_for_one_survivor() {
-    let width = splice::simd::lanes::<i32>();
+    let width = splice::Target::host().unwrap().vector_bytes() / size_of::<i32>();
     let plan = Plan::Project(
         Box::new(Plan::Filter(
             Box::new(Plan::Scan(0)),
@@ -401,7 +401,7 @@ fn fused_join_streams_all_hits_and_stays_successful_as_workspace_grows() {
 
 #[test]
 fn batched_probe_returns_every_build_side_match() {
-    let width = splice::simd::lanes::<i32>();
+    let width = splice::Target::host().unwrap().vector_bytes() / size_of::<i32>();
     let plan = Plan::Join(
         Box::new(Plan::Scan(0)),
         Box::new(Plan::Scan(1)),
@@ -440,7 +440,8 @@ fn probe_verifies_keys_in_singleton_and_colliding_buckets() {
     let b = colliding_key(2);
     let c = colliding_key(3);
     let keys = [0, a, b, c, colliding_key(4), 65536, i32::MIN, 3, 7];
-    let left: Vec<_> = (0..2 * splice::simd::lanes::<i32>() + 3)
+    let left: Vec<_> = (0..2 * (splice::Target::host().unwrap().vector_bytes() / size_of::<i32>())
+        + 3)
         .map(|i| (keys[i % keys.len()], 17 + i as i32))
         .collect();
     // 65536 hashes to slot one. The other salts start from occupied slot zero.
@@ -461,7 +462,7 @@ fn probe_verifies_keys_in_singleton_and_colliding_buckets() {
 
 #[test]
 fn colliding_keys_with_duplicate_values_and_a_late_neighbor_both_match() {
-    let width = splice::simd::lanes::<i32>();
+    let width = splice::Target::host().unwrap().vector_bytes() / size_of::<i32>();
     let plan = Plan::Join(
         Box::new(Plan::Scan(0)),
         Box::new(Plan::Scan(1)),
@@ -489,7 +490,7 @@ fn colliding_keys_with_duplicate_values_and_a_late_neighbor_both_match() {
 
 #[test]
 fn refilled_probe_lanes_preserve_late_hits_and_drain_the_tail() {
-    let width = splice::simd::lanes::<i32>();
+    let width = splice::Target::host().unwrap().vector_bytes() / size_of::<i32>();
     let chain = 4 * width + 5;
     let mut right: Vec<_> = (0..chain)
         .map(|i| (colliding_key(i as i32), 100 + i as i32))
@@ -539,7 +540,7 @@ fn refilled_probe_lanes_preserve_late_hits_and_drain_the_tail() {
 
 #[test]
 fn duplicate_values_span_several_batches_of_many_to_many_matches() {
-    let width = splice::simd::lanes::<i32>();
+    let width = splice::Target::host().unwrap().vector_bytes() / size_of::<i32>();
     let count = 6 * width + 3;
     let other = colliding_key(1);
     // Interleave two colliding keys with unrelated rows and give each
@@ -708,7 +709,10 @@ fn simd_ops(f: &Function) -> Vec<SimdOp> {
     let mut ops = Vec::new();
     for instruction in f.instructions() {
         match instruction {
-            Instr::Simd { inst, .. } => ops.push(inst.op),
+            Instr::CallIntrinsic {
+                intrinsic: splice::hir::Intrinsic::Simd(inst),
+                ..
+            } => ops.push(inst.op),
             Instr::Call { function, .. } => ops.extend(simd_ops(function)),
             _ => {}
         }

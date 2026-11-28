@@ -6,14 +6,12 @@ pub enum ValueType {
     Scalar(ScalarType),
     Vector(Element),
     Mask(Element),
-    /// A value of an `#[intrinsic] struct`: an opaque type that only the
-    /// backends that implement its intrinsics represent.
-    Opaque(crate::intrinsic::OpaqueType),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SimdOp {
-    Lanes,
+    ElementWidth,
+    ByteWidth,
     FirstN,
     Splat(u64),
     SplatScalar,
@@ -40,6 +38,7 @@ pub enum SimdOp {
     GatherSelect(Buffer),
     ScatterSelect(Buffer),
     Add,
+    AddMasked,
     Sub,
     Mul,
     Div,
@@ -206,7 +205,8 @@ impl SimdOp {
         use SimdOp::*;
         use Slot::*;
         let (name, operands, output, elements): (_, &'static [Slot], _, _) = match self {
-            Lanes => ("lanes", &[], Some(Offset), E::Any),
+            ByteWidth => ("byte_width", &[], Some(Offset), E::Any),
+            ElementWidth => ("element_width", &[], Some(Offset), E::Any),
             FirstN => ("first_n", &[Offset], Some(Mask), E::Any),
             Splat(_) => ("splat", &[], Some(Vector), E::Any),
             SplatScalar => ("splat_scalar", &[Lane], Some(Vector), E::I32),
@@ -242,6 +242,12 @@ impl SimdOp {
                 E::Any,
             ),
             ScatterSelect(_) => ("scatter_select", &[Indices, Mask, Vector], None, E::Any),
+            AddMasked => (
+                "add_masked",
+                &[Vector, Mask, Vector, Vector],
+                Some(Vector),
+                E::Any,
+            ),
             Add => ("add", &[Vector, Vector], Some(Vector), E::Any),
             Sub => ("sub", &[Vector, Vector], Some(Vector), E::Any),
             Mul => ("mul", &[Vector, Vector], Some(Vector), E::Any),

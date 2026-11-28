@@ -1,14 +1,7 @@
-//! The kernel intrinsics Cranelift implements: every [`splice_core::Math`]
-//! operation, with Cranelift's own instructions on every target.
+//! Lower integer bit operations to native instructions.
 use cranelift_codegen::ir::{InstBuilder, Value, types::I32};
 use cranelift_frontend::FunctionBuilder;
-use splice_core::intrinsic::IntrinsicId;
-use splice_core::math::MathOp;
-
-/// How Cranelift implements `id`, if it does.
-pub(crate) fn native(id: &IntrinsicId) -> Option<MathOp> {
-    splice_core::math::decode(id).map(|(op, _)| op)
-}
+use splice_core::hir::MathOp;
 
 /// `op` on `args`.
 pub(crate) fn emit(b: &mut FunctionBuilder, op: MathOp, args: &[Value]) -> Value {
@@ -34,7 +27,8 @@ pub(crate) fn emit(b: &mut FunctionBuilder, op: MathOp, args: &[Value]) -> Value
             let c = b.ins().ctz(x);
             count(b, c)
         }
-        // `rotl` takes the count modulo the width, as Rust does.
+        // Cranelift's `rotl` accepts an independent scalar integer count.
+        // It takes that count modulo the value's width, as Rust does.
         MathOp::RotateLeft => b.ins().rotl(x, args[1]),
     }
 }

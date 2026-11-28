@@ -4,7 +4,7 @@
 use splice::frontend::{self, KernelBuilder, Signature};
 use splice::hir::{Buffer, Simd, SimdOp};
 use splice::hir::{Constant, ScalarType};
-use splice::simd::Element;
+use splice::std::intrinsics::simd::Element;
 use splice::{BufferElement, BufferKind, BuildOptions, Codegen, Executable, Mode};
 
 fn options() -> BuildOptions {

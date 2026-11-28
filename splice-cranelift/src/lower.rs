@@ -249,9 +249,9 @@ pub(super) fn emit(
                     b.def_var(d, value);
                 }
             }
-            Instr::Simd {
+            Instr::CallIntrinsic {
                 dst,
-                inst,
+                intrinsic: splice_core::hir::Intrinsic::Simd(inst),
                 ref args,
             } => {
                 simd::emit(&mut b, m, inst, &vars, dst, args, buffers);
@@ -328,12 +328,12 @@ pub(super) fn emit(
                 let value = b.ins().stack_load(scalar_type(result), packet, 0);
                 b.def_var(var(dst), value);
             }
-            Instr::Intrinsic {
+            Instr::CallIntrinsic {
                 dst,
-                ref id,
+                intrinsic: splice_core::hir::Intrinsic::Math { op, .. },
                 ref args,
             } => {
-                let op = crate::intrinsic::native(id).expect("the module checked its intrinsics");
+                let dst = dst.expect("verified math result");
                 let args: Vec<_> = args.iter().map(|&r| b.use_var(var(r))).collect();
                 let value = crate::intrinsic::emit(&mut b, op, &args);
                 b.def_var(var(dst), value);

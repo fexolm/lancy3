@@ -1,8 +1,8 @@
+use splice::{BufferArg, BufferKind, Executable, kernel};
 use splice_core::hir::{Buffer, Instr};
-use splice_core::{BufferArg, BufferKind, Executable, kernel};
 use splice_lancy::Lancy;
 
-#[kernel(crate = splice_core)]
+#[kernel]
 fn append_score(out: &mut [i32], #[comptime] factor: i32, values: &[i32], row: i32) -> i32 {
     let score = values[row as usize]
         .wrapping_mul(factor)
@@ -13,7 +13,7 @@ fn append_score(out: &mut [i32], #[comptime] factor: i32, values: &[i32], row: i
     1
 }
 
-#[kernel(crate = splice_core)]
+#[kernel]
 fn lookup(input: &[i32], row: i32) -> i32 {
     let index = row as usize;
     if !input.is_empty() && index < input.len() {
@@ -36,7 +36,7 @@ fn negative_indices_compare_as_usize_before_loading() {
     }
 }
 
-#[kernel(crate = splice_core)]
+#[kernel]
 fn score_column(values: &[i32], out: &mut [i32], #[comptime] factor: i32) -> i32 {
     let mut count = 0;
     for row in 0..values.len() {
@@ -98,7 +98,7 @@ fn entry_points_check_buffer_signatures_before_executing() {
     assert_eq!(out, [24]);
 }
 
-#[kernel(crate = splice_core)]
+#[kernel]
 fn assign_in_order(buffer: &mut [i32], value: i32) -> i32 {
     buffer[{
         buffer[1] = buffer[0];
@@ -132,7 +132,7 @@ fn indexed_assignments_evaluate_rhs_before_place() {
     assert_eq!(out, expected);
 }
 
-#[kernel(crate = splice_core)]
+#[kernel]
 fn read_at(#[comptime] index: usize, input: &[i32]) -> i32 {
     input[index]
 }
@@ -146,7 +146,7 @@ fn host_indices_outside_register_width_stay_out_of_bounds() {
     assert!(f.call(read_at::CallArgs { input: &[12] }).is_err());
 }
 
-#[kernel(crate = splice_core)]
+#[kernel]
 fn divide(mode: i32, mut value: i32, divisor: i32) -> i32 {
     match mode {
         0 => value / divisor,
@@ -201,12 +201,12 @@ fn division_errors_follow_runtime_control_flow() {
     );
 }
 
-#[kernel(crate = splice_core)]
+#[kernel]
 fn scale(#[comptime] multiplier: i32, row: i32) -> i32 {
     multiplier.wrapping_mul(row)
 }
 
-#[kernel(crate = splice_core)]
+#[kernel]
 fn staged_divide(#[comptime] a: i32, #[comptime] n: i32, row: i32) -> i32 {
     if row == 0 {
         0
@@ -218,7 +218,7 @@ fn staged_divide(#[comptime] a: i32, #[comptime] n: i32, row: i32) -> i32 {
     }
 }
 
-#[kernel(crate = splice_core)]
+#[kernel]
 fn staged_usize(#[comptime] offset: usize, input: &[i32], row: i32) -> i32 {
     if row == 0 { 0 } else { input[offset / 2] }
 }

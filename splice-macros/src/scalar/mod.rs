@@ -4,7 +4,7 @@
 pub(crate) mod abi;
 pub(crate) mod lower;
 pub(crate) mod methods;
-pub(crate) use lower::simd::{constructor_arity, simd_api_tokens};
+pub(crate) use lower::simd::simd_path;
 use lower::{Binding, BufferType, Lower, Scalar};
 pub(crate) use lower::{Elem, uses_stage_requirements};
 use proc_macro2::{Ident, TokenStream};
@@ -38,7 +38,12 @@ pub(crate) fn configuration(meta: &Meta) -> Result<Option<TokenStream>> {
 
 /// `print` (`#[kernel(print)]`) also publishes `print`, which renders the
 /// specialized kernel as Rust; without it the kernel prints as a call.
-pub(super) fn expand(root: Path, native: &mut ItemFn, print: bool) -> Result<TokenStream> {
+pub(super) fn expand(
+    root: Path,
+    native: &mut ItemFn,
+    print: bool,
+    local_types: &[Ident],
+) -> Result<TokenStream> {
     let mut generated_sig = native.sig.clone();
     crate::declaration::rebase_signature(&mut generated_sig);
     let sig = &generated_sig;
@@ -70,15 +75,6 @@ pub(super) fn expand(root: Path, native: &mut ItemFn, print: bool) -> Result<Tok
                 )
             })?
     };
-    if matches!(
-        result_type,
-        Scalar::Vector(Elem::Param(_)) | Scalar::Mask(Elem::Param(_))
-    ) {
-        return Err(Error::new_spanned(
-            ty,
-            "a kernel cannot return vectors or masks with generic elements",
-        ));
-    }
     let name = &sig.ident;
     let generic = &sig.generics;
     let where_ = &generic.where_clause;
@@ -126,6 +122,10 @@ pub(super) fn expand(root: Path, native: &mut ItemFn, print: bool) -> Result<Tok
     let mut pattern_decls = Vec::new();
     let mut mutable_host = Vec::new();
     let mut context = None;
+    let mut vector_types = Vec::new();
+    if let ReturnType::Type(_, original) = &native.sig.output {
+        vector_types.extend(result_type.vector_witness(original, &root, &types));
+    }
     for ((arg, original), parameter) in sig.inputs.iter().zip(&native.sig.inputs).zip(&parameters) {
         let abi::Parameter {
             name: id,
@@ -138,6 +138,9 @@ pub(super) fn expand(root: Path, native: &mut ItemFn, print: bool) -> Result<Tok
             unreachable!()
         };
         let original_ty = &original.ty;
+        if let Binding::Reg(kind, _) = formal {
+            vector_types.extend(kind.vector_witness(original_ty, &root, &types));
+        }
         if matches!(formal, Binding::Host(_)) {
             match pattern {
                 Pat::Ident(pat) if pat.by_ref.is_none() && pat.subpat.is_none() => {
@@ -316,6 +319,8 @@ pub(super) fn expand(root: Path, native: &mut ItemFn, print: bool) -> Result<Tok
         source_fault: None,
         evaluation: None,
         context: context.as_ref(),
+        imports: Vec::new(),
+        local_types,
     };
     let (evaluator, evaluable) = lower.evaluator(&native.sig, &lowered_block, module_vis, None)?;
     let code = lower.kernel_body(&lowered_block)?;
@@ -378,7 +383,7 @@ pub(super) fn expand(root: Path, native: &mut ItemFn, print: bool) -> Result<Tok
             #vis fn print #generic (#host_decls) -> #root::Result<::std::string::String> #where_ {
                 let mut source = <#source_support::Source as ::core::default::Default>::default();
                 __SpliceDefinition::__splice_print #fish (#(#host_names,)* &mut source)?;
-                ::core::result::Result::Ok(::std::format!("#[allow(unused_imports)]\nuse {}::simd::{{Lane, Mask}};\n\n{}", ::core::stringify!(#root), source.functions.join("\n")))
+                ::core::result::Result::Ok(source.functions.join("\n"))
             }
             #nested_source
         };
@@ -486,6 +491,7 @@ pub(super) fn expand(root: Path, native: &mut ItemFn, print: bool) -> Result<Tok
         }
     });
     let result_value_type = result_type.value_type(&root, &types);
+    let scalar_result = result_type.is_scalar();
     let source = emit! {
         __splice_builder.set_source(&#root::frontend::KernelSource {
             name: ::core::stringify!(#name),
@@ -651,7 +657,7 @@ pub(super) fn expand(root: Path, native: &mut ItemFn, print: bool) -> Result<Tok
             #[doc(hidden)]
             const __SPLICE_NEEDS_STAGES: bool = #needs_stages;
             #[doc(hidden)] #vis use #fold_macro as __splice_fold;
-            #vis const __SPLICE_RETURN: #hir::ValueType = #result_value_type;
+            #vis const __SPLICE_RETURNS_SCALAR: bool = #scalar_result;
             #[doc(hidden)]
             #vis use #root::__private::__splice_choose_kernel as __splice_dispatch;
             #context_sign
@@ -668,6 +674,7 @@ pub(super) fn expand(root: Path, native: &mut ItemFn, print: bool) -> Result<Tok
             #[allow(unreachable_code, unused_variables, clippy::too_many_arguments)]
             fn __splice_inline #outer_generic (#(#outer_call_decls,)* #context_decls __splice_builder:&mut #factory)
                 -> #root::Result<#hir::Reg> #outer_where {
+                #(#vector_types)*
                 let __splice_guard = #support::enter_expansion()?;
                 #overflow
                 let __splice_wants_debug = __splice_builder.debug_enabled();
@@ -912,7 +919,7 @@ mod tests {
         let mut f = parse_quote! {
             fn edit(column: &[i32]) -> i32 { column[0] = 1; 0 }
         };
-        let error = expand(parse_quote!(::splice), &mut f, false).unwrap_err();
+        let error = expand(parse_quote!(::splice), &mut f, false, &[]).unwrap_err();
         assert!(
             error
                 .to_string()
@@ -927,9 +934,10 @@ mod tests {
             #[cfg_attr(all(), inline, cfg(target_arch = "x86_64"))]
             fn sum(x: i32, y: i32) -> i32 { x + y }
         };
-        let items = syn::parse2::<syn::File>(expand(parse_quote!(::splice), &mut f, true).unwrap())
-            .unwrap()
-            .items;
+        let items =
+            syn::parse2::<syn::File>(expand(parse_quote!(::splice), &mut f, true, &[]).unwrap())
+                .unwrap()
+                .items;
         assert_eq!(items.len(), 3);
         for item in items {
             let attrs = match item {

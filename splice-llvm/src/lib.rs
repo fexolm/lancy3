@@ -115,13 +115,6 @@ pub struct LlvmKernel {
 impl Backend for Llvm {
     type Output = LlvmKernel;
 
-    fn supports_intrinsic(
-        id: &splice_core::intrinsic::IntrinsicId,
-        _target: &splice_core::Target,
-    ) -> bool {
-        lower::native_intrinsic(id).is_some()
-    }
-
     fn compile_function(
         function: &Function,
         options: BuildOptions,
@@ -140,13 +133,6 @@ impl Backend for Llvm {
 
 impl Backend for LlvmManualSimd {
     type Output = LlvmKernel;
-
-    fn supports_intrinsic(
-        id: &splice_core::intrinsic::IntrinsicId,
-        _target: &splice_core::Target,
-    ) -> bool {
-        lower::native_intrinsic(id).is_some()
-    }
 
     fn compile_function(
         function: &Function,
@@ -239,7 +225,7 @@ mod tests {
     fn options() -> BuildOptions {
         BuildOptions::host(splice_core::Mode::Release).unwrap()
     }
-    use splice_core::kernel;
+    use splice::kernel;
 
     #[test]
     fn both_lowering_paths_offer_the_entire_kernel_to_o3() {
@@ -711,7 +697,7 @@ mod tests {
         }
     }
 
-    #[kernel(crate = splice_core)]
+    #[kernel]
     fn update(#[comptime] amount: i32, data: &mut [i32]) -> i32 {
         data[0] += amount;
         data[0]

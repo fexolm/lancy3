@@ -54,14 +54,7 @@ impl Jit {
         options.target.check_execution()?;
         options.target.check_native_convention()?;
         let debug = options.debug();
-        let machine = crate::target::Machine {
-            backend: if auto_vectorize {
-                "Llvm"
-            } else {
-                "LlvmManualSimd"
-            },
-            ..crate::target::Machine::new(&options.target)
-        };
+        let machine = crate::target::Machine::new(&options.target);
         let target = tracing::debug_span!(target: "splice_core::compile", "llvm_target")
             .in_scope(|| crate::target::machine(&options.target, debug))?;
         let context = Context::create();

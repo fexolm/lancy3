@@ -176,7 +176,7 @@ fn invalid_arguments_are_rejected_before_staging_or_reusing_a_callee()
 -> Result<(), Box<dyn std::error::Error>> {
     use splice::frontend::{KernelBuilder, Specialization};
     use splice::hir::{Buffer, Reg, ValueType};
-    use splice::simd::Element;
+    use splice::std::intrinsics::simd::Element;
     use splice::{BufferArg, BufferKind};
 
     fn stage(root: &mut dyn KernelBuilder) -> splice::Result<()> {

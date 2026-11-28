@@ -57,8 +57,8 @@ pub trait PlainTrait {
 }
 
 #[kernel]
-pub trait Lanes {
-    fn sum(x: splice::simd::Lane<i32>) -> i32;
+pub trait UnsupportedArgument {
+    fn sum(x: &mut State) -> i32;
 }
 
 pub struct Marked;
@@ -125,6 +125,13 @@ fn many_conditions(
     #[cfg(test)] e: i32,
 ) -> i32 {
     0
+}
+
+#[kernel]
+mod module_with_rust_helper {
+    async fn helper() -> String {
+        String::new()
+    }
 }
 
 fn main() {}

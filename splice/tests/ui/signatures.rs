@@ -1,6 +1,6 @@
 // Every signature diagnostic of #[kernel] points at the offending item.
 use splice::kernel;
-use splice::simd::{Element, Lane};
+use splice::std::intrinsics::simd::Lane;
 use splice::BufferArg;
 
 #[kernel]
@@ -12,8 +12,8 @@ fn wide_result() -> i128 {
 }
 
 #[kernel]
-fn generic_vector<T: Element>() -> Lane<T> {
-    Lane::splat(T::default())
+fn unsupported_vector() -> Lane<u8> {
+    Lane::splat(0)
 }
 
 #[kernel]

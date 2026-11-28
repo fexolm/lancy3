@@ -1,4 +1,4 @@
-use splice::simd::Lane;
+use splice::std::intrinsics::simd::Lane;
 use splice::{BuildError, Codegen, Executable, kernel};
 use std::cell::Cell;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -335,7 +335,7 @@ fn guarded_division(#[comptime] divisor: i32, flag: i32, output: &mut [i32]) -> 
 
 #[kernel]
 fn require_lane_count() -> i32 {
-    comptime!(Lane::<i32>::lanes() as i32)
+    comptime!(Lane::<i32>::element_width() as i32)
 }
 
 #[kernel]
@@ -1286,7 +1286,7 @@ fn integer_methods_are_core_operations_on_every_integer_type() {
     }
     assert!(
         !splice_testkit::instructions(&ir)
-            .any(|op| matches!(op, Instr::RustCall { .. } | Instr::Intrinsic { .. }))
+            .any(|op| matches!(op, Instr::RustCall { .. } | Instr::CallIntrinsic { .. }))
     );
     fn check<B: Codegen<Output: Executable>>() {
         let direct = integer_methods::build::<B>(integer_methods::BuildArgs {}).unwrap();

@@ -1,44 +1,16 @@
-#[splice::intrinsic]
-pub trait Bits {
-    fn ones(self) -> u32 {
-        0
-    }
+use splice::kernel;
+
+#[allow(non_camel_case_types)]
+type block = splice::std::intrinsics::Lane<i32>;
+struct Hook;
+impl Hook {
+    fn record(&mut self, x: usize) -> usize { x }
 }
 
-#[splice::intrinsic]
-pub trait Shapes {
-    fn generic<T>(self) -> u32;
-    fn no_receiver() -> u32;
-    fn mutable(&mut self) -> u32;
-    fn no_result(self);
-}
+#[kernel]
+fn ambiguous_width(h: &mut Hook) -> usize { h.record(block::byte_width()) }
 
-#[splice::intrinsic]
-pub trait Plain {
-    fn plain(self) -> u32;
-}
-
-#[splice::intrinsic]
-impl Plain for u32 {
-    fn plain(self) -> u32 {
-        self
-    }
-}
-
-#[splice::intrinsic]
-impl<T> Plain for Vec<T> {
-    fn plain(self) -> u32;
-}
-
-#[splice::intrinsic]
-pub struct Fields {
-    value: i32,
-}
-
-#[splice::intrinsic]
-pub struct Bounded<T: Copy>;
-
-#[splice::intrinsic]
-pub fn free(x: i32) -> i32;
+#[kernel]
+fn ambiguous_vector(h: &mut Hook) -> usize { h.record(block::splat(3).last() as usize) }
 
 fn main() {}

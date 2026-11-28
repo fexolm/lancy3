@@ -1,5 +1,5 @@
 //! MurmurHash3 x86_32 over eight INT32 columns, with one key per SIMD lane.
-use splice::{kernel, simd::Lane};
+use splice::{kernel, std::intrinsics::simd::Lane};
 
 pub(crate) const COLUMNS: usize = 8;
 const COLUMN_IDS: [i32; COLUMNS] = [0, 1, 2, 3, 4, 5, 6, 7];
@@ -64,7 +64,7 @@ pub(crate) fn hash_keys(seed: i32, keys: &[i32], out: &mut [i32]) -> i32 {
     if words % COLUMNS as i32 != 0 || rows > out.len() as i32 {
         return -1;
     }
-    let width = Lane::<i32>::lanes() as i32;
+    let width = Lane::<i32>::element_width() as i32;
     let mut row = 0;
     while rows - row >= width {
         packet(true, width, rows, row, seed, keys, out);

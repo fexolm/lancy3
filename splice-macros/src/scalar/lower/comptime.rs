@@ -445,6 +445,24 @@ impl Lower<'_> {
                 let Expr::Path(path) = c.func.as_ref() else {
                     unreachable!()
                 };
+                // A target-dependent operation can only be staged. In a mandatory
+                // comptime expression, preserve Rust's result type in the error arm.
+                if super::simd::simd_path(path) {
+                    return Ok(if self.optional() {
+                        self.unevaluable()
+                    } else {
+                        opaque()
+                    });
+                }
+                if super::memory::math_op(&path.path.segments.last().unwrap().ident.to_string())
+                    .is_some()
+                    && super::memory::integer_owner(path).is_some()
+                {
+                    let args = c.args.iter().map(visit).collect::<Result<Vec<_>>>()?;
+                    return Ok(emit!(if false { #path(#(#args),*) } else {
+                        return ::core::result::Result::Err(#support::BuildError::staging("intrinsic requires kernel staging"))
+                    }));
+                }
                 let trait_owner = crate::scalar::methods::trait_path(path);
                 let evaluator = if trait_owner.is_some() {
                     "eval_method"

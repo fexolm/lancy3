@@ -70,6 +70,7 @@ pub(super) fn definition(
         #helpers
         #(#[#gates])* #[doc(hidden)] #export
         macro_rules! #symbol {
+            (@intrinsic $kind:ident, $builtin:expr, $ordinary:expr) => { $ordinary };
             #arms
             (@implementation $body:expr) => {{ #impl_scope $body }};
             ($published:expr, $ordinary:expr) => { $published };

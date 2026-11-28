@@ -11,7 +11,7 @@ splice-kernel = "0.1"
 
 В коде используйте `splice::kernel` и `splice::lancy::Lancy`. Каждый бэкенд — модуль фасада: `splice::lancy`, `splice::cranelift` (feature `cranelift`) и `splice::llvm` (feature `llvm`, там же `LlvmManualSimd` и `to_llvm_ir`). Для других бэкендов включите features `cranelift` или `llvm`, например `splice-kernel = { version = "0.1", features = ["cranelift"] }`. Чтобы отключить Lancy, укажите `default-features = false`. LLVM требует установленную версию, указанную ниже. Для самостоятельного использования Lancy добавьте `lancy = "0.1"`.
 
-Пакеты публикуются вместе: `cargo publish --workspace` сам упорядочивает их по зависимостям (`splice-target`, `splice-macros`, `lancy`, `splice-core`, `splice-jit`, бэкенды, затем `splice-kernel`); `cargo xtask package` проверяет это без публикации.
+Пакеты публикуются вместе: `cargo publish --workspace` сам упорядочивает их по зависимостям (`splice-target`, `lancy`, `splice-core`, `splice-macros`, `splice-jit`, бэкенды, затем `splice-kernel`); `cargo xtask package` проверяет это без публикации.
 
 Проект распространяется по выбору пользователя на условиях MIT или Apache-2.0.
 
@@ -51,13 +51,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 При вложенном вызове Rust получает срезы в порядке аргументов. Повторная передача общего среза и повторное заимствование `&mut [T]` сохраняют обычные правила Rust. Если вызов завершился паникой, выполненные перед ней записи видны через исходный буфер.
 
-`#[kernel]` ставится на свободную функцию или целиком на `impl` или `trait`. Тело, которое Splice не может понизить в IR, — ошибка компиляции: Rust-ядер нет, а обычные Rust-функции и методы ядро вызывает как Rust-вызовы. Rust-методы типа пишут в обычном `impl` рядом с `#[kernel] impl`. Для специализации вызова через трейт размечают оба блока, `trait` и `impl Trait for T`. Вызов `<T as Trait>::f(&plan)` может специализироваться, пока живы заимствования внутри `T`. Обычный вызов `plan.f()` выполняет Rust-метод при запуске ядра.
+`#[kernel]` ставится на свободную функцию, блок `impl`, трейт или встроенный модуль `mod name { … }`. Атрибут на модуле охватывает все его функции, блоки `impl` и `trait`, а также вложенные встроенные модули. Обычные Rust-хелперы пишутся вне такого модуля. В модуле один `use splice::std::intrinsics::*;` открывает `Lane<T>` и `Mask<T>` для сигнатур и тел всех его ядер. Тело, которое Splice не может понизить в IR, — ошибка компиляции: Rust-ядер нет, а обычные Rust-функции и методы ядро вызывает как Rust-вызовы. Rust-методы типа пишут в обычном `impl` рядом с `#[kernel] impl`. Для специализации вызова через трейт размечают оба блока, `trait` и `impl Trait for T`. Вызов `<T as Trait>::f(&plan)` может специализироваться, пока живы заимствования внутри `T`. Обычный вызов `plan.f()` выполняет Rust-метод при запуске ядра.
 
 | Крейт | Ответственность |
 | --- | --- |
-| [splice-core](splice-core/src/lib.rs) | Общий фронтенд, построение и проверка переносимого IR, трейты `Codegen` и `Executable`. |
+| [splice-kernel](splice/src/lib.rs) | Пользовательский крейт `splice`. Экспортирует макрос, билдеры и интринсики, подключает бэкенды через Cargo features. |
+| [splice-core](splice-core/src/lib.rs) | Интерфейс между макросами и бэкендами, построение и проверка переносимого IR, трейты `Codegen` и `Executable`. |
 | [splice-target](splice-target/src/lib.rs) | Определяет доступные на хосте расширения x64 и общую для Splice и Lancy ширину вектора. |
-| [splice-macros](splice-macros/src/lib.rs) | Макрос `#[kernel]` разбирает Rust-синтаксис и генерирует обращения к фронтенду. |
+| [splice-macros](splice-macros/src/lib.rs) | Макрос `#[kernel]` разбирает Rust-синтаксис и переводит встроенные операции в типизированные вызовы IR. |
 | [splice-lancy](splice-lancy/src/lib.rs) | Переводит поток операций Splice или готовую переносимую функцию в SSA HIR и вызывает JIT Lancy. |
 | [splice-cranelift](splice-cranelift/src/lib.rs) | Собирает CLIF всех функций кернела в одном модуле. Инлайнер Cranelift может встроить каждое тело один раз и расходует на дополнительные копии бюджет, равный исходному числу инструкций модуля. JIT компилирует точку входа и оставшиеся вызываемые функции с `opt_level=speed`. |
 | [splice-llvm](splice-llvm/src/lib.rs) | Помещает точку входа и все внутренние функции кернела в один LLVM-модуль через Inkwell. Запускает `default<O3>` для всего модуля и устанавливает машинный код через ORC LLJIT. `to_llvm_ir(&ir)` печатает модуль до оптимизации. |
@@ -70,7 +71,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 Вход `#[columns(layout)] columns: &[BufferArg<'_>]` описывает набор колонок, который меняется между вызовами. Выражение `layout` вычисляется при `build` или `ir` и задаёт порядок и типы колонок через `BufferKind`. `columns[slot].as_slice::<T>()` получает `&[T]` для известного при сборке номера колонки. Поддерживаются `u16`, `u32`, `i32`, `i64`, `f32` и `f64`. Splice проверяет номер и тип в раскладке при сборке, а `Executable::call` проверяет переданные буферы перед входом в JIT.
 
 ```rust
-# use splice::{BufferArg, BufferKind, kernel, lancy::Lancy, simd::Element};
+# use splice::{BufferArg, BufferKind, kernel, lancy::Lancy, std::intrinsics::simd::Element};
 # #[derive(splice::KernelType)]
 # struct Schema { layout: [BufferKind; 1], elements: [Element; 1] }
 # enum Expr { Ge { col: usize, val: i32 } }
@@ -146,7 +147,7 @@ cargo test -p splice-kernel --release --example sql_plan --test simd
 
 ## SIMD в ядрах
 
-`Lane<T>` представляет один вектор ядра. Ядро использует ширину цели из `BuildOptions`; хостовый код узнаёт ширину цели по умолчанию (`SPLICE_SIMD`) через `splice::simd::lanes::<T>()`. `Lane<T>` и `Mask<T>` — интринсик-типы: их операции объявлены без тел и вне ядра не исполняются (паникуют). `Lane::<T>::lanes()` в ядре возвращает число **элементов**. Например, для 32 байт это восемь `f32` или четыре `f64`, для 64 байт — шестнадцать или восемь. В переносимом IR размер вектора определяется типом элемента при компиляции бэкендом.
+`Lane<T>` представляет один вектор ядра. Операции `Lane::<T>::element_width()` и `Lane::<T>::byte_width()` дают число элементов и байтов в векторе на цели компиляции. Например, для 32 байтов это восемь `f32` или четыре `f64`. Полное имя типа — `splice::std::intrinsics::Lane<T>`. Короткие имена `Lane` и `Mask` вводятся обычным импортом Rust. Их методы входят в закрытый набор встроенных операций Splice.
 
 ```rust
 use splice::{kernel, Executable};
@@ -154,14 +155,14 @@ use splice::lancy::Lancy;
 
 #[kernel]
 fn add_block(a: &[u16], b: &[u16], dst: &mut [u16]) -> i32 {
-    use splice::simd::Lane;
+    use splice::std::intrinsics::simd::Lane;
     let x = Lane::load(a, 0);
     let y = Lane::load(b, 0);
     (x + y).store(dst, 0);
-    Lane::<u16>::lanes() as i32
+    Lane::<u16>::element_width() as i32
 }
 
-let n = splice::simd::lanes::<u16>();
+let n = splice::Target::host()?.vector_bytes() / size_of::<u16>();
 let (a, b, mut dst) = (vec![u16::MAX; n], vec![1u16; n], vec![9u16; n]);
 let jit = add_block::build::<Lancy>(add_block::BuildArgs {})?;
 let count = jit.call(add_block::CallArgs { a: &a, b: &b, dst: &mut dst })?;
@@ -173,7 +174,7 @@ assert_eq!(dst, vec![0u16; n]);
 - Элементы векторов и срезов поддерживают `u16`, `u32`, `i32`, `i64`, `f32` и `f64`. `+`, `-` и `*` для целых выполняются по модулю разрядности. Целые поддерживают побитовые операции, вещественные — деление, `sqrt` и `mul_add` с одним округлением. `splat` заполняет полосы одним значением, включая runtime-параметр `i32`. `iota()` нумерует их с нуля.
 - `cast::<T>()` преобразует полосы одинаковой ширины по правилам Rust. `widen_low::<T>()` и `widen_high::<T>()` расширяют половину входного вектора. `narrow::<T>(high)` сужает и объединяет два вектора в порядке от младших полос к старшим. `reduce_sum()` сворачивает полосы `i32` с переполнением по модулю 2³².
 - Поэлементные сравнения `simd_eq/ne/lt/le/gt/ge` дают `Mask<T>`. Маску, полученную сравнением целочисленных индексов, можно применять к вещественным данным той же разрядности. Маски поддерживают `&`, `|`, `^`, `!`, `any()`, `all()` и `select(yes, no)`. Для `a.add_masked(mask, b, fallback)` каждая выключенная полоса берётся из соответствующей позиции `fallback`.
-- Маска `Lane::<T>::first_n(remaining)` включает первые `min(remaining, Lane::<T>::lanes())` полос. Для хвоста используйте `Lane::load_select(src, offset, mask, fallback)` и `value.store_select(dst, offset, mask)`. Смещения и индексы измеряются в элементах. `Lane::gather(src, indices)` и `value.scatter(dst, indices)` принимают столько индексов, сколько полос в данных. Для `u16` это `Lane<u16>`, для `i32/f32` — `Lane<i32>`, для `i64/f64` — `Lane<i64>`. Маскированные формы — `Lane::gather_select(src, mask, indices, fallback)` и `value.scatter_select(dst, mask, indices)`.
+- Маска `Lane::<T>::first_n(remaining)` включает первые `min(remaining, Lane::<T>::element_width())` полос. Для хвоста используйте `Lane::load_select(src, offset, mask, fallback)` и `value.store_select(dst, offset, mask)`. Смещения и индексы измеряются в элементах. `Lane::gather(src, indices)` и `value.scatter(dst, indices)` принимают столько индексов, сколько полос в данных. Для `u16` это `Lane<u16>`, для `i32/f32` — `Lane<i32>`, для `i64/f64` — `Lane<i64>`. Маскированные формы — `Lane::gather_select(src, mask, indices, fallback)` и `value.scatter_select(dst, mask, indices)`.
 - Выключенная полоса не обращается к памяти. Записи идут по возрастанию номера полосы. При повторении индекса остаётся последняя выполненная запись. Первый активный индекс за границей завершает Rust-вызов паникой, JIT-вызов возвращает ошибку. Оба сохраняют все записи до этой полосы, в том числе при неполном последовательном `store`.
 
 Для `Lane<i32>` доступны `compress(mask)` с нулевым хвостом и `compress_store(dst, offset, mask)` с записью ровно `mask.count()` элементов в порядке исходных полос. `prefix_sum()` вычисляет включительную префиксную сумму с переполнением по модулю 2³². `expand(mask, fallback)` заполняет выбранные позиции последовательными элементами из начала вектора. Остальные позиции сохраняют значения из `fallback`. `extract_wrapping` и `replace_wrapping` читают и заменяют полосу по индексу, взятому по модулю числа полос. `last()` извлекает последнюю полосу, `swizzle(indices)` возвращает ноль для индексов за пределами вектора. `interleave_low/high` и `deinterleave_even/odd` переводят пары колонок в чередующийся формат и обратно. `>>` с известным при специализации числом бит выполняет арифметический сдвиг вправо. Методы `simd_min` и `simd_max` сравнивают полосы как знаковые `i32`. `rotate_left(count)` циклически сдвигает биты каждой полосы на известное при специализации число по модулю 32. `Lane::<i32>::alignment_prefix(slice, offset)` возвращает число элементов до ближайшего выровненного адреса, включая ноль для уже выровненного входа.

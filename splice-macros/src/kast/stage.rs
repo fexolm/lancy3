@@ -257,7 +257,8 @@ impl Pass<'_, '_> {
             }
             Expr::Call(call) => {
                 let operands = self.operands(&call.args, control);
-                let constructor = matches!(&*call.func, Expr::Path(p) if crate::scalar::constructor_arity(&p.path).is_some());
+                let constructor =
+                    matches!(&*call.func, Expr::Path(p) if crate::scalar::simd_path(p));
                 operands.max(if constructor {
                     Level::Runtime
                 } else if self.host {

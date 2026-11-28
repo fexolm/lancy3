@@ -15,10 +15,6 @@ struct Inspect(Function);
 impl Backend for Inspect {
     type Output = Self;
 
-    fn supports_intrinsic(_: &splice::intrinsic::IntrinsicId, _: &splice::Target) -> bool {
-        false
-    }
-
     fn compile_function(f: &Function, _: splice::BuildOptions) -> splice::Result<Self> {
         Ok(Self(f.clone()))
     }
@@ -150,10 +146,6 @@ fn slice_parameters_expose_their_alias_contract() {
     struct InspectKinds;
     impl Backend for InspectKinds {
         type Output = Vec<BufferKind>;
-        fn supports_intrinsic(_: &splice::intrinsic::IntrinsicId, _: &splice::Target) -> bool {
-            false
-        }
-
         fn compile_function(_: &Function, _: splice::BuildOptions) -> splice::Result<Self::Output> {
             panic!("expected direct staging")
         }
@@ -429,9 +421,6 @@ mod directly_staged {
     }
     impl Backend for Trace {
         type Output = Self;
-        fn supports_intrinsic(_: &splice::intrinsic::IntrinsicId, _: &splice::Target) -> bool {
-            false
-        }
         fn compile_function(_: &Function, _: splice::BuildOptions) -> splice::Result<Self> {
             panic!("direct build materialized portable IR")
         }
@@ -729,7 +718,7 @@ fn slice_length(xs: &[i32]) -> i32 {
 
 #[kernel]
 fn first_lane(xs: &[i32]) -> i32 {
-    splice::simd::Lane::<i32>::load(xs, 0).extract_wrapping(0)
+    splice::std::intrinsics::simd::Lane::<i32>::load(xs, 0).extract_wrapping(0)
 }
 
 #[kernel]

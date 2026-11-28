@@ -16,7 +16,7 @@ error: expected a named binding
 24 |     fn tuple_param(#[comptime] (a, b): (i32, i32)) -> i32 {
    |                                ^^^^^^
 
-error: a Splice method parameter is #[comptime], a kernel scalar, a slice, or the &mut self receiver
+error: a Splice method parameter is #[comptime], a kernel scalar, vector, mask, slice, or the &mut self receiver
   --> tests/ui/declarations.rs:33:22
    |
 33 |     fn context_param(state: &mut State) -> i32 {
@@ -40,10 +40,10 @@ error: put #[kernel] on the enclosing impl or trait to publish its methods
 56 |     fn get(&self) -> i32;
    |     ^^^^^^^^^^^^^^^^^^^^^
 
-error: a Splice trait method parameter is #[comptime], a kernel scalar or a slice
+error: a Splice trait method parameter is #[comptime], a kernel scalar, vector, mask or slice
   --> tests/ui/declarations.rs:61:12
    |
-61 |     fn sum(x: splice::simd::Lane<i32>) -> i32;
+61 |     fn sum(x: &mut State) -> i32;
    |            ^
 
 error: expected #[comptime] on a method parameter
@@ -70,7 +70,7 @@ error: runtime parameters must be bool, i32, u32, i64, u64, usize, f32, f64 or a
 90 |     fn area(x: char) -> i32;
    |                ^^^^
 
-error: expected a free function, impl or trait
+error: expected a free function, inline module, impl or trait
   --> tests/ui/declarations.rs:94:1
    |
 94 | struct NotAFunction;
@@ -111,3 +111,9 @@ error: a kernel accepts at most 4 #[cfg]/#[cfg_attr] parameter attributes
 125 | |     #[cfg(test)] e: i32,
 126 | | ) -> i32 {
     | |________^
+
+error: expected a safe synchronous kernel with Rust ABI and fixed arity
+   --> tests/ui/declarations.rs:132:5
+    |
+132 |     async fn helper() -> String {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^

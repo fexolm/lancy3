@@ -1,4 +1,4 @@
-error: a Splice method returns () or a kernel scalar; keep a Rust method in an ordinary impl
+error: a Splice method returns (), a kernel scalar, a vector or a mask; keep a Rust method in an ordinary impl
   --> tests/ui/unsupported_methods.rs:11:23
    |
 11 |     fn name(&self) -> String {
@@ -10,7 +10,7 @@ error: runtime parameters must be bool, i32, u32, i64, u64, usize, f32, f64 or a
 15 |     fn wide(x: char) -> i32 {
    |                ^^^^
 
-error: a Splice trait method returns () or a primitive; keep a Rust method in an ordinary trait
+error: a Splice trait method returns (), a primitive, a vector or a mask; keep a Rust method in an ordinary trait
   --> tests/ui/unsupported_methods.rs:23:29
    |
 23 |     fn widen(value: i32) -> Self::Output;

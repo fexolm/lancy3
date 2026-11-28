@@ -6,19 +6,19 @@ use super::{
     declare, emit_entry, permit_buffer_capture,
 };
 use inkwell::{
-    attributes::{Attribute, AttributeLoc},
+    attributes::AttributeLoc,
     builder::Builder,
     context::Context,
     module::{Linkage, Module},
     values::FunctionValue,
 };
-use splice_core::intrinsic::IntrinsicId;
 use splice_core::{
     Function,
     debug::{Location, Point, Slot, Variable},
     frontend::{Body as StagedBody, KernelBuilder, KernelSource, Signature, Specialization},
     hir::{
-        Binary, Buffer, Constant, ContextSlice, Label, Reg, RustTarget, ScalarType, Simd, ValueType,
+        Binary, Buffer, Constant, ContextSlice, Intrinsic, Label, Reg, RustTarget, ScalarType,
+        ValueType,
     },
 };
 
@@ -167,7 +167,10 @@ pub(crate) fn populate<'ctx>(
             #[cfg(target_os = "linux")]
             f.add_attribute(
                 AttributeLoc::Function,
-                ctx.create_enum_attribute(Attribute::get_named_enum_kind_id("uwtable"), 2),
+                ctx.create_enum_attribute(
+                    inkwell::attributes::Attribute::get_named_enum_kind_id("uwtable"),
+                    2,
+                ),
             );
         }
     }
@@ -311,10 +314,21 @@ impl KernelBuilder for Direct<'_, '_> {
             .new_local(&self.allocas, ty)
             .map_err(crate::error)
     }
-    fn simd(&mut self, inst: Simd, args: &[Reg]) -> splice_core::Result<Option<Reg>> {
-        let dst = inst.output().map(|ty| self.local(ty)).transpose()?;
-        self.emit(|ir| ir.simd(dst, inst, args))?;
-        Ok(dst)
+    fn call_intrinsic(
+        &mut self,
+        intrinsic: Intrinsic,
+        args: &[Reg],
+    ) -> splice_core::Result<Option<Reg>> {
+        match intrinsic {
+            Intrinsic::Math { op, ty } => self
+                .result(op.result(ty), |ir, dst| ir.native_intrinsic(dst, op, args))
+                .map(Some),
+            Intrinsic::Simd(inst) => {
+                let dst = inst.output().map(|ty| self.local(ty)).transpose()?;
+                self.emit(|ir| ir.simd(dst, inst, args))?;
+                Ok(dst)
+            }
+        }
     }
     fn constant(&mut self, c: Constant) -> splice_core::Result<Reg> {
         self.result(c.ty(), |ir, d| ir.constant(d, c))
@@ -382,14 +396,7 @@ impl KernelBuilder for Direct<'_, '_> {
         let plan = target.plan(self.kinds, args.len(), slices);
         self.result(result, |ir, dst| ir.rust_call(dst, plan, args))
     }
-    fn intrinsic(&mut self, id: &IntrinsicId, args: &[Reg]) -> splice_core::Result<Reg> {
-        let op = body::native(id)
-            .ok_or_else(|| splice_core::intrinsic::unsupported(self.graph.machine.backend, id))?;
-        let ValueType::Scalar(result) = id.result else {
-            unreachable!("a Math intrinsic returns a scalar")
-        };
-        self.result(result, |ir, dst| ir.native_intrinsic(dst, op, args))
-    }
+
     fn call_kernel(
         &mut self,
         signature: Signature<'_>,

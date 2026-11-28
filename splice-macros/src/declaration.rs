@@ -11,6 +11,15 @@ pub(crate) use selector::{trait_method_dispatch, trait_method_eval_dispatch};
 
 /// `print` (`#[kernel(print)]`) applies to a free function lowered to IR.
 pub(crate) fn expand(root: Path, print: bool, tokens: TokenStream) -> Result<TokenStream> {
+    expand_scoped(root, print, tokens, &[])
+}
+
+fn expand_scoped(
+    root: Path,
+    print: bool,
+    tokens: TokenStream,
+    local_types: &[proc_macro2::Ident],
+) -> Result<TokenStream> {
     let method_error = "put #[kernel] on the enclosing impl or trait to publish its methods";
     let item = match syn::parse2::<Item>(tokens.clone()) {
         Ok(Item::Verbatim(_)) | Err(_)
@@ -23,10 +32,63 @@ pub(crate) fn expand(root: Path, print: bool, tokens: TokenStream) -> Result<Tok
     if let Some(variants) = configured_parameters(&item)? {
         return variants
             .into_iter()
-            .map(|variant| expand(root.clone(), print, variant.into_token_stream()))
+            .map(|variant| {
+                expand_scoped(
+                    root.clone(),
+                    print,
+                    variant.into_token_stream(),
+                    local_types,
+                )
+            })
             .collect();
     }
     match item {
+        Item::Mod(mut module) => {
+            item_markers(&module.attrs)?;
+            let Some((_, items)) = &mut module.content else {
+                return Err(Error::new_spanned(
+                    module,
+                    "#[kernel] requires an inline module",
+                ));
+            };
+            let local_types: Vec<_> = items
+                .iter()
+                .filter_map(|item| match item {
+                    Item::Struct(x) if configuration(&x.attrs).ok()?.is_empty() => Some(&x.ident),
+                    Item::Enum(x) if configuration(&x.attrs).ok()?.is_empty() => Some(&x.ident),
+                    Item::Union(x) if configuration(&x.attrs).ok()?.is_empty() => Some(&x.ident),
+                    _ => None,
+                })
+                .cloned()
+                .collect();
+            for item in items {
+                let (attrs, inherit_print) = match item {
+                    Item::Fn(f) => (&f.attrs, print),
+                    Item::Impl(i) => (&i.attrs, false),
+                    Item::Trait(t) => (&t.attrs, false),
+                    Item::Mod(m) if m.content.is_some() => (&m.attrs, print),
+                    _ => continue,
+                };
+                if attrs.iter().any(|a| marker(a, "kernel")) {
+                    continue;
+                }
+                // A disabled item can contain unsupported kernel syntax. Its
+                // configuration gates diagnostics as well as generated items.
+                let gates = configuration(attrs)?;
+                let output = expand_scoped(
+                    root.clone(),
+                    inherit_print,
+                    item.to_token_stream(),
+                    &local_types,
+                )
+                .unwrap_or_else(|error| {
+                    let error = error.into_compile_error();
+                    quote!(#(#[#gates])* const _: () = { #error };)
+                });
+                *item = Item::Verbatim(output);
+            }
+            Ok(module.into_token_stream())
+        }
         Item::Fn(mut function) => {
             if method_context(&function.sig) {
                 return Err(Error::new_spanned(&function.sig, method_error));
@@ -34,7 +96,7 @@ pub(crate) fn expand(root: Path, print: bool, tokens: TokenStream) -> Result<Tok
             hoist_lint_attributes(&mut function.attrs, &mut function.sig);
             signature(&function.sig)?;
             item_markers(&function.attrs)?;
-            crate::scalar::expand(root, &mut function, print)
+            crate::scalar::expand(root, &mut function, print, local_types)
         }
         Item::Impl(_) | Item::Trait(_) if print => Err(Error::new_spanned(
             tokens,
@@ -55,6 +117,7 @@ pub(crate) fn expand(root: Path, print: bool, tokens: TokenStream) -> Result<Tok
                         &method.block,
                         &method.vis,
                         trait_path.is_some(),
+                        local_types,
                     )
                     .unwrap_or_else(|error| {
                         errors.push(error);
@@ -68,8 +131,7 @@ pub(crate) fn expand(root: Path, print: bool, tokens: TokenStream) -> Result<Tok
                         let alias =
                             selector_alias("trait", path.segments.last().unwrap().ident.span());
                         let name = &method.sig.ident;
-                        let kind =
-                            crate::scalar::methods::TraitMethodKind::for_result(&method.sig.output);
+                        let kind = crate::scalar::methods::TraitMethodKind::for_result(&method.sig);
                         let provided = if kind == crate::scalar::methods::TraitMethodKind::EvalOnly
                         {
                             quote!(eval)
@@ -142,7 +204,7 @@ pub(crate) fn expand(root: Path, print: bool, tokens: TokenStream) -> Result<Tok
         }
         other => Err(Error::new_spanned(
             other,
-            "expected a free function, impl or trait",
+            "expected a free function, inline module, impl or trait",
         )),
     }
 }
@@ -287,7 +349,7 @@ fn configuration(attrs: &[Attribute]) -> Result<Vec<TokenStream>> {
         .collect()
 }
 
-fn select_trait(root: &Path, path: &Path, input: TokenStream) -> TokenStream {
+pub(crate) fn select_trait(root: &Path, path: &Path, input: TokenStream) -> TokenStream {
     let mut path = path.clone();
     for part in &mut path.segments {
         part.arguments = syn::PathArguments::None;
@@ -297,7 +359,7 @@ fn select_trait(root: &Path, path: &Path, input: TokenStream) -> TokenStream {
         mod __splice_default_trait {
             pub use #root::__private::__splice_choose_rust as #alias;
         }
-        use __splice_default_trait::*;
+        #[allow(unused_imports)] use __splice_default_trait::*;
         {
             #[allow(unused_imports)]
             use #path as #alias;

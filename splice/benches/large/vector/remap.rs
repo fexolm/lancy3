@@ -1,5 +1,5 @@
 //! Nearest-neighbor geometric remapping of three planar 16-bit color channels.
-use splice::{kernel, simd::Lane};
+use splice::{kernel, std::intrinsics::simd::Lane};
 
 const CHANNELS: [i32; 3] = [0, 1, 2];
 
@@ -14,7 +14,7 @@ pub(crate) fn remap_rgb16(source: &[u16], map: &[u16], out: &mut [u16]) -> i32 {
         return -1;
     }
     let plane = count / channels;
-    let width = Lane::<u16>::lanes() as i32;
+    let width = Lane::<u16>::element_width() as i32;
     let mut x = 0;
     while plane - x >= width {
         for &channel in CHANNELS.iter() {

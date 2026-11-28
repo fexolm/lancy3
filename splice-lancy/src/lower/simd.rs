@@ -28,9 +28,6 @@ pub(super) fn native_type(ty: ValueType) -> Type {
         ValueType::Scalar(ty) => super::scalar_type(ty),
         ValueType::Vector(e) => Type::Vector(lane(e)),
         ValueType::Mask(e) => Type::Vector(lane(e.index())),
-        ValueType::Opaque(_) => {
-            unreachable!("intrinsic::check rejects opaque values before lowering")
-        }
     }
 }
 
@@ -61,8 +58,13 @@ impl Builder<'_> {
             vs[0] = self.index32(vs[0]);
         }
         let op = match inst.op {
-            Lanes => {
-                let lanes = self.value(Op::Simd(V::LaneCount(lane(e))));
+            ElementWidth | ByteWidth => {
+                let unit = if inst.op == ByteWidth {
+                    Lane::U8
+                } else {
+                    lane(e)
+                };
+                let lanes = self.value(Op::Simd(V::LaneCount(unit)));
                 return Ok(Some(self.extend_index(lanes)));
             }
             Iota => Op::Simd(V::Iota(lane(e))),
@@ -197,6 +199,10 @@ impl Builder<'_> {
             Any => Op::Simd(V::AnyTrue(vs[0])),
             All => Op::Simd(V::AllTrue(vs[0])),
             Not | MaskNot => Op::Unary(Unary::Not, vs[0]),
+            AddMasked => {
+                let sum = self.value(Op::Bin(Binary::Add, vs[0], vs[2]));
+                Op::Ternary(Ternary::Select, vs[1], sum, vs[3])
+            }
             Select => Op::Ternary(Ternary::Select, vs[0], vs[1], vs[2]),
             Load(_) | Store(_) | LoadSelect(_) | StoreSelect(_) | Gather(_) | GatherSelect(_)
             | Scatter(_) | ScatterSelect(_) | CompressStore(_) => {

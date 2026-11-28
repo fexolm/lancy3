@@ -56,6 +56,28 @@ fn emitted_graph(f: &Function, unique_bodies: usize) -> HashMap<FuncId, Vec<Func
     graph
 }
 
+#[test]
+fn rotate_left_with_u32_count_verifies_for_64_bit_operands() {
+    use splice_core::hir::{Intrinsic, MathOp};
+    for ty in [ScalarType::I64, ScalarType::U64] {
+        let mut builder =
+            FunctionBuilder::new(options(), Signature::new(&[ty, ScalarType::U32], ty, &[]));
+        let args = [builder.arg(0).unwrap(), builder.arg(1).unwrap()];
+        let rotated = builder
+            .call_intrinsic(
+                Intrinsic::Math {
+                    op: MathOp::RotateLeft,
+                    ty,
+                },
+                &args,
+            )
+            .unwrap()
+            .unwrap();
+        builder.ret(rotated).unwrap();
+        emitted_graph(&builder.finish().unwrap(), 1);
+    }
+}
+
 /// Instructions outside cold blocks: the path that does not trap.
 fn instructions_of_type(f: &ir::Function, opcode: Opcode, ty: Type) -> usize {
     f.layout
@@ -346,8 +368,8 @@ fn masked_contiguous_access_selects_packed_and_ordered_paths() {
 
 #[test]
 fn a_full_gather_has_one_bounds_branch_for_all_lanes() {
-    use splice_core::{kernel, simd::Lane};
-    #[kernel(crate = splice_core)]
+    use splice::{kernel, std::intrinsics::simd::Lane};
+    #[kernel]
     fn first_block(data: &[i32]) -> i32 {
         Lane::<i32>::gather(data, Lane::<i32>::iota()).last()
     }

@@ -1,14 +1,7 @@
-//! The kernel intrinsics LLVM implements: every [`splice_core::Math`]
-//! operation, with LLVM's own intrinsics on every target.
+//! Lower integer bit operations to native instructions.
 use super::{Body, Built};
+use splice_core::hir::MathOp;
 use splice_core::hir::Reg;
-use splice_core::intrinsic::IntrinsicId;
-use splice_core::math::MathOp;
-
-/// How LLVM implements `id`, if it does.
-pub(crate) fn native(id: &IntrinsicId) -> Option<MathOp> {
-    splice_core::math::decode(id).map(|(op, _)| op)
-}
 
 impl<'ctx> Body<'_, 'ctx> {
     /// Store `op` on `args` to `dst`.

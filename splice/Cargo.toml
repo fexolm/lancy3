@@ -23,6 +23,7 @@ cranelift = ["dep:splice-cranelift"]
 llvm = ["dep:splice-llvm"]
 
 [dependencies]
+splice-macros.workspace = true
 splice-core.workspace = true
 splice-lancy = { workspace = true, optional = true }
 splice-cranelift = { workspace = true, optional = true }

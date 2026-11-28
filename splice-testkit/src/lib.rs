@@ -50,7 +50,10 @@ pub fn instructions(function: &Function) -> impl Iterator<Item = &Instr> {
 pub fn simd_ops(function: &Function) -> Vec<Simd> {
     instructions(function)
         .filter_map(|instruction| match instruction {
-            Instr::Simd { inst, .. } => Some(*inst),
+            Instr::CallIntrinsic {
+                intrinsic: splice::hir::Intrinsic::Simd(inst),
+                ..
+            } => Some(*inst),
             _ => None,
         })
         .collect()

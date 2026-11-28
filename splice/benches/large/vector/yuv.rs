@@ -1,5 +1,5 @@
 //! Convert packed Y'CbCr 4:4:4 pixels into opaque RGBA8.
-use splice::{kernel, simd::Lane};
+use splice::{kernel, std::intrinsics::simd::Lane};
 
 #[kernel]
 fn clamp_byte(value: Lane<i32>) -> Lane<i32> {
@@ -34,7 +34,7 @@ pub(crate) fn yuv_to_rgba(input: &[i32], out: &mut [i32]) -> i32 {
         return -1;
     }
     let size = input.len() as i32;
-    let width = Lane::<i32>::lanes() as i32;
+    let width = Lane::<i32>::element_width() as i32;
     let mut offset = 0;
     while size - offset >= width {
         let yuv = Lane::load(input, offset as usize);
