@@ -217,7 +217,8 @@ impl Lower<'_> {
                     Binding::Columns
                     | Binding::Buffer(_)
                     | Binding::Context
-                    | Binding::Aggregate(_),
+                    | Binding::Aggregate(_)
+                    | Binding::Record(_),
                 ) => rejected(),
                 Some(Binding::Host(_)) => emit!(#path),
                 // A const path constructs a fresh value, including in a

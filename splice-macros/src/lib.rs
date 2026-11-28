@@ -1,8 +1,8 @@
 //! Rust attribute frontend for Splice kernels.
 use proc_macro::TokenStream;
 use syn::{
-    Data, DeriveInput, Error, Expr, Meta, MetaNameValue, Path, Token, parse_macro_input,
-    parse_quote, punctuated::Punctuated,
+    DeriveInput, Error, Expr, Meta, MetaNameValue, Path, Token, parse_macro_input, parse_quote,
+    punctuated::Punctuated,
 };
 
 // Generated locals and labels share a hygiene context across fragments.
@@ -16,6 +16,7 @@ mod api;
 mod comptime_key;
 mod declaration;
 mod kast;
+mod kernel_type;
 mod scalar;
 
 /// Derive a value key for a struct or enum used as a specialization parameter.
@@ -27,36 +28,21 @@ pub fn comptime_key(item: TokenStream) -> TokenStream {
         .into()
 }
 
-/// Describe the owned fields of a Rust structure for Splice's typed IR.
+/// Describe a Rust struct for Splice: the names of its fields, which a
+/// comptime projection reads, and, when its fields are kernel data and it
+/// is `Copy`, the layout rustc chose for it (`splice::KernelData`), so that
+/// kernels can take it by value and in slices.
+/// `#[kernel_type(transparent)]` (or `#[repr(transparent)]`) makes a
+/// newtype over a kernel scalar that scalar; `#[kernel_type(pod)]` asserts
+/// that the struct is kernel data.
 /// `#[splice(crate = path)]` names the Splice crate when it is not `::splice`.
-#[proc_macro_derive(KernelType, attributes(splice))]
+#[proc_macro_derive(KernelType, attributes(splice, kernel_type))]
 pub fn kernel_type(item: TokenStream) -> TokenStream {
     let item = parse_macro_input!(item as DeriveInput);
-    let root = match derive_root(&item.attrs) {
-        Ok(root) => root,
-        Err(error) => return error.into_compile_error().into(),
-    };
-    let Data::Struct(data) = item.data else {
-        return Error::new_spanned(item.ident, "KernelType can only be derived for structs")
-            .into_compile_error()
-            .into();
-    };
-    let name = item.ident;
-    let (params, args, where_) = item.generics.split_for_impl();
-    let fields = data
-        .fields
-        .iter()
-        .enumerate()
-        .map(|(index, field)| match &field.ident {
-            Some(name) => name.to_string().trim_start_matches("r#").to_owned(),
-            None => index.to_string(),
-        });
-    quote::quote! {
-        impl #params #root::KernelType for #name #args #where_ {
-            const FIELDS: &'static [&'static str] = &[#(#fields),*];
-        }
-    }
-    .into()
+    derive_root(&item.attrs)
+        .and_then(|root| kernel_type::expand(item, &root))
+        .unwrap_or_else(Error::into_compile_error)
+        .into()
 }
 
 /// The Splice crate path a derive names with `#[splice(crate = path)]`.

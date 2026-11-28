@@ -7,6 +7,7 @@ pub mod evaluation;
 pub mod methods;
 #[doc(hidden)]
 pub mod native;
+pub mod record;
 #[doc(hidden)]
 pub mod scalar;
 #[doc(hidden)]

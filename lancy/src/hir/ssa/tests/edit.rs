@@ -181,6 +181,7 @@ fn slice_params_must_be_distinct_pointer_and_length_parameters() {
         .unwrap();
     let zero = f.append(f.entry(), Op::Const(0)).unwrap();
     for bad in [
+        slice(q, m, 0),
         slice(n, p, 4),
         slice(p, n, 1),
         slice(p, zero, 4),
@@ -194,4 +195,7 @@ fn slice_params_must_be_distinct_pointer_and_length_parameters() {
     }
     assert_eq!(f.slice_param(q), Some(slice(q, m, 8)));
     assert_eq!(f.slice_param(n), None);
+    // A struct element has any size.
+    f.set_slice_params(vec![slice(p, n, 4), slice(q, m, 24)])
+        .unwrap();
 }
