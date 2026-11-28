@@ -313,6 +313,14 @@ pub(super) struct Expansion {
     pub args: [Option<(Type, VReg)>; 3],
 }
 
+impl Expansion {
+    pub(super) fn is_f32x4_fma(self, width: usize) -> bool {
+        width == 16
+            && self.input == Type::Vector(crate::hir::Lane::F32)
+            && matches!(self.action, Action::Ternary(crate::hir::Ternary::MulAdd))
+    }
+}
+
 /// A lane select by a vector mask.
 #[derive(Clone, Copy, Debug)]
 pub(super) struct MaskSelect<R = VReg> {

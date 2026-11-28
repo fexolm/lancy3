@@ -1,10 +1,10 @@
 use crate::hir::transforms::{ControlFlowGraph, DomTree};
 use crate::hir::{
-    Block, Effects, Function, Inst, Lane, MIN_VECTOR_BYTES, Op, Simd, TrapKind, Value,
+    Binary, Block, Effects, Function, Inst, Lane, MIN_VECTOR_BYTES, Op, Simd, TrapKind, Type, Value,
 };
 use crate::support::numeric::integer;
 use crate::support::slotmap::DenseMap;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 
 #[derive(Clone, Copy)]
@@ -225,10 +225,72 @@ pub(super) struct Facts {
     in_bounds_loads: HashSet<Value>,
 }
 
+/// Unrolled accesses can compute the same wrapping index in separate SSA
+/// values. Canonicalize i32 additions before checking address equality. The
+/// constant is part of the i32 index, never a displacement of the pointer.
+fn offset_roots(
+    f: &Function,
+    cfg: &ControlFlowGraph,
+    dom: &DomTree,
+    defs: &DenseMap<Value, Definition>,
+) -> DenseMap<Value, Value> {
+    let mut roots = forwarded_params(f, cfg, dom, defs);
+    let constant = |v: Value| {
+        let inst = defs[v].inst;
+        if inst != Inst::INVALID
+            && let Op::Const(n) = *f.op(inst)
+        {
+            return Some(n);
+        }
+        None
+    };
+    let offset = |op, roots: &mut DenseMap<Value, Value>| {
+        let Op::Bin(Binary::Add, a, b) = op else {
+            return None;
+        };
+        if f.value_type(a) != Type::I32 {
+            return None;
+        }
+        let (a, b) = (root(roots, a), root(roots, b));
+        constant(b)
+            .map(|n| (a, n))
+            .or_else(|| constant(a).map(|n| (b, n)))
+    };
+    let mut offsets = HashMap::<(Value, i32), Value>::new();
+    let mut changed = false;
+    for &block in dom.preorder() {
+        for inst in f.instructions(block) {
+            let Some((base, displacement)) = offset(*f.op(inst), &mut roots) else {
+                continue;
+            };
+            let previous = defs[base].inst;
+            let key = if previous != Inst::INVALID
+                && let Some((base, prefix)) = offset(*f.op(previous), &mut roots)
+            {
+                (base, prefix.wrapping_add(displacement))
+            } else {
+                (base, displacement)
+            };
+            let result = f.result(inst).unwrap();
+            let first = offsets.entry(key).or_insert(result);
+            if *first != result && dom.dominates(defs[*first].block, block) {
+                roots[result] = *first;
+                changed = true;
+            } else {
+                *first = result;
+            }
+        }
+    }
+    if changed {
+        flatten(&mut roots);
+    }
+    roots
+}
+
 impl Facts {
     pub(super) fn new(f: &Function, cfg: &ControlFlowGraph, dom: &DomTree) -> Self {
         let defs = definitions(f);
-        let roots = forwarded_params(f, cfg, dom, &defs);
+        let roots = offset_roots(f, cfg, dom, &defs);
         Self {
             defs,
             roots,
@@ -294,7 +356,7 @@ impl Facts {
         });
         f.substitute_values(aliases);
         if changed_inputs {
-            self.roots = forwarded_params(f, cfg, dom, &self.defs);
+            self.roots = offset_roots(f, cfg, dom, &self.defs);
         } else {
             // Every replacement is an earlier canonical value.
             for root in self.roots.values_mut() {

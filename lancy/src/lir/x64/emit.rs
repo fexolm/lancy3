@@ -519,6 +519,7 @@ impl Emitter<'_> {
     /// Call `lir::fallback` with the area below the Win64 shadow space and
     /// report its trap code. Every generated frame enters with RSP 8 mod 16.
     fn fallback(&mut self, expansion: Expansion, allocs: Allocations) -> AsmResult {
+        let fast_fma = expansion.is_f32x4_fma(self.cpu.bytes);
         let Expansion {
             action,
             input,
@@ -526,38 +527,53 @@ impl Emitter<'_> {
             dst,
             args,
         } = expansion;
-        use crate::lir::fallback::{AREA_BYTES, RESULT, SLOT_BYTES, Site, entry};
+        use crate::lir::fallback::{SLOT_BYTES, Site, entry};
         let (width, abi) = (self.cpu.bytes, self.abi);
+        let stride = if fast_fma {
+            super::fma::SLOT_BYTES
+        } else {
+            SLOT_BYTES
+        };
         let area = abi.shadow;
-        let saved = area + AREA_BYTES as i32;
+        let saved = area + (4 * stride) as i32;
         let frame = saved + 8;
-        let types = args.map(|arg| arg.map(|(ty, _)| ty));
-        let site = self
-            .sites
-            .add(Site::new(action, input, output, types, width));
         let a = &mut *self.a;
         a.sub(rsp, frame)?;
         a.mov(qword_ptr(rsp + saved), r11)?;
         for (i, arg) in args.into_iter().enumerate() {
             if let Some((ty, v)) = arg {
-                let at = ptr(rsp + area + (i * SLOT_BYTES) as i32);
+                let at = ptr(rsp + area + (i * stride) as i32);
                 store(a, width, ty, at, allocs.reg(v))?;
             }
         }
         let [site_arg, area_arg] = [0, 1].map(|i| R64[abi.args[i].hw_enc()]);
-        a.mov(site_arg, site)?;
-        a.lea(area_arg, ptr(rsp + area))?;
-        a.mov(r10, entry())?;
+        if fast_fma {
+            a.lea(site_arg, ptr(rsp + area))?;
+            a.mov(r10, super::fma::entry(abi.is_win64()))?;
+        } else {
+            let types = args.map(|arg| arg.map(|(ty, _)| ty));
+            let site = self
+                .sites
+                .add(Site::new(action, input, output, types, width));
+            a.mov(site_arg, site)?;
+            a.lea(area_arg, ptr(rsp + area))?;
+            a.mov(r10, entry())?;
+        }
         if self.cpu.isa.avx {
             a.vzeroupper()?;
         }
         a.call(r10)?;
         // The result register may be RAX: keep the code in R10D.
-        a.mov(r10d, eax)?;
-        let result = ptr(rsp + area + RESULT as i32);
+        if !fast_fma {
+            a.mov(r10d, eax)?;
+        }
+        let result = ptr(rsp + area + (3 * stride) as i32);
         load(a, width, output, allocs.reg(dst), result)?;
         a.mov(r11, qword_ptr(rsp + saved))?;
         a.add(rsp, frame)?;
+        if fast_fma {
+            return Ok(());
+        }
         let report = self.exits.report(a);
         a.test(r10d, r10d)?;
         a.jne(report)

@@ -86,6 +86,12 @@ impl LancyKernel {
 
 /// Words of a call whose arguments Lancy receives on the stack.
 const INLINE_WORDS: usize = 32;
+const _: () = {
+    assert!(size_of::<SliceDescriptor>() == 2 * size_of::<u64>());
+    assert!(align_of::<SliceDescriptor>() >= align_of::<u64>());
+    assert!(std::mem::offset_of!(SliceDescriptor, data) == 0);
+    assert!(std::mem::offset_of!(SliceDescriptor, len) == size_of::<u64>());
+};
 
 // SAFETY: `enter` runs the code compiled for `interface`, and Lancy checks
 // the calling thread's target itself.
@@ -100,6 +106,20 @@ unsafe impl Executable for LancyKernel {
             // SAFETY: as below, without slices.
             unsafe { self.code.memory().call_packed_unchecked(words, &mut result) }
                 .map_err(call_error)?;
+            return Ok(result[0]);
+        }
+        if words.is_empty() {
+            // SAFETY: the asserted native layout is exactly Lancy's
+            // address/length pairs. The caller keeps the descriptor array
+            // and the referenced buffers and Rust contexts live.
+            unsafe {
+                self.code.memory().call_packed_raw(
+                    slices.as_ptr().cast(),
+                    2 * slices.len(),
+                    &mut result,
+                )
+            }
+            .map_err(call_error)?;
             return Ok(result[0]);
         }
         // Lancy takes the scalars followed by each slice's address and length.

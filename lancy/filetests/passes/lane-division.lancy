@@ -1,0 +1,16 @@
+fn main(out:ptr x:i32) -> i32
+  d = lanes f32
+  base = mul x d
+  one = const 1
+  n = sub base one
+  q = div n d
+  r = rem n d
+  store out q
+  ret r
+@isel regex: Q=idiv\.imm=(4|8|16) pow2
+@isel regex: R=irem\.imm=(4|8|16) pow2
+@isel check: $Q
+@isel check: $R
+@asm not: idiv
+@run -1 -> -1 | 00 00 00 00 | ff ff ff ff
+@run -2 -> -1 | 00 00 00 00 | fe ff ff ff

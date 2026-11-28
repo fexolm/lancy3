@@ -87,6 +87,16 @@ pub(super) fn last_lane(f: &Function, facts: &Facts, value: Value) -> Option<Cou
     }
 }
 
+pub(super) fn doubled(f: &Function, facts: &Facts, value: Value) -> Option<Value> {
+    let Op::Bin(Binary::Mul, a, b) = facts.op(f, value)? else {
+        return None;
+    };
+    [(a, b), (b, a)].into_iter().find_map(|(base, factor)| {
+        (f.value_type(base) == Type::I32 && facts.constant(f, factor) == Some(2))
+            .then(|| facts.root(base))
+    })
+}
+
 #[derive(Clone, Copy)]
 struct PacketCounts {
     fixed: Option<i32>,
@@ -139,6 +149,8 @@ fn unsigned_slice_length(f: &Function, facts: &Facts, value: Value) -> Option<Va
 
 pub(super) struct Bounds {
     before: ScopedFacts<(Value, Value), ()>,
+    doubled_before: ScopedFacts<(Value, Value), bool>,
+    upper_bounds: ScopedFacts<Value, i32>,
     checked: ScopedFacts<(Index, Value), ()>,
     minimum_lengths: ScopedFacts<Value, i32>,
     packets: ScopedFacts<(Value, Index), PacketCounts>,
@@ -206,6 +218,8 @@ impl Bounds {
         loop_bounds: &[Value],
     ) -> Self {
         let mut before = Witnesses::default();
+        let mut doubled_before = Witnesses::default();
+        let mut upper_bounds = Witnesses::default();
         let mut checked = Witnesses::default();
         let mut minimum_lengths = Witnesses::default();
         let mut packets = Witnesses::default();
@@ -270,6 +284,24 @@ impl Bounds {
                 let scope = 2 * scope.start..2 * scope.end;
                 if loop_bounds.binary_search(&lower).is_ok() {
                     before.record((lower, upper), scope.clone(), ());
+                    if let Some(limit) = facts.constant(f, upper) {
+                        upper_bounds.record(lower, scope.clone(), limit);
+                    }
+                }
+                if !loop_bounds.is_empty() {
+                    if f.is_slice_length(upper)
+                        && let Some(bound) = doubled(f, facts, lower)
+                        && loop_bounds.binary_search(&bound).is_ok()
+                    {
+                        doubled_before.record((bound, upper), scope.clone(), false);
+                    }
+                    if loop_bounds.binary_search(&lower).is_ok()
+                        && let Some(Op::Bin(Binary::Div, len, divisor)) = facts.op(f, upper)
+                        && facts.constant(f, divisor) == Some(2)
+                        && f.is_slice_length(facts.root(len))
+                    {
+                        doubled_before.record((lower, facts.root(len)), scope.clone(), true);
+                    }
                 }
                 if declared && let Some(minimum) = facts.constant(f, lower) {
                     let (length, minimum) = if minimum < 0 {
@@ -301,6 +333,8 @@ impl Bounds {
         }
         Self {
             before: before.index(|(), ()| ()),
+            doubled_before: doubled_before.index(|a, b| a || b),
+            upper_bounds: upper_bounds.index(i32::min),
             checked: checked.index(|(), ()| ()),
             minimum_lengths: minimum_lengths.index(i32::max),
             packets: packets.index(PacketCounts::combine),
@@ -312,6 +346,26 @@ impl Bounds {
         self.before
             .at(&(lower, upper), position(dom, block))
             .is_some()
+    }
+
+    /// A signed guard comparing 2 * bound with len is usable only with a
+    /// separate upper bound. Comparing bound with len / 2 proves both facts.
+    pub(super) fn twice_before(
+        &self,
+        dom: &DomTree,
+        bound: Value,
+        len: Value,
+        block: Block,
+    ) -> bool {
+        let at = position(dom, block);
+        self.doubled_before
+            .at(&(bound, len), at)
+            .is_some_and(|safe| {
+                safe || self
+                    .upper_bounds
+                    .at(&bound, at)
+                    .is_some_and(|max| max <= i32::MAX / 2)
+            })
     }
 
     // Only declared slice lengths are used here. They are nonnegative, so

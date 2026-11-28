@@ -133,6 +133,49 @@ fn fp_results_include_signed_zero_nan_and_fused_rounding() {
 }
 
 #[test]
+fn sse_fma_helper_preserves_live_values_for_both_x64_abis() {
+    use splice_target::{CallingConvention, Profile, Target};
+    let vector = Type::Vector(Lane::F32);
+    let bits = Type::Vector(Lane::I32);
+    let mut f = Function::new(&[vector, vector, vector, bits], bits);
+    let b = f.entry();
+    let [a, c, d, mask] = f.params(b).try_into().unwrap();
+    let fused = f.append(b, Op::Ternary(Ternary::MulAdd, a, c, d)).unwrap();
+    let fused = f.append(b, Op::Bitcast(bits, fused)).unwrap();
+    let result = f.append(b, Op::Bin(Binary::Xor, fused, mask)).unwrap();
+    f.set_terminator(b, Terminator::Return(result));
+    let args = [
+        [0x3f800001, 0x40000000, 0x80000000, 0x7f7fffff],
+        [0x3f7ffffe, 0x40400000, 0x3f800000, 0x40000000],
+        [0xbf800000, 0x40800000, 0x80000000, 0xff7fffff],
+        [1, 2, 3, 4],
+    ];
+    let pack = |v: [u32; 4]| -> [u64; 2] {
+        [
+            u64::from(v[0]) | (u64::from(v[1]) << 32),
+            u64::from(v[2]) | (u64::from(v[3]) << 32),
+        ]
+    };
+    let words = args.into_iter().flat_map(pack).collect::<Vec<_>>();
+    let expected = pack(std::array::from_fn(|i| {
+        f32::from_bits(args[0][i])
+            .mul_add(f32::from_bits(args[1][i]), f32::from_bits(args[2][i]))
+            .to_bits()
+            ^ args[3][i]
+    }));
+    for convention in [CallingConvention::SysV, CallingConvention::Win64] {
+        let target = Target::from_profile(Profile::Sse)
+            .unwrap()
+            .with_calling_convention(convention)
+            .unwrap();
+        let code = Kernel::compile(&f, &crate::CompileOptions::new(target)).unwrap();
+        let mut output = [0; 2];
+        code.call_packed(&words, &mut output).unwrap();
+        assert_eq!(output, expected, "{convention:?}");
+    }
+}
+
+#[test]
 fn wide_spills_and_outlined_calls_preserve_every_lane() {
     let v = Type::Vector(Lane::U64);
     let w = crate::test_target::width() / 8;

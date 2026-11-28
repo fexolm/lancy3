@@ -1,0 +1,7 @@
+fn main(a:vec.f32 b:vec.f32 c:vec.f32) -> vec.f32
+  fused = fma a b c
+  ret fused
+@isel regex: FMA=(helper\.vec\.f32\.fma|native\.vec\.f32\.mul_add|native\.vec\.f32\.fma)
+@isel check: $FMA
+@run vec.f32[0x3f800001 0x33800001 0x80000000 0x7f7fffff] vec.f32[0x3f7ffffe 0x3f7ffffe 1 2] vec.f32[-1 0x3f800001 0x80000000 0xff7fffff] -> vec.f32[0xa8800000 0x3f800001 0x80000000 0x7f7fffff]
+@run vec.f32[0x00800000 0x00000001 0x7f7fffff 2] vec.f32[0.5 0.5 2 3] vec.f32[0 0x007fffff 0 4] -> vec.f32[0x00400000 0x00800000 0x7f800000 10]

@@ -1,0 +1,56 @@
+# Truncating a declared length to a multiple of the step makes every taken
+# iteration of the strict loop cover one packet in that slice.
+fn main(p:ptr len:i32 out:ptr) -> i32
+  slice p len read4
+  width = lanes i32
+  packets = div len width
+  bound = mul packets width
+  zero = const 0
+  one = const 1
+  last = sub width one
+  jump head(zero)
+block head(i:i32)
+  more = lt i bound
+  br more body() | done()
+block body()
+  bounds i len
+  remaining = sub len i
+  bounds last remaining
+  next = add i width
+  store out next
+  jump head(next)
+block done()
+  ret i
+@source check: bounds
+@source check: bounds
+@opt not: bounds
+@opt check: store
+@opt not: bounds
+@opt check: ret
+@run 1 -> 0 | 00 00 00 00 | 00 00 00 00 | aa aa aa aa | aa aa aa aa
+
+---
+
+# An unrounded loop must still test the last lane of its final iteration.
+fn main(p:ptr len:i32 out:ptr) -> i32
+  slice p len read4
+  width = lanes i32
+  zero = const 0
+  one = const 1
+  last = sub width one
+  jump head(zero)
+block head(i:i32)
+  more = lt i len
+  br more body() | done()
+block body()
+  bounds i len
+  store out one
+  remaining = sub len i
+  bounds last remaining
+  next = add i width
+  jump head(next)
+block done()
+  ret i
+@opt check: store
+@opt check: bounds
+@run 1 -> !bounds | 00 00 00 00 | 00 00 00 00 | aa aa aa aa | 01 00 00 00

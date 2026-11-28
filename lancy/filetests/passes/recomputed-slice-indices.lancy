@@ -1,0 +1,56 @@
+fn main(src:ptr len:i32 dst:ptr room:i32 base:i32) -> i32
+  slice src len read4
+  slice dst room write4
+  one = const 1
+  two = const 2
+  zero = const 0
+  bounds zero room
+  out = offset dst zero 4
+  first = const 41
+  store out first
+  next = add base one
+  i = add next one
+  bounds i len
+  p = offset src i 4
+  a = load i32 p
+  store out a
+  j = add two base
+  bounds j len
+  q = offset src j 4
+  b = load i32 q
+  sum = add a b
+  ret sum
+@source check: load i32
+@source check: load i32
+@opt check: store
+@opt check: bounds
+@opt check: load i32
+@opt not: load i32
+@opt check: ret
+@run 3 1 0 -> 22 | 07 00 00 00 07 00 00 00 0b 00 00 00 | 07 00 00 00 07 00 00 00 0b 00 00 00 | 00 00 00 00 | 0b 00 00 00
+@run 1 1 0 -> !bounds | 07 00 00 00 | 07 00 00 00 | 00 00 00 00 | 29 00 00 00
+@run 1 1 2147483647 -> !bounds | 07 00 00 00 | 07 00 00 00 | 00 00 00 00 | 29 00 00 00
+
+---
+
+fn main(src:ptr len:i32 base:i32 j:i32) -> i32
+  slice src len write4
+  one = const 1
+  i = add base one
+  bounds i len
+  p = offset src i 4
+  a = load i32 p
+  bounds j len
+  out = offset src j 4
+  value = const 53
+  store out value
+  k = add one base
+  bounds k len
+  q = offset src k 4
+  b = load i32 q
+  sum = add a b
+  ret sum
+@opt check: load i32
+@opt check: store
+@opt check: load i32
+@run 2 0 1 -> 64 | 07 00 00 00 0b 00 00 00 | 07 00 00 00 35 00 00 00
