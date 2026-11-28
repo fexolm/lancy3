@@ -470,6 +470,7 @@ impl Lower<'_> {
             (Reg(a), Reg(b)) if a.base() == b.base() => Ok(Reg(a.base())),
             (Buffer(a), Buffer(b)) if a.elem == b.elem => Ok(Buffer(BufferType {
                 write: a.write && b.write,
+                utf8: a.utf8 && b.utf8,
                 ..a
             })),
             (Reg(t), Literal(u)) | (Literal(u), Reg(t)) if t == u => Ok(Reg(t)),

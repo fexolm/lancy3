@@ -26,4 +26,20 @@ fn mutable(xs: &[i32]) -> i32 {
     0
 }
 
+#[kernel]
+fn chars(text: &str) -> i32 {
+    let mut n = 0;
+    for c in text.chars() {
+        n += 1;
+    }
+    n
+}
+
+#[kernel]
+fn index_str(text: &str) -> i32 {
+    let first = text.as_bytes()[0];
+    let other = text.find('a');
+    0
+}
+
 fn main() {}

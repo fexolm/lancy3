@@ -160,7 +160,9 @@ pub(super) fn generate(
         let Type::Reference(reference) = ty else {
             unreachable!("buffer parameters are references")
         };
-        if reference.mutability.is_some() {
+        if matches!(&*reference.elem, Type::Path(path) if path.path.is_ident("str")) {
+            emit!(#root::BufferArg::str(self.#name))
+        } else if reference.mutability.is_some() {
             emit!(#root::BufferArg::write(self.#name))
         } else {
             emit!(#root::BufferArg::read(self.#name))

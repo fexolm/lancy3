@@ -56,6 +56,8 @@ pub enum SignatureError {
     },
     #[error("buffer {buffer} has the wrong Rust context signature")]
     Context { buffer: usize },
+    #[error("buffer {buffer} requires a &str")]
+    Utf8 { buffer: usize },
     #[error("buffer {buffer} requires a writable slice")]
     ReadOnly { buffer: usize },
     #[error("buffer {buffer} length exceeds i32::MAX")]

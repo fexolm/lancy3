@@ -274,16 +274,28 @@ impl Lower<'_> {
     }
     pub(super) fn for_expr(&self, f: &syn::ExprForLoop) -> Result<Value> {
         let Expr::Range(range) = &*f.expr else {
-            let Some((slice, element)) = self.iterated_buffer(&f.expr) else {
+            let Some((slice, element, bytes)) = self.iterated_buffer(&f.expr) else {
+                // A method of a runtime slice reports itself, as `chars` does.
+                if let Expr::MethodCall(call) = &*f.expr
+                    && let Expr::Path(path) = &*call.receiver
+                    && matches!(self.binding(path), Some(Binding::Buffer(_)))
+                {
+                    self.expr(&f.expr)?;
+                    return err(&f.expr, "iterate a runtime slice with `for &x in xs`");
+                }
                 return self.unroll(f);
             };
-            let Pat::Reference(pattern) = &*f.pat else {
-                return err(
-                    &f.pat,
-                    "use a by-value reference pattern to read a scalar slice element",
-                );
+            // `str::bytes` yields bytes; a slice yields references.
+            let binding = match &*f.pat {
+                Pat::Reference(pattern) if !bytes => crate::scalar::named(&pattern.pat)?,
+                pat if bytes => crate::scalar::named(pat)?,
+                _ => {
+                    return err(
+                        &f.pat,
+                        "use a by-value reference pattern to read a scalar slice element",
+                    );
+                }
             };
-            let binding = crate::scalar::named(&pattern.pat)?;
             let id = &binding.ident;
             let index = quote::format_ident!(
                 "__splice_element_index",
@@ -332,18 +344,21 @@ impl Lower<'_> {
     pub(super) fn iterated_buffer<'a>(
         &self,
         iterable: &'a Expr,
-    ) -> Option<(&'a syn::ExprPath, Scalar)> {
-        let operand = match iterable {
+    ) -> Option<(&'a syn::ExprPath, Scalar, bool)> {
+        let (operand, bytes) = match iterable {
             Expr::MethodCall(call) if call.method == "iter" && call.args.is_empty() => {
-                &*call.receiver
+                (&*call.receiver, false)
             }
-            other => other,
+            Expr::MethodCall(call) if call.method == "bytes" && call.args.is_empty() => {
+                (&*call.receiver, true)
+            }
+            other => (other, false),
         };
         let Expr::Path(path) = operand else {
             return None;
         };
         match self.binding(path) {
-            Some(Binding::Buffer(ty)) => Some((path, ty.elem.scalar()?)),
+            Some(Binding::Buffer(ty)) if ty.utf8 == bytes => Some((path, ty.elem.scalar()?, bytes)),
             _ => None,
         }
     }
