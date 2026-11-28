@@ -176,7 +176,7 @@ fn invalid_arguments_are_rejected_before_staging_or_reusing_a_callee()
 -> Result<(), Box<dyn std::error::Error>> {
     use splice::frontend::{KernelBuilder, Specialization};
     use splice::hir::ScalarType;
-    use splice::hir::{Buffer, Reg, ValueType};
+    use splice::hir::{Reg, Slice, ValueType};
     use splice::{BufferArg, BufferKind};
 
     fn stage(root: &mut dyn KernelBuilder) -> splice::Result<()> {
@@ -201,12 +201,15 @@ fn invalid_arguments_are_rejected_before_staging_or_reusing_a_callee()
         let read = [BufferKind::READ_I32];
         for (kinds, buffers) in [
             (&read[..], &[][..]),
-            (&read, &[Buffer(2)]),
-            (&[BufferKind::WRITE_I32], &[Buffer(0)]),
-            (&[BufferKind::new(ScalarType::I64, false)], &[Buffer(0)]),
+            (&read, &[Slice::param(1, 2)]),
+            (&[BufferKind::WRITE_I32], &[Slice::param(1, 0)]),
+            (
+                &[BufferKind::new(ScalarType::I64, false)],
+                &[Slice::param(1, 0)],
+            ),
             (
                 &[BufferKind::READ_I32, BufferKind::WRITE_I32],
-                &[Buffer(1), Buffer(1)],
+                &[Slice::param(1, 1), Slice::param(1, 1)],
             ),
         ] {
             assert!(
@@ -226,7 +229,7 @@ fn invalid_arguments_are_rejected_before_staging_or_reusing_a_callee()
                 &[BufferKind::READ_I32, BufferKind::READ_I32],
             ))
         };
-        let shared = [Buffer(1), Buffer(1)];
+        let shared = [Slice::param(1, 1), Slice::param(1, 1)];
         assert!(
             root.call_specialized(key(), &[vector], &shared, Box::new(unexpected))
                 .is_err()

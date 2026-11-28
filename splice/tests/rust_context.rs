@@ -1,4 +1,4 @@
-use splice::hir::{Buffer, Instr, RustTarget};
+use splice::hir::{Instr, RustTarget};
 use splice::{CallError, Codegen, Executable, Trap, TypedIr, kernel};
 use std::collections::HashSet;
 use std::ops::AddAssign;
@@ -331,9 +331,12 @@ fn native_and_rust_operations_reborrow_the_same_writable_slice_in_order() {
         panic!("expected a mutable view followed by repeated shared views: {borrows:?}");
     };
     assert!(first.writable && !tag.writable && !left.writable && !right.writable);
-    assert_eq!(first.buffer, left.buffer);
+    assert_eq!(first.slice, left.slice);
     assert_eq!(left, right);
-    assert_eq!((first.buffer, tag.buffer), (Buffer(3), Buffer(2)));
+    assert_eq!(
+        (first.slice, tag.slice),
+        (ir.param_slice(3), ir.param_slice(2))
+    );
 
     fn check<B: Codegen<Output: Executable>>(ir: &TypedIr<writable_opaque_slice::Signature>) {
         for code in [
@@ -750,11 +753,6 @@ fn published_free_functions_share_the_enclosing_context() {
 fn published_and_ordinary_methods_preserve_shared_slice_arguments() {
     let ir = single_published::ir().unwrap();
     let instructions = ir.instructions();
-    assert!(
-        instructions
-            .iter()
-            .any(|op| matches!(op, Instr::BufferLen { .. }))
-    );
     assert!(
         instructions
             .iter()

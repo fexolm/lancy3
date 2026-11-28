@@ -219,7 +219,7 @@ impl Lower<'_> {
                     let ty = elem.ty(root, self.types);
                     return Ok(emit!({
                         let slot = #slot;
-                        #root::frontend::scalar::column((__splice_column_layout, #root::hir::Buffer(0)), slot, #element)?;
+                        #root::frontend::scalar::column_kind(__splice_column_layout, slot, #element)?;
                         ::std::format!("{}[{}].as_slice::<{}>()", ::core::stringify!(#table), slot, ::core::stringify!(#ty))
                     }));
                 }

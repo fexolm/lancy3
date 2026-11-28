@@ -1,4 +1,5 @@
 use super::*;
+use splice_core::BufferKind;
 use splice_core::KernelScalar;
 use splice_core::hir::{Constant, ScalarType};
 mod simd;
@@ -27,7 +28,7 @@ fn context_descriptors_reject_other_signatures_and_slice_operations() {
         let operation = ContextFrame::root(&FIRST).child(0)?.operation(0)?;
         let result = b.rust_call(
             RustTarget::Context {
-                buffer: Buffer(0),
+                context: b.buffer(0)?,
                 operation,
             },
             &[b.arg(0)?],
@@ -39,17 +40,20 @@ fn context_descriptors_reject_other_signatures_and_slice_operations() {
     }
 
     use splice_core::hir::check_forwarding;
-    assert!(check_forwarding(&KINDS, &[BufferKind::READ_I32], &[Buffer(0)]).is_err());
-    assert!(check_forwarding(&[BufferKind::WRITE_I32], &KINDS, &[Buffer(0)]).is_err());
-    assert!(check_forwarding(&KINDS, &[KINDS[0]; 2], &[Buffer(0); 2]).is_err());
-    assert!(check_forwarding(&KINDS, &KINDS, &[Buffer(0)]).is_ok());
+    let types = |kinds| move |r| Signature::new(&[], ScalarType::I32, kinds).param_type(r);
+    let (context, writable) = (types(&KINDS), types(&[BufferKind::WRITE_I32]));
+    let first = Slice::param(0, 0);
+    assert!(check_forwarding(&context, &[BufferKind::READ_I32], &[first]).is_err());
+    assert!(check_forwarding(&writable, &KINDS, &[first]).is_err());
+    assert!(check_forwarding(&context, &[KINDS[0]; 2], &[first; 2]).is_err());
+    assert!(check_forwarding(&context, &KINDS, &[first]).is_ok());
 
     type Invalid = fn(&mut dyn KernelBuilder) -> splice_core::Result<Reg>;
     let invalid: [Invalid; 5] = [
         |b| {
             b.rust_call(
                 RustTarget::Context {
-                    buffer: Buffer(0),
+                    context: b.buffer(0)?,
                     operation: 2,
                 },
                 &[b.arg(0)?],
@@ -60,7 +64,7 @@ fn context_descriptors_reject_other_signatures_and_slice_operations() {
         |b| {
             b.rust_call(
                 RustTarget::Context {
-                    buffer: Buffer(0),
+                    context: b.buffer(0)?,
                     operation: 0,
                 },
                 &[],
@@ -71,7 +75,7 @@ fn context_descriptors_reject_other_signatures_and_slice_operations() {
         |b| {
             b.rust_call(
                 RustTarget::Context {
-                    buffer: Buffer(1),
+                    context: b.buffer(1)?,
                     operation: 0,
                 },
                 &[b.arg(0)?],
@@ -79,8 +83,8 @@ fn context_descriptors_reject_other_signatures_and_slice_operations() {
                 ScalarType::I32,
             )
         },
-        |b| b.load(Buffer(0), b.arg(0)?),
-        |b| b.buffer_len(Buffer(0)),
+        |b| b.load(b.buffer(0)?, b.arg(0)?),
+        |b| b.buffer(0).map(|s| s.len),
     ];
     for bad in invalid {
         let body = |b: &mut dyn KernelBuilder| {
@@ -163,7 +167,7 @@ fn context_slice_operands_require_valid_nonaliasing_descriptors() {
         BufferKind::WRITE_I32,
     ];
     let view = |buffer, writable| ContextSlice {
-        buffer: Buffer(buffer),
+        slice: Slice::param(0, buffer),
         writable,
     };
     let cases: &[(&[ContextSlice], bool)] = &[
@@ -180,7 +184,7 @@ fn context_slice_operands_require_valid_nonaliasing_descriptors() {
         let body = |builder: &mut dyn KernelBuilder| {
             let result = builder.rust_call(
                 RustTarget::Context {
-                    buffer: Buffer(0),
+                    context: builder.buffer(0)?,
                     operation: 0,
                 },
                 &[],
@@ -388,10 +392,10 @@ fn checked_nested_call_preserves_writes_before_failure() {
                     &[BufferKind::WRITE_I32],
                 ),
                 &[b.arg(0)?],
-                &[Buffer(1)],
+                &[b.buffer(1)?],
                 Box::new(|c| {
                     let first = c.constant(Constant::from(0usize))?;
-                    c.store(Buffer(0), first, c.arg(0)?)?;
+                    c.store(c.buffer(0)?, first, c.arg(0)?)?;
                     let zero = c.constant(Constant::from(0))?;
                     let x = c.binary(Binary::Div, c.arg(0)?, zero)?;
                     c.ret(x)?;
@@ -568,7 +572,7 @@ fn rejects_undefined_labels_and_aliased_writable_arguments() {
                     &[BufferKind::WRITE_I32, BufferKind::READ_I32],
                 ),
                 &[],
-                &[Buffer(0), Buffer(0)],
+                &[b.buffer(0)?, b.buffer(0)?],
                 Box::new(|c| {
                     let n = c.constant(Constant::from(0))?;
                     c.ret(n)?;
@@ -596,7 +600,7 @@ enum IndexOperand {
 fn index_operand(b: &mut dyn KernelBuilder, operand: IndexOperand) -> splice_core::Result<Reg> {
     match operand {
         IndexOperand::Arg(n) => b.cast(b.arg(n)?, ScalarType::Index),
-        IndexOperand::Len => b.buffer_len(Buffer(0)),
+        IndexOperand::Len => b.buffer(0).map(|s| s.len),
         IndexOperand::Constant(bits) => b.constant(Constant::from(bits as usize)),
     }
 }
@@ -668,7 +672,7 @@ fn index_comparisons_on_i32_forms_match_unsigned_64_bit_order() {
 #[test]
 fn index_guard_on_a_slice_length_compares_the_i32_length() {
     fn body(b: &mut dyn KernelBuilder) -> splice_core::Result<()> {
-        let len = b.buffer_len(Buffer(0))?;
+        let len = b.buffer(0).map(|s| s.len)?;
         let four = b.constant(Constant::from(4usize))?;
         let short = b.binary(Binary::Lt, len, four)?;
         let (fail, read) = (b.label()?, b.label()?);
@@ -678,7 +682,7 @@ fn index_guard_on_a_slice_length_compares_the_i32_length() {
         b.ret(minus_one)?;
         b.mark(read)?;
         let three = b.constant(Constant::from(3usize))?;
-        let value = b.load(Buffer(0), three)?;
+        let value = b.load(b.buffer(0)?, three)?;
         b.ret(value)
     }
     let graph = build(
@@ -717,7 +721,7 @@ fn index_parameters_carry_their_i32_form_across_blocks() {
         b.mark(right)?;
         b.jump(join)?;
         b.mark(join)?;
-        let value = b.load(Buffer(0), index)?;
+        let value = b.load(b.buffer(0)?, index)?;
         b.ret(value)
     }
     let graph = build(

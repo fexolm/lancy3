@@ -1,5 +1,5 @@
 use splice_core::frontend::{KernelBuilder, Signature};
-use splice_core::hir::{Binary, Buffer, BufferKind, FunctionBuilder};
+use splice_core::hir::{Binary, BufferKind, FunctionBuilder};
 use splice_core::hir::{Constant, ScalarType};
 use splice_core::{BufferArg, CallError, Codegen, Executable, KernelScalar, Trap};
 use splice_llvm::Llvm;
@@ -67,16 +67,18 @@ fn checked_calls_remap_buffers_and_stop_after_the_first_fault() {
     let zero = child.constant(Constant::from(0usize)).unwrap();
     let one = child.constant(Constant::from(1usize)).unwrap();
     let mark = child.constant(Constant::from(42)).unwrap();
-    child.store(Buffer(0), zero, mark).unwrap();
+    child.store(child.buffer(0).unwrap(), zero, mark).unwrap();
     let at = child
         .cast(child.arg(0).unwrap(), ScalarType::Index)
         .unwrap();
-    let value = child.load(Buffer(1), at).unwrap();
+    let value = child.load(child.buffer(1).unwrap(), at).unwrap();
     let quotient = child
         .binary(Binary::Div, value, child.arg(1).unwrap())
         .unwrap();
-    child.store(Buffer(0), one, quotient).unwrap();
-    let length = child.buffer_len(Buffer(1)).unwrap();
+    child
+        .store(child.buffer(0).unwrap(), one, quotient)
+        .unwrap();
+    let length = child.buffer(1).map(|s| s.len).unwrap();
     let length = child.cast(length, ScalarType::I32).unwrap();
     child.ret(length).unwrap();
 
@@ -93,11 +95,13 @@ fn checked_calls_remap_buffers_and_stop_after_the_first_fault() {
         .call_function(
             &child,
             &[parent.arg(0).unwrap(), parent.arg(1).unwrap()],
-            &[Buffer(1), Buffer(0)],
+            &[parent.buffer(1).unwrap(), parent.buffer(0).unwrap()],
         )
         .unwrap();
     let two = parent.constant(Constant::from(2usize)).unwrap();
-    parent.store(Buffer(1), two, length).unwrap();
+    parent
+        .store(parent.buffer(1).unwrap(), two, length)
+        .unwrap();
     parent.ret(length).unwrap();
     let code = Llvm::compile(&parent.finish().unwrap()).unwrap();
 
@@ -198,7 +202,7 @@ fn masked_f64_gather_checks_active_indices_at_full_i64_width() {
             element: ScalarType::F64,
             op,
         };
-        let idx = b.simd(i64op(SimdOp::Load(Buffer(0))), &[zero])?.unwrap();
+        let idx = b.simd(i64op(SimdOp::Load(b.buffer(0)?)), &[zero])?.unwrap();
         let positions = b.simd(f64op(SimdOp::Iota), &[])?.unwrap();
         let one = b
             .simd(f64op(SimdOp::Splat(1.0_f64.to_bits())), &[])?
@@ -206,11 +210,11 @@ fn masked_f64_gather_checks_active_indices_at_full_i64_width() {
         let first = b.simd(f64op(SimdOp::Lt), &[positions, one])?.unwrap();
         let selected = b
             .simd(
-                f64op(SimdOp::GatherSelect(Buffer(1))),
+                f64op(SimdOp::GatherSelect(b.buffer(1)?)),
                 &[idx, first, positions],
             )?
             .unwrap();
-        b.simd(f64op(SimdOp::Store(Buffer(2))), &[zero, selected])?;
+        b.simd(f64op(SimdOp::Store(b.buffer(2)?)), &[zero, selected])?;
         let result = b.constant(Constant::from(0))?;
         b.ret(result)?;
         Ok(())

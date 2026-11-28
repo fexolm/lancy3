@@ -16,7 +16,7 @@ pub use specialization::{ComptimeKey, KeyArgument, MaybeKey, Specialization};
 
 use crate::hir::Intrinsic;
 use crate::hir::{
-    Binary, Buffer, BufferKind, Constant, ContextSlice, Function, Label, Reg, ScalarType, Simd,
+    Binary, BufferKind, Constant, ContextSlice, Function, Label, Reg, ScalarType, Simd, Slice,
     ValueType,
 };
 use std::sync::Arc;
@@ -43,6 +43,27 @@ pub struct Signature<'a> {
 }
 
 impl<'a> Signature<'a> {
+    /// The registers of buffer parameter `buffer`, after the scalars.
+    pub const fn slice(&self, buffer: usize) -> Slice {
+        Slice::param(self.params.len(), buffer)
+    }
+    /// The type of parameter register `r`, if it is one.
+    pub fn param_type(&self, r: Reg) -> Option<ValueType> {
+        let index = r.0 as usize;
+        if let Some(&ty) = self.params.get(index) {
+            return Some(ValueType::Scalar(ty));
+        }
+        let slices = index - self.params.len();
+        match self.buffers.get(slices / 2) {
+            Some(&kind) if slices.is_multiple_of(2) => Some(ValueType::Ptr(kind)),
+            Some(_) => Some(ValueType::Scalar(ScalarType::Index)),
+            None => None,
+        }
+    }
+    /// The number of parameter registers.
+    pub const fn registers(&self) -> usize {
+        self.params.len() + 2 * self.buffers.len()
+    }
     pub const fn new(
         params: &'a [ScalarType],
         result: ScalarType,
@@ -91,6 +112,8 @@ pub trait KernelBuilder {
             .map(Reg)
             .map_err(|_| crate::BuildError::verify("invalid parameter index"))
     }
+    /// The slice of buffer parameter `index`: its two registers.
+    fn buffer(&self, index: usize) -> crate::Result<Slice>;
     fn reg_type(&self, r: Reg) -> Option<ValueType>;
     fn local(&mut self, ty: ValueType) -> crate::Result<Reg>;
     fn simd(&mut self, inst: Simd, args: &[Reg]) -> crate::Result<Option<Reg>> {
@@ -99,9 +122,10 @@ pub trait KernelBuilder {
     fn constant(&mut self, value: Constant) -> crate::Result<Reg>;
     /// Rust's `value as to`.
     fn cast(&mut self, value: Reg, to: ScalarType) -> crate::Result<Reg>;
-    fn buffer_len(&mut self, buffer: Buffer) -> crate::Result<Reg>;
-    fn load(&mut self, buffer: Buffer, index: Reg) -> crate::Result<Reg>;
-    fn store(&mut self, buffer: Buffer, index: Reg, value: Reg) -> crate::Result<()>;
+    /// Element `index` of `slice`; traps unless `index` is below its length.
+    fn load(&mut self, slice: Slice, index: Reg) -> crate::Result<Reg>;
+    /// Write element `index` of `slice`; traps unless `index` is below its length.
+    fn store(&mut self, slice: Slice, index: Reg, value: Reg) -> crate::Result<()>;
     fn binary(&mut self, op: Binary, a: Reg, b: Reg) -> crate::Result<Reg>;
     fn assign(&mut self, dst: Reg, src: Reg) -> crate::Result<()>;
     fn label(&mut self) -> crate::Result<Label>;
@@ -134,7 +158,7 @@ pub trait KernelBuilder {
         &mut self,
         signature: Signature<'_>,
         args: &[Reg],
-        buffers: &[Buffer],
+        buffers: &[Slice],
         body: Body<'_>,
     ) -> crate::Result<Reg>;
 
@@ -145,7 +169,7 @@ pub trait KernelBuilder {
         &mut self,
         key: Specialization,
         args: &[Reg],
-        buffers: &[Buffer],
+        buffers: &[Slice],
         body: Body<'_>,
     ) -> crate::Result<Reg> {
         self.call_kernel(key.signature(), args, buffers, body)
@@ -157,7 +181,7 @@ pub trait KernelBuilder {
         &mut self,
         function: &Arc<Function>,
         args: &[Reg],
-        buffers: &[Buffer],
+        buffers: &[Slice],
     ) -> crate::Result<Reg> {
         let callee = Arc::clone(function);
         self.call_kernel(

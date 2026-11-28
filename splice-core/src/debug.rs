@@ -1,6 +1,6 @@
 //! Source-level metadata supplied by the frontend to native code generators.
 
-use crate::hir::{Buffer, BufferKind, Function, Reg, ScalarType, ValueType};
+use crate::hir::{Function, Reg, ScalarType, Slice, ValueType};
 
 /// A point in a kernel's source. `#[kernel]` gives an absolute `file`; a
 /// relative one is relative to `directory`, the compilation directory.
@@ -15,7 +15,7 @@ pub struct Location {
 #[derive(Clone, Copy, Debug)]
 pub enum Value {
     Register(Reg),
-    Slice(Buffer),
+    Slice(Slice),
     Constant(Option<Constant>),
 }
 
@@ -153,10 +153,10 @@ pub enum Store {
     /// A mask register as the vector of its index lanes: all bits set for
     /// an active lane, zero otherwise.
     Mask(Reg, ScalarType),
-    /// The data pointer of a slice.
-    Data(Buffer),
-    /// The length of a slice, zero-extended to 64 bits.
-    Length(Buffer),
+    /// The data pointer of a slice, this register.
+    Data(Reg),
+    /// The length of a slice, this `Index` register, as 64 bits.
+    Length(Reg),
 }
 
 impl Slot {
@@ -172,12 +172,13 @@ impl Slot {
                     ValueType::Scalar(ty) => Store::Scalar(reg, ty),
                     ValueType::Vector(_) => Store::Vector(reg),
                     ValueType::Mask(element) => Store::Mask(reg, element),
+                    ValueType::Ptr(_) => unreachable!("a pointer is saved with its slice"),
                 },
                 None,
             ),
-            Value::Slice(buffer) => (
-                Store::Data(buffer),
-                Some((self.offset + 8, Store::Length(buffer))),
+            Value::Slice(slice) => (
+                Store::Data(slice.ptr),
+                Some((self.offset + 8, Store::Length(slice.len))),
             ),
             Value::Constant(_) => unreachable!("only runtime values have slots"),
         };
@@ -191,7 +192,6 @@ impl Point {
     pub fn slots<'a>(
         &'a self,
         reg_type: impl Fn(Reg) -> ValueType + 'a,
-        buffers: &'a [BufferKind],
         vector_bytes: usize,
     ) -> impl Iterator<Item = Slot> + 'a {
         let vector = move |element: ScalarType| Type::Vector {
@@ -206,8 +206,12 @@ impl Point {
                         ValueType::Scalar(ty) => Type::Scalar(ty),
                         ValueType::Vector(element) => vector(element),
                         ValueType::Mask(element) => vector(element.index()),
+                        ValueType::Ptr(_) => unreachable!("a pointer is saved with its slice"),
                     },
-                    Value::Slice(buffer) => Type::Slice(buffers[buffer.index()].element()),
+                    Value::Slice(slice) => match reg_type(slice.ptr) {
+                        ValueType::Ptr(kind) => Type::Slice(kind.element()),
+                        _ => unreachable!("a verified slice"),
+                    },
                     Value::Constant(_) => return None,
                 };
                 Some((variable, ty))
@@ -230,11 +234,7 @@ impl Point {
         function: &'a Function,
         vector_bytes: usize,
     ) -> impl Iterator<Item = Slot> + 'a {
-        self.slots(
-            |r| function.reg_type(r),
-            function.buffer_kinds(),
-            vector_bytes,
-        )
+        self.slots(|r| function.reg_type(r), vector_bytes)
     }
 
     /// Bytes of the debug workspace for vectors of `vector_bytes`.
@@ -261,33 +261,34 @@ mod tests {
         let point = Point {
             location,
             variables: [
-                variable("flag", Value::Register(Reg(0))),
-                variable("xs", Value::Slice(Buffer(0))),
+                variable("flag", Value::Register(Reg(2))),
+                variable("xs", Value::Slice(Slice::param(0, 0))),
                 variable("known", Value::Constant(None)),
-                variable("lanes", Value::Register(Reg(1))),
-                variable("active", Value::Register(Reg(2))),
+                variable("lanes", Value::Register(Reg(3))),
+                variable("active", Value::Register(Reg(4))),
             ]
             .into(),
         };
         let types = [
+            ValueType::Ptr(crate::BufferKind::new(ScalarType::U16, false)),
+            ValueType::Scalar(ScalarType::Index),
             ValueType::Scalar(ScalarType::Bool),
             ValueType::Vector(ScalarType::F32),
             ValueType::Mask(ScalarType::F32),
         ];
         let reg_type = |r: Reg| types[r.0 as usize];
-        let kinds = [BufferKind::new(ScalarType::U16, false)];
         let stores: Vec<_> = point
-            .slots(reg_type, &kinds, 16)
+            .slots(reg_type, 16)
             .flat_map(|slot| slot.stores(reg_type).collect::<Vec<_>>())
             .collect();
         assert_eq!(
             stores,
             [
-                (0, Store::Scalar(Reg(0), ScalarType::Bool)),
-                (8, Store::Data(Buffer(0))),
-                (16, Store::Length(Buffer(0))),
-                (24, Store::Vector(Reg(1))),
-                (40, Store::Mask(Reg(2), ScalarType::F32)),
+                (0, Store::Scalar(Reg(2), ScalarType::Bool)),
+                (8, Store::Data(Reg(0))),
+                (16, Store::Length(Reg(1))),
+                (24, Store::Vector(Reg(3))),
+                (40, Store::Mask(Reg(4), ScalarType::F32)),
             ]
         );
     }

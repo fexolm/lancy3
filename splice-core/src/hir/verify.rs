@@ -19,11 +19,11 @@ impl Function {
 #[cfg(test)]
 mod tests {
     use super::super::{
-        Binary, Buffer, BufferKind, Constant, Intrinsic, Label, Reg, ScalarType, Simd, SimdOp,
-        ValueType,
+        Binary, BufferKind, Constant, Intrinsic, Label, Reg, ScalarType, Simd, SimdOp, ValueType,
     };
     use super::*;
     use crate::debug::{Location, Point, Value, Variable};
+    use crate::hir::Slice;
     use std::sync::Arc;
 
     const R0: Reg = Reg(0);
@@ -125,11 +125,11 @@ mod tests {
             vec![I32],
             vec![
                 Instr::Load {
-                    dst: R1,
-                    buffer: Buffer(0),
+                    dst: Reg(3),
+                    slice: Slice::param(1, 0),
                     index: R0,
                 },
-                Instr::Return(R1),
+                Instr::Return(Reg(3)),
             ],
         )
         .verify()
@@ -188,6 +188,20 @@ mod tests {
                 vec![Instr::Copy(R1, R0), Instr::Return(R0)]
             ),
             "register copy type mismatch at instruction 0"
+        );
+        let index = ValueType::Scalar(ScalarType::Index);
+        assert_eq!(
+            typed_error(
+                vec![ScalarType::Index],
+                vec![BufferKind::READ_I32],
+                vec![index],
+                vec![
+                    Instr::Copy(Reg(3), R0),
+                    Instr::Copy(Reg(2), Reg(3)),
+                    Instr::Return(R0)
+                ]
+            ),
+            "a buffer parameter's registers are read-only at instruction 1"
         );
         assert_eq!(
             error(1, vec![], vec![vector], vec![Instr::Return(R1)]),
@@ -303,7 +317,7 @@ mod tests {
         }
         let slice = vec![Variable {
             name: "xs",
-            value: Value::Slice(Buffer(0)),
+            value: Value::Slice(Slice::param(1, 0)),
         }];
         assert_eq!(
             error(
@@ -319,12 +333,12 @@ mod tests {
     #[test]
     fn buffer_errors() {
         let load = Instr::Load {
-            dst: R1,
-            buffer: Buffer(0),
+            dst: Reg(3),
+            slice: Slice::param(1, 0),
             index: R0,
         };
         let store = Instr::Store {
-            buffer: Buffer(0),
+            slice: Slice::param(1, 0),
             index: R0,
             value: R0,
         };
@@ -333,8 +347,8 @@ mod tests {
             typed_error(
                 index(),
                 vec![],
-                vec![I32],
-                vec![load.clone(), Instr::Return(R1)]
+                vec![I32; 3],
+                vec![load.clone(), Instr::Return(Reg(3))]
             ),
             "invalid buffer at instruction 0"
         );
@@ -343,7 +357,7 @@ mod tests {
                 index(),
                 vec![BufferKind::new(ScalarType::U16, true)],
                 vec![I32],
-                vec![load.clone(), Instr::Return(R1)]
+                vec![load.clone(), Instr::Return(Reg(3))]
             ),
             "result register type mismatch at instruction 0",
             "a u16 element loads into a u16 register"
@@ -353,7 +367,7 @@ mod tests {
                 1,
                 vec![BufferKind::READ_I32],
                 vec![I32],
-                vec![load, Instr::Return(R1)]
+                vec![load, Instr::Return(Reg(3))]
             ),
             "expected a register of type usize, got i32 at instruction 0"
         );

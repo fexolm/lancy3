@@ -122,10 +122,10 @@ pub(crate) fn publish(
                 }
                 emit!(#id: impl #support::RunArg)
             }
-            Binding::Buffer(_) => emit!(#id: #hir::Buffer),
+            Binding::Buffer(_) => emit!(#id: #hir::Slice),
             Binding::Context if runtime_receiver && context.is_none() => {
                 context = Some(super::lower::Context::new(id.clone(), ty));
-                emit!(#id: #hir::Buffer)
+                emit!(#id: #hir::Slice)
             }
             _ => {
                 return Err(syn::Error::new_spanned(

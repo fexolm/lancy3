@@ -147,11 +147,16 @@ pub(super) fn emit(
     debug_bytes: Option<u32>,
 ) {
     let (params, result_slot) = parameters(&mut b, f, is_entry);
-    let (scalars, pairs) = params.split_at(f.arity());
-    let buffers = pairs.as_chunks::<2>().0;
     let vars = simd::Registers::new(&mut b, f, m);
     let var = |r: Reg| vars.get(r)[0];
-    for (index, &value) in scalars.iter().enumerate() {
+    // A buffer parameter is the slice of its two registers: the data
+    // pointer and the `Index` length that extends the ABI's `i32`.
+    for (index, &value) in params.iter().enumerate() {
+        let value = if index >= f.arity() && (index - f.arity()) % 2 == 1 {
+            b.ins().uextend(I64, value)
+        } else {
+            value
+        };
         b.def_var(var(Reg(index as u32)), value);
     }
     let labels: Vec<_> = (0..f.label_count()).map(|_| b.create_block()).collect();
@@ -169,7 +174,11 @@ pub(super) fn emit(
                 args,
                 slices,
                 ..
-            } => Some(target.plan(f.buffer_kinds(), args.len(), slices).bytes),
+            } => Some(
+                target
+                    .plan(&|r| Some(f.reg_type(r)), args.len(), slices)
+                    .bytes,
+            ),
             _ => None,
         })
         .max();
@@ -209,20 +218,14 @@ pub(super) fn emit(
                             // a vector of all-ones or zero index lanes.
                             DebugStore::Scalar(reg, _)
                             | DebugStore::Vector(reg)
-                            | DebugStore::Mask(reg, _) => {
+                            | DebugStore::Mask(reg, _)
+                            | DebugStore::Data(reg)
+                            | DebugStore::Length(reg) => {
                                 for (part, &variable) in vars.get(reg).iter().enumerate() {
                                     let value = b.use_var(variable);
                                     b.ins()
                                         .stack_store(value, slot, offset + (part * 16) as i32);
                                 }
-                            }
-                            DebugStore::Data(buffer) => {
-                                b.ins()
-                                    .stack_store(buffers[buffer.index()][0], slot, offset);
-                            }
-                            DebugStore::Length(buffer) => {
-                                let len = b.ins().uextend(I64, buffers[buffer.index()][1]);
-                                b.ins().stack_store(len, slot, offset);
                             }
                         }
                     }
@@ -253,7 +256,7 @@ pub(super) fn emit(
                 intrinsic: splice_core::hir::Intrinsic::Simd(inst),
                 ref args,
             } => {
-                simd::emit(&mut b, m, inst, &vars, dst, args, buffers);
+                simd::emit(&mut b, m, inst, &vars, dst, args);
             }
             Instr::Bin(dst, op, left, right) => {
                 let lhs = b.use_var(var(left));
@@ -261,26 +264,24 @@ pub(super) fn emit(
                 let value = binary(&mut b, op, scalar(f, left), lhs, rhs);
                 b.def_var(var(dst), value);
             }
-            Instr::BufferLen { dst, buffer } => {
-                let len = b.ins().uextend(I64, buffers[buffer.index()][1]);
-                b.def_var(var(dst), len);
-            }
-            Instr::Load { dst, buffer, index } => {
+            Instr::Load { dst, slice, index } => {
                 let index = b.use_var(var(index));
                 let ty = scalar_type(scalar(f, dst));
-                let addr = element(&mut b, buffers[buffer.index()], index, ty);
+                let pair = [b.use_var(var(slice.ptr)), b.use_var(var(slice.len))];
+                let addr = element(&mut b, pair, index, ty);
                 let value = b.ins().load(ty, MemFlags::new(), addr, 0);
                 b.def_var(var(dst), value);
             }
             Instr::Store {
-                buffer,
+                slice,
                 index,
                 value,
             } => {
                 let index = b.use_var(var(index));
                 let ty = scalar_type(scalar(f, value));
                 let value = b.use_var(var(value));
-                let addr = element(&mut b, buffers[buffer.index()], index, ty);
+                let pair = [b.use_var(var(slice.ptr)), b.use_var(var(slice.len))];
+                let addr = element(&mut b, pair, index, ty);
                 b.ins().store(MemFlags::new(), value, addr, 0);
             }
             Instr::RustCall {
@@ -291,7 +292,7 @@ pub(super) fn emit(
                 result,
             } => {
                 use cranelift_codegen::ir::{AbiParam, Signature};
-                let plan = target.plan(f.buffer_kinds(), args.len(), slices);
+                let plan = target.plan(&|r| Some(f.reg_type(r)), args.len(), slices);
                 let packet = packet.expect("a Rust call has a packet slot");
                 for PacketStore { at, value } in plan.stores {
                     let value = match value {
@@ -299,8 +300,11 @@ pub(super) fn emit(
                             let value = b.use_var(var(args[n]));
                             word(&mut b, value, scalar(f, args[n]))
                         }
-                        PacketValue::Data(buffer) => buffers[buffer.index()][0],
-                        PacketValue::Length(buffer) => buffers[buffer.index()][1],
+                        PacketValue::Data(ptr) => b.use_var(var(ptr)),
+                        PacketValue::Length(len) => {
+                            let len = b.use_var(var(len));
+                            b.ins().ireduce(I32, len)
+                        }
                         PacketValue::Tag(tag) => b.ins().iconst(I32, i64::from(tag)),
                         PacketValue::Symbol(address) => b.ins().iconst(I64, address as i64),
                     };
@@ -309,7 +313,7 @@ pub(super) fn emit(
                 let address = b.ins().stack_addr(I64, packet, 0);
                 let receiver = plan
                     .context
-                    .map_or(address, |context| buffers[context.index()][0]);
+                    .map_or(address, |context| b.use_var(var(context.ptr)));
                 let operation = b.ins().iconst(I32, i64::from(plan.operation));
                 let zero = b.ins().iconst(I32, 0);
                 let mut signature = Signature::new(b.func.signature.call_conv);
@@ -357,7 +361,8 @@ pub(super) fn emit(
                     .collect();
                 actuals.extend(args.iter().map(|&r| b.use_var(var(r))));
                 for slice in forwarded {
-                    actuals.extend(buffers[slice.index()]);
+                    let len = b.use_var(var(slice.len));
+                    actuals.extend([b.use_var(var(slice.ptr)), b.ins().ireduce(I32, len)]);
                 }
                 let call = b.ins().call(imports[&Arc::as_ptr(function)], &actuals);
                 let status = b.inst_results(call)[0];
@@ -425,7 +430,6 @@ fn return_if(b: &mut FunctionBuilder, condition: Value, result: Value) {
 }
 
 fn element(b: &mut FunctionBuilder, [data, len]: [Value; 2], index: Value, ty: Type) -> Value {
-    let len = b.ins().uextend(I64, len);
     let invalid = b.ins().icmp(IntCC::UnsignedGreaterThanOrEqual, index, len);
     let bounds = trap(b, Trap::Bounds);
     return_if(b, invalid, bounds);

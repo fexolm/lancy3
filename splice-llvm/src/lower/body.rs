@@ -16,8 +16,8 @@ use inkwell::values::{
 use inkwell::{FloatPredicate, IntPredicate, module::Module};
 use splice_core::Trap;
 use splice_core::hir::{
-    Binary, Buffer, BufferKind, Constant, Label, PacketStore, PacketValue, Reg, RustCallPlan,
-    ScalarType, ValueType,
+    Binary, BufferKind, Constant, Label, PacketStore, PacketValue, Reg, RustCallPlan, ScalarType,
+    Slice as SliceValue, ValueType,
 };
 
 type Built<T> = Result<T, Error>;
@@ -74,7 +74,6 @@ pub(super) struct Body<'a, 'ctx> {
     function: FunctionValue<'ctx>,
     status: PointerValue<'ctx>,
     registers: Vec<(ValueType, PointerValue<'ctx>)>,
-    slices: Vec<Slice<'ctx>>,
     static_rust_slice_operands: bool,
     labels: Vec<Option<BasicBlock<'ctx>>>,
     exits: [Option<BasicBlock<'ctx>>; Failure::COUNT],
@@ -127,17 +126,11 @@ impl<'a, 'ctx> Body<'a, 'ctx> {
             .collect::<Built<Vec<_>>>()?;
         let mut params = function.get_param_iter();
         let status = params.next().unwrap().into_pointer_value();
-        for &(_, ptr) in &registers[..arity] {
+        // A buffer parameter is the slice of its two registers, which follow
+        // the scalars: the data pointer and the `Index` length.
+        for &(_, ptr) in &registers[..arity + 2 * kinds.len()] {
             builder.build_store(ptr, params.next().unwrap())?;
         }
-        let slices = kinds
-            .iter()
-            .map(|kind| Slice {
-                data: params.next().unwrap().into_pointer_value(),
-                len: params.next().unwrap().into_int_value(),
-                element: kind.element(),
-            })
-            .collect();
         Ok(Self {
             ctx,
             machine,
@@ -146,7 +139,6 @@ impl<'a, 'ctx> Body<'a, 'ctx> {
             function,
             status,
             registers,
-            slices,
             static_rust_slice_operands: false,
             labels: Vec::new(),
             exits: [None; Failure::COUNT],
@@ -293,8 +285,20 @@ impl<'a, 'ctx> Body<'a, 'ctx> {
         Ok(exit)
     }
 
-    fn element(&mut self, buffer: Buffer, index: Reg) -> Built<PointerValue<'ctx>> {
-        let slice = self.slices[buffer.0 as usize];
+    /// The pointer, length and element of slice `s`.
+    fn slice(&self, s: SliceValue) -> Built<Slice<'ctx>> {
+        let ValueType::Ptr(kind) = self.registers[s.ptr.0 as usize].0 else {
+            unreachable!("validated slice");
+        };
+        Ok(Slice {
+            data: self.value(s.ptr)?.into_pointer_value(),
+            len: self.load(s.len)?,
+            element: kind.element(),
+        })
+    }
+
+    fn element(&mut self, s: SliceValue, index: Reg) -> Built<PointerValue<'ctx>> {
+        let slice = self.slice(s)?;
         let ty = slice.element;
         let ty = simd::scalar_type(self.ctx, ty);
         self.checked_element(slice, ty, self.load(index)?)
@@ -593,17 +597,14 @@ impl<'a, 'ctx> Body<'a, 'ctx> {
         let result = self.binary(op, ty, self.value(a)?, self.value(b)?)?;
         self.store(dst, result)
     }
-    pub(super) fn length(&self, dst: Reg, buffer: Buffer) -> Built<()> {
-        self.store(dst, self.slices[buffer.index()].len)
-    }
-    pub(super) fn read_element(&mut self, dst: Reg, buffer: Buffer, index: Reg) -> Built<()> {
-        let ptr = self.element(buffer, index)?;
+    pub(super) fn read_element(&mut self, dst: Reg, s: SliceValue, index: Reg) -> Built<()> {
+        let ptr = self.element(s, index)?;
         let ty = simd::scalar_type(self.ctx, self.scalar_type(dst));
         let value = self.builder.build_load(ty, ptr, "")?;
         self.store(dst, value)
     }
-    pub(super) fn write_element(&mut self, buffer: Buffer, index: Reg, value: Reg) -> Built<()> {
-        let ptr = self.element(buffer, index)?;
+    pub(super) fn write_element(&mut self, s: SliceValue, index: Reg, value: Reg) -> Built<()> {
+        let ptr = self.element(s, index)?;
         self.builder.build_store(ptr, self.value(value)?)?;
         Ok(())
     }
@@ -626,7 +627,7 @@ impl<'a, 'ctx> Body<'a, 'ctx> {
         callee: FunctionValue<'ctx>,
         needs_status: bool,
         args: &[Reg],
-        buffers: &[Buffer],
+        buffers: &[SliceValue],
     ) -> Built<()> {
         let ir = self.builder;
         let mut actuals =
@@ -635,10 +636,9 @@ impl<'a, 'ctx> Body<'a, 'ctx> {
         for &r in args {
             actuals.push(self.value(r)?.into());
         }
-        for buffer in buffers {
-            let slice = self.slices[buffer.index()];
-            actuals.push(slice.data.into());
-            actuals.push(slice.len.into());
+        for &s in buffers {
+            actuals.push(self.value(s.ptr)?.into());
+            actuals.push(self.value(s.len)?.into());
         }
         let result = call(ir, callee, &actuals)?;
         if needs_status {
@@ -666,10 +666,10 @@ impl<'a, 'ctx> Body<'a, 'ctx> {
         for &PacketStore { at, value } in &plan.stores {
             let value: BasicValueEnum<'ctx> = match value {
                 PacketValue::Word(n) => self.word(args[n])?.into(),
-                PacketValue::Data(buffer) => self.slices[buffer.index()].data.into(),
-                PacketValue::Length(buffer) => self
+                PacketValue::Data(ptr) => self.value(ptr)?,
+                PacketValue::Length(len) => self
                     .builder
-                    .build_int_truncate(self.slices[buffer.index()].len, word, "")?
+                    .build_int_truncate(self.load(len)?, word, "")?
                     .into(),
                 PacketValue::Tag(tag) => word.const_int(u64::from(tag), false).into(),
                 PacketValue::Symbol(address) => wide.const_int(address as u64, false).into(),
@@ -686,9 +686,10 @@ impl<'a, 'ctx> Body<'a, 'ctx> {
             };
             self.builder.build_store(slot, value)?;
         }
-        let receiver = plan
-            .context
-            .map_or(packet, |context| self.slices[context.index()].data);
+        let receiver = match plan.context {
+            Some(context) => self.value(context.ptr)?.into_pointer_value(),
+            None => packet,
+        };
         let ty = wide.fn_type(
             &[pointer.into(), word.into(), pointer.into(), word.into()],
             false,

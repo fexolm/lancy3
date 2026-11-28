@@ -292,7 +292,7 @@ impl Lower<'_> {
             let (start, one) = (self.constant(emit!(0usize)), self.constant(emit!(1usize)));
             let setup = emit!(let buffer = #slice;
                 let (__splice_start, __splice_one) = (#start, #one);
-                let __splice_limit = __splice_builder.buffer_len(buffer)?;);
+                let __splice_limit = buffer.len;);
             let read = emit!(let #id = __splice_builder.load(buffer, #index)?;);
             return self.counted_loop(f, binding, element, &index, setup, read);
         };

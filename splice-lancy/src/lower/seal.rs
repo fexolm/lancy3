@@ -3,7 +3,7 @@ use super::{Builder, Exit};
 use lancy::hir::{Block, Function, Terminator, Value};
 use splice_core::hir::Reg;
 
-impl Builder<'_> {
+impl Builder {
     /// All predecessors are known now. Walk backwards through single-entry
     /// blocks, path-compressing live-through names. A merge gets a parameter
     /// immediately to break cycles, and its incoming operands join the worklist.

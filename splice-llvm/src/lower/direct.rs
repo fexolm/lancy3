@@ -17,7 +17,7 @@ use splice_core::{
     debug::{Location, Point, Slot, Variable},
     frontend::{Body as StagedBody, KernelBuilder, KernelSource, Signature, Specialization},
     hir::{
-        Binary, Buffer, Constant, ContextSlice, Intrinsic, Label, Reg, RustTarget, ScalarType,
+        Binary, Constant, ContextSlice, Intrinsic, Label, Reg, RustTarget, ScalarType, Slice,
         ValueType,
     },
 };
@@ -109,7 +109,8 @@ impl<'ctx> Graph<'_, 'ctx> {
             &builder,
             function,
             signature.params.len(),
-            signature.params.iter().map(|&ty| ValueType::Scalar(ty)),
+            (0..signature.registers())
+                .map(|r| signature.param_type(Reg(r as u32)).expect("a parameter")),
             signature.buffers,
         )
         .map_err(crate::error)?;
@@ -119,7 +120,8 @@ impl<'ctx> Graph<'_, 'ctx> {
             id,
             root,
             allocas: self.ctx.create_builder(),
-            kinds: signature.buffers,
+            arity: signature.params.len(),
+            buffers: signature.buffers.len(),
             open: true,
         };
         stage(&mut direct)?;
@@ -202,7 +204,8 @@ struct Direct<'a, 'ctx> {
     root: bool,
     native: Body<'a, 'ctx>,
     allocas: Builder<'ctx>,
-    kinds: &'a [splice_core::BufferKind],
+    arity: usize,
+    buffers: usize,
     /// Whether the insertion point is in a block that has no terminator yet.
     /// Operations after a terminator are unreachable and emit nothing.
     open: bool,
@@ -241,7 +244,7 @@ impl<'a, 'ctx> Direct<'a, 'ctx> {
         fallible: bool,
         result: ScalarType,
         args: &[Reg],
-        buffers: &[Buffer],
+        buffers: &[Slice],
     ) -> splice_core::Result<Reg> {
         self.result(result, |ir, d| {
             ir.call_function(d, callee, fallible, args, buffers)
@@ -283,7 +286,6 @@ impl KernelBuilder for Direct<'_, '_> {
         let slots: Vec<_> = point
             .slots(
                 |r| self.native.reg_type(r).expect("validated register"),
-                self.kinds,
                 self.graph.machine.vector_bytes,
             )
             .collect();
@@ -300,6 +302,13 @@ impl KernelBuilder for Direct<'_, '_> {
             .map_err(crate::error)?;
         points.push((point, slots));
         Ok(())
+    }
+    fn buffer(&self, index: usize) -> splice_core::Result<Slice> {
+        if index < self.buffers {
+            Ok(Slice::param(self.arity, index))
+        } else {
+            Err(splice_core::BuildError::verify("invalid buffer index"))
+        }
     }
     fn reg_type(&self, r: Reg) -> Option<ValueType> {
         self.native.reg_type(r)
@@ -336,14 +345,13 @@ impl KernelBuilder for Direct<'_, '_> {
     fn cast(&mut self, src: Reg, to: ScalarType) -> splice_core::Result<Reg> {
         self.result(to, |ir, d| ir.cast(d, src, to))
     }
-    fn buffer_len(&mut self, b: Buffer) -> splice_core::Result<Reg> {
-        self.result(ScalarType::Index, |ir, d| ir.length(d, b))
+    fn load(&mut self, b: Slice, index: Reg) -> splice_core::Result<Reg> {
+        let Some(ValueType::Ptr(kind)) = self.native.reg_type(b.ptr) else {
+            unreachable!("validated slice");
+        };
+        self.result(kind.element(), |ir, d| ir.read_element(d, b, index))
     }
-    fn load(&mut self, b: Buffer, index: Reg) -> splice_core::Result<Reg> {
-        let ty = self.kinds[b.index()].element();
-        self.result(ty, |ir, d| ir.read_element(d, b, index))
-    }
-    fn store(&mut self, b: Buffer, index: Reg, value: Reg) -> splice_core::Result<()> {
+    fn store(&mut self, b: Slice, index: Reg, value: Reg) -> splice_core::Result<()> {
         self.emit(|ir| ir.write_element(b, index, value))
     }
     fn binary(&mut self, op: Binary, a: Reg, b: Reg) -> splice_core::Result<Reg> {
@@ -392,7 +400,8 @@ impl KernelBuilder for Direct<'_, '_> {
         slices: &[ContextSlice],
         result: ScalarType,
     ) -> splice_core::Result<Reg> {
-        let plan = target.plan(self.kinds, args.len(), slices);
+        let native = &self.native;
+        let plan = target.plan(&|r| native.reg_type(r), args.len(), slices);
         self.result(result, |ir, dst| ir.rust_call(dst, plan, args))
     }
 
@@ -400,7 +409,7 @@ impl KernelBuilder for Direct<'_, '_> {
         &mut self,
         signature: Signature<'_>,
         args: &[Reg],
-        buffers: &[Buffer],
+        buffers: &[Slice],
         stage: StagedBody<'_>,
     ) -> splice_core::Result<Reg> {
         let (callee, fallible) = self.graph.function(signature, false, stage)?;
@@ -410,7 +419,7 @@ impl KernelBuilder for Direct<'_, '_> {
         &mut self,
         key: Specialization,
         args: &[Reg],
-        buffers: &[Buffer],
+        buffers: &[Slice],
         stage: StagedBody<'_>,
     ) -> splice_core::Result<Reg> {
         let result = key.signature().result;
@@ -430,7 +439,7 @@ impl KernelBuilder for Direct<'_, '_> {
         &mut self,
         function: &Arc<Function>,
         args: &[Reg],
-        buffers: &[Buffer],
+        buffers: &[Slice],
     ) -> splice_core::Result<Reg> {
         let key = Arc::as_ptr(function);
         let hit = self

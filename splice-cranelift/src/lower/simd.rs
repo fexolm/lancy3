@@ -13,8 +13,8 @@ use splice_core::Trap;
 use splice_core::{
     Function,
     hir::{
-        Buffer, Reg, ScalarType, Simd, SimdOp, ValueType,
-        memory::{self, Address, BeforeTrap, Masked, Slice},
+        Reg, ScalarType, Simd, SimdOp, Slice, ValueType,
+        memory::{self, Address, BeforeTrap, Masked, Region},
     },
 };
 use std::cell::Cell;
@@ -77,6 +77,7 @@ impl Registers {
                 ValueType::Scalar(ty) => (super::scalar_type(ty), 1),
                 ValueType::Vector(e) => (chunk_type(e), m.chunks()),
                 ValueType::Mask(e) => (chunk_type(e.index()), m.chunks()),
+                ValueType::Ptr(_) => (I64, 1),
             };
             vars.extend((0..count).map(|_| b.declare_var(ty)));
         }
@@ -141,20 +142,10 @@ pub(super) fn emit(
     vars: &Registers,
     dst: Option<Reg>,
     args: &[Reg],
-    buffers: &[[Value; 2]],
 ) {
     use SimdOp::*;
     if inst.op.may_trap() {
-        let Ok(result) = memory::lower(
-            &mut Slices {
-                b,
-                m,
-                vars,
-                buffers,
-            },
-            inst,
-            args,
-        );
+        let Ok(result) = memory::lower(&mut Slices { b, m, vars }, inst, args);
         define(b, vars, dst, result.map_or_else(Vec::new, |v| v.to_vec()));
         return;
     }
@@ -167,7 +158,8 @@ pub(super) fn emit(
     let results = match inst.op {
         AlignmentPrefix(buf) => {
             // Only the address modulo the vector width matters.
-            let base = b.ins().ireduce(I32, buffers[buf.index()][0]);
+            let base = b.use_var(vars.get(buf.ptr)[0]);
+            let base = b.ins().ireduce(I32, base);
             let offset = b.ins().ireduce(I32, inputs[0][0]);
             let scaled = b.ins().ishl_imm(offset, 2);
             let addr = b.ins().iadd(base, scaled);
@@ -764,21 +756,22 @@ struct Slices<'a, 'f> {
     b: &'a mut FunctionBuilder<'f>,
     m: Machine,
     vars: &'a Registers,
-    buffers: &'a [[Value; 2]],
 }
 
 type Lowered<T> = Result<T, std::convert::Infallible>;
 
 impl Slices<'_, '_> {
-    fn length(&mut self, buffer: Buffer) -> Value {
-        let len = self.buffers[buffer.index()][1];
-        self.b.ins().uextend(I64, len)
+    fn length(&mut self, slice: Slice) -> Value {
+        self.b.use_var(self.vars.get(slice.len)[0])
+    }
+    fn data(&mut self, slice: Slice) -> Value {
+        self.b.use_var(self.vars.get(slice.ptr)[0])
     }
     /// An access to the lanes at `at`.
-    fn access<'v>(&self, s: Slice, at: &'v Address<Value, Chunks>) -> Memory<'v> {
+    fn access<'v>(&mut self, s: Region, at: &'v Address<Value, Chunks>) -> Memory<'v> {
         Memory {
             m: self.m,
-            data: self.buffers[s.buffer.index()][0],
+            data: self.data(s.slice),
             element: s.element,
             address: match at {
                 Address::Offset(offset) => Lanes::Contiguous(*offset),
@@ -831,19 +824,19 @@ impl memory::Primitives for Slices<'_, '_> {
     }
     fn require_full(
         &mut self,
-        s: Slice,
+        s: Region,
         offset: Value,
         before_trap: BeforeTrap<'_, Self>,
     ) -> Lowered<()> {
         // offset() clamped the start, so this addition cannot wrap into the slice.
         let lanes = s.element.lanes(self.m.vector_bytes) as i64;
         let end = self.b.ins().iadd_imm(offset, lanes);
-        let len = self.length(s.buffer);
+        let len = self.length(s.slice);
         let outside = self.b.ins().icmp(IntCC::UnsignedGreaterThan, end, len);
         self.trap_if(outside, before_trap)
     }
-    fn room(&mut self, s: Slice, offset: Value) -> Lowered<Value> {
-        let len = self.length(s.buffer);
+    fn room(&mut self, s: Region, offset: Value) -> Lowered<Value> {
+        let len = self.length(s.slice);
         let end = self.b.ins().umax(offset, len);
         Ok(self.b.ins().isub(end, offset))
     }
@@ -862,9 +855,9 @@ impl memory::Primitives for Slices<'_, '_> {
             })
             .collect())
     }
-    fn outside(&mut self, s: Slice, indices: Chunks) -> Lowered<Chunks> {
+    fn outside(&mut self, s: Region, indices: Chunks) -> Lowered<Chunks> {
         let index = s.element.index();
-        let mut len = self.length(s.buffer);
+        let mut len = self.length(s.slice);
         // Compare narrow lanes against the length capped where it still fits
         // them: at the first negative index (unsigned, every negative index is
         // at least that), or at the largest unsigned index, where `memory`
@@ -889,8 +882,8 @@ impl memory::Primitives for Slices<'_, '_> {
             })
             .collect())
     }
-    fn length_at_most(&mut self, buffer: Buffer, n: u64) -> Lowered<Value> {
-        let len = self.length(buffer);
+    fn length_at_most(&mut self, slice: Slice, n: u64) -> Lowered<Value> {
+        let len = self.length(slice);
         let ins = self.b.ins();
         Ok(ins.icmp_imm(IntCC::UnsignedLessThanOrEqual, len, n as i64))
     }
@@ -968,7 +961,7 @@ impl memory::Primitives for Slices<'_, '_> {
     }
     fn load(
         &mut self,
-        s: Slice,
+        s: Region,
         at: Address<Value, Chunks>,
         masked: Option<Masked<Chunks>>,
     ) -> Lowered<Chunks> {
@@ -993,7 +986,7 @@ impl memory::Primitives for Slices<'_, '_> {
     }
     fn store(
         &mut self,
-        s: Slice,
+        s: Region,
         at: Address<Value, Chunks>,
         mask: Option<Chunks>,
         value: Chunks,
@@ -1009,13 +1002,13 @@ impl memory::Primitives for Slices<'_, '_> {
     }
     fn compress_store(
         &mut self,
-        s: Slice,
+        s: Region,
         offset: Value,
         mask: Chunks,
         value: Chunks,
         room: Value,
     ) -> Lowered<()> {
-        let data = self.buffers[s.buffer.index()][0];
+        let data = self.data(s.slice);
         let b = &mut self.b;
         let end = b.ins().iadd(offset, room);
         let mut cursor = offset;
