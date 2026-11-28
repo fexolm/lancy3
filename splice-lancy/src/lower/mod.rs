@@ -411,7 +411,8 @@ impl Builder {
     }
 
     /// The `i32` Lancy index of a `usize` slice index or offset, with the
-    /// same bounds check: every slice length fits `i32`, so an `Index` past
+    /// same bounds check: every slice length fits `i32` (the interface
+    /// rejects longer slices, see `with_longest_slice`), so an `Index` past
     /// `i32::MAX` clamps to it. An `Index` that sign-extends an `i32` is out
     /// of bounds exactly when the `i32` is negative or too large.
     fn index32(&mut self, index: Value) -> Value {
@@ -1159,7 +1160,6 @@ impl KernelBuilder for Builder {
                 }
                 PacketValue::Length(len) => {
                     let len = self.read(len);
-                    let len = self.index32(len);
                     store(self, at, len);
                 }
                 PacketValue::Tag(tag) => {

@@ -598,9 +598,16 @@ impl<'ctx> Body<'_, 'ctx> {
                 // Valid slice indices fit in a signed i32. Keep 32-bit VSIB
                 // offsets for x86 gather/scatter. A disabled negative GEP is
                 // never dereferenced.
+                // A `u32` index can pass `i32::MAX` in a longer slice:
+                // GEP sign-extends, so it takes 64-bit offsets.
+                let offset_type = if s.element.index() == ScalarType::U32 {
+                    self.ctx.i64_type()
+                } else {
+                    self.index_type(s.element)
+                };
                 let offsets = ir.build_int_z_extend_or_bit_cast(
                     indices,
-                    self.index_type(s.element).vec_type(self.lanes(s.element)),
+                    offset_type.vec_type(self.lanes(s.element)),
                     "offsets",
                 )?;
                 // Inkwell's build_gep accepts scalar indices. LLVM GEP also
@@ -612,9 +619,9 @@ impl<'ctx> Body<'_, 'ctx> {
                 // SAFETY: the positioned builder, scalar pointer, vector index
                 // and element type share a context. LLVM consumes this
                 // one-index array during the call. GEP sign-extends the
-                // 32-bit offsets; an active lane's index is below the slice
-                // length, which `validate_buffers` bounds by `i32::MAX`, so
-                // the extended offset is the index itself.
+                // 32-bit offsets of signed indices (and of narrow unsigned
+                // ones, zero-extended above): an active lane's index is
+                // nonnegative, so the extended offset is the index itself.
                 unsafe {
                     VectorValue::new(LLVMBuildGEP2(
                         ir.as_mut_ptr(),
@@ -690,7 +697,7 @@ impl<'ctx> memory::Primitives for Body<'_, 'ctx> {
         offset: Self::Scalar,
         before_trap: BeforeTrap<'_, Self>,
     ) -> Built<()> {
-        // `offset` is clamped to i32::MAX, so the end does not wrap.
+        // `offset` is clamped to i64::MAX, so the end does not wrap.
         let lanes = self
             .ctx
             .i64_type()
@@ -703,16 +710,25 @@ impl<'ctx> memory::Primitives for Body<'_, 'ctx> {
         self.trap_if(outside, before_trap)
     }
     fn room(&mut self, s: Region, offset: Self::Scalar) -> Built<Self::Scalar> {
-        // Slice lengths fit i32; the subtraction is guarded for an invalid offset.
+        // The subtraction is guarded for an invalid offset; only a room
+        // below the lanes matters, so it is capped to fit `i32`.
         let ir = self.builder;
         let len = self.slice(s.slice)?.len;
+        let wide = self.ctx.i64_type();
         let room = ir
             .build_select(
                 ir.build_int_compare(IntPredicate::ULT, offset, len, "")?,
                 ir.build_int_sub(len, offset, "")?,
-                self.ctx.i64_type().const_zero(),
+                wide.const_zero(),
                 "remaining",
             )?
+            .into_int_value();
+        let umin = self.intrinsic("llvm.umin", &[wide.into()])?;
+        let cap = wide.const_int(i32::MAX as u64, false);
+        let room = ir
+            .build_call(umin, &[room.into(), cap.into()], "")?
+            .try_as_basic_value()
+            .unwrap_basic()
             .into_int_value();
         Ok(ir.build_int_truncate(room, self.ctx.i32_type(), "")?)
     }
@@ -731,13 +747,32 @@ impl<'ctx> memory::Primitives for Body<'_, 'ctx> {
         let ty = self.index_type(s.element);
         let lanes = self.lanes(s.element);
         // Widen narrow indices with their sign: a negative index becomes
-        // larger than every length (validation caps lengths at `i32::MAX`).
-        let offsets = if s.element.index().is_signed() {
+        // at least `2^31` as unsigned. A 32-bit comparison takes the length
+        // capped where it still decides every lane: at the first negative
+        // index, or at the largest unsigned one, where `memory` ignores the
+        // result for a longer slice.
+        let index = s.element.index();
+        let offsets = if index.is_signed() {
             ir.build_int_s_extend_or_bit_cast(indices, ty.vec_type(lanes), "")?
         } else {
             ir.build_int_z_extend_or_bit_cast(indices, ty.vec_type(lanes), "")?
         };
-        let len = ir.build_int_truncate_or_bit_cast(self.slice(s.slice)?.len, ty, "length")?;
+        let mut len = self.slice(s.slice)?.len;
+        if ty.get_bit_width() == 32 {
+            let wide = self.ctx.i64_type();
+            let cap = if index.is_signed() {
+                1 << 31
+            } else {
+                u64::from(u32::MAX)
+            };
+            let umin = self.intrinsic("llvm.umin", &[wide.into()])?;
+            len = ir
+                .build_call(umin, &[len.into(), wide.const_int(cap, false).into()], "")?
+                .try_as_basic_value()
+                .unwrap_basic()
+                .into_int_value();
+        }
+        let len = ir.build_int_truncate_or_bit_cast(len, ty, "length")?;
         Ok(ir.build_int_compare(
             IntPredicate::UGE,
             offsets,

@@ -3,10 +3,7 @@ use crate::lower;
 use cranelift_codegen::{
     Context,
     inline::{Inline, InlineCommand},
-    ir::{
-        self, AbiParam, FuncRef, InstructionData, UserFuncName, Value,
-        types::{I32, I64},
-    },
+    ir::{self, AbiParam, FuncRef, InstructionData, UserFuncName, Value, types::I64},
 };
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
 use cranelift_jit::JITModule;
@@ -51,7 +48,7 @@ fn declare(
                 .map(|&ty| AbiParam::new(lower::scalar_type(ty))),
         );
         for _ in f.buffer_kinds() {
-            sig.params.extend([AbiParam::new(I64), AbiParam::new(I32)]);
+            sig.params.extend([AbiParam::new(I64), AbiParam::new(I64)]);
         }
     }
     sig.returns.push(AbiParam::new(I64));

@@ -507,7 +507,8 @@ fn lowered_call_graphs_retain_slice_contracts_for_out_of_line_calls() {
         .unwrap();
         crate::LancyKernel {
             code: splice_jit::Publish::new(false).finish(false, code).unwrap(),
-            interface: splice_core::call::Interface::new(ir.signature()),
+            interface: splice_core::call::Interface::new(ir.signature())
+                .with_longest_slice(i32::MAX as usize),
         }
     }
     for guard in [false, true] {

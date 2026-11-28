@@ -229,10 +229,10 @@ pub fn lower<P: Primitives>(
                 None => outside,
             };
             let mut fail = p.any(bad)?;
-            // Narrow unsigned indices cannot leave a longer slice; narrow
-            // signed ones still can, by being negative.
+            // Unsigned indices of at most 32 bits cannot leave a longer
+            // slice; signed ones still can, by being negative.
             let index = e.index();
-            if !index.is_signed() && index.bits() < 32 {
+            if !index.is_signed() && index.bits() <= 32 {
                 let largest = u64::MAX >> (64 - index.bits());
                 let short = p.length_at_most(memory.slice, largest)?;
                 fail = p.and(fail, short)?;

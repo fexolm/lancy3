@@ -107,11 +107,11 @@ impl Registers {
     }
 }
 
-/// A contiguous access start. Every slice length fits `i32`, so clamping
-/// keeps an out-of-range start out of range and lets `start + lanes`
-/// not wrap.
+/// A contiguous access start. Every slice length is below `i64::MAX` (a
+/// Rust slice spans at most `isize::MAX` bytes), so clamping keeps an
+/// out-of-range start out of range and lets `start + lanes` not wrap.
 fn offset(b: &mut FunctionBuilder, start: Value) -> Value {
-    let limit = b.ins().iconst(I64, i64::from(i32::MAX));
+    let limit = b.ins().iconst(I64, i64::MAX);
     b.ins().umin(start, limit)
 }
 
@@ -858,11 +858,11 @@ impl memory::Primitives for Slices<'_, '_> {
     fn outside(&mut self, s: Region, indices: Chunks) -> Lowered<Chunks> {
         let index = s.element.index();
         let mut len = self.length(s.slice);
-        // Compare narrow lanes against the length capped where it still fits
-        // them: at the first negative index (unsigned, every negative index is
-        // at least that), or at the largest unsigned index, where `memory`
-        // ignores the result for a longer slice.
-        if index.bits() < 32 {
+        // Compare lanes of at most 32 bits against the length capped where
+        // it still fits them: at the first negative index (unsigned, every
+        // negative index is at least that), or at the largest unsigned
+        // index, where `memory` ignores the result for a longer slice.
+        if index.bits() <= 32 {
             let cap = if index.is_signed() {
                 1i64 << (index.bits() - 1)
             } else {
