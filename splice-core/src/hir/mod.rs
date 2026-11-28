@@ -3,6 +3,8 @@
 //! registers. Mutable locals and temporary results share the same index space.
 
 mod buffer;
+mod intrinsic;
+pub use intrinsic::{Intrinsic, MathOp};
 mod builder;
 pub mod memory;
 mod replay;
@@ -20,7 +22,6 @@ pub use builder::FunctionBuilder;
 pub use replay::replay;
 pub use rust_call::{PacketStore, PacketValue, RustCallPlan, RustTarget};
 
-use crate::intrinsic::IntrinsicId;
 use std::collections::HashSet;
 use std::sync::Arc;
 
@@ -115,9 +116,10 @@ impl Binary {
 #[derive(Clone, Debug)]
 pub enum Instr {
     Debug(crate::debug::Point),
-    Simd {
+    /// Apply a typed intrinsic to its runtime operands.
+    CallIntrinsic {
         dst: Option<Reg>,
-        inst: Simd,
+        intrinsic: Intrinsic,
         args: Vec<Reg>,
     },
     Const(Reg, Constant),
@@ -165,13 +167,6 @@ pub enum Instr {
         args: Vec<Reg>,
         buffers: Vec<Buffer>,
     },
-    /// Call the intrinsic `id` on `args`; `dst` has its result type. The
-    /// backend that compiles the function implements it or fails the build.
-    Intrinsic {
-        dst: Reg,
-        id: IntrinsicId,
-        args: Vec<Reg>,
-    },
 }
 
 impl Instr {
@@ -182,14 +177,17 @@ impl Instr {
                 true
             }
             Self::Call { function, .. } => function.needs_status(),
-            Self::Simd { inst, .. } => inst.op.may_trap(),
+            Self::CallIntrinsic {
+                intrinsic: Intrinsic::Simd(inst),
+                ..
+            } => inst.op.may_trap(),
             _ => false,
         }
     }
 
     fn written(&self) -> Option<Reg> {
         match self {
-            Self::Simd { dst, .. } => *dst,
+            Self::CallIntrinsic { dst, .. } => *dst,
             Self::Const(dst, _)
             | Self::Cast { dst, .. }
             | Self::Copy(dst, _)
@@ -197,7 +195,6 @@ impl Instr {
             | Self::BufferLen { dst, .. }
             | Self::Load { dst, .. }
             | Self::Call { dst, .. }
-            | Self::Intrinsic { dst, .. }
             | Self::RustCall { dst, .. } => Some(*dst),
             _ => None,
         }

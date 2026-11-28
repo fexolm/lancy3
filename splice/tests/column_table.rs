@@ -3,7 +3,7 @@ use splice::hir::{Constant, Instr, SimdOp};
 use splice::lancy::Lancy;
 use splice::{
     BufferArg, BufferKind, Codegen, Executable, TypedKernel, kernel,
-    simd::{Element, Lane},
+    std::intrinsics::simd::{Element, Lane},
 };
 
 /// Whether staging left a call to the kernel function `name`.
@@ -63,7 +63,7 @@ fn query(
 
 #[kernel(print)]
 fn any_ge_float(col: &[f32], #[comptime] val: f32) -> i32 {
-    let width = Lane::<f32>::lanes() as i32;
+    let width = Lane::<f32>::element_width() as i32;
     let mut row = 0;
     let end = col.len() as i32;
     while row < end {

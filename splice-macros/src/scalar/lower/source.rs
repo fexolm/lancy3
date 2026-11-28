@@ -229,10 +229,24 @@ impl Lower<'_> {
                     return self.source_syntax(e);
                 };
                 if crate::scalar::methods::method_path(p) {
-                    return self.source_syntax(e);
-                }
-                if super::simd::constructor_arity(&p.path).is_some() {
-                    return self.source_syntax(e);
+                    let syntax = self.source_syntax(e)?;
+                    if super::simd::simd_path(p)
+                        && !self.local_owner(p)
+                        && p.qself.is_none()
+                        && p.path.segments.len() == 2
+                    {
+                        let head = &p.path.segments.first().unwrap().ident;
+                        if head == "Lane" || head == "Mask" {
+                            let owner = super::simd::owner_path(p).unwrap();
+                            let qualified = emit!(
+                                ::std::format!("{}::std::intrinsics::{}", ::core::stringify!(#root), #syntax)
+                            );
+                            return Ok(super::calls::select_builtin(
+                                root, &owner, "simd", qualified, syntax,
+                            ));
+                        }
+                    }
+                    return Ok(syntax);
                 }
                 if !call.args.iter().all(|arg| self.body.known(arg)) {
                     let mut path = p.path.clone();

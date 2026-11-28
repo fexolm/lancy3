@@ -173,7 +173,6 @@ impl Slot {
                     ValueType::Scalar(ty) => Store::Scalar(reg, ty),
                     ValueType::Vector(_) => Store::Vector(reg),
                     ValueType::Mask(element) => Store::Mask(reg, element),
-                    ValueType::Opaque(_) => unreachable!("`Point::slots` skips opaque values"),
                 },
                 None,
             ),
@@ -208,8 +207,6 @@ impl Point {
                         ValueType::Scalar(ty) => Type::Scalar(ty),
                         ValueType::Vector(element) => vector(element),
                         ValueType::Mask(element) => vector(element.index()),
-                        // The debugger does not show an opaque value.
-                        ValueType::Opaque(_) => return None,
                     },
                     Value::Slice(buffer) => Type::Slice(buffers[buffer.index()].element()),
                     Value::Constant(_) => return None,

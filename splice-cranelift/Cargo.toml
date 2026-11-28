@@ -21,5 +21,8 @@ cranelift-module = "0.132"
 cranelift-jit = "0.132"
 cranelift-native = "0.132"
 
+[dev-dependencies]
+splice = { package = "splice-kernel", path = "../splice", default-features = false }
+
 [lints]
 workspace = true

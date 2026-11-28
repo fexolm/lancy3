@@ -1,5 +1,5 @@
 //! Summed-area tables for local mean and variance on a grayscale image.
-use splice::{kernel, simd::Lane};
+use splice::{kernel, std::intrinsics::simd::Lane};
 
 /// Write two row-major planes, one for intensity and one for squared intensity.
 /// The rectangle for an output pixel includes that pixel. Sums wrap modulo 2^32.
@@ -12,7 +12,7 @@ pub(crate) fn integral_moments(width: i32, height: i32, pixels: &[i32], out: &mu
         return -1;
     }
     let plane = width * height;
-    let lanes = Lane::<i32>::lanes() as i32;
+    let lanes = Lane::<i32>::element_width() as i32;
     let zero = Lane::<i32>::splat(0);
     for y in 0..height {
         let row = y * width;

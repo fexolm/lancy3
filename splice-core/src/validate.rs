@@ -2,11 +2,11 @@
 //! receives was checked here first, on the direct build path and when a
 //! portable function is verified (which replays it through this check).
 use crate::frontend::{Body, KernelBuilder, KernelSource, Signature, Specialization};
+use crate::hir::Intrinsic;
 use crate::hir::{
     Binary, Buffer, BufferKind, Constant, ContextSlice, Function, Label, Reg, RustTarget,
-    ScalarType, Simd, ValueType,
+    ScalarType, ValueType,
 };
-use crate::intrinsic::IntrinsicId;
 use crate::{BuildError, Result};
 use std::cell::RefCell;
 use std::collections::{HashSet, VecDeque};
@@ -375,16 +375,16 @@ impl KernelBuilder for Validating<'_> {
         let r = self.inner.local(ty)?;
         Ok(self.allocated(r, ty))
     }
-    fn simd(&mut self, inst: Simd, args: &[Reg]) -> Result<Option<Reg>> {
+    fn call_intrinsic(&mut self, inst: Intrinsic, args: &[Reg]) -> Result<Option<Reg>> {
         let types = self.types(args)?;
         self.at(inst.validate(&types, self.kinds))?;
-        let dst = self.inner.simd(inst, args)?;
+        let dst = self.inner.call_intrinsic(inst, args)?;
         match (dst, inst.output()) {
             (Some(dst), Some(ty)) => {
                 self.value(args, dst, ty);
             }
             (None, None) => self.record(args, None),
-            _ => return Err(self.error("invalid SIMD result type")),
+            _ => return Err(self.error("invalid intrinsic result type")),
         }
         Ok(dst)
     }
@@ -499,16 +499,6 @@ impl KernelBuilder for Validating<'_> {
         let r = self.inner.rust_call(target, args, slices, result)?;
         Ok(self.value(args, r, ValueType::Scalar(result)))
     }
-    fn intrinsic(&mut self, id: &IntrinsicId, args: &[Reg]) -> Result<Reg> {
-        let types = self.types(args)?;
-        if types != id.params {
-            return Err(self.error(format!(
-                "intrinsic {id} takes operands of its parameter types, got {types:?}"
-            )));
-        }
-        let r = self.inner.intrinsic(id, args)?;
-        Ok(self.value(args, r, id.result))
-    }
     fn call_kernel(
         &mut self,
         signature: Signature<'_>,
@@ -621,7 +611,7 @@ impl KernelBuilder for Sink {
     fn local(&mut self, _: ValueType) -> Result<Reg> {
         self.next()
     }
-    fn simd(&mut self, inst: Simd, _: &[Reg]) -> Result<Option<Reg>> {
+    fn call_intrinsic(&mut self, inst: Intrinsic, _: &[Reg]) -> Result<Option<Reg>> {
         inst.output().map(|_| self.next()).transpose()
     }
     fn constant(&mut self, _: Constant) -> Result<Reg> {
@@ -685,9 +675,6 @@ impl KernelBuilder for Sink {
         self.next()
     }
     fn call_function(&mut self, _: &Arc<Function>, _: &[Reg], _: &[Buffer]) -> Result<Reg> {
-        self.next()
-    }
-    fn intrinsic(&mut self, _: &IntrinsicId, _: &[Reg]) -> Result<Reg> {
         self.next()
     }
 }

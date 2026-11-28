@@ -107,8 +107,7 @@ pub(super) fn generate(
         ReturnType::Default => syn::parse_quote!(()),
     };
     elision.visit_result(&mut result_ty);
-    let api =
-        crate::api::PublicApi::new(root, vis, &sig.generics, &elision.generics, &host, &runtime);
+    let api = crate::api::PublicApi::new(vis, &sig.generics, &elision.generics, &host, &runtime);
     let api_items = &api.items;
     let (_, host_args, _) = api.host.split_for_impl();
     let build_type = emit!(BuildArgs #host_args);

@@ -71,9 +71,6 @@ impl Registers {
                 ValueType::Scalar(ty) => (super::scalar_type(ty), 1),
                 ValueType::Vector(e) => (chunk_type(e), m.chunks()),
                 ValueType::Mask(e) => (chunk_type(e.index()), m.chunks()),
-                ValueType::Opaque(_) => {
-                    unreachable!("intrinsic::check rejects opaque values before lowering")
-                }
             };
             vars.extend((0..count).map(|_| b.declare_var(ty)));
         }
@@ -213,7 +210,8 @@ pub(super) fn emit(
             let sources: Vec<_> = inputs.iter().flatten().copied().collect();
             convert_width(b, m, element, to, &sources, 0)
         }
-        Lanes => vec![b.ins().iconst(I64, element.lanes(m.vector_bytes) as i64)],
+        ByteWidth => vec![b.ins().iconst(I64, m.vector_bytes as i64)],
+        ElementWidth => vec![b.ins().iconst(I64, element.lanes(m.vector_bytes) as i64)],
         FirstN => {
             // Clamp the full unsigned index before narrowing it to a mask lane.
             let width = b.ins().iconst(I64, element.lanes(m.vector_bytes) as i64);
@@ -566,13 +564,23 @@ fn packed(b: &mut FunctionBuilder, inst: Simd, inputs: &[Vec<Value>], part: usiz
             };
             b.ins().icmp(cc, arg(0), arg(1))
         }
-        Select => {
-            let mask = if float {
-                b.ins().bitcast(ty, MemFlags::new(), arg(0))
+        AddMasked | Select => {
+            let (mask, yes, no) = if op == AddMasked {
+                let sum = if float {
+                    b.ins().fadd(arg(0), arg(2))
+                } else {
+                    b.ins().iadd(arg(0), arg(2))
+                };
+                (arg(1), sum, arg(3))
             } else {
-                arg(0)
+                (arg(0), arg(1), arg(2))
             };
-            b.ins().bitselect(mask, arg(1), arg(2))
+            let mask = if float {
+                b.ins().bitcast(ty, MemFlags::new(), mask)
+            } else {
+                mask
+            };
+            b.ins().bitselect(mask, yes, no)
         }
         _ => unreachable!("memory and scalar results are emitted for the whole vector"),
     }

@@ -1,14 +1,14 @@
 use super::{Llvm, build_module, jit, lower, target};
 use inkwell::{context::Context, targets::FileType};
-use splice_core::{Codegen, Target, kernel, simd::Lane};
+use splice::{Codegen, Target, kernel, std::intrinsics::simd::Lane};
 
-#[kernel(crate = splice_core)]
+#[kernel]
 fn xor_three(a: &[i32], b: &[i32], c: &[i32], out: &mut [i32]) -> i32 {
     let x = Lane::load(a, 0);
     let y = Lane::load(b, 0);
     let z = Lane::load(c, 0);
     (x ^ y ^ z).store(out, 0);
-    Lane::<i32>::lanes() as i32
+    Lane::<i32>::element_width() as i32
 }
 
 #[test]
@@ -46,7 +46,7 @@ fn emits_aarch64_simd_and_preserves_the_logical_width() {
         assert!(!assembly.contains("eor3\tz"), "{assembly}");
     }
 
-    let n = splice_core::simd::lanes::<i32>();
+    let n = splice::Target::host().unwrap().vector_bytes() / size_of::<i32>();
     // Leave enough space for a whole architectural SVE register so the
     // canary detects a full-register store at a VL above the logical width.
     let a: Vec<_> = (0..64).collect();

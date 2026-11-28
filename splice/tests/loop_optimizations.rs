@@ -1,4 +1,4 @@
-use splice::simd::Lane;
+use splice::std::intrinsics::simd::Lane;
 use splice::{Codegen, Executable, kernel};
 
 #[kernel]
@@ -142,7 +142,7 @@ fn vector_store_reload(src: &[u16], dst: &mut [u16]) -> i32 {
 #[test]
 fn vector_store_reload_preserves_the_short_store_prefix() {
     fn check<B: Codegen<Output: Executable>>() {
-        let lanes = splice::simd::lanes::<u16>();
+        let lanes = splice::Target::host().unwrap().vector_bytes() / size_of::<u16>();
         let src: Vec<_> = (0..lanes).map(|i| 65534 - i as u16).collect();
         for code in [
             vector_store_reload::build::<B>(vector_store_reload::BuildArgs {}).unwrap(),
@@ -185,7 +185,7 @@ fn packet_passes(
             return -1;
         }
     }
-    let lanes = Lane::<u16>::lanes() as i32;
+    let lanes = Lane::<u16>::element_width() as i32;
     let mut i = 0;
     while n - i >= lanes {
         let x = Lane::<u16>::load(src, i as usize);
@@ -206,7 +206,7 @@ fn packet_passes(
 #[test]
 fn packet_loops_preserve_tail_and_partial_store_semantics() {
     fn check<B: Codegen<Output: Executable>>() {
-        let lanes = splice::simd::lanes::<u16>();
+        let lanes = splice::Target::host().unwrap().vector_bytes() / size_of::<u16>();
         let n = 2 * lanes + 3;
         let src: Vec<_> = (0..n).map(|i| u16::MAX - i as u16).collect();
         for guarded in [true, false] {

@@ -54,9 +54,6 @@ pub(super) fn llvm_type(ctx: &Context, bytes: usize, ty: ValueType) -> BasicType
         ValueType::Scalar(ty) => scalar_type(ctx, ty),
         ValueType::Vector(e) => vector_type(ctx, bytes, e).into(),
         ValueType::Mask(e) => ctx.bool_type().vec_type(e.lanes(bytes) as u32).into(),
-        // `intrinsic::check` rejects a portable function with an opaque
-        // value, and direct staging rejects the intrinsic that would make one.
-        ValueType::Opaque(_) => unreachable!("no backend represents an opaque value"),
     }
 }
 
@@ -161,7 +158,12 @@ impl<'ctx> Body<'_, 'ctx> {
         let arg = |n: usize| self.vector(args[n]);
         let float = e.is_float();
         let value: BasicValueEnum<'ctx> = match inst.op {
-            Lanes => self
+            ByteWidth => self
+                .ctx
+                .i64_type()
+                .const_int(self.machine.vector_bytes as u64, false)
+                .into(),
+            ElementWidth => self
                 .ctx
                 .i64_type()
                 .const_int(e.lanes(self.machine.vector_bytes) as u64, false)
@@ -429,6 +431,14 @@ impl<'ctx> Body<'_, 'ctx> {
             Or | MaskOr => ir.build_or(arg(0)?, arg(1)?, "")?.into(),
             Xor | MaskXor => ir.build_xor(arg(0)?, arg(1)?, "")?.into(),
             Not | MaskNot => ir.build_not(arg(0)?, "")?.into(),
+            AddMasked => {
+                let sum = if float {
+                    ir.build_float_add(arg(0)?, arg(2)?, "")?
+                } else {
+                    ir.build_int_add(arg(0)?, arg(2)?, "")?
+                };
+                ir.build_select(arg(1)?, sum, arg(3)?, "")?
+            }
             Select => ir.build_select(arg(0)?, arg(1)?, arg(2)?, "")?,
             Shuffle(order) => {
                 let mask: Vec<_> = (0..e.lanes(self.machine.vector_bytes))

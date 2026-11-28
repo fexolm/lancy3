@@ -1,7 +1,7 @@
 use splice::lancy::Lancy;
 use splice::{
     BufferArg, BufferKind, Executable, kernel,
-    simd::{Element, Lane, LaneElement},
+    std::intrinsics::simd::{Element, Lane, LaneElement},
 };
 
 #[derive(Clone, Copy)]

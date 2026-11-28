@@ -14,13 +14,6 @@ pub struct Lancy;
 impl Backend for Lancy {
     type Output = LancyKernel;
 
-    fn supports_intrinsic(
-        id: &splice_core::intrinsic::IntrinsicId,
-        _target: &splice_core::Target,
-    ) -> bool {
-        lower::native_intrinsic(id).is_some()
-    }
-
     fn stage(
         signature: Signature<'_>,
         body: Body<'_>,

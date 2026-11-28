@@ -434,9 +434,9 @@ fn checked_nested_call_preserves_writes_before_failure() {
 #[test]
 fn lowered_call_graphs_retain_slice_contracts_for_out_of_line_calls() {
     use lancy::{Inlining, Kernel};
-    use splice_core::{BufferArg, Executable, kernel};
+    use splice::{BufferArg, Executable, kernel};
 
-    #[kernel(crate = splice_core)]
+    #[kernel]
     fn read_first(#[comptime] guard: bool, n: i32, xs: &[i32]) -> i32 {
         if guard && xs.is_empty() {
             return -1;
@@ -449,11 +449,11 @@ fn lowered_call_graphs_retain_slice_contracts_for_out_of_line_calls() {
         }
         sum
     }
-    #[kernel(crate = splice_core)]
+    #[kernel]
     fn reader(#[comptime] guard: bool, n: i32, xs: &[i32]) -> i32 {
         read_first(guard, n, xs)
     }
-    #[kernel(crate = splice_core)]
+    #[kernel]
     fn write_first(n: i32, xs: &mut [i32]) -> i32 {
         let mut sum = 0;
         let mut i = 0;
@@ -464,7 +464,7 @@ fn lowered_call_graphs_retain_slice_contracts_for_out_of_line_calls() {
         }
         sum
     }
-    #[kernel(crate = splice_core)]
+    #[kernel]
     fn writer(n: i32, xs: &mut [i32]) -> i32 {
         write_first(n, xs)
     }

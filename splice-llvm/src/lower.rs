@@ -1,7 +1,6 @@
 //! Lower Splice kernels using Inkwell's typed builder.
 mod body;
 mod direct;
-pub(crate) use body::native as native_intrinsic;
 pub(crate) use direct::{Staged, populate, populate_function};
 
 use inkwell::AddressSpace;

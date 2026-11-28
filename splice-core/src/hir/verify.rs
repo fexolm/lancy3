@@ -19,7 +19,8 @@ impl Function {
 #[cfg(test)]
 mod tests {
     use super::super::{
-        Binary, Buffer, BufferKind, Constant, Label, Reg, ScalarType, Simd, SimdOp, ValueType,
+        Binary, Buffer, BufferKind, Constant, Intrinsic, Label, Reg, ScalarType, Simd, SimdOp,
+        ValueType,
     };
     use super::*;
     use crate::debug::{Location, Point, Value, Variable};
@@ -199,12 +200,12 @@ mod tests {
                 vec![],
                 vec![vector],
                 vec![
-                    Instr::Simd {
+                    Instr::CallIntrinsic {
                         dst: Some(R1),
-                        inst: Simd {
+                        intrinsic: Intrinsic::Simd(Simd {
                             element: Element::I32,
-                            op: SimdOp::Lanes,
-                        },
+                            op: SimdOp::ElementWidth,
+                        }),
                         args: vec![],
                     },
                     Instr::Return(R0),

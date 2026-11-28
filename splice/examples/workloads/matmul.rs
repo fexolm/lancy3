@@ -1,6 +1,6 @@
 //! Cache-blocked row-major i32 matrix multiplication.
 //! Each lane accumulates one output column across the current depth panel.
-use splice::{kernel, simd::Lane};
+use splice::{kernel, std::intrinsics::simd::Lane};
 
 #[kernel]
 #[allow(clippy::too_many_arguments)]
@@ -70,7 +70,7 @@ pub fn matmul(rows: i32, inner: i32, cols: i32, a: &[i32], b: &[i32], out: &mut 
         return elements;
     }
 
-    let width = Lane::<i32>::lanes() as i32;
+    let width = Lane::<i32>::element_width() as i32;
     let mut row_start = 0;
     while row_start < rows {
         let row_end = row_start + (rows - row_start).min(16);

@@ -14,11 +14,9 @@ use splice_core::{
     BufferKind,
     frontend::{Body, KernelBuilder, KernelSource, Signature, Specialization},
     hir::{
-        Binary, Buffer, Constant, ContextSlice, Label, PacketStore, PacketValue, Reg, RustTarget,
-        ScalarType, Simd, ValueType,
+        Binary, Buffer, Constant, ContextSlice, Intrinsic, Label, MathOp, PacketStore, PacketValue,
+        Reg, RustTarget, ScalarType, ValueType,
     },
-    intrinsic::IntrinsicId,
-    math::MathOp,
 };
 use std::{
     collections::{HashMap, HashSet},
@@ -71,12 +69,6 @@ fn binary(op: Binary) -> hir::Binary {
         Binary::Min => H::Min,
         Binary::Max => H::Max,
     }
-}
-
-/// The [`splice_core::Math`] operation `id` is, if Lancy implements `id`:
-/// Lancy implements every intrinsic Splice declares, on every target.
-pub(crate) fn native_intrinsic(id: &IntrinsicId) -> Option<(MathOp, ScalarType)> {
-    splice_core::math::decode(id)
 }
 
 /// A source point of a debug build: the function it belongs to and, after
@@ -329,6 +321,42 @@ enum Narrow {
 }
 
 impl Builder<'_> {
+    fn math(&mut self, op: MathOp, ty: ScalarType, args: &[Reg]) -> splice_core::Result<Reg> {
+        let dst = self.local(ValueType::Scalar(op.result(ty)))?;
+        if !self.reachable() {
+            return Ok(dst);
+        }
+        let value = self.read(args[0]);
+        let result = match op {
+            MathOp::RotateLeft => {
+                // Lancy rotates by an operand of the value's type, modulo
+                // the width, as Rust's `rotate_left` does.
+                let count = self.read(args[1]);
+                let count = if ty == ScalarType::U32 {
+                    count
+                } else {
+                    self.value(Op::Cast(scalar_type(ty), count))
+                };
+                self.value(Op::Bin(hir::Binary::RotateLeft, value, count))
+            }
+            MathOp::CountOnes | MathOp::LeadingZeros | MathOp::TrailingZeros => {
+                let unary = match op {
+                    MathOp::CountOnes => hir::Unary::Popcnt,
+                    MathOp::LeadingZeros => hir::Unary::LeadingZeros,
+                    _ => hir::Unary::TrailingZeros,
+                };
+                let count = self.value(Op::Unary(unary, value));
+                // The count of a 64-bit operand fits its low bits.
+                if ty == ScalarType::U32 {
+                    count
+                } else {
+                    self.value(Op::Cast(hir::Type::U32, count))
+                }
+            }
+        };
+        self.bind(dst, result);
+        Ok(dst)
+    }
     fn slice(&self, buffer: Buffer) -> (Value, Value) {
         let first = self.arity + 2 * buffer.index();
         let params = self.graph.params(self.graph.entry());
@@ -778,11 +806,20 @@ impl KernelBuilder for Builder<'_> {
         self.types.push(ty);
         Ok(r)
     }
-    fn simd(&mut self, inst: Simd, args: &[Reg]) -> splice_core::Result<Option<Reg>> {
-        let value = self.emit_simd(inst, args)?;
-        let dst = inst.output().map(|ty| self.local(ty)).transpose()?;
-        self.bind_simd(dst, value);
-        Ok(dst)
+    fn call_intrinsic(
+        &mut self,
+        intrinsic: Intrinsic,
+        args: &[Reg],
+    ) -> splice_core::Result<Option<Reg>> {
+        match intrinsic {
+            Intrinsic::Math { op, ty } => self.math(op, ty, args).map(Some),
+            Intrinsic::Simd(inst) => {
+                let value = self.emit_simd(inst, args)?;
+                let dst = inst.output().map(|ty| self.local(ty)).transpose()?;
+                self.bind_simd(dst, value);
+                Ok(dst)
+            }
+        }
     }
     fn constant(&mut self, c: Constant) -> splice_core::Result<Reg> {
         let dst = self.local(ValueType::Scalar(c.ty()))?;
@@ -952,44 +989,7 @@ impl KernelBuilder for Builder<'_> {
         self.define(dst, Op::Load(scalar_type(result), packet));
         Ok(dst)
     }
-    fn intrinsic(&mut self, id: &IntrinsicId, args: &[Reg]) -> splice_core::Result<Reg> {
-        let (op, ty) =
-            native_intrinsic(id).ok_or_else(|| splice_core::intrinsic::unsupported("Lancy", id))?;
-        let dst = self.local(id.result)?;
-        if !self.reachable() {
-            return Ok(dst);
-        }
-        let value = self.read(args[0]);
-        let result = match op {
-            MathOp::RotateLeft => {
-                // Lancy rotates by an operand of the value's type, modulo
-                // the width, as Rust's `rotate_left` does.
-                let count = self.read(args[1]);
-                let count = if ty == ScalarType::U32 {
-                    count
-                } else {
-                    self.value(Op::Cast(scalar_type(ty), count))
-                };
-                self.value(Op::Bin(hir::Binary::RotateLeft, value, count))
-            }
-            MathOp::CountOnes | MathOp::LeadingZeros | MathOp::TrailingZeros => {
-                let unary = match op {
-                    MathOp::CountOnes => hir::Unary::Popcnt,
-                    MathOp::LeadingZeros => hir::Unary::LeadingZeros,
-                    _ => hir::Unary::TrailingZeros,
-                };
-                let count = self.value(Op::Unary(unary, value));
-                // The count of a 64-bit operand fits its low bits.
-                if ty == ScalarType::U32 {
-                    count
-                } else {
-                    self.value(Op::Cast(hir::Type::U32, count))
-                }
-            }
-        };
-        self.bind(dst, result);
-        Ok(dst)
-    }
+
     fn call_kernel(
         &mut self,
         signature: Signature<'_>,

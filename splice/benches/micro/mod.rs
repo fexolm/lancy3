@@ -2,7 +2,7 @@
 //! explicit SIMD. Every result is checked against a scalar Rust reference.
 use super::Workload;
 use criterion::Criterion;
-use splice::simd::{Lane, Mask};
+use splice::std::intrinsics::simd::{Lane, Mask};
 use splice::{BufferArg, Executable, KernelScalar, kernel};
 
 /// Elements per input: small enough for L1, so the loops are compute bound,
@@ -17,7 +17,7 @@ fn saxpy(x: &[f32], y: &[f32], out: &mut [f32]) -> i32 {
     if y.len() as i32 != n || (out.len() as i32) < n {
         return -1;
     }
-    let width = Lane::<f32>::lanes() as i32;
+    let width = Lane::<f32>::element_width() as i32;
     let a = Lane::<f32>::splat(1.25);
     let mut i = 0;
     while n - i >= width {
@@ -43,7 +43,7 @@ fn reduce3(src: &[i32], out: &mut [i32]) -> i32 {
         return -1;
     }
     let n = src.len() as i32;
-    let width = Lane::<i32>::lanes() as i32;
+    let width = Lane::<i32>::element_width() as i32;
     let mut sum = Lane::<i32>::splat(0);
     let mut lo = Lane::<i32>::splat(2147483647);
     let mut hi = Lane::<i32>::splat(-2147483647 - 1);
@@ -81,7 +81,7 @@ fn threshold(src: &[i32], out: &mut [i32]) -> i32 {
     if (out.len() as i32) <= n {
         return -1;
     }
-    let width = Lane::<i32>::lanes() as i32;
+    let width = Lane::<i32>::element_width() as i32;
     let limit = Lane::<i32>::splat(1000);
     let mut count = 0;
     let mut i = 0;
@@ -112,7 +112,7 @@ fn requantize(src: &[i32], out: &mut [i32]) -> i32 {
     if (out.len() as i32) < n {
         return -1;
     }
-    let width = Lane::<i32>::lanes() as i32;
+    let width = Lane::<i32>::element_width() as i32;
     let scale = Lane::<f32>::splat(0.37);
     let offset = Lane::<f32>::splat(-12.5);
     let mut i = 0;
@@ -136,7 +136,7 @@ fn requantize(src: &[i32], out: &mut [i32]) -> i32 {
 /// Interleave two channels into pairs (full vectors only).
 #[kernel]
 fn interleave(left: &[i32], right: &[i32], out: &mut [i32]) -> i32 {
-    let width = Lane::<i32>::lanes() as i32;
+    let width = Lane::<i32>::element_width() as i32;
     let n = left.len() as i32 / width * width;
     if (right.len() as i32) < n || (out.len() as i32) < 2 * n {
         return -1;
@@ -177,7 +177,7 @@ fn polynomial(x: &[f32], out: &mut [f32]) -> i32 {
     if (out.len() as i32) < n {
         return -1;
     }
-    let width = Lane::<f32>::lanes() as i32;
+    let width = Lane::<f32>::element_width() as i32;
     let mut i = 0;
     while n - i >= width {
         let p: Lane<f32> = horner(Lane::load(x, i as usize));
@@ -202,7 +202,7 @@ fn madd3(#[comptime] simd: bool, a: &[i32], b: &[i32], c: &[i32], out: &mut [i32
         return -1;
     }
     if simd {
-        let width = Lane::<i32>::lanes() as i32;
+        let width = Lane::<i32>::element_width() as i32;
         let mut i = 0;
         while n - i >= width {
             let x =

@@ -86,12 +86,9 @@ impl Lower<'_> {
         } else {
             let mut path = p.path.clone();
             let fish = std::mem::take(&mut path.segments.last_mut().unwrap().arguments);
-            let expected = if output == Scalar::Inferred {
-                emit!(#root::hir::ValueType::Scalar(_))
-            } else {
-                output.value_type(root, self.types)
-            };
-            check = emit!(const {::core::assert!(::core::matches!(#path::__SPLICE_RETURN,#expected),"annotate the kernel helper result with its Lane<T> or Mask<T> type")};);
+            if output == Scalar::Inferred {
+                check = emit!(const { ::core::assert!(#path::__SPLICE_RETURNS_SCALAR, "annotate the kernel helper result with its Lane<T> or Mask<T> type") };);
+            }
             emit!(#path::__splice_call #fish)
         };
         let all_known = named && values.iter().all(|v| v.stage.is_host());
@@ -374,4 +371,16 @@ pub(crate) fn select_free(
             #alias::#selector!(#kernel, #rust)
         }
     })
+}
+
+/// Ask rustc whether an imported name (possibly renamed) denotes a builtin.
+pub(super) fn select_builtin(
+    root: &syn::Path,
+    item: &syn::Path,
+    kind: &str,
+    builtin: TokenStream,
+    ordinary: TokenStream,
+) -> TokenStream {
+    let kind = quote::format_ident!("{kind}");
+    crate::declaration::select_trait(root, item, emit!(@intrinsic #kind, #builtin, #ordinary))
 }

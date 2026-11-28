@@ -150,13 +150,6 @@ pub struct CraneliftKernel {
 impl Backend for Cranelift {
     type Output = CraneliftKernel;
 
-    fn supports_intrinsic(
-        id: &splice_core::intrinsic::IntrinsicId,
-        _target: &splice_core::Target,
-    ) -> bool {
-        intrinsic::native(id).is_some()
-    }
-
     fn compile_function(function: &Function, options: BuildOptions) -> Result<CraneliftKernel> {
         let _span = tracing::debug_span!(target: "splice_core::compile", "compile", backend = "cranelift", input = "portable").entered();
         let debug = options.debug();

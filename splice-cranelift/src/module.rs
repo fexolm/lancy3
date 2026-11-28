@@ -106,11 +106,6 @@ impl<'a> KernelModule<'a> {
                 .clone();
             let mut imports = HashMap::new();
             for inst in f.instructions() {
-                if let Instr::Intrinsic { id, .. } = inst
-                    && crate::intrinsic::native(id).is_none()
-                {
-                    return Err(splice_core::intrinsic::unsupported("Cranelift", id));
-                }
                 if let Instr::Call { function, .. } = inst {
                     let key = Arc::as_ptr(function);
                     let profile_id = profile.then_some(ids.len());

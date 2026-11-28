@@ -688,6 +688,9 @@ macro_rules! __splice_choose_kernel {
 #[macro_export]
 #[doc(hidden)]
 macro_rules! __splice_choose_rust {
+    (@intrinsic $kind:ident, $builtin:expr, $ordinary:expr) => {
+        $ordinary
+    };
     (@implementation $body:expr) => {
         ::core::compile_error!("a #[kernel] trait impl requires #[kernel] on the trait declaration")
     };

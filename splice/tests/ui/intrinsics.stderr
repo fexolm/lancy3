@@ -1,50 +1,26 @@
-error: an intrinsic has no body: the backend implements it
- --> tests/ui/intrinsics.rs:3:26
+error: unsupported kernel integer method 'extra'
+ --> tests/ui/intrinsics.rs:9:31
   |
-3 |       fn ones(self) -> u32 {
-  |  __________________________^
-4 | |         0
-5 | |     }
-  | |_____^
+9 | fn unknown(x: u32) -> u32 { x.extra() }
+  |                               ^^^^^
 
-error: an intrinsic is a plain method without generic parameters
-  --> tests/ui/intrinsics.rs:10:5
+error[E0658]: `use` associated items of traits is unstable
+  --> tests/ui/intrinsics.rs:26:1
    |
-10 |     fn generic<T>(self) -> u32;
-   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^
+26 | #[kernel]
+   | ^^^^^^^^^
+   |
+   = note: see issue #134691 <https://github.com/rust-lang/rust/issues/134691> for more information
+   = note: this error originates in the attribute macro `kernel` (in Nightly builds, run with -Z macro-backtrace for more info)
 
-error: an intrinsic has no body: the backend implements it
-  --> tests/ui/intrinsics.rs:23:27
+error[E0432]: unresolved import `block`
+  --> tests/ui/intrinsics.rs:19:54
    |
-23 |       fn plain(self) -> u32 {
-   |  ___________________________^
-24 | |         self
-25 | |     }
-   | |_____^
+19 | fn ambiguous_width(h: &mut Hook) -> usize { h.record(block::byte_width()) }
+   |                                                      ^^^^^ `block` is a type alias, not a module
 
-error: an intrinsic implementation is for one concrete kernel type
-  --> tests/ui/intrinsics.rs:29:5
+error[E0432]: unresolved import `block`
+  --> tests/ui/intrinsics.rs:22:55
    |
-29 | impl<T> Plain for Vec<T> {
-   |     ^^^
-
-error: an intrinsic struct is opaque: declare it without fields (`struct Atomic<T>;`)
-  --> tests/ui/intrinsics.rs:34:19
-   |
-34 |   pub struct Fields {
-   |  ___________________^
-35 | |     value: i32,
-36 | | }
-   | |_^
-
-error: an intrinsic struct takes only plain type parameters
-  --> tests/ui/intrinsics.rs:39:19
-   |
-39 | pub struct Bounded<T: Copy>;
-   |                   ^^^^^^^^^
-
-error: #[intrinsic] declares an intrinsic trait or struct, or implements its intrinsics
-  --> tests/ui/intrinsics.rs:42:1
-   |
-42 | pub fn free(x: i32) -> i32;
-   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+22 | fn ambiguous_vector(h: &mut Hook) -> usize { h.record(block::splat(3).last() as usize) }
+   |                                                       ^^^^^ `block` is a type alias, not a module

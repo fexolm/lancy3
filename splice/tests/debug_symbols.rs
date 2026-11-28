@@ -2,7 +2,8 @@ use splice::frontend::Signature;
 use splice::hir::ValueType;
 use splice::hir::{Binary, Constant, ScalarType};
 use splice::{
-    BuildOptions, CallError, Codegen, Executable, Mode, Trap, debug, hir::Instr, kernel, simd::Lane,
+    BuildOptions, CallError, Codegen, Executable, Mode, Trap, debug, hir::Instr, kernel,
+    std::intrinsics::simd::Lane,
 };
 
 #[kernel]
@@ -311,7 +312,8 @@ fn gdb_shows_runtime_bools_as_rust_bools() {
 
 #[kernel]
 fn masked(xs: &[i32]) -> i32 {
-    let above = splice::simd::Lane::<i32>::load(xs, 0).simd_gt(splice::simd::Lane::splat(1));
+    let above = splice::std::intrinsics::simd::Lane::<i32>::load(xs, 0)
+        .simd_gt(splice::std::intrinsics::simd::Lane::splat(1));
     let count = above.count(); // gdb: above is assigned
     count.wrapping_add(xs[0])
 }

@@ -14,11 +14,11 @@ pub mod source;
 mod specialization;
 pub use specialization::{ComptimeKey, KeyArgument, MaybeKey, Specialization};
 
+use crate::hir::Intrinsic;
 use crate::hir::{
     Binary, Buffer, BufferKind, Constant, ContextSlice, Function, Label, Reg, ScalarType, Simd,
     ValueType,
 };
-use crate::intrinsic::IntrinsicId;
 use std::sync::Arc;
 
 /// A function body is staged once against the builder selected by its backend.
@@ -93,10 +93,8 @@ pub trait KernelBuilder {
     }
     fn reg_type(&self, r: Reg) -> Option<ValueType>;
     fn local(&mut self, ty: ValueType) -> crate::Result<Reg>;
-    fn simd(&mut self, _inst: Simd, _args: &[Reg]) -> crate::Result<Option<Reg>> {
-        Err(crate::BuildError::unsupported(
-            "this builder does not support SIMD",
-        ))
+    fn simd(&mut self, inst: Simd, args: &[Reg]) -> crate::Result<Option<Reg>> {
+        self.call_intrinsic(Intrinsic::Simd(inst), args)
     }
     fn constant(&mut self, value: Constant) -> crate::Result<Reg>;
     /// Rust's `value as to`.
@@ -170,14 +168,16 @@ pub trait KernelBuilder {
         )
     }
 
-    /// Call the intrinsic `id` on `args`, which have its parameter types.
-    /// A builder that does not implement `id` fails the build with
-    /// [`crate::intrinsic::unsupported`], naming its backend.
-    fn intrinsic(&mut self, id: &IntrinsicId, _args: &[Reg]) -> crate::Result<Reg> {
-        Err(crate::intrinsic::unsupported(
-            std::any::type_name::<Self>(),
-            id,
-        ))
+    /// Emit one built-in operation. Stores have no result register.
+    fn call_intrinsic(
+        &mut self,
+        intrinsic: Intrinsic,
+        _args: &[Reg],
+    ) -> crate::Result<Option<Reg>> {
+        Err(crate::BuildError::unsupported(format!(
+            "intrinsic {intrinsic:?} is not supported by builder {}",
+            std::any::type_name::<Self>()
+        )))
     }
 }
 

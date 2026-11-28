@@ -182,7 +182,7 @@ fn print_remainder(#[comptime] a: i32, #[comptime] d: i32, marks: &mut [i32], x:
 }
 
 mod __splice_source_child_0 {
-    pub use splice::simd::Lane;
+    pub use splice::std::intrinsics::simd::Lane;
 }
 
 #[kernel(print)]

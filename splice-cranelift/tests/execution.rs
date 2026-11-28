@@ -1,7 +1,7 @@
+use splice::{BufferArg, CallError, Codegen, Executable, KernelScalar, Trap, kernel};
 use splice_core::frontend::{KernelBuilder, Signature};
 use splice_core::hir::{Binary, FunctionBuilder};
 use splice_core::hir::{Constant, ScalarType};
-use splice_core::{BufferArg, CallError, Codegen, Executable, KernelScalar, Trap, kernel};
 use splice_cranelift::Cranelift;
 use std::sync::Arc;
 
@@ -10,7 +10,7 @@ fn options() -> splice_core::BuildOptions {
     splice_core::BuildOptions::host(splice_core::Mode::for_profile(cfg!(debug_assertions))).unwrap()
 }
 
-#[kernel(crate = splice_core)]
+#[kernel]
 fn update(out: &mut [i32], row: i32, values: &[i32], divisor: i32, #[comptime] bias: i32) -> i32 {
     out[row as usize] = bias;
     let value = values[row as usize] / divisor;
@@ -18,7 +18,7 @@ fn update(out: &mut [i32], row: i32, values: &[i32], divisor: i32, #[comptime] b
     value
 }
 
-#[kernel(crate = splice_core)]
+#[kernel]
 fn batch(values: &[i32], out: &mut [i32], divisor: i32, #[comptime] bias: i32) -> i32 {
     let mut result = bias;
     for row in 0..out.len() {

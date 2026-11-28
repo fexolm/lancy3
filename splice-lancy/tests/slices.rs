@@ -1,7 +1,7 @@
-use splice_core::{BufferArg, Codegen, Executable, kernel};
+use splice::{BufferArg, Codegen, Executable, kernel};
 use splice_lancy::Lancy;
 
-#[kernel(crate = splice_core)]
+#[kernel]
 fn project(#[comptime] gain: i32, values: &[i32], second: &[i32], out: &mut [i32]) -> i32 {
     for i in 0..out.len() as i32 {
         let value = values[i as usize];
@@ -11,7 +11,7 @@ fn project(#[comptime] gain: i32, values: &[i32], second: &[i32], out: &mut [i32
     out.len() as i32
 }
 
-#[kernel(crate = splice_core)]
+#[kernel]
 fn reciprocal(values: &[i32], out: &mut [i32]) -> i32 {
     for i in 0..out.len() as i32 {
         out[i as usize] = 64 / values[i as usize];
@@ -19,7 +19,7 @@ fn reciprocal(values: &[i32], out: &mut [i32]) -> i32 {
     out.len() as i32
 }
 
-#[kernel(crate = splice_core)]
+#[kernel]
 fn constant(out: &mut [i32]) -> i32 {
     for i in 0..out.len() as i32 {
         out[i as usize] = 9;

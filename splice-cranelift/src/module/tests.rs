@@ -346,8 +346,8 @@ fn masked_contiguous_access_selects_packed_and_ordered_paths() {
 
 #[test]
 fn a_full_gather_has_one_bounds_branch_for_all_lanes() {
-    use splice_core::{kernel, simd::Lane};
-    #[kernel(crate = splice_core)]
+    use splice::{kernel, std::intrinsics::simd::Lane};
+    #[kernel]
     fn first_block(data: &[i32]) -> i32 {
         Lane::<i32>::gather(data, Lane::<i32>::iota()).last()
     }

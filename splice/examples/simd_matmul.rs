@@ -94,7 +94,7 @@ mod tests {
     fn tiles_tails_and_invalid_shapes_match_scalar_dot_products() {
         const SENTINEL: i32 = 0x0bad_cafe;
         let kernels = kernels();
-        let width = splice::simd::lanes::<i32>();
+        let width = splice::Target::host().unwrap().vector_bytes() / size_of::<i32>();
         let cases = [
             (2, 3, 4),
             (16, 32, 4 * width),

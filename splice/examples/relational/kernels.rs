@@ -2,7 +2,7 @@ use super::pipeline::{Program, Step, Task};
 use super::{Combine, Expr, Predicate};
 use splice::{
     kernel,
-    simd::{Lane, Mask},
+    std::intrinsics::simd::{Lane, Mask},
 };
 
 #[kernel]
@@ -45,7 +45,7 @@ fn write_rows(
     keys: Lane<i32>,
     values: Lane<i32>,
 ) -> i32 {
-    let width = Lane::<i32>::lanes() as i32;
+    let width = Lane::<i32>::element_width() as i32;
     let lo = keys.interleave_low(values);
     let hi = keys.interleave_high(values);
     if count == width {
@@ -70,7 +70,7 @@ fn write_rows(
 #[kernel]
 fn build_index(arena: &mut [i32], begin: i32, end: i32, base: i32, buckets: i32) -> i32 {
     let heads = base + buckets;
-    let width = Lane::<i32>::lanes() as i32;
+    let width = Lane::<i32>::element_width() as i32;
     let zero = Lane::<i32>::splat(0);
     let mut slot = 0;
     while buckets - slot >= width {
@@ -106,7 +106,7 @@ fn build_index(arena: &mut [i32], begin: i32, end: i32, base: i32, buckets: i32)
 // path. All vector gathers operate on a full packet of real requests.
 #[kernel]
 fn read_indices(arena: &[i32], indices: Lane<i32>, count: i32) -> Lane<i32> {
-    if count == Lane::<i32>::lanes() as i32 {
+    if count == Lane::<i32>::element_width() as i32 {
         Lane::<i32>::gather(arena, indices)
     } else {
         let mut result = Lane::<i32>::splat(0);
@@ -137,7 +137,7 @@ pub fn query(
         state[word as usize] = 0;
     }
     let lanes = program.lanes;
-    let width = Lane::<i32>::lanes() as i32;
+    let width = Lane::<i32>::element_width() as i32;
     let zero = Lane::<i32>::splat(0);
     if width > lanes as i32 {
         return -1;

@@ -44,7 +44,7 @@ mod tests {
     use splice::Codegen;
     use splice::KernelScalar;
     use splice::hir::{Simd, SimdOp};
-    use splice::simd::Element;
+    use splice::std::intrinsics::simd::Element;
 
     fn check(
         kernels: &[Box<dyn Executable>],
@@ -100,7 +100,7 @@ mod tests {
             #[cfg(feature = "llvm")]
             Box::new(Llvm::compile(&ir).unwrap().into_inner()),
         ];
-        let w = splice::simd::lanes::<i32>();
+        let w = splice::Target::host().unwrap().vector_bytes() / size_of::<i32>();
         // The multiplier is 1 modulo 8. Keys 7, 15, -1 and 31 all start at 7.
         let cluster = [15, -1, 0, 0, 0, 0, 0, 7];
         let chunk = [7, -1, 15, 31, 7, 0];

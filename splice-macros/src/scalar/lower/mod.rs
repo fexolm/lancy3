@@ -231,6 +231,8 @@ pub(super) struct Lower<'a> {
     pub(super) evaluation: Option<std::rc::Rc<Evaluation>>,
     pub(super) body: &'a crate::kast::Body<'a>,
     pub(super) context: Option<&'a Context>,
+    pub(super) imports: Vec<Vec<syn::ItemUse>>,
+    pub(super) local_types: &'a [Ident],
 }
 
 /// The IR type of a runtime scalar, or `None` for a vector, a mask, or a
@@ -421,6 +423,12 @@ impl Lower<'_> {
     ) -> Result<(Value, Value)> {
         match self.expr_with_hint(lhs, hint) {
             Ok(left) => {
+                if left.stage == Stage::Reg(Scalar::Inferred) && simd::uses_lane(lhs) {
+                    let right = self.expr_with_hint(rhs, hint.or(fallback))?;
+                    if let Stage::Reg(t @ (Scalar::Vector(_) | Scalar::Mask(_))) = right.stage {
+                        return Ok((self.expr_with_hint(lhs, Some(t))?, right));
+                    }
+                }
                 let ty = if let Stage::Reg(t) = left.stage {
                     Some(t)
                 } else {
@@ -691,6 +699,18 @@ impl Lower<'_> {
         let mut scope = self.clone();
         let mut prefix = TokenStream::new();
         let mut tail = Value::unit(emit!({}));
+        if scope.context.is_some() || !scope.local_types.is_empty() {
+            scope.imports.push(
+                block
+                    .stmts
+                    .iter()
+                    .filter_map(|s| match s {
+                        Stmt::Item(syn::Item::Use(item)) => Some(item.clone()),
+                        _ => None,
+                    })
+                    .collect(),
+            );
+        }
         // Rust imports apply to the whole block, including expressions before a return.
         for s in &block.stmts {
             if let Stmt::Item(syn::Item::Use(item)) = s {
@@ -829,8 +849,14 @@ impl Lower<'_> {
         {
             return Ok(value);
         }
-        if let Some(v) = self.simd_constructor(e, hint)? {
+        if let Some(v) = self.qualified_simd(e, hint)? {
             return Ok(v);
+        }
+        if let Expr::Call(call) = e
+            && let Expr::Path(path) = call.func.as_ref()
+            && let Some(value) = self.qualified_math(call, path)?
+        {
+            return Ok(value);
         }
         if self.body.known(e)
             && let Some(value) = self.known_value(e, hint)?

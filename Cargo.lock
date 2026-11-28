@@ -927,9 +927,7 @@ checksum = "3244542535d5de959d90ec55d1b5ff0fd2bb7b1310223907d5f11932847f7b59"
 name = "splice-core"
 version = "0.1.0"
 dependencies = [
- "splice-macros",
  "splice-target",
- "syn 2.0.119",
  "thiserror 2.0.21",
  "tracing",
 ]
@@ -945,6 +943,7 @@ dependencies = [
  "cranelift-native",
  "splice-core",
  "splice-jit",
+ "splice-kernel",
  "splice-target",
  "tracing",
 ]
@@ -969,6 +968,7 @@ dependencies = [
  "splice-cranelift",
  "splice-lancy",
  "splice-llvm",
+ "splice-macros",
  "splice-test-fixtures",
  "splice-testkit",
  "tracing",
@@ -983,6 +983,7 @@ dependencies = [
  "lancy",
  "splice-core",
  "splice-jit",
+ "splice-kernel",
  "splice-target",
  "tracing",
 ]
@@ -997,6 +998,7 @@ dependencies = [
  "llvm-sys",
  "splice-core",
  "splice-jit",
+ "splice-kernel",
  "splice-target",
  "thiserror 2.0.21",
  "tracing",
@@ -1008,6 +1010,7 @@ version = "0.1.0"
 dependencies = [
  "proc-macro2",
  "quote",
+ "splice-core",
  "syn 2.0.119",
 ]
 

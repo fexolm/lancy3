@@ -152,19 +152,23 @@ impl<'f, 'b> Replay<'f, 'b> {
                         .collect::<crate::Result<Vec<_>>>()?;
                     self.b.debug_point(point.location, &variables)?;
                 }
-                Instr::Simd { dst, inst, args } => {
+                Instr::CallIntrinsic {
+                    dst,
+                    intrinsic,
+                    args,
+                } => {
                     let args = self.regs(args)?;
                     match dst {
                         Some(dst) => self.define(*dst, |b| {
-                            b.simd(*inst, &args)?.ok_or_else(|| {
-                                crate::BuildError::verify_at(pc, "invalid SIMD result type")
+                            b.call_intrinsic(*intrinsic, &args)?.ok_or_else(|| {
+                                crate::BuildError::verify_at(pc, "invalid intrinsic result type")
                             })
                         })?,
                         None => {
-                            if self.b.simd(*inst, &args)?.is_some() {
+                            if self.b.call_intrinsic(*intrinsic, &args)?.is_some() {
                                 return Err(crate::BuildError::verify_at(
                                     pc,
-                                    "invalid SIMD result type",
+                                    "invalid intrinsic result type",
                                 ));
                             }
                         }
@@ -238,10 +242,6 @@ impl<'f, 'b> Replay<'f, 'b> {
                 } => {
                     let args = self.regs(args)?;
                     self.define(*dst, |b| b.call_function(function, &args, buffers))?;
-                }
-                Instr::Intrinsic { dst, id, args } => {
-                    let args = self.regs(args)?;
-                    self.define(*dst, |b| b.intrinsic(id, &args))?;
                 }
             }
         }

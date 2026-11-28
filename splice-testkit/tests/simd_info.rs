@@ -4,7 +4,7 @@
 //! compiles and runs each accepted operation with the same effect.
 use splice::frontend::{self, KernelBuilder, Signature};
 use splice::hir::{Access, Buffer, Constant, ScalarType, Simd, SimdOp, Slot, ValueType};
-use splice::simd::{Element, Shuffle as Pairing};
+use splice::std::intrinsics::simd::{Element, Shuffle as Pairing};
 use splice::{BufferArg, BufferElement, BufferKind, BuildError, BuildOptions, Codegen, Mode};
 use std::fmt::Debug;
 
@@ -23,7 +23,8 @@ fn operations() -> Vec<SimdOp> {
     use SimdOp::*;
     let b = Buffer(0);
     let mut ops = vec![
-        Lanes,
+        ElementWidth,
+        ByteWidth,
         FirstN,
         Splat(1),
         SplatScalar,
@@ -49,6 +50,7 @@ fn operations() -> Vec<SimdOp> {
         GatherSelect(b),
         ScatterSelect(b),
         Add,
+        AddMasked,
         Sub,
         Mul,
         Div,

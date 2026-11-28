@@ -1,5 +1,5 @@
 //! Batched lookup in a power-of-two linear-probing table without tombstones.
-use splice::{kernel, simd::Lane};
+use splice::{kernel, std::intrinsics::simd::Lane};
 use std::collections::HashMap;
 
 const EMPTY: i32 = 0;
@@ -18,7 +18,7 @@ pub fn lookup(table: &[i32], queries: &[i32], out: &mut [i32]) -> i32 {
     let empty = Lane::<i32>::splat(EMPTY);
     let miss = Lane::<i32>::splat(-1);
     let step = Lane::<i32>::splat(1);
-    let width = Lane::<i32>::lanes() as i32;
+    let width = Lane::<i32>::element_width() as i32;
     let count = queries.len() as i32;
     let mut base = 0;
     while base < count {

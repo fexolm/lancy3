@@ -9,8 +9,6 @@ use std::sync::Once;
 /// What lowering needs from the build target.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Machine {
-    /// The backend named in diagnostics.
-    pub(crate) backend: &'static str,
     pub(crate) vector_bytes: usize,
     /// AVX-512 compress and expand instructions at this vector width.
     pub(crate) x86_compress: bool,
@@ -22,7 +20,6 @@ impl Machine {
     pub(crate) fn new(target: &Target) -> Self {
         let bytes = target.vector_bytes();
         Self {
-            backend: "Llvm",
             vector_bytes: bytes,
             x86_compress: target
                 .x86()

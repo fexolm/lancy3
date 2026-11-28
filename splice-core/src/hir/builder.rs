@@ -1,9 +1,8 @@
 use super::{
-    Binary, Buffer, Constant, ContextSlice, Function, Instr, Label, Reg, ScalarType, Simd,
-    ValueType,
+    Binary, Buffer, Constant, ContextSlice, Function, Instr, Label, Reg, ScalarType, ValueType,
 };
 use crate::frontend::{Body, KernelBuilder, KernelSource, Signature, Specialization};
-use crate::intrinsic::IntrinsicId;
+use crate::hir::Intrinsic;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -130,10 +129,10 @@ impl KernelBuilder for FunctionBuilder {
         self.function.locals.push(ty);
         Ok(Reg(index))
     }
-    fn simd(&mut self, inst: Simd, args: &[Reg]) -> crate::Result<Option<Reg>> {
+    fn call_intrinsic(&mut self, inst: Intrinsic, args: &[Reg]) -> crate::Result<Option<Reg>> {
         let dst = inst.output().map(|ty| self.local(ty)).transpose()?;
-        self.push(Instr::Simd {
-            inst,
+        self.push(Instr::CallIntrinsic {
+            intrinsic: inst,
             dst,
             args: args.to_vec(),
         })?;
@@ -238,14 +237,6 @@ impl KernelBuilder for FunctionBuilder {
             function: Arc::clone(function),
             args: args.to_vec(),
             buffers: buffers.to_vec(),
-        })
-    }
-    /// The backend is chosen when the function is compiled.
-    fn intrinsic(&mut self, id: &IntrinsicId, args: &[Reg]) -> crate::Result<Reg> {
-        self.emit_value(id.result, |dst| Instr::Intrinsic {
-            dst,
-            id: *id,
-            args: args.to_vec(),
         })
     }
 }

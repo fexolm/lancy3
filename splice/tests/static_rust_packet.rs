@@ -56,7 +56,7 @@ fn modify(mut args: ContextArguments<'_>) -> u64 {
 }
 
 static MODIFY: StaticRustSymbol = StaticRustSymbol::new("modify", 1, 2, modify);
-const READ_U16: BufferKind = BufferKind::new(splice::simd::Element::U16, false);
+const READ_U16: BufferKind = BufferKind::new(splice::std::intrinsics::simd::Element::U16, false);
 const PARENT_KINDS: [BufferKind; 2] = [BufferKind::WRITE_I32, READ_U16];
 const CHILD_KINDS: [BufferKind; 2] = [READ_U16, BufferKind::WRITE_I32];
 const SHARED_INPUT: ContextSlice = view(0, false);

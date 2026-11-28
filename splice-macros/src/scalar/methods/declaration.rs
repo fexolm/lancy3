@@ -12,11 +12,12 @@ pub(crate) enum TraitMethodKind {
 }
 
 impl TraitMethodKind {
-    pub(crate) fn for_result(output: &ReturnType) -> Self {
-        match output {
+    pub(crate) fn for_result(signature: &Signature) -> Self {
+        let types: Vec<_> = signature.generics.type_params().map(|t| &t.ident).collect();
+        match &signature.output {
             ReturnType::Default => Self::Word,
-            ReturnType::Type(_, ty) => match Scalar::from_type(ty, &[]) {
-                Some(scalar) if scalar.is_scalar() => Self::Word,
+            ReturnType::Type(_, ty) => match Scalar::from_type(ty, &types) {
+                Some(_) => Self::Word,
                 _ if matches!(ty.as_ref(), Type::Tuple(tuple) if tuple.elems.is_empty()) => {
                     Self::Word
                 }
@@ -36,14 +37,14 @@ pub(crate) fn trait_defaults(
     signature: &Signature,
     trait_owner: &TokenStream,
 ) -> syn::Result<(TraitMethodKind, Vec<TokenStream>)> {
-    let kind = TraitMethodKind::for_result(&signature.output);
+    let kind = TraitMethodKind::for_result(signature);
     if kind == TraitMethodKind::Rust {
         let ReturnType::Type(_, ty) = &signature.output else {
             unreachable!("a method without a result returns ()")
         };
         return Err(syn::Error::new_spanned(
             ty,
-            "a Splice trait method returns () or a primitive; keep a Rust method in an ordinary trait",
+            "a Splice trait method returns (), a primitive, a vector or a mask; keep a Rust method in an ordinary trait",
         ));
     }
     let mut signature = normalize(signature, None);
@@ -86,7 +87,7 @@ pub(crate) fn trait_defaults(
     let mut stage_checks = Vec::new();
     let support = emit!(#root::frontend::scalar);
     let hir = emit!(#root::hir);
-    let mut materializable = true;
+    let mut materializable = !matches!(&signature.output, ReturnType::Type(_, t) if matches!(Scalar::from_type(t, &types), Some(Scalar::Mask(_) | Scalar::Vector(_))));
     for param in &params {
         let id = &param.name;
         let ty = param.ty;
@@ -100,7 +101,10 @@ pub(crate) fn trait_defaults(
                 materializable = false;
                 emit!(#id: #support::Host<#ty>)
             }
-            Binding::Reg(scalar, _) if scalar.is_scalar() => emit!(#id: impl #support::RunArg),
+            Binding::Reg(scalar, _) => {
+                materializable &= scalar.is_scalar();
+                emit!(#id: impl #support::RunArg)
+            }
             Binding::Buffer(_) => {
                 materializable = false;
                 emit!(#id: #hir::Buffer)
@@ -108,7 +112,7 @@ pub(crate) fn trait_defaults(
             _ => {
                 return Err(syn::Error::new_spanned(
                     param.pattern,
-                    "a Splice trait method parameter is #[comptime], a kernel scalar or a slice",
+                    "a Splice trait method parameter is #[comptime], a kernel scalar, vector, mask or slice",
                 ));
             }
         });

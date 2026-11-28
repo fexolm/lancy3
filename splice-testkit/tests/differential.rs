@@ -3,7 +3,7 @@
 use splice::frontend::{KernelBuilder, Signature};
 use splice::hir::{Binary, Buffer, Reg, Simd, SimdOp};
 use splice::hir::{Constant, ScalarType};
-use splice::simd::Element;
+use splice::std::intrinsics::simd::Element;
 use splice::{BufferArg, BufferKind, CallError, KernelScalar, Trap};
 use splice_testkit::{Stage, agree};
 use std::rc::Rc;

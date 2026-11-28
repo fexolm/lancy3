@@ -28,6 +28,7 @@ pub(crate) fn publish(
     body: &Block,
     visibility: &Visibility,
     trait_impl: bool,
+    local_types: &[Ident],
 ) -> syn::Result<Vec<TokenStream>> {
     let runtime_receiver = !trait_impl
         && signature.receiver().is_some_and(|r| {
@@ -50,7 +51,7 @@ pub(crate) fn publish(
 
     let name = &signature.ident;
     let eval_only =
-        trait_impl && TraitMethodKind::for_result(&signature.output) == TraitMethodKind::EvalOnly;
+        trait_impl && TraitMethodKind::for_result(&signature) == TraitMethodKind::EvalOnly;
     let types: Vec<_> = signature
         .generics
         .type_params()
@@ -62,12 +63,12 @@ pub(crate) fn publish(
     };
     let result_type = match &signature.output {
         ReturnType::Type(_, ty) if !unit_result => match Scalar::from_type(ty, &types) {
-            Some(result) if result.is_scalar() => result.base(),
+            Some(result) => result.base(),
             _ if eval_only => Scalar::I32,
             _ => {
                 return Err(syn::Error::new_spanned(
                     ty,
-                    "a Splice method returns () or a kernel scalar; keep a Rust method in an ordinary impl",
+                    "a Splice method returns (), a kernel scalar, a vector or a mask; keep a Rust method in an ordinary impl",
                 ));
             }
         },
@@ -92,12 +93,19 @@ pub(crate) fn publish(
     let mut debug_host_args = Vec::new();
     let mut mutable_args = Vec::new();
     let mut context = None;
+    let mut vector_types = Vec::new();
+    if let ReturnType::Type(_, ty) = &signature.output {
+        vector_types.extend(result_type.vector_witness(ty, root, &types));
+    }
     let support = emit!(#root::frontend::scalar);
     let hir = emit!(#root::hir);
     for param in &params {
         let pat = super::named(param.pattern)?;
         let id = &pat.ident;
         let ty = param.ty;
+        if let Binding::Reg(kind, _) = param.binding {
+            vector_types.extend(kind.vector_witness(ty, root, &types));
+        }
         if matches!(param.binding, Binding::Host(_)) {
             debug_host_args.push(id);
         }
@@ -107,7 +115,7 @@ pub(crate) fn publish(
                 emit!(#id: impl #support::KnownArg<#ty>)
             }
             Binding::Host(_) => emit!(#support::Host(#id): #support::Host<#ty>),
-            Binding::Reg(scalar, write) if scalar.is_scalar() => {
+            Binding::Reg(_, write) => {
                 scalar_args.push(id);
                 if write {
                     mutable_args.push(id);
@@ -122,7 +130,7 @@ pub(crate) fn publish(
             _ => {
                 return Err(syn::Error::new_spanned(
                     param.pattern,
-                    "a Splice method parameter is #[comptime], a kernel scalar, a slice, or the &mut self receiver",
+                    "a Splice method parameter is #[comptime], a kernel scalar, vector, mask, slice, or the &mut self receiver",
                 ));
             }
         };
@@ -170,6 +178,8 @@ pub(crate) fn publish(
         source_fault: None,
         evaluation: None,
         context: context.as_ref(),
+        imports: Vec::new(),
+        local_types,
     };
     let eval_name = entry_name(
         if trait_impl {
@@ -214,6 +224,7 @@ pub(crate) fn publish(
         #visibility fn #stage_name #generics (#(#declarations,)* #frame __splice_builder: &mut dyn #root::frontend::KernelBuilder)
             -> #root::Result<#hir::Reg> #where_
         {
+            #(#vector_types)*
             let __splice_guard = #support::enter_expansion()?;
             #overflow
             let __splice_wants_debug = __splice_builder.debug_enabled();
@@ -331,7 +342,10 @@ fn rename_receiver(
 pub(crate) fn method_path(path: &syn::ExprPath) -> bool {
     path.qself.is_some()
         || path.path.segments.iter().rev().nth(1).is_some_and(|s| {
-            s.ident == "Self" || s.ident.to_string().starts_with(char::is_uppercase)
+            crate::kast::types::Primitive::named(&s.ident.to_string()).is_some()
+                || !matches!(s.arguments, syn::PathArguments::None)
+                || s.ident == "Self"
+                || s.ident.to_string().starts_with(char::is_uppercase)
         })
 }
 

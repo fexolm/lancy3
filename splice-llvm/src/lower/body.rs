@@ -2,7 +2,6 @@ mod debug;
 mod intrinsic;
 mod simd;
 
-pub(crate) use intrinsic::native;
 pub(super) use simd::scalar_type;
 
 use super::call;

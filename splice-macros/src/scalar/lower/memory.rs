@@ -2,31 +2,42 @@
 //! Only lengths, element accesses, and scalar computations become instructions.
 use super::{Lower, Scalar, Stage, Value, err};
 use proc_macro2::TokenStream;
+use splice_core::hir::MathOp;
 use syn::{BinOp, Expr, ExprCast, ExprIndex, ExprReference, Result, UnOp};
 
+pub(super) fn math_op(name: &str) -> Option<MathOp> {
+    Some(match name {
+        "count_ones" => MathOp::CountOnes,
+        "leading_zeros" => MathOp::LeadingZeros,
+        "trailing_zeros" => MathOp::TrailingZeros,
+        "rotate_left" => MathOp::RotateLeft,
+        _ => return None,
+    })
+}
+
 pub(super) fn primitive_method(name: &str) -> bool {
-    matches!(
-        name,
-        "wrapping_add"
-            | "wrapping_sub"
-            | "wrapping_mul"
-            | "wrapping_neg"
-            | "checked_add"
-            | "checked_sub"
-            | "checked_mul"
-            | "checked_div"
-            | "checked_rem"
-            | "saturating_add"
-            | "saturating_sub"
-            | "saturating_mul"
-            | "min"
-            | "max"
-    )
+    math_op(name).is_some()
+        || matches!(
+            name,
+            "wrapping_add"
+                | "wrapping_sub"
+                | "wrapping_mul"
+                | "wrapping_neg"
+                | "checked_add"
+                | "checked_sub"
+                | "checked_mul"
+                | "checked_div"
+                | "checked_rem"
+                | "saturating_add"
+                | "saturating_sub"
+                | "saturating_mul"
+                | "min"
+                | "max"
+        )
 }
 
 /// The core methods of runtime integers (`frontend::methods`): each stages
-/// a portable operation. Any other method of a runtime scalar is an
-/// intrinsic.
+/// a portable operation.
 const CORE_METHODS: [&str; 9] = [
     "wrapping_add",
     "wrapping_sub",
@@ -70,11 +81,22 @@ impl Lower<'_> {
                 emit!(#root::frontend::scalar::column(#table, #slot, #element)?),
             ));
         }
-        let data_type = self.simd_store_receiver(m)?;
-        let receiver = self.expr_with_hint(&m.receiver, data_type)?;
+        let hint_for_receiver = self.store_hint(&m.method, m.args.first())?;
+        let mut receiver = self.expr_with_hint(&m.receiver, hint_for_receiver)?;
+        if receiver.stage == Stage::Reg(Scalar::Inferred)
+            && let Some(t @ Scalar::Vector(_)) = hint_for_receiver
+        {
+            receiver.stage = Stage::Reg(t);
+        }
 
         if let Stage::Reg(t @ (Scalar::Vector(_) | Scalar::Mask(_))) = receiver.stage {
-            return self.simd_method(t, receiver, m, hint);
+            let name = m.method.to_string();
+            if !primitive_method(&name) || super::simd::has_method(t, &name) {
+                return self.simd_method(t, receiver, m, hint);
+            }
+            // A constructor with the same spelling can return an ordinary
+            // scalar. Rust checked this scalar method on the original result.
+            receiver.stage = Stage::Reg(Scalar::Inferred);
         }
         if (m.method == "len" || m.method == "is_empty")
             && m.args.is_empty()
@@ -109,69 +131,133 @@ impl Lower<'_> {
         };
         let root = self.root;
         let name = m.method.to_string();
-        if !CORE_METHODS.contains(&name.as_str())
-            && let Some(ty) = kind.rust_type()
-        {
-            return self.intrinsic_method(ty, receiver, kind, m, hint);
+        if let Some(op) = math_op(&name) {
+            return self.math_call(op, receiver, kind, &m.receiver, m.args.iter());
         }
-        // The registry stages the method on the receiver's type; the name
-        // must be registered for some type.
+        if !CORE_METHODS.contains(&name.as_str()) {
+            return err(
+                &m.method,
+                &format!("unsupported kernel integer method '{name}'"),
+            );
+        }
         let receiver = self.reg(receiver, kind, &m.receiver)?;
         let args = m
             .args
             .iter()
             .map(|arg| self.operand(arg, kind))
             .collect::<Result<Vec<_>>>()?;
-        let message = format!(
-            "`{name}` is not a kernel operation on runtime integers; an intrinsic method needs a receiver of a known type"
-        );
         Ok(Value::new(
             Stage::Reg(kind),
             emit!({
-                const { ::core::assert!(#root::frontend::methods::is_method(#name), #message) };
                 let operands = [#receiver, #(#args),*];
                 #root::frontend::methods::method(__splice_builder, #name, &operands)?
             }),
         ))
     }
 
-    /// `receiver.method(args)` on a runtime scalar, where `method` is not a
-    /// core method: an intrinsic of an `#[intrinsic]` trait in scope.
-    /// Rust's method resolution selects the trait's stage entry for the
-    /// receiver's type; the type the use expects, when it is known, types the result.
-    fn intrinsic_method(
+    pub(super) fn qualified_math(
         &self,
-        ty: proc_macro2::Ident,
+        c: &syn::ExprCall,
+        path: &syn::ExprPath,
+    ) -> Result<Option<Value>> {
+        if self.local_owner(path) {
+            return Ok(None);
+        }
+        let Some(member) = path.path.segments.last() else {
+            return Ok(None);
+        };
+        let Some(op) = math_op(&member.ident.to_string()) else {
+            return Ok(None);
+        };
+        let mut owner = path.path.clone();
+        owner.segments.pop();
+        owner.segments.pop_punct();
+        if owner.segments.is_empty() && path.qself.is_none() {
+            return Ok(None);
+        }
+        let qualified_trait = path.qself.as_ref().is_some_and(|q| q.as_token.is_some());
+        let ty: syn::Type = match &path.qself {
+            Some(q) => (*q.ty).clone(),
+            None => syn::parse_quote!(#owner),
+        };
+        let kind = Scalar::from_type(&ty, self.types);
+        let inherent = kind.is_some() && !qualified_trait;
+        if !inherent && (owner.segments.is_empty() || !crate::scalar::methods::method_path(path)) {
+            return Ok(None);
+        }
+        if !inherent && owner.segments.last().is_some_and(|s| s.ident == "Self") {
+            return Ok(None);
+        }
+        let builtin = || {
+            let mut args = c.args.iter();
+            let first = args.next().ok_or_else(|| {
+                syn::Error::new_spanned(member, "missing integer intrinsic receiver")
+            })?;
+            let receiver = self.expr_with_hint(first, kind)?;
+            let kind = kind.unwrap_or(match receiver.stage {
+                Stage::Reg(t) | Stage::Word(t) | Stage::Literal(t) => t,
+                _ => Scalar::Inferred,
+            });
+            self.math_call(op, receiver, kind, first, args)
+        };
+        if inherent {
+            return builtin().map(Some);
+        }
+        let ordinary = self.call(c, None)?;
+        let mut value =
+            builtin().unwrap_or_else(|e| Value::new(ordinary.stage, e.into_compile_error()));
+        value.code =
+            super::calls::select_builtin(self.root, &owner, "math", value.code, ordinary.code);
+        Ok(Some(value))
+    }
+
+    fn math_call<'a>(
+        &self,
+        op: MathOp,
         receiver: Value,
         kind: Scalar,
-        m: &syn::ExprMethodCall,
-        hint: Option<Scalar>,
+        at: &Expr,
+        args: impl ExactSizeIterator<Item = &'a Expr>,
     ) -> Result<Value> {
         let root = self.root;
-        let operand = emit!(#root::frontend::methods::Operand);
-        let receiver = self.reg(receiver, kind, &m.receiver)?;
-        let args = m
-            .args
-            .iter()
-            .map(|arg| Ok(self.simd_argument(arg, Scalar::Inferred)?.1))
+        let (name, result) = match op {
+            MathOp::CountOnes => ("CountOnes", Scalar::Number(super::Number::U32)),
+            MathOp::LeadingZeros => ("LeadingZeros", Scalar::Number(super::Number::U32)),
+            MathOp::TrailingZeros => ("TrailingZeros", Scalar::Number(super::Number::U32)),
+            MathOp::RotateLeft => ("RotateLeft", kind),
+        };
+        if !matches!(
+            kind,
+            Scalar::Inferred
+                | Scalar::Number(
+                    super::Number::I32
+                        | super::Number::U32
+                        | super::Number::I64
+                        | super::Number::U64
+                )
+        ) {
+            return err(
+                at,
+                "unsupported intrinsic receiver: expected i32, u32, i64 or u64",
+            );
+        }
+        if args.len() != usize::from(op == MathOp::RotateLeft) {
+            return err(at, "wrong number of integer intrinsic arguments");
+        }
+        let receiver = self.reg(receiver, kind, at)?;
+        let count = args
+            .map(|arg| self.operand(arg, Scalar::Number(super::Number::U32)))
             .collect::<Result<Vec<_>>>()?;
-        let stage = quote::format_ident!(
-            "__splice_stage_{}",
-            m.method.to_string().trim_start_matches("r#"),
-            span = m.method.span()
-        );
-        // rustc checks the result against the type the use expects, so a
-        // concrete expected type is the intrinsic's result type.
-        let result = hint
-            .filter(|t| t.is_scalar() && t.rust_type().is_some())
-            .unwrap_or(Scalar::Inferred);
+        let op = quote::format_ident!("{name}");
         Ok(Value::new(
             Stage::Reg(result),
             emit!({
-                let __splice_receiver = #receiver;
-                let __splice_operands = [#operand::Reg(__splice_receiver), #(#args),*];
-                let __splice_probe: #ty = ::core::default::Default::default();
-                __splice_probe.#stage(__splice_builder, &__splice_operands)?
+                let args = [#receiver, #(#count),*];
+                let ::core::option::Option::Some(#root::hir::ValueType::Scalar(ty)) = __splice_builder.reg_type(args[0]) else {
+                    return ::core::result::Result::Err(#root::BuildError::staging("expected integer intrinsic receiver"));
+                };
+                __splice_builder.call_intrinsic(#root::hir::Intrinsic::Math { op: #root::hir::MathOp::#op, ty }, &args)?
+                    .ok_or_else(|| #root::BuildError::staging("missing integer intrinsic result"))?
             }),
         ))
     }
