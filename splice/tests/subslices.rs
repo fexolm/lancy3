@@ -19,6 +19,28 @@ fn window_sum(xs: &[i32], start: i32, end: i32) -> i32 {
     sum
 }
 
+/// The `i32` loop over a subslice whose checks Lancy drops
+/// (`lancy/filetests/passes/subslice-bounds.lancy`), next to a loop to the
+/// whole length that indexes the shorter subslice and must trap.
+#[kernel]
+fn window_scan(xs: &[i32], start: i32, end: i32, whole: bool) -> i32 {
+    let window = &xs[start as usize..end as usize];
+    let (head, tail) = window.split_at(window.len() / 2);
+    let mut sum = 0_i32;
+    for i in 0..head.len() as i32 {
+        sum = sum.wrapping_add(head[i as usize]);
+    }
+    for i in 0..tail.len() as i32 {
+        sum = sum.wrapping_mul(3).wrapping_add(tail[i as usize]);
+    }
+    if whole {
+        for i in 0..xs.len() as i32 {
+            sum = sum.wrapping_add(window[i as usize]);
+        }
+    }
+    sum
+}
+
 #[kernel]
 fn open_ranges(xs: &[i32], k: i32) -> i32 {
     let tail = &xs[k as usize..];
@@ -135,6 +157,25 @@ fn check<B: Codegen<Output: Executable>>() {
             });
             let expected = rust(|| window_sum(&xs, start, end));
             assert_eq!(actual, expected, "window_sum({start}, {end})");
+        }
+    }
+    for code in builds!(window_scan, B) {
+        for (start, end, whole) in [
+            (0, 9, false),
+            (2, 7, false),
+            (3, 3, false),
+            (0, 9, true),
+            (2, 7, true),
+            (6, 5, false),
+        ] {
+            let actual = code.call(window_scan::CallArgs {
+                xs: &xs,
+                start,
+                end,
+                whole,
+            });
+            let expected = rust(|| window_scan(&xs, start, end, whole));
+            assert_eq!(actual, expected, "window_scan({start}, {end}, {whole})");
         }
     }
     for code in builds!(open_ranges, B) {

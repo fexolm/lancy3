@@ -1,0 +1,102 @@
+# A loop over a subslice `&xs[start..end]` as splice-lancy lowers it: after
+# the range check the subslice length is the `i32` difference of the
+# unsigned minima `end' = min(end, len)` and `start' = min(start, end')`,
+# and the loop guard and the element check use that same value. The guard
+# proves every check, as for a whole slice parameter.
+fn main(start:i32 end:i32 p:ptr len:i32) -> i32
+  slice p len read4
+  bias = const -2147483648
+  e = xor end bias
+  l = xor len bias
+  inside = le e l
+  s = xor start bias
+  e2 = xor end bias
+  ordered = le s e2
+  valid = and inside ordered
+  br valid sliced() | fail()
+block fail()
+  trap Bounds
+  zero0 = const 0
+  ret zero0
+block sliced()
+  eu = bitcast u32 end
+  lu = bitcast u32 len
+  em = min eu lu
+  end2 = bitcast i32 em
+  su = bitcast u32 start
+  eu2 = bitcast u32 end2
+  sm = min su eu2
+  start2 = bitcast i32 sm
+  base = offset p start2 4
+  n = sub end2 start2
+  zero = const 0
+  one = const 1
+  jump head(zero zero)
+block head(i:i32 sum:i32)
+  more = lt i n
+  br more body(i sum) | done(sum)
+block body(j:i32 acc:i32)
+  bounds j n
+  at = offset base j 4
+  x = load i32 at
+  next_sum = add acc x
+  next = add j one
+  jump head(next next_sum)
+block done(r:i32)
+  ret r
+@opt not: bounds
+@opt check: load i32
+@opt not: bounds
+@opt check: ret
+@run 1 3 4 -> 5 | 01 00 00 00 02 00 00 00 03 00 00 00 04 00 00 00 | 01 00 00 00 02 00 00 00 03 00 00 00 04 00 00 00
+@run 0 4 4 -> 10 | 01 00 00 00 02 00 00 00 03 00 00 00 04 00 00 00 | 01 00 00 00 02 00 00 00 03 00 00 00 04 00 00 00
+@run 3 5 4 -> !bounds | 01 00 00 00 02 00 00 00 03 00 00 00 04 00 00 00 | 01 00 00 00 02 00 00 00 03 00 00 00 04 00 00 00
+
+---
+
+# Counterexample: the loop runs to the whole slice's length but indexes the
+# subslice, which is shorter, so the element check stays and traps.
+fn main(start:i32 end:i32 p:ptr len:i32) -> i32
+  slice p len read4
+  bias = const -2147483648
+  e = xor end bias
+  l = xor len bias
+  inside = le e l
+  s = xor start bias
+  e2 = xor end bias
+  ordered = le s e2
+  valid = and inside ordered
+  br valid sliced() | fail()
+block fail()
+  trap Bounds
+  zero0 = const 0
+  ret zero0
+block sliced()
+  eu = bitcast u32 end
+  lu = bitcast u32 len
+  em = min eu lu
+  end2 = bitcast i32 em
+  su = bitcast u32 start
+  eu2 = bitcast u32 end2
+  sm = min su eu2
+  start2 = bitcast i32 sm
+  base = offset p start2 4
+  n = sub end2 start2
+  zero = const 0
+  one = const 1
+  jump head(zero zero)
+block head(i:i32 sum:i32)
+  more = lt i len
+  br more body(i sum) | done(sum)
+block body(j:i32 acc:i32)
+  bounds j n
+  at = offset base j 4
+  x = load i32 at
+  next_sum = add acc x
+  next = add j one
+  jump head(next next_sum)
+block done(r:i32)
+  ret r
+@opt check: bounds
+@run 0 4 4 -> 10 | 01 00 00 00 02 00 00 00 03 00 00 00 04 00 00 00 | 01 00 00 00 02 00 00 00 03 00 00 00 04 00 00 00
+@run 1 3 4 -> !bounds | 01 00 00 00 02 00 00 00 03 00 00 00 04 00 00 00 | 01 00 00 00 02 00 00 00 03 00 00 00 04 00 00 00

@@ -736,3 +736,89 @@ fn index_parameters_carry_their_i32_form_across_blocks() {
         .count();
     assert_eq!(clamps, 0, "{graph}");
 }
+
+/// A subslice length keeps an exact `i32` form: the loop over
+/// `&xs[start..end]` compares and checks against the `i32` difference of
+/// the range's minima, with no clamp of a 64-bit length
+/// (`lancy/filetests/passes/subslice-bounds.lancy` shows Lancy then drops
+/// the check, as for a whole slice).
+#[test]
+fn subslice_lengths_keep_their_i32_form() {
+    fn body(b: &mut dyn KernelBuilder) -> splice_core::Result<()> {
+        let xs = b.buffer(0)?;
+        let start = b.cast(b.arg(0)?, ScalarType::Index)?;
+        let end = b.cast(b.arg(1)?, ScalarType::Index)?;
+        let sub = b.subslice(xs, start, end, false)?;
+        let (head, tail) = b.split_at(sub, start)?;
+        let (zero, one) = (
+            b.constant(Constant::from(0))?,
+            b.constant(Constant::from(1))?,
+        );
+        let sum = b.copy(zero)?;
+        // The limits are taken where the subslices are made: an `Index`
+        // that reaches a later block through a parameter is only `Bounded`.
+        let mut limits = Vec::new();
+        for part in [sub, head, tail] {
+            limits.push((part, b.cast(part.len, ScalarType::I32)?));
+        }
+        for (part, limit) in limits {
+            let i = b.copy(zero)?;
+            let (test, step, done) = (b.label()?, b.label()?, b.label()?);
+            b.jump(test)?;
+            b.mark(test)?;
+            let more = b.binary(Binary::Lt, i, limit)?;
+            b.branch(more, step, done)?;
+            b.mark(step)?;
+            let index = b.cast(i, ScalarType::Index)?;
+            let x = b.load(part, index)?;
+            let total = b.binary(Binary::Add, sum, x)?;
+            b.assign(sum, total)?;
+            let next = b.binary(Binary::Add, i, one)?;
+            b.assign(i, next)?;
+            b.jump(test)?;
+            b.mark(done)?;
+        }
+        b.ret(sum)
+    }
+    let graph = build(
+        Signature::new(
+            &[ScalarType::I32; 2],
+            ScalarType::I32,
+            &[BufferKind::READ_I32],
+        ),
+        Box::new(body),
+    )
+    .unwrap();
+    let clamps = graph
+        .blocks()
+        .flat_map(|b| graph.instructions(b))
+        .filter(|&i| match *graph.op(i) {
+            Op::Cast(hir::Type::I32, v) => graph.value_type(v) == hir::Type::Usize,
+            _ => false,
+        })
+        .count();
+    assert_eq!(clamps, 0, "{graph}");
+}
+
+/// Only a local is a variable: Lancy reads an operation's result where it is
+/// defined, so assigning it again is rejected before staging.
+#[test]
+fn an_operation_result_cannot_be_assigned() {
+    fn body(b: &mut dyn KernelBuilder) -> splice_core::Result<()> {
+        let one = b.constant(Constant::from(1))?;
+        let sum = b.binary(Binary::Add, b.arg(0)?, one)?;
+        b.assign(sum, one)?;
+        b.ret(sum)
+    }
+    let error = build(
+        Signature::new(&[ScalarType::I32], ScalarType::I32, &[]),
+        Box::new(body),
+    )
+    .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("only a local register can be assigned"),
+        "{error}"
+    );
+}

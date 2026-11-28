@@ -225,6 +225,8 @@ impl Builder {
             unassigned: HashSet::new(),
             labels: Vec::new(),
             indices,
+            minimums: HashMap::new(),
+            results: HashMap::new(),
             debug,
             marker: 0,
         };
@@ -320,6 +322,14 @@ struct Builder {
     labels: Vec<Option<Block>>,
     /// The `i32` form of `Index` values (see `index32`).
     indices: HashMap<Value, Narrow>,
+    /// The operands an `Index` minimum is at most, so that the difference
+    /// of an operand and the minimum is known nonnegative.
+    minimums: HashMap<Value, [Value; 2]>,
+    /// The value of each operation's result register. Validation lets only
+    /// locals be assigned, so the one definition dominates every read and
+    /// a later block reads the value itself, with its `i32` form, instead
+    /// of a block parameter.
+    results: HashMap<Reg, Option<Value>>,
     /// The source points of a debug build, shared by its functions.
     debug: Option<Vec<DebugSource>>,
     /// This function's entry in `debug`.
@@ -351,7 +361,7 @@ enum Narrow {
 
 impl Builder {
     fn math(&mut self, op: MathOp, ty: ScalarType, args: &[Reg]) -> splice_core::Result<Reg> {
-        let dst = self.local(ValueType::Scalar(op.result(ty)))?;
+        let dst = self.result(ValueType::Scalar(op.result(ty)))?;
         if !self.reachable() {
             return Ok(dst);
         }
@@ -424,9 +434,11 @@ impl Builder {
             }
         }
     }
-    /// The minimum of two `Index` values.
+    /// The minimum of two `Index` values, with its `i32` form.
     fn index_min(&mut self, a: Value, b: Value) -> Value {
-        self.value(Op::Bin(hir::Binary::Min, a, b))
+        let v = self.value(Op::Bin(hir::Binary::Min, a, b));
+        self.minimum32(v, a, b);
+        v
     }
     fn const32(&mut self, n: i32) -> Value {
         self.value(Op::Const(n))
@@ -468,6 +480,82 @@ impl Builder {
             (a, b)
         };
         Some(self.value(Op::Bin(kind, a, b)))
+    }
+    /// The `i32` of an `Index` that sign-extends a nonnegative `i32`: a
+    /// slice length, or a value at most one.
+    fn length32(&mut self, index: Value) -> Option<Value> {
+        match *self.indices.get(&index)? {
+            Narrow::Extends {
+                value,
+                nonnegative: true,
+            } => Some(value),
+            Narrow::Constant(bits) => Some(self.const32(i32::try_from(bits).ok()?)),
+            Narrow::Extends { .. } | Narrow::Bounded(_) => None,
+        }
+    }
+    /// The `Index` minimum `v` of `a` and `b`, where `b` (or `a`) has an
+    /// exact nonnegative `i32` form `n`: `v <= n <= i32::MAX`, so `v`
+    /// sign-extends the unsigned minimum of `n` and the other operand's
+    /// `index32`, which is the operand itself up to `i32::MAX` and at least
+    /// `i32::MAX` as unsigned above it. The subslice lengths of
+    /// `frontend::subslice` take their exact form from it.
+    fn minimum32(&mut self, v: Value, a: Value, b: Value) {
+        self.minimums.insert(v, [a, b]);
+        let exact = |n: Option<&Narrow>| {
+            matches!(
+                n,
+                Some(Narrow::Extends {
+                    nonnegative: true,
+                    ..
+                })
+            ) || matches!(n, Some(&Narrow::Constant(bits)) if i32::try_from(bits).is_ok())
+        };
+        let (other, bound) = if exact(self.indices.get(&b)) {
+            (a, b)
+        } else if exact(self.indices.get(&a)) {
+            (b, a)
+        } else {
+            return;
+        };
+        let bound = self.length32(bound).expect("an exact form");
+        let other = self.index32(other);
+        let unsigned = |this: &mut Self, x| this.value(Op::Bitcast(hir::Type::U32, x));
+        let (x, y) = (unsigned(self, other), unsigned(self, bound));
+        let least = self.value(Op::Bin(hir::Binary::Min, x, y));
+        let value = self.value(Op::Bitcast(hir::Type::I32, least));
+        self.indices.insert(
+            v,
+            Narrow::Extends {
+                value,
+                nonnegative: true,
+            },
+        );
+    }
+    /// The `Index` difference `v = a - b` of two values with exact
+    /// nonnegative `i32` forms: in `-i32::MAX..=i32::MAX`, so `v`
+    /// sign-extends the `i32` difference. It is nonnegative when `b` is a
+    /// minimum of `a` and another value.
+    fn difference32(&mut self, v: Value, a: Value, b: Value) {
+        let exact = |n: Option<&Narrow>| {
+            matches!(
+                n,
+                Some(Narrow::Extends {
+                    nonnegative: true,
+                    ..
+                })
+            ) || matches!(n, Some(&Narrow::Constant(bits)) if i32::try_from(bits).is_ok())
+        };
+        if !exact(self.indices.get(&a)) || !exact(self.indices.get(&b)) {
+            return;
+        }
+        let (x, y) = (
+            self.length32(a).expect("an exact form"),
+            self.length32(b).expect("an exact form"),
+        );
+        let value = self.value(Op::Bin(hir::Binary::Sub, x, y));
+        let nonnegative = self.minimums.get(&b).is_some_and(|m| m.contains(&a));
+        self.indices
+            .insert(v, Narrow::Extends { value, nonnegative });
     }
     fn address(&mut self, slice: Slice, index: Value) -> Value {
         let (base, len) = self.slice(slice);
@@ -520,8 +608,18 @@ impl Builder {
             .contains(&index)
             .then(|| self.blocks[self.graph.entry()].defs[&r])
     }
+    /// A register for the result of an operation (see `results`).
+    fn result(&mut self, ty: ValueType) -> splice_core::Result<Reg> {
+        let r = self.local(ty)?;
+        self.results.insert(r, None);
+        Ok(r)
+    }
     fn read(&mut self, r: Reg) -> Value {
         if let Some(v) = self.slice_param(r) {
+            return v;
+        }
+        if let Some(&Some(v)) = self.results.get(&r) {
+            self.require(v);
             return v;
         }
         let b = self.current.expect("open block");
@@ -663,6 +761,15 @@ impl Builder {
                 self.effect(Op::TrapIf(overflow, Trap::Overflow));
                 self.define(dst, Op::Bin(kind, a, b));
             }
+            Binary::Min if ty == ScalarType::Index => {
+                let v = self.index_min(a, b);
+                self.bind(dst, v);
+            }
+            Binary::Sub if ty == ScalarType::Index => {
+                let v = self.value(Op::Bin(kind, a, b));
+                self.difference32(v, a, b);
+                self.bind(dst, v);
+            }
             Binary::Eq | Binary::Ne | Binary::Lt | Binary::Le | Binary::Gt | Binary::Ge
                 if ty == ScalarType::Index =>
             {
@@ -706,6 +813,10 @@ impl Builder {
         self.bind(dst, value);
     }
     fn bind(&mut self, r: Reg, v: Value) {
+        if let Some(slot) = self.results.get_mut(&r) {
+            debug_assert!(slot.is_none(), "an operation's result is defined once");
+            *slot = Some(v);
+        }
         let b = self.current.expect("open block");
         self.blocks[b].defs.insert(r, v);
     }
@@ -725,7 +836,7 @@ impl Builder {
         args: &[Reg],
         buffers: &[Slice],
     ) -> splice_core::Result<Reg> {
-        let dst = self.local(ValueType::Scalar(result))?;
+        let dst = self.result(ValueType::Scalar(result))?;
         if self.reachable() {
             let mut values: Vec<_> = args.iter().map(|&r| self.read(r)).collect();
             for &slice in buffers {
@@ -880,14 +991,14 @@ impl KernelBuilder for Builder {
             Intrinsic::Math { op, ty } => self.math(op, ty, args).map(Some),
             Intrinsic::Simd(inst) => {
                 let value = self.emit_simd(inst, args)?;
-                let dst = inst.output().map(|ty| self.local(ty)).transpose()?;
+                let dst = inst.output().map(|ty| self.result(ty)).transpose()?;
                 self.bind_simd(dst, value);
                 Ok(dst)
             }
         }
     }
     fn constant(&mut self, c: Constant) -> splice_core::Result<Reg> {
-        let dst = self.local(ValueType::Scalar(c.ty()))?;
+        let dst = self.result(ValueType::Scalar(c.ty()))?;
         if self.reachable() {
             let v = self.literal(c.ty(), c.bits());
             if c.ty() == ScalarType::Index {
@@ -898,7 +1009,7 @@ impl KernelBuilder for Builder {
         Ok(dst)
     }
     fn cast(&mut self, src: Reg, to: ScalarType) -> splice_core::Result<Reg> {
-        let dst = self.local(ValueType::Scalar(to))?;
+        let dst = self.result(ValueType::Scalar(to))?;
         if self.reachable() {
             self.convert(dst, src, to);
         }
@@ -910,8 +1021,8 @@ impl KernelBuilder for Builder {
             unreachable!("validated slice pointer")
         };
         let dst = Slice {
-            ptr: self.local(ty)?,
-            len: self.local(ValueType::Scalar(ScalarType::Index))?,
+            ptr: self.result(ty)?,
+            len: self.result(ValueType::Scalar(ScalarType::Index))?,
         };
         if self.reachable() {
             let (base, len) = (self.read(slice.ptr), self.read(slice.len));
@@ -929,13 +1040,14 @@ impl KernelBuilder for Builder {
                 Op::PtrOffset(base, offset, simd::stride(kind.element())),
             );
             let length = self.value(Op::Bin(hir::Binary::Sub, end, start));
+            self.difference32(length, end, start);
             self.bind(dst.len, length);
         }
         Ok(dst)
     }
     fn load(&mut self, slice: Slice, index: Reg) -> splice_core::Result<Reg> {
         let ty = self.element(slice);
-        let dst = self.local(ValueType::Scalar(ty))?;
+        let dst = self.result(ValueType::Scalar(ty))?;
         if self.reachable() {
             let index = self.read(index);
             let index = self.index32(index);
@@ -954,7 +1066,7 @@ impl KernelBuilder for Builder {
     }
     fn binary(&mut self, op: Binary, a: Reg, b: Reg) -> splice_core::Result<Reg> {
         let output = op.output(self.scalar(a)).expect("validated operation");
-        let dst = self.local(ValueType::Scalar(output))?;
+        let dst = self.result(ValueType::Scalar(output))?;
         if self.reachable() {
             self.arithmetic(dst, op, a, b);
         }
@@ -1020,7 +1132,7 @@ impl KernelBuilder for Builder {
         slices: &[ContextSlice],
         result: ScalarType,
     ) -> splice_core::Result<Reg> {
-        let dst = self.local(ValueType::Scalar(result))?;
+        let dst = self.result(ValueType::Scalar(result))?;
         if !self.reachable() {
             return Ok(dst);
         }

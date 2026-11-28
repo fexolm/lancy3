@@ -144,10 +144,7 @@ fn the_registers_of_a_slice_are_not_reassigned() {
         b.local(ValueType::Ptr(kind))?;
         finish(b)
     }
-    rejected_everywhere(
-        length,
-        "a slice's registers are written only by its slice operation",
-    );
+    rejected_everywhere(length, "only a local register can be assigned");
     rejected_everywhere(pointer_local, "a slice pointer is produced with its length");
 }
 
