@@ -110,6 +110,26 @@ impl Lower<'_> {
                 emit!(#root::frontend::scalar::column(#table, #slot, #element)?),
             ));
         }
+        if let Expr::MethodCall(chunks) = &*m.receiver
+            && (m.method == "remainder" || m.method == "into_remainder")
+            && m.args.is_empty()
+            && chunks.args.len() == 1
+        {
+            let write = chunks.method == "chunks_exact_mut";
+            if ((write && m.method == "into_remainder")
+                || (chunks.method == "chunks_exact" && m.method == "remainder"))
+                && let Some((slice, actual, size)) = self.chunks_exact(chunks, write)?
+            {
+                return Ok(Value::new(
+                    Stage::Buffer(super::BufferType { write, ..actual }),
+                    emit!({
+                        let __splice_slice = #slice;
+                        let __splice_size = #size;
+                        __splice_builder.chunks_exact_remainder(__splice_slice, __splice_size)?
+                    }),
+                ));
+            }
+        }
         let hint_for_receiver = self.store_hint(&m.method, m.args.first())?;
         let mut receiver = self.expr_with_hint(&m.receiver, hint_for_receiver)?;
         if receiver.stage == Stage::Reg(Scalar::Inferred)
@@ -206,6 +226,19 @@ impl Lower<'_> {
                 return err(
                     &m.method,
                     &format!("`{name}` returns an Option, which kernels do not support yet"),
+                );
+            }
+            if name.starts_with("chunks_exact") {
+                return err(
+                    m,
+                    &format!(
+                        "iterate `for chunk in xs.{name}(n)` or take `xs.{name}(n).{}()`; a chunk iterator cannot be bound",
+                        if name == "chunks_exact" {
+                            "remainder"
+                        } else {
+                            "into_remainder"
+                        }
+                    ),
                 );
             }
             if name == "split_at" || name == "split_at_mut" {

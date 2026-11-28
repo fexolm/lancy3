@@ -33,3 +33,21 @@ error: `str::find` is not supported in kernels; use `as_bytes()`
    |
 41 |     let other = text.find('a');
    |                      ^^^^
+
+error: iterate `for chunk in xs.chunks_exact(n)` or take `xs.chunks_exact(n).remainder()`; a chunk iterator cannot be bound
+  --> tests/ui/slice_options.rs:47:18
+   |
+47 |     let chunks = xs.chunks_exact(2);
+   |                  ^^^^^^^^^^^^^^^^^^
+
+error: `chunks_exact_mut` needs a writable slice
+  --> tests/ui/slice_options.rs:53:18
+   |
+53 |     for chunk in xs.chunks_exact_mut(2) {}
+   |                  ^^^^^^^^^^^^^^^^^^^^^^
+
+error: a `&mut` element of a runtime slice is not supported; index the slice to write it
+  --> tests/ui/slice_options.rs:59:9
+   |
+59 |     for x in xs {
+   |         ^

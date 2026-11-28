@@ -213,6 +213,12 @@ impl<'b> Visit<'b> for Collect<'b, '_> {
                     self.elements.push((self.body.binding(name), element));
                 }
             }
+            // `for x in xs`: `x` is a reference whose `*x` has the element type.
+            (Pat::Ident(name), iterable) if name.subpat.is_none() => {
+                if let Some(element) = iterated_element(self.body, iterable) {
+                    self.elements.push((self.body.binding(name), element));
+                }
+            }
             _ => {}
         }
         syn::visit::visit_expr_for_loop(self, f);
@@ -275,7 +281,12 @@ fn type_of(body: &Body<'_>, found: &[Option<Primitive>], e: &Expr) -> Option<Pri
     match e {
         Expr::Paren(p) => type_of(body, found, &p.expr),
         Expr::Group(g) => type_of(body, found, &g.expr),
-        Expr::Unary(u) if matches!(u.op, syn::UnOp::Neg(_) | syn::UnOp::Not(_)) => {
+        Expr::Unary(u)
+            if matches!(
+                u.op,
+                syn::UnOp::Neg(_) | syn::UnOp::Not(_) | syn::UnOp::Deref(_)
+            ) =>
+        {
             type_of(body, found, &u.expr)
         }
         Expr::Cast(c) => Primitive::of(&c.ty),
@@ -343,7 +354,12 @@ fn mark(
     match e {
         Expr::Paren(p) => mark(body, &p.expr, ty, literal, marks),
         Expr::Group(g) => mark(body, &g.expr, ty, literal, marks),
-        Expr::Unary(u) if matches!(u.op, syn::UnOp::Neg(_) | syn::UnOp::Not(_)) => {
+        Expr::Unary(u)
+            if matches!(
+                u.op,
+                syn::UnOp::Neg(_) | syn::UnOp::Not(_) | syn::UnOp::Deref(_)
+            ) =>
+        {
             mark(body, &u.expr, ty, literal, marks);
         }
         Expr::Binary(b) if arithmetic(&b.op) => {

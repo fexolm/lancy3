@@ -936,6 +936,11 @@ impl Lower<'_> {
                 let Stage::Reg(t) = v.stage else {
                     return err(x, "expected an operand");
                 };
+                // A register holding a reference is a slice element read by
+                // `for x in xs`: rustc checked that `*x` names its value.
+                if matches!(op, UnOp::Deref(_)) {
+                    return Ok(v);
+                }
                 if matches!(t, Scalar::Vector(_) | Scalar::Mask(_)) {
                     return self.simd_unary(t, op, v, x);
                 }
