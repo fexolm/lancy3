@@ -1,5 +1,5 @@
 //! Scalar call results whose stage depends on the resolved Rust declaration.
-use super::{Lower, Scalar, Stage, Value, checked_operator, err};
+use super::{Lower, Scalar, Stage, Value, err};
 use proc_macro2::{Ident, Span, TokenStream};
 use quote::ToTokens;
 use syn::{BinOp, ExprBinary, Result};
@@ -62,14 +62,7 @@ impl Lower<'_> {
         };
         let root = self.root;
         let variant = Ident::new(op, Span::call_site());
-        let plain = emit!(#root::hir::Binary::#variant);
-        let op = if let Some(checked) = checked_operator(op) {
-            let checked = Ident::new(checked, Span::call_site());
-            let enabled = super::host::kernel_overflow_checks();
-            emit!(if #enabled { #root::hir::Binary::#checked }else{#plain})
-        } else {
-            plain
-        };
+        let checks = super::host::kernel_overflow_checks();
         let operand = |value: &Value| match value.stage {
             Stage::Word(t) | Stage::Reg(t) | Stage::Literal(t) if t != Scalar::Inferred => Some(t),
             _ => None,
@@ -87,7 +80,8 @@ impl Lower<'_> {
             Stage::Word(kind),
             emit!({
                 let (left,right)=(#left,#right);
-                left.binary(#op,right,__splice_builder)?
+                let checks = #checks;
+                left.binary(#root::hir::Binary::#variant, checks, right, __splice_builder)?
             }),
         ))
     }
