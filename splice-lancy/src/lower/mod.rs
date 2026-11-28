@@ -424,6 +424,10 @@ impl Builder {
             }
         }
     }
+    /// The minimum of two `Index` values.
+    fn index_min(&mut self, a: Value, b: Value) -> Value {
+        self.value(Op::Bin(hir::Binary::Min, a, b))
+    }
     fn const32(&mut self, n: i32) -> Value {
         self.value(Op::Const(n))
     }
@@ -900,20 +904,32 @@ impl KernelBuilder for Builder {
         }
         Ok(dst)
     }
-    fn offset(&mut self, ptr: Reg, offset: Reg) -> splice_core::Result<Reg> {
-        let ty = self.types[ptr.0 as usize];
+    fn slice_range(&mut self, slice: Slice, start: Reg, end: Reg) -> splice_core::Result<Slice> {
+        let ty = self.types[slice.ptr.0 as usize];
         let ValueType::Ptr(kind) = ty else {
             unreachable!("validated slice pointer")
         };
-        let dst = self.local(ty)?;
+        let dst = Slice {
+            ptr: self.local(ty)?,
+            len: self.local(ValueType::Scalar(ScalarType::Index))?,
+        };
         if self.reachable() {
-            // The frontend checked the offset against a length, which fits `i32`.
-            let (base, offset) = (self.read(ptr), self.read(offset));
-            let offset = self.index32(offset);
+            let (base, len) = (self.read(slice.ptr), self.read(slice.len));
+            let (start, end) = (self.read(start), self.read(end));
+            let end = if end == len {
+                len
+            } else {
+                self.index_min(end, len)
+            };
+            let start = self.index_min(start, end);
+            // `start <= len`, which fits `i32`.
+            let offset = self.index32(start);
             self.define(
-                dst,
+                dst.ptr,
                 Op::PtrOffset(base, offset, simd::stride(kind.element())),
             );
+            let length = self.value(Op::Bin(hir::Binary::Sub, end, start));
+            self.bind(dst.len, length);
         }
         Ok(dst)
     }

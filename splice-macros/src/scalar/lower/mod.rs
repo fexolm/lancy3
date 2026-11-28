@@ -818,7 +818,8 @@ impl Lower<'_> {
     }
 
     /// `let (head, tail) = xs.split_at(mid);`, or `split_at_mut`: two
-    /// subslices, after a check that traps unless `mid` is within the length.
+    /// subslices, after a check that traps unless `mid` is within the length
+    /// (and, for a `&str`, a character boundary).
     fn split_local(&mut self, pat: &Pat, init: &Expr) -> Result<Option<TokenStream>> {
         let (Pat::Tuple(tuple), Expr::MethodCall(m)) = (pat, init) else {
             return Ok(None);
@@ -853,11 +854,17 @@ impl Lower<'_> {
         self.declare(head, Binding::Buffer(ty));
         self.declare(tail, Binding::Buffer(ty));
         let (head, tail) = (&head.ident, &tail.ident);
+        // A `&str` splits only at a character boundary.
+        let split = if actual.utf8 {
+            emit!(str_split_at)
+        } else {
+            emit!(split_at)
+        };
         Ok(Some(emit! {
             let (#head, #tail) = {
                 let __splice_slice = #slice;
                 let __splice_mid = #mid;
-                __splice_builder.split_at(__splice_slice, __splice_mid)?
+                __splice_builder.#split(__splice_slice, __splice_mid)?
             };
         }))
     }

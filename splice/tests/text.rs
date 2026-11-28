@@ -1,6 +1,6 @@
 //! `&str` parameters: read-only UTF-8 bytes with `len`, `as_bytes`,
-//! `bytes`, `is_char_boundary` and `&text[a..b]`, which traps where Rust
-//! panics on a range outside the text or off a character boundary. Each
+//! `bytes`, `is_char_boundary`, `&text[a..b]` and `split_at`, which trap
+//! where Rust panics on a range outside the text or off a character boundary. Each
 //! case runs on every backend, staged directly and from portable IR, in
 //! release and debug, against the kernel's own Rust function.
 // Kernels spell comparisons out: a range `contains` is not kernel code.
@@ -50,6 +50,14 @@ fn middle(text: &str, start: i32, end: i32) -> i32 {
     byte_sum(part.as_bytes()) * 1000 + part.len() as i32 * 10 + first % 10
 }
 
+/// `split_at` on a `&str` traps unless `mid` is a character boundary; both
+/// halves stay `&str`s (the nested call needs one).
+#[kernel]
+fn halves(text: &str, mid: i32) -> i32 {
+    let (head, tail) = text.split_at(mid as usize);
+    byte_sum(head.as_bytes()) * 100_000 + boundaries(tail) * 10 + head.len() as i32
+}
+
 macro_rules! builds {
     ($kernel:ident, $b:ident) => {{
         let mut codes = Vec::new();
@@ -79,6 +87,14 @@ fn check<B: Codegen<Output: Executable>>() {
         for text in TEXTS {
             let actual = code.call(boundaries::CallArgs { text });
             assert_eq!(actual, Ok(boundaries(text)), "{text:?}");
+        }
+    }
+    for code in builds!(halves, B) {
+        for text in TEXTS {
+            for mid in 0..=text.len() as i32 + 1 {
+                let actual = code.call(halves::CallArgs { text, mid });
+                assert_eq!(actual, rust(|| halves(text, mid)), "{text:?} at {mid}");
+            }
         }
     }
     for code in builds!(middle, B) {

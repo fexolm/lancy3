@@ -9,7 +9,7 @@ use crate::hir::{
 };
 use crate::{BuildError, Result};
 use std::cell::RefCell;
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
 /// Check `body` as it stages and when it completes.
@@ -47,6 +47,14 @@ pub struct Validating<'a> {
     current: Option<usize>,
     pc: usize,
     overflow_checks: Option<bool>,
+    /// The length register of each slice pointer: a buffer parameter's
+    /// pair, or the pair one [`KernelBuilder::slice_range`] produced. A
+    /// slice operand must be one of these pairs, so the length a backend
+    /// checks an access against is the length of the memory it addresses.
+    pairs: HashMap<Reg, Reg>,
+    /// The registers of the pairs `slice_range` produced: no other
+    /// operation writes them.
+    derived: HashSet<Reg>,
 }
 
 #[derive(Clone, Copy)]
@@ -98,6 +106,11 @@ impl<'a> Validating<'a> {
             current: Some(0),
             pc: 0,
             overflow_checks: None,
+            pairs: (0..signature.buffers.len())
+                .map(|i| Slice::param(signature.params.len(), i))
+                .map(|s| (s.ptr, s.len))
+                .collect(),
+            derived: HashSet::new(),
         })
     }
 
@@ -193,11 +206,24 @@ impl<'a> Validating<'a> {
         |r: Reg| self.types.get(r.0 as usize).copied()
     }
 
-    /// The kind of a slice whose registers are valid.
+    /// Reject a slice whose pointer and length were not produced together.
+    fn paired(&self, slice: Slice) -> Result<()> {
+        if self.pairs.get(&slice.ptr) == Some(&slice.len) {
+            Ok(())
+        } else {
+            Err(self.error(
+                "a slice operand must be a buffer parameter or the result of one slice operation",
+            ))
+        }
+    }
+
+    /// The kind of a slice whose registers are a valid pair.
     fn slice_kind(&self, slice: Slice) -> Result<BufferKind> {
-        slice
+        let kind = slice
             .kind(&self.reg_types())
-            .ok_or_else(|| self.error("invalid buffer"))
+            .ok_or_else(|| self.error("invalid buffer"))?;
+        self.paired(slice)?;
+        Ok(kind)
     }
 
     fn buffer(&self, slice: Slice) -> Result<BufferKind> {
@@ -219,6 +245,9 @@ impl<'a> Validating<'a> {
     }
 
     fn call_arguments(&self, callee: Signature<'_>, args: &[Reg], buffers: &[Slice]) -> Result<()> {
+        for &slice in buffers {
+            self.paired(slice)?;
+        }
         let types: Vec<_> = args
             .iter()
             .map(|&r| self.types.get(r.0 as usize).copied())
@@ -345,9 +374,9 @@ impl KernelBuilder for Validating<'_> {
                 }
                 crate::debug::Value::Register(_) => {}
                 crate::debug::Value::Slice(slice)
-                    if slice
-                        .kind(&self.reg_types())
-                        .is_none_or(|kind| kind.context_signature().is_some()) =>
+                    if self
+                        .slice_kind(slice)
+                        .map_or(true, |kind| kind.context_signature().is_some()) =>
                 {
                     return Err(self.error("invalid debug buffer"));
                 }
@@ -385,11 +414,21 @@ impl KernelBuilder for Validating<'_> {
                 e.name()
             )));
         }
+        if let ValueType::Ptr(_) = ty {
+            return Err(BuildError::verify(
+                "a slice pointer is produced with its length by a slice operation",
+            ));
+        }
         let r = self.inner.local(ty)?;
         Ok(self.allocated(r, ty))
     }
     fn call_intrinsic(&mut self, inst: Intrinsic, args: &[Reg]) -> Result<Option<Reg>> {
         let types = self.types(args)?;
+        if let Intrinsic::Simd(simd) = inst
+            && let Some(memory) = simd.op.info().memory
+        {
+            self.paired(memory.slice)?;
+        }
         self.at(inst.validate(&types, &self.reg_types()))?;
         let dst = self.inner.call_intrinsic(inst, args)?;
         let mut reads = args.to_vec();
@@ -424,15 +463,18 @@ impl KernelBuilder for Validating<'_> {
         let r = self.inner.cast(value, to)?;
         Ok(self.value(&[value], r, ValueType::Scalar(to)))
     }
-    fn offset(&mut self, ptr: Reg, offset: Reg) -> Result<Reg> {
-        let ty = self.ty(ptr)?;
-        match ty {
-            ValueType::Ptr(kind) if kind.context_signature().is_none() => {}
-            _ => return Err(self.error("expected a slice pointer")),
-        }
-        self.expect(offset, ScalarType::Index)?;
-        let r = self.inner.offset(ptr, offset)?;
-        Ok(self.value(&[ptr, offset], r, ty))
+    fn slice_range(&mut self, slice: Slice, start: Reg, end: Reg) -> Result<Slice> {
+        let kind = self.buffer(slice)?;
+        self.expect(start, ScalarType::Index)?;
+        self.expect(end, ScalarType::Index)?;
+        let dst = self.inner.slice_range(slice, start, end)?;
+        self.allocated(dst.ptr, ValueType::Ptr(kind));
+        self.allocated(dst.len, ValueType::Scalar(ScalarType::Index));
+        self.pairs.insert(dst.ptr, dst.len);
+        self.derived.extend([dst.ptr, dst.len]);
+        self.block().defined.insert(dst.len);
+        self.record(&[slice.ptr, slice.len, start, end], Some(dst.ptr));
+        Ok(dst)
     }
     fn load(&mut self, slice: Slice, index: Reg) -> Result<Reg> {
         self.expect(index, ScalarType::Index)?;
@@ -465,6 +507,9 @@ impl KernelBuilder for Validating<'_> {
         // body, so a backend may read it where it is defined.
         if (self.params - 2 * self.buffers..self.params).contains(&(dst.0 as usize)) {
             return Err(self.error("a buffer parameter's registers are read-only"));
+        }
+        if self.derived.contains(&dst) {
+            return Err(self.error("a slice's registers are written only by its slice operation"));
         }
         self.inner.assign(dst, src)?;
         self.record(&[src], Some(dst));
@@ -528,6 +573,12 @@ impl KernelBuilder for Validating<'_> {
         slices: &[ContextSlice],
         result: ScalarType,
     ) -> Result<Reg> {
+        if let RustTarget::Context { context, .. } = target {
+            self.paired(context)?;
+        }
+        for s in slices {
+            self.paired(s.slice)?;
+        }
         let types = self.rust_operands(args);
         self.at(target.check(&self.reg_types(), types.into_iter(), slices))?;
         let r = self.inner.rust_call(target, args, slices, result)?;
@@ -688,8 +739,11 @@ impl KernelBuilder for Sink {
     fn cast(&mut self, _: Reg, _: ScalarType) -> Result<Reg> {
         self.next()
     }
-    fn offset(&mut self, _: Reg, _: Reg) -> Result<Reg> {
-        self.next()
+    fn slice_range(&mut self, _: Slice, _: Reg, _: Reg) -> Result<Slice> {
+        Ok(Slice {
+            ptr: self.next()?,
+            len: self.next()?,
+        })
     }
     fn load(&mut self, _: Slice, _: Reg) -> Result<Reg> {
         self.next()

@@ -391,6 +391,94 @@ mod tests {
         );
     }
 
+    /// Portable IR passes the same pairing check as a staged body.
+    #[test]
+    fn slice_operands_are_recorded_pairs() {
+        let index = || vec![ScalarType::Index];
+        let param = Slice::param(1, 0);
+        let derived = Slice {
+            ptr: Reg(3),
+            len: Reg(4),
+        };
+        let range = |dst| Instr::SliceRange {
+            dst,
+            slice: param,
+            start: R0,
+            end: R0,
+        };
+        let load = |slice| Instr::Load {
+            dst: Reg(5),
+            slice,
+            index: R0,
+        };
+        let locals = || {
+            vec![
+                ValueType::Ptr(BufferKind::READ_I32),
+                ValueType::Scalar(ScalarType::Index),
+                I32,
+            ]
+        };
+        let forged = Slice {
+            ptr: param.ptr,
+            len: R0,
+        };
+        assert_eq!(
+            typed_error(
+                index(),
+                vec![BufferKind::READ_I32],
+                vec![I32],
+                vec![
+                    Instr::Load {
+                        dst: Reg(3),
+                        slice: forged,
+                        index: R0
+                    },
+                    Instr::Return(Reg(3))
+                ]
+            ),
+            "a slice operand must be a buffer parameter or the result of one slice operation \
+             at instruction 0"
+        );
+        let paired = typed(
+            index(),
+            vec![BufferKind::READ_I32],
+            locals(),
+            vec![range(derived), load(derived), Instr::Return(Reg(5))],
+        );
+        assert!(paired.verify().is_ok());
+        let mixed = Slice {
+            ptr: derived.ptr,
+            len: param.len,
+        };
+        assert_eq!(
+            typed_error(
+                index(),
+                vec![BufferKind::READ_I32],
+                locals(),
+                vec![range(derived), load(mixed), Instr::Return(Reg(5))]
+            ),
+            "a slice operand must be a buffer parameter or the result of one slice operation \
+             at instruction 1"
+        );
+        let reversed = Slice {
+            ptr: Reg(4),
+            len: Reg(3),
+        };
+        assert_eq!(
+            typed_error(
+                index(),
+                vec![BufferKind::READ_I32],
+                vec![
+                    ValueType::Scalar(ScalarType::Index),
+                    ValueType::Ptr(BufferKind::READ_I32),
+                    I32
+                ],
+                vec![range(reversed), Instr::Return(R0)]
+            ),
+            "a slice range defines a fresh register pair at instruction 0"
+        );
+    }
+
     #[test]
     fn type_errors() {
         let ty = ValueType::Scalar;

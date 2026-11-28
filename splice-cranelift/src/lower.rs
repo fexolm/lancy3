@@ -264,15 +264,32 @@ pub(super) fn emit(
                 let value = binary(&mut b, op, scalar(f, left), lhs, rhs);
                 b.def_var(var(dst), value);
             }
-            Instr::Offset { dst, ptr, offset } => {
-                let ValueType::Ptr(kind) = f.reg_type(ptr) else {
+            Instr::SliceRange {
+                dst,
+                slice,
+                start,
+                end,
+            } => {
+                // `&slice[s..e]` for `e = min(end, len)`, `s = min(start, e)`.
+                let ValueType::Ptr(kind) = f.reg_type(slice.ptr) else {
                     unreachable!("verified slice pointer");
                 };
-                let base = b.use_var(var(ptr));
-                let offset = b.use_var(var(offset));
-                let bytes = b.ins().imul_imm(offset, kind.element().bytes() as i64);
-                let value = b.ins().iadd(base, bytes);
-                b.def_var(var(dst), value);
+                let index = ScalarType::Index;
+                let len = b.use_var(var(slice.len));
+                let end = if end == slice.len {
+                    len
+                } else {
+                    let end = b.use_var(var(end));
+                    binary(&mut b, Binary::Min, index, end, len)
+                };
+                let start = b.use_var(var(start));
+                let start = binary(&mut b, Binary::Min, index, start, end);
+                let base = b.use_var(var(slice.ptr));
+                let bytes = b.ins().imul_imm(start, kind.element().bytes() as i64);
+                let ptr = b.ins().iadd(base, bytes);
+                b.def_var(var(dst.ptr), ptr);
+                let length = binary(&mut b, Binary::Sub, index, end, start);
+                b.def_var(var(dst.len), length);
             }
             Instr::Load { dst, slice, index } => {
                 let index = b.use_var(var(index));

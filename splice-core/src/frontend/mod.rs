@@ -122,8 +122,17 @@ pub trait KernelBuilder {
     fn constant(&mut self, value: Constant) -> crate::Result<Reg>;
     /// Rust's `value as to`.
     fn cast(&mut self, value: Reg, to: ScalarType) -> crate::Result<Reg>;
-    /// `ptr` advanced by `offset` elements, without a check.
-    fn offset(&mut self, ptr: Reg, offset: Reg) -> crate::Result<Reg>;
+    /// `&slice[s..e]` for `e = min(end, len)` and `s = min(start, e)`, with
+    /// no trap: the part of `slice` the range selects, clamped so that it
+    /// stays within `slice` whatever `start` and `end` hold. This is the
+    /// only way to derive a slice: its pointer and length come from one
+    /// operation, and the verifier accepts a slice operand only as such a
+    /// pair or a buffer parameter. The checked forms (`subslice` and the
+    /// others on `dyn KernelBuilder`) trap first, so the minima are `start`
+    /// and `end`; they show a backend that the length is a nonnegative
+    /// difference within `len`.
+    ///
+    fn slice_range(&mut self, slice: Slice, start: Reg, end: Reg) -> crate::Result<Slice>;
     /// Element `index` of `slice`; traps unless `index` is below its length.
     fn load(&mut self, slice: Slice, index: Reg) -> crate::Result<Reg>;
     /// Write element `index` of `slice`; traps unless `index` is below its length.
@@ -244,9 +253,7 @@ impl dyn KernelBuilder + '_ {
         self.mark(fail)?;
         self.trap_bounds()?;
         self.mark(next)?;
-        let ptr = self.offset(slice.ptr, start)?;
-        let len = self.binary(Binary::Sub, end, start)?;
-        Ok(Slice { ptr, len })
+        self.slice_range(slice, start, end)
     }
 
     /// `text.is_char_boundary(index)` for the UTF-8 bytes `text`: the end,
@@ -300,9 +307,21 @@ impl dyn KernelBuilder + '_ {
     pub fn split_at(&mut self, slice: Slice, mid: Reg) -> crate::Result<(Slice, Slice)> {
         let zero = self.constant(Constant::from(0usize))?;
         let head = self.subslice(slice, zero, mid, false)?;
-        let ptr = self.offset(slice.ptr, mid)?;
-        let len = self.binary(Binary::Sub, slice.len, mid)?;
-        Ok((head, Slice { ptr, len }))
+        Ok((head, self.slice_range(slice, mid, slice.len)?))
+    }
+
+    /// `text.split_at(mid)` of a `&str`: the check of
+    /// `split_at`, then a trap unless `mid` is a character
+    /// boundary, as Rust's `str::split_at` panics.
+    pub fn str_split_at(&mut self, text: Slice, mid: Reg) -> crate::Result<(Slice, Slice)> {
+        let halves = self.split_at(text, mid)?;
+        let boundary = self.is_char_boundary(text, mid)?;
+        let (next, fail) = (self.label()?, self.label()?);
+        self.branch(boundary, next, fail)?;
+        self.mark(fail)?;
+        self.trap_bounds()?;
+        self.mark(next)?;
+        Ok(halves)
     }
 
     pub fn branch_if_false(&mut self, cond: Reg, otherwise: Label) -> crate::Result<()> {
