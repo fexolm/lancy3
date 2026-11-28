@@ -4,11 +4,11 @@ error: a Splice method returns (), a kernel scalar, a vector or a mask; keep a R
 11 |     fn name(&self) -> String {
    |                       ^^^^^^
 
-error: runtime parameters must be bool, i32, u32, i64, u64, usize, f32, f64 or a slice of u16, u32, i32, i64, f32, or f64
+error: runtime parameters must be a kernel scalar (bool, char, i8, i16, i32, i64, u8, u16, u32, u64, usize, f32, f64) or a slice of one other than bool
   --> tests/ui/unsupported_methods.rs:15:16
    |
-15 |     fn wide(x: char) -> i32 {
-   |                ^^^^
+15 |     fn wide(x: isize) -> i32 {
+   |                ^^^^^
 
 error: a Splice trait method returns (), a primitive, a vector or a mask; keep a Rust method in an ordinary trait
   --> tests/ui/unsupported_methods.rs:23:29

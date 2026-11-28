@@ -8,6 +8,22 @@ impl Lower<'_> {
         let Expr::Path(p) = &*c.func else {
             return err(&c.func, "expected a kernel function path");
         };
+        // `char::from_u32(x)`, `u8::from(x)`: an associated function of a
+        // primitive type is Rust library code, not a kernel operation.
+        if p.qself.is_none()
+            && p.path.segments.len() == 2
+            && let Some(primitive) =
+                crate::kast::types::Primitive::named(&p.path.segments[0].ident.to_string())
+        {
+            let function = &p.path.segments[1].ident;
+            return err(
+                &c.func,
+                &format!(
+                    "`{}::{function}` is not supported in a kernel: an associated function of a primitive type is not a kernel operation",
+                    primitive.name()
+                ),
+            );
+        }
         if self.body.decl_of(p).is_some() {
             return err(
                 &c.func,

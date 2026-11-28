@@ -504,6 +504,9 @@ impl Lower<'_> {
                     syn::Lit::Int(int) => super::literal_stage(int.suffix(), false, hint),
                     syn::Lit::Float(float) => super::literal_stage(float.suffix(), true, hint),
                     syn::Lit::Bool(_) => Stage::Literal(Scalar::Bool),
+                    syn::Lit::Char(_) => {
+                        Stage::Literal(Scalar::Number(crate::kast::types::Primitive::Char))
+                    }
                     _ => Stage::Host,
                 },
                 e,

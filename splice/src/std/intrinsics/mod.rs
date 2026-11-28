@@ -35,4 +35,4 @@ pub mod math;
 pub mod simd;
 
 pub use math::Math;
-pub use simd::{Element, Lane, LaneCast, LaneElement, LaneIndex, Mask, Shuffle};
+pub use simd::{Lane, LaneCast, LaneElement, LaneIndex, LaneInteger, Mask, Shuffle};

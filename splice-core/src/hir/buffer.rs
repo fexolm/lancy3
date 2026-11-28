@@ -1,5 +1,6 @@
+use crate::KernelScalar;
+use crate::hir::ScalarType;
 use crate::runtime_context::{ContextSignature, RuntimeContext};
-use crate::simd::{Element, LaneElement};
 use std::collections::HashMap;
 use std::fmt;
 use std::marker::PhantomData;
@@ -17,17 +18,23 @@ impl Buffer {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct BufferKind {
-    element: Element,
+    element: ScalarType,
     writable: bool,
     context: Option<&'static ContextSignature>,
 }
 
 impl BufferKind {
     /// A shared `i32` slice.
-    pub const READ_I32: Self = Self::new(Element::I32, false);
+    pub const READ_I32: Self = Self::new(ScalarType::I32, false);
     /// A writable `i32` slice.
-    pub const WRITE_I32: Self = Self::new(Element::I32, true);
-    pub const fn new(element: Element, writable: bool) -> Self {
+    pub const WRITE_I32: Self = Self::new(ScalarType::I32, true);
+    /// # Panics
+    /// If `element` is `Bool`: a kernel cannot borrow a `bool` slice.
+    pub const fn new(element: ScalarType, writable: bool) -> Self {
+        assert!(
+            !matches!(element, ScalarType::Bool),
+            "a bool slice is not a kernel buffer"
+        );
         Self {
             element,
             writable,
@@ -37,7 +44,7 @@ impl BufferKind {
     #[doc(hidden)]
     pub const fn context(signature: &'static ContextSignature) -> Self {
         Self {
-            element: Element::I32,
+            element: ScalarType::I32,
             writable: true,
             context: Some(signature),
         }
@@ -46,7 +53,7 @@ impl BufferKind {
     pub const fn context_signature(self) -> Option<&'static ContextSignature> {
         self.context
     }
-    pub const fn element(self) -> Element {
+    pub const fn element(self) -> ScalarType {
         self.element
     }
     pub const fn writable(self) -> bool {
@@ -85,14 +92,25 @@ impl fmt::Debug for BufferArg<'_> {
     }
 }
 
-/// An element type that can be borrowed from a [`BufferArg`].
-pub trait BufferElement: LaneElement {}
-impl BufferElement for i32 {}
-impl BufferElement for u16 {}
-impl BufferElement for u32 {}
-impl BufferElement for i64 {}
-impl BufferElement for f32 {}
-impl BufferElement for f64 {}
+mod sealed {
+    pub trait Sealed {}
+}
+
+/// An element type that can be borrowed from a [`BufferArg`]: every kernel
+/// scalar but `bool`, whose bytes Rust requires to be 0 or 1.
+#[diagnostic::on_unimplemented(
+    message = "`[{Self}]` is not a kernel slice",
+    label = "not a slice element",
+    note = "slice elements are `char`, `i8`, `u8`, `i16`, `u16`, `i32`, `u32`, `i64`, `u64`, `usize`, `f32` and `f64`"
+)]
+pub trait BufferElement: KernelScalar + sealed::Sealed {}
+macro_rules! buffer_element {
+    ($($ty:ty),*) => {$(
+        impl sealed::Sealed for $ty {}
+        impl BufferElement for $ty {}
+    )*};
+}
+buffer_element!(char, i8, u8, i16, u16, i32, u32, i64, u64, usize, f32, f64);
 
 impl<'a, T: BufferElement> From<&'a [T]> for BufferArg<'a> {
     fn from(slice: &'a [T]) -> Self {
@@ -112,7 +130,7 @@ impl<'a> BufferArg<'a> {
         Self {
             data: NonNull::from(slice).cast(),
             len: slice.len(),
-            kind: BufferKind::new(T::ELEMENT, false),
+            kind: BufferKind::new(T::TYPE, false),
             borrow: PhantomData,
         }
     }
@@ -122,7 +140,7 @@ impl<'a> BufferArg<'a> {
         Self {
             data: NonNull::from(slice).cast(),
             len,
-            kind: BufferKind::new(T::ELEMENT, true),
+            kind: BufferKind::new(T::TYPE, true),
             borrow: PhantomData,
         }
     }
@@ -174,9 +192,9 @@ impl BufferArg<'_> {
     #[allow(unsafe_code)]
     pub fn as_slice<T: BufferElement>(&self) -> &[T] {
         assert!(
-            self.kind.context.is_none() && self.kind.element == T::ELEMENT,
+            self.kind.context.is_none() && self.kind.element == T::TYPE,
             "expected a {} buffer",
-            T::ELEMENT.name()
+            T::TYPE.name()
         );
         // SAFETY: `read` and `write` made `data` and `len` from a live
         // `&[T]` or `&mut [T]` that this argument borrows, and the element
@@ -278,11 +296,11 @@ mod tests {
     fn an_argument_keeps_its_borrow_kind_and_length() {
         let mut data = [1.5f32, 2.5, 3.5];
         let mut arg = BufferArg::write(&mut data);
-        assert_eq!(arg.kind(), BufferKind::new(Element::F32, true));
+        assert_eq!(arg.kind(), BufferKind::new(ScalarType::F32, true));
         assert_eq!(arg.len(), 3);
         let address = arg.data();
         let shared = arg.as_read_only().expect("a slice has a read-only form");
-        assert_eq!(shared.kind(), BufferKind::new(Element::F32, false));
+        assert_eq!(shared.kind(), BufferKind::new(ScalarType::F32, false));
         assert_eq!(shared.as_slice::<f32>(), &[1.5, 2.5, 3.5]);
         assert_eq!(address, data.as_mut_ptr().cast());
     }
@@ -293,7 +311,7 @@ mod tests {
     fn a_slice_longer_than_i32_max_is_rejected() {
         // Zeroed pages are mapped lazily: the 4 GiB are never touched.
         let long = vec![0u16; i32::MAX as usize + 1];
-        let kinds = [BufferKind::new(Element::U16, false)];
+        let kinds = [BufferKind::new(ScalarType::U16, false)];
         assert!(matches!(
             validate_buffers(&kinds, &[BufferArg::read(&long)]),
             Err(crate::SignatureError::Length { buffer: 0 })

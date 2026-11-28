@@ -1,0 +1,13 @@
+error: unsupported kernel scalar method 'to_ascii_uppercase'
+ --> tests/ui/unsupported_char_methods.rs:6:7
+  |
+6 |     c.to_ascii_uppercase()
+  |       ^^^^^^^^^^^^^^^^^^
+
+error[E0433]: failed to resolve: use of unresolved module or unlinked crate `upper`
+  --> tests/ui/unsupported_char_methods.rs:10:13
+   |
+10 |     let _ = upper::ir();
+   |             ^^^^^ use of unresolved module or unlinked crate `upper`
+   |
+   = help: if you wanted to use a crate named `upper`, use `cargo add upper` to add it to your `Cargo.toml`

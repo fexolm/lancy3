@@ -39,11 +39,7 @@ impl Intrinsic {
             Self::Math { op, ty } => {
                 let operands = [ValueType::Scalar(ty), ValueType::Scalar(ScalarType::U32)];
                 let arity = if op == MathOp::RotateLeft { 2 } else { 1 };
-                if matches!(
-                    ty,
-                    ScalarType::I32 | ScalarType::U32 | ScalarType::I64 | ScalarType::U64
-                ) && args == &operands[..arity]
-                {
+                if ty.is_integer() && ty != ScalarType::Index && args == &operands[..arity] {
                     Ok(())
                 } else {
                     Err(crate::BuildError::verify(format!(

@@ -1,0 +1,111 @@
+# Byte and word scalars as Splice kernels use them. A narrow sum keeps
+# garbage above its width on x64 and a zero-extended value on AArch64, so
+# each operation that reads the upper bits picks its 8- or 16-bit form
+# (x64) or extends a signed operand first (AArch64 `signed_inputs`).
+fn main(x:i8 y:i8) -> i32
+  s = add x y
+  l = lt s x
+  ret l
+@isel check: alu.i8.add
+@isel check: cmp.lt.8
+@aarch64-isel check: int add_32_addsub_shift x1
+@aarch64-isel check: int.cmp lt x1 signed_inputs
+@run 127 1 -> -1
+@run -128 -1 -> 0
+@run 1 1 -> 0
+---
+# A shift count wraps at the width: 300 = 44, and 44 >> (100 mod 8) = 2.
+fn main(x:u8 y:u8) -> u8
+  s = add x y
+  q = shr s y
+  ret q
+@isel check: alu.u8.add
+@isel check: shr.u8
+@aarch64-isel check: lsrv_32_dp_2src x1 wrap_shift
+@run 255 1 -> 0
+@run 200 100 -> 2
+@run 100 2 -> 25
+---
+fn main(x:u16 y:u16) -> f32
+  s = mul x y
+  f = cast f32 s
+  ret f
+@isel check: alu.u16.mul
+@isel check: convert.u16.f32
+@aarch64-isel check: madd_32a_dp_3src x2
+@aarch64-isel check: ucvtf_scalar u16 f32
+@run 65535 2 -> 65534
+@run 300 300 -> 24464
+---
+fn main(x:i16 y:i16) -> i16
+  q = rem x y
+  ret q
+@isel check: extend.i16
+@isel check: rem.i16
+@aarch64-isel check: int.rem signed x2 signed_inputs
+@run -32768 -1 -> !overflow
+@run -7 2 -> -1
+@run 5 0 -> !zero
+---
+fn main(x:u8 y:u8) -> u8
+  s = saturatingadd x y
+  m = max s y
+  ret m
+@isel check: addsat.u8
+@isel check: alu.u8.max
+@aarch64-isel check: uqadd_asimd x1
+@aarch64-isel check: int.minmax cs x1
+@run 200 100 -> 255
+@run 1 2 -> 3
+---
+# Bit counts and rotation of a narrow sum (splice::Math on u8) read only
+# its 8 bits: 200 + 100 = 44 = 0b0010_1100.
+fn main(x:u8 y:u8) -> i32
+  s = add x y
+  p = popcnt s
+  l = leadingzeros s
+  t = trailingzeros s
+  r = rotateleft s y
+  p32 = cast i32 p
+  l32 = cast i32 l
+  t32 = cast i32 t
+  r32 = cast i32 r
+  k = const 256
+  hi = mul l32 k
+  a = add p32 hi
+  k2 = const 65536
+  tt = mul t32 k2
+  b = add a tt
+  k3 = const 16777216
+  rr = mul r32 k3
+  c = add b rr
+  ret c
+@aarch64-isel check: popcnt
+@run 200 100 -> -1040055805
+@run 255 1 -> 526336
+@run 0 0 -> 526336
+---
+# The same on a signed 16-bit difference: -32768 - 1 wraps to 32767.
+fn main(x:i16 y:i16) -> i32
+  s = sub x y
+  p = popcnt s
+  l = leadingzeros s
+  t = trailingzeros s
+  r = rotateleft s y
+  p32 = cast i32 p
+  l32 = cast i32 l
+  t32 = cast i32 t
+  r32 = cast i32 r
+  k = const 256
+  hi = mul l32 k
+  a = add p32 hi
+  k2 = const 65536
+  tt = mul t32 k2
+  b = add a tt
+  k3 = const 16777216
+  rr = mul r32 k3
+  c = add b rr
+  ret c
+@aarch64-isel check: popcnt
+@run -32768 1 -> -33554161
+@run 0 16 -> -268173300

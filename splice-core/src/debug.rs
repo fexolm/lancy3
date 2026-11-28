@@ -1,7 +1,6 @@
 //! Source-level metadata supplied by the frontend to native code generators.
 
 use crate::hir::{Buffer, BufferKind, Function, Reg, ScalarType, ValueType};
-use crate::simd::Element;
 
 /// A point in a kernel's source. `#[kernel]` gives an absolute `file`; a
 /// relative one is relative to `directory`, the compilation directory.
@@ -116,10 +115,10 @@ pub enum Type {
     /// A scalar in its memory layout: a `bool` is one byte holding 0 or 1.
     Scalar(ScalarType),
     Vector {
-        element: Element,
+        element: ScalarType,
         lanes: usize,
     },
-    Slice(Element),
+    Slice(ScalarType),
     Constant(ConstantType),
 }
 
@@ -153,7 +152,7 @@ pub enum Store {
     Vector(Reg),
     /// A mask register as the vector of its index lanes: all bits set for
     /// an active lane, zero otherwise.
-    Mask(Reg, Element),
+    Mask(Reg, ScalarType),
     /// The data pointer of a slice.
     Data(Buffer),
     /// The length of a slice, zero-extended to 64 bits.
@@ -195,7 +194,7 @@ impl Point {
         buffers: &'a [BufferKind],
         vector_bytes: usize,
     ) -> impl Iterator<Item = Slot> + 'a {
-        let vector = move |element: Element| Type::Vector {
+        let vector = move |element: ScalarType| Type::Vector {
             element,
             lanes: element.lanes(vector_bytes),
         };
@@ -272,11 +271,11 @@ mod tests {
         };
         let types = [
             ValueType::Scalar(ScalarType::Bool),
-            ValueType::Vector(Element::F32),
-            ValueType::Mask(Element::F32),
+            ValueType::Vector(ScalarType::F32),
+            ValueType::Mask(ScalarType::F32),
         ];
         let reg_type = |r: Reg| types[r.0 as usize];
-        let kinds = [BufferKind::new(Element::U16, false)];
+        let kinds = [BufferKind::new(ScalarType::U16, false)];
         let stores: Vec<_> = point
             .slots(reg_type, &kinds, 16)
             .flat_map(|slot| slot.stores(reg_type).collect::<Vec<_>>())
@@ -288,7 +287,7 @@ mod tests {
                 (8, Store::Data(Buffer(0))),
                 (16, Store::Length(Buffer(0))),
                 (24, Store::Vector(Reg(1))),
-                (40, Store::Mask(Reg(2), Element::F32)),
+                (40, Store::Mask(Reg(2), ScalarType::F32)),
             ]
         );
     }

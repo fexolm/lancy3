@@ -5,7 +5,8 @@ use super::intrinsic;
 pub use __splice_math as Math;
 
 /// The built-in integer intrinsics. Inside a kernel the frontend also
-/// recognizes the corresponding inherent methods on i32, u32, i64 and u64.
+/// recognizes the corresponding inherent methods on i8, u8, i16, u16, i32,
+/// u32, i64 and u64.
 pub trait Math {
     fn count_ones(self) -> u32;
     fn leading_zeros(self) -> u32;
@@ -25,4 +26,4 @@ macro_rules! integers {
         }
     )*};
 }
-integers!(i32, u32, i64, u64);
+integers!(i8, u8, i16, u16, i32, u32, i64, u64);

@@ -340,8 +340,7 @@ impl KernelBuilder for Direct<'_, '_> {
         self.result(ScalarType::Index, |ir, d| ir.length(d, b))
     }
     fn load(&mut self, b: Buffer, index: Reg) -> splice_core::Result<Reg> {
-        let ty = ScalarType::of_element(self.kinds[b.index()].element())
-            .expect("validated scalar element");
+        let ty = self.kinds[b.index()].element();
         self.result(ty, |ir, d| ir.read_element(d, b, index))
     }
     fn store(&mut self, b: Buffer, index: Reg, value: Reg) -> splice_core::Result<()> {

@@ -1,7 +1,9 @@
 use splice::lancy::Lancy;
 use splice::{
-    BufferArg, BufferKind, Executable, kernel,
-    std::intrinsics::simd::{Element, Lane, LaneElement},
+    BufferArg, BufferKind, Executable,
+    hir::ScalarType,
+    kernel,
+    std::intrinsics::simd::{Lane, LaneElement},
 };
 
 #[derive(Clone, Copy)]
@@ -33,7 +35,7 @@ struct Projection {
 #[derive(splice::KernelType)]
 struct Schema {
     layout: [BufferKind; 6],
-    elements: [Element; 6],
+    elements: [ScalarType; 6],
 }
 
 impl Schema {
@@ -146,19 +148,19 @@ fn query(
             return -1;
         }
         match (schema.elements[col], val) {
-            (Element::U16, Literal::U16(val)) => {
+            (ScalarType::U16, Literal::U16(val)) => {
                 filter::<u16>(columns[col].as_slice::<u16>(), op, val, keep)
             }
-            (Element::I32, Literal::I32(val)) => {
+            (ScalarType::I32, Literal::I32(val)) => {
                 filter::<i32>(columns[col].as_slice::<i32>(), op, val, keep)
             }
-            (Element::I64, Literal::I64(val)) => {
+            (ScalarType::I64, Literal::I64(val)) => {
                 filter::<i64>(columns[col].as_slice::<i64>(), op, val, keep)
             }
-            (Element::F32, Literal::F32(val)) => {
+            (ScalarType::F32, Literal::F32(val)) => {
                 filter::<f32>(columns[col].as_slice::<f32>(), op, val, keep)
             }
-            (Element::F64, Literal::F64(val)) => {
+            (ScalarType::F64, Literal::F64(val)) => {
                 filter::<f64>(columns[col].as_slice::<f64>(), op, val, keep)
             }
             _ => return -1,
@@ -170,31 +172,31 @@ fn query(
         return -1;
     }
     let count = match (schema.elements[left], schema.elements[right]) {
-        (Element::U16, Element::U16) => join::<u16>(
+        (ScalarType::U16, ScalarType::U16) => join::<u16>(
             columns[left].as_slice::<u16>(),
             columns[right].as_slice::<u16>(),
             keep,
             right_rows,
         ),
-        (Element::I32, Element::I32) => join::<i32>(
+        (ScalarType::I32, ScalarType::I32) => join::<i32>(
             columns[left].as_slice::<i32>(),
             columns[right].as_slice::<i32>(),
             keep,
             right_rows,
         ),
-        (Element::I64, Element::I64) => join::<i64>(
+        (ScalarType::I64, ScalarType::I64) => join::<i64>(
             columns[left].as_slice::<i64>(),
             columns[right].as_slice::<i64>(),
             keep,
             right_rows,
         ),
-        (Element::F32, Element::F32) => join::<f32>(
+        (ScalarType::F32, ScalarType::F32) => join::<f32>(
             columns[left].as_slice::<f32>(),
             columns[right].as_slice::<f32>(),
             keep,
             right_rows,
         ),
-        (Element::F64, Element::F64) => join::<f64>(
+        (ScalarType::F64, ScalarType::F64) => join::<f64>(
             columns[left].as_slice::<f64>(),
             columns[right].as_slice::<f64>(),
             keep,
@@ -214,7 +216,7 @@ fn query(
             return -1;
         }
         match (schema.elements[col], val) {
-            (Element::U16, Literal::U16(val)) => project::<u16>(
+            (ScalarType::U16, Literal::U16(val)) => project::<u16>(
                 columns[col].as_slice::<u16>(),
                 right_rows,
                 count,
@@ -223,7 +225,7 @@ fn query(
                 bit,
                 out,
             ),
-            (Element::I32, Literal::I32(val)) => project::<i32>(
+            (ScalarType::I32, Literal::I32(val)) => project::<i32>(
                 columns[col].as_slice::<i32>(),
                 right_rows,
                 count,
@@ -232,7 +234,7 @@ fn query(
                 bit,
                 out,
             ),
-            (Element::I64, Literal::I64(val)) => project::<i64>(
+            (ScalarType::I64, Literal::I64(val)) => project::<i64>(
                 columns[col].as_slice::<i64>(),
                 right_rows,
                 count,
@@ -241,7 +243,7 @@ fn query(
                 bit,
                 out,
             ),
-            (Element::F32, Literal::F32(val)) => project::<f32>(
+            (ScalarType::F32, Literal::F32(val)) => project::<f32>(
                 columns[col].as_slice::<f32>(),
                 right_rows,
                 count,
@@ -250,7 +252,7 @@ fn query(
                 bit,
                 out,
             ),
-            (Element::F64, Literal::F64(val)) => project::<f64>(
+            (ScalarType::F64, Literal::F64(val)) => project::<f64>(
                 columns[col].as_slice::<f64>(),
                 right_rows,
                 count,

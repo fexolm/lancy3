@@ -1,112 +1,187 @@
 //! Scalar types, constants and the reference semantics of scalar operations.
 use super::Binary;
 use crate::Trap;
-use crate::simd::Element;
 use std::fmt;
 
 // `Index` is Rust's `usize`. Every supported target is 64-bit.
 const _: () = assert!(usize::BITS == 64);
 
-/// The type of a scalar register. Integers wrap or trap as the operation
-/// says; `Index` is Rust's `usize` (64 bits).
+/// What the bits of a scalar mean.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum ScalarType {
+pub enum ScalarKind {
     Bool,
-    I32,
-    U32,
-    I64,
-    U64,
-    Index,
-    F32,
-    F64,
+    /// A Unicode scalar value: an unsigned 32-bit integer outside the
+    /// surrogates and at most `0x10FFFF`.
+    Char,
+    Signed,
+    Unsigned,
+    Float,
+}
+
+/// The properties of a scalar type: one row per [`ScalarType`].
+#[derive(Clone, Copy, Debug)]
+pub struct ScalarInfo {
+    /// The Rust name of the type.
+    pub name: &'static str,
+    /// Significant bits of a value: 1 for `bool`.
+    pub bits: u32,
+    pub kind: ScalarKind,
+}
+
+macro_rules! scalar_types {
+    ($($variant:ident => $name:literal, $bits:literal, $kind:ident;)*) => {
+        /// The type of a scalar register. Integers wrap or trap as the
+        /// operation says; `Index` is Rust's `usize` (64 bits) and `Char`
+        /// Rust's `char`. Every property comes from [`ScalarType::info`].
+        #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+        pub enum ScalarType {
+            $($variant,)*
+        }
+
+        impl ScalarType {
+            pub const ALL: [Self; [$(Self::$variant),*].len()] = [$(Self::$variant),*];
+            const INFO: [ScalarInfo; Self::ALL.len()] = [$(ScalarInfo {
+                name: $name,
+                bits: $bits,
+                kind: ScalarKind::$kind,
+            }),*];
+        }
+    };
+}
+
+scalar_types! {
+    Bool => "bool", 1, Bool;
+    Char => "char", 32, Char;
+    I8 => "i8", 8, Signed;
+    U8 => "u8", 8, Unsigned;
+    I16 => "i16", 16, Signed;
+    U16 => "u16", 16, Unsigned;
+    I32 => "i32", 32, Signed;
+    U32 => "u32", 32, Unsigned;
+    I64 => "i64", 64, Signed;
+    U64 => "u64", 64, Unsigned;
+    Index => "usize", 64, Unsigned;
+    F32 => "f32", 32, Float;
+    F64 => "f64", 64, Float;
 }
 
 impl ScalarType {
-    pub const ALL: [Self; 8] = [
-        Self::Bool,
-        Self::I32,
-        Self::U32,
-        Self::I64,
-        Self::U64,
-        Self::Index,
-        Self::F32,
-        Self::F64,
-    ];
+    /// The row of the type table that describes this type.
+    pub const fn info(self) -> ScalarInfo {
+        Self::INFO[self as usize]
+    }
+
+    pub const fn kind(self) -> ScalarKind {
+        self.info().kind
+    }
 
     /// Significant bits of a value: 1 for `Bool`.
     pub const fn bits(self) -> u32 {
-        match self {
-            Self::Bool => 1,
-            Self::I32 | Self::U32 | Self::F32 => 32,
-            Self::I64 | Self::U64 | Self::Index | Self::F64 => 64,
-        }
+        self.info().bits
     }
 
     /// Bytes of a value in memory: one for `Bool`.
     pub const fn bytes(self) -> usize {
-        match self {
-            Self::Bool => 1,
-            _ => self.bits() as usize / 8,
-        }
+        self.bits().div_ceil(8) as usize
     }
 
     pub const fn is_float(self) -> bool {
-        matches!(self, Self::F32 | Self::F64)
+        matches!(self.kind(), ScalarKind::Float)
     }
 
+    /// A signed or unsigned integer (`Char` and `Bool` are not).
     pub const fn is_integer(self) -> bool {
-        !matches!(self, Self::Bool | Self::F32 | Self::F64)
+        matches!(self.kind(), ScalarKind::Signed | ScalarKind::Unsigned)
     }
 
     pub const fn is_signed(self) -> bool {
-        matches!(self, Self::I32 | Self::I64)
+        matches!(self.kind(), ScalarKind::Signed)
     }
 
-    /// The element of a slice whose elements have this type.
-    pub const fn element(self) -> Option<Element> {
-        Some(match self {
-            Self::I32 => Element::I32,
-            Self::U32 => Element::U32,
-            Self::I64 => Element::I64,
-            Self::F32 => Element::F32,
-            Self::F64 => Element::F64,
-            Self::Bool | Self::U64 | Self::Index => return None,
-        })
+    /// An integer or float: the types arithmetic applies to.
+    pub const fn is_number(self) -> bool {
+        self.is_integer() || self.is_float()
     }
 
-    /// The scalar type of a slice element, if a scalar register can hold it.
-    pub const fn of_element(element: Element) -> Option<Self> {
-        Some(match element {
-            Element::I32 => Self::I32,
-            Element::U32 => Self::U32,
-            Element::I64 => Self::I64,
-            Element::F32 => Self::F32,
-            Element::F64 => Self::F64,
-            Element::U16 => return None,
-        })
+    /// Whether the type is the element of a [`Lane`](crate::simd::Lane): a
+    /// number other than `u64` and `usize`.
+    pub const fn is_lane(self) -> bool {
+        self.is_number() && !matches!(self, Self::U64 | Self::Index)
+    }
+
+    /// The integer type of the same width and signedness a code generator
+    /// stores this type as: `Char` is `U32`; other types are themselves.
+    pub const fn representation(self) -> Self {
+        match self {
+            Self::Char => Self::U32,
+            ty => ty,
+        }
+    }
+
+    /// The integer type of the same width as a lane of this type: the
+    /// type of its lane indices and masks. `F32` is `I32`, `F64` is `I64`.
+    pub const fn index(self) -> Self {
+        match self {
+            Self::F32 => Self::I32,
+            Self::F64 => Self::I64,
+            ty => ty,
+        }
+    }
+
+    /// Lanes of this type in a vector of `vector_bytes`.
+    pub const fn lanes(self, vector_bytes: usize) -> usize {
+        vector_bytes / self.bytes()
     }
 
     /// The Rust name of the type.
     pub const fn name(self) -> &'static str {
-        match self {
-            Self::Bool => "bool",
-            Self::I32 => "i32",
-            Self::U32 => "u32",
-            Self::I64 => "i64",
-            Self::U64 => "u64",
-            Self::Index => "usize",
-            Self::F32 => "f32",
-            Self::F64 => "f64",
+        self.info().name
+    }
+
+    /// The integer type of `bits` bits: `U64`, not `Index`, for 64
+    /// unsigned bits.
+    ///
+    /// # Panics
+    /// If no integer type has `bits` bits.
+    pub const fn integer(bits: u32, signed: bool) -> Self {
+        match (bits, signed) {
+            (8, true) => Self::I8,
+            (8, false) => Self::U8,
+            (16, true) => Self::I16,
+            (16, false) => Self::U16,
+            (32, true) => Self::I32,
+            (32, false) => Self::U32,
+            (64, true) => Self::I64,
+            (64, false) => Self::U64,
+            _ => panic!("no integer type of this width"),
         }
     }
 
+    /// The type Rust names `name`.
+    pub fn named(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|ty| ty.name() == name)
+    }
+
     /// Whether Rust's `as` converts a value of this type to `to`: numbers
-    /// convert to numbers and `bool` to integers.
+    /// convert to numbers, `bool` and `char` to integers, and `u8` to
+    /// `char`.
     pub const fn casts_to(self, to: Self) -> bool {
-        match (self, to) {
-            (_, Self::Bool) => matches!(self, Self::Bool),
-            (Self::Bool, _) => to.is_integer(),
+        match (self.kind(), to.kind()) {
+            (ScalarKind::Bool, ScalarKind::Bool) | (ScalarKind::Char, ScalarKind::Char) => true,
+            (ScalarKind::Bool | ScalarKind::Char, _) => to.is_integer(),
+            (_, ScalarKind::Bool) => false,
+            (_, ScalarKind::Char) => matches!(self, Self::U8),
             _ => true,
+        }
+    }
+
+    /// The smallest and largest value of an integer type.
+    const fn range(self) -> (i128, i128) {
+        let bits = self.bits();
+        if self.is_signed() {
+            (-(1i128 << (bits - 1)), (1i128 << (bits - 1)) - 1)
+        } else {
+            (0, (1i128 << bits) - 1)
         }
     }
 
@@ -154,18 +229,16 @@ impl Constant {
     /// The value's bits, sign-extended to 64 for signed integers: the
     /// 64-bit word that holds the value in a register.
     pub const fn word(self) -> u64 {
-        match self.ty {
-            ScalarType::I32 => self.bits as u32 as i32 as i64 as u64,
-            _ => self.bits,
-        }
+        self.integer() as u64
     }
 
-    /// An integer or `bool`, exactly.
+    /// An integer, `bool` or `char`, exactly.
     const fn integer(self) -> i128 {
-        match self.ty {
-            ScalarType::I32 => self.bits as u32 as i32 as i128,
-            ScalarType::I64 => self.bits as i64 as i128,
-            _ => self.bits as i128,
+        if self.ty.is_signed() {
+            let unused = 64 - self.ty.bits();
+            ((self.bits << unused) as i64 >> unused) as i128
+        } else {
+            self.bits as i128
         }
     }
 
@@ -206,11 +279,12 @@ impl Constant {
             (true, true) => Self::from_float(to, self.float()),
             (true, false) => {
                 let value = self.float();
-                let saturated = match to {
-                    ScalarType::I32 => value as i32 as i128,
-                    ScalarType::U32 => value as u32 as i128,
-                    ScalarType::I64 => value as i64 as i128,
-                    _ => value as u64 as i128,
+                // Rust saturates and maps NaN to zero.
+                let (min, max) = to.range();
+                let saturated = if value.is_nan() {
+                    0
+                } else {
+                    (value as i128).clamp(min, max)
                 };
                 Self::from_integer(to, saturated)
             }
@@ -231,6 +305,10 @@ impl fmt::Display for Constant {
             ScalarType::Bool => write!(f, "{}", self.bits != 0),
             ScalarType::F32 => write!(f, "{:?}f32", f32::from_bits(self.bits as u32)),
             ScalarType::F64 => write!(f, "{:?}f64", f64::from_bits(self.bits)),
+            ScalarType::Char => match char::from_u32(self.bits as u32) {
+                Some(c) => write!(f, "{c:?}"),
+                None => write!(f, "'\\u{{{:x}}}'", self.bits),
+            },
             ty => write!(f, "{}{ty}", self.integer()),
         }
     }
@@ -245,7 +323,10 @@ macro_rules! constant_from {
         }
     )*};
 }
-constant_from!(bool => Bool, i32 => I32, u32 => U32, i64 => I64, u64 => U64, usize => Index);
+constant_from!(
+    bool => Bool, char => Char, i8 => I8, u8 => U8, i16 => I16, u16 => U16, i32 => I32,
+    u32 => U32, i64 => I64, u64 => U64, usize => Index
+);
 
 impl From<f32> for Constant {
     fn from(value: f32) -> Self {
@@ -269,15 +350,16 @@ impl Binary {
 
     /// The result type of this operation on two operands of type `ty`, or
     /// `None` if it does not apply to them. Comparisons produce `Bool`.
-    /// `Bool` supports `Eq`, `Ne`, `And`, `Or` and `Xor`; floats support
+    /// `Char` supports comparisons, `Min` and `Max`; `Bool` supports `Eq`, `Ne`, `And`, `Or` and `Xor`; floats support
     /// `Add`, `Sub`, `Mul`, `Div`, `Min`, `Max` and comparisons; integers
     /// support every operation, including the `Saturating` forms.
     pub const fn output(self, ty: ScalarType) -> Option<ScalarType> {
-        let applies = match ty {
-            ScalarType::Bool => {
+        let applies = match ty.kind() {
+            ScalarKind::Bool => {
                 matches!(self, Self::Eq | Self::Ne | Self::And | Self::Or | Self::Xor)
             }
-            ScalarType::F32 | ScalarType::F64 => {
+            ScalarKind::Char => self.is_comparison() || matches!(self, Self::Min | Self::Max),
+            ScalarKind::Float => {
                 self.is_comparison()
                     || matches!(
                         self,
@@ -324,11 +406,7 @@ impl Binary {
             return Ok(Constant::from(compare(self, x, y)));
         }
         let bits = ty.bits();
-        let (min, max) = if ty.is_signed() {
-            (-(1i128 << (bits - 1)), (1i128 << (bits - 1)) - 1)
-        } else {
-            (0, (1i128 << bits) - 1)
-        };
+        let (min, max) = ty.range();
         let checked = |value: Option<i128>| {
             value
                 .filter(|v| (min..=max).contains(v))
@@ -470,6 +548,53 @@ mod tests {
     }
 
     #[test]
+    fn narrow_integers_follow_rust() {
+        let b = |v: i8| Constant::from(v);
+        let w = |v: u16| Constant::from(v);
+        assert_eq!(Binary::Add.checked_eval(b(i8::MAX), b(1)), Ok(b(i8::MIN)));
+        assert_eq!(
+            Binary::CheckedMul.checked_eval(b(-128), b(-1)),
+            Err(Trap::Overflow)
+        );
+        assert_eq!(
+            Binary::Div.checked_eval(b(-128), b(-1)),
+            Err(Trap::DivisionOverflow)
+        );
+        assert_eq!(Binary::Rem.checked_eval(b(-7), b(2)), Ok(b(-1)));
+        assert_eq!(Binary::Shr.checked_eval(b(-128), b(9)), Ok(b(-64)));
+        assert_eq!(
+            Binary::CheckedShl.checked_eval(w(1), w(16)),
+            Err(Trap::Overflow)
+        );
+        assert_eq!(Binary::Lt.checked_eval(b(-1), b(0)), Ok(true.into()));
+        assert_eq!(Binary::SaturatingSub.checked_eval(w(1), w(2)), Ok(w(0)));
+        assert_eq!(b(-1).word(), u64::MAX, "a signed word is sign-extended");
+        assert_eq!(b(-1).bits(), 0xff);
+        for ty in ScalarType::ALL {
+            assert_eq!(ScalarType::named(ty.name()), Some(ty));
+        }
+    }
+
+    #[test]
+    fn chars_compare_and_cast_like_rust() {
+        let c = Constant::from('é');
+        assert_eq!(c.cast(ScalarType::U8), Some(0xe9u8.into()));
+        assert_eq!(c.cast(ScalarType::I64), Some(0xe9i64.into()));
+        assert_eq!(
+            Constant::from(200u8).cast(ScalarType::Char),
+            Some('È'.into())
+        );
+        assert_eq!(Constant::from(65u32).cast(ScalarType::Char), None);
+        assert_eq!(c.cast(ScalarType::F32), None);
+        assert_eq!(
+            Binary::Lt.checked_eval('a'.into(), 'b'.into()),
+            Ok(true.into())
+        );
+        assert_eq!(Binary::Add.output(ScalarType::Char), None);
+        assert_eq!(c.to_string(), "'é'");
+    }
+
+    #[test]
     fn floats_follow_ieee_and_min_prefers_numbers() {
         let f = |v: f32| Constant::from(v);
         assert_eq!(Binary::Min.checked_eval(f(f32::NAN), f(1.0)), Ok(f(1.0)));
@@ -505,5 +630,9 @@ mod tests {
         );
         assert_eq!(Constant::from(1i32).cast(ScalarType::Bool), None);
         assert_eq!(Constant::from(true).cast(ScalarType::F32), None);
+        assert_eq!(c(300f32.into(), ScalarType::U8), 255u8.into());
+        assert_eq!(c((-1e9f64).into(), ScalarType::I16), i16::MIN.into());
+        assert_eq!(c((-1i8).into(), ScalarType::U16), u16::MAX.into());
+        assert_eq!(c(200u8.into(), ScalarType::I8), (-56i8).into());
     }
 }

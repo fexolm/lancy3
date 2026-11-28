@@ -20,7 +20,8 @@ impl Lowering {
     }
 }
 
-/// A core method of the integer types and its lowering.
+/// A core method of the scalar types and its lowering. A method applies to
+/// the types its operation does: `min` and `max` also to `char`.
 const INTEGER_METHODS: [(&str, Lowering); 9] = [
     ("wrapping_add", Lowering::Binary(Binary::Add)),
     ("wrapping_sub", Lowering::Binary(Binary::Sub)),
@@ -35,13 +36,12 @@ const INTEGER_METHODS: [(&str, Lowering); 9] = [
 
 /// The lowering of `method` on a receiver of type `ty`, if it is a core method.
 fn lookup(ty: ScalarType, method: &str) -> Option<Lowering> {
-    if !ty.is_integer() {
-        return None;
-    }
-    INTEGER_METHODS
-        .iter()
-        .find(|(name, _)| *name == method)
-        .map(|&(_, lowering)| lowering)
+    let (_, lowering) = INTEGER_METHODS.iter().find(|(name, _)| *name == method)?;
+    let applies = match *lowering {
+        Lowering::Binary(op) => op.output(ty) == Some(ty),
+        Lowering::WrappingNeg => ty.is_integer(),
+    };
+    applies.then_some(*lowering)
 }
 
 /// Stage the Rust method `method` on runtime scalars: `args[0]` is the

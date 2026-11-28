@@ -1,4 +1,4 @@
-error: unsupported kernel integer method 'extra'
+error: unsupported kernel scalar method 'extra'
  --> tests/ui/intrinsics.rs:9:31
   |
 9 | fn unknown(x: u32) -> u32 { x.extra() }

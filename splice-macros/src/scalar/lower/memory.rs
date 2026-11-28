@@ -1,6 +1,7 @@
 //! Runtime slices carry an immutable buffer identity through specialization.
 //! Only lengths, element accesses, and scalar computations become instructions.
 use super::{Lower, Scalar, Stage, Value, err};
+use crate::kast::types::Primitive;
 use proc_macro2::TokenStream;
 use splice_core::hir::MathOp;
 use syn::{BinOp, Expr, ExprCast, ExprIndex, ExprReference, Result, UnOp};
@@ -70,7 +71,7 @@ impl Lower<'_> {
             else {
                 return err(
                     m,
-                    "as_slice::<T>() requires u16, u32, i32, i64, f32, or f64",
+                    "as_slice::<T>() requires a slice element: a kernel scalar other than bool",
                 );
             };
             let slot = self.host(self.expr(&index.index)?, &index.index)?;
@@ -113,7 +114,13 @@ impl Lower<'_> {
             });
         }
         let kind = match receiver.stage {
-            Stage::Reg(t) | Stage::Word(t) if t.is_number() || t == Scalar::Inferred => t.base(),
+            Stage::Reg(t) | Stage::Word(t)
+                if t.is_number()
+                    || t == Scalar::Inferred
+                    || t == Scalar::Number(crate::kast::types::Primitive::Char) =>
+            {
+                t.base()
+            }
             // A host receiver with runtime arguments, such as `k.min(x)`,
             // takes the arguments' type.
             stage if stage.is_host() => {
@@ -137,7 +144,7 @@ impl Lower<'_> {
         if !CORE_METHODS.contains(&name.as_str()) {
             return err(
                 &m.method,
-                &format!("unsupported kernel integer method '{name}'"),
+                &format!("unsupported kernel scalar method '{name}'"),
             );
         }
         let receiver = self.reg(receiver, kind, &m.receiver)?;
@@ -221,24 +228,28 @@ impl Lower<'_> {
     ) -> Result<Value> {
         let root = self.root;
         let (name, result) = match op {
-            MathOp::CountOnes => ("CountOnes", Scalar::Number(super::Number::U32)),
-            MathOp::LeadingZeros => ("LeadingZeros", Scalar::Number(super::Number::U32)),
-            MathOp::TrailingZeros => ("TrailingZeros", Scalar::Number(super::Number::U32)),
+            MathOp::CountOnes => ("CountOnes", Scalar::Number(Primitive::U32)),
+            MathOp::LeadingZeros => ("LeadingZeros", Scalar::Number(Primitive::U32)),
+            MathOp::TrailingZeros => ("TrailingZeros", Scalar::Number(Primitive::U32)),
             MathOp::RotateLeft => ("RotateLeft", kind),
         };
         if !matches!(
             kind,
             Scalar::Inferred
                 | Scalar::Number(
-                    super::Number::I32
-                        | super::Number::U32
-                        | super::Number::I64
-                        | super::Number::U64
+                    Primitive::I8
+                        | Primitive::U8
+                        | Primitive::I16
+                        | Primitive::U16
+                        | Primitive::I32
+                        | Primitive::U32
+                        | Primitive::I64
+                        | Primitive::U64
                 )
         ) {
             return err(
                 at,
-                "unsupported intrinsic receiver: expected i32, u32, i64 or u64",
+                "unsupported intrinsic receiver: expected i8, u8, i16, u16, i32, u32, i64 or u64",
             );
         }
         if args.len() != usize::from(op == MathOp::RotateLeft) {
@@ -246,7 +257,7 @@ impl Lower<'_> {
         }
         let receiver = self.reg(receiver, kind, at)?;
         let count = args
-            .map(|arg| self.operand(arg, Scalar::Number(super::Number::U32)))
+            .map(|arg| self.operand(arg, Scalar::Number(Primitive::U32)))
             .collect::<Result<Vec<_>>>()?;
         let op = quote::format_ident!("{name}");
         Ok(Value::new(
@@ -264,8 +275,11 @@ impl Lower<'_> {
 
     pub(super) fn cast(&self, cast: &ExprCast) -> Result<Value> {
         let value = self.expr(&cast.expr)?;
-        let Some(kind) = Scalar::from_type(&cast.ty, self.types).filter(|t| t.is_number()) else {
-            return err(&cast.ty, "a runtime cast converts to a number type");
+        // rustc checked the cast: to a number, or `u8` to `char`.
+        let Some(kind) = Scalar::from_type(&cast.ty, self.types)
+            .filter(|t| t.is_number() || *t == Scalar::Number(crate::kast::types::Primitive::Char))
+        else {
+            return err(&cast.ty, "a runtime cast converts to a number type or char");
         };
         let (Stage::Reg(scalar) | Stage::Word(scalar)) = value.stage else {
             return err(cast, "expected a runtime scalar to cast");

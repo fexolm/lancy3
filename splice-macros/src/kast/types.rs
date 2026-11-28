@@ -302,11 +302,33 @@ fn type_of(body: &Body<'_>, found: &[Option<Primitive>], e: &Expr) -> Option<Pri
 }
 
 impl Primitive {
-    fn is_float(self) -> bool {
+    pub(crate) fn is_float(self) -> bool {
         matches!(self, Self::F32 | Self::F64)
     }
-    fn is_number(self) -> bool {
+    pub(crate) fn is_number(self) -> bool {
         !matches!(self, Self::Bool | Self::Char)
+    }
+    /// The Rust name of the type.
+    pub(crate) fn name(self) -> &'static str {
+        Self::ALL
+            .iter()
+            .find_map(|(primitive, spelling)| (*primitive == self).then_some(*spelling))
+            .expect("every primitive has a name")
+    }
+    /// Whether a kernel register can hold the type: what
+    /// `splice::KernelScalar` is implemented for. 128-bit integers and
+    /// `isize` are not.
+    pub(crate) fn is_kernel_scalar(self) -> bool {
+        !matches!(self, Self::I128 | Self::U128 | Self::Isize)
+    }
+    /// The kernel scalar types, for diagnostics: `bool, char, i8, …`.
+    pub(crate) fn kernel_scalars() -> String {
+        Self::ALL
+            .iter()
+            .filter(|(primitive, _)| primitive.is_kernel_scalar())
+            .map(|(_, name)| *name)
+            .collect::<Vec<_>>()
+            .join(", ")
     }
 }
 

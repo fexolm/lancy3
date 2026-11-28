@@ -4,14 +4,13 @@
 use splice::frontend::{self, KernelBuilder, Signature};
 use splice::hir::{Buffer, Simd, SimdOp};
 use splice::hir::{Constant, ScalarType};
-use splice::std::intrinsics::simd::Element;
-use splice::{BufferElement, BufferKind, BuildOptions, Codegen, Executable, Mode};
+use splice::{BufferKind, BuildOptions, Codegen, Executable, Mode};
 
 fn options() -> BuildOptions {
     BuildOptions::host(Mode::Release).unwrap()
 }
 
-trait Lane: BufferElement + Copy + std::fmt::Debug {
+trait Lane: splice::std::intrinsics::simd::LaneElement {
     fn samples() -> Vec<Self>;
     /// Equality that treats every NaN as the same value.
     fn same(self, other: Self) -> bool;
@@ -124,8 +123,8 @@ enum Conversion {
 }
 
 fn stage(
-    from: Element,
-    to: Element,
+    from: ScalarType,
+    to: ScalarType,
     conversion: Conversion,
 ) -> impl Fn(&mut dyn KernelBuilder) -> splice::Result<()> {
     move |b| {
@@ -161,7 +160,7 @@ fn run<B: Codegen, F: Lane, T: Lane>(conversion: Conversion, input: &[F], expect
 where
     B::Output: Executable,
 {
-    let (from, to) = (F::ELEMENT, T::ELEMENT);
+    let (from, to) = (F::TYPE, T::TYPE);
     let kinds = [BufferKind::new(from, false), BufferKind::new(to, true)];
     let ir = frontend::materialize(
         Signature::new(&[ScalarType::I32; 0], ScalarType::I32, &kinds),
@@ -209,7 +208,7 @@ where
 }
 
 fn check<F: Lane + As<T>, T: Lane>(conversion: Conversion) {
-    let lanes = F::ELEMENT.lanes(options().target.vector_bytes());
+    let lanes = F::TYPE.lanes(options().target.vector_bytes());
     let samples = F::samples();
     // Rotate the samples through every lane position across several windows.
     for window in 0..samples.len().div_ceil(lanes).max(1) + 1 {
@@ -273,12 +272,12 @@ fn narrowing_conversions() {
 #[test]
 fn rejected_conversions_stay_rejected() {
     let kinds = [
-        BufferKind::new(Element::F64, false),
-        BufferKind::new(Element::I32, true),
+        BufferKind::new(ScalarType::F64, false),
+        BufferKind::new(ScalarType::I32, true),
     ];
     let error = frontend::materialize(
         Signature::new(&[ScalarType::I32; 0], ScalarType::I32, &kinds),
-        Box::new(stage(Element::F64, Element::I32, Conversion::Cast)),
+        Box::new(stage(ScalarType::F64, ScalarType::I32, Conversion::Cast)),
         options(),
     );
     assert!(error.is_err());

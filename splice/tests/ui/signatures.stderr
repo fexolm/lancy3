@@ -4,17 +4,11 @@ error: expected a safe synchronous kernel with Rust ABI and fixed arity
 7 | async fn asynchronous() {}
   | ^^^^^^^^^^^^^^^^^^^^^^^
 
-error: expected (), bool, i32, u32, i64, u64, usize, f32, f64, Lane<T> or Mask<T>
+error: expected (), a kernel scalar (bool, char, i8, i16, i32, i64, u8, u16, u32, u64, usize, f32, f64), Lane<T> or Mask<T>
   --> tests/ui/signatures.rs:10:21
    |
 10 | fn wide_result() -> i128 {
    |                     ^^^^
-
-error: expected (), bool, i32, u32, i64, u64, usize, f32, f64, Lane<T> or Mask<T>
-  --> tests/ui/signatures.rs:15:28
-   |
-15 | fn unsupported_vector() -> Lane<u8> {
-   |                            ^^^^^^^^
 
 error: use &mut [i32] to write to a slice
   --> tests/ui/signatures.rs:20:18
@@ -100,16 +94,148 @@ error: missing aggregate field
 99 |     comptime!(pair.second)
    |               ^^^^^^^^^^^
 
-warning: unused import: `splice::std::intrinsics::simd::Lane`
- --> tests/ui/signatures.rs:3:5
-  |
-3 | use splice::std::intrinsics::simd::Lane;
-  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  |
-  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+error: runtime parameters must be a kernel scalar (bool, char, i8, i16, i32, i64, u8, u16, u32, u64, usize, f32, f64) or a slice of one other than bool
+   --> tests/ui/signatures.rs:105:22
+    |
+105 | fn bool_slice(flags: &[bool]) -> i32 {
+    |                      ^^^^^^^
+
+error: expected (), a kernel scalar (bool, char, i8, i16, i32, i64, u8, u16, u32, u64, usize, f32, f64), Lane<T> or Mask<T>
+   --> tests/ui/signatures.rs:110:31
+    |
+110 | fn pointer_sized(x: isize) -> isize {
+    |                               ^^^^^
 
 warning: unused import: `splice::BufferArg`
  --> tests/ui/signatures.rs:4:5
   |
 4 | use splice::BufferArg;
   |     ^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+error[E0277]: `char` is not a SIMD lane element
+  --> tests/ui/signatures.rs:15:28
+   |
+15 | fn unsupported_vector() -> Lane<char> {
+   |                            ^^^^^^^^^^ not a lane element
+   |
+   = help: the trait `LaneElement` is not implemented for `char`
+   = note: lane elements are `i8`, `u8`, `i16`, `u16`, `i32`, `u32`, `i64`, `f32` and `f64`
+   = help: the following other types implement trait `LaneElement`:
+             f32
+             f64
+             i16
+             i32
+             i64
+             i8
+             u16
+             u32
+             u8
+note: required by a bound in `splice::std::intrinsics::Lane`
+  --> src/std/intrinsics/simd.rs
+   |
+   | pub struct Lane<T: LaneElement>(PhantomData<T>);
+   |                    ^^^^^^^^^^^ required by this bound in `Lane`
+
+error[E0277]: `char` is not a SIMD lane element
+  --> tests/ui/signatures.rs:16:17
+   |
+16 |     Lane::splat('a')
+   |     ----------- ^^^ not a lane element
+   |     |
+   |     required by a bound introduced by this call
+   |
+   = help: the trait `LaneElement` is not implemented for `char`
+   = note: lane elements are `i8`, `u8`, `i16`, `u16`, `i32`, `u32`, `i64`, `f32` and `f64`
+   = help: the following other types implement trait `LaneElement`:
+             f32
+             f64
+             i16
+             i32
+             i64
+             i8
+             u16
+             u32
+             u8
+note: required by a bound in `splice::std::intrinsics::Lane::<T>::splat`
+  --> src/std/intrinsics/simd.rs
+   |
+   | impl<T: LaneElement> Lane<T> {
+   |         ^^^^^^^^^^^ required by this bound in `Lane::<T>::splat`
+...
+   |         pub fn splat(v: T) -> Self
+   |                ----- required by a bound in this associated function
+
+error[E0277]: `char` is not a SIMD lane element
+  --> tests/ui/signatures.rs:16:5
+   |
+16 |     Lane::splat('a')
+   |     ^^^^^^^^^^^^^^^^ not a lane element
+   |
+   = help: the trait `LaneElement` is not implemented for `char`
+   = note: lane elements are `i8`, `u8`, `i16`, `u16`, `i32`, `u32`, `i64`, `f32` and `f64`
+   = help: the following other types implement trait `LaneElement`:
+             f32
+             f64
+             i16
+             i32
+             i64
+             i8
+             u16
+             u32
+             u8
+note: required by a bound in `splice::std::intrinsics::Lane`
+  --> src/std/intrinsics/simd.rs
+   |
+   | pub struct Lane<T: LaneElement>(PhantomData<T>);
+   |                    ^^^^^^^^^^^ required by this bound in `Lane`
+
+error[E0277]: `char` is not a SIMD lane element
+  --> tests/ui/signatures.rs:14:1
+   |
+14 | #[kernel]
+   | ^^^^^^^^^ not a lane element
+   |
+   = help: the trait `LaneElement` is not implemented for `char`
+   = note: lane elements are `i8`, `u8`, `i16`, `u16`, `i32`, `u32`, `i64`, `f32` and `f64`
+   = help: the following other types implement trait `LaneElement`:
+             f32
+             f64
+             i16
+             i32
+             i64
+             i8
+             u16
+             u32
+             u8
+note: required by a bound in `splice::std::intrinsics::Lane`
+  --> src/std/intrinsics/simd.rs
+   |
+   | pub struct Lane<T: LaneElement>(PhantomData<T>);
+   |                    ^^^^^^^^^^^ required by this bound in `Lane`
+
+error[E0277]: `char` is not a SIMD lane element
+  --> tests/ui/signatures.rs:14:1
+   |
+14 | #[kernel]
+   | ^^^^^^^^^ not a lane element
+   |
+   = help: the trait `LaneElement` is not implemented for `char`
+   = note: lane elements are `i8`, `u8`, `i16`, `u16`, `i32`, `u32`, `i64`, `f32` and `f64`
+   = help: the following other types implement trait `LaneElement`:
+             f32
+             f64
+             i16
+             i32
+             i64
+             i8
+             u16
+             u32
+             u8
+note: required by a bound in `splice::std::intrinsics::Lane`
+  --> src/std/intrinsics/simd.rs
+   |
+   | pub struct Lane<T: LaneElement>(PhantomData<T>);
+   |                    ^^^^^^^^^^^ required by this bound in `Lane`
+   = note: this error originates in the attribute macro `kernel` (in Nightly builds, run with -Z macro-backtrace for more info)
