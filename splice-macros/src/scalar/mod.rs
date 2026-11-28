@@ -233,7 +233,34 @@ pub(super) fn expand(
                         emit!(#hir::BufferKind::slices(const { &#hir::BufferKind::new(#elem, false) }))
                     }
                     None if writable.utf8 => emit!(#hir::BufferKind::STR),
+                    None if writable.elem == Elem::Record => {
+                        let Type::Reference(reference) = ty else { unreachable!("a slice parameter") };
+                        let Type::Slice(slice) = &*reference.elem else { unreachable!("a slice parameter") };
+                        let data = &slice.elem;
+                        emit!(#hir::BufferKind::data_of::<#data>(#write))
+                    }
                     None => emit!(#hir::BufferKind::new(#elem,#write)),
+                });
+                emit!(#id: #hir::Slice)
+            }
+            Binding::Record(mutable) => {
+                if columns.is_some() {
+                    return Err(Error::new_spanned(
+                        arg,
+                        "declare the column table after other buffers",
+                    ));
+                }
+                // A struct parameter is a slice of one element; its fields
+                // are read into registers where the body starts.
+                let index = buffer_names.len();
+                inline_args.push(emit!(__splice_builder.buffer(#index)?));
+                buffer_names.push(id);
+                let data = record_param(ty).expect("a struct parameter");
+                buffer_kinds.push(emit!(#hir::BufferKind::data_of::<#data>(false)));
+                copy_mutable.push(if mutable {
+                    emit!(let #id = #root::frontend::record::Record::param(__splice_builder, #id)?.copy(__splice_builder)?;)
+                } else {
+                    emit!(let #id = #root::frontend::record::Record::param(__splice_builder, #id)?;)
                 });
                 emit!(#id: #hir::Slice)
             }
@@ -754,7 +781,9 @@ fn stage_param(binding: Binding) -> crate::kast::Param {
         Binding::Host(_) => Param::Known,
         Binding::Reg(t, _) | Binding::Word(t) => Param::Scalar(t.primitive()),
         Binding::Buffer(buffer) => Param::Slice(buffer.elem.primitive()),
-        Binding::Columns | Binding::Context | Binding::Aggregate(_) => Param::Object,
+        Binding::Columns | Binding::Context | Binding::Aggregate(_) | Binding::Record(_) => {
+            Param::Object
+        }
     }
 }
 
@@ -799,6 +828,15 @@ fn parameter<'a>(arg: &'a FnArg, types: &[&Ident], name: Ident) -> Result<abi::P
             .is_some_and(|t| t.is_scalar() || matches!(t, Scalar::Vector(_) | Scalar::Mask(_))) =>
         {
             Binding::Reg(Scalar::from_type(&arg.ty, types).unwrap(), mutable)
+        }
+        [] if record_param(&arg.ty).is_some() => {
+            if mutable && matches!(&*arg.ty, Type::Reference(_)) {
+                return Err(Error::new_spanned(
+                    &arg.pat,
+                    "a struct reference binding is fixed; copy the struct into a `let mut` binding to change it",
+                ));
+            }
+            Binding::Record(mutable)
         }
         [] if nested_mutable_slice(&arg.ty) => {
             return Err(Error::new_spanned(
@@ -920,11 +958,32 @@ fn slice_type(ty: &syn::Type, types: &[&Ident]) -> Option<BufferType> {
         });
     }
     Some(BufferType {
-        elem: Elem::parse(&slice.elem, types)?,
+        elem: Elem::parse(&slice.elem, types)
+            .or_else(|| record_type(&slice.elem).then_some(Elem::Record))?,
         write: reference.mutability.is_some(),
         utf8: false,
         slice_of: None,
     })
+}
+
+/// A type the macro cannot name as a kernel scalar: kernel data that only
+/// rustc knows the layout of (a struct that derives `KernelType`). Rustc
+/// reports a type that is not kernel data.
+fn record_type(ty: &syn::Type) -> bool {
+    matches!(ty, syn::Type::Path(path) if path.qself.is_none()
+        && crate::kast::types::Primitive::of(ty).is_none()
+        && !is_str(ty))
+}
+
+/// The struct of a by-value struct parameter `p: T` or a shared reference
+/// `r: &T`.
+fn record_param(ty: &syn::Type) -> Option<&syn::Type> {
+    match ty {
+        syn::Type::Reference(r) if r.mutability.is_none() => {
+            record_type(&r.elem).then_some(&*r.elem)
+        }
+        ty => record_type(ty).then_some(ty),
+    }
 }
 
 fn is_str(ty: &syn::Type) -> bool {

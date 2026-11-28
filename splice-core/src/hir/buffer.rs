@@ -129,6 +129,11 @@ impl BufferKind {
             },
         }
     }
+    /// A slice of `T`s (see [`data`](Self::data)), checked against the
+    /// type: a layout must have the size rustc gives `T`.
+    pub const fn data_of<T: crate::KernelData>(writable: bool) -> Self {
+        Self::data(crate::data_type::<T>(), writable)
+    }
     #[doc(hidden)]
     pub const fn context(signature: &'static ContextSignature) -> Self {
         Self {
@@ -275,7 +280,7 @@ impl<'a> BufferArg<'a> {
         Self {
             data: NonNull::from(slice).cast(),
             len: slice.len(),
-            kind: const { BufferKind::data(crate::data_type::<T>(), false) },
+            kind: const { BufferKind::data_of::<T>(false) },
             borrow: PhantomData,
         }
     }
@@ -286,7 +291,7 @@ impl<'a> BufferArg<'a> {
         Self {
             data: NonNull::from(slice).cast(),
             len,
-            kind: const { BufferKind::data(crate::data_type::<T>(), true) },
+            kind: const { BufferKind::data_of::<T>(true) },
             borrow: PhantomData,
         }
     }

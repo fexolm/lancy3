@@ -185,6 +185,11 @@ impl Lower<'_> {
         Ok((name.ident.clone(), constructor))
     }
 
+    /// The fields of aggregate local `layout`, in construction order.
+    pub(super) fn aggregate_fields(&self, layout: usize) -> Vec<(Member, Scalar)> {
+        self.aggregates.borrow()[layout].fields.clone()
+    }
+
     pub(super) fn aggregate_field(
         &self,
         field: &ExprField,

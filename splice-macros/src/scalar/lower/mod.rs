@@ -10,6 +10,7 @@ pub(super) use context::Context;
 mod host;
 pub(crate) use host::overflow_prologue;
 mod memory;
+mod record;
 pub(crate) mod simd;
 mod source;
 mod word;
@@ -128,6 +129,9 @@ pub(super) enum Binding {
     Columns,
     Reg(Scalar, bool),
     Buffer(BufferType),
+    /// A struct value (a `frontend::record::Record`), mutable or not: a
+    /// struct parameter, or a local read from one or from a slice.
+    Record(bool),
 }
 struct Value {
     stage: Stage,
@@ -656,13 +660,18 @@ impl Lower<'_> {
                 Binding::Reg(..) => emit!(#root::debug::Value::Register(#ident)),
                 // Debug info describes slices of scalars; like a column
                 // table, a slice of slices is not shown.
-                Binding::Buffer(ty) if ty.slice_of.is_some() => return None,
+                Binding::Buffer(ty) if ty.slice_of.is_some() || ty.elem == Elem::Record => {
+                    return None;
+                }
                 Binding::Buffer(_) => emit!(#root::debug::Value::Slice(#ident)),
                 Binding::Host(_) => {
                     let constant = Self::constant_name(&ident);
                     emit!(#root::debug::Value::Constant(#constant))
                 }
-                Binding::Columns | Binding::Context | Binding::Aggregate(_) => return None,
+                Binding::Columns
+                | Binding::Context
+                | Binding::Aggregate(_)
+                | Binding::Record(_) => return None,
             };
             Some(emit!(#root::debug::Variable { name: #name, value: #value }))
         });
@@ -725,6 +734,9 @@ impl Lower<'_> {
         }
         if let Some(literal) = aggregate::Literal::of(self, local, &init.expr) {
             return self.aggregate_local(&local.pat, &literal);
+        }
+        if let Some(record) = self.record_local(local, &init.expr)? {
+            return Ok(record);
         }
         if let Some(split) = self.split_local(&local.pat, &init.expr)? {
             return Ok(split);
@@ -884,6 +896,9 @@ impl Lower<'_> {
         {
             return Ok(value);
         }
+        if let Some(v) = self.record_scalar(e)? {
+            return Ok(v);
+        }
         if let Some(v) = self.qualified_simd(e, hint)? {
             return Ok(v);
         }
@@ -986,6 +1001,9 @@ impl Lower<'_> {
         right: &Expr,
         op: Option<(&str, &BinOp)>,
     ) -> Result<Value> {
+        if let Some(value) = self.record_assignment(left, right, op)? {
+            return Ok(value);
+        }
         if let Expr::Index(index) = left {
             if self.body.known(expr) {
                 return Ok(Value::new(Stage::Host, self.host_code(expr)?));

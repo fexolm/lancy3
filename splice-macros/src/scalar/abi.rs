@@ -91,6 +91,10 @@ pub(super) fn generate(
                 written_buffers.push((name, ty.clone(), Some(buffer.elem)));
                 runtime.push((name, ty));
             }
+            Binding::Record(_) => {
+                written_buffers.push((name, ty.clone(), Some(super::Elem::Record)));
+                runtime.push((name, ty));
+            }
             Binding::Context => {
                 context_param = Some(name);
                 written_buffers.push((name, ty.clone(), None));
@@ -163,6 +167,22 @@ pub(super) fn generate(
     let buffers = written_buffers.iter().map(|(name, ty, elem)| {
         if elem.is_none() {
             return emit!(#root::BufferArg::context(&mut __splice_runtime_context));
+        }
+        if *elem == Some(super::Elem::Record) {
+            // A struct parameter is a slice of one element.
+            return match ty {
+                Type::Reference(r) if matches!(&*r.elem, Type::Slice(_)) => {
+                    if r.mutability.is_some() {
+                        emit!(#root::BufferArg::records_mut(self.#name))
+                    } else {
+                        emit!(#root::BufferArg::records(self.#name))
+                    }
+                }
+                Type::Reference(_) => {
+                    emit!(#root::BufferArg::records(::core::slice::from_ref(self.#name)))
+                }
+                _ => emit!(#root::BufferArg::records(::core::slice::from_ref(&self.#name))),
+            };
         }
         let Type::Reference(reference) = ty else {
             unreachable!("buffer parameters are references")

@@ -15,6 +15,10 @@ pub(crate) enum Elem {
     Named(Primitive),
     Param(usize),
     Index(usize),
+    /// Kernel data other than a scalar the macro can name: a struct that
+    /// derives `KernelType` (or its `transparent` scalar). Only the builder
+    /// knows its layout.
+    Record,
 }
 #[derive(Copy, Clone, PartialEq, Eq)]
 pub(crate) struct BufferType {
@@ -53,7 +57,7 @@ impl Elem {
     pub(in crate::scalar) fn primitive(self) -> Option<Primitive> {
         match self {
             Self::Named(p) => Some(p),
-            Self::Param(_) | Self::Index(_) => None,
+            Self::Param(_) | Self::Index(_) | Self::Record => None,
         }
     }
     /// The register an element of a slice loads into: a generic element's
@@ -62,7 +66,7 @@ impl Elem {
         match self {
             Self::Named(p) => Scalar::of(p),
             Self::Param(_) => Some(Scalar::Inferred),
-            Self::Index(_) => None,
+            Self::Index(_) | Self::Record => None,
         }
     }
     pub(crate) fn parse(t: &Type, types: &[&Ident]) -> Option<Self> {
@@ -85,6 +89,9 @@ impl Elem {
                 emit!(<#ty as #root::std::intrinsics::simd::LaneElement>::Index)
             }
             Self::Named(p) => Ident::new(p.name(), Span::call_site()).to_token_stream(),
+            Self::Record => emit!(::core::compile_error!(
+                "SIMD operations and Rust calls do not support slices of structs yet"
+            )),
         }
     }
     fn index(self) -> Self {

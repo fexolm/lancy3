@@ -162,7 +162,9 @@ impl Builder {
             .map(|(pair, kind)| hir::SliceParam {
                 ptr: pair[0],
                 len: pair[1],
-                element: kind.element().bytes() as u8,
+                // A struct past 255 bytes is modeled as a slice of smaller
+                // elements, which bounds proofs only see less of.
+                element: kind.element().bytes().min(u8::MAX as usize) as u8,
                 writable: kind.writable(),
             })
             .collect();
@@ -1130,9 +1132,12 @@ impl KernelBuilder for Builder {
             let index = self.index32(index);
             let (address, ty) = self.field_address(slice, index, field);
             let value = if ty == ScalarType::Bool {
-                // A `bool` is one byte in memory and an `i32` register.
+                // A `bool` is a byte of 0 or 1 in memory and an `i32` of 0 or
+                // -1 in a register.
                 let byte = self.value(Op::Load(hir::Type::U8, address));
-                self.value(Op::Cast(hir::Type::I32, byte))
+                let bit = self.value(Op::Cast(hir::Type::I32, byte));
+                let zero = self.const32(0);
+                self.value(Op::Bin(hir::Binary::Sub, zero, bit))
             } else {
                 self.value(Op::Load(scalar_type(ty), address))
             };
@@ -1152,7 +1157,9 @@ impl KernelBuilder for Builder {
             let index = self.index32(index);
             let (address, ty) = self.field_address(slice, index, field);
             let value = if ty == ScalarType::Bool {
-                self.value(Op::Cast(hir::Type::U8, value))
+                let zero = self.const32(0);
+                let bit = self.value(Op::Bin(hir::Binary::Sub, zero, value));
+                self.value(Op::Cast(hir::Type::U8, bit))
             } else {
                 value
             };

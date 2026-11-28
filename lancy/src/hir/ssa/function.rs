@@ -139,8 +139,10 @@ pub struct SliceParam {
     pub ptr: Value,
     /// The length parameter, in elements.
     pub len: Value,
-    /// Bytes per element: a scalar, or 16 for an element of two words
-    /// (a slice reference).
+    /// Bytes per element: a scalar, 16 for an element of two words (a
+    /// slice reference), or a struct's size. Bounds proofs see the slice
+    /// as `len * element` bytes, so a smaller value than the real size
+    /// (for a struct past 255 bytes) only proves less.
     pub element: u8,
     /// Whether the kernel may write the slice.
     pub writable: bool,
@@ -197,9 +199,8 @@ impl Function {
 
     /// Declare the slice parameters of the raw call contract (see
     /// [`SliceParam`]). Each is a distinct `(Ptr, I32)` pair of entry
-    /// parameters, with elements of 2, 4 or 8 bytes: the element widths of
-    /// the buffers Lancy's bounds proofs model. A rejected declaration
-    /// leaves the previous one.
+    /// parameters with elements of at least one byte. A rejected
+    /// declaration leaves the previous one.
     pub fn set_slice_params(&mut self, slices: Vec<SliceParam>) -> Result<(), IrError> {
         let entry = self.params(self.entry());
         let mut slice_of = DenseMap::filled(self.value_count(), None);
@@ -207,7 +208,7 @@ impl Function {
             let is_param = |v: Value, ty| entry.contains(&v) && self.types[v] == ty;
             if !is_param(slice.ptr, Type::Ptr)
                 || !is_param(slice.len, Type::I32)
-                || !matches!(slice.element, 1 | 2 | 4 | 8 | 16)
+                || slice.element == 0
                 || slice_of[slice.ptr].is_some()
                 || slice_of[slice.len].is_some()
             {

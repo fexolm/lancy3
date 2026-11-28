@@ -289,12 +289,28 @@ impl Lower<'_> {
         let args = m
             .args
             .iter()
-            .map(|arg| self.operand(arg, kind))
+            .map(|arg| {
+                // A literal argument of a receiver whose type only the
+                // builder knows (a struct field) takes the receiver's type.
+                if kind == Scalar::Inferred && matches!(arg, Expr::Lit(_)) {
+                    let value = self.expr(arg)?;
+                    let like = match value.stage {
+                        Stage::Literal(t) if t.is_float() => Some(emit!(float_like)),
+                        Stage::Literal(t) if t.is_number() => Some(emit!(int_like)),
+                        _ => None,
+                    };
+                    if let Some(like) = like {
+                        return Ok(emit!(#root::frontend::scalar::#like(__splice_builder, __splice_receiver, #value)?));
+                    }
+                }
+                self.operand(arg, kind)
+            })
             .collect::<Result<Vec<_>>>()?;
         Ok(Value::new(
             Stage::Reg(kind),
             emit!({
-                let operands = [#receiver, #(#args),*];
+                let __splice_receiver = #receiver;
+                let operands = [__splice_receiver, #(#args),*];
                 #root::frontend::methods::method(__splice_builder, #name, &operands)?
             }),
         ))
