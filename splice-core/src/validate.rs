@@ -392,6 +392,11 @@ impl KernelBuilder for Validating<'_> {
         Ok(dst)
     }
     fn constant(&mut self, value: Constant) -> Result<Reg> {
+        // A kernel's `char`s reach `&mut [char]` and the result word that
+        // `KernelScalar::from_word` decodes: each must be a Unicode scalar value.
+        if value.ty() == ScalarType::Char && char::from_u32(value.bits() as u32).is_none() {
+            return Err(self.error(format!("{:#x} is not a char", value.bits())));
+        }
         let r = self.inner.constant(value)?;
         Ok(self.value(&[], r, ValueType::Scalar(value.ty())))
     }

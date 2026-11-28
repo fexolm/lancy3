@@ -199,8 +199,9 @@ macro_rules! kernel_scalar {
 }
 kernel_scalar! {
     bool => Bool, |word| word & 1 != 0;
-    // Kernels produce only valid `char`s: from `u8`, literals, parameters
-    // and `char` slices, which the call checks.
+    // Kernels produce only valid `char`s: casts from `u8` and constants,
+    // which validation checks, and parameters and `char` slices, which the
+    // call checks.
     char => Char, |word| char::from_u32(word as u32).expect("a kernel word of type char holds a char");
     i8 => I8, |word| word as i8;
     u8 => U8, |word| word as u8;
