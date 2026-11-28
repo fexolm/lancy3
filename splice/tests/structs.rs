@@ -202,10 +202,11 @@ fn literal_field(a: f32) -> f32 {
 }
 
 macro_rules! builds {
-    ($kernel:ident, $b:ident) => {{
+    ($kernel:ident, $b:ident $(, overflow_checks = $checks:expr)?) => {{
         let mut codes = Vec::new();
         for mode in [Mode::Release, Mode::Debug] {
             let options = BuildOptions::host(mode).unwrap();
+            $(let options = options.with_overflow_checks($checks);)?
             codes.push($kernel::build_with_options::<$b>(options, $kernel::BuildArgs {}).unwrap());
             codes.push($b::compile(&$kernel::ir_with_options(options).unwrap()).unwrap());
         }
@@ -240,7 +241,7 @@ fn check<B: Codegen<Output: Executable>>() {
             assert_eq!(code.call(norm1::CallArgs { p }), Ok(norm1(p)));
         }
     }
-    for code in builds!(literal_field, B) {
+    for code in builds!(literal_field, B, overflow_checks = true) {
         assert_eq!(
             code.call(literal_field::CallArgs { a: 3.0 }),
             Ok(literal_field(3.0))

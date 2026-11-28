@@ -74,20 +74,26 @@ impl Word {
     pub fn known<T: ImportWord>(value: T) -> Self {
         Self::Known(value.constant())
     }
-    pub fn binary(self, op: Binary, rhs: Self, b: &mut dyn KernelBuilder) -> crate::Result<Self> {
+    pub fn binary(
+        self,
+        op: Binary,
+        checks: bool,
+        rhs: Self,
+        b: &mut dyn KernelBuilder,
+    ) -> crate::Result<Self> {
         if let (Self::Known(a), Self::Known(z)) = (self, rhs)
             && a.ty() == z.ty()
-            && op.output(a.ty()).is_some()
-            && let Ok(value) = op.checked_eval(a, z)
         {
-            return Ok(Self::Known(value));
+            let op = arithmetic_operator(op, checks, a.ty());
+            if op.output(a.ty()).is_some()
+                && let Ok(value) = op.checked_eval(a, z)
+            {
+                return Ok(Self::Known(value));
+            }
         }
         // rustc gave both operands of an operator other than a shift one
         // type, so a known operand of another type is an unsuffixed literal.
-        let shift = matches!(
-            op,
-            Binary::Shl | Binary::Shr | Binary::CheckedShl | Binary::CheckedShr
-        );
+        let shift = matches!(op, Binary::Shl | Binary::Shr);
         let retyped = |known: Self, runtime: Self, b: &dyn KernelBuilder| match (known, runtime) {
             (Self::Known(value), Self::Runtime(r)) if !shift && value.ty() != ScalarType::Bool => {
                 match b.reg_type(r) {
@@ -101,7 +107,7 @@ impl Word {
         };
         let (lhs, rhs) = (retyped(self, rhs, b), retyped(rhs, self, b));
         let (a, z) = (lhs.reg(b)?, rhs.reg(b)?);
-        Ok(Self::Runtime(b.binary(op, a, z)?))
+        Ok(Self::Runtime(arithmetic(b, op, checks, a, z)?))
     }
 }
 
@@ -287,20 +293,26 @@ pub fn arithmetic(
     lhs: Reg,
     rhs: Reg,
 ) -> crate::Result<Reg> {
-    let checked = match op {
+    let op = if checks {
+        arithmetic_operator(op, checks, scalar_type(b, lhs, "arithmetic")?)
+    } else {
+        op
+    };
+    b.binary(op, lhs, rhs)
+}
+
+fn arithmetic_operator(op: Binary, checks: bool, ty: ScalarType) -> Binary {
+    if !checks || !ty.is_integer() {
+        return op;
+    }
+    match op {
         Binary::Add => Binary::CheckedAdd,
         Binary::Sub => Binary::CheckedSub,
         Binary::Mul => Binary::CheckedMul,
         Binary::Shl => Binary::CheckedShl,
         Binary::Shr => Binary::CheckedShr,
         op => op,
-    };
-    let op = if checks && scalar_type(b, lhs, "arithmetic")?.is_integer() {
-        checked
-    } else {
-        op
-    };
-    b.binary(op, lhs, rhs)
+    }
 }
 
 /// Rust's `-x`. A float is multiplied by `-1.0`: `0.0 - x` loses the sign of
