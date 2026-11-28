@@ -1,5 +1,7 @@
 //! Small kernels that isolate one code generation pattern each, mostly
 //! explicit SIMD. Every result is checked against a scalar Rust reference.
+mod particles;
+
 use super::Workload;
 use criterion::Criterion;
 use splice::std::intrinsics::simd::{Lane, Mask};
@@ -544,4 +546,5 @@ pub(super) fn compare(c: &mut Criterion) {
         classify::ir,
         builders!(B => classify::build::<B>(classify::BuildArgs {})),
     );
+    particles::compare(c);
 }
