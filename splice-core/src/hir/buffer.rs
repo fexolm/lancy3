@@ -10,6 +10,8 @@ use std::ptr::NonNull;
 pub struct BufferKind {
     element: ScalarType,
     writable: bool,
+    /// The bytes are UTF-8: a `&str`, a read-only slice of `u8`.
+    utf8: bool,
     context: Option<&'static ContextSignature>,
 }
 
@@ -18,6 +20,11 @@ impl BufferKind {
     pub const READ_I32: Self = Self::new(ScalarType::I32, false);
     /// A writable `i32` slice.
     pub const WRITE_I32: Self = Self::new(ScalarType::I32, true);
+    /// A `&str`: a shared slice of `u8` that holds UTF-8.
+    pub const STR: Self = Self {
+        utf8: true,
+        ..Self::new(ScalarType::U8, false)
+    };
     /// # Panics
     /// If `element` is `Bool`: a kernel cannot borrow a `bool` slice.
     pub const fn new(element: ScalarType, writable: bool) -> Self {
@@ -28,6 +35,7 @@ impl BufferKind {
         Self {
             element,
             writable,
+            utf8: false,
             context: None,
         }
     }
@@ -36,6 +44,7 @@ impl BufferKind {
         Self {
             element: ScalarType::I32,
             writable: true,
+            utf8: false,
             context: Some(signature),
         }
     }
@@ -46,6 +55,17 @@ impl BufferKind {
     pub const fn element(self) -> ScalarType {
         self.element
     }
+    /// Whether the slice is a `&str`, whose bytes are UTF-8.
+    pub const fn utf8(self) -> bool {
+        self.utf8
+    }
+    /// This kind without the UTF-8 guarantee: `str::as_bytes`.
+    pub const fn bytes(self) -> Self {
+        Self {
+            utf8: false,
+            ..self
+        }
+    }
     pub const fn writable(self) -> bool {
         self.writable
     }
@@ -54,8 +74,9 @@ impl BufferKind {
     pub const fn may_alias(self, other: Self) -> bool {
         !self.writable() && !other.writable()
     }
+    /// A `&str` is also its bytes, but bytes need not be a `&str`.
     fn accepts(self, actual: Self) -> bool {
-        self.same_type(actual) && (!self.writable || actual.writable)
+        self.same_type(actual) && (!self.writable || actual.writable) && (!self.utf8 || actual.utf8)
     }
     fn same_type(self, actual: Self) -> bool {
         self.element == actual.element && self.context == actual.context
@@ -122,6 +143,14 @@ impl<'a> BufferArg<'a> {
             len: slice.len(),
             kind: BufferKind::new(T::TYPE, false),
             borrow: PhantomData,
+        }
+    }
+
+    /// A `&str`, as its UTF-8 bytes. Native code never writes through it.
+    pub fn str(text: &'a str) -> Self {
+        Self {
+            kind: BufferKind::STR,
+            ..Self::read(text.as_bytes())
         }
     }
 
@@ -220,6 +249,9 @@ pub fn validate_buffers(
                 expected: kind.element(),
             });
         }
+        if kind.utf8() && !arg.kind().utf8() {
+            return Err(Utf8 { buffer });
+        }
         if !kind.accepts(arg.kind()) {
             return Err(ReadOnly { buffer });
         }
@@ -255,6 +287,11 @@ pub fn check_forwarding(
         if !required.same_type(kind) {
             return Err(crate::BuildError::verify(format!(
                 "buffer argument {i} has wrong element type"
+            )));
+        }
+        if required.utf8() && !kind.utf8() {
+            return Err(crate::BuildError::verify(format!(
+                "buffer argument {i} is not a &str"
             )));
         }
         if !required.accepts(kind) {
@@ -306,6 +343,21 @@ mod tests {
     }
 
     /// Backends address slices with signed 32-bit offsets (BE-19).
+    #[test]
+    fn a_str_parameter_needs_a_str() {
+        use crate::SignatureError;
+        let text = BufferArg::str("ab");
+        assert_eq!(text.kind(), BufferKind::STR);
+        assert!(validate_buffers(&[BufferKind::STR], &[BufferArg::str("ab")]).is_ok());
+        assert!(matches!(
+            validate_buffers(&[BufferKind::STR], &[BufferArg::read(b"ab")]),
+            Err(SignatureError::Utf8 { buffer: 0 })
+        ));
+        // A `&str` is also its bytes.
+        let bytes = BufferKind::new(ScalarType::U8, false);
+        assert!(validate_buffers(&[bytes], &[BufferArg::str("ab")]).is_ok());
+    }
+
     #[test]
     #[cfg(all(target_os = "linux", target_pointer_width = "64"))]
     fn a_slice_longer_than_i32_max_is_rejected() {

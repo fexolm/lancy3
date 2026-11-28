@@ -78,7 +78,11 @@ impl Lower<'_> {
             let root = self.root;
             let element = elem.tokens(root, self.types);
             return Ok(Value::new(
-                Stage::Buffer(super::BufferType { elem, write: false }),
+                Stage::Buffer(super::BufferType {
+                    elem,
+                    write: false,
+                    utf8: false,
+                }),
                 emit!(#root::frontend::scalar::column(#table, #slot, #element)?),
             ));
         }
@@ -112,6 +116,53 @@ impl Lower<'_> {
                     self.bin("Eq", length, self.constant(emit!(0usize))),
                 )
             });
+        }
+        if let Stage::Buffer(text @ super::BufferType { utf8: true, .. }) = receiver.stage {
+            let name = m.method.to_string();
+            match (name.as_str(), m.args.len()) {
+                ("as_bytes", 0) => {
+                    return Ok(Value::new(
+                        Stage::Buffer(super::BufferType {
+                            utf8: false,
+                            ..text
+                        }),
+                        receiver.code,
+                    ));
+                }
+                ("is_char_boundary", 1) => {
+                    let index = self.expr(&m.args[0])?;
+                    let index = self.reg(index, Scalar::Index, &m.args[0])?;
+                    return Ok(Value::new(
+                        Stage::Reg(Scalar::Bool),
+                        emit!({
+                            let __splice_text = #receiver;
+                            let __splice_index = #index;
+                            __splice_builder.is_char_boundary(__splice_text, __splice_index)?
+                        }),
+                    ));
+                }
+                ("len" | "is_empty", 0) => {}
+                ("chars" | "char_indices", 0) => {
+                    return err(
+                        &m.method,
+                        &format!(
+                            "`str::{name}` is not supported in kernels: decoding a char needs Option"
+                        ),
+                    );
+                }
+                ("bytes", 0) => {
+                    return err(
+                        m,
+                        "iterate a str's bytes in a loop: `for b in text.bytes()`",
+                    );
+                }
+                _ => {
+                    return err(
+                        &m.method,
+                        &format!("`str::{name}` is not supported in kernels; use `as_bytes()`"),
+                    );
+                }
+            }
         }
         if matches!(receiver.stage, Stage::Buffer(_)) {
             let name = m.method.to_string();
@@ -369,6 +420,11 @@ impl Lower<'_> {
             write: writable,
             ..actual
         });
+        let take = if actual.utf8 {
+            emit!(str_subslice)
+        } else {
+            emit!(subslice)
+        };
         let bound = |e: &Expr| -> Result<TokenStream> {
             let value = self.expr(e)?;
             self.reg(value, Scalar::Index, e)
@@ -387,7 +443,7 @@ impl Lower<'_> {
                 let __splice_slice = #slice;
                 let __splice_start = #start;
                 let __splice_end = #end;
-                __splice_builder.subslice(__splice_slice, __splice_start, __splice_end, #inclusive)?
+                __splice_builder.#take(__splice_slice, __splice_start, __splice_end, #inclusive)?
             }),
         ))
     }
@@ -402,6 +458,9 @@ impl Lower<'_> {
         let Stage::Buffer(writable) = slice.stage else {
             return err(&index.expr, "index a runtime slice parameter");
         };
+        if writable.utf8 {
+            return err(index, "a str has no integer index; index its `as_bytes()`");
+        }
         let Some(element) = writable.elem.scalar() else {
             return err(
                 index,

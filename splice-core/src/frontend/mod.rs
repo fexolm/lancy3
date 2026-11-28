@@ -249,6 +249,53 @@ impl dyn KernelBuilder + '_ {
         Ok(Slice { ptr, len })
     }
 
+    /// `text.is_char_boundary(index)` for the UTF-8 bytes `text`: the end,
+    /// or a byte inside that does not continue a character. It reads no
+    /// byte at or past the end.
+    pub fn is_char_boundary(&mut self, text: Slice, index: Reg) -> crate::Result<Reg> {
+        let result = self.local(ValueType::Scalar(ScalarType::Bool))?;
+        let (inside, outside, done) = (self.label()?, self.label()?, self.label()?);
+        let within = self.binary(Binary::Lt, index, text.len)?;
+        self.branch(within, inside, outside)?;
+        self.mark(inside)?;
+        let byte = self.load(text, index)?;
+        let top = self.constant(Constant::from(0xc0u8))?;
+        let continuation = self.constant(Constant::from(0x80u8))?;
+        let top = self.binary(Binary::And, byte, top)?;
+        let starts = self.binary(Binary::Ne, top, continuation)?;
+        self.assign(result, starts)?;
+        self.jump(done)?;
+        self.mark(outside)?;
+        let end = self.binary(Binary::Eq, index, text.len)?;
+        self.assign(result, end)?;
+        self.jump(done)?;
+        self.mark(done)?;
+        Ok(result)
+    }
+
+    /// `&text[start..end]` of a `&str` (or `..=` when `inclusive`): the
+    /// range check of [`subslice`](Self::subslice), then a trap unless both
+    /// ends are character boundaries, as Rust's `str` index panics.
+    pub fn str_subslice(
+        &mut self,
+        text: Slice,
+        start: Reg,
+        end: Reg,
+        inclusive: bool,
+    ) -> crate::Result<Slice> {
+        let part = self.subslice(text, start, end, inclusive)?;
+        let end = self.binary(Binary::Add, start, part.len)?;
+        let first = self.is_char_boundary(text, start)?;
+        let last = self.is_char_boundary(text, end)?;
+        let valid = self.binary(Binary::And, first, last)?;
+        let (next, fail) = (self.label()?, self.label()?);
+        self.branch(valid, next, fail)?;
+        self.mark(fail)?;
+        self.trap_bounds()?;
+        self.mark(next)?;
+        Ok(part)
+    }
+
     /// `slice.split_at(mid)`: traps unless `mid` is within the length.
     pub fn split_at(&mut self, slice: Slice, mid: Reg) -> crate::Result<(Slice, Slice)> {
         let zero = self.constant(Constant::from(0usize))?;

@@ -225,7 +225,11 @@ pub(super) fn expand(
                 buffer_names.push(id);
                 let elem = writable.elem.tokens(&root, &types);
                 let write = writable.write;
-                buffer_kinds.push(emit!(#hir::BufferKind::new(#elem,#write)));
+                buffer_kinds.push(if writable.utf8 {
+                    emit!(#hir::BufferKind::STR)
+                } else {
+                    emit!(#hir::BufferKind::new(#elem,#write))
+                });
                 emit!(#id: #hir::Slice)
             }
             Binding::Context => {
@@ -868,12 +872,23 @@ fn slice_type(ty: &syn::Type, types: &[&Ident]) -> Option<BufferType> {
     let syn::Type::Reference(reference) = ty else {
         return None;
     };
+    if let syn::Type::Path(path) = &*reference.elem
+        && path.qself.is_none()
+        && path.path.is_ident("str")
+    {
+        return reference.mutability.is_none().then_some(BufferType {
+            elem: Elem::Named(crate::kast::types::Primitive::U8),
+            write: false,
+            utf8: true,
+        });
+    }
     let syn::Type::Slice(slice) = &*reference.elem else {
         return None;
     };
     Some(BufferType {
         elem: Elem::parse(&slice.elem, types)?,
         write: reference.mutability.is_some(),
+        utf8: false,
     })
 }
 
