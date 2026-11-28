@@ -681,7 +681,7 @@ impl NestedIntrinsics<'_, '_> {
         let name = member.to_string();
         if !crate::scalar::methods::method_path(path)
             && path.path.segments.len() > 1
-            && (super::simd::registered(&name) || super::memory::math_op(&name).is_some())
+            && super::simd::registered(&name)
         {
             // A lowercase prefix may denote a module or a type alias.
             // Only a module's free function can be imported. Require
@@ -708,25 +708,10 @@ impl NestedIntrinsics<'_, '_> {
                     emit!(#nominal.is_some()),
                 ));
             }
-        } else if super::memory::math_op(&member.to_string()).is_some() {
-            let mut owner = path.path.clone();
-            owner.segments.pop();
-            owner.segments.pop_punct();
-            if path.qself.as_ref().is_some_and(|q| q.as_token.is_none())
-                || owner.segments.last().is_some_and(|s| {
-                    crate::kast::types::Primitive::named(&s.ident.to_string()).is_some()
-                })
-            {
-                self.guarded.push(emit!(true));
-            } else if !owner.segments.is_empty() && crate::scalar::methods::method_path(path) {
-                self.guarded.push(super::calls::select_builtin(
-                    root,
-                    &owner,
-                    "math",
-                    emit!(true),
-                    emit!(false),
-                ));
-            }
+        } else if super::memory::math_op(&name).is_some()
+            && super::memory::integer_owner(path).is_some()
+        {
+            self.guarded.push(emit!(true));
         }
         width
     }

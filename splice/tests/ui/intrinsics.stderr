@@ -1,26 +1,11 @@
-error: unsupported kernel scalar method 'extra'
- --> tests/ui/intrinsics.rs:9:31
-  |
-9 | fn unknown(x: u32) -> u32 { x.extra() }
-  |                               ^^^^^
-
-error[E0658]: `use` associated items of traits is unstable
-  --> tests/ui/intrinsics.rs:26:1
-   |
-26 | #[kernel]
-   | ^^^^^^^^^
-   |
-   = note: see issue #134691 <https://github.com/rust-lang/rust/issues/134691> for more information
-   = note: this error originates in the attribute macro `kernel` (in Nightly builds, run with -Z macro-backtrace for more info)
-
 error[E0432]: unresolved import `block`
-  --> tests/ui/intrinsics.rs:19:54
+  --> tests/ui/intrinsics.rs:11:54
    |
-19 | fn ambiguous_width(h: &mut Hook) -> usize { h.record(block::byte_width()) }
+11 | fn ambiguous_width(h: &mut Hook) -> usize { h.record(block::byte_width()) }
    |                                                      ^^^^^ `block` is a type alias, not a module
 
 error[E0432]: unresolved import `block`
-  --> tests/ui/intrinsics.rs:22:55
+  --> tests/ui/intrinsics.rs:14:55
    |
-22 | fn ambiguous_vector(h: &mut Hook) -> usize { h.record(block::splat(3).last() as usize) }
+14 | fn ambiguous_vector(h: &mut Hook) -> usize { h.record(block::splat(3).last() as usize) }
    |                                                       ^^^^^ `block` is a type alias, not a module

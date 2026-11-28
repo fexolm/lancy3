@@ -127,4 +127,11 @@ fn many_conditions(
     0
 }
 
+#[kernel]
+mod module_with_rust_helper {
+    async fn helper() -> String {
+        String::new()
+    }
+}
+
 fn main() {}
